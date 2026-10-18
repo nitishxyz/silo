@@ -68,6 +68,12 @@ pub struct PreparedFrame {
 }
 
 impl PreparedFrame {
+    /// The terminal frame this geometry was built from (what is painted).
+    #[must_use]
+    pub fn frame(&self) -> &Arc<Frame> {
+        &self.frame
+    }
+
     /// Quads and glyphs the UI thread will issue for this frame.
     pub(crate) fn primitives(&self) -> (u64, u64) {
         let quads = self.backgrounds.len() + self.selection.len() + self.sprite_quads.len();

@@ -1,0 +1,312 @@
+//! Client-local entry/exit motion for tabs and panes.
+//!
+//! Animations are keyed by stable server ids (window and block ids), so a
+//! refreshed `SessionView` never replays them: only ids that appear or
+//! disappear between two views of the *same* session animate. The first
+//! view after attach, reconnect or a session switch only records ids.
+//! Progress is computed from wall time while rendering; the layout (and so
+//! every terminal grid) is final from the first frame, motion is a clipped
+//! offset or a width/opacity change on top of it.
+
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use gpui::{Bounds, Pixels};
+use silo_render::PreparedFrame;
+
+pub const TAB_ENTER: Duration = Duration::from_millis(190);
+pub const TAB_EXIT: Duration = Duration::from_millis(180);
+pub const PANE_ENTER: Duration = Duration::from_millis(210);
+pub const PANE_EXIT: Duration = Duration::from_millis(200);
+pub const CLOSE_BUTTON: Duration = Duration::from_millis(140);
+
+/// Cubic ease-out.
+pub fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Eased progress of an animation started at `started`, or `None` once it
+/// finished.
+pub fn progress(started: Instant, duration: Duration, now: Instant) -> Option<f32> {
+    let duration = duration.mul_f32(slowdown());
+    let elapsed = now.saturating_duration_since(started);
+    (elapsed < duration).then(|| ease_out(elapsed.as_secs_f32() / duration.as_secs_f32()))
+}
+
+/// `SILO_MOTION_SLOWDOWN=10` stretches every animation, for inspecting
+/// intermediate frames in UI tests.
+fn slowdown() -> f32 {
+    static FACTOR: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("SILO_MOTION_SLOWDOWN").ok().and_then(|v| v.parse().ok()).filter(|f: &f32| *f > 0.0).unwrap_or(1.0)
+    })
+}
+
+/// Ids added and removed since the previous sync of the same scope.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Diff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// The set of ids last seen for one scope (a session).
+#[derive(Default)]
+pub struct Tracker {
+    scope: Option<String>,
+    known: Vec<String>,
+}
+
+impl Tracker {
+    /// Forget everything: the next sync only records (attach, reconnect).
+    pub fn reset(&mut self) {
+        self.scope = None;
+        self.known.clear();
+    }
+
+    /// Record `ids` for `scope`, reporting changes only when the previous
+    /// sync was for the same scope.
+    pub fn sync(&mut self, scope: &str, ids: Vec<String>) -> Diff {
+        let same = self.scope.as_deref() == Some(scope);
+        let diff = if same {
+            let old: HashSet<&String> = self.known.iter().collect();
+            let new: HashSet<&String> = ids.iter().collect();
+            Diff {
+                added: ids.iter().filter(|id| !old.contains(id)).cloned().collect(),
+                removed: self.known.iter().filter(|id| !new.contains(id)).cloned().collect(),
+            }
+        } else {
+            Diff::default()
+        };
+        self.scope = Some(scope.to_owned());
+        self.known = ids;
+        diff
+    }
+}
+
+/// Where a pane enters from or leaves towards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    /// Offset of the content as a fraction of the slot (x, y) for a pane
+    /// that is `hidden` (1 = fully outside the slot) towards this edge.
+    pub fn offset(self, hidden: f32) -> (f32, f32) {
+        match self {
+            Edge::Left => (-hidden, 0.0),
+            Edge::Right => (hidden, 0.0),
+            Edge::Top => (0.0, -hidden),
+            Edge::Bottom => (0.0, hidden),
+        }
+    }
+}
+
+/// The outer edge a closing pane leaves through: the side of the body it
+/// touches along the axis it did not span.
+pub fn exit_edge(pane: Bounds<Pixels>, body: Bounds<Pixels>) -> Edge {
+    let (px, py) = (f32::from(pane.origin.x), f32::from(pane.origin.y));
+    let (pw, ph) = (f32::from(pane.size.width), f32::from(pane.size.height));
+    let (bx, by) = (f32::from(body.origin.x), f32::from(body.origin.y));
+    let (bw, bh) = (f32::from(body.size.width), f32::from(body.size.height));
+    let width_share = pw / bw.max(1.0);
+    let height_share = ph / bh.max(1.0);
+    if width_share <= height_share {
+        if px + pw / 2.0 < bx + bw / 2.0 { Edge::Left } else { Edge::Right }
+    } else if py + ph / 2.0 < by + bh / 2.0 {
+        Edge::Top
+    } else {
+        Edge::Bottom
+    }
+}
+
+/// A closed tab, drawn collapsing at its old position.
+pub struct TabGhost {
+    pub id: String,
+    pub title: String,
+    pub index: usize,
+    pub started: Instant,
+}
+
+/// A closed pane: its last frame sliding out of its old slot. Visual only.
+pub struct PaneGhost {
+    pub frame: Arc<PreparedFrame>,
+    pub slot: Bounds<Pixels>,
+    pub edge: Edge,
+    /// Header label when pane headers were shown.
+    pub title: Option<String>,
+    pub started: Instant,
+}
+
+/// All running motion of one workspace window.
+#[derive(Default)]
+pub struct Motion {
+    pub windows: Tracker,
+    pub blocks: Tracker,
+    pub tab_enter: HashMap<String, Instant>,
+    pub pane_enter: HashMap<String, (Instant, Edge)>,
+    pub tab_ghosts: Vec<TabGhost>,
+    pub pane_ghosts: Vec<PaneGhost>,
+    hover: Option<(String, Instant)>,
+    unhover: Option<(String, Instant)>,
+}
+
+impl Motion {
+    /// Attach, reconnect or session switch: forget ids, drop running motion.
+    pub fn reset(&mut self) {
+        self.windows.reset();
+        self.blocks.reset();
+        self.tab_enter.clear();
+        self.pane_enter.clear();
+        self.tab_ghosts.clear();
+        self.pane_ghosts.clear();
+    }
+
+    /// Drop finished animations; true while anything still moves.
+    pub fn prune(&mut self, now: Instant) -> bool {
+        self.tab_enter.retain(|_, s| progress(*s, TAB_ENTER, now).is_some());
+        self.pane_enter.retain(|_, (s, _)| progress(*s, PANE_ENTER, now).is_some());
+        self.tab_ghosts.retain(|g| progress(g.started, TAB_EXIT, now).is_some());
+        self.pane_ghosts.retain(|g| progress(g.started, PANE_EXIT, now).is_some());
+        if self.unhover.as_ref().is_some_and(|(_, s)| progress(*s, CLOSE_BUTTON, now).is_none()) {
+            self.unhover = None;
+        }
+        let hovering = self.hover.as_ref().is_some_and(|(_, s)| progress(*s, CLOSE_BUTTON, now).is_some());
+        hovering
+            || self.unhover.is_some()
+            || !self.tab_enter.is_empty()
+            || !self.pane_enter.is_empty()
+            || !self.tab_ghosts.is_empty()
+            || !self.pane_ghosts.is_empty()
+    }
+
+    /// Hover entered or left tab `id`. Leaving only affects the tab that
+    /// is hovered, so states never leak between tabs.
+    pub fn set_hover(&mut self, id: &str, hovered: bool, now: Instant, animate: bool) {
+        let current = self.close_button(id, now);
+        // Continue from the current extent instead of jumping.
+        let start_at = |extent: f32| {
+            let full = CLOSE_BUTTON.mul_f32(slowdown());
+            let elapsed = if animate { full.mul_f32(linear_for(extent)) } else { full };
+            now.checked_sub(elapsed).unwrap_or(now)
+        };
+        if hovered {
+            let previous = self.hover.as_ref().filter(|(other, _)| other != id).map(|(other, _)| other.clone());
+            if let Some(other) = previous {
+                let extent = self.close_button(&other, now);
+                self.hover = None;
+                self.unhover = Some((other, start_at(1.0 - extent)));
+            }
+            if self.unhover.as_ref().is_some_and(|(u, _)| u == id) {
+                self.unhover = None;
+            }
+            if self.hover.is_none() {
+                self.hover = Some((id.to_owned(), start_at(current)));
+            }
+        } else if self.hover.as_ref().is_some_and(|(h, _)| h == id) {
+            self.hover = None;
+            self.unhover = Some((id.to_owned(), start_at(1.0 - current)));
+        }
+    }
+
+    /// Extent (0 hidden … 1 shown) of tab `id`'s close button.
+    pub fn close_button(&self, id: &str, now: Instant) -> f32 {
+        match (&self.hover, &self.unhover) {
+            (Some((h, s)), _) if h == id => progress(*s, CLOSE_BUTTON, now).unwrap_or(1.0),
+            (_, Some((u, s))) if u == id => 1.0 - progress(*s, CLOSE_BUTTON, now).unwrap_or(1.0),
+            _ => 0.0,
+        }
+    }
+}
+
+/// Inverse of `ease_out`: the linear time at which it reaches `value`.
+fn linear_for(value: f32) -> f32 {
+    1.0 - (1.0 - value.clamp(0.0, 1.0)).cbrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, px, size};
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn first_sync_and_scope_change_do_not_animate() {
+        let mut t = Tracker::default();
+        assert_eq!(t.sync("s1", ids(&["a", "b"])), Diff::default());
+        assert_eq!(t.sync("s2", ids(&["c"])), Diff::default());
+        t.reset();
+        assert_eq!(t.sync("s2", ids(&["c", "d"])), Diff::default());
+    }
+
+    #[test]
+    fn only_new_ids_animate_and_refresh_does_not_replay() {
+        let mut t = Tracker::default();
+        t.sync("s", ids(&["a"]));
+        assert_eq!(t.sync("s", ids(&["a", "b"])), Diff { added: ids(&["b"]), removed: vec![] });
+        // Same ids again (title change, focus change, …): nothing.
+        assert_eq!(t.sync("s", ids(&["a", "b"])), Diff::default());
+        assert_eq!(t.sync("s", ids(&["b"])), Diff { added: vec![], removed: ids(&["a"]) });
+    }
+
+    #[test]
+    fn progress_eases_and_ends() {
+        let start = Instant::now();
+        assert_eq!(progress(start, TAB_ENTER, start), Some(0.0));
+        let mid = progress(start, TAB_ENTER, start + TAB_ENTER / 2).unwrap();
+        assert!(mid > 0.5 && mid < 1.0, "ease-out is past half at half time: {mid}");
+        assert_eq!(progress(start, TAB_ENTER, start + TAB_ENTER), None);
+    }
+
+    #[test]
+    fn exit_edge_follows_geometry() {
+        let body = Bounds::new(point(px(0.), px(46.)), size(px(1000.), px(600.)));
+        let right = Bounds::new(point(px(500.), px(46.)), size(px(500.), px(600.)));
+        let left = Bounds::new(point(px(0.), px(46.)), size(px(500.), px(600.)));
+        let bottom = Bounds::new(point(px(0.), px(346.)), size(px(1000.), px(300.)));
+        let top = Bounds::new(point(px(0.), px(46.)), size(px(1000.), px(300.)));
+        assert_eq!(exit_edge(right, body), Edge::Right);
+        assert_eq!(exit_edge(left, body), Edge::Left);
+        assert_eq!(exit_edge(bottom, body), Edge::Bottom);
+        assert_eq!(exit_edge(top, body), Edge::Top);
+    }
+
+    #[test]
+    fn close_button_hover_does_not_leak_between_tabs() {
+        let mut m = Motion::default();
+        let t0 = Instant::now();
+        m.set_hover("a", true, t0, true);
+        let done = t0 + CLOSE_BUTTON;
+        assert!((m.close_button("a", done) - 1.0).abs() < 1e-3);
+        assert_eq!(m.close_button("b", done), 0.0);
+        // Entering b before a's leave event: a collapses, b grows.
+        m.set_hover("b", true, done, true);
+        // A stale leave for a must not hide b.
+        m.set_hover("a", false, done, true);
+        let later = done + CLOSE_BUTTON;
+        assert!((m.close_button("b", later) - 1.0).abs() < 1e-3);
+        assert_eq!(m.close_button("a", later), 0.0);
+        m.set_hover("b", false, later, true);
+        assert!(m.close_button("b", later) > 0.99, "collapse starts from fully shown");
+        assert_eq!(m.close_button("b", later + CLOSE_BUTTON), 0.0);
+        assert!(!m.prune(later + CLOSE_BUTTON));
+    }
+
+    #[test]
+    fn reduced_motion_close_button_is_instant() {
+        let mut m = Motion::default();
+        let t0 = Instant::now() + Duration::from_secs(1);
+        m.set_hover("a", true, t0, false);
+        assert_eq!(m.close_button("a", t0), 1.0);
+    }
+}

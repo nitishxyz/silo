@@ -22,6 +22,10 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+raw-window-handle = "0.6"
+
 [features]
 # Compile Metal shaders at runtime: works with only the Command Line Tools.
 # Build with `--no-default-features` when the Xcode Metal toolchain exists.

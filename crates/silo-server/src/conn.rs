@@ -218,6 +218,18 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::Capture { history, reply });
             to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
         }
+        Method::TerminalClear { block_id } => {
+            // Home + erase screen + erase scrollback for every client, then
+            // ask the program to redraw (shells repaint their prompt on ^L).
+            let msg = BlockMsg::Inject { bytes: b"\x1b[H\x1b[2J\x1b[3J".to_vec(), input: b"\x0c".to_vec() };
+            server.registry.lock().unwrap().block(&block_id)?.send(msg);
+            Ok(json!({}))
+        }
+        Method::TerminalReset { block_id } => {
+            let msg = BlockMsg::Inject { bytes: b"\x1bc".to_vec(), input: b"\x0c".to_vec() };
+            server.registry.lock().unwrap().block(&block_id)?.send(msg);
+            Ok(json!({}))
+        }
         Method::TerminalSize { block_id } => {
             let (reply, rx) = tokio::sync::oneshot::channel();
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::SizeInfo { reply });
@@ -288,6 +300,9 @@ where
                     }
                     Ok(ClientData::Resize(size)) if size.columns > 0 && size.rows > 0 => {
                         let _ = block.send(BlockMsg::Desired { client_id, client_name: client_name.clone(), size });
+                    }
+                    Ok(ClientData::Config(config)) => {
+                        let _ = block.send(BlockMsg::Config { client_id, config });
                     }
                     Ok(_) => {}
                     Err(_) => break,

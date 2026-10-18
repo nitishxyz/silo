@@ -45,6 +45,8 @@ bool silo_vt_drag_scroll(SiloVt *vt, int32_t lines);
 void silo_vt_cancel_drag(SiloVt *vt);
 /* Clear the selection; returns whether one existed. */
 bool silo_vt_clear_selection(SiloVt *vt);
+/* Select all selectable content; returns whether anything was selected. */
+bool silo_vt_select_all(SiloVt *vt);
 int silo_vt_copy(SiloVt *vt, unsigned char *out, size_t cap, size_t *written);
 int silo_vt_write(SiloVt *vt, const unsigned char *data, size_t len);
 size_t silo_vt_replies(SiloVt *vt, unsigned char *out);

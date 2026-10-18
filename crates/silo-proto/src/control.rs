@@ -131,6 +131,12 @@ pub enum Method {
     TerminalSize { block_id: BlockId },
     #[serde(rename = "terminal.resize")]
     TerminalResize { block_id: BlockId, size: TermSize },
+    /// Clear the screen and scrollback for every client.
+    #[serde(rename = "terminal.clear")]
+    TerminalClear { block_id: BlockId },
+    /// Full terminal reset (RIS) for every client.
+    #[serde(rename = "terminal.reset")]
+    TerminalReset { block_id: BlockId },
 
     #[serde(rename = "session.own_block")]
     OwnBlock {
@@ -174,6 +180,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("terminal.capture", "Plain-text contents of a terminal."),
     ("terminal.size", "Applied size, owner and every client's desired size."),
     ("terminal.resize", "Report this client's desired size; applied if owner or unowned."),
+    ("terminal.clear", "Clear screen and scrollback, spliced at a parser-ground boundary."),
+    ("terminal.reset", "Reset the terminal (RIS), spliced at a parser-ground boundary."),
     ("session.own_block", "Take or request size/theme ownership of blocks."),
     ("session.disown_block", "Release ownership or candidacy of blocks."),
     ("data.connect", "Single-use ticket for a block data stream."),

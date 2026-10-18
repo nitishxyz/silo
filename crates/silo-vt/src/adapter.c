@@ -802,6 +802,14 @@ bool silo_vt_clear_selection(SiloVt *vt) {
     return true;
 }
 
+bool silo_vt_select_all(SiloVt *vt) {
+    GhosttySelection all = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (ghostty_terminal_select_all(vt->terminal, &all) != GHOSTTY_SUCCESS) return false;
+    vt->selecting = false;
+    vt->extending = false;
+    return ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &all) == GHOSTTY_SUCCESS;
+}
+
 int silo_vt_copy(SiloVt *vt, unsigned char *out, size_t cap, size_t *written) {
     GhosttyTerminalSelectionFormatOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
     options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;

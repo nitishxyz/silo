@@ -110,6 +110,17 @@ fn shift_click_extends_and_clear_drops() {
 }
 
 #[test]
+fn select_all_covers_history() {
+    let mut vt = TerminalCore::new(grid(40, 3)).unwrap();
+    for i in 0..10 {
+        vt.write_output(format!("row-{i}\r\n").as_bytes()).unwrap();
+    }
+    assert!(vt.select_all());
+    let text = vt.copy_selection().unwrap();
+    assert!(text.starts_with("row-0\n") && text.contains("row-9"), "{text:?}");
+}
+
+#[test]
 fn tracking_programs_get_plain_drags_shift_selects() {
     let mut vt = TerminalCore::new(grid(40, 6)).unwrap();
     vt.write_output(b"hello world\r\n\x1b[?1002h\x1b[?1006h").unwrap();
@@ -122,4 +133,34 @@ fn tracking_programs_get_plain_drags_shift_selects() {
     vt.encode_mouse_at(mouse(MouseAction::Motion, 4, 0, true), t + Duration::from_secs(1)).unwrap();
     vt.encode_mouse_at(mouse(MouseAction::Release, 4, 0, true), t + Duration::from_secs(1)).unwrap();
     assert_eq!(vt.copy_selection().unwrap(), "hello");
+}
+
+#[test]
+fn cursor_blink_and_visibility_follow_the_program() {
+    // Server terminal with silo's default (blinking), restored on a client.
+    let mut server = TerminalCore::new(grid(40, 6)).unwrap();
+    server.write_output(b"$ ").unwrap();
+    let snapshot = server.snapshot().unwrap();
+    let head = silo_vt::snapshot::head_len(&snapshot).unwrap();
+    let (mut vt, _) = TerminalCore::restore(&snapshot[..head], RestoreOptions { retain_continuation: false, compress_history: true }).unwrap();
+    let cursor = |vt: &mut TerminalCore| vt.frame().unwrap().cursor;
+    assert!(cursor(&mut vt).visible && cursor(&mut vt).blinking, "default blinks after restore");
+    vt.write_output(b"\x1b[2 q").unwrap();
+    assert!(!cursor(&mut vt).blinking, "DECSCUSR 2 = steady block");
+    vt.write_output(b"\x1b[1 q").unwrap();
+    assert!(cursor(&mut vt).blinking, "DECSCUSR 1 = blinking block");
+    vt.write_output(b"\x1b[6 q").unwrap();
+    assert!(!cursor(&mut vt).blinking, "DECSCUSR 6 = steady bar");
+    vt.write_output(b"\x1b[0 q").unwrap();
+    assert!(cursor(&mut vt).blinking, "DECSCUSR 0 restores the default");
+    vt.write_output(b"\x1b[?25l").unwrap();
+    assert!(!cursor(&mut vt).visible, "DECTCEM hides");
+    vt.write_output(b"\x1b[?25h").unwrap();
+    assert!(cursor(&mut vt).visible);
+    // A client-side default (Ghostty cursor-style-blink = false) wins over
+    // the snapshot's default but not over an explicit DECSCUSR.
+    vt.set_defaults(&silo_vt::TerminalDefaults { cursor_blink: Some(false), ..Default::default() }).unwrap();
+    assert!(!cursor(&mut vt).blinking);
+    vt.write_output(b"\x1b[5 q").unwrap();
+    assert!(cursor(&mut vt).blinking);
 }

@@ -2,7 +2,14 @@
 //! transport, forward events to the UI, and reconnect when the connection
 //! drops.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use silo_client::Control;
 use silo_proto::control::Event;
@@ -49,16 +56,25 @@ pub fn sibling(names: &[&str]) -> Option<PathBuf> {
     })
 }
 
-pub fn start(rt: &tokio::runtime::Handle, transport: Transport) -> mpsc::UnboundedReceiver<ConnEvent> {
+/// Start a host connection loop. While `paused` is set (Stop Server) the
+/// loop neither connects nor spawns a server.
+pub fn start(rt: &tokio::runtime::Handle, transport: Transport, paused: Arc<AtomicBool>) -> mpsc::UnboundedReceiver<ConnEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
-    rt.spawn(run(transport, tx));
+    rt.spawn(run(transport, tx, paused));
     rx
 }
 
-async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>) {
+async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused: Arc<AtomicBool>) {
     let name = format!("Silo {} (macOS, pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let mut backoff = Duration::from_millis(100);
     loop {
+        if paused.load(Ordering::Acquire) {
+            if tx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
         match transport.connect(&name).await {
             Ok((control, mut events)) => {
                 backoff = Duration::from_millis(100);
@@ -71,7 +87,8 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>) {
                         return;
                     }
                 }
-                if tx.send(ConnEvent::Disconnected("connection closed".into())).is_err() {
+                let reason = if paused.load(Ordering::Acquire) { "server stopped" } else { "connection closed" };
+                if tx.send(ConnEvent::Disconnected(reason.into())).is_err() {
                     return;
                 }
             }

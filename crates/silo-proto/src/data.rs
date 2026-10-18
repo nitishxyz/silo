@@ -11,7 +11,10 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Frame, kind, model::TermSize};
+use crate::{
+    Frame, kind,
+    model::{TermSize, TerminalConfig},
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DataHello {
@@ -65,6 +68,9 @@ pub enum ServerData {
     /// The PTY was resized at this point of the output stream.
     Resized { offset: u64, size: TermSize },
     Exited { code: i32 },
+    /// The effective terminal configuration from this point of the output
+    /// stream on (sent after `Welcome` and whenever it changes).
+    Configured(TerminalConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +79,9 @@ pub enum ClientData {
     /// This client's desired size.
     Resize(TermSize),
     Ack(u64),
+    /// This client's desired terminal configuration; applied while it owns
+    /// the block (same ownership as size).
+    Config(TerminalConfig),
 }
 
 fn size_bytes(size: TermSize) -> [u8; 8] {
@@ -119,6 +128,7 @@ impl ServerData {
                 Frame::new(kind::RESIZED, payload)
             }
             Self::Exited { code } => Frame::new(kind::EXITED, code.to_le_bytes().to_vec()),
+            Self::Configured(config) => Frame::json(kind::CONFIGURED, config).expect("config serializes"),
         }
     }
 
@@ -136,6 +146,7 @@ impl ServerData {
                 let code = p.get(..4).ok_or_else(|| invalid("short exit"))?;
                 Self::Exited { code: i32::from_le_bytes(code.try_into().unwrap()) }
             }
+            kind::CONFIGURED => Self::Configured(parse_config(&p)?),
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
     }
@@ -148,6 +159,7 @@ impl ClientData {
             Self::Input(bytes) => Frame::new(kind::INPUT, bytes.clone()),
             Self::Resize(size) => Frame::new(kind::RESIZE, size_bytes(*size).to_vec()),
             Self::Ack(offset) => Frame::new(kind::ACK, offset.to_le_bytes().to_vec()),
+            Self::Config(config) => Frame::json(kind::CONFIG, config).expect("config serializes"),
         }
     }
 
@@ -158,9 +170,14 @@ impl ClientData {
             kind::INPUT => Self::Input(frame.payload),
             kind::RESIZE => Self::Resize(parse_size(&frame.payload)?),
             kind::ACK => Self::Ack(parse_u64(&frame.payload)?),
+            kind::CONFIG => Self::Config(parse_config(&frame.payload)?),
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
     }
+}
+
+fn parse_config(bytes: &[u8]) -> io::Result<TerminalConfig> {
+    serde_json::from_slice::<TerminalConfig>(bytes).map(TerminalConfig::sanitized).map_err(|e| invalid(&e.to_string()))
 }
 
 /// Encode/decode a 16-byte ticket as lowercase hex.
@@ -181,11 +198,23 @@ mod tests {
             ServerData::Resized { offset: 7, size },
             ServerData::Exited { code: -1 },
             ServerData::SnapshotDone,
+            ServerData::Configured(TerminalConfig::default()),
         ] {
             assert_eq!(ServerData::from_frame(message.to_frame()).unwrap(), message);
         }
-        for message in [ClientData::Input(b"ls\r".to_vec()), ClientData::Resize(size), ClientData::Ack(99)] {
+        let light = TerminalConfig { background: 0x00ff_ffff, foreground: 0, scrollback_lines: 500, ..TerminalConfig::default() };
+        assert!(light.is_light() && !TerminalConfig::default().is_light());
+        for message in [ClientData::Input(b"ls\r".to_vec()), ClientData::Resize(size), ClientData::Ack(99), ClientData::Config(light)] {
             assert_eq!(ClientData::from_frame(message.to_frame()).unwrap(), message);
         }
+        // Out-of-range values are clamped, missing optional fields default.
+        let frame = Frame::new(
+            kind::CONFIG,
+            br#"{"foreground":4294967295,"background":0,"cursor":0,"palette":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"scrollback_lines":99999999999}"#.to_vec(),
+        );
+        let ClientData::Config(config) = ClientData::from_frame(frame).unwrap() else { panic!() };
+        assert_eq!(config.foreground, 0x00ff_ffff);
+        assert_eq!(config.scrollback_lines, TerminalConfig::MAX_SCROLLBACK);
+        assert!(config.cursor_blink);
     }
 }

@@ -5,6 +5,7 @@ use gpui::{
     AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb,
 };
 
+use crate::theme::Continuous as _;
 use crate::{
     add_host::AddHostSheet,
     assets::icon,
@@ -55,6 +56,7 @@ impl Workspace {
     }
 
     fn open_switcher(&mut self, rename: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         let placeholder = if rename.is_some() { "Rename session" } else { "Filter or create…" };
         let field = cx.new(|cx| TextField::new(placeholder, cx));
         if let Some((_, name)) = &rename {
@@ -100,6 +102,9 @@ impl Workspace {
         }
         let mut exact = false;
         for (index, host) in self.hosts.iter().enumerate() {
+            if host.removed {
+                continue;
+            }
             rows.push(Row::Header { host: index });
             if host.state == HostState::Connected {
                 for s in &host.sessions {
@@ -245,19 +250,20 @@ impl Workspace {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(10.0))
-                            .px(px(14.0))
-                            .pt(px(8.0))
-                            .pb(px(4.0))
-                            .text_size(px(13.0))
+                            .gap(px(6.0))
+                            .px(px(12.0))
+                            .pt(px(6.0))
+                            .pb(px(3.0))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(theme::muted()))
-                            .child(icon(if entry.info.local { "laptop" } else { "globe" }, 16.0, theme::muted()))
-                            .child(div().flex_1().child(entry.info.name.clone()))
-                            .children(state.map(|s| div().text_size(px(11.0)).child(s))),
+                            .child(icon(if entry.info.local { "laptop" } else { "globe" }, 12.0, theme::muted()))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.info.name.clone()))
+                            .children(state.map(|s| div().flex_none().text_size(px(10.5)).font_weight(FontWeight::NORMAL).child(s))),
                     );
                 }
                 Row::Divider => {
-                    list = list.child(div().h(px(1.0)).mx(px(10.0)).my(px(5.0)).bg(rgb(theme::border())));
+                    list = list.child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(theme::border())));
                 }
                 Row::Item(item) => {
                     let selected = index == switcher.selected;
@@ -276,33 +282,33 @@ impl Workspace {
             .id("switcher")
             .occlude()
             .absolute()
-            .top(px(TITLEBAR_HEIGHT - 4.0))
-            .left(px(TRAFFIC_LIGHTS - 6.0))
-            .w(px(340.0))
+            .top(px(TITLEBAR_HEIGHT - 6.0))
+            .left(px(TRAFFIC_LIGHTS - 4.0))
+            .w(px(280.0))
             .max_h(px((f32::from(window.viewport_size().height) - TITLEBAR_HEIGHT - 16.0).max(160.0)))
             .overflow_y_scroll()
-            .rounded(px(14.0))
+            .continuous(10.0)
             .bg(rgb(theme::popover()))
             .border_1()
             .border_color(rgb(theme::border()))
-            .shadow_xl()
-            .font_family(theme::UI_FONT)
-            .text_size(px(13.5))
+            .shadow_lg()
+            .font_family(theme::ui_font())
+            .text_size(px(12.5))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(10.0))
-                    .h(px(44.0))
-                    .px(px(14.0))
+                    .gap(px(8.0))
+                    .h(px(34.0))
+                    .px(px(12.0))
                     .border_b_1()
                     .border_color(rgb(theme::border()))
-                    .child(icon("filter", 17.0, theme::muted()))
+                    .child(icon("filter", 13.0, theme::muted()))
                     .child(switcher.field.clone()),
             )
             .when(renaming, |el| {
-                el.child(div().px(px(14.0)).py(px(8.0)).text_size(px(11.5)).text_color(rgb(theme::muted())).child("Enter to rename · Esc to cancel"))
+                el.child(div().px(px(12.0)).py(px(6.0)).text_size(px(11.0)).text_color(rgb(theme::muted())).child("Enter to rename · Esc to cancel"))
             })
             .when(!renaming, |el| el.child(list));
         let backdrop = div()
@@ -328,7 +334,7 @@ impl Workspace {
             }
             Item::Create(name) => (Some("plus"), format!("Create “{name}”"), Some("↩".into()), false),
             Item::Connect(_) => (Some("globe"), "Connect (remote hosts coming soon)".into(), None, false),
-            Item::NewSession => (Some("new-session"), "New Session".into(), Some("⇧⌘N".into()), false),
+            Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
             Item::AddHost => (Some("add-host"), "Add Remote Host…".into(), None, false),
         };
         let is_session = matches!(item, Item::Session { .. });
@@ -336,22 +342,23 @@ impl Workspace {
         let muted = matches!(item, Item::Connect(_));
         div()
             .id(("switcher-item", index))
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
-            .h(px(34.0))
-            .mx(px(6.0))
+            .gap(px(8.0))
+            .h(px(26.0))
+            .mx(px(4.0))
             .px(px(8.0))
-            .rounded(px(8.0))
+            .continuous(crate::radius::MENU_ROW)
             .when(selected, |el| el.bg(rgb(theme::row_active())))
             .when(!selected, |el| el.hover(|s| s.bg(rgb(theme::tab_hover()))))
             .cursor_pointer()
-            .child(div().w(px(18.0)).flex_none().flex().justify_center().map(|el| {
+            .child(div().w(px(14.0)).flex_none().flex().justify_center().map(|el| {
                 if is_session {
-                    el.when(checked, |el| el.child(icon("check", 15.0, theme::foreground())))
+                    el.when(checked, |el| el.child(icon("check", 12.0, theme::foreground())))
                 } else {
-                    el.children(glyph.map(|g| icon(g, 16.0, theme::muted())))
+                    el.children(glyph.map(|g| icon(g, 13.0, theme::muted())))
                 }
             }))
             .child(
@@ -361,11 +368,11 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .when(checked, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .when(checked, |el| el.font_weight(FontWeight::MEDIUM))
                     .text_color(rgb(if muted { theme::muted() } else { theme::foreground() }))
                     .child(label),
             )
-            .children(hint.map(|h| div().flex_none().text_size(px(12.0)).text_color(rgb(theme::muted())).child(h)))
+            .children(hint.map(|h| div().flex_none().text_size(px(11.0)).text_color(rgb(theme::muted())).child(h)))
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if let Some(s) = this.switcher.as_mut()
                     && s.selected != index

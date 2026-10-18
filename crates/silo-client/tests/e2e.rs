@@ -7,7 +7,7 @@ use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
     control::{Capture, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
     data::{ClientData, StartMode},
-    model::{Axis, SessionView, TermSize},
+    model::{Axis, SessionView, TermSize, TerminalConfig},
     paths,
 };
 
@@ -221,5 +221,207 @@ async fn snapshot_mid_escape_and_alt_screen_body() {
     assert_eq!(a.screen_text(), b.screen_text());
     assert!(!b.screen_text().contains("base"));
     control.call_value(Method::SessionClose { session_id: created.session_id }).await.unwrap();
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_and_reset_reach_every_client() {
+    guarded("clear_and_reset_reach_every_client", clear_and_reset_body()).await;
+}
+
+async fn clear_and_reset_body() {
+    let home = temp_home("clear");
+    start_server(&home).await;
+    let (control, _events) = connect(&home, "test").await;
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    // Generated default names are two lowercase words.
+    let sessions: Vec<silo_proto::model::SessionSummary> = control.call(Method::SessionList {}).await.unwrap();
+    assert!(sessions[0].name.split('-').count() == 2, "{}", sessions[0].name);
+    let block = created.block_id.clone();
+    let mut a = Mirror::new();
+    let mut stream = attach(&control, &block, &mut a).await;
+    stream.send(&ClientData::Input(b"PS1='$ '; i=0; while [ $i -lt 100 ]; do i=$((i+1)); echo old-$i; done; echo end-old\n".to_vec()));
+    pump_until(&mut stream, &mut a, |m| m.screen_text().contains("\nend-old\n$")).await;
+    assert!(a.terminal().unwrap().scroll_state().unwrap().total > 50);
+    control.call_value(Method::TerminalClear { block_id: block.clone() }).await.unwrap();
+    pump_until(&mut stream, &mut a, |m| !m.screen_text().contains("old-")).await;
+    pump_until(&mut stream, &mut a, |m| m.terminal().unwrap().scroll_state().unwrap().total < 30).await;
+    let capture: Capture = control.call(Method::TerminalCapture { block_id: block.clone(), history: true }).await.unwrap();
+    assert!(!capture.text.contains("old-"), "{}", capture.text);
+    // Reset: alt screen is left and the screen cleared for everyone.
+    stream.send(&ClientData::Input(b"printf '\\033[?1049hALT'; echo\n".to_vec()));
+    pump_until(&mut stream, &mut a, |m| m.screen_text().contains("ALT")).await;
+    control.call_value(Method::TerminalReset { block_id: block.clone() }).await.unwrap();
+    pump_until(&mut stream, &mut a, |m| !m.screen_text().contains("ALT") && m.screen_text().contains('$')).await;
+    let mut b = Mirror::new();
+    let mut stream_b = attach(&control, &block, &mut b).await;
+    let a_offset = a.resume().unwrap().offset;
+    pump_until(&mut stream_b, &mut b, |m| m.resume().is_some_and(|r| r.offset >= a_offset)).await;
+    assert_eq!(a.screen_text(), b.screen_text());
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_terminal_config_reaches_server_and_every_client() {
+    guarded("owner_terminal_config", owner_terminal_config_body()).await;
+}
+
+fn config(background: u32) -> TerminalConfig {
+    TerminalConfig { background, ..TerminalConfig::default() }
+}
+
+fn background(m: &mut Mirror) -> u32 {
+    m.terminal().unwrap().frame().unwrap().background
+}
+
+/// Ask the server terminal for its background (OSC 11) and wait for the
+/// reply, echoed by `cat -v`, to show `rgb`.
+async fn query_background(stream: &mut DataStream, m: &mut Mirror, rgb: &str) {
+    stream.send(&ClientData::Input(b"clear; stty -echo -icanon; printf '\\033]11;?\\007'; cat -v\n".to_vec()));
+    let want = format!("11;rgb:{rgb}");
+    pump_until(stream, m, |m| m.screen_text().contains(&want)).await;
+    stream.send(&ClientData::Input(b"\x03stty sane; clear\n".to_vec()));
+}
+
+async fn owner_terminal_config_body() {
+    let home = temp_home("config");
+    start_server(&home).await;
+    let (control, _events) = connect(&home, "test-a").await;
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let block = created.block_id.clone();
+    let red = config(0x0010_2030);
+    let blue = config(0x0000_0040);
+
+    // A owns the block: its config becomes effective on the server terminal
+    // (OSC 11 answers with it) and is announced to its mirror.
+    let mut a = Mirror::new();
+    let mut stream_a = attach(&control, &block, &mut a).await;
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(TerminalConfig::default())).await;
+    stream_a.send(&ClientData::Config(red));
+    control.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
+    assert_eq!(background(&mut a), red.background);
+    stream_a.send(&ClientData::Input(b"PS1='$ '\n".to_vec()));
+    query_background(&mut stream_a, &mut a, "1010/2020/3030").await;
+
+    // B attaches with its own config but does not own: it renders A's.
+    let (control_b, _events_b) = connect(&home, "test-b").await;
+    let mut b = Mirror::new();
+    let mut stream_b = attach(&control_b, &block, &mut b).await;
+    stream_b.send(&ClientData::Config(blue));
+    control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await.unwrap();
+    pump_until(&mut stream_b, &mut b, |m| m.config() == Some(red) && m.terminal().is_some()).await;
+    assert_eq!(background(&mut b), red.background);
+
+    // B takes over: everyone (and the server) switches to B's config.
+    control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(blue)).await;
+    pump_until(&mut stream_b, &mut b, |m| m.config() == Some(blue)).await;
+    assert_eq!(background(&mut a), blue.background);
+    query_background(&mut stream_a, &mut a, "0000/0000/4040").await;
+
+    // The owner leaves: A's config is effective again.
+    drop(stream_b);
+    drop(control_b);
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
+    query_background(&mut stream_a, &mut a, "1010/2020/3030").await;
+
+    // A config change while the program is mid-escape waits for the ground
+    // state, so the mirror switches between the same bytes the server did.
+    stream_a.send(&ClientData::Input(b"printf '\\033[3'; sleep 0.15; printf '1mX\\033[0m\\n'\n".to_vec()));
+    pump_until(&mut stream_a, &mut a, |m| !m.terminal().unwrap().at_ground().unwrap()).await;
+    stream_a.send(&ClientData::Config(blue));
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let data = stream_a.rx.recv().await.expect("stream closed");
+            if matches!(data, silo_proto::data::ServerData::Configured(_)) {
+                assert!(a.terminal().unwrap().at_ground().unwrap(), "config applied mid-escape");
+                a.apply(data).unwrap();
+                return;
+            }
+            a.apply(data).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.config(), Some(blue));
+
+    // Program overrides (OSC 11) survive a config change on every side.
+    stream_a.send(&ClientData::Input(b"printf '\\033]11;#123456\\007'; echo set-bg\n".to_vec()));
+    pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\nset-bg")).await;
+    stream_a.send(&ClientData::Config(red));
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
+    assert_eq!(background(&mut a), 0x0012_3456);
+    query_background(&mut stream_a, &mut a, "1212/3434/5656").await;
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_across_config_change_keeps_byte_order() {
+    guarded("resume_across_config_change", resume_across_config_change_body()).await;
+}
+
+async fn resume_across_config_change_body() {
+    let home = temp_home("config-resume");
+    start_server(&home).await;
+    let (control, _events) = connect(&home, "test-a").await;
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let block = created.block_id.clone();
+    let red = config(0x0010_2030);
+    let blue = config(0x0000_0040);
+
+    let mut a = Mirror::new();
+    let mut stream_a = attach(&control, &block, &mut a).await;
+    stream_a.send(&ClientData::Config(red));
+    control.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
+    stream_a.send(&ClientData::Input(b"PS1='$ '; echo ready-$((0+1))\n".to_vec()));
+    pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\nready-1\n$")).await;
+
+    let (control_b, _events_b) = connect(&home, "test-b").await;
+    let mut b = Mirror::new();
+    let mut stream_b = attach(&control_b, &block, &mut b).await;
+    let a_offset = a.resume().unwrap().offset;
+    pump_until(&mut stream_b, &mut b, |m| m.config() == Some(red) && m.resume().is_some_and(|r| r.offset >= a_offset)).await;
+
+    // B goes away. Meanwhile the program sets an OSC 11 override, prints,
+    // and is mid-escape when the owner switches theme; more output follows.
+    drop(stream_b);
+    let resume = b.resume().unwrap();
+    stream_a.send(&ClientData::Input(
+        b"printf '\\033]11;#123456\\007'; echo before-$((1+1)); printf '\\033[3'; sleep 0.1; printf '1mX\\033[0m\\n'; sleep 0.2; echo after-$((2+2))\n".to_vec(),
+    ));
+    pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\nbefore-2")).await;
+    pump_until(&mut stream_a, &mut a, |m| !m.terminal().unwrap().at_ground().unwrap()).await;
+    stream_a.send(&ClientData::Config(blue));
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(blue) && m.screen_text().contains("\nafter-4\n$")).await;
+
+    // Resume replays the old config first, then switches exactly where the
+    // live stream did: after the earlier output, outside the escape.
+    let mut stream_b = DataStream::open(&control_b, &block, Some(resume)).await.unwrap();
+    assert_eq!(stream_b.welcome.mode, StartMode::Resume);
+    b.begin(&stream_b.welcome).unwrap();
+    let mut configs = Vec::new();
+    tokio::time::timeout(TIMEOUT, async {
+        while !b.screen_text().contains("\nafter-4\n$") {
+            let data = stream_b.rx.recv().await.expect("stream closed");
+            if let silo_proto::data::ServerData::Configured(config) = data {
+                if config == blue {
+                    let text = b.screen_text();
+                    assert!(text.contains("\nbefore-2"), "switched before older output:\n{text}");
+                    assert!(!text.contains("after-4"), "switched after newer output:\n{text}");
+                    assert!(b.terminal().unwrap().at_ground().unwrap(), "config applied mid-escape");
+                }
+                configs.push(config);
+            }
+            b.apply(data).unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out; screen:\n{}", b.screen_text()));
+    assert_eq!(configs, vec![red, blue]);
+    assert_eq!(b.config(), Some(blue));
+    assert_eq!(background(&mut b), 0x0012_3456, "program override survives");
+    assert_eq!(a.screen_text(), b.screen_text());
     control.call_value(Method::ServerShutdown {}).await.unwrap();
 }

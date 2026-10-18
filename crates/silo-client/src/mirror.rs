@@ -5,9 +5,9 @@
 use anyhow::{anyhow, bail};
 use silo_proto::{
     data::{Resume, ServerData, StartMode, Welcome},
-    model::TermSize,
+    model::{CursorShape, TermSize, TerminalConfig},
 };
-use silo_vt::{GridSize, RestoreOptions, TerminalColors, TerminalCore};
+use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Applied {
@@ -27,8 +27,10 @@ pub struct Mirror {
     /// Local cell metrics in device pixels, used for mouse encoding.
     cell: (u16, u16),
     exited: Option<i32>,
-    /// Local default colors, re-installed into every restored terminal.
-    colors: Option<TerminalColors>,
+    /// The block's effective configuration as announced by the server,
+    /// re-installed into every restored terminal. Never a local guess: the
+    /// server terminal answers color queries with exactly these values.
+    config: Option<TerminalConfig>,
 }
 
 impl Default for Mirror {
@@ -40,21 +42,18 @@ impl Default for Mirror {
 impl Mirror {
     #[must_use]
     pub fn new() -> Self {
-        Self { vt: None, epoch: 0, next_offset: 0, size: TermSize::new(80, 24), cell: (8, 16), exited: None, colors: None }
+        Self { vt: None, epoch: 0, next_offset: 0, size: TermSize::new(80, 24), cell: (8, 16), exited: None, config: None }
     }
 
-    /// Default colors for rendering. Program-set colors (OSC 4/10/11) from
-    /// the snapshot and output still take precedence.
-    pub fn set_colors(&mut self, colors: TerminalColors) {
-        self.colors = Some(colors);
-        if let Some(vt) = self.vt.as_mut() {
-            let _ = vt.set_colors(&colors);
-        }
+    /// The effective configuration the server last announced.
+    #[must_use]
+    pub fn config(&self) -> Option<TerminalConfig> {
+        self.config
     }
 
     fn install(&mut self, mut vt: TerminalCore) {
-        if let Some(colors) = &self.colors {
-            let _ = vt.set_colors(colors);
+        if let Some(config) = &self.config {
+            install_config(&mut vt, config);
         }
         self.vt = Some(vt);
     }
@@ -143,6 +142,13 @@ impl Mirror {
                 self.exited = Some(code);
                 Ok(Applied::Exited(code))
             }
+            ServerData::Configured(config) => {
+                self.config = Some(config);
+                if let Some(vt) = self.vt.as_mut() {
+                    install_config(vt, &config);
+                }
+                Ok(Applied::Redraw)
+            }
         }
     }
 
@@ -196,4 +202,36 @@ impl Mirror {
         }
         lines.join("\n")
     }
+}
+
+/// The engine colors and defaults for a configuration (the same mapping the
+/// server uses for its authoritative terminal).
+#[must_use]
+pub fn engine_config(config: &TerminalConfig) -> (TerminalColors, TerminalDefaults) {
+    let colors = TerminalColors {
+        scheme: if config.is_light() { ColorScheme::Light } else { ColorScheme::Dark },
+        foreground: config.foreground,
+        background: config.background,
+        cursor: config.cursor,
+        ansi: config.palette,
+    };
+    let defaults = TerminalDefaults {
+        cursor_shape: Some(match config.cursor_shape {
+            CursorShape::Block => silo_vt::CursorShape::Block,
+            CursorShape::Bar => silo_vt::CursorShape::Bar,
+            CursorShape::Underline => silo_vt::CursorShape::Underline,
+            CursorShape::Hollow => silo_vt::CursorShape::Hollow,
+        }),
+        cursor_blink: Some(config.cursor_blink),
+        scrollback_bytes: config.scrollback_bytes(),
+        scrollback_lines: config.scrollback_lines,
+    };
+    (colors, defaults)
+}
+
+fn install_config(vt: &mut TerminalCore, config: &TerminalConfig) {
+    let (colors, defaults) = engine_config(config);
+    // Scheme reports are the server's to send; the mirror's are dropped.
+    let _ = vt.set_colors(&colors);
+    let _ = vt.set_defaults(&defaults);
 }

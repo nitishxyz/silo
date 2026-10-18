@@ -2,6 +2,7 @@
 
 use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
 
+use crate::theme::Continuous as _;
 use crate::{
     hosts::{self, HostInfo, RemoteHost},
     text_field::{FieldEvent, TextField},
@@ -58,32 +59,51 @@ impl Workspace {
     }
 
     fn save_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(sheet) = &mut self.add_host else { return };
+        let Some(sheet) = &self.add_host else { return };
         let name = sheet.name.read(cx).text.trim().to_owned();
         let address = sheet.address.read(cx).text.trim().to_owned();
+        match self.save_host(name, address, window, cx) {
+            Ok(()) => self.close_add_host(window, cx),
+            Err(error) => {
+                if let Some(sheet) = &mut self.add_host {
+                    sheet.error = Some(error);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Validate, persist to hosts.json and connect a new remote host.
+    pub(crate) fn save_host(&mut self, name: String, address: String, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         if name.is_empty() || address.is_empty() {
-            sheet.error = Some("Enter a name and an address.".into());
-            cx.notify();
-            return;
+            return Err("Enter a name and an address.".into());
         }
         let mut saved = hosts::load(&self.home);
         if saved.iter().any(|h| h.name == name) {
-            sheet.error = Some(format!("A host named “{name}” already exists."));
-            cx.notify();
-            return;
+            return Err(format!("A host named “{name}” already exists."));
         }
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let host = RemoteHost { id: format!("h{:x}", nanos & 0xffff_ffff_ffff), name, address };
         saved.push(host.clone());
-        if let Err(error) = hosts::save(&self.home, &saved) {
-            sheet.error = Some(format!("Could not save: {error:#}"));
-            cx.notify();
-            return;
-        }
+        hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
         self.add_host_entry(HostInfo::remote(&host), window, cx);
-        self.close_add_host(window, cx);
+        Ok(())
     }
 
+    /// Forget a remote host (hosts.json and the switcher).
+    pub(crate) fn remove_host(&mut self, index: usize) -> Result<String, String> {
+        let entry = self.hosts.get_mut(index).ok_or("no such host")?;
+        if entry.info.local {
+            return Err("This Mac cannot be removed.".into());
+        }
+        let name = entry.info.name.clone();
+        let saved: Vec<RemoteHost> = hosts::load(&self.home).into_iter().filter(|h| h.name != name).collect();
+        hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
+        entry.removed = true;
+        entry.conn = None;
+        entry.control = None;
+        Ok(name)
+    }
     pub(crate) fn render_add_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.add_host.as_ref()?;
         let field = |label: &'static str, input: &Entity<TextField>| {
@@ -98,7 +118,7 @@ impl Workspace {
                         .items_center()
                         .h(px(34.0))
                         .px(px(10.0))
-                        .rounded(px(8.0))
+                        .continuous(8.0)
                         .bg(rgb(theme::background()))
                         .border_1()
                         .border_color(rgb(theme::border()))
@@ -110,7 +130,7 @@ impl Workspace {
                 .id(id)
                 .px(px(14.0))
                 .py(px(6.0))
-                .rounded(px(8.0))
+                .continuous(8.0)
                 .text_size(px(13.0))
                 .cursor_pointer()
                 .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())))
@@ -125,12 +145,12 @@ impl Workspace {
             .flex_col()
             .gap(px(14.0))
             .p(px(20.0))
-            .rounded(px(14.0))
+            .continuous(14.0)
             .bg(rgb(theme::popover()))
             .border_1()
             .border_color(rgb(theme::border()))
             .shadow_xl()
-            .font_family(theme::UI_FONT)
+            .font_family(theme::ui_font())
             .text_size(px(13.0))
             .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).child("Add Remote Host"))
             .child(

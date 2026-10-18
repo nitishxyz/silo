@@ -22,12 +22,13 @@ use silo_proto::{
 use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, PreparedFrame, terminal_canvas};
 use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
 
+use crate::theme::Continuous as _;
 use crate::{
     composition::{Composition, InputGate, RawDisposition, byte_range},
     theme,
 };
 
-const PADDING: f32 = 6.0;
+pub const PADDING: f32 = 6.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -69,6 +70,12 @@ pub struct Pane {
     autoscroll: i32,
     drag_event: Option<MouseEvent>,
     autoscroll_task: Option<Task<()>>,
+    blink: crate::blink::Blink,
+    /// Whether the last render wanted the blink animation; the timer task
+    /// stops itself as soon as this is false.
+    blink_wanted: bool,
+    /// At most one timer, dropped (cancelled) with the pane.
+    blink_task: Option<Task<()>>,
     wheel: f32,
     own_requested: Option<Instant>,
     /// Focused pane: takes ownership rather than requesting it.
@@ -99,6 +106,7 @@ impl Pane {
     pub fn new(block_id: String, rt: tokio::runtime::Handle, control: Option<Control>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         cx.on_focus(&focus, window, |this, _, cx| {
+            this.blink.reset();
             this.active = true;
             this.send_focus(true);
             cx.emit(PaneEvent::Activated);
@@ -115,8 +123,7 @@ impl Pane {
             cx.notify();
         })
         .detach();
-        let mut mirror = Mirror::new();
-        mirror.set_colors(theme::terminal_colors());
+        let mirror = Mirror::new();
         let mut pane = Self {
             block_id,
             rt,
@@ -141,6 +148,9 @@ impl Pane {
             autoscroll: 0,
             drag_event: None,
             autoscroll_task: None,
+            blink: crate::blink::Blink::default(),
+            blink_wanted: false,
+            blink_task: None,
             wheel: 0.0,
             own_requested: None,
             active: false,
@@ -218,6 +228,7 @@ impl Pane {
             if !ok {
                 return;
             }
+            tracing::debug!("pane attached");
             while let Some(first) = stream.rx.recv().await {
                 let mut batch = vec![first];
                 while batch.len() < 512 {
@@ -244,6 +255,7 @@ impl Pane {
         }
         self.sender = Some(stream.sender());
         self.status = Status::Live;
+        self.send_config();
         self.send_size();
         self.own_requested = None;
         self.own(if self.active { OwnMode::Take } else { OwnMode::Request });
@@ -253,7 +265,6 @@ impl Pane {
 
     fn reset_mirror(&mut self) {
         self.mirror = Mirror::new();
-        self.mirror.set_colors(theme::terminal_colors());
         if let Some(grid) = self.grid {
             self.mirror.set_cell_size(grid.cell_width, grid.cell_height);
         }
@@ -324,6 +335,14 @@ impl Pane {
         }
     }
 
+    /// This client's desired terminal configuration (colors, cursor,
+    /// scrollback); the font stays local.
+    fn send_config(&self) {
+        if let Some(sender) = &self.sender {
+            sender.send(&ClientData::Config(theme::terminal_config()));
+        }
+    }
+
     fn send_size(&self) {
         if let (Some(sender), Some(g)) = (&self.sender, self.grid) {
             sender.send(&ClientData::Resize(TermSize { columns: g.columns, rows: g.rows, cell_width: g.cell_width, cell_height: g.cell_height }));
@@ -331,6 +350,7 @@ impl Pane {
     }
 
     fn typed(&mut self, cx: &mut Context<Self>) {
+        self.blink.reset();
         self.own(OwnMode::Take);
         let Some(vt) = self.mirror.terminal() else { return };
         let mut changed = vt.clear_selection();
@@ -351,8 +371,11 @@ impl Pane {
     // ---- keyboard ----
 
     fn route_key(&mut self, key: &Keystroke, release: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        // Command chords belong to the app (bindings run before this).
-        if key.modifiers.platform {
+        // Command chords belong to the app (bindings run before this),
+        // except the few line-editing ones the terminal handles.
+        if key.modifiers.platform
+            && !(crate::keys::Chord::of(&key.modifiers) == Some(crate::keys::Chord::Cmd) && crate::keys::terminal_cmd_key(&key.key))
+        {
             return false;
         }
         if !self.accepts_input(window) {
@@ -398,7 +421,14 @@ impl Pane {
             release,
         };
         let Some(vt) = self.mirror.terminal() else { return };
-        if let Ok(bytes) = vt.encode_key(&event)
+        let encoded = vt.encode_key(&event).map(|bytes| {
+            // macOS editing chords whose legacy encoding shells ignore.
+            match crate::keys::edit_override(&key.key, crate::keys::Chord::of(&key.modifiers), &bytes) {
+                Some(edit) if !release => edit.to_vec(),
+                _ => bytes,
+            }
+        });
+        if let Ok(bytes) = encoded
             && !bytes.is_empty()
         {
             self.send_input(bytes);
@@ -429,6 +459,37 @@ impl Pane {
         {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
+    }
+
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(vt) = self.mirror.terminal()
+            && vt.select_all()
+        {
+            self.generation += 1;
+            cx.notify();
+        }
+    }
+
+    /// Content bounds from the last layout (window coordinates).
+    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.content_bounds
+    }
+
+    /// A visual-only copy of the last painted frame and its slot (content
+    /// bounds grown by the padding), for a close animation.
+    pub fn ghost(&self) -> Option<(Arc<PreparedFrame>, Bounds<Pixels>)> {
+        let bounds = self.content_bounds?;
+        Some((self.prepared.clone()?, bounds.dilate(px(PADDING))))
+    }
+
+    /// Report the (changed) terminal preferences to the server. They become
+    /// effective for every client while this app owns the block; the
+    /// server announces the result, which the mirror then renders.
+    pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        self.send_config();
+        self.generation += 1;
+        self.prepared_key = None;
+        cx.notify();
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -575,6 +636,7 @@ impl Pane {
         self.content_bounds = Some(bounds);
         let grid = metrics.grid(f32::from(bounds.size.width), f32::from(bounds.size.height));
         if self.grid != Some(grid) {
+            tracing::debug!(block = %self.block_id, columns = grid.columns, rows = grid.rows, "pane grid");
             self.grid = Some(grid);
             self.mirror.set_cell_size(grid.cell_width, grid.cell_height);
             self.send_size();
@@ -607,6 +669,58 @@ impl Pane {
             });
         })
         .detach();
+    }
+
+    /// Cursor phase for this render, starting or stopping the blink timer
+    /// as needed. The painted frame's cursor decides: DECTCEM visibility,
+    /// DECSCUSR steady/blinking (and the terminal settings' blink
+    /// default), and whether the viewport shows the cursor at all.
+    fn blink_phase(&mut self, focused: bool, window_active: bool, cx: &mut Context<Self>) -> bool {
+        let frame = self.prepared.as_ref().map(|p| p.frame().clone());
+        let Some(frame) = frame else {
+            self.blink_wanted = false;
+            return true;
+        };
+        let c = frame.cursor;
+        self.blink.track(c.column, c.row);
+        self.blink_wanted = crate::blink::active(focused && self.status == Status::Live, window_active, c.visible, c.blinking, frame.scroll.at_bottom());
+        if !self.blink_wanted {
+            return true;
+        }
+        if self.blink_task.is_none() {
+            tracing::debug!(block = %self.block_id, "blink timer start");
+            self.blink_task = Some(cx.spawn(async move |this, cx| {
+                // Each step decides and clears the slot in one update, so a
+                // render never sees a stale task and skips starting a new one.
+                let next = |pane: &mut Pane| {
+                    if pane.blink_wanted {
+                        Some(pane.blink.until_next(Instant::now()))
+                    } else {
+                        tracing::debug!(block = %pane.block_id, "blink timer stop");
+                        pane.blink_task = None;
+                        None
+                    }
+                };
+                let mut wait = match this.update(cx, |pane, _| next(pane)) {
+                    Ok(Some(wait)) => wait,
+                    _ => return,
+                };
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    wait = match this.update(cx, |pane, cx| {
+                        let wait = next(pane);
+                        if wait.is_some() {
+                            cx.notify();
+                        }
+                        wait
+                    }) {
+                        Ok(Some(wait)) => wait,
+                        _ => return,
+                    };
+                }
+            }));
+        }
+        self.blink.visible_at(Instant::now())
     }
 
     fn status_text(&self) -> Option<String> {
@@ -658,7 +772,8 @@ impl Render for Pane {
         let metrics = CellMetrics::for_window(window);
         self.request_prepare(metrics, cx);
         let focused = self.focus.is_focused(window) && window.is_window_active();
-        let cursor = CursorPresentation { focused, phase_visible: true };
+        let phase_visible = self.blink_phase(focused, window.is_window_active(), cx);
+        let cursor = CursorPresentation { focused, phase_visible };
         let selection = rgb(theme::selection()).opacity(0.55);
         let status = self.status_text();
         let sized_elsewhere = self.sized_elsewhere();
@@ -671,7 +786,8 @@ impl Render for Pane {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(theme::background()))
+            // No fill: the workspace's pane card paints the background, so
+            // its rounded corners (Comfortable) stay visible.
             .p(px(PADDING))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if this.route_key(&event.keystroke, false, window, cx) {
@@ -742,7 +858,7 @@ impl Render for Pane {
                             .right(px(4.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .rounded(px(4.0))
+                            .continuous(4.0)
                             .bg(rgb(theme::tab_active()))
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
@@ -758,7 +874,7 @@ impl Render for Pane {
                             .right(px(2.0))
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(4.0))
+                            .continuous(4.0)
                             .bg(rgb(theme::tab_active()))
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))

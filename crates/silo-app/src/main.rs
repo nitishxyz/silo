@@ -1,20 +1,38 @@
 //! Silo: GPUI client for the silo terminal multiplexer daemon.
 
 mod add_host;
+mod appearance;
 mod assets;
+mod blink;
+mod commands;
 mod composition;
+mod controls;
 mod conn;
+mod focus;
+mod fonts;
 mod hosts;
+mod keys;
+mod layout;
+mod motion;
+mod palette;
 mod pane;
+mod radius;
+mod settings;
+mod settings_panel;
 mod switcher;
+mod terminal_prefs;
 mod text_field;
 mod theme;
 mod titlebar;
+mod tooltip;
 mod workspace;
 
 use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
 
-use crate::workspace::{NewSession, Quit, Workspace};
+use crate::{
+    commands::act::{CommandPalette, NewSession, OpenSettings, Quit},
+    workspace::Workspace,
+};
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
@@ -30,31 +48,32 @@ fn main() {
     let home = silo_proto::paths::home();
     let exe = conn::server_exe();
     tracing::info!(home = %home.display(), server = %exe.display(), "starting Silo");
-    let theme = theme::load_ghostty();
-    tracing::info!(source = %theme.source, background = format!("#{:06x}", theme.background), font = ?theme.font_family, "theme");
-    theme::install(theme);
+    let loaded = terminal_prefs::load(&home);
+    if let Some(problem) = &loaded.problem {
+        tracing::warn!("{problem}");
+    }
+    tracing::info!(theme = %loaded.prefs.theme, font = %loaded.prefs.font_family, "terminal preferences");
+    theme::install(loaded.prefs, loaded.problem);
     start_menubar(&home);
 
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
-        let (family, font_size) = theme::font();
-        let mut font = silo_render::FontSettings { size: font_size.unwrap_or(13.0), ..Default::default() };
-        if let Some(family) = family {
-            // Match like Ghostty: case- and space-insensitive
-            // ("BerkeleyMono Nerd Font Mono" = "Berkeley Mono Nerd Font Mono").
-            let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
-            let wanted = key(&family);
-            if let Some(name) = cx.text_system().all_font_names().into_iter().find(|f| key(f) == wanted) {
-                font.family = name;
-            } else {
-                tracing::warn!("font {family:?} from the Ghostty config is not installed; using {}", font.family);
-            }
-        }
-        silo_render::set_terminal_font(font);
-        workspace::bind_keys(cx);
+        theme::apply_font(cx);
+        // System Settings › Accessibility › Display › Reduce motion, read
+        // once at launch (toggling it needs an app restart).
+        cx.set_reduce_motion(reduce_motion());
+        commands::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(vec![
-            Menu { name: "Silo".into(), items: vec![MenuItem::action("Quit Silo", Quit)], disabled: false },
-            Menu { name: "Session".into(), items: vec![MenuItem::action("New Session", NewSession)], disabled: false },
+            Menu {
+                name: "Silo".into(),
+                items: vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit Silo", Quit)],
+                disabled: false,
+            },
+            Menu {
+                name: "Session".into(),
+                items: vec![MenuItem::action("New Session", NewSession), MenuItem::action("Command Palette", CommandPalette)],
+                disabled: false,
+            },
         ]);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -84,6 +103,16 @@ fn main() {
         cx.activate(true);
     });
     drop(runtime);
+}
+
+fn reduce_motion() -> bool {
+    if let Some(forced) = std::env::var_os("SILO_REDUCE_MOTION") {
+        return forced == "1";
+    }
+    std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "com.apple.universalaccess", "reduceMotion"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "1")
 }
 
 /// Launch the bundled menu-bar agent (`silo-menubar`) if it is next to us

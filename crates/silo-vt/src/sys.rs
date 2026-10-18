@@ -65,6 +65,7 @@ unsafe extern "C" {
     fn silo_vt_drag_scroll(vt: *mut c_void, lines: i32) -> bool;
     fn silo_vt_cancel_drag(vt: *mut c_void);
     fn silo_vt_clear_selection(vt: *mut c_void) -> bool;
+    fn silo_vt_select_all(vt: *mut c_void) -> bool;
     fn silo_vt_copy(vt: *mut c_void, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_mouse(
         vt: *mut c_void,
@@ -248,6 +249,13 @@ impl TerminalCore {
     pub fn clear_selection(&mut self) -> bool {
         // SAFETY: exclusive handle; no borrowed output.
         unsafe { silo_vt_clear_selection(self.handle.as_ptr()) }
+    }
+
+    /// Select the whole screen and scrollback. Returns whether anything
+    /// was selectable.
+    pub fn select_all(&mut self) -> bool {
+        // SAFETY: exclusive handle; no borrowed output.
+        unsafe { silo_vt_select_all(self.handle.as_ptr()) }
     }
 
     /// Scroll only an active native selection, bounded to eight rows per tick.

@@ -15,7 +15,16 @@ macro_rules! icons {
     };
 }
 
-icons!("laptop", "globe", "check", "filter", "new-session", "add-host", "close", "plus", "terminal", "chevron");
+icons!(
+    "laptop", "globe", "check", "filter", "new-session", "add-host", "close", "plus", "terminal", "chevron", "split-right", "split-down",
+    "zoom", "unzoom", "eye", "settings-hard-drive", "settings-info", "settings-keyboard", "settings-search", "settings-shapes"
+);
+
+#[cfg(test)]
+pub fn has_icon(name: &str) -> bool {
+    let path = format!("icons/{name}.svg");
+    ICONS.iter().any(|(p, _)| *p == path)
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {

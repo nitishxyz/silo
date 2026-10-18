@@ -15,7 +15,8 @@ pub mod paths;
 pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 
 /// Protocol version; bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// 2: terminal configuration frames (`CONFIG`, `CONFIGURED`).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Upper bound for any single frame.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -32,6 +33,8 @@ pub mod kind {
     pub const INPUT: u8 = 0x11;
     pub const RESIZE: u8 = 0x12;
     pub const ACK: u8 = 0x13;
+    /// JSON [`crate::model::TerminalConfig`]: this client's desired config.
+    pub const CONFIG: u8 = 0x14;
 
     // Data stream, server -> client.
     pub const WELCOME: u8 = 0x81;
@@ -42,4 +45,7 @@ pub mod kind {
     pub const RESIZED: u8 = 0x86;
     pub const EXITED: u8 = 0x87;
     pub const SNAPSHOT_DONE: u8 = 0x88;
+    /// JSON [`crate::model::TerminalConfig`]: the effective config from
+    /// this point of the output stream on.
+    pub const CONFIGURED: u8 = 0x89;
 }

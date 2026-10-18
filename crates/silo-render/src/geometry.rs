@@ -193,6 +193,23 @@ mod tests {
     }
 
     #[test]
+    fn resizing_keeps_the_cell_stride_and_leaves_residue_as_trailing_padding() {
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let metrics = CellMetrics::new(scale);
+            let first = metrics.grid(400.0, 300.0);
+            for width in (300..1200).map(|w| w as f32 * 0.5) {
+                let grid = metrics.grid(width, 300.0);
+                // One fixed advance; spare pixels never spread between cells.
+                assert_eq!(grid.cell_width, first.cell_width, "scale {scale} width {width}");
+                let used = u32::from(grid.columns) * u32::from(grid.cell_width);
+                let available = (width * scale).floor() as u32;
+                assert!(used <= available, "scale {scale} width {width}");
+                assert!(available - used < u32::from(grid.cell_width), "whole columns only: scale {scale} width {width}");
+            }
+        }
+    }
+
+    #[test]
     fn installing_a_font_bumps_the_generation_only_when_it_changed() {
         let before = font_generation();
         let settings = FontSettings {
