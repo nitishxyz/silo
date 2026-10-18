@@ -1,0 +1,29 @@
+[package]
+name = "silo-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silo-app"
+path = "src/main.rs"
+
+[dependencies]
+silo-client.workspace = true
+silo-proto.workspace = true
+silo-vt.workspace = true
+silo-render.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+
+[features]
+# Compile Metal shaders at runtime: works with only the Command Line Tools.
+# Build with `--no-default-features` when the Xcode Metal toolchain exists.
+default = ["runtime_shaders"]
+runtime_shaders = ["gpui_platform/runtime_shaders"]

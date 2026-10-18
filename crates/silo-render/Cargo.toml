@@ -1,0 +1,9 @@
+[package]
+name = "silo-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gpui.workspace = true
+silo-vt.workspace = true

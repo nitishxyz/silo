@@ -1,0 +1,13 @@
+[package]
+name = "silo-vt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+links = "ghostty-vt"
+
+[build-dependencies]
+cc = "1"
+
+# Only sys.rs may perform unsafe operations. C ABI layouts belong to the shim.
+[lints.rust]
+unsafe_code = "deny"

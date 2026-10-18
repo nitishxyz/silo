@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.dependencies]
+silo-vt = { path = "crates/silo-vt" }
+silo-pty = { path = "crates/silo-pty" }
+silo-proto = { path = "crates/silo-proto" }
+silo-server = { path = "crates/silo-server" }
+silo-client = { path = "crates/silo-client" }
+silo-render = { path = "crates/silo-render" }
+gpui = { git = "https://github.com/nitishxyz/zed", rev = "b36b2e8276c7054dc0a32083156859e4156a9c16", default-features = false, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "b36b2e8276c7054dc0a32083156859e4156a9c16", default-features = false, features = ["font-kit"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.9"
+rustix = { version = "1", features = ["pty", "termios", "process", "fs", "stdio"] }
+libc = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.gpui]
+opt-level = 3
+debug = false
+
+[profile.dev.package.gpui_platform]
+opt-level = 3
+debug = false

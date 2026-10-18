@@ -1,0 +1,23 @@
+[package]
+name = "silo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silo"
+path = "src/main.rs"
+
+[dependencies]
+silo-proto.workspace = true
+silo-server.workspace = true
+silo-client.workspace = true
+silo-vt.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustix.workspace = true
+libc.workspace = true
+clap = { version = "4", features = ["derive"] }

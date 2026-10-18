@@ -1,0 +1,307 @@
+//! Control and data stream handling, transport-independent.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use serde_json::{Value, json};
+use silo_proto::{
+    Frame, PROTOCOL_VERSION,
+    control::{ClientHello, METHODS, Method, Request, RpcError, ServerHello, ServerMessage},
+    data::{ClientData, DataHello, Reject},
+    kind, read_frame, spawn_reader, write_frame,
+};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+};
+
+use crate::{
+    Server,
+    block::{Attach, BlockMsg, Sink},
+};
+
+/// Serve one accepted stream; its first frame selects control or data.
+pub async fn serve<S>(server: Arc<Server>, stream: S)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, writer) = tokio::io::split(stream);
+    let first = match read_frame(&mut reader).await {
+        Ok(Some(frame)) => frame,
+        _ => return,
+    };
+    let result = match first.kind {
+        kind::CONTROL_HELLO => control(server, first, reader, writer).await,
+        kind::DATA_HELLO => data(server, first, reader, writer).await,
+        other => {
+            tracing::debug!("unexpected first frame {other:#x}");
+            Ok(())
+        }
+    };
+    if let Err(error) = result {
+        tracing::debug!("connection ended: {error}");
+    }
+}
+
+/// Writer task draining a channel. Every frame must go through the returned
+/// [`Sink`] so the unsent-bytes counter stays balanced.
+fn spawn_writer<W>(mut writer: W) -> (Sink, tokio::task::JoinHandle<()>)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let counter = queued.clone();
+    let task = tokio::spawn(async move {
+        while let Some(frame) = rx.recv().await {
+            let len = frame.payload.len() + 5;
+            let ok = write_frame(&mut writer, &frame).await.is_ok();
+            counter.fetch_sub(len, Ordering::AcqRel);
+            if !ok {
+                break;
+            }
+            // Coalesce small frames before flushing.
+            if rx.is_empty() && writer.flush().await.is_err() {
+                break;
+            }
+        }
+        let _ = writer.shutdown().await;
+    });
+    (Sink { tx, queued }, task)
+}
+
+async fn control<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let hello: ClientHello = hello.parse()?;
+    let (tx, writer_task) = spawn_writer(writer);
+    if hello.protocol != PROTOCOL_VERSION {
+        tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response {
+            id: 0,
+            result: None,
+            error: Some(RpcError::new("protocol", format!("server speaks protocol {PROTOCOL_VERSION}"))),
+        })?);
+        drop(tx);
+        let _ = writer_task.await;
+        return Ok(());
+    }
+    let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
+    let client_id = {
+        let mut reg = server.registry.lock().unwrap();
+        let id = reg.add_client(hello.client_name.clone(), hello.passive);
+        if let Some(entry) = reg.clients.get_mut(&id) {
+            entry.close = Some(close_tx);
+        }
+        id
+    };
+    let reply = ServerHello { protocol: PROTOCOL_VERSION, client_id, server: server.info.clone() };
+    tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
+    server.touch();
+
+    let mut frames = spawn_reader(reader, 64);
+    let result = loop {
+        tokio::select! {
+            frame = frames.recv() => {
+                let frame = match frame {
+                    Some(Ok(frame)) => frame,
+                    None => break Ok(()),
+                    Some(Err(e)) => break Err(e),
+                };
+                if frame.kind != kind::CONTROL {
+                    continue;
+                }
+                let request: Request = match frame.parse() {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let id = serde_json::from_slice::<Value>(&frame.payload).ok().and_then(|v| v.get("id")?.as_u64()).unwrap_or(0);
+                        respond(&tx, id, Err(RpcError::bad_request(e.to_string())));
+                        continue;
+                    }
+                };
+                let id = request.id;
+                let subscribe = matches!(request.method, Method::EventsSubscribe {});
+                if subscribe {
+                    server.registry.lock().unwrap().subscribe(client_id, tx.clone());
+                }
+                let shutdown = matches!(request.method, Method::ServerShutdown {});
+                let result = handle(&server, client_id, request.method).await;
+                respond(&tx, id, result);
+                if shutdown {
+                    server.shutdown.notify_one();
+                }
+            }
+            _ = &mut close_rx => break Ok(()),
+        }
+    };
+    server.registry.lock().unwrap().remove_client(client_id);
+    server.touch();
+    drop(tx);
+    let _ = writer_task.await;
+    result
+}
+
+fn respond(tx: &Sink, id: u64, result: Result<Value, RpcError>) {
+    let message = match result {
+        Ok(value) => ServerMessage::Response { id, result: Some(value), error: None },
+        Err(error) => ServerMessage::Response { id, result: None, error: Some(error) },
+    };
+    if let Ok(frame) = Frame::json(kind::CONTROL, &message) {
+        tx.send(frame);
+    }
+}
+
+fn to_value(value: impl serde::Serialize) -> Result<Value, RpcError> {
+    serde_json::to_value(value).map_err(RpcError::internal)
+}
+
+async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value, RpcError> {
+    match method {
+        Method::ServerInfo {} => to_value(&server.info),
+        Method::ServerShutdown {} => Ok(json!({})),
+        Method::ApiList {} => Ok(json!(METHODS.iter().map(|(name, description)| json!({"name": name, "description": description})).collect::<Vec<_>>())),
+        Method::EventsSubscribe {} => Ok(json!({})),
+        Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries()),
+        Method::SessionCreate { name, spawn } => to_value(server.registry.lock().unwrap().create_session(name, &spawn)?),
+        Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view(&session_id)?),
+        Method::SessionRename { session_id, name } => {
+            server.registry.lock().unwrap().rename_session(&session_id, name)?;
+            Ok(json!({}))
+        }
+        Method::SessionClose { session_id } => {
+            server.registry.lock().unwrap().close_session(&session_id)?;
+            Ok(json!({}))
+        }
+        Method::WindowCreate { session_id, spawn } => to_value(server.registry.lock().unwrap().create_window(&session_id, &spawn)?),
+        Method::WindowSelect { session_id, window_id } => {
+            server.registry.lock().unwrap().select_window(&session_id, &window_id)?;
+            Ok(json!({}))
+        }
+        Method::WindowClose { window_id } => {
+            server.registry.lock().unwrap().close_window(&window_id)?;
+            Ok(json!({}))
+        }
+        Method::WindowRename { window_id, name } => {
+            server.registry.lock().unwrap().rename_window(&window_id, name)?;
+            Ok(json!({}))
+        }
+        Method::WindowMove { window_id, index } => {
+            server.registry.lock().unwrap().move_window(&window_id, index)?;
+            Ok(json!({}))
+        }
+        Method::BlockSplit { block_id, axis, spawn } => to_value(server.registry.lock().unwrap().split(&block_id, axis, &spawn)?),
+        Method::BlockClose { block_id } => {
+            server.registry.lock().unwrap().close_block(&block_id)?;
+            Ok(json!({}))
+        }
+        Method::BlockFocus { block_id } => {
+            server.registry.lock().unwrap().focus(&block_id)?;
+            Ok(json!({}))
+        }
+        Method::BlockZoom { block_id, zoomed } => {
+            server.registry.lock().unwrap().zoom(&block_id, zoomed)?;
+            Ok(json!({}))
+        }
+        Method::LayoutRatio { window_id, path, ratio } => {
+            server.registry.lock().unwrap().set_ratio(&window_id, &path, ratio)?;
+            Ok(json!({}))
+        }
+        Method::TerminalSend { block_id, text } => {
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::Input(text.into_bytes()));
+            Ok(json!({}))
+        }
+        Method::TerminalCapture { block_id, history } => {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::Capture { history, reply });
+            to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
+        }
+        Method::TerminalSize { block_id } => {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::SizeInfo { reply });
+            to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
+        }
+        Method::TerminalResize { block_id, size } => {
+            if size.columns == 0 || size.rows == 0 {
+                return Err(RpcError::bad_request("size must be at least 1x1"));
+            }
+            let reg = server.registry.lock().unwrap();
+            let client_name = reg.client_name(client_id);
+            reg.block(&block_id)?.send(BlockMsg::Desired { client_id, client_name, size });
+            Ok(json!({}))
+        }
+        Method::OwnBlock { block_ids, mode } => {
+            let reg = server.registry.lock().unwrap();
+            for id in &block_ids {
+                reg.block(id)?.send(BlockMsg::Own { client_id, mode });
+            }
+            Ok(json!({}))
+        }
+        Method::DisownBlock { block_ids } => {
+            let reg = server.registry.lock().unwrap();
+            for id in &block_ids {
+                reg.block(id)?.send(BlockMsg::Disown { client_id });
+            }
+            Ok(json!({}))
+        }
+        Method::DataConnect { block_id } => to_value(server.registry.lock().unwrap().issue_ticket(client_id, &block_id)?),
+        Method::UiOpenSession { session_id } => {
+            let mut reg = server.registry.lock().unwrap();
+            let id = reg.view(&session_id)?.session.id;
+            reg.emit(silo_proto::control::Event::OpenSession { session_id: id });
+            Ok(json!({}))
+        }
+    }
+}
+
+async fn data<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let hello: DataHello = hello.parse()?;
+    let (tx, writer_task) = spawn_writer(writer);
+    let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket);
+    let reject = |code: &str, reason: &str| -> std::io::Result<()> {
+        tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason: reason.into() })?);
+        Ok(())
+    };
+    if hello.protocol != PROTOCOL_VERSION {
+        reject("protocol", "protocol version mismatch")?;
+    } else if let Some((block_id, client_id)) = redeemed {
+        let block = {
+            let reg = server.registry.lock().unwrap();
+            reg.blocks.get(&block_id).map(|b| (b.tx.clone(), reg.client_name(client_id)))
+        };
+        if let Some((block, client_name)) = block {
+            let native = hello.ghostty_rev == silo_vt::GHOSTTY_REV && hello.snapshot_version == crate::SNAPSHOT_VERSION;
+            let sub_id = rand::random::<u64>();
+            let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, native, sink: tx.clone() })));
+            drop(tx);
+            let mut frames = spawn_reader(reader, 256);
+            while let Some(Ok(frame)) = frames.recv().await {
+                match ClientData::from_frame(frame) {
+                    Ok(ClientData::Input(bytes)) => {
+                        let _ = block.send(BlockMsg::Input(bytes));
+                    }
+                    Ok(ClientData::Resize(size)) if size.columns > 0 && size.rows > 0 => {
+                        let _ = block.send(BlockMsg::Desired { client_id, client_name: client_name.clone(), size });
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = block.send(BlockMsg::Detach(sub_id));
+            writer_task.abort();
+            return Ok(());
+        }
+        reject("not_found", "block no longer exists")?;
+    } else {
+        reject("ticket", "invalid or expired ticket")?;
+    }
+    drop(tx);
+    let _ = writer_task.await;
+    Ok(())
+}

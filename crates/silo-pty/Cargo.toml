@@ -1,0 +1,9 @@
+[package]
+name = "silo-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+rustix.workspace = true

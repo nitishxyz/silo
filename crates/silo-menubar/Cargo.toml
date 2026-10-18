@@ -1,0 +1,21 @@
+[package]
+name = "silo-menubar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silo-menubar"
+path = "src/main.rs"
+
+[dependencies]
+silo-client.workspace = true
+silo-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustix.workspace = true
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"

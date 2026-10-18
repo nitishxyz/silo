@@ -1,0 +1,52 @@
+use std::{env, fs, path::PathBuf, process::Command};
+
+fn main() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../..");
+    let rev_file = root.join("GHOSTTY_REV");
+    println!("cargo:rerun-if-changed={}", rev_file.display());
+    println!("cargo:rerun-if-env-changed=SILO_GHOSTTY_RUNTIME");
+    println!("cargo:rerun-if-changed=src/adapter.c");
+    println!("cargo:rerun-if-changed=src/adapter.h");
+    let revision = fs::read_to_string(&rev_file).expect("GHOSTTY_REV");
+    let revision = revision.trim();
+
+    let runtime = env::var_os("SILO_GHOSTTY_RUNTIME").map_or_else(
+        || root.join(format!("target/ghostty/{revision}/runtime")),
+        PathBuf::from,
+    );
+    let stamp = runtime.join("silo-revision");
+    if fs::read_to_string(&stamp).unwrap_or_default().trim() != revision {
+        let status = Command::new("bash")
+            .arg(root.join("scripts/build-ghostty.sh"))
+            .status()
+            .expect("run scripts/build-ghostty.sh");
+        assert!(status.success(), "building libghostty-vt failed");
+    }
+    assert_eq!(
+        fs::read_to_string(&stamp).unwrap_or_default().trim(),
+        revision,
+        "libghostty-vt runtime missing; run scripts/build-ghostty.sh"
+    );
+    println!("cargo:rerun-if-changed={}", stamp.display());
+
+    cc::Build::new()
+        .file("src/adapter.c")
+        .include(runtime.join("include"))
+        .define("GHOSTTY_STATIC", None)
+        .flag_if_supported("-std=c11")
+        .warnings(true)
+        .compile("silo_vt_adapter");
+    // ld64 prefers a dylib over an archive with the same name in one search
+    // directory, so link a private copy of the archive.
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    fs::copy(
+        runtime.join("lib/libghostty-vt.a"),
+        out.join("libsilo_ghostty_vt.a"),
+    )
+    .expect("copy libghostty-vt.a");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=silo_ghostty_vt");
+    println!("cargo:include={}", runtime.join("include").display());
+    println!("cargo:rustc-env=SILO_GHOSTTY_REV={revision}");
+}
