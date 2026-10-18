@@ -23,6 +23,29 @@ type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<serde_json::
 /// Sequenced server events; `None` once the connection closed.
 pub type Events = mpsc::UnboundedReceiver<(u64, Event)>;
 
+/// The server rejected our hello because it speaks another protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProtocolMismatch {
+    /// The server's protocol, when its rejection names it.
+    pub server: Option<u32>,
+}
+
+impl std::fmt::Display for ProtocolMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.server {
+            Some(p) => write!(f, "server speaks protocol {p}, this client {PROTOCOL_VERSION}"),
+            None => write!(f, "server speaks another protocol than {PROTOCOL_VERSION}"),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolMismatch {}
+
+/// The protocol named in a rejection like "server speaks protocol 1".
+pub(crate) fn speaks(message: &str) -> Option<u32> {
+    message.rsplit(' ').next()?.trim().parse().ok()
+}
+
 /// A control connection. Cheap to clone; all clones share one stream.
 #[derive(Clone)]
 pub struct Control {
@@ -56,13 +79,32 @@ impl Control {
     /// # Errors
     /// Connection or handshake failure.
     pub async fn connect_with(socket: &Path, client_name: &str, passive: bool) -> anyhow::Result<(Self, Events)> {
+        Self::connect_protocol(socket, client_name, passive, PROTOCOL_VERSION).await
+    }
+
+    /// Like [`Control::connect_with`], announcing `protocol` in the hello.
+    /// Only for requests whose shape that protocol shares with ours (e.g.
+    /// `session.list` and `server.shutdown` on an older server).
+    ///
+    /// # Errors
+    /// Connection or handshake failure; a protocol rejection is a
+    /// [`ProtocolMismatch`].
+    pub async fn connect_protocol(
+        socket: &Path,
+        client_name: &str,
+        passive: bool,
+        protocol: u32,
+    ) -> anyhow::Result<(Self, Events)> {
         let stream = UnixStream::connect(socket).await.with_context(|| format!("connect {}", socket.display()))?;
         let (mut reader, mut writer) = stream.into_split();
-        let hello = ClientHello { protocol: PROTOCOL_VERSION, client_name: client_name.to_owned(), token: None, passive };
+        let hello = ClientHello { protocol, client_name: client_name.to_owned(), token: None, passive };
         write_frame(&mut writer, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         let reply = read_frame(&mut reader).await?.ok_or_else(|| anyhow!("server closed during hello"))?;
         if reply.kind != kind::CONTROL_HELLO {
             if let Ok(ServerMessage::Response { error: Some(error), .. }) = reply.parse::<ServerMessage>() {
+                if error.code == "protocol" {
+                    return Err(ProtocolMismatch { server: speaks(&error.message) }.into());
+                }
                 bail!("server rejected client: {error}");
             }
             bail!("unexpected hello reply");

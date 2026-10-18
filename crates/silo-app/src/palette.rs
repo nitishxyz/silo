@@ -174,6 +174,7 @@ impl Workspace {
                     self.call(Method::TerminalReset { block_id });
                 }
             }
+            Command::RestartServer if self.incompatible().is_some() => self.restart_incompatible(cx),
             Command::RestartServer => {
                 self.status = Some("Restarting server…".into());
                 self.call(Method::ServerShutdown {});
@@ -223,7 +224,8 @@ impl Workspace {
         let panes = self.active_window().map_or(0, |w| w.layout.blocks().len());
         match command {
             Command::StartServer => paused,
-            Command::StopServer | Command::RestartServer => connected,
+            Command::StopServer => connected,
+            Command::RestartServer => connected || self.incompatible().is_some(),
             Command::NextTab | Command::PreviousTab => tabs > 1,
             Command::NextSession | Command::PreviousSession => host.is_some_and(|h| h.sessions.len() > 1),
             Command::FocusNextPane

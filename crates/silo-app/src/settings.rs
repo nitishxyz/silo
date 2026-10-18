@@ -51,18 +51,24 @@ impl Workspace {
         let local = self.hosts.first();
         let paused = local.is_some_and(|h| h.paused.load(std::sync::atomic::Ordering::Acquire));
         let connected = local.and_then(|h| h.control.as_ref());
+        let incompatible = local.and_then(|h| h.incompatible.as_ref());
         let server = SettingsServer {
             status: match (connected, paused, local.map(|h| &h.state)) {
                 (Some(_), _, _) => "Running".into(),
+                (None, _, _) if incompatible.is_some() => {
+                    format!("{} server running", incompatible.map_or("Incompatible", |s| s.age()))
+                }
                 (None, true, _) => "Stopped".into(),
                 (None, false, Some(HostState::Unreachable(reason))) => format!("Unavailable: {reason}"),
                 _ => "Connecting…".into(),
             },
-            version: connected.map(|c| c.hello().server.version.clone()),
+            version: connected
+                .map(|c| c.hello().server.version.clone())
+                .or_else(|| incompatible.and_then(|s| s.version.clone())),
             has_log: silo_proto::paths::log(&self.home).exists(),
             can_start: paused,
             can_stop: connected.is_some(),
-            can_restart: connected.is_some(),
+            can_restart: connected.is_some() || incompatible.is_some(),
         };
         let (_, font_in_use, _) = theme::summary();
         let prefs = theme::prefs();

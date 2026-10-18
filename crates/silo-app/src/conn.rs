@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use silo_client::Control;
+use silo_client::{Control, Incompatible};
 use silo_proto::control::Event;
 use tokio::sync::mpsc;
 
@@ -21,7 +21,15 @@ pub enum ConnEvent {
     Connected(Control),
     Event(Event),
     Disconnected(String),
+    /// A server of another version holds this host; nothing was spawned.
+    /// Sent again only when its description changes.
+    Incompatible(Incompatible),
+    /// "Quit Silo" stopped the server on purpose: quit, don't reconnect.
+    Quit,
 }
+
+/// How often to look again while an incompatible server holds the host.
+const INCOMPATIBLE_POLL: Duration = Duration::from_secs(2);
 
 /// The server binary: `silo-server` (app bundle) or `silo` (cargo target
 /// dir) next to this executable, else `silo` on `PATH`.
@@ -67,6 +75,7 @@ pub fn start(rt: &tokio::runtime::Handle, transport: Transport, paused: Arc<Atom
 async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused: Arc<AtomicBool>) {
     let name = format!("Silo {} (macOS, pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let mut backoff = Duration::from_millis(100);
+    let mut incompatible: Option<Incompatible> = None;
     loop {
         if paused.load(Ordering::Acquire) {
             if tx.is_closed() {
@@ -75,10 +84,23 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused:
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         }
+        // Quit Silo stopped the incompatible server: don't start ours.
+        if let Some(pid) = incompatible.as_ref().and_then(|s| s.pid)
+            && quit_requested(&transport, pid)
+        {
+            tracing::info!(pid, "incompatible server stopped by Quit Silo");
+            let _ = tx.send(ConnEvent::Quit);
+            return;
+        }
         match transport.connect(&name).await {
             Ok((control, mut events)) => {
                 backoff = Duration::from_millis(100);
-                tracing::info!(pid = control.hello().server.pid, "connected to silo server");
+                incompatible = None;
+                let pid = control.hello().server.pid;
+                tracing::info!(pid, "connected to silo server");
+                if let Transport::Local { home, .. } = &transport {
+                    silo_proto::paths::clear_quit(home, Some(pid));
+                }
                 if tx.send(ConnEvent::Connected(control.clone())).is_err() {
                     return;
                 }
@@ -87,12 +109,33 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused:
                         return;
                     }
                 }
+                if quit_requested(&transport, pid) {
+                    tracing::info!(pid, "server stopped by Quit Silo");
+                    let _ = tx.send(ConnEvent::Quit);
+                    return;
+                }
                 let reason = if paused.load(Ordering::Acquire) { "server stopped" } else { "connection closed" };
                 if tx.send(ConnEvent::Disconnected(reason.into())).is_err() {
                     return;
                 }
             }
             Err(error) => {
+                if let Some(server) = error.downcast_ref::<Incompatible>() {
+                    // Slow, quiet polling: nothing is spawned meanwhile.
+                    if incompatible.as_ref() != Some(server) {
+                        tracing::info!(?server, "incompatible server");
+                        incompatible = Some(server.clone());
+                        if tx.send(ConnEvent::Incompatible(server.clone())).is_err() {
+                            return;
+                        }
+                    }
+                    if tx.is_closed() {
+                        return;
+                    }
+                    tokio::time::sleep(INCOMPATIBLE_POLL).await;
+                    continue;
+                }
+                incompatible = None;
                 tracing::debug!("connect failed: {error:#}");
                 if tx.send(ConnEvent::Disconnected(format!("{error:#}"))).is_err() || !transport.retries() {
                     return;
@@ -101,5 +144,51 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused:
                 backoff = (backoff * 2).min(Duration::from_secs(3));
             }
         }
+    }
+}
+
+/// Whether the server with `pid` went away because of "Quit Silo" (as
+/// opposed to a crash, idle exit, Stop Server or Restart Server).
+fn quit_requested(transport: &Transport, pid: u32) -> bool {
+    match transport {
+        Transport::Local { home, .. } => silo_proto::paths::quit_marked(home, pid),
+        Transport::Iroh { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(name: &str) -> (PathBuf, Transport) {
+        let home = std::env::temp_dir().join(format!("silo-quit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        (home.clone(), Transport::Local { home, server_exe: PathBuf::from("silo") })
+    }
+
+    #[test]
+    fn crash_or_restart_reconnects() {
+        let (home, transport) = local("crash");
+        assert!(!quit_requested(&transport, 42));
+        // A marker for an older server (e.g. before a restart) is ignored.
+        silo_proto::paths::mark_quit(&home, 7).unwrap();
+        assert!(!quit_requested(&transport, 42));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn quit_silo_quits() {
+        let (home, transport) = local("quit");
+        silo_proto::paths::mark_quit(&home, 42).unwrap();
+        assert!(quit_requested(&transport, 42));
+        // Connecting to another server clears the stale marker.
+        silo_proto::paths::clear_quit(&home, Some(43));
+        assert!(!quit_requested(&transport, 42));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remote_never_quits() {
+        assert!(!quit_requested(&Transport::Iroh { address: "x".into() }, 42));
     }
 }

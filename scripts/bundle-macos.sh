@@ -49,6 +49,13 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>xyz.nitish.silo</string>
+      <key>CFBundleURLSchemes</key><array><string>silo</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

@@ -11,6 +11,7 @@ mod conn;
 mod focus;
 mod fonts;
 mod hosts;
+mod incompatible;
 mod keys;
 mod layout;
 mod motion;
@@ -56,7 +57,16 @@ fn main() {
     theme::install(loaded.prefs, loaded.problem);
     start_menubar(&home);
 
-    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+    // `silo://settings` (sent by the menu-bar agent) opens Settings, in a
+    // running app or at launch.
+    let (urls_tx, mut urls) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    application.on_open_urls(move |list| {
+        for url in list {
+            let _ = urls_tx.send(url);
+        }
+    });
+    application.run(move |cx: &mut App| {
         theme::apply_font(cx);
         // System Settings › Accessibility › Display › Reduce motion, read
         // once at launch (toggling it needs an app restart).
@@ -95,14 +105,39 @@ fn main() {
             },
             |window, cx| cx.new(|cx| Workspace::new(rt.clone(), home.clone(), exe.clone(), window, cx)),
         );
-        if let Err(error) = opened {
-            eprintln!("silo: cannot open window: {error:#}");
-            cx.quit();
-            return;
+        let handle = match opened {
+            Ok(handle) => handle,
+            Err(error) => {
+                eprintln!("silo: cannot open window: {error:#}");
+                cx.quit();
+                return;
+            }
+        };
+        if std::env::var("SILO_OPEN").is_ok_and(|v| v == "settings") {
+            let _ = handle.update(cx, |workspace, window, cx| workspace.open_settings(window, cx));
         }
+        cx.spawn(async move |cx| {
+            while let Some(url) = urls.recv().await {
+                if !opens_settings(&url) {
+                    tracing::info!(url, "ignoring URL");
+                    continue;
+                }
+                let _ = handle.update(cx, |workspace, window, cx| {
+                    window.activate_window();
+                    workspace.open_settings(window, cx);
+                });
+                cx.update(|cx| cx.activate(true));
+            }
+        })
+        .detach();
         cx.activate(true);
     });
     drop(runtime);
+}
+
+/// `silo://settings` (any trailing slash or query).
+fn opens_settings(url: &str) -> bool {
+    url.strip_prefix("silo://settings").is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
 }
 
 fn reduce_motion() -> bool {
@@ -133,5 +168,16 @@ fn start_menubar(home: &std::path::Path) {
     command.process_group(0);
     if let Err(error) = command.spawn() {
         tracing::warn!("menubar agent: {error}");
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    #[test]
+    fn settings_url() {
+        assert!(super::opens_settings("silo://settings"));
+        assert!(super::opens_settings("silo://settings/"));
+        assert!(!super::opens_settings("silo://settingsx"));
+        assert!(!super::opens_settings("https://settings"));
     }
 }

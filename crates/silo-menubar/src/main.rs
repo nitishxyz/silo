@@ -1,6 +1,6 @@
 //! `silo-menubar`: a menu-bar agent (no Dock icon) for the always-on silo
-//! server. Shows its status and sessions, opens the app at a session, and
-//! starts, stops or restarts the server. One instance per state directory.
+//! server. Shows its status, opens the app or its Settings (where the server
+//! controls live), and quits Silo. One instance per state directory.
 
 mod net;
 
@@ -18,8 +18,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, NSTimer};
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,24 +49,28 @@ impl AppLauncher {
         }
     }
 
-    pub fn open(&self, session: Option<&str>) {
+    /// Open the app; with `settings`, at its Settings panel.
+    pub fn open(&self, settings: bool) {
         let mut command = match self {
             Self::Bundle(bundle) => {
+                // `silo://settings` reaches a running app as well as a
+                // launching one (CFBundleURLTypes in the bundle).
                 let mut c = std::process::Command::new("/usr/bin/open");
                 c.arg("-a").arg(bundle);
-                if let Some(session) = session {
-                    c.arg("--env").arg(format!("SILO_SESSION={session}"));
+                if settings {
+                    c.arg(SETTINGS_URL);
                 }
                 c
             }
             Self::Binary(app) => {
-                // Development: activate a running instance, else launch one.
+                // Development: activate a running instance (no URL scheme
+                // without a bundle), else launch one.
                 if activate_running("silo-app") {
                     return;
                 }
                 let mut c = std::process::Command::new(app);
-                if let Some(session) = session {
-                    c.env("SILO_SESSION", session);
+                if settings {
+                    c.env("SILO_OPEN", "settings");
                 }
                 c.env("SILO_NO_MENUBAR", "1");
                 c
@@ -80,6 +84,8 @@ impl AppLauncher {
     }
 }
 
+const SETTINGS_URL: &str = "silo://settings";
+
 fn activate_running(name: &str) -> bool {
     let script = format!(
         "tell application \"System Events\" to set frontmost of (first process whose unix id is (do shell script \"pgrep -n -x {name}\") as integer) to true"
@@ -88,29 +94,10 @@ fn activate_running(name: &str) -> bool {
         && std::process::Command::new("/usr/bin/osascript").args(["-e", &script]).status().is_ok_and(|s| s.success())
 }
 
-fn server_exe() -> PathBuf {
-    if let Some(path) = std::env::var_os("SILO_SERVER_EXE") {
-        return path.into();
-    }
-    let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
-    for name in ["silo-server", "silo"] {
-        if let Some(candidate) = exe.as_ref().and_then(|e| e.parent()).map(|d| d.join(name))
-            && candidate.is_file()
-        {
-            return candidate;
-        }
-    }
-    PathBuf::from("silo")
-}
-
 #[derive(Clone, Debug)]
 enum Action {
     Open,
-    OpenSession(String),
-    NewSession,
-    Start,
-    Stop,
-    Restart,
+    Settings,
     Quit,
 }
 
@@ -121,8 +108,6 @@ struct Ivars {
     item: RefCell<Option<Retained<NSStatusItem>>>,
     actions: RefCell<Vec<Action>>,
     seen: Cell<u64>,
-    /// Uptime label minute last rendered.
-    minute: Cell<u64>,
 }
 
 define_class!(
@@ -135,11 +120,13 @@ define_class!(
     impl Controller {
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &AnyObject) {
+            if self.ivars().shared.quit.load(Ordering::Acquire) {
+                NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
+                return;
+            }
             let generation = self.ivars().shared.generation.load(Ordering::Acquire);
-            let minute = now_ms() / 60_000;
-            if generation != self.ivars().seen.get() || minute != self.ivars().minute.get() {
+            if generation != self.ivars().seen.get() {
                 self.ivars().seen.set(generation);
-                self.ivars().minute.set(minute);
                 self.rebuild();
             }
         }
@@ -149,36 +136,25 @@ define_class!(
             let index = usize::try_from(item.tag()).unwrap_or(usize::MAX);
             let action = self.ivars().actions.borrow().get(index).cloned();
             let Some(action) = action else { return };
-            let send = |cmd| {
-                let _ = self.ivars().cmds.send(cmd);
-            };
             match action {
-                Action::Open => self.ivars().app.open(None),
-                Action::OpenSession(id) => send(Cmd::OpenSession(id)),
-                Action::NewSession => send(Cmd::NewSession),
-                Action::Start => send(Cmd::Start),
-                Action::Stop => send(Cmd::Stop),
-                Action::Restart => send(Cmd::Restart),
+                Action::Open => self.ivars().app.open(false),
+                Action::Settings => self.ivars().app.open(true),
                 Action::Quit => {
-                    let mtm = MainThreadMarker::from(self);
-                    NSApplication::sharedApplication(mtm).terminate(None);
+                    if self.confirm_quit() {
+                        let _ = self.ivars().cmds.send(Cmd::Quit);
+                    }
                 }
             }
         }
     }
 );
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
-}
-
-fn uptime(started_at: u64) -> String {
-    let secs = now_ms().saturating_sub(started_at) / 1000;
-    match secs {
-        s if s < 60 => "just now".into(),
-        s if s < 3600 => format!("{}m", s / 60),
-        s if s < 86_400 => format!("{}h {}m", s / 3600, (s % 3600) / 60),
-        s => format!("{}d {}h", s / 86_400, (s % 86_400) / 3600),
+/// Confirmation text for quitting with `sessions` running, if any are.
+fn quit_warning(sessions: usize) -> Option<String> {
+    match sessions {
+        0 => None,
+        1 => Some("This ends 1 running session.".to_owned()),
+        n => Some(format!("This ends {n} running sessions.")),
     }
 }
 
@@ -186,6 +162,23 @@ impl Controller {
     fn new(mtm: MainThreadMarker, ivars: Ivars) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Ask before "Quit Silo" ends running sessions; true to go ahead.
+    fn confirm_quit(&self) -> bool {
+        let sessions = self.ivars().shared.state.lock().map_or(0, |s| s.running_sessions());
+        let Some(warning) = quit_warning(sessions) else { return true };
+        let mtm = MainThreadMarker::from(self);
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&NSString::from_str("Quit Silo?"));
+        alert.setInformativeText(&NSString::from_str(&warning));
+        alert.addButtonWithTitle(&NSString::from_str("Quit"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        // An accessory app must come forward for its alert to get focus.
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        alert.runModal() == NSAlertFirstButtonReturn
     }
 
     fn add(&self, menu: &NSMenu, title: &str, action: Option<Action>, key: &str) {
@@ -216,46 +209,16 @@ impl Controller {
         self.ivars().actions.borrow_mut().clear();
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
-        let separator = || NSMenuItem::separatorItem(mtm);
-        match &state.server {
-            Some(info) => {
-                self.add(&menu, "Silo Server — Running", None, "");
-                self.add(&menu, &format!("v{} · pid {} · up {}", info.version, info.pid, uptime(info.started_at)), None, "");
-            }
-            None => self.add(&menu, "Silo Server — Stopped", None, ""),
-        }
-        if let Some(busy) = state.busy {
-            self.add(&menu, busy, None, "");
-        }
+        let status = state.status();
+        self.add(&menu, &status, None, "");
         if let Some(error) = &state.error {
             let short: String = error.chars().take(80).collect();
             self.add(&menu, &format!("⚠︎ {short}"), None, "");
         }
-        if state.server.is_some() {
-            menu.addItem(&separator());
-            if state.sessions.is_empty() {
-                self.add(&menu, "No Sessions", None, "");
-            } else {
-                self.add(&menu, "Sessions", None, "");
-                for (i, s) in state.sessions.iter().enumerate() {
-                    let windows = if s.windows == 1 { "1 window".to_owned() } else { format!("{} windows", s.windows) };
-                    let key = if i < 9 { (i + 1).to_string() } else { String::new() };
-                    self.add(&menu, &format!("{}  ·  {windows}", s.name), Some(Action::OpenSession(s.id.clone())), &key);
-                }
-            }
-        }
-        menu.addItem(&separator());
         self.add(&menu, "Open Silo", Some(Action::Open), "o");
-        self.add(&menu, "New Session", Some(Action::NewSession), "n");
-        menu.addItem(&separator());
-        if state.server.is_some() {
-            self.add(&menu, "Restart Server", Some(Action::Restart), "");
-            self.add(&menu, "Stop Server", Some(Action::Stop), "");
-        } else {
-            self.add(&menu, "Start Server", Some(Action::Start), "");
-        }
-        menu.addItem(&separator());
-        self.add(&menu, "Quit Menu Bar", Some(Action::Quit), "q");
+        self.add(&menu, "Settings…", Some(Action::Settings), ",");
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        self.add(&menu, "Quit Silo", Some(Action::Quit), "q");
         if let Some(item) = self.ivars().item.borrow().as_ref() {
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
@@ -263,11 +226,7 @@ impl Controller {
                 if let Some(image) = symbol_image(symbol) {
                     button.setImage(Some(&image));
                 }
-                let tip = match &state.server {
-                    Some(_) => format!("Silo — {} sessions", state.sessions.len()),
-                    None => "Silo — server stopped".to_owned(),
-                };
-                button.setToolTip(Some(&NSString::from_str(&tip)));
+                button.setToolTip(Some(&NSString::from_str(&status)));
             }
         }
     }
@@ -301,7 +260,7 @@ fn main() {
 
     let shared = Arc::new(Shared::default());
     let launcher = AppLauncher::find();
-    let cmds = net::spawn(net::Config { home, server_exe: server_exe(), app: launcher.clone() }, shared.clone());
+    let cmds = net::spawn(net::Config { home }, shared.clone());
     let controller = Controller::new(
         mtm,
         Ivars {
@@ -311,7 +270,6 @@ fn main() {
             item: RefCell::new(None),
             actions: RefCell::new(Vec::new()),
             seen: Cell::new(u64::MAX),
-            minute: Cell::new(0),
         },
     );
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
@@ -321,4 +279,16 @@ fn main() {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, &controller, sel!(tick:), None, true)
     };
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quit_warning;
+
+    #[test]
+    fn quit_confirmation_only_with_sessions() {
+        assert_eq!(quit_warning(0), None);
+        assert_eq!(quit_warning(1).as_deref(), Some("This ends 1 running session."));
+        assert_eq!(quit_warning(3).as_deref(), Some("This ends 3 running sessions."));
+    }
 }

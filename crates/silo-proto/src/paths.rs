@@ -46,6 +46,35 @@ pub fn log(home: &std::path::Path) -> PathBuf {
     home.join("server.log")
 }
 
+/// Written by "Quit Silo" with the pid of the server it stops, so clients
+/// can tell that shutdown from a crash or a restart.
+#[must_use]
+pub fn quit_marker(home: &std::path::Path) -> PathBuf {
+    home.join("quit")
+}
+
+/// Record that the server with `pid` is being stopped to quit Silo.
+///
+/// # Errors
+/// The marker cannot be written.
+pub fn mark_quit(home: &std::path::Path, pid: u32) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    std::fs::write(quit_marker(home), pid.to_string())
+}
+
+/// Whether "Quit Silo" stopped the server with `pid`.
+#[must_use]
+pub fn quit_marked(home: &std::path::Path, pid: u32) -> bool {
+    std::fs::read_to_string(quit_marker(home)).is_ok_and(|s| s.trim().parse() == Ok(pid))
+}
+
+/// Remove the quit marker unless it names `keep`.
+pub fn clear_quit(home: &std::path::Path, keep: Option<u32>) {
+    if keep.is_none_or(|pid| !quit_marked(home, pid)) {
+        let _ = std::fs::remove_file(quit_marker(home));
+    }
+}
+
 /// Contents of `runtime.json`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Runtime {

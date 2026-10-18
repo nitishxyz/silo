@@ -39,6 +39,8 @@ pub struct HostEntry {
     pub sessions: Vec<SessionSummary>,
     /// Stop Server: the connection loop waits instead of respawning.
     pub paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A server of another version holds this host.
+    pub incompatible: Option<silo_client::Incompatible>,
     /// Removed via Remove Host…; kept so host indices stay stable.
     pub removed: bool,
     pub(crate) conn: Option<Task<()>>,
@@ -50,6 +52,8 @@ pub struct Workspace {
     pub(crate) hosts: Vec<HostEntry>,
     pub(crate) active_host: usize,
     pub(crate) status: Option<String>,
+    /// The incompatible-server card asked to confirm its Restart.
+    pub(crate) confirm_restart: bool,
     pub(crate) view: Option<SessionView>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
@@ -86,6 +90,7 @@ impl Workspace {
             hosts: Vec::new(),
             active_host: 0,
             status: Some("connecting to server…".into()),
+            confirm_restart: false,
             view: None,
             wanted_session,
             panes: HashMap::new(),
@@ -129,6 +134,7 @@ impl Workspace {
             control: None,
             sessions: Vec::new(),
             paused,
+            incompatible: None,
             removed: false,
             conn: Some(conn),
         });
@@ -145,6 +151,8 @@ impl Workspace {
                 let entry = &mut self.hosts[host];
                 entry.state = HostState::Connected;
                 entry.control = Some(control.clone());
+                entry.incompatible = None;
+                self.confirm_restart = false;
                 self.refresh_sessions(host, cx);
                 self.refresh_settings(None, cx);
                 if active {
@@ -161,6 +169,7 @@ impl Workspace {
             ConnEvent::Disconnected(reason) => {
                 let entry = &mut self.hosts[host];
                 entry.control = None;
+                entry.incompatible = None;
                 // Retries repeat the same failure; only a change refreshes
                 // the settings panel (which would reset its confirmations).
                 let changed = !matches!(&entry.state, HostState::Unreachable(old) if *old == reason);
@@ -175,6 +184,20 @@ impl Workspace {
                     } else {
                         format!("server unavailable: {reason}")
                     });
+                }
+            }
+            ConnEvent::Quit => cx.quit(),
+            ConnEvent::Incompatible(server) => {
+                let entry = &mut self.hosts[host];
+                entry.control = None;
+                entry.sessions.clear();
+                entry.state = HostState::Unreachable(server.headline());
+                entry.incompatible = Some(server);
+                self.refresh_settings(None, cx);
+                if active {
+                    self.motion.reset();
+                    self.detach_view();
+                    self.status = None;
                 }
             }
             ConnEvent::Event(Event::SessionsChanged { mut sessions }) => {
@@ -686,14 +709,18 @@ impl Render for Workspace {
         }
         let body: AnyElement = match self.active_window().cloned() {
             Some(w) => self.render_body(&w, now, window, cx),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(theme::muted()))
-                .child(self.status.clone().unwrap_or_default())
-                .into_any_element(),
+            None => match self.incompatible().cloned() {
+                Some(server) => self.render_incompatible(&server, cx),
+                None => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(24.0))
+                    .text_color(rgb(theme::muted()))
+                    .child(div().max_w(px(520.0)).text_center().child(self.status.clone().unwrap_or_default()))
+                    .into_any_element(),
+            },
         };
         let ghosts = self.render_pane_ghosts(now, window);
         let appearance = self.render_appearance_menu(cx);
