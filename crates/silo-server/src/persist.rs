@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use silo_proto::model::{BlockId, BlockInfo, Lifecycle, TermSize, TerminalConfig};
+use silo_proto::model::{BlockId, BlockInfo, BlockKind, Lifecycle, TermSize, TerminalConfig};
 use silo_store::{HostKey, Store};
 use silo_vt::{GridSize, TerminalCore};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
@@ -18,6 +18,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender};
 use crate::{
     Server,
     block::{self, BlockHandle, Checkpoint, Note},
+    browser::{Block, BrowserBlock},
     registry::Session,
 };
 
@@ -92,7 +93,7 @@ pub struct Persist {
 
 pub struct Restored {
     pub sessions: Vec<Session>,
-    pub blocks: HashMap<BlockId, BlockHandle>,
+    pub blocks: HashMap<BlockId, Block>,
 }
 
 /// Open `<home>/state` and rebuild the last committed tree. Blocks come back
@@ -120,6 +121,10 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
     let mut blocks = HashMap::new();
     for record in manifest.blocks {
         let id = record.info.id.clone();
+        if record.info.kind == BlockKind::Browser {
+            blocks.insert(id, Block::Browser(Box::new(BrowserBlock::restore(record.info)?)));
+            continue;
+        }
         let restored = record
             .generation
             .and_then(|g| snapshots.remove(&(id.clone(), g)).map(|bytes| (g, bytes)))
@@ -136,7 +141,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
                 block::spawn_restored(record.info, empty_checkpoint(size)?, notes.clone())?
             }
         };
-        blocks.insert(id, handle);
+        blocks.insert(id, Block::Terminal(handle));
     }
     for session in &manifest.sessions {
         if let Some(missing) = session.blocks().into_iter().find(|b| !blocks.contains_key(b)) {
@@ -197,7 +202,7 @@ impl Persist {
             let ids: Vec<BlockId> = sessions.iter().flat_map(Session::blocks).collect();
             let mut targets = Vec::new();
             for id in &ids {
-                let Some(handle) = reg.blocks.get(id) else { continue };
+                let Some(Block::Terminal(handle)) = reg.blocks.get(id) else { continue };
                 let running = handle.info.lock().is_ok_and(|i| i.lifecycle.is_running());
                 if dirty.contains(id) || !self.generations.contains_key(id) || (full && running) {
                     targets.push((id.clone(), BlockHandle { tx: handle.tx.clone(), info: handle.info.clone() }));

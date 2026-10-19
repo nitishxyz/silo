@@ -11,7 +11,8 @@
 //! 2. old -> successor: frames of `u32 LE length` + bytes:
 //!    - one JSON [`Transfer`] (tree, block infos, fd index);
 //!    - one [`crate::persist::encode`]d checkpoint per `Transfer::blocks`
-//!      entry, in order.
+//!      entry, in order (browser blocks travel as `Transfer::browsers`
+//!      state only).
 //! 3. old -> successor: the PTY masters via `SCM_RIGHTS`, in messages of at
 //!    most [`FDS_PER_MESSAGE`] descriptors, each with a 4-byte `u32 LE`
 //!    payload holding its descriptor count (`PtyRecord::fd` indexes their
@@ -56,6 +57,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     Server,
     block::{self, BlockHandle, Handoff, Note},
+    browser::{Block, BrowserBlock},
     persist,
     registry::Session,
 };
@@ -74,6 +76,8 @@ pub struct Transfer {
     pub server_id: String,
     pub sessions: Vec<Session>,
     pub blocks: Vec<Record>,
+    /// Browser blocks: no process, so their info is all there is.
+    pub browsers: Vec<BlockInfo>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,9 +196,13 @@ enum Slot {
 /// # Errors
 /// Releasing, transferring, or the successor not getting ready.
 pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, own: [OwnedFd; 2]) -> anyhow::Result<UnixStream> {
-    let (handles, sessions, mut parked) = {
+    let (handles, browsers, sessions, mut parked) = {
         let mut reg = server.registry.lock().unwrap();
-        (reg.blocks.drain().collect::<Vec<_>>(), reg.sessions.clone(), std::mem::take(&mut reg.parked))
+        // Browsers stay registered: mutations are refused while upgrading.
+        let terminals = reg.blocks.extract_if(|_, b| matches!(b, Block::Terminal(_)));
+        let handles: Vec<_> = terminals.filter_map(|(id, b)| b.into_terminal().map(|h| (id, h))).collect();
+        let browsers = reg.blocks.values().filter_map(Block::info).collect::<Vec<_>>();
+        (handles, browsers, reg.sessions.clone(), std::mem::take(&mut reg.parked))
     };
     let mut slots = Vec::with_capacity(handles.len());
     let mut failed = None;
@@ -219,7 +227,7 @@ pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, o
     server.registry.lock().unwrap().parked.extend(parked);
     let result = match failed {
         Some(error) => Err(error),
-        None => transfer(sock, server_id, sessions, &slots, own).await,
+        None => transfer(sock, Transfer { server_id, sessions, blocks: Vec::new(), browsers }, &slots, own).await,
     };
     if result.is_err() {
         readopt(&server.registry, slots);
@@ -227,14 +235,8 @@ pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, o
     result
 }
 
-async fn transfer(
-    mut sock: UnixStream,
-    server_id: String,
-    sessions: Vec<Session>,
-    slots: &[(BlockId, Slot)],
-    own: [OwnedFd; 2],
-) -> anyhow::Result<UnixStream> {
-    let mut blocks = Vec::with_capacity(slots.len());
+/// Send `transfer` with the released `slots` as its blocks.
+async fn transfer(mut sock: UnixStream, mut transfer: Transfer, slots: &[(BlockId, Slot)], own: [OwnedFd; 2]) -> anyhow::Result<UnixStream> {
     let mut checkpoints = Vec::with_capacity(slots.len());
     let mut fds = Vec::new();
     for (_, slot) in slots {
@@ -248,10 +250,9 @@ async fn transfer(
             }
             None => None,
         };
-        blocks.push(Record { info: (**info).clone(), pty });
+        transfer.blocks.push(Record { info: (**info).clone(), pty });
         checkpoints.push(persist::encode(released.checkpoint.clone())?);
     }
-    let transfer = Transfer { server_id, sessions, blocks };
     let sock = tokio::task::spawn_blocking(move || -> io::Result<UnixStream> {
         sock.set_nonblocking(false)?;
         sock.set_write_timeout(Some(STEP_TIMEOUT))?;
@@ -294,7 +295,7 @@ fn readopt(registry: &std::sync::Mutex<crate::registry::Registry>, slots: Vec<(B
             Slot::Released(info, Handoff { checkpoint, pty: None }) => restore(*info, checkpoint, &notes),
         };
         match handle {
-            Ok(handle) => drop(reg.blocks.insert(id, handle)),
+            Ok(handle) => drop(reg.blocks.insert(id, Block::Terminal(handle))),
             Err(error) => tracing::error!(block = %id, "re-adopt after aborted upgrade: {error:#}"),
         }
     }
@@ -315,7 +316,7 @@ fn restore(info: BlockInfo, checkpoint: block::Checkpoint, notes: &UnboundedSend
 pub struct Taken {
     pub server_id: String,
     pub sessions: Vec<Session>,
-    pub blocks: HashMap<BlockId, BlockHandle>,
+    pub blocks: HashMap<BlockId, Block>,
     pub lock: std::fs::File,
     pub listener: tokio::net::UnixListener,
     pub persist: persist::Persist,
@@ -353,8 +354,11 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
     let (lock, listener) = (std::fs::File::from(lock), std::os::unix::net::UnixListener::from(listener));
     listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(listener)?;
+    let browsers = transfer.browsers.into_iter().map(|info| Ok((info.id.clone(), Block::Browser(Box::new(BrowserBlock::restore(info)?)))));
+    let browsers = browsers.collect::<anyhow::Result<Vec<_>>>()?;
     let blocks = adopt(transfer.blocks, checkpoints, fds, notes).await?;
     let blocks = commit(sock, blocks, old_pid).await?;
+    let blocks = blocks.into_iter().map(|(id, h)| (id, Block::Terminal(h))).chain(browsers).collect();
     Ok(Taken { server_id: transfer.server_id, sessions: transfer.sessions, blocks, lock, listener, persist })
 }
 
@@ -525,6 +529,7 @@ mod tests {
             size: TermSize::new(40, 10),
             owner: None,
             pid: None,
+            browser: None,
         };
         let config = silo_pty::SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() };
         let handle = block::spawn(info.clone(), &config, notes.clone()).unwrap();

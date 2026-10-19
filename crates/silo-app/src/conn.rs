@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::hosts::Transport;
 
+#[allow(clippy::large_enum_variant, reason = "sent one at a time over a channel")]
 pub enum ConnEvent {
     Connected(Control),
     Event(Event),

@@ -17,6 +17,9 @@ objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+sha1_smol = "1"
+
 [[bin]]
 name = "silo-web-helper"
 path = "src/bin/helper.rs"

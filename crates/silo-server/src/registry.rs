@@ -9,18 +9,21 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{Created, DataTicket, Event, RpcError, ServerMessage, SpawnSpec},
+    control::{BrowserCommand, Created, DataTicket, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
     data::ticket_hex,
     kind,
     model::{
-        Axis, BlockId, BlockInfo, BlockKind, ClientId, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary, SessionView,
-        TermSize, WindowId, WindowInfo,
+        Axis, BlockId, BlockInfo, BlockKind, BrowserState, ClientId, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary,
+        SessionView, TermSize, WindowId, WindowInfo, browser_url,
     },
 };
 use silo_pty::SpawnConfig;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
-use crate::block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms};
+use crate::{
+    block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms},
+    browser::{Block, BrowserBlock, Report},
+};
 
 /// A control connection whose unsent event backlog exceeds this is closed;
 /// the client reconnects and re-reads state (events are never dropped).
@@ -93,7 +96,7 @@ struct Ticket {
 
 pub struct Registry {
     pub sessions: Vec<Session>,
-    pub blocks: HashMap<BlockId, BlockHandle>,
+    pub blocks: HashMap<BlockId, Block>,
     pub clients: HashMap<ClientId, ClientEntry>,
     tickets: HashMap<String, Ticket>,
     next_client: ClientId,
@@ -115,6 +118,14 @@ fn new_id(prefix: char) -> String {
     format!("{prefix}{:08x}", rand::random::<u32>())
 }
 
+/// What a new block runs: a program (`spawn`) or a browser at `url`.
+#[derive(Clone, Copy)]
+pub struct New<'a> {
+    pub spawn: &'a SpawnSpec,
+    pub kind: BlockKind,
+    pub url: Option<&'a str>,
+}
+
 impl Registry {
     pub fn new(notes: UnboundedSender<Note>) -> Self {
         Self {
@@ -133,7 +144,7 @@ impl Registry {
     }
 
     /// A registry holding a restored tree; nothing is spawned.
-    pub fn restored(notes: UnboundedSender<Note>, sessions: Vec<Session>, blocks: HashMap<BlockId, BlockHandle>) -> Self {
+    pub fn restored(notes: UnboundedSender<Note>, sessions: Vec<Session>, blocks: HashMap<BlockId, Block>) -> Self {
         Self { sessions, blocks, ..Self::new(notes) }
     }
 
@@ -193,8 +204,19 @@ impl Registry {
     pub fn remove_client(&mut self, id: ClientId) {
         self.clients.remove(&id);
         self.tickets.retain(|_, t| t.client_id != id);
-        for block in self.blocks.values() {
-            block.send(BlockMsg::ClientGone { client_id: id });
+        let mut disowned = Vec::new();
+        for (block_id, block) in &mut self.blocks {
+            match block {
+                Block::Terminal(handle) => handle.send(BlockMsg::ClientGone { client_id: id }),
+                Block::Browser(browser) => {
+                    if browser.disown(id) {
+                        disowned.push(block_id.clone());
+                    }
+                }
+            }
+        }
+        for block_id in disowned {
+            self.block_changed(&block_id);
         }
     }
 
@@ -253,11 +275,32 @@ impl Registry {
     }
 
     pub fn block_info(&self, id: &str) -> Option<BlockInfo> {
-        self.blocks.get(id).and_then(|b| b.info.lock().ok().map(|i| i.clone()))
+        self.blocks.get(id).and_then(Block::info)
     }
 
+    /// A terminal block; `bad_request` for a browser.
     pub fn block(&self, id: &str) -> Result<&BlockHandle, RpcError> {
-        self.blocks.get(id).ok_or_else(|| RpcError::not_found(format!("block {id}")))
+        match self.blocks.get(id) {
+            Some(Block::Terminal(handle)) => Ok(handle),
+            Some(Block::Browser(_)) => Err(RpcError::bad_request(format!("block {id} is a browser"))),
+            None => Err(RpcError::not_found(format!("block {id}"))),
+        }
+    }
+
+    /// A browser block; `bad_request` for a terminal.
+    fn browser(&mut self, id: &str) -> Result<&mut BrowserBlock, RpcError> {
+        match self.blocks.get_mut(id) {
+            Some(Block::Browser(browser)) => Ok(browser),
+            Some(Block::Terminal(_)) => Err(RpcError::bad_request(format!("block {id} is not a browser"))),
+            None => Err(RpcError::not_found(format!("block {id}"))),
+        }
+    }
+
+    fn block_changed(&mut self, id: &str) {
+        self.mark_dirty(Some(id));
+        if let Some(block) = self.block_info(id) {
+            self.emit(Event::BlockChanged { block });
+        }
     }
 
     /// Session and window containing `block`.
@@ -281,8 +324,9 @@ impl Registry {
         Err(RpcError::not_found(format!("window {window}")))
     }
 
-    fn spawn_block(&mut self, session_id: &str, spawn: &SpawnSpec, fallback: TermSize) -> Result<BlockId, RpcError> {
+    fn spawn_block(&mut self, session_id: &str, new: &New<'_>, fallback: TermSize) -> Result<BlockId, RpcError> {
         let id = self.fresh_id('b');
+        let spawn = new.spawn;
         let size = spawn.size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(fallback);
         let info = BlockInfo {
             id: id.clone(),
@@ -295,14 +339,21 @@ impl Registry {
             size,
             owner: None,
             pid: None,
+            browser: None,
         };
+        if new.kind == BlockKind::Browser {
+            let url = browser_url(new.url.unwrap_or("about:blank")).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+            let info = BlockInfo { size: TermSize::default(), ..info };
+            self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
+            return Ok(id);
+        }
         let config = SpawnConfig {
             command: spawn.command.iter().map(Into::into).collect(),
             cwd: spawn.cwd.as_ref().map(|c| expand_home(c).into()).filter(|p: &std::path::PathBuf| p.is_dir()),
             env: Vec::new(),
         };
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
-        self.blocks.insert(id.clone(), handle);
+        self.blocks.insert(id.clone(), Block::Terminal(handle));
         Ok(id)
     }
 
@@ -321,17 +372,15 @@ impl Registry {
         self.emit(Event::SessionsChanged { sessions });
     }
 
-    pub fn create_session(&mut self, name: Option<String>, spawn: &SpawnSpec) -> Result<Created, RpcError> {
+    pub fn create_session(&mut self, name: Option<String>, new: &New<'_>) -> Result<Created, RpcError> {
         let session_id = self.fresh_id('s');
-        let block_id = self.spawn_block(&session_id, spawn, TermSize::new(80, 24))?;
+        let block_id = self.spawn_block(&session_id, new, TermSize::new(80, 24))?;
         let window_id = self.fresh_id('w');
         let name = name
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
         if self.sessions.iter().any(|s| s.name == name) {
-            if let Some(block) = self.blocks.remove(&block_id) {
-                block.send(BlockMsg::Shutdown);
-            }
+            self.kill_block(&block_id);
             return Err(RpcError::new("conflict", format!("session {name} already exists")));
         }
         self.sessions.push(Session {
@@ -348,7 +397,7 @@ impl Registry {
         Ok(Created { session_id, window_id, block_id })
     }
 
-    pub fn create_window(&mut self, session_id: &str, spawn: &SpawnSpec) -> Result<Created, RpcError> {
+    pub fn create_window(&mut self, session_id: &str, new: &New<'_>) -> Result<Created, RpcError> {
         let session = self.session(session_id)?;
         let sid = session.id.clone();
         let fallback = session
@@ -357,7 +406,7 @@ impl Registry {
             .find(|w| w.id == session.active_window)
             .map(|w| self.window_size(w))
             .unwrap_or(TermSize::new(80, 24));
-        let block_id = self.spawn_block(&sid, spawn, fallback)?;
+        let block_id = self.spawn_block(&sid, new, fallback)?;
         let window_id = self.fresh_id('w');
         let session = self.session_mut(&sid)?;
         session.windows.push(Window { id: window_id.clone(), name: None, layout: Layout::block(&block_id), focused: block_id.clone(), zoomed: false });
@@ -372,7 +421,7 @@ impl Registry {
     fn window_size(&self, window: &Window) -> TermSize {
         fn size(layout: &Layout, reg: &Registry) -> Option<TermSize> {
             match layout {
-                Layout::Block { id } => reg.block_info(id).map(|i| i.size),
+                Layout::Block { id } => reg.block_info(id).filter(|i| i.kind == BlockKind::Terminal).map(|i| i.size),
                 Layout::Split { axis, first, second, .. } => {
                     let (a, b) = (size(first, reg)?, size(second, reg)?);
                     Some(match axis {
@@ -385,19 +434,19 @@ impl Registry {
         size(&window.layout, self).unwrap_or(TermSize::new(80, 24))
     }
 
-    pub fn split(&mut self, block_id: &str, axis: Axis, spawn: &SpawnSpec) -> Result<Created, RpcError> {
+    pub fn split(&mut self, block_id: &str, axis: Axis, new: &New<'_>) -> Result<Created, RpcError> {
         let (si, wi) = self.locate(block_id)?;
         let sid = self.sessions[si].id.clone();
-        let base = self.block_info(block_id).map_or(TermSize::new(80, 24), |i| i.size);
+        let base = self.block_info(block_id).map(|i| i.size).filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(TermSize::new(80, 24));
         let fallback = match axis {
             Axis::Horizontal => TermSize { columns: (base.columns / 2).max(2), ..base },
             Axis::Vertical => TermSize { rows: (base.rows / 2).max(2), ..base },
         };
-        let mut spawn = spawn.clone();
+        let mut spawn = new.spawn.clone();
         if spawn.cwd.is_none() {
             spawn.cwd = self.block_info(block_id).and_then(|i| i.cwd);
         }
-        let new = self.spawn_block(&sid, &spawn, fallback)?;
+        let new = self.spawn_block(&sid, &New { spawn: &spawn, ..*new }, fallback)?;
         let window = &mut self.sessions[si].windows[wi];
         window.layout.split(block_id, new.clone(), axis);
         window.focused = new.clone();
@@ -528,8 +577,8 @@ impl Registry {
     fn kill_block(&mut self, block_id: &str) {
         // Closing a block hangs up its program, parked or not.
         self.parked.remove(block_id);
-        if let Some(block) = self.blocks.remove(block_id) {
-            block.send(BlockMsg::Shutdown);
+        if let Some(Block::Terminal(handle)) = self.blocks.remove(block_id) {
+            handle.send(BlockMsg::Shutdown);
         }
     }
 
@@ -612,10 +661,51 @@ impl Registry {
 
     pub fn shutdown(&mut self) {
         for (_, block) in self.blocks.drain() {
-            block.send(BlockMsg::Shutdown);
+            if let Block::Terminal(handle) = block {
+                handle.send(BlockMsg::Shutdown);
+            }
         }
         self.parked.clear();
         self.sessions.clear();
+    }
+
+    /// Take or request (`Some(mode)`) or release (`None`) ownership of
+    /// blocks; a terminal also drops this client's candidacy on release.
+    pub fn own(&mut self, client_id: ClientId, block_ids: &[BlockId], mode: Option<OwnMode>) -> Result<(), RpcError> {
+        for id in block_ids {
+            let changed = match (self.blocks.get_mut(id), mode) {
+                (Some(Block::Terminal(handle)), mode) => {
+                    handle.send(mode.map_or(BlockMsg::Disown { client_id }, |mode| BlockMsg::Own { client_id, mode }));
+                    false
+                }
+                (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, mode),
+                (Some(Block::Browser(browser)), None) => browser.disown(client_id),
+                (None, _) => return Err(RpcError::not_found(format!("block {id}"))),
+            };
+            if changed {
+                self.block_changed(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a browser command to the stored state and send it to every
+    /// subscriber (the owner's engine runs it; viewers follow).
+    pub fn browser_command(&mut self, block_id: &str, mut command: BrowserCommand) -> Result<(), RpcError> {
+        if let BrowserCommand::Navigate { url } = &mut command {
+            *url = browser_url(url).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+        }
+        self.browser(block_id)?.command(&command)?;
+        self.emit(Event::BrowserCommand { block_id: block_id.to_owned(), command });
+        self.block_changed(block_id);
+        Ok(())
+    }
+
+    /// Store engine state reported by the block's owner.
+    pub fn browser_report(&mut self, client_id: ClientId, block_id: &str, report: Report) -> Result<(), RpcError> {
+        self.browser(block_id)?.report(client_id, report)?;
+        self.block_changed(block_id);
+        Ok(())
     }
 }
 

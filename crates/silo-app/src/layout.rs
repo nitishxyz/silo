@@ -30,6 +30,9 @@ const BUTTON: f32 = 22.0;
 /// come from [`radius`].
 const OUTER: f32 = 8.0;
 const GAP: f32 = 6.0;
+/// Width of the corner ring over browser surfaces: covers a corner of
+/// radius ≤ 12 (r·(√2−1)) and stays inside the gap between cards.
+const CAP: f32 = 5.0;
 
 /// Which window edges a pane card lies along, and the window's corner
 /// radius when its corners are visible behind the cards.
@@ -149,21 +152,23 @@ impl Workspace {
             .pane_enter
             .get(id)
             .and_then(|(started, edge)| motion::progress(*started, motion::PANE_ENTER, now).map(|p| edge.offset(1.0 - p)));
-        let inner: AnyElement = match self.panes.get(id) {
-            Some((pane, _)) => pane.clone().into_any_element(),
-            None => div().size_full().into_any_element(),
+        let inner: AnyElement = match (self.panes.get(id), self.browsers.get(id)) {
+            (Some((pane, _)), _) => pane.clone().into_any_element(),
+            (None, Some((pane, _))) => pane.clone().into_any_element(),
+            (None, None) => div().size_full().into_any_element(),
         };
         let content = div().relative().flex_1().min_h_0().min_w_0().child(inner);
         // Header and terminal are one surface; an inactive pane is dimmed
         // as a whole so no band appears between them. No listeners on the
         // wash: clicks and hovers reach the header and terminal below.
+        let dim = if self.browsers.contains_key(id) { theme::INACTIVE_DIM_PAGE } else { theme::INACTIVE_DIM };
         let wash = dimmed.then(|| {
             div()
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
-                .bg(rgb(theme::background()).opacity(theme::INACTIVE_DIM))
+                .bg(rgb(theme::background()).opacity(dim))
                 .when(comfortable, |el| el.continuous_corners(fill))
         });
         // Drop target for a pane dragged by its header: an accent outline
@@ -203,7 +208,29 @@ impl Workspace {
             Some((dx, dy)) => div().absolute().left(relative(dx)).top(relative(dy)).size_full().child(card).into_any_element(),
             None => card.into_any_element(),
         };
-        div().relative().size_full().min_w_0().min_h_0().when(entering.is_some(), |el| el.overflow_hidden()).child(card).into_any_element()
+        // The page surface is clipped to a rectangle: a ring of window
+        // colour just outside the card's rounded shape hides its corners.
+        let caps = (comfortable && entering.is_none() && self.browsers.contains_key(id)).then(|| {
+            let ring = |r: f32| r + CAP;
+            let outer = CardCorners {
+                top_left: ring(corners.top_left),
+                top_right: ring(corners.top_right),
+                bottom_right: ring(corners.bottom_right),
+                bottom_left: ring(corners.bottom_left),
+            };
+            let ring = div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
+            let outline = div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline())).continuous_corners(corners);
+            [ring.continuous_corners(outer), outline]
+        });
+        div()
+            .relative()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .when(entering.is_some(), |el| el.overflow_hidden())
+            .child(card)
+            .children(caps.into_iter().flatten())
+            .into_any_element()
     }
 
     fn render_pane_header(&self, id: &str, active: bool, zoomed: bool, swap: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
@@ -212,8 +239,13 @@ impl Workspace {
             .get(id)
             .and_then(|(p, _)| p.read(cx).info.clone())
             .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
-        let (name, cwd) = header_labels(info.as_ref());
-        let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into() });
+        let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
+        let glyph = self.block_icon(id);
+        let (name, cwd) = match browser {
+            Some(title) => (title, None),
+            None => header_labels(info.as_ref()),
+        };
+        let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into(), icon: glyph });
         let block = id.to_owned();
         // Comfortable: the corner button sits inside the card's top corner,
         // 1pt border + (header - button) / 2 in, so it nests concentrically.
@@ -259,7 +291,7 @@ impl Workspace {
             .gap(px(6.0))
             .font_family(theme::ui_font())
             .text_size(px(11.5))
-            .child(icon("terminal", 12.0, if active { theme::accent() } else { theme::muted() }))
+            .child(icon(glyph, 12.0, if active { theme::accent() } else { theme::muted() }))
             .child(
                 div()
                     .flex()
@@ -302,7 +334,7 @@ impl Workspace {
                     this.focus_block(&focus_block, window, cx);
                 }),
             )
-            .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), offset })))
+            .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), icon: d.icon, offset })))
             .into_any_element()
     }
 
@@ -405,6 +437,7 @@ pub(crate) struct DraggedPane {
     window_id: String,
     block_id: String,
     label: gpui::SharedString,
+    icon: &'static str,
 }
 
 /// The pill following the pointer while a pane is dragged. GPUI places
@@ -412,6 +445,7 @@ pub(crate) struct DraggedPane {
 /// the pill just below-right of the pointer.
 struct PanePill {
     label: gpui::SharedString,
+    icon: &'static str,
     offset: gpui::Point<gpui::Pixels>,
 }
 
@@ -430,7 +464,7 @@ impl Render for PanePill {
             .font_family(theme::ui_font())
             .text_size(px(11.5))
             .text_color(rgb(theme::foreground()))
-            .child(icon("terminal", 12.0, theme::accent()))
+            .child(icon(self.icon, 12.0, theme::accent()))
             .child(self.label.clone());
         // Padding, not margin: the root's margins are ignored by layout.
         div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
@@ -530,7 +564,7 @@ mod tests {
         assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), false)), Some("w"));
         assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), true)), None);
         assert_eq!(swap_window(&window(block("a"), false)), None);
-        let dragged = DraggedPane { window_id: "w".into(), block_id: "a".into(), label: "zsh".into() };
+        let dragged = DraggedPane { window_id: "w".into(), block_id: "a".into(), label: "zsh".into(), icon: "terminal" };
         assert!(can_swap(&dragged, "w", "b"));
         assert!(!can_swap(&dragged, "w", "a"));
         assert!(!can_swap(&dragged, "other", "b"));
@@ -550,6 +584,7 @@ mod tests {
             size: silo_proto::model::TermSize { columns: 80, rows: 24, cell_width: 0, cell_height: 0 },
             owner: None,
             pid: None,
+            browser: None,
         };
         assert_eq!(header_labels(Some(&info("-zsh", Some(format!("{home}/dev"))))), ("zsh".into(), Some("~/dev".into())));
         assert_eq!(header_labels(Some(&info("", None))), ("shell".into(), None));

@@ -21,3 +21,4 @@ rustix.workspace = true
 
 [dev-dependencies]
 silo-client.workspace = true
+data-encoding.workspace = true

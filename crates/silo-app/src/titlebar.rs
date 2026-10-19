@@ -104,6 +104,7 @@ pub fn drop_index(from: usize, target: usize, after: bool) -> Option<usize> {
 struct TabDrag {
     window_id: String,
     title: String,
+    icon: &'static str,
     /// Grab point within the tab; the preview pads it away so the pill
     /// sits just below-right of the pointer.
     offset: gpui::Point<gpui::Pixels>,
@@ -124,13 +125,27 @@ impl Render for TabDrag {
             .font_family(theme::ui_font())
             .text_size(px(12.0))
             .text_color(rgb(theme::foreground()))
-            .child(icon("terminal", 12.0, theme::accent()))
+            .child(icon(self.icon, 12.0, theme::accent()))
             .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()));
         div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
     }
 }
 
 impl Workspace {
+    /// The tab's glyph: a globe when the window's focused block is a browser.
+    pub(crate) fn tab_icon(&self, w: &silo_proto::model::WindowInfo) -> &'static str {
+        self.block_icon(&w.focused)
+    }
+
+    /// A block's glyph: a globe for a browser, else a terminal.
+    pub(crate) fn block_icon(&self, id: &str) -> &'static str {
+        let block = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id));
+        match crate::browser_pane::kind_of(block) {
+            crate::browser_pane::Kind::Browser => "globe",
+            crate::browser_pane::Kind::Terminal => "terminal",
+        }
+    }
+
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let several = self.view.as_ref().is_some_and(|v| v.session.windows.len() > 1);
         let strip = theme::surface();
@@ -371,7 +386,8 @@ impl Workspace {
         let primary = selected || !several;
         let close = self.motion.close_button(&w.id, now);
         let title = self.window_title(w, cx);
-        let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), offset: gpui::Point::default() };
+        let glyph = self.tab_icon(w);
+        let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default() };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
         let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
@@ -397,7 +413,7 @@ impl Workspace {
             .capsule()
             .when(several && selected, |el| el.bg(rgb(fill)))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(rgb(hover))))
-            .child(icon("terminal", 12.0, if primary { theme::accent() } else { theme::muted() }))
+            .child(icon(glyph, 12.0, if primary { theme::accent() } else { theme::muted() }))
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {
@@ -609,7 +625,7 @@ fn render_tab_ghost(ghost: &TabGhost, now: Instant) -> Option<AnyElement> {
                     .min_w_0()
                     .px(px(10.0))
                     .capsule()
-                    .child(icon("terminal", 12.0, theme::muted()))
+                    .child(icon(ghost.icon, 12.0, theme::muted()))
                     .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ghost.title.clone())),
             )
             .into_any_element(),

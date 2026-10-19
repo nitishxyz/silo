@@ -41,7 +41,7 @@ async fn setup(name: &str) -> (Control, Events, String) {
     start_server(&home).await;
     let (control, events) = Control::connect(&paths::socket(&home), name).await.unwrap();
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
     (control, events, created.block_id)
 }
 
@@ -174,8 +174,13 @@ async fn acking_client_keeps_up_with_a_flood() {
     let (mut a, mut stream) = live(&control, &block, "ready").await;
     let start = a.resume().unwrap().offset;
 
-    // Throttling: an idle ack goes out once per applied offset.
-    assert_eq!(a.take_ack(true), None, "already acked by the pump");
+    // Throttling: an idle ack goes out once per applied offset. The pump may
+    // have stopped before its last frame was acked (it was not idle then).
+    if let Some(offset) = a.take_ack(true) {
+        assert_eq!(offset, start);
+        assert!(stream.send(&ClientData::Ack(offset)));
+    }
+    assert_eq!(a.take_ack(true), None, "same offset acked twice");
     stream.send(&ClientData::Input(b"i=0; while [ $i -lt 40000 ]; do i=$((i+1)); echo flood-line-$i; done; echo flood-done\n".to_vec()));
     let mut acks = 0u32;
     tokio::time::timeout(Duration::from_secs(60), async {

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use silo_client::transport::{Net, RelayConfig};
+use silo_client::transport::{Net, NetOptions, RelayConfig};
 use tokio::sync::OnceCell;
 
 static NET: OnceCell<Net> = OnceCell::const_new();
@@ -22,7 +22,9 @@ pub fn identity_dir(home: &Path) -> PathBuf {
 pub async fn net(home: &Path) -> anyhow::Result<&'static Net> {
     NET.get_or_try_init(|| async {
         let identity = silo_client::client_identity(&identity_dir(home))?;
-        Net::bind(&identity, RelayConfig::Default, true).await
+        // Dev/test knob (docs/PHASE5.md §5): keep the dialed path, e.g. a delay proxy.
+        let pin_initial_path = std::env::var_os("SILO_PIN_PATH").is_some_and(|v| v == "1");
+        Net::bind_with(&identity, NetOptions { relay: RelayConfig::Default, mdns: true, pin_initial_path, port: None }).await
     })
     .await
 }

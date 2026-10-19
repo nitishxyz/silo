@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Axis, BlockId, BlockInfo, ClientId, SessionId, SessionSummary, SessionView, TermSize, WindowId};
+use crate::model::{
+    Axis, BlockId, BlockInfo, BlockKind, ClientId, HistoryEntry, SessionId, SessionSummary, SessionView, TermSize, WindowId,
+};
 
 /// First frame on a control stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,6 +97,11 @@ pub enum Method {
         name: Option<String>,
         #[serde(default)]
         spawn: SpawnSpec,
+        #[serde(default)]
+        kind: BlockKind,
+        /// Browser blocks: the start URL (default `about:blank`).
+        #[serde(default)]
+        url: Option<String>,
     },
     #[serde(rename = "session.view")]
     SessionView { session_id: SessionId },
@@ -108,6 +115,11 @@ pub enum Method {
         session_id: SessionId,
         #[serde(default)]
         spawn: SpawnSpec,
+        #[serde(default)]
+        kind: BlockKind,
+        /// Browser blocks: the start URL (default `about:blank`).
+        #[serde(default)]
+        url: Option<String>,
     },
     #[serde(rename = "window.select")]
     WindowSelect { session_id: SessionId, window_id: WindowId },
@@ -124,6 +136,11 @@ pub enum Method {
         axis: Axis,
         #[serde(default)]
         spawn: SpawnSpec,
+        #[serde(default)]
+        kind: BlockKind,
+        /// Browser blocks: the start URL (default `about:blank`).
+        #[serde(default)]
+        url: Option<String>,
     },
     #[serde(rename = "block.close")]
     BlockClose { block_id: BlockId },
@@ -169,6 +186,33 @@ pub enum Method {
     #[serde(rename = "data.connect")]
     DataConnect { block_id: BlockId },
 
+    #[serde(rename = "browser.navigate")]
+    BrowserNavigate { block_id: BlockId, url: String },
+    #[serde(rename = "browser.back")]
+    BrowserBack { block_id: BlockId },
+    #[serde(rename = "browser.forward")]
+    BrowserForward { block_id: BlockId },
+    #[serde(rename = "browser.reload")]
+    BrowserReload {
+        block_id: BlockId,
+        #[serde(default)]
+        ignore_cache: bool,
+    },
+    #[serde(rename = "browser.zoom")]
+    BrowserZoom { block_id: BlockId, zoom: f32 },
+    /// Owner only: the engine's committed state.
+    #[serde(rename = "browser.report")]
+    BrowserReport {
+        block_id: BlockId,
+        url: String,
+        title: String,
+        #[serde(default)]
+        favicon: Option<String>,
+        loading: bool,
+        history: Vec<HistoryEntry>,
+        index: usize,
+    },
+
     /// Ask attached UI clients (the app) to show a session.
     #[serde(rename = "ui.open_session")]
     UiOpenSession { session_id: SessionId },
@@ -191,16 +235,16 @@ pub const METHODS: &[(&str, &str)] = &[
     ("api.list", "List control methods."),
     ("events.subscribe", "Start receiving sequenced events on this connection."),
     ("session.list", "List sessions."),
-    ("session.create", "Create a session with one window running a shell or command."),
+    ("session.create", "Create a session with one window running a shell, command or browser."),
     ("session.view", "Full session tree and block metadata."),
     ("session.rename", "Rename a session."),
     ("session.close", "Close a session and terminate its processes."),
-    ("window.create", "Add a window (tab) to a session."),
+    ("window.create", "Add a window (tab) with a terminal or browser block to a session."),
     ("window.select", "Make a window the session's active window."),
     ("window.close", "Close a window and its blocks."),
     ("window.rename", "Set or clear a window's name."),
     ("window.move", "Move a window to a new index."),
-    ("block.split", "Split a block, starting a new terminal next to it."),
+    ("block.split", "Split a block, starting a new terminal or browser next to it."),
     ("block.close", "Close a block and terminate its process."),
     ("block.focus", "Focus a block within its window."),
     ("block.zoom", "Zoom or unzoom a block within its window."),
@@ -215,6 +259,12 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.own_block", "Take or request size/theme ownership of blocks."),
     ("session.disown_block", "Release ownership or candidacy of blocks."),
     ("data.connect", "Single-use ticket for a block data stream."),
+    ("browser.navigate", "Load a URL in a browser block (bare hosts get a scheme)."),
+    ("browser.back", "Go back in a browser block's history."),
+    ("browser.forward", "Go forward in a browser block's history."),
+    ("browser.reload", "Reload a browser block, optionally bypassing the cache."),
+    ("browser.zoom", "Set a browser block's zoom level (0 = 100%)."),
+    ("browser.report", "Report a browser block's engine state (owner only)."),
     ("ui.open_session", "Ask subscribed UI clients to show a session."),
     ("pair.create", "Create a single-use pairing invite (owner only)."),
     ("pair.list", "List paired devices (owner only)."),
@@ -328,6 +378,19 @@ pub enum Event {
     BlockBell { block_id: BlockId },
     #[serde(rename = "ui.open_session")]
     OpenSession { session_id: SessionId },
+    /// A browser command for the owner's engine; viewers follow it too.
+    #[serde(rename = "browser.command")]
+    BrowserCommand { block_id: BlockId, command: BrowserCommand },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum BrowserCommand {
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload { ignore_cache: bool },
+    Zoom { zoom: f32 },
 }
 
 // Typed results.
@@ -399,11 +462,13 @@ mod tests {
 
     #[test]
     fn request_and_messages_round_trip() {
-        let request = Request { id: 3, method: Method::BlockSplit { block_id: "b".into(), axis: Axis::Vertical, spawn: SpawnSpec::default() } };
+        let method = Method::BlockSplit { block_id: "b".into(), axis: Axis::Vertical, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+        let request = Request { id: 3, method };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"method\":\"block.split\""), "{json}");
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, 3);
+        assert!(matches!(back.method, Method::BlockSplit { kind: BlockKind::Browser, .. }), "{json}");
         let json = r#"{"id":1,"method":"session.list"}"#;
         assert!(matches!(serde_json::from_str::<Request>(json).unwrap().method, Method::SessionList {}));
 

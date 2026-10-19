@@ -158,8 +158,10 @@ These only apply to browser blocks on **remote** servers. Local servers load `lo
 
 **Client: a local proxy port, with no URL rewriting:**
 - `silo-client/src/tunnel.rs` (new) runs one loopback HTTP proxy per remote server on `127.0.0.1:0`.
-- CEF's profile `RequestContext` for that server's blocks gets a `proxy` preference with a PAC script. The PAC
-  sends exactly the server-private hosts to `PROXY 127.0.0.1:<port>` and everything else `DIRECT`.
+- CEF's profile `RequestContext` for that server's blocks gets a `proxy` preference
+  `{mode: "fixed_servers", server: "127.0.0.1:<port>", bypass_list: "<-loopback>"}`: **all** of that profile's
+  traffic goes to the client proxy (a PAC can't reach loopback, see §8). The proxy tunnels exactly the
+  server-private hosts and connects everything else DIRECT itself.
   - Pages keep their real origin (`http://localhost:3000`), so cookies, CORS and HMR websockets behave as they
     would on the server.
   - Profiles are per server (`profile = "<server>/<name>"`), so localhost cookies of two servers never mix.
@@ -189,8 +191,10 @@ These only apply to browser blocks on **remote** servers. Local servers load `lo
 - **Getting CEF:**
   - `cef-dll-sys`'s `build.rs` downloads the CEF minimal distribution for the pinned version (~120 MB archive from
     the Spotify CDN) on first build, or uses `CEF_PATH`.
-  - We set `CEF_PATH=$HOME/.local/share/cef/<version>`, filled once by cef-rs's `export-cef-dir`. That keeps
-    clean builds and CI offline after the first fetch.
+  - We set `CEF_PATH=$HOME/Library/Caches/silo-dev/cef/<version>` (now `154.0.34`, ~340 MB), filled once by
+    `scripts/fetch-cef.sh` (cef-rs's `export-cef-dir`). That keeps clean builds and CI offline after the first
+    fetch. The workspace includes `silo-web`, so every workspace build needs `CEF_PATH` exported.
+  - Build prerequisites: CMake and Ninja (`brew install cmake ninja`) for the `libcef_dll_wrapper` build.
   - Pin `cef = "=154.5.0"` exactly (build-ID rule: the version is part of `BUILD` through `Cargo.lock`).
 - **Bundle layout** (extend `scripts/bundle-macos.sh`; don't adopt `bundle-cef-app`, because the bundle already
   has the server binary and the menubar):
@@ -231,13 +235,14 @@ These only apply to browser blocks on **remote** servers. Local servers load `lo
   - paired peer → `TunnelOpen{localhost, P}` reaches a test HTTP server; an unpaired peer is closed;
   - a public destination gets `TunnelErr{forbidden}`;
   - the client proxy handles `CONNECT` and absolute-form GET and a websocket upgrade end to end (with `curl -x`);
-  - the PAC script routes `localhost:3000` → proxy and `example.com` → DIRECT (pure function test).
+  - the proxy's routing rule sends `localhost:3000` through the tunnel and `example.com` DIRECT, for both
+    `CONNECT` and absolute-form requests (pure function test + `curl -x` passthrough to a public test server).
 
 **P6-3: fork + `silo-web` runtime.** Depends on nothing. Needs a GUI session to fully verify.
 - **Files:** `nitishxyz/zed` fork (`CrAppControlProtocol` on `GPUIApplication`, rounded surfaces), workspace
   `Cargo.toml` rev bump, `crates/silo-web/**` (new), `scripts/bundle-macos.sh`.
 - **Tests:**
-  - headless: `cargo test -p silo-web` covers the input/key translation tables and the PAC builder;
+  - headless: `cargo test -p silo-web` covers the input/key translation tables;
   - `silo-web` example `offscreen_smoke` inits CEF, loads a `data:` page that paints a known color, and gets at
     least one `on_accelerated_paint` with a 32BGRA IOSurface whose centre pixel matches. It needs a logged-in
     macOS session (WindowServer), not a visible window, so it runs on a self-hosted macOS runner;
@@ -254,7 +259,7 @@ These only apply to browser blocks on **remote** servers. Local servers load `lo
 
 Order: P6-1 ∥ P6-2 ∥ P6-3, then P6-4.
 
-**Verifiable headless:** P6-1 and P6-2 fully, and P6-3's translation and PAC units. CEF paint needs a WindowServer
+**Verifiable headless:** P6-1 and P6-2 fully, and P6-3's translation units. CEF paint needs a WindowServer
 session, and P6-4 needs the GUI.
 
 ## 8. Blockers and risks
@@ -269,7 +274,42 @@ session, and P6-4 needs the GUI.
   the port; budget it in P6-3.
 - **IME:** brand-new code (`ime_set_composition` mapping). Main risk is candidate-window placement; tested with
   Japanese/Pinyin in P6-4.
-- **Proxy via PAC:** CEF applies proxy prefs per `RequestContext` at runtime (`set_preference("proxy", …)`).
-  Verify in P6-3 that changing it doesn't need a restart. If it does, create the context with the PAC at profile
-  creation (the port is known before any browser opens).
+- **Tunnel proxy (resolved in P6-3):** a PAC can't proxy loopback. With `mode: pac_script`, Chromium resolves
+  `localhost`/`127/8`/`[::1]` DIRECT even when the PAC returns `PROXY` for every host (seen in the net log). A
+  `bypass_list: "<-loopback>"` is dropped in PAC mode, and the global `--proxy-bypass-list=<-loopback>` switch
+  doesn't help either. `fixed_servers` + `bypass_list: "<-loopback>"` does proxy loopback, but a bypass list can't
+  say "private hosts only". So the profile sends everything to the client proxy, which goes DIRECT for public
+  hosts (§5). The pref is applied in `on_request_context_initialized` and switched at runtime with
+  `Profile::set_tunnel` (no restart). The offscreen example proves: `10.77.0.x` via the proxy, a runtime
+  port switch, and `http://localhost:<port with no listener>/` + its websocket (`CONNECT localhost:<port>`, as
+  Vite HMR uses) via the proxy.
+  Cost: public traffic takes a local hop through the client proxy, and HTTP/3 isn't used through an HTTP proxy.
+- **cef-rs 154.5 pitfalls (audited in `silo-web`):** `None` and `CefString::default()` marshal as null, and
+  libcef silently ignores a call with a null required parameter. That includes out-params (`set_preference`'s
+  `error`, `Image::as_png`'s sizes) and by-ref structs (`ime_commit_text`/`ime_set_composition`'s
+  `replacement_range`, so pass `CefRange::InvalidRange()`). Check `optional_param` in the CEF header before
+  passing `None`. `CefStringList::clone` copies the opaque handle by value (dangling), so use `mem::take` on
+  borrowed lists. Ref-counted handles (`Browser`, `RequestContext`, …) clone safely (`add_ref`).
+- **OSR focus after navigation:** a cross-document navigation creates a new render widget that starts unfocused.
+  Blink then drops IME input (not key events), so `silo-web` re-applies `set_focus` on each main-frame
+  `on_load_start`.
+- **Keychain / cookies at rest (intentional):** the app always passes `--use-mock-keychain`, so Chromium never
+  prompts for "Chromium Safe Storage". As a deliberate consequence, cookies, saved logins and other Chromium
+  data are stored **unencrypted**. Their only protection is file permissions: `silo-web` creates
+  `<root>/profiles` and every profile directory with mode 0700 (re-applied at each start). Anyone running as
+  the user, or reading their backups, can read the session cookies. We accept that for a dev tool in exchange
+  for no keychain prompt.
+- **Tunnel proxy auth:** each client proxy requires Basic proxy auth with per-proxy credentials, passed as
+  `silo_web::Tunnel {port, user, pass}` to `runtime.profile(name, Some(tunnel))` / `Profile::set_tunnel`.
+  - `RequestHandler::auth_credentials` (IO thread) answers only `is_proxy` challenges whose challenger is
+    exactly `127.0.0.1:<that profile's port>`. Origin 401s and other proxies are cancelled, never auto-filled.
+  - This requires the `disable-chrome-login-prompt` switch (always set by `silo-web`). Without it, CEF hands
+    challenges to Chrome's login dialog, which is invisible in windowless mode, so loads hang.
+  - Chromium re-asks right after every rejected 407 (~20/s with stale credentials), so answers are capped at
+    4 per second per profile. `set_tunnel` resets the budget.
+  - `set_tunnel` on a context that hasn't finished initializing only records the tunnel (CEF rejects prefs
+    before init with `has=0 can_set=0`). The init handler then applies the latest one, so an open never fails
+    on it.
+  - The offscreen example proves: auth with A, a runtime switch to B's credentials, localhost + websocket through
+    A, an unanswered origin 401, and wrong credentials stopping after 4 attempts.
 - **Helper count and signing:** four helper apps, each signed with entitlements. Notarization time grows.

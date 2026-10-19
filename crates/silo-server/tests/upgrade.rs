@@ -105,8 +105,8 @@ async fn reconnect(home: &Path) -> Control {
 
 /// A session with a split of two counters, streaming the first block.
 async fn populate(control: &Control) -> (Created, SessionView, DataStream, Tail) {
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: counter() }).await.unwrap();
-    let split = Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: counter() };
+    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: counter(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split = Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: counter(), kind: BlockKind::Terminal, url: None };
     let _: Created = control.call(split).await.unwrap();
     let before = view(control, &created.session_id).await;
     let mut stream = DataStream::open(control, &created.block_id, None).await.unwrap();
@@ -170,7 +170,7 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
     let listener = std::os::unix::net::UnixListener::bind(paths::socket(home)).unwrap();
     let info = BlockInfo {
         id: "b1".into(), session_id: "s1".into(), kind: BlockKind::Terminal, title: "shell".into(), cwd: None,
-        exited: None, lifecycle: Lifecycle::Running, size: TermSize::new(80, 24), owner: None, pid: None,
+        exited: None, lifecycle: Lifecycle::Running, size: TermSize::new(80, 24), owner: None, pid: None, browser: None,
     };
     let spec = counter();
     let config = silo_pty::SpawnConfig { command: spec.command.iter().map(Into::into).collect(), ..Default::default() };
@@ -182,7 +182,7 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
     let window = Window { id: "w1".into(), name: None, layout: Layout::block("b1"), focused: "b1".into(), zoomed: false };
     let session = Session { id: "s1".into(), name: "main".into(), windows: vec![window], active_window: "w1".into(), revision: 1, created_at: 0 };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
-    let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks };
+    let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new() };
     let checkpoint = silo_server::persist::encode(released.checkpoint).unwrap();
     let thread = std::thread::spawn(move || {
         let (mut sock, _) = listener.accept().unwrap();

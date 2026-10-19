@@ -14,7 +14,7 @@ use silo_cli::{NetOptions, hosts::Hosts, parse_duration, parse_relay};
 use silo_client::{Control, Events, transport::{Net, RelayConfig}};
 use silo_proto::{
     control::{Capture, Created, Method, SpawnSpec},
-    model::{SessionSummary, SessionView, TermSize},
+    model::{BlockKind, SessionSummary, SessionView, TermSize},
     paths,
 };
 
@@ -91,9 +91,20 @@ enum Command {
         /// Working directory (default: current directory).
         #[arg(short = 'c', long)]
         cwd: Option<PathBuf>,
+        /// Run a browser at URL instead of a program; prints the session id.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["command", "detached", "cwd"])]
+        browser: Option<String>,
         /// Command to run instead of the login shell.
         #[arg(last = true)]
         command: Vec<String>,
+    },
+    /// Drive a browser block.
+    Browser {
+        /// Block id, or a session whose focused block is used.
+        #[arg(short, long, global = true)]
+        target: Option<String>,
+        #[command(subcommand)]
+        command: BrowserCmd,
     },
     /// Attach to a session's focused block (or a block id). Detach with Ctrl-\.
     #[command(alias = "a")]
@@ -157,6 +168,35 @@ enum ApiCommand {
     List,
     /// Call a method with JSON params.
     Call { method: String, params: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum BrowserCmd {
+    /// Load a URL (bare hosts get https://, localhost and private IPs http://).
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload {
+        #[arg(long)]
+        ignore_cache: bool,
+    },
+    /// Set the zoom level (0 = 100%).
+    Zoom {
+        #[arg(allow_negative_numbers = true)]
+        level: f32,
+    },
+}
+
+impl BrowserCmd {
+    fn method(self, block_id: String) -> Method {
+        match self {
+            Self::Navigate { url } => Method::BrowserNavigate { block_id, url },
+            Self::Back => Method::BrowserBack { block_id },
+            Self::Forward => Method::BrowserForward { block_id },
+            Self::Reload { ignore_cache } => Method::BrowserReload { block_id, ignore_cache },
+            Self::Zoom { level } => Method::BrowserZoom { block_id, zoom: level },
+        }
+    }
 }
 
 fn main() {
@@ -297,17 +337,30 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             }
             Ok(0)
         }
-        Command::New { name, detached, cwd, command } => {
+        Command::New { name, browser: Some(url), .. } => {
+            let (control, _, _net) = connect(host).await?;
+            let method = Method::SessionCreate { name, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some(url) };
+            let created: Created = control.call(method).await?;
+            println!("{}", created.session_id);
+            Ok(0)
+        }
+        Command::New { name, detached, cwd, command, browser: None } => {
             let (control, _, _net) = connect(host).await?;
             let cwd = cwd.or_else(|| std::env::current_dir().ok()).map(|p| p.to_string_lossy().into_owned());
             let size = attach::host_size().map(|(c, r)| TermSize::new(c, r));
             let spawn = SpawnSpec { cwd, command, size };
-            let created: Created = control.call(Method::SessionCreate { name, spawn }).await?;
+            let created: Created = control.call(Method::SessionCreate { name, spawn, kind: BlockKind::Terminal, url: None }).await?;
             if detached || !std::io::stdin().is_terminal() {
                 println!("{}", created.session_id);
                 return Ok(0);
             }
             attach::run(&control, &created.block_id, false).await
+        }
+        Command::Browser { target, command } => {
+            let (control, _, _net) = connect(host).await?;
+            let block = resolve_block(&control, target.as_deref()).await?;
+            control.call_value(command.method(block)).await?;
+            Ok(0)
         }
         Command::Attach { target, watch } => {
             let (control, _, _net) = connect(host).await?;
@@ -633,5 +686,21 @@ mod tests {
         let cli = Cli::parse_from(["silo", "ls", "--host", "work"]);
         assert_eq!(cli.host.as_deref(), Some("work"));
         assert!(matches!(Cli::parse_from(["silo", "devices", "revoke", "ab12"]).command, Some(Command::Devices { command: Some(DevicesCommand::Revoke { .. }) })));
+    }
+
+    #[test]
+    fn browser_commands() {
+        let cli = Cli::parse_from(["silo", "new", "--browser", "localhost:3000", "-s", "work"]);
+        let Some(Command::New { name, browser, .. }) = cli.command else { panic!() };
+        assert_eq!((name.as_deref(), browser.as_deref()), (Some("work"), Some("localhost:3000")));
+        assert!(Cli::try_parse_from(["silo", "new", "--browser", "x", "--", "vim"]).is_err());
+        let cli = Cli::parse_from(["silo", "browser", "zoom", "-1.5", "-t", "b1"]);
+        let Some(Command::Browser { target, command }) = cli.command else { panic!() };
+        assert_eq!(target.as_deref(), Some("b1"));
+        assert!(matches!(command.method("b1".into()), Method::BrowserZoom { zoom, .. } if zoom == -1.5));
+        let Some(Command::Browser { command, .. }) = Cli::parse_from(["silo", "browser", "reload", "--ignore-cache"]).command else { panic!() };
+        assert!(matches!(command.method("b".into()), Method::BrowserReload { ignore_cache: true, .. }));
+        let Some(Command::Browser { command, .. }) = Cli::parse_from(["silo", "browser", "navigate", "example.com"]).command else { panic!() };
+        assert!(matches!(command.method("b".into()), Method::BrowserNavigate { url, .. } if url == "example.com"));
     }
 }

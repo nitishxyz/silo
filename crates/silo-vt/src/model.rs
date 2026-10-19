@@ -220,6 +220,8 @@ pub struct Frame {
     pub mouse_tracking: bool,
     /// The cursor is on an OSC 133 prompt/input row (shell integration).
     pub at_prompt: bool,
+    /// The alternate screen is active.
+    pub alt_screen: bool,
     /// OSC 8 hyperlink spans on viewport rows, shared like `cells`.
     pub links: std::sync::Arc<[Link]>,
     /// Present while a search needle is set.

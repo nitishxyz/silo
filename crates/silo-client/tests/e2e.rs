@@ -7,7 +7,7 @@ use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
     control::{Capture, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
     data::{ClientData, StartMode},
-    model::{Axis, Lifecycle, SessionView, TermSize, TerminalConfig},
+    model::{Axis, BlockKind, Lifecycle, SessionView, TermSize, TerminalConfig},
     paths,
 };
 
@@ -94,7 +94,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     start_server(&home).await;
     let (control, events) = connect(&home, "test-a").await;
     control.subscribe().await.unwrap();
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell() }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let block = created.block_id.clone();
 
     // Live attach + input + output.
@@ -158,7 +158,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(a.screen_text(), b.screen_text());
 
     // Splits and windows.
-    let split: Created = control.call(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell() }).await.unwrap();
+    let split: Created = control.call(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     assert_eq!(view.session.windows[0].layout.blocks(), [block.clone(), split.block_id.clone()]);
     assert_eq!(view.blocks.len(), 2);
@@ -233,11 +233,11 @@ async fn block_swap_and_window_move_body() {
     let (control, _) = connect(&home, "test-a").await;
     let (observer, mut events) = connect(&home, "test-b").await;
     observer.subscribe().await.unwrap();
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let sid = created.session_id.clone();
     let a = created.block_id.clone();
-    let b: Created = control.call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell() }).await.unwrap();
-    let c: Created = control.call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell() }).await.unwrap();
+    let b: Created = control.call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let c: Created = control.call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let (b, c) = (b.block_id, c.block_id);
     control.call_value(Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await.unwrap();
     control.call_value(Method::BlockFocus { block_id: a.clone() }).await.unwrap();
@@ -258,7 +258,7 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
 
     // Cross-window swaps are rejected and change nothing.
-    let other: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell() }).await.unwrap();
+    let other: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let after_create = next_view(&mut events, &sid).await;
     let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await.unwrap_err();
     assert!(err.to_string().contains("different windows"), "{err}");
@@ -268,7 +268,7 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(unchanged.session.revision, after_create.session.revision);
 
     // window.move: order changes for every client.
-    let third: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell() }).await.unwrap();
+    let third: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     next_view(&mut events, &sid).await;
     control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await.unwrap();
     let view = next_view(&mut events, &sid).await;
@@ -296,7 +296,7 @@ async fn snapshot_mid_escape_and_alt_screen_body() {
         cwd: None,
         size: Some(TermSize::new(40, 10)),
     };
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
     let mut a = Mirror::new();
     let mut stream = attach(&control, &created.block_id, &mut a).await;
     pump_until(&mut stream, &mut a, |m| m.screen_text().contains("alt-screen")).await;
@@ -320,7 +320,7 @@ async fn clear_and_reset_body() {
     let home = temp_home("clear");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     // Generated default names are two lowercase words.
     let sessions: Vec<silo_proto::model::SessionSummary> = control.call(Method::SessionList {}).await.unwrap();
     assert!(sessions[0].name.split('-').count() == 2, "{}", sessions[0].name);
@@ -381,7 +381,7 @@ async fn owner_terminal_config_body() {
     let home = temp_home("config");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test-a").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let block = created.block_id.clone();
     let red = config(0x0010_2030);
     let blue = config(0x0000_0040);
@@ -459,7 +459,7 @@ async fn resume_across_config_change_body() {
     let home = temp_home("config-resume");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test-a").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let block = created.block_id.clone();
     let red = config(0x0010_2030);
     let blue = config(0x0000_0040);

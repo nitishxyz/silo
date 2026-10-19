@@ -11,7 +11,7 @@ use gpui::{
 use silo_client::Control;
 use silo_proto::{
     control::{Created, Event, Method, SpawnSpec},
-    model::{Axis, SessionSummary, SessionView, WindowInfo},
+    model::{Axis, BlockKind, SessionSummary, SessionView, WindowInfo},
 };
 
 use crate::{
@@ -70,6 +70,8 @@ pub struct Workspace {
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
+    /// Browser blocks' panes (terminal blocks are in `panes`).
+    pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
     pub(crate) focus: FocusHandle,
@@ -134,6 +136,7 @@ impl Workspace {
             ahead_of: None,
             wanted_session,
             panes: HashMap::new(),
+            browsers: HashMap::new(),
             server_focus: None,
             focus: cx.focus_handle(),
             switcher: None,
@@ -310,6 +313,9 @@ impl Workspace {
                     for (pane, _) in self.panes.values() {
                         pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
                     }
+                    for (pane, _) in self.browsers.values() {
+                        pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
+                    }
                     let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
                     self.choose_session(preferred, window, cx);
                 }
@@ -391,7 +397,9 @@ impl Workspace {
                 }
             }
             ConnEvent::Event(Event::BlockChanged { block }) => {
-                if let Some((pane, _)) = self.panes.get(&block.id) {
+                if let Some((pane, _)) = self.browsers.get(&block.id) {
+                    pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
+                } else if let Some((pane, _)) = self.panes.get(&block.id) {
                     pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
                 }
                 if let Some(view) = self.view.as_mut()
@@ -404,6 +412,11 @@ impl Workspace {
                 window.activate_window();
                 cx.activate(true);
                 self.open_session(host, session_id, window, cx);
+            }
+            ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
+                if let Some((pane, _)) = self.browsers.get(&block_id) {
+                    pane.update(cx, |pane, cx| pane.apply_command(&command, cx));
+                }
             }
             ConnEvent::Event(Event::BlockBell { .. }) => {}
         }
@@ -480,8 +493,9 @@ impl Workspace {
 
     /// Drop every pane (closing its data stream) and give up ownership.
     pub(crate) fn detach_view(&mut self) {
-        let blocks: Vec<String> = self.panes.keys().cloned().collect();
+        let blocks: Vec<String> = self.panes.keys().chain(self.browsers.keys()).cloned().collect();
         self.panes.clear();
+        self.browsers.clear();
         self.view = None;
         self.server_focus = None;
         self.motion.reset();
@@ -496,7 +510,7 @@ impl Workspace {
         let Some(control) = self.control() else { return };
         let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx)).or_else(|| std::env::var("HOME").ok());
         let task = self.rt.spawn(async move {
-            control.call::<Created>(Method::SessionCreate { name, spawn: SpawnSpec { cwd, command: Vec::new(), size: None } }).await
+            control.call::<Created>(Method::SessionCreate { name, spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None }).await
         });
         cx.spawn_in(window, async move |this, cx| match task.await {
             Ok(Ok(created)) => {
@@ -532,7 +546,7 @@ impl Workspace {
                 None => {
                     let home = std::env::var("HOME").ok();
                     let spawn = SpawnSpec { cwd: home, command: Vec::new(), size: None };
-                    let created: Created = control.call(Method::SessionCreate { name: None, spawn }).await?;
+                    let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await?;
                     created.session_id
                 }
             };
@@ -583,18 +597,22 @@ impl Workspace {
             writer.forget(cache::closed_blocks(old, &view));
         }
         self.view = Some(view);
-        let view = self.view.as_ref().expect("view");
+        let view = self.view.clone().expect("view");
         // Panes for every block of the active window; keep panes of other
         // windows that are still alive, drop the rest.
         let all: Vec<String> = view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect();
         self.panes.retain(|id, _| all.contains(id));
+        self.browsers.retain(|id, _| all.contains(id));
         if live {
             self.hosts[self.active_host].restored.retain(|id, _| all.contains(id));
         }
         let active = self.active_window().cloned();
+        let browsers: Vec<String> = view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == crate::browser_pane::Kind::Browser).map(|b| b.id.clone()).collect();
         if let Some(active) = &active {
             for block in active.layout.blocks() {
-                if !self.panes.contains_key(&block) {
+                if browsers.contains(&block) {
+                    self.ensure_browser(&block, window, cx);
+                } else if !self.panes.contains_key(&block) {
                     let control = self.control();
                     let rt = self.rt.clone();
                     let id = block.clone();
@@ -617,7 +635,9 @@ impl Workspace {
         }
         let infos = view.blocks.clone();
         for info in infos {
-            if let Some((pane, _)) = self.panes.get(&info.id) {
+            if let Some((pane, _)) = self.browsers.get(&info.id) {
+                pane.update(cx, |pane, cx| pane.set_info(info, cx));
+            } else if let Some((pane, _)) = self.panes.get(&info.id) {
                 pane.update(cx, |pane, cx| pane.set_info(info, cx));
             }
         }
@@ -628,7 +648,8 @@ impl Workspace {
             && self.add_host.is_none()
         {
             let focused = active.focused.clone();
-            let local = self.panes.values().any(|(p, _)| p.read(cx).focus.is_focused(window));
+            let local = self.panes.values().any(|(p, _)| p.read(cx).focus.is_focused(window))
+                || self.browsers.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window));
             if self.server_focus.as_deref() != Some(&focused) || !local {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
@@ -657,7 +678,8 @@ impl Workspace {
             for id in &windows.removed {
                 if let Some(index) = old.session.windows.iter().position(|w| &w.id == id) {
                     let title = self.window_title(&old.session.windows[index], cx);
-                    tab_ghosts.push(TabGhost { id: id.clone(), title, index, started: now });
+                    let icon = self.tab_icon(&old.session.windows[index]);
+                    tab_ghosts.push(TabGhost { id: id.clone(), title, icon, index, started: now });
                 }
             }
         }
@@ -709,12 +731,15 @@ impl Workspace {
         if let Some((pane, _)) = self.panes.get(block) {
             let handle = pane.read(cx).focus.clone();
             handle.focus(window, cx);
+        } else if let Some((pane, _)) = self.browsers.get(block) {
+            let handle = pane.read(cx).focus.clone();
+            handle.focus(window, cx);
         }
     }
 
     /// Return keyboard focus to the terminal after closing an overlay.
     pub(crate) fn refocus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_window().map(|w| w.focused.clone()).filter(|b| self.panes.contains_key(b)) {
+        match self.active_window().map(|w| w.focused.clone()).filter(|b| self.panes.contains_key(b) || self.browsers.contains_key(b)) {
             Some(block) => self.focus_block(&block, window, cx),
             // No terminal (server stopped, no session): keep key bindings
             // working by focusing the workspace itself.
@@ -722,7 +747,7 @@ impl Workspace {
         }
     }
 
-    fn pane_activated(&mut self, block: String) {
+    pub(crate) fn pane_activated(&mut self, block: String) {
         if self.server_focus.as_deref() == Some(&block) {
             return;
         }
@@ -768,6 +793,7 @@ impl Workspace {
             .iter()
             .find(|(_, (p, _))| p.read(cx).focus.is_focused(window))
             .map(|(id, _)| id.clone())
+            .or_else(|| self.browser_focused(window, cx))
             .or_else(|| self.active_window().map(|w| w.focused.clone()))
     }
 
@@ -783,7 +809,7 @@ impl Workspace {
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
         let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn: SpawnSpec { cwd, command: Vec::new(), size: None } });
+        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None });
     }
 
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
@@ -795,7 +821,7 @@ impl Workspace {
     pub(crate) fn split_block(&mut self, block: String, axis: Axis, cx: &gpui::App) {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
-        self.call(Method::BlockSplit { block_id: block, axis, spawn: SpawnSpec { cwd, command: Vec::new(), size: None } });
+        self.call(Method::BlockSplit { block_id: block, axis, spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None });
     }
 
     pub(crate) fn close_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -816,7 +842,7 @@ impl Workspace {
         let cwd = self.cwd_of(&block, cx);
         self.rt.spawn(async move {
             let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-            if let Err(error) = control.call_value(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn }).await {
+            if let Err(error) = control.call_value(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None }).await {
                 tracing::warn!("new shell: {error:#}");
                 return;
             }
@@ -937,6 +963,9 @@ impl Workspace {
         if let Some(name) = &w.name {
             return name.clone();
         }
+        if let Some((pane, _)) = self.browsers.get(&w.focused) {
+            return pane.read(cx).title();
+        }
         self.panes.get(&w.focused).map_or_else(
             || {
                 self.view
@@ -963,7 +992,7 @@ impl Render for Workspace {
             && self.palette.is_none()
             && self.settings.is_none()
             && self.add_host.is_none()
-            && self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused))
+            && self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused) || self.browsers.contains_key(&w.focused))
         {
             cx.defer_in(window, |this, window, cx| {
                 // Re-check: an overlay may have taken focus meanwhile.

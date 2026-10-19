@@ -45,7 +45,7 @@ async fn ctl_connect_streams_and_close() {
     let mut server = Net::bind(&sid, RelayConfig::Disabled, false).await.unwrap();
     let client = Net::bind(&cid, RelayConfig::Disabled, false).await.unwrap();
     assert_eq!(server.id(), sid.id());
-    let mut incoming = server.serve_ctl(4).unwrap();
+    let (mut incoming, _tunnels) = server.serve(4).unwrap();
 
     let rc = timeout(T, client.dial(loopback_addr(&server)))
         .await
@@ -93,12 +93,12 @@ async fn ctl_connect_streams_and_close() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn serve_ctl_twice_fails() {
+async fn serve_twice_fails() {
     let tmp = TempDir::new();
     let id = Identity::load_or_create(tmp.path()).unwrap();
     let mut net = Net::bind(&id, RelayConfig::Disabled, false).await.unwrap();
-    let _incoming = net.serve_ctl(1).unwrap();
-    assert!(net.serve_ctl(1).is_err());
+    let _incoming = net.serve(1).unwrap();
+    assert!(net.serve(1).is_err());
     timeout(T, net.close()).await.unwrap().unwrap();
 }
 
@@ -165,7 +165,7 @@ async fn settle(pin: bool) -> (SocketAddr, Paths, Paths) {
     let cid = Identity::load_or_create(tmp.path().join("c")).unwrap();
     let mut server = bind_pinned(&sid, pin).await;
     let client = bind_pinned(&cid, pin).await;
-    let mut incoming = server.serve_ctl(1).unwrap();
+    let (mut incoming, _tunnels) = server.serve(1).unwrap();
     let direct = *loopback_addr(&server).ip_addrs().next().unwrap();
     let dialed_ip = delay_proxy(direct, Duration::from_millis(25)).await;
     let dialed = EndpointAddr::new(server.id()).with_ip_addr(dialed_ip);

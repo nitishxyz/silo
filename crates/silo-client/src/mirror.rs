@@ -230,6 +230,9 @@ impl Mirror {
                 }
                 Ok(Applied::Redraw)
             }
+            // Prediction metadata: the caller hands these to its
+            // `Predictor::server`; they never move `next_offset` or acks.
+            ServerData::InputAck { .. } | ServerData::TtyMode { .. } => Ok(Applied::None),
         }
     }
 
@@ -274,6 +277,12 @@ impl Mirror {
     #[must_use]
     pub fn terminal(&mut self) -> Option<&mut TerminalCore> {
         self.vt.as_mut()
+    }
+
+    /// End of the output applied so far.
+    #[must_use]
+    pub fn next_offset(&self) -> u64 {
+        self.next_offset
     }
 
     /// Applied (server) grid size.

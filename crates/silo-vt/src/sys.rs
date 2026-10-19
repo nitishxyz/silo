@@ -36,6 +36,7 @@ struct RawFrame {
     mouse_tracking: u32,
     dirty: u32,
     at_prompt: u32,
+    alt_screen: u32,
 }
 
 #[repr(C)]
@@ -656,6 +657,7 @@ impl TerminalCore {
             },
             mouse_tracking: frame.mouse_tracking != 0,
             at_prompt: frame.at_prompt != 0,
+            alt_screen: frame.alt_screen != 0,
             links: Arc::from(self.links.clone()),
             search,
             cursor: Cursor {

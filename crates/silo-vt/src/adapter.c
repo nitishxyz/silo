@@ -39,7 +39,7 @@ struct SiloVt {
 };
 
 _Static_assert(sizeof(SiloCell) == 276, "Rust RawCell ABI");
-_Static_assert(sizeof(SiloFrame) == 64, "Rust RawFrame ABI");
+_Static_assert(sizeof(SiloFrame) == 72, "Rust RawFrame ABI");
 _Static_assert(sizeof(SiloLink) == 1040, "Rust RawLink ABI");
 _Static_assert(sizeof(SiloEvents) == 16, "Rust RawEvents ABI");
 
@@ -516,6 +516,9 @@ int silo_vt_frame(SiloVt *vt, SiloFrame *out, SiloCell *cells, size_t capacity,
     bool at_prompt = false;
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_AT_PROMPT, &at_prompt));
     out->at_prompt = at_prompt;
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    out->alt_screen = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
     GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
     GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
     CHECK(ghostty_render_state_get(vt->render, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors));

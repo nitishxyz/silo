@@ -84,6 +84,12 @@ impl TextField {
         cx.notify();
     }
 
+    /// Select the whole text (as ⌘A does).
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.all = !self.text.is_empty();
+        cx.notify();
+    }
+
     fn edit(&mut self, edit: Edit<'_>, cx: &mut Context<Self>) {
         apply(&mut self.text, &mut self.all, edit);
         cx.emit(FieldEvent::Changed(self.text.clone()));

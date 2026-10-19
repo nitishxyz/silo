@@ -124,6 +124,11 @@ impl Auth {
         Ok(())
     }
 
+    /// Whether `endpoint_id` holds a grant (read-only; no `last_seen`).
+    pub fn is_paired(&self, endpoint_id: &str) -> bool {
+        self.devices.iter().any(|d| d.id == endpoint_id)
+    }
+
     pub fn devices(&self) -> Vec<PairedDevice> {
         self.devices.clone()
     }

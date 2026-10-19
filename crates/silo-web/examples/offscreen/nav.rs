@@ -1,5 +1,6 @@
 //! Navigation checks on an existing 200x100@1x browser: navigate, favicon + popup events,
-//! back/forward, reload, zoom and wheel scrolling — each proven by the centre pixel or an event.
+//! back/forward, reload, zoom, wheel scrolling, text insertion and IME composition — each proven by
+//! the centre pixel or an event.
 
 use anyhow::Result;
 use silo_web::{Browser, Event, Modifiers, MouseButton, Runtime};
@@ -19,6 +20,13 @@ const STATE_PAGE: &str = "data:text/html,<html><body style='margin:0;height:100v
 /// Dark grey for the first viewport, green below.
 const TALL_PAGE: &str = "data:text/html,<html><body style='margin:0'><div style='height:100vh;background:rgb(64,64,64)'>\
     </div><div style='height:200vh;background:rgb(0,128,0)'></div></body></html>";
+/// Dark grey; blue once the input holds "hi" (then cleared); purple once an IME commits "にほん".
+/// (Composition events have no `on*` attributes, hence `addEventListener`.)
+const INPUT_PAGE: &str = "data:text/html;charset=utf-8,<html><body style='margin:0;height:100vh;background:rgb(64,64,64)'>\
+    <input autofocus><script>var i=document.querySelector('input'),s=document.body.style;\
+    function f(e){if(e.isComposing)return;if(i.value=='hi'){s.background='rgb(0,0,255)';i.value=''}\
+    else if(i.value=='\u{306b}\u{307b}\u{3093}')s.background='rgb(128,0,255)'}\
+    i.addEventListener('input',f);i.addEventListener('compositionend',f)</script></body></html>";
 
 const CYAN: [u8; 4] = [255, 255, 0, 255];
 const YELLOW: [u8; 4] = [0, 255, 255, 255];
@@ -27,10 +35,11 @@ const ORANGE: [u8; 4] = [0, 128, 255, 255];
 const PURPLE: [u8; 4] = [255, 0, 128, 255];
 const DARK: [u8; 4] = [64, 64, 64, 255];
 const GREEN: [u8; 4] = [0, 128, 0, 255];
+const BLUE: [u8; 4] = [255, 0, 0, 255];
 const SIZE: (u32, u32) = (200, 100);
 
 pub fn run(runtime: &Runtime, browser: &Browser) -> Result<()> {
-    let origin = server::spawn(CYAN_PAGE.to_owned())?;
+    let origin = server::spawn(CYAN_PAGE.to_owned(), None)?;
     browser.navigate(&format!("http://127.0.0.1:{}/", origin.port));
     wait_for(runtime, browser, CYAN, SIZE, "navigate")?;
     wait_event(runtime, browser, "favicon", |e| {
@@ -64,5 +73,15 @@ pub fn run(runtime: &Runtime, browser: &Browser) -> Result<()> {
     browser.mouse_move(100.0, 50.0, none, &[]);
     browser.wheel(100.0, 50.0, 0.0, -150.0, none);
     wait_for(runtime, browser, GREEN, SIZE, "wheel scroll")?;
+    browser.navigate(INPUT_PAGE);
+    wait_for(runtime, browser, DARK, SIZE, "input page")?;
+    browser.insert_text("hi");
+    wait_for(runtime, browser, BLUE, SIZE, "insert_text")?;
+    browser.ime_set_composition("\u{306b}\u{307b}\u{3093}", 3..3);
+    wait_event(runtime, browser, "IME composing", |e| {
+        matches!(e, Event::ImeBounds { .. })
+    })?;
+    browser.ime_finish();
+    wait_for(runtime, browser, PURPLE, SIZE, "IME composition")?;
     Ok(())
 }

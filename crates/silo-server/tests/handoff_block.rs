@@ -26,6 +26,7 @@ fn info(id: &str) -> BlockInfo {
         size: TermSize::new(40, 10),
         owner: None,
         pid: None,
+        browser: None,
     }
 }
 
@@ -58,7 +59,7 @@ async fn wait_for(block: &BlockHandle, text: &str) {
 fn attach(block: &BlockHandle, sub_id: u64, resume: Option<Resume>) -> (Sink, UnboundedReceiver<Frame>) {
     let (tx, rx) = unbounded_channel();
     let sink = Sink::new(tx);
-    let attach = Attach { sub_id, client_id: 7, resume, sink: sink.clone() };
+    let attach = Attach { sub_id, client_id: 7, resume, sink: sink.clone(), remote: false };
     block.send(BlockMsg::Attach(Box::new(attach)));
     (sink, rx)
 }

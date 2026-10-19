@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use silo_proto::{
     BUILD, Frame,
-    control::{ClientHello, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage},
+    control::{BrowserCommand, ClientHello, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage},
     data::{ClientData, DataHello, Reject},
     kind, read_frame, spawn_reader, write_frame,
 };
@@ -19,7 +19,9 @@ use crate::{
     Server,
     auth::Peer,
     block::{Attach, BlockMsg, Sink},
+    browser::{Block, Report},
     handoff,
+    registry::New,
 };
 
 /// A remote peer must send its first frame within this time.
@@ -251,6 +253,11 @@ fn to_value(value: impl serde::Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(RpcError::internal)
 }
 
+fn browser(server: &Server, block_id: &str, command: BrowserCommand) -> Result<Value, RpcError> {
+    server.registry.lock().unwrap().browser_command(block_id, command)?;
+    Ok(json!({}))
+}
+
 /// Owner-only methods: pairing and stopping the server. (Upgrades arrive
 /// only over the unix socket.) Everything else is open to paired devices.
 fn permitted(peer: &Peer, method: &Method) -> Result<(), RpcError> {
@@ -274,7 +281,10 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
         Method::ApiList {} => Ok(json!(METHODS.iter().map(|(name, description)| json!({"name": name, "description": description})).collect::<Vec<_>>())),
         Method::EventsSubscribe {} => Ok(json!({})),
         Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries()),
-        Method::SessionCreate { name, spawn } => to_value(server.registry.lock().unwrap().create_session(name, &spawn)?),
+        Method::SessionCreate { name, spawn, kind, url } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+            to_value(server.registry.lock().unwrap().create_session(name, &new)?)
+        }
         Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view(&session_id)?),
         Method::SessionRename { session_id, name } => {
             server.registry.lock().unwrap().rename_session(&session_id, name)?;
@@ -284,7 +294,10 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().close_session(&session_id)?;
             Ok(json!({}))
         }
-        Method::WindowCreate { session_id, spawn } => to_value(server.registry.lock().unwrap().create_window(&session_id, &spawn)?),
+        Method::WindowCreate { session_id, spawn, kind, url } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+            to_value(server.registry.lock().unwrap().create_window(&session_id, &new)?)
+        }
         Method::WindowSelect { session_id, window_id } => {
             server.registry.lock().unwrap().select_window(&session_id, &window_id)?;
             Ok(json!({}))
@@ -301,7 +314,10 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().move_window(&window_id, index)?;
             Ok(json!({}))
         }
-        Method::BlockSplit { block_id, axis, spawn } => to_value(server.registry.lock().unwrap().split(&block_id, axis, &spawn)?),
+        Method::BlockSplit { block_id, axis, spawn, kind, url } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+            to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
+        }
         Method::BlockClose { block_id } => {
             server.registry.lock().unwrap().close_block(&block_id)?;
             Ok(json!({}))
@@ -358,20 +374,24 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             Ok(json!({}))
         }
         Method::OwnBlock { block_ids, mode } => {
-            let reg = server.registry.lock().unwrap();
-            for id in &block_ids {
-                reg.block(id)?.send(BlockMsg::Own { client_id, mode });
-            }
+            server.registry.lock().unwrap().own(client_id, &block_ids, Some(mode))?;
             Ok(json!({}))
         }
         Method::DisownBlock { block_ids } => {
-            let reg = server.registry.lock().unwrap();
-            for id in &block_ids {
-                reg.block(id)?.send(BlockMsg::Disown { client_id });
-            }
+            server.registry.lock().unwrap().own(client_id, &block_ids, None)?;
             Ok(json!({}))
         }
         Method::DataConnect { block_id } => to_value(server.registry.lock().unwrap().issue_ticket(client_id, &block_id)?),
+        Method::BrowserNavigate { block_id, url } => browser(server, &block_id, BrowserCommand::Navigate { url }),
+        Method::BrowserBack { block_id } => browser(server, &block_id, BrowserCommand::Back),
+        Method::BrowserForward { block_id } => browser(server, &block_id, BrowserCommand::Forward),
+        Method::BrowserReload { block_id, ignore_cache } => browser(server, &block_id, BrowserCommand::Reload { ignore_cache }),
+        Method::BrowserZoom { block_id, zoom } => browser(server, &block_id, BrowserCommand::Zoom { zoom }),
+        Method::BrowserReport { block_id, url, title, favicon, loading, history, index } => {
+            let report = Report { url, title, favicon, loading, history, index };
+            server.registry.lock().unwrap().browser_report(client_id, &block_id, report)?;
+            Ok(json!({}))
+        }
         Method::UiOpenSession { session_id } => {
             let mut reg = server.registry.lock().unwrap();
             let id = reg.view(&session_id)?.session.id;
@@ -424,12 +444,13 @@ where
     } else if let Some((block_id, client_id)) = redeemed {
         let block = {
             let reg = server.registry.lock().unwrap();
-            reg.blocks.get(&block_id).map(|b| (b.tx.clone(), reg.client_name(client_id)))
+            reg.blocks.get(&block_id).and_then(Block::terminal).map(|b| (b.tx.clone(), reg.client_name(client_id)))
         };
         if let Some((block, client_name)) = block {
             let sub_id = rand::random::<u64>();
             let cancelled = tx.cancelled();
-            let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, sink: tx.clone() })));
+            let remote = matches!(peer, Peer::Remote { .. });
+            let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, sink: tx.clone(), remote })));
             drop(tx);
             let mut frames = spawn_reader(reader, 256);
             tokio::pin!(cancelled);
@@ -446,7 +467,7 @@ where
                         let _ = block.send(BlockMsg::Ack { sub_id, offset });
                     }
                     Ok(ClientData::Input(bytes)) => {
-                        let _ = block.send(BlockMsg::Input(bytes));
+                        let _ = block.send(BlockMsg::StreamInput { sub_id, bytes });
                     }
                     Ok(ClientData::Resize(size)) if size.columns > 0 && size.rows > 0 => {
                         let _ = block.send(BlockMsg::Desired { client_id, client_name: client_name.clone(), size });
@@ -469,4 +490,19 @@ where
     drop(tx);
     let _ = writer_task.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paired_devices_may_drive_browsers() {
+        let remote = Peer::Remote { endpoint_id: "peer".into(), conn_id: 1 };
+        let report = Method::BrowserReport { block_id: "b".into(), url: "u".into(), title: String::new(), favicon: None, loading: false, history: Vec::new(), index: 0 };
+        for method in [Method::BrowserNavigate { block_id: "b".into(), url: "u".into() }, Method::BrowserBack { block_id: "b".into() }, report] {
+            assert!(permitted(&remote, &method).is_ok());
+        }
+        assert_eq!(permitted(&remote, &Method::ServerShutdown {}).unwrap_err().code, RpcError::FORBIDDEN);
+    }
 }

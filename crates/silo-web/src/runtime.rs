@@ -47,8 +47,18 @@ wrap_app! {
     impl App {
         fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
             let Some(command_line) = command_line else { return };
+            // Route every auth challenge to `RequestHandler::auth_credentials` instead of Chrome's
+            // login dialog (invisible in windowless mode, so loads would hang): tunnel proxies are
+            // answered there, everything else is cancelled.
+            command_line.append_switch(Some(&CefString::from("disable-chrome-login-prompt")));
             for switch in &self.switches {
-                command_line.append_switch(Some(&CefString::from(switch.as_str())));
+                match switch.split_once('=') {
+                    Some((name, value)) => command_line.append_switch_with_value(
+                        Some(&CefString::from(name)),
+                        Some(&CefString::from(value)),
+                    ),
+                    None => command_line.append_switch(Some(&CefString::from(switch.as_str()))),
+                }
             }
         }
 
@@ -63,7 +73,7 @@ pub struct Config {
     pub root: PathBuf,
     /// Asked to call `Runtime::pump` after the given delay (external message pump).
     pub schedule: Schedule,
-    /// Extra Chromium switches, e.g. `"use-mock-keychain"` for dev runs.
+    /// Extra Chromium switches, `name` or `name=value`, e.g. `"use-mock-keychain"` for dev runs.
     pub switches: Vec<String>,
 }
 
@@ -102,7 +112,8 @@ impl Runtime {
         let root = config.root.canonicalize()?;
         // Chromium profiles must be direct children of `root_cache_path`.
         let profiles = root.join("profiles");
-        std::fs::create_dir_all(&profiles)?;
+        crate::profile::private_dir(&profiles)?;
+        crate::profile::private_dir(&profiles.join(crate::profile::DEFAULT))?;
         let path = |p: &std::path::Path| CefString::from(p.to_string_lossy().as_ref());
         let settings = Settings {
             no_sandbox: 1,
@@ -112,7 +123,7 @@ impl Runtime {
             external_message_pump: 1,
             windowless_rendering_enabled: 1,
             root_cache_path: path(&profiles),
-            cache_path: path(&profiles.join("default")),
+            cache_path: path(&profiles.join(crate::profile::DEFAULT)),
             persist_session_cookies: 1,
             log_file: path(&root.join("cef.log")),
             ..Default::default()
@@ -148,18 +159,18 @@ impl Runtime {
         LIVE_BROWSERS.load(Ordering::SeqCst)
     }
 
-    /// The named profile, created on first use. `tunnel_port` only applies at creation; use
-    /// `Profile::set_tunnel_port` to change it later.
-    pub fn profile(&self, name: &str, tunnel_port: Option<u16>) -> Result<crate::Profile> {
+    /// The named profile, created on first use. `tunnel` only applies at creation; use
+    /// `Profile::set_tunnel` to change it later.
+    pub fn profile(&self, name: &str, tunnel: Option<crate::Tunnel>) -> Result<crate::Profile> {
         if let Some(profile) = self.profiles.borrow().get(name) {
             return Ok(profile.clone());
         }
-        let profile = match (name, tunnel_port) {
+        let profile = match (name, tunnel) {
             (crate::profile::DEFAULT, None) => crate::Profile::global()?,
             (crate::profile::DEFAULT, Some(_)) => {
                 bail!("the default profile is local-only; tunnels need a server profile")
             }
-            _ => crate::Profile::create(&self.profiles_dir, name, tunnel_port)?,
+            (_, tunnel) => crate::Profile::create(&self.profiles_dir, name, tunnel)?,
         };
         self.profiles
             .borrow_mut()

@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod block;
+pub mod browser;
 pub mod conn;
 pub mod handoff;
 mod names;
@@ -11,6 +12,7 @@ pub mod notify;
 pub mod persist;
 pub mod registry;
 pub mod remote;
+pub mod tunnel;
 
 use std::{
     os::fd::AsFd,
@@ -202,14 +204,14 @@ struct Start {
     notes_rx: tokio::sync::mpsc::UnboundedReceiver<block::Note>,
     persist: persist::Persist,
     sessions: Vec<registry::Session>,
-    blocks: std::collections::HashMap<silo_proto::model::BlockId, block::BlockHandle>,
+    blocks: std::collections::HashMap<silo_proto::model::BlockId, browser::Block>,
     remote: Remote,
 }
 
 async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     let Start { lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks, remote } = start;
     let Remote { identity, auth, net } = remote;
-    let (net, incoming, remote_error) = match net.and_then(|mut net| net.serve_ctl(16).map(|incoming| (net, incoming)).map_err(|e| format!("{e:#}"))) {
+    let (net, incoming, remote_error) = match net.and_then(|mut net| net.serve(16).map(|incoming| (net, incoming)).map_err(|e| format!("{e:#}"))) {
         Ok((net, incoming)) => (Some(net), Some(incoming), None),
         Err(error) => {
             tracing::error!("remote access unavailable: {error}");
@@ -252,7 +254,9 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         last_activity: Mutex::new(Instant::now()),
     });
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
+    let (incoming, tunnels) = incoming.unzip();
     let _remote_task = incoming.map(|incoming| AbortOnDrop(tokio::spawn(remote::accept_loop(server.clone(), incoming))));
+    let _tunnel_task = tunnels.map(|tunnels| AbortOnDrop(tokio::spawn(tunnel::accept_loop(server.clone(), tunnels))));
     notify::notify("READY=1");
 
     let notes_server = server.clone();

@@ -48,14 +48,20 @@ async fn proxy_loss_drops_everything() {
     assert!(tokio::time::timeout(Duration::from_millis(100), sink.recv(&mut buf)).await.is_err());
 }
 
-/// Full path: in-process server, client paired over a 50 ms proxy.
+/// Full path: in-process server, client paired over a 50 ms proxy. 40 keys
+/// so the two warm-up keys (no RTT sample yet, then the tentative epoch)
+/// stay out of p95.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "iroh QUIC NAT traversal routes around the proxy until silo-transport can pin the path"]
 async fn bench_echo_at_50ms() {
-    let report = silo_latency::bench(&[50], 15).await.unwrap();
-    let row = report.rows.iter().find(|r| r.rtt_ms == Some(50)).unwrap();
-    assert_eq!(row.echo.n, 15);
-    assert!(row.echo.p50 >= 50.0 && row.echo.p50 < 50.0 + 15.0, "{}", report.table());
+    let report = silo_latency::bench(&[50], 40).await.unwrap();
+    let table = report.markdown();
+    let row = report.rows.iter().find(|r| r.rtt_ms == Some(50) && r.program == "cat").unwrap();
+    assert_eq!(row.echo.n, 40 + 6, "letters plus the backspace burst");
+    assert!(row.echo.p50 >= 50.0 && row.echo.p50 < 50.0 + 15.0, "{table}");
+    let pred = row.pred.expect("predicted at 50 ms");
+    assert!(pred.p50 < 5.0 && row.predicted >= 40, "{table}");
     let unix = &report.rows[0];
-    assert!(unix.echo.p50 < 15.0, "{}", report.table());
+    assert!(unix.echo.p50 < 15.0 && unix.pred.is_none(), "{table}");
+    assert!(report.passwords.iter().all(|p| p.shown == 0 && !p.enabled), "{table}");
+    assert!(report.misses().is_empty(), "{table}");
 }

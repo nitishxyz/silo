@@ -55,7 +55,7 @@ async fn setup(name: &str) -> (Control, String) {
     start_server(&home).await;
     let (control, _events) = Control::connect(&paths::socket(&home), name).await.unwrap();
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn }).await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
     (control, created.block_id)
 }
 

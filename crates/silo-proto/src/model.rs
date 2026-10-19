@@ -264,10 +264,12 @@ pub struct SessionInfo {
     pub created_at: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlockKind {
+    #[default]
     Terminal,
+    Browser,
 }
 
 /// Whether a block still has a process behind it.
@@ -311,6 +313,120 @@ pub struct BlockInfo {
     pub owner: Option<ClientId>,
     #[serde(default)]
     pub pid: Option<i32>,
+    /// Engine state; `Some` exactly when `kind` is [`BlockKind::Browser`].
+    #[serde(default)]
+    pub browser: Option<BrowserState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// Server-held state of a browser block. The owning client's engine reports
+/// it; commands edit it directly so the next client opens there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowserState {
+    /// Committed URL of the current entry.
+    pub url: String,
+    /// Back/forward list, at most [`BrowserState::HISTORY`] entries.
+    pub history: Vec<HistoryEntry>,
+    pub index: usize,
+    pub title: String,
+    /// `data:` URL, at most [`BrowserState::FAVICON`] bytes.
+    pub favicon: Option<String>,
+    /// CEF zoom level; 0.0 = 100%.
+    pub zoom: f32,
+    /// `default` or a name; selects the client-side profile directory.
+    pub profile: String,
+    pub loading: bool,
+}
+
+impl BrowserState {
+    pub const HISTORY: usize = 50;
+    pub const FAVICON: usize = 32 * 1024;
+    pub const PROFILE: &str = "default";
+
+    /// A fresh state showing `url` (already normalized).
+    #[must_use]
+    pub fn new(url: String) -> Self {
+        let history = vec![HistoryEntry { url: url.clone(), title: String::new() }];
+        Self { url, history, index: 0, title: String::new(), favicon: None, zoom: 0.0, profile: Self::PROFILE.into(), loading: false }
+    }
+
+    /// Navigate: drop forward entries, push `url`, keep the newest
+    /// [`Self::HISTORY`].
+    pub fn push(&mut self, url: String) {
+        self.history.truncate(self.index + 1);
+        self.history.push(HistoryEntry { url: url.clone(), title: String::new() });
+        let excess = self.history.len().saturating_sub(Self::HISTORY);
+        self.history.drain(..excess);
+        self.index = self.history.len() - 1;
+        self.url = url;
+        self.title.clear();
+        self.favicon = None;
+    }
+
+    /// Move `delta` entries through history; false at either end.
+    pub fn go(&mut self, delta: isize) -> bool {
+        let Some(index) = self.index.checked_add_signed(delta).filter(|&i| i < self.history.len()) else { return false };
+        self.index = index;
+        let entry = &self.history[index];
+        (self.url, self.title) = (entry.url.clone(), entry.title.clone());
+        self.favicon = None;
+        true
+    }
+}
+
+/// Normalize typed input to a URL a browser block may load. Schemes are
+/// limited to `http`, `https`, `ws`, `wss`, `data:` and `about:blank`; any
+/// other (`file:`, `chrome:`, `javascript:`…) gives `None`, as does empty
+/// input. A bare host gets `http://` when server-private (localhost,
+/// loopback, private or link-local IPs) and `https://` otherwise.
+#[must_use]
+pub fn browser_url(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    if let Some((scheme, rest)) = input.split_once(':') {
+        let token = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
+        // `host:port` is not a scheme.
+        if token && !rest.starts_with(|c: char| c.is_ascii_digit()) {
+            let scheme = scheme.to_ascii_lowercase();
+            let allowed = match scheme.as_str() {
+                "http" | "https" | "ws" | "wss" => rest.starts_with("//"),
+                "data" => true,
+                "about" => rest == "blank",
+                _ => false,
+            };
+            return allowed.then(|| input.to_owned());
+        }
+    }
+    let authority = input.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    let scheme = if private_host(host) { "http" } else { "https" };
+    Some(format!("{scheme}://{input}"))
+}
+
+/// Whether `host` names the server machine or its private network.
+#[must_use]
+pub fn private_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -332,6 +448,44 @@ pub struct SessionSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_url_picks_scheme() {
+        assert_eq!(browser_url(" example.com/a ").as_deref(), Some("https://example.com/a"));
+        assert_eq!(browser_url("localhost:3000").as_deref(), Some("http://localhost:3000"));
+        assert_eq!(browser_url("app.localhost").as_deref(), Some("http://app.localhost"));
+        assert_eq!(browser_url("192.168.1.4:8080/x").as_deref(), Some("http://192.168.1.4:8080/x"));
+        assert_eq!(browser_url("[::1]:5173").as_deref(), Some("http://[::1]:5173"));
+        assert_eq!(browser_url("8.8.8.8").as_deref(), Some("https://8.8.8.8"));
+        assert_eq!(browser_url("http://example.com").as_deref(), Some("http://example.com"));
+        assert_eq!(browser_url("about:blank").as_deref(), Some("about:blank"));
+        assert_eq!(browser_url("  "), None);
+        assert_eq!(browser_url("WSS://h/s").as_deref(), Some("WSS://h/s"));
+        assert_eq!(browser_url("data:text/html,hi").as_deref(), Some("data:text/html,hi"));
+        assert_eq!(browser_url("example.com:8080/x").as_deref(), Some("https://example.com:8080/x"));
+        for bad in ["file:///etc/passwd", "file:/etc/passwd", "chrome://settings", "devtools://devtools", "javascript:alert(1)", "about:config", "http:example.com", "view-source:https://x"] {
+            assert_eq!(browser_url(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn browser_history_push_go_and_cap() {
+        let mut state = BrowserState::new("a".into());
+        state.push("b".into());
+        state.push("c".into());
+        assert!(state.go(-2));
+        assert_eq!((state.url.as_str(), state.index), ("a", 0));
+        assert!(!state.go(-1));
+        state.push("d".into());
+        let urls: Vec<_> = state.history.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(urls, ["a", "d"], "forward entries dropped");
+        for i in 0..100 {
+            state.push(format!("u{i}"));
+        }
+        assert_eq!(state.history.len(), BrowserState::HISTORY);
+        assert_eq!((state.index, state.url.as_str()), (BrowserState::HISTORY - 1, "u99"));
+        assert!(!state.go(1));
+    }
 
     #[test]
     fn split_and_remove_collapse() {

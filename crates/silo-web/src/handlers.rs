@@ -5,11 +5,13 @@
 
 use std::os::raw::c_int;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use cef::rc::Rc as _;
 use cef::*;
 
 use crate::frame::Frame as SurfaceFrame;
+use crate::profile::{SharedTunnel, proxy_credentials};
 use crate::shared::{Cursor, Event, Shared, lock};
 
 wrap_render_handler! {
@@ -151,6 +153,17 @@ wrap_load_handler! {
         fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: c_int, back: c_int, forward: c_int) {
             self.shared.push(Event::Loading { loading: loading != 0, can_go_back: back != 0, can_go_forward: forward != 0 });
         }
+
+        // A cross-document navigation gets a new render widget that starts unfocused, and Blink
+        // drops IME input (not key events) for unfocused widgets, so re-apply the focus.
+        fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
+            let main = frame.is_some_and(|frame| frame.is_main() != 0);
+            if main && self.shared.focused.load(Ordering::Relaxed)
+                && let Some(host) = browser.and_then(|browser| browser.host())
+            {
+                host.set_focus(1);
+            }
+        }
     }
 }
 
@@ -195,12 +208,41 @@ wrap_life_span_handler! {
     }
 }
 
+wrap_request_handler! {
+    pub(crate) struct PageRequestHandler {
+        tunnel: SharedTunnel,
+    }
+
+    impl RequestHandler {
+        // IO thread. Answers only proxy challenges from this profile's own tunnel proxy; anything
+        // else (origin 401s, other proxies) is cancelled, never prompted or auto-filled.
+        fn auth_credentials(
+            &self,
+            _browser: Option<&mut Browser>,
+            _origin_url: Option<&CefString>,
+            is_proxy: c_int,
+            host: Option<&CefString>,
+            port: c_int,
+            _realm: Option<&CefString>,
+            _scheme: Option<&CefString>,
+            callback: Option<&mut AuthCallback>,
+        ) -> c_int {
+            let host = host.map(ToString::to_string).unwrap_or_default();
+            let creds = (is_proxy != 0).then(|| proxy_credentials(&self.tunnel, &host, port)).flatten();
+            let (Some((user, pass)), Some(callback)) = (creds, callback) else { return 0 };
+            callback.cont(Some(&CefString::from(user.as_str())), Some(&CefString::from(pass.as_str())));
+            1
+        }
+    }
+}
+
 wrap_client! {
     pub(crate) struct PageClient {
         view: RenderHandler,
         display: DisplayHandler,
         load: LoadHandler,
         life_span: LifeSpanHandler,
+        request: RequestHandler,
     }
 
     impl Client {
@@ -219,15 +261,20 @@ wrap_client! {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(self.life_span.clone())
         }
+
+        fn request_handler(&self) -> Option<RequestHandler> {
+            Some(self.request.clone())
+        }
     }
 }
 
-pub(crate) fn client(shared: &Arc<Shared>) -> Client {
+pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
     PageClient::new(
         ViewHandler::new(Arc::clone(shared)),
         PageDisplayHandler::new(Arc::clone(shared)),
         PageLoadHandler::new(Arc::clone(shared)),
         PageLifeSpanHandler::new(Arc::clone(shared)),
+        PageRequestHandler::new(Arc::clone(tunnel)),
     )
 }
 

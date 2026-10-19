@@ -14,7 +14,6 @@ mod input;
 mod keyboard;
 pub mod layout;
 mod profile;
-pub mod proxy;
 mod runtime;
 mod shared;
 
@@ -22,7 +21,7 @@ pub use browser::{Browser, BrowserOptions};
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;
-pub use profile::Profile;
+pub use profile::{Profile, Tunnel};
 pub use runtime::{Config, Runtime, Schedule};
 pub use shared::{Cursor, Event, ViewSize};
 

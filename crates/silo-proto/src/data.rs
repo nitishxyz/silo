@@ -75,6 +75,13 @@ pub enum ServerData {
     /// The effective terminal configuration from this point of the output
     /// stream on (sent after `Welcome` and whenever it changes).
     Configured(TerminalConfig),
+    /// The first `count` `Input` frames of this stream were written to the
+    /// PTY while the output ring ended at `offset`; their echo, if any, is
+    /// at `>= offset`. Cumulative.
+    InputAck { count: u64, offset: u64 },
+    /// The PTY line discipline flags from this point of the output stream on
+    /// (sent after `Welcome` and whenever they change).
+    TtyMode { offset: u64, echo: bool, icanon: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +145,16 @@ impl ServerData {
             }
             Self::Exited { code } => Frame::new(kind::EXITED, code.map(|c| c.to_le_bytes().to_vec()).unwrap_or_default()),
             Self::Configured(config) => Frame::json(kind::CONFIGURED, config).expect("config serializes"),
+            Self::InputAck { count, offset } => {
+                let mut payload = count.to_le_bytes().to_vec();
+                payload.extend_from_slice(&offset.to_le_bytes());
+                Frame::new(kind::INPUT_ACK, payload)
+            }
+            Self::TtyMode { offset, echo, icanon } => {
+                let mut payload = offset.to_le_bytes().to_vec();
+                payload.push(u8::from(*echo) | (u8::from(*icanon) << 1));
+                Frame::new(kind::TTY_MODE, payload)
+            }
         }
     }
 
@@ -157,6 +174,11 @@ impl ServerData {
                 _ => return Err(invalid("short exit")),
             },
             kind::CONFIGURED => Self::Configured(parse_config(&p)?),
+            kind::INPUT_ACK => Self::InputAck { count: parse_u64(&p)?, offset: parse_u64(p.get(8..).unwrap_or_default())? },
+            kind::TTY_MODE => match p.get(8) {
+                Some(flags) => Self::TtyMode { offset: parse_u64(&p)?, echo: flags & 1 != 0, icanon: flags & 2 != 0 },
+                None => return Err(invalid("short tty mode")),
+            },
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
     }
@@ -210,6 +232,9 @@ mod tests {
             ServerData::Exited { code: None },
             ServerData::SnapshotDone,
             ServerData::Configured(TerminalConfig::default()),
+            ServerData::InputAck { count: 3, offset: u64::MAX - 1 },
+            ServerData::TtyMode { offset: 5, echo: false, icanon: true },
+            ServerData::TtyMode { offset: 6, echo: true, icanon: false },
         ] {
             assert_eq!(ServerData::from_frame(message.to_frame()).unwrap(), message);
         }

@@ -17,6 +17,8 @@ typedef struct {
     uint32_t dirty;
     /* Cursor sits on an OSC 133 prompt/input row (shell integration). */
     uint32_t at_prompt;
+    /* The alternate screen is active. */
+    uint32_t alt_screen;
 } SiloFrame;
 /* One OSC 8 hyperlink span on an extracted viewport row; `end` is exclusive. */
 typedef struct {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    Bounds, Hsla, IntoElement, Path, Pixels, Point, Rgba, Window, canvas, fill, point, prelude::*,
-    px, rgb, size,
+    App, Bounds, Hsla, IntoElement, Path, Pixels, Point, Rgba, TextAlign, TextRun, Window, canvas,
+    fill, point, prelude::*, px, rgb, size,
 };
 use silo_vt::Span;
 
@@ -22,6 +22,22 @@ pub struct Overlay {
     pub matches: Vec<Span>,
     pub match_color: Rgba,
     pub link: Option<Span>,
+    /// Predicted, unconfirmed cells (docs/PHASE5.md §5).
+    pub predicted: Vec<Predicted>,
+    /// Painted instead of the frame's cursor position while set.
+    pub predicted_cursor: Option<(u16, u16)>,
+    /// The terminal's default foreground, for predicted glyphs.
+    pub predicted_foreground: Rgba,
+    /// The 1 px underline under predicted cells (`theme::muted()`).
+    pub predicted_underline: Rgba,
+}
+
+/// One predicted cell in viewport coordinates; empty `text` is a blank.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Predicted {
+    pub row: u16,
+    pub column: u16,
+    pub text: String,
 }
 
 impl Overlay {
@@ -45,6 +61,28 @@ impl Overlay {
             point(bounds.left() + px(x), bounds.top() + px(y)),
             size(px(width), px(height)),
         ))
+    }
+
+    /// Cell and underline bounds of every predicted cell inside the grid.
+    fn predicted_quads(
+        &self,
+        bounds: Bounds<Pixels>,
+        columns: u16,
+        rows: u16,
+        metrics: CellMetrics,
+    ) -> Vec<(&Predicted, Bounds<Pixels>, Bounds<Pixels>)> {
+        let place = |(x, y, w, h): crate::predict_geometry::Rect| {
+            Bounds::new(point(bounds.left() + px(x), bounds.top() + px(y)), size(px(w), px(h)))
+        };
+        self.predicted
+            .iter()
+            .filter_map(|p| {
+                let (cell, line) = crate::predict_geometry::predicted_rects(
+                    p.row, p.column, columns, rows, metrics.width, metrics.height, metrics.scale,
+                )?;
+                Some((p, place(cell), place(line)))
+            })
+            .collect()
     }
 }
 
@@ -189,6 +227,30 @@ fn paint_grid(
     }
 }
 
+/// Predicted cells in their own layer above the grid, so the background
+/// covers the mirror's glyph: default background, default foreground glyph,
+/// and the muted underline as the only cue.
+fn paint_predicted(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    let frame = &prepared.frame;
+    let quads = overlay.predicted_quads(bounds, frame.size.columns, frame.size.rows, prepared.metrics);
+    if quads.is_empty() {
+        return;
+    }
+    let mask = Some(gpui::ContentMask { bounds });
+    window.with_content_mask(mask, |window| window.paint_layer(bounds, |window| {
+        for (cell, quad, line) in quads {
+            window.paint_quad(fill(quad, rgb(frame.background)));
+            window.paint_quad(fill(line, overlay.predicted_underline));
+            if cell.text.is_empty() {
+                continue;
+            }
+            let run = TextRun { len: cell.text.len(), font: crate::terminal_font(), color: overlay.predicted_foreground.into(), background_color: None, underline: None, strikethrough: None };
+            let shaped = window.text_system().shape_line(cell.text.clone().into(), px(prepared.metrics.font_size), &[run], None);
+            let _ = shaped.paint(quad.origin, quad.size.height, TextAlign::Left, None, window, cx);
+        }
+    }));
+}
+
 /// One canvas for the complete grid; no GPUI element or event handler per
 /// cell, and no layout work in the prepaint phase: `prepared` already holds
 /// every span, sprite and shaped run, built off the UI thread.
@@ -206,19 +268,45 @@ pub fn terminal_canvas(
 ) -> impl IntoElement {
     canvas(
         move |_, _, _| (prepared, overlay),
-        move |bounds, (prepared, overlay), window, _| {
+        move |bounds, (prepared, overlay), window, cx| {
             let started = profile::start();
             paint(&prepared, &overlay, bounds, metrics, selection, window);
+            paint_predicted(&prepared, &overlay, bounds, window, cx);
             let (quads, glyphs) = if profile::enabled() {
                 prepared.primitives()
             } else {
                 (0, 0)
             };
             profile::record_painted(started, quads, glyphs);
+            let mut caret = prepared.frame.cursor;
+            if let Some((row, column)) = overlay.predicted_cursor {
+                (caret.row, caret.column) = (row, column);
+            }
             window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                crate::cursor::paint(prepared.frame.cursor, cursor, bounds, metrics, window);
+                crate::cursor::paint(caret, cursor, bounds, metrics, window);
             });
         },
     )
     .size_full()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn underline_only_under_predicted_cells() {
+        let metrics = CellMetrics { width: 8.0, height: 20.0, font_size: 14.0, scale: 2.0, font: 0 };
+        let bounds = Bounds::new(point(px(100.0), px(50.0)), size(px(800.0), px(480.0)));
+        assert!(Overlay::default().predicted_quads(bounds, 80, 24, metrics).is_empty());
+        let cell = |column, text: &str| Predicted { row: 1, column, text: text.into() };
+        let overlay = Overlay { predicted: vec![cell(4, "a"), cell(5, ""), cell(80, "x")], ..Overlay::default() };
+        let quads = overlay.predicted_quads(bounds, 80, 24, metrics);
+        assert_eq!(quads.len(), 2, "off-grid cell skipped");
+        for ((p, quad, line), x) in quads.into_iter().zip([132.0, 140.0]) {
+            assert_eq!(f32::from(p.column), (x - 100.0) / 8.0);
+            assert_eq!(quad, Bounds::new(point(px(x), px(70.0)), size(px(8.0), px(20.0))));
+            assert_eq!(line, Bounds::new(point(px(x), px(88.0)), size(px(8.0), px(0.5))));
+        }
+    }
 }

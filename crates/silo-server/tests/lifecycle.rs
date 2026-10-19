@@ -25,6 +25,7 @@ fn info(id: &str) -> BlockInfo {
         size: TermSize::new(40, 10),
         owner: None,
         pid: None,
+        browser: None,
     }
 }
 
@@ -70,7 +71,7 @@ async fn wait_exited(notes: &mut UnboundedReceiver<Note>) {
 async fn attach(block: &BlockHandle) -> Vec<silo_proto::Frame> {
     let (tx, mut rx) = unbounded_channel();
     let sink = Sink::new(tx);
-    block.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink })));
+    block.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink, remote: false })));
     let mut frames = Vec::new();
     while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
         frames.push(frame);

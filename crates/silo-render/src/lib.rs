@@ -3,6 +3,7 @@ mod cursor;
 mod cursor_geometry;
 mod geometry;
 pub use cursor::CursorPresentation;
+mod predict_geometry;
 mod prepare;
 mod profile;
 mod quads;
@@ -16,4 +17,4 @@ pub use geometry::{
     terminal_font_size,
 };
 pub use prepare::{FrameOptions, FramePreparer, PreparedFrame};
-pub use surface::{Overlay, terminal_canvas};
+pub use surface::{Overlay, Predicted, terminal_canvas};

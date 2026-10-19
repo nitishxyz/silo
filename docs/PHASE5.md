@@ -113,6 +113,9 @@ Turning off drops every prediction at once.
 - The predicted cursor uses the normal cursor style, with no extra decoration.
 - Rollback just stops painting the overlay. No flash or animation.
 - Nothing in the titlebar or status. Concise UI: the user should only notice that typing is fast.
+- **Dev/test knob, no UI:** `SILO_PIN_PATH=1` in the app's environment sets `NetOptions.pin_initial_path` on its
+  iroh endpoint, so a remote host dialed through the `silo-latency` delay proxy stays on that path instead of
+  holepunching around it. That is how to see predictions in the GUI at a known RTT.
 
 ## 6. Keystroke-to-photon harness
 

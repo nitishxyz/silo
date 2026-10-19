@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
@@ -14,7 +15,7 @@ use crate::stream::BiStream;
 
 /// Control-plane ALPN: framed JSON-RPC + per-block data streams.
 pub const CTL_ALPN: &[u8] = b"silo/ctl/1";
-/// Reserved for browser-block tunnels (Phase 6). Not served yet.
+/// Browser-block tunnels: one TCP connection per bi stream (see `tunnel`).
 pub const TUNNEL_ALPN: &[u8] = b"silo/tunnel/1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -118,28 +119,39 @@ impl Net {
     }
 
     pub async fn dial(&self, addr: impl Into<EndpointAddr>) -> Result<RemoteConn> {
-        let addr = addr.into();
+        self.connect(addr.into(), CTL_ALPN).await
+    }
+
+    /// Connect with TUNNEL_ALPN; every bi stream is one tunnel.
+    pub async fn dial_tunnel(&self, addr: impl Into<EndpointAddr>) -> Result<RemoteConn> {
+        self.connect(addr.into(), TUNNEL_ALPN).await
+    }
+
+    async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<RemoteConn> {
         let id = addr.id;
         let conn = self
             .endpoint
-            .connect(addr, CTL_ALPN)
+            .connect(addr, alpn)
             .await
             .with_context(|| format!("connect to {id}"))?;
         Ok(RemoteConn { conn })
     }
 
-    /// Start accepting CTL_ALPN connections. Each connection is delivered
-    /// with its first bi stream once the peer has written on it.
-    pub fn serve_ctl(&mut self, backlog: usize) -> Result<CtlIncoming> {
+    /// Start accepting CTL_ALPN and TUNNEL_ALPN connections. Each CTL
+    /// connection is delivered with its first bi stream once the peer has
+    /// written on it; every TUNNEL bi stream is delivered on its own.
+    pub fn serve(&mut self, backlog: usize) -> Result<(CtlIncoming, TunnelIncoming)> {
         if self.router.is_some() {
-            bail!("serve_ctl called twice");
+            bail!("serve called twice");
         }
         let (tx, rx) = mpsc::channel(backlog.max(1));
+        let (tunnel_tx, tunnel_rx) = mpsc::channel(backlog.max(1));
         let router = Router::builder(self.endpoint.clone())
             .accept(CTL_ALPN, CtlHandler { tx })
+            .accept(TUNNEL_ALPN, TunnelHandler { tx: tunnel_tx })
             .spawn();
         self.router = Some(router);
-        Ok(CtlIncoming { rx })
+        Ok((CtlIncoming { rx }, TunnelIncoming { rx: tunnel_rx }))
     }
 
     /// Close all connections and the endpoint, waiting for a clean shutdown.
@@ -178,6 +190,11 @@ impl RemoteConn {
     /// Currently open network paths of this connection.
     pub fn paths(&self) -> PathList<'_> {
         self.conn.paths()
+    }
+
+    /// Round-trip time of the selected path, if one is selected.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.conn.paths().iter().find(|p| p.is_selected()).map(|p| p.rtt())
     }
 
     /// Identifier unique among this process's live connections.
@@ -225,6 +242,37 @@ impl ProtocolHandler for CtlHandler {
         };
         if self.tx.send((rc.clone(), first)).await.is_err() {
             rc.close(b"server not accepting");
+        }
+        Ok(())
+    }
+}
+
+/// Stream of TUNNEL_ALPN bi streams with their connection.
+#[derive(Debug)]
+pub struct TunnelIncoming {
+    rx: mpsc::Receiver<(RemoteConn, BiStream)>,
+}
+
+impl TunnelIncoming {
+    /// `None` once the endpoint is shut down.
+    pub async fn next(&mut self) -> Option<(RemoteConn, BiStream)> {
+        self.rx.recv().await
+    }
+}
+
+#[derive(Debug)]
+struct TunnelHandler {
+    tx: mpsc::Sender<(RemoteConn, BiStream)>,
+}
+
+impl ProtocolHandler for TunnelHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let rc = RemoteConn { conn };
+        while let Ok(stream) = rc.accept_stream().await {
+            if self.tx.send((rc.clone(), stream)).await.is_err() {
+                rc.close(b"server not accepting");
+                break;
+            }
         }
         Ok(())
     }

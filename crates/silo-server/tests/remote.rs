@@ -146,7 +146,7 @@ async fn ticket(ctl: &mut Ctl, block: &str) -> String {
 }
 
 async fn create(ctl: &mut Ctl) -> Created {
-    serde_json::from_value(ctl.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap()).unwrap()
+    serde_json::from_value(ctl.call(Method::SessionCreate { name: None, spawn: shell(), kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap()).unwrap()
 }
 
 fn code(result: Result<impl std::fmt::Debug, RpcError>) -> String {

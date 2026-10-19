@@ -39,6 +39,9 @@ const OUTPUT_CHUNK: usize = 256 * 1024;
 const PROBE_INTERVAL: Duration = Duration::from_millis(400);
 /// How often pending bulk sends are retried while a writer drains.
 const PUMP_INTERVAL: Duration = Duration::from_millis(5);
+/// How often the line discipline flags are polled while streams are
+/// attached (they are also read after every output chunk).
+const MODE_INTERVAL: Duration = Duration::from_millis(50);
 /// Out-of-band output waits this long for a parser-ground boundary.
 const INJECT_WAIT: Duration = Duration::from_millis(250);
 /// Configuration and size transitions remembered inside the ring; older
@@ -144,6 +147,8 @@ pub struct Attach {
     pub client_id: ClientId,
     pub resume: Option<Resume>,
     pub sink: Sink,
+    /// A remote stream: gets `TTY_MODE` and `INPUT_ACK` (for prediction).
+    pub remote: bool,
 }
 
 pub enum BlockMsg {
@@ -152,6 +157,9 @@ pub enum BlockMsg {
     /// The program's exit code; `None` when killed by a signal.
     ChildExited(Option<i32>),
     Input(Vec<u8>),
+    /// Input from data stream `sub_id`: counted and acknowledged with
+    /// `INPUT_ACK` on that stream.
+    StreamInput { sub_id: u64, bytes: Vec<u8> },
     Attach(Box<Attach>),
     Detach(u64),
     /// Subscriber `sub_id` applied every output byte below `offset`.
@@ -286,11 +294,29 @@ struct Subscriber {
     sent: u64,
     /// Every output byte below this was applied by the client.
     acked: u64,
+    /// `Input` frames written so far, the ring end at the last write, and
+    /// the count already announced in `INPUT_ACK`.
+    inputs: u64,
+    input_offset: u64,
+    inputs_acked: u64,
+    /// Remote streams get `TTY_MODE` and `INPUT_ACK`.
+    remote: bool,
 }
 
 impl Subscriber {
-    fn new(sink: Sink, start: u64) -> Self {
-        Self { sink, pending: VecDeque::new(), pending_live: 0, pending_bulk: 0, sent: start, acked: start }
+    fn new(sink: Sink, start: u64, remote: bool) -> Self {
+        Self {
+            remote,
+            sink,
+            pending: VecDeque::new(),
+            pending_live: 0,
+            pending_bulk: 0,
+            sent: start,
+            acked: start,
+            inputs: 0,
+            input_offset: start,
+            inputs_acked: 0,
+        }
     }
 
     /// Queue a frame behind any bulk send; returns false if the stream is
@@ -458,6 +484,9 @@ struct Actor {
     log: TransitionLog,
     /// Send [`Note::Dirty`] on the next change; re-armed by `checkpoint()`.
     dirty_armed: bool,
+    /// Last `(echo, icanon)` read from the PTY and when it was polled.
+    tty_mode: Option<(bool, bool)>,
+    last_mode_poll: Instant,
 }
 
 /// Configuration or size change at an output offset.
@@ -785,6 +814,8 @@ impl Actor {
             pending_config: None,
             log: TransitionLog::new(config, info.size),
             dirty_armed: true,
+            tty_mode: None,
+            last_mode_poll: Instant::now(),
         }
     }
 
@@ -797,6 +828,9 @@ impl Actor {
             }
             if self.subscribers.values().any(|sub| !sub.pending.is_empty()) {
                 timeout = timeout.min(PUMP_INTERVAL);
+            }
+            if self.pty.is_some() && self.remote_attached() {
+                timeout = timeout.min(MODE_INTERVAL.saturating_sub(self.last_mode_poll.elapsed()));
             }
             match rx.recv_timeout(timeout) {
                 Ok(BlockMsg::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -824,6 +858,10 @@ impl Actor {
             }
             self.flush_config();
             self.flush_injects();
+            self.flush_input_acks();
+            if self.remote_attached() && self.last_mode_poll.elapsed() >= MODE_INTERVAL {
+                self.poll_mode();
+            }
             self.pump();
             if self.child_exited
                 && self.lifecycle.is_running()
@@ -850,6 +888,14 @@ impl Actor {
             }
             BlockMsg::ChildExited(_) => {}
             BlockMsg::Input(bytes) => {
+                self.send_input(bytes);
+            }
+            BlockMsg::StreamInput { sub_id, bytes } => {
+                let end = self.ring_end();
+                if let Some(sub) = self.subscribers.get_mut(&sub_id).filter(|sub| sub.remote) {
+                    sub.inputs += 1;
+                    sub.input_offset = end;
+                }
                 self.send_input(bytes);
             }
             BlockMsg::Attach(attach) => self.attach(*attach),
@@ -1009,6 +1055,9 @@ impl Actor {
             self.log.trim(self.ring_start);
         }
         self.broadcast(&ServerData::Output { offset, bytes: bytes.to_vec() });
+        if self.remote_attached() {
+            self.poll_mode();
+        }
         if let Ok(events) = self.vt.take_events() {
             if events.bells > 0 {
                 let _ = self.notes.send(Note::Bell(self.id.clone()));
@@ -1105,6 +1154,35 @@ impl Actor {
         }
     }
 
+    /// Announce each stream's newly written inputs (one `INPUT_ACK` per
+    /// stream per actor turn).
+    fn flush_input_acks(&mut self) {
+        for sub in self.subscribers.values_mut() {
+            if sub.inputs > sub.inputs_acked {
+                sub.inputs_acked = sub.inputs;
+                sub.send(ServerData::InputAck { count: sub.inputs, offset: sub.input_offset }.to_frame());
+            }
+        }
+    }
+
+    fn remote_attached(&self) -> bool {
+        self.subscribers.values().any(|sub| sub.remote)
+    }
+
+    /// Read the line discipline flags and announce a change at the current
+    /// end of the output stream to remote streams.
+    fn poll_mode(&mut self) {
+        self.last_mode_poll = Instant::now();
+        let Some(mode) = self.pty.as_ref().and_then(|pty| pty.line_mode().ok()) else { return };
+        if self.tty_mode.replace(mode) != Some(mode) {
+            let (echo, icanon) = mode;
+            let frame = ServerData::TtyMode { offset: self.ring_end(), echo, icanon }.to_frame();
+            for sub in self.subscribers.values_mut().filter(|sub| sub.remote) {
+                sub.send(frame.clone());
+            }
+        }
+    }
+
     /// Feed bulk sends to writers with room.
     fn pump(&mut self) {
         let mut cut = Vec::new();
@@ -1155,6 +1233,9 @@ impl Actor {
     }
 
     fn attach(&mut self, attach: Attach) {
+        if attach.remote {
+            self.poll_mode();
+        }
         let end = self.ring_end();
         let welcome = |mode, offset, size| Frame::json(kind::WELCOME, &Welcome { epoch: self.epoch, mode, offset, size }).expect("welcome");
         // Resume needs the configuration and size of every replayed byte;
@@ -1163,7 +1244,7 @@ impl Actor {
         let resumable = attach.resume.filter(|r| r.epoch == self.epoch && (start..=end).contains(&r.offset));
         let mut sub;
         if let Some(Resume { offset: from, .. }) = resumable {
-            sub = Subscriber::new(attach.sink, from);
+            sub = Subscriber::new(attach.sink, from, attach.remote);
             let (state, changes) = self.log.from(from);
             sub.send(welcome(StartMode::Resume, from, state.size));
             sub.send(ServerData::Configured(state.config).to_frame());
@@ -1181,7 +1262,7 @@ impl Actor {
                     return;
                 }
             };
-            sub = Subscriber::new(attach.sink, end);
+            sub = Subscriber::new(attach.sink, end, attach.remote);
             let history = head.split_off(head_len.min(head.len()));
             sub.send(welcome(StartMode::Snapshot, end, self.size));
             // The snapshot already reflects the current configuration.
@@ -1189,6 +1270,9 @@ impl Actor {
             sub.send(ServerData::SnapshotHead(head).to_frame());
             sub.send_bulk(Out::History { bytes: history, pos: 0 });
             sub.send(ServerData::SnapshotDone.to_frame());
+        }
+        if let Some((echo, icanon)) = self.tty_mode.filter(|_| attach.remote && self.pty.is_some()) {
+            sub.send(ServerData::TtyMode { offset: end, echo, icanon }.to_frame());
         }
         if !self.lifecycle.is_running() {
             sub.send(ServerData::Exited { code: self.exit_code }.to_frame());

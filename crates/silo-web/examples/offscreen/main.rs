@@ -8,7 +8,7 @@ mod server;
 mod tunnel;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -49,9 +49,37 @@ fn pixels_match(pixel: [u8; 4], expected: [u8; 4]) -> bool {
     pixel.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 2)
 }
 
+/// Earliest pump CEF asked for; the example pumps exactly like silo-app (`web.rs`): when due,
+/// plus a 33 ms safety tick while browsers are live, never otherwise.
+static DUE: Mutex<Option<Instant>> = Mutex::new(None);
+static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn schedule(delay: Duration) {
+    let at = Instant::now() + delay;
+    let mut due = DUE.lock().unwrap();
+    if due.is_none_or(|d| at < d) {
+        *due = Some(at);
+    }
+}
+
 fn pump_once(runtime: &Runtime) {
-    runtime.pump();
-    NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.005));
+    NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.004));
+    let now = Instant::now();
+    let due = {
+        let mut due = DUE.lock().unwrap();
+        let ready = due.is_some_and(|d| d <= now);
+        if ready {
+            *due = None;
+        }
+        ready
+    };
+    let mut last = LAST.lock().unwrap();
+    let tick =
+        Runtime::live_browsers() > 0 && last.is_none_or(|l| now - l >= Duration::from_millis(33));
+    if due || tick {
+        *last = Some(now);
+        runtime.pump();
+    }
 }
 
 fn pump_for(runtime: &Runtime, duration: Duration) {
@@ -120,12 +148,30 @@ fn run() -> Result<()> {
     let root = std::env::temp_dir().join("silo-web-offscreen");
     let config = Config {
         root,
-        schedule: Arc::new(|_delay| {}),
-        switches: vec!["use-mock-keychain".into()],
+        schedule: Arc::new(schedule),
+        switches: ["use-mock-keychain".to_owned()]
+            .into_iter()
+            .chain(
+                std::env::var("SILO_WEB_SWITCHES")
+                    .ok()
+                    .into_iter()
+                    .flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>()),
+            )
+            .collect(),
     };
     let runtime = Runtime::init(config)?;
     let handling = app.respondsToSelector(sel!(isHandlingSendEvent));
     println!("offscreen: CEF initialized; NSApp answers isHandlingSendEvent: {handling}");
+
+    // Like the app on launch: the engine idles (pumped only when CEF asks) before the first
+    // page, longer than the helpers' 15 s connection timeout; then a tunnelled profile opens.
+    let idle = Duration::from_secs(20);
+    pump_for(&runtime, idle);
+    println!("offscreen: idled {idle:?} with no browser");
+    if let Err(err) = tunnel::run(&runtime) {
+        runtime.shutdown(Duration::from_secs(5))?;
+        return Err(err);
+    }
 
     let profile = runtime.profile("default", None)?;
     let size = ViewSize {
@@ -176,8 +222,7 @@ fn run() -> Result<()> {
             (200, 100),
             "after resize to 200x100@1x",
         )?;
-        nav::run(&runtime, &browser)?;
-        tunnel::run(&runtime)
+        nav::run(&runtime, &browser)
     })();
     println!("offscreen: events {:?}", browser.take_events());
     browser.close();

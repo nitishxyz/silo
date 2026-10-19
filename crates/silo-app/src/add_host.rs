@@ -154,6 +154,8 @@ impl Workspace {
         let Some(id) = entry.info.transport.remote_id() else { return Err("This Mac cannot be removed.".into()) };
         let saved: Vec<RemoteHost> = hosts::load(&self.home).into_iter().filter(|h| h.id != id).collect();
         hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
+        self.rt.spawn(crate::web::close_tunnel(id));
+        let entry = &mut self.hosts[index];
         entry.removed = true;
         entry.conn = None;
         entry.control = None;
@@ -181,6 +183,9 @@ impl Workspace {
         saved.push(host.clone());
         hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
         if let Some(entry) = replace.and_then(|i| self.hosts.get_mut(i)) {
+            if let Some(id) = entry.info.transport.remote_id() {
+                self.rt.spawn(crate::web::close_tunnel(id));
+            }
             entry.removed = true;
             entry.conn = None;
             entry.control = None;

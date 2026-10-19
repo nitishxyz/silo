@@ -3,7 +3,9 @@
 //! mouse, paste, wheel and selection are encoded locally and sent as input.
 
 use std::{
+    cell::RefCell,
     ops::Range,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -13,13 +15,13 @@ use gpui::{
     IntoElement, Keystroke, Pixels, Point, Render, ShapedLine, Task, TextInputPurpose, TextRun, UTF16Selection, Window,
     canvas, div, fill, point, prelude::*, px, rgb, size,
 };
-use silo_client::{Applied, Control, DataSender, DataStream, Mirror, cache::MirrorCheckpoint};
+use silo_client::{Applied, Control, DataSender, DataStream, Mirror, Predictor, cache::MirrorCheckpoint, transport::Conn};
 use silo_proto::{
     control::{Method, OwnMode},
     data::{ClientData, ServerData},
     model::{BlockInfo, Lifecycle, TermSize},
 };
-use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, PreparedFrame, terminal_canvas};
+use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, Predicted, PreparedFrame, terminal_canvas};
 use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
 
 use crate::theme::Continuous as _;
@@ -67,6 +69,10 @@ pub struct Pane {
     rt: tokio::runtime::Handle,
     control: Option<Control>,
     mirror: Mirror,
+    /// Predictive local echo over the mirror (docs/PHASE5.md).
+    predictor: Predictor,
+    /// `SILO_LATENCY_TRACE`: key-to-paint timestamps.
+    trace: Option<Rc<RefCell<crate::latency::Trace>>>,
     sender: Option<DataSender>,
     pub status: Status,
     pub info: Option<BlockInfo>,
@@ -77,6 +83,8 @@ pub struct Pane {
     saved: Option<(silo_proto::data::Resume, Option<silo_proto::model::TerminalConfig>)>,
     preparer: Arc<Mutex<FramePreparer>>,
     prepared: Option<Arc<PreparedFrame>>,
+    /// `Mirror::next_offset` when `prepared`'s frame was captured.
+    prepared_offset: u64,
     prepared_key: Option<(u64, u32, u32, u32, u32)>,
     preparing: bool,
     last_frame: Option<Arc<Frame>>,
@@ -152,6 +160,8 @@ impl Pane {
         let mut pane = Self {
             block_id,
             rt,
+            predictor: predictor_for(control.as_ref()),
+            trace: crate::latency::Trace::from_env().map(|t| Rc::new(RefCell::new(t))),
             control,
             mirror,
             sender: None,
@@ -161,6 +171,7 @@ impl Pane {
             saved: None,
             preparer: Arc::new(Mutex::new(FramePreparer::new(cx.text_system().clone()))),
             prepared: None,
+            prepared_offset: 0,
             prepared_key: None,
             preparing: false,
             last_frame: None,
@@ -190,6 +201,7 @@ impl Pane {
 
     /// A new control connection (after reconnecting to the server).
     pub fn set_control(&mut self, control: Control, cx: &mut Context<Self>) {
+        self.predictor = predictor_for(Some(&control));
         self.control = Some(control);
         self.own_requested = None;
         self.connect(cx);
@@ -205,6 +217,11 @@ impl Pane {
 
     pub fn title(&self) -> String {
         self.info.as_ref().map_or_else(|| "shell".into(), block_title)
+    }
+
+    /// An iroh connection: the only kind that predicts (docs/PHASE5.md §4.1).
+    fn remote(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| matches!(c.conn(), Conn::Iroh(_)))
     }
 
     fn is_owner(&self) -> bool {
@@ -309,6 +326,7 @@ impl Pane {
             self.connect(cx);
             return false;
         }
+        self.predictor.begin(&stream.welcome);
         self.sender = Some(stream.sender());
         self.status = Status::Live;
         self.send_config();
@@ -329,9 +347,11 @@ impl Pane {
     /// Apply server frames; returns false to stop the stream task.
     fn apply(&mut self, batch: Vec<ServerData>, cx: &mut Context<Self>) -> bool {
         let mut dirty = false;
+        let shown = self.predictor.overlay();
         // A short batch drained everything received so far.
         let idle = batch.len() < 512;
         for data in batch {
+            self.predictor.server(&data);
             match self.mirror.apply(data) {
                 Ok(Applied::Redraw) => dirty = true,
                 Ok(Applied::None) => {}
@@ -347,11 +367,25 @@ impl Pane {
         if let Some(sender) = &self.sender {
             sender.ack(&mut self.mirror, idle);
         }
+        // A changed mirror is judged once its prepared frame lands.
+        if !dirty {
+            self.judge_painted();
+        }
         if dirty {
             self.generation += 1;
             cx.notify();
+        } else if self.predictor.overlay() != shown {
+            cx.notify();
         }
         true
+    }
+
+    /// Judge predictions against the frame actually painted, so a confirmed
+    /// cell leaves the overlay only once the grid shows its glyph.
+    fn judge_painted(&mut self) {
+        if let (true, Some(prepared)) = (self.remote(), &self.prepared) {
+            self.predictor.judge(prepared.frame(), self.prepared_offset);
+        }
     }
 
     fn lost(&mut self, attempt: u64, cx: &mut Context<Self>) {
@@ -380,8 +414,16 @@ impl Pane {
         if bytes.is_empty() || !matches!(self.status, Status::Live) || !self.running() {
             return;
         }
-        if let Some(sender) = &self.sender {
-            sender.send(&ClientData::Input(bytes));
+        let Some(sender) = &self.sender else { return };
+        sender.send(&ClientData::Input(bytes.clone()));
+        if !self.remote() && self.trace.is_none() {
+            return;
+        }
+        let Some(frame) = self.mirror.terminal().and_then(|vt| vt.frame().ok()) else { return };
+        let target = self.predictor.overlay().1.unwrap_or((frame.cursor.row, frame.cursor.column));
+        self.predictor.input(&bytes, &frame);
+        if let (Some(trace), [byte @ 0x20..=0x7e]) = (&self.trace, bytes.as_slice()) {
+            trace.borrow_mut().key(char::from(*byte), target);
         }
     }
 
@@ -413,6 +455,8 @@ impl Pane {
     fn typed(&mut self, cx: &mut Context<Self>) {
         self.blink.reset();
         self.own(OwnMode::Take);
+        // The prediction overlay changed with the input just sent.
+        cx.notify();
         let Some(vt) = self.mirror.terminal() else { return };
         let mut changed = vt.clear_selection();
         if vt.scroll_state().is_ok_and(|s| !s.at_bottom()) {
@@ -421,7 +465,6 @@ impl Pane {
         }
         if changed {
             self.generation += 1;
-            cx.notify();
         }
     }
 
@@ -709,6 +752,7 @@ impl Pane {
         if self.preparing || self.prepared_key == Some(key) {
             return;
         }
+        let offset = self.mirror.next_offset();
         let Some(vt) = self.mirror.terminal() else { return };
         let Ok(frame) = vt.frame() else { return };
         let frame = Arc::new(frame);
@@ -725,7 +769,9 @@ impl Pane {
             let _ = this.update(cx, |pane, cx| {
                 pane.preparing = false;
                 pane.prepared = Some(Arc::new(prepared));
+                pane.prepared_offset = offset;
                 pane.prepared_key = Some(key);
+                pane.judge_painted();
                 cx.notify();
             });
         })
@@ -811,6 +857,14 @@ impl Pane {
     }
 }
 
+/// Remote (iroh) connections predict, seeded with the path RTT; local ones never do.
+fn predictor_for(control: Option<&Control>) -> Predictor {
+    match control.map(Control::conn) {
+        Some(Conn::Iroh(conn)) => Predictor::remote(conn.rtt()),
+        _ => Predictor::local(),
+    }
+}
+
 /// Tab title: a program's title or foreground command, else the
 /// abbreviated cwd while a shell sits at its prompt.
 pub fn block_title(info: &BlockInfo) -> String {
@@ -848,6 +902,15 @@ impl Render for Pane {
         let status = self.status_text();
         let lifecycle = self.lifecycle_text();
         let sized_elsewhere = self.sized_elsewhere();
+        let (cells, predicted_cursor) = self.predictor.overlay();
+        let overlay = Overlay {
+            predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
+            predicted_cursor,
+            predicted_underline: rgb(theme::muted()),
+            predicted_foreground: rgb(self.mirror.config().map_or_else(theme::foreground, |c| c.foreground)),
+            ..Overlay::default()
+        };
+        let trace = self.trace.clone().zip(self.prepared.clone()).map(|(t, p)| (t, p, overlay.predicted.clone()));
         let entity = cx.entity();
         let mut element = div()
             .id(gpui::ElementId::Name(format!("pane-{}", self.block_id).into()))
@@ -918,7 +981,10 @@ impl Render for Pane {
                 .relative()
                 .size_full()
                 .when_some(self.prepared.clone(), |el, prepared| {
-                    el.child(div().absolute().top_0().left_0().size_full().child(terminal_canvas(prepared, metrics, cursor, selection, Overlay::default())))
+                    el.child(div().absolute().top_0().left_0().size_full().child(terminal_canvas(prepared, metrics, cursor, selection, overlay)))
+                })
+                .when_some(trace, |el, (trace, prepared, predicted)| {
+                    el.child(crate::latency::paint_probe(trace, prepared, predicted))
                 })
                 .child(input_canvas(entity, metrics))
                 .when_some(status.filter(|_| lifecycle.is_none()), |el, text| {
@@ -1196,6 +1262,7 @@ mod tests {
             size: TermSize::new(80, 24),
             owner: None,
             pid: None,
+            browser: None,
         }
     }
 
@@ -1213,5 +1280,48 @@ mod tests {
         assert_eq!(lifecycle_label(Lifecycle::Exited, Some(3)).as_deref(), Some("Process exited (code 3)"));
         assert_eq!(lifecycle_label(Lifecycle::Exited, None).as_deref(), Some("Process exited"));
         assert_eq!(lifecycle_label(Lifecycle::Restored, None).as_deref(), Some("Restored · process exited"));
+    }
+
+    /// Types `abc` with a delayed echo and returns the most cells shown.
+    fn most_shown(mut predictor: Predictor) -> usize {
+        let mut vt = silo_vt::TerminalCore::new(GridSize { columns: 20, rows: 5, cell_width: 8, cell_height: 16 }).unwrap();
+        predictor.server(&ServerData::TtyMode { offset: 0, echo: true, icanon: true });
+        let (mut offset, mut most) = (0, 0);
+        for (count, key) in (1..).zip(b"abc") {
+            predictor.input(&[*key], &vt.frame().unwrap());
+            most = most.max(predictor.overlay().0.len());
+            predictor.server(&ServerData::InputAck { count, offset });
+            vt.write_output(&[*key]).unwrap();
+            offset += 1;
+            predictor.judge(&vt.frame().unwrap(), offset);
+        }
+        most
+    }
+
+    #[test]
+    fn local_connection_never_predicts() {
+        assert_eq!(most_shown(predictor_for(None)), 0);
+        assert!(most_shown(Predictor::remote(Some(Duration::from_secs(1)))) > 0, "the same typing predicts remotely");
+    }
+
+    /// `judge_painted`: judged against the painted frame and its offset, a
+    /// prediction stays shown until that frame holds the echo.
+    #[test]
+    fn prediction_stays_until_painted_echo() {
+        let mut vt = silo_vt::TerminalCore::new(GridSize { columns: 20, rows: 5, cell_width: 8, cell_height: 16 }).unwrap();
+        let mut p = Predictor::remote(Some(Duration::from_secs(1)));
+        p.server(&ServerData::TtyMode { offset: 0, echo: true, icanon: true });
+        p.input(b"a", &vt.frame().unwrap());
+        p.server(&ServerData::InputAck { count: 1, offset: 0 });
+        vt.write_output(b"a").unwrap();
+        p.judge(&vt.frame().unwrap(), 1);
+        let painted = vt.frame().unwrap();
+        p.input(b"b", &painted);
+        p.server(&ServerData::InputAck { count: 2, offset: 1 });
+        vt.write_output(b"b").unwrap();
+        p.judge(&painted, 1);
+        assert_eq!(p.overlay().0.len(), 1, "the painted frame lacks the echo");
+        p.judge(&vt.frame().unwrap(), 2);
+        assert_eq!(p.overlay(), (vec![], None));
     }
 }

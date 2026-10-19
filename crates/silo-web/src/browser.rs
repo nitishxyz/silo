@@ -1,5 +1,6 @@
 //! One windowless browser (a browser block's engine side).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
@@ -10,6 +11,13 @@ use crate::input::{Modifiers, MouseButton, mouse_event};
 use crate::keyboard::{KeyInput, key_events};
 use crate::shared::{Event, Shared, ViewSize, lock};
 use crate::{Profile, Runtime};
+
+/// `CefRange::InvalidRange()`: "no range". libcef rejects a null `const CefRange&`, so the
+/// optional-in-spirit IME ranges must be passed explicitly.
+const NO_RANGE: Range = Range {
+    from: u32::MAX,
+    to: u32::MAX,
+};
 
 pub struct BrowserOptions<'a> {
     pub url: &'a str,
@@ -32,6 +40,7 @@ impl Runtime {
             browser: Mutex::new(None),
             events: Mutex::new(Vec::new()),
             notify: options.notify,
+            focused: AtomicBool::new(false),
         });
         let window_info = WindowInfo {
             windowless_rendering_enabled: 1,
@@ -44,7 +53,7 @@ impl Runtime {
             background_color: 0xFFFF_FFFF,
             ..Default::default()
         };
-        let mut client = crate::handlers::client(&shared);
+        let mut client = crate::handlers::client(&shared, &options.profile.tunnel);
         let mut context = options.profile.context.clone();
         let url = CefString::from(options.url);
         let created = browser_host_create_browser(
@@ -136,6 +145,7 @@ impl Browser {
     }
 
     pub fn set_focus(&self, focused: bool) {
+        self.shared.focused.store(focused, Ordering::Relaxed);
         if let Some(host) = self.host() {
             host.set_focus(i32::from(focused));
         }
@@ -210,7 +220,7 @@ impl Browser {
     /// Inserts committed text (typing, IME commit, paste-like input).
     pub fn insert_text(&self, text: &str) {
         if let Some(host) = self.host() {
-            host.ime_commit_text(Some(&CefString::from(text)), None, 0);
+            host.ime_commit_text(Some(&CefString::from(text)), Some(&NO_RANGE), 0);
         }
     }
 
@@ -233,7 +243,7 @@ impl Browser {
             host.ime_set_composition(
                 Some(&CefString::from(text)),
                 Some(&[underline]),
-                None,
+                Some(&NO_RANGE),
                 Some(&selection),
             );
         }

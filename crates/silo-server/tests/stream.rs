@@ -27,6 +27,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
         size,
         owner: None,
         pid: None,
+        browser: None,
     }
 }
 
@@ -52,7 +53,7 @@ impl Client {
     fn attach(block: &BlockHandle, sub_id: u64, resume: Option<Resume>) -> Self {
         let (tx, rx) = unbounded_channel();
         let sink = Sink::new(tx);
-        block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id: 7, resume, sink: sink.clone() })));
+        block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id: 7, resume, sink: sink.clone(), remote: false })));
         Self { sink, rx }
     }
 

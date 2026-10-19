@@ -1,32 +1,35 @@
 //! Headless keystroke bench: an in-process server, a client paired over the
-//! delay proxy, and per-key `key→echo` timings.
+//! delay proxy, a real `Predictor`, and per-key `key→pred` / `key→echo`.
 
 use std::{
     fmt::Write as _,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use serde::Serialize;
 use silo_client::{
-    Control, DataStream, Mirror,
+    Control, Predictor,
     proto::{
-        control::{Created, Method, PairInvite, SpawnSpec},
-        data::{ClientData, ServerData},
-        model::TermSize,
+        control::{Method, PairInvite},
         paths,
     },
-    transport::{EndpointAddr, Net, PairTicket, RelayConfig},
+    transport::{EndpointAddr, Net, NetOptions, PairTicket, RelayConfig},
 };
 use tokio::{task::JoinHandle, time::timeout};
 
+use crate::keys::{Key, Session};
 use crate::proxy::{Proxy, ProxyConfig};
 
-const T: Duration = Duration::from_secs(10);
+pub(crate) const T: Duration = Duration::from_secs(10);
 /// Pause between keystrokes so each key is measured on a quiet link.
 const KEY_GAP: Duration = Duration::from_millis(20);
+/// Keys per line: Enter before the cursor gets near the margin.
+const LINE: usize = 60;
+/// The backspace burst typed after the letters.
+const BURST: &[u8] = b"xyz\x7f\x7f\x7f";
 
 /// Percentiles in milliseconds.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -52,18 +55,40 @@ pub struct Row {
     pub link: String,
     /// Injected RTT; `None` for the unix baseline.
     pub rtt_ms: Option<u64>,
+    /// `"cat"` or `"zsh"`.
+    pub program: String,
     pub echo: Stats,
-    /// `key→pred`; `None` until the predictor exists.
-    // TODO(P5-2): fill from `Predictor::overlay()` (first frame showing the key's cell).
+    /// `key→pred`: the key's cell first visible (overlay, else echo);
+    /// `None` when nothing was predicted.
     pub pred: Option<Stats>,
+    /// Keys the overlay showed before their echo.
+    pub predicted: usize,
+    /// Shown predictions the mirror disagreed with.
+    pub mispredicted: usize,
     /// Echo p50 came in under the injected RTT: iroh found a path around the proxy.
     pub bypassed: bool,
+}
+
+impl Row {
+    #[must_use]
+    pub fn misprediction_rate(&self) -> f64 {
+        self.mispredicted as f64 / self.echo.n.max(1) as f64
+    }
+}
+
+/// `read -s` typed over one link: no cell may be shown.
+#[derive(Clone, Debug, Serialize)]
+pub struct Password {
+    pub link: String,
+    pub shown: usize,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
     pub keys: usize,
     pub rows: Vec<Row>,
+    pub passwords: Vec<Password>,
 }
 
 impl Report {
@@ -72,21 +97,72 @@ impl Report {
         self.rows.iter().filter(|r| r.bypassed).map(|r| r.link.as_str()).collect()
     }
 
+    /// Every missed §6 target (headless): pred p95 ≤ 20 ms at ≥ 50 ms RTT,
+    /// echo p95 ≤ RTT + 20 ms, < 1 % mispredictions on zsh, nothing shown
+    /// on a password prompt.
+    #[must_use]
+    pub fn misses(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in &self.rows {
+            let (name, rtt) = (format!("{} {}", r.link, r.program), r.rtt_ms.unwrap_or(0) as f64);
+            match r.pred {
+                _ if rtt < 50.0 => {}
+                Some(p) if p.p95 <= 20.0 => {}
+                p => out.push(format!("{name}: pred p95 {:?} > 20 ms", p.map(|p| p.p95))),
+            }
+            if r.echo.p95 > rtt + 20.0 {
+                out.push(format!("{name}: echo p95 {:.1} > {:.0} ms", r.echo.p95, rtt + 20.0));
+            }
+            if r.program == "zsh" && r.misprediction_rate() >= 0.01 {
+                out.push(format!("{name}: {} mispredictions", r.mispredicted));
+            }
+        }
+        let shown = self.passwords.iter().filter(|p| p.shown > 0 || p.enabled);
+        out.extend(shown.map(|p| format!("{} password prompt: {} cells shown, enabled {}", p.link, p.shown, p.enabled)));
+        out
+    }
+
+    /// `target/latency/report.md`: the table, password checks and targets.
+    #[must_use]
+    pub fn markdown(&self) -> String {
+        let mut out = format!("# Keystroke latency (headless)\n\n{} keys per program plus a backspace burst; times in ms.\n\n", self.keys);
+        out.push_str(&self.table());
+        out.push_str("\n## Password prompt (`read -s`)\n\n| link | cells shown | prediction enabled |\n|---|---:|---|\n");
+        for p in &self.passwords {
+            let _ = writeln!(out, "| {} | {} | {} |", p.link, p.shown, p.enabled);
+        }
+        let misses = self.misses();
+        out.push_str("\n## §6 targets\n\n");
+        out.push_str(if misses.is_empty() { "All met.\n" } else { "Missed:\n" });
+        for miss in misses {
+            let _ = writeln!(out, "- {miss}");
+        }
+        out
+    }
+
     pub fn table(&self) -> String {
-        let mut out = String::from("link    | echo p50 | echo p95 | echo p99 | pred p50 | pred p95 | pred p99\n");
+        let mut out = String::from(
+            "| link | program | echo p50 | echo p95 | echo p99 | pred p50 | pred p95 | pred p99 | predicted | mispredicted |\n\
+             |---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        );
         for row in &self.rows {
             let pred = |f: fn(&Stats) -> f64| row.pred.as_ref().map_or("-".to_owned(), |s| format!("{:.1}", f(s)));
             let _ = writeln!(
                 out,
-                "{:<7} | {:>8.1} | {:>8.1} | {:>8.1} | {:>8} | {:>8} | {:>8}{}",
+                "| {} | {} | {:.1} | {:.1} | {:.1} | {} | {} | {} | {}/{} | {} ({:.1} %) |{}",
                 row.link,
+                row.program,
                 row.echo.p50,
                 row.echo.p95,
                 row.echo.p99,
                 pred(|s| s.p50),
                 pred(|s| s.p95),
                 pred(|s| s.p99),
-                if row.bypassed { "  BYPASSED PROXY" } else { "" }
+                row.predicted,
+                row.echo.n,
+                row.mispredicted,
+                row.misprediction_rate() * 100.0,
+                if row.bypassed { " BYPASSED PROXY" } else { "" }
             );
         }
         out
@@ -110,67 +186,71 @@ pub async fn bench(rtts: &[u64], keys: usize) -> anyhow::Result<Report> {
 
 async fn run(home: &Path, rtts: &[u64], keys: usize) -> anyhow::Result<Report> {
     let owner = Control::connect(&paths::socket(home), "bench").await?.0;
-    let unix = measure(&owner, keys).await?;
-    let mut rows = vec![Row { link: "unix".into(), rtt_ms: None, echo: unix, pred: None, bypassed: false }];
+    let (mut rows, password) = measure(&owner, "unix", None, keys).await?;
+    let mut passwords = vec![password];
     for (i, &rtt) in rtts.iter().enumerate() {
         let upstream = server_addr(&owner).await?;
         let proxy = Proxy::spawn((Ipv4Addr::LOCALHOST, 0).into(), upstream.1, ProxyConfig::rtt(Duration::from_millis(rtt))).await?;
         let ticket = PairTicket { addr: EndpointAddr::new(upstream.0.addr.id).with_ip_addr(proxy.addr()), secret: upstream.0.secret };
         let identity = silo_client::client_identity(&home.join(format!("client-{i}")))?;
-        let net = Net::bind(&identity, RelayConfig::Disabled, false).await?;
+        let options = NetOptions { relay: RelayConfig::Disabled, mdns: false, port: None, pin_initial_path: true };
+        let net = Net::bind_with(&identity, options).await?;
         let (remote, _events) = timeout(T, silo_client::pair(&net, &ticket, "bench")).await.context("pair timed out")??;
-        let echo = measure(&remote, keys).await;
+        let measured = measure(&remote, &format!("{rtt}ms"), Some(rtt), keys).await;
         drop(remote);
         net.close().await?;
-        let echo = echo?;
-        let bypassed = echo.p50 < rtt as f64;
-        rows.push(Row { link: format!("{rtt}ms"), rtt_ms: Some(rtt), echo, pred: None, bypassed });
+        let (measured, password) = measured?;
+        rows.extend(measured);
+        passwords.push(password);
     }
-    Ok(Report { keys, rows })
+    Ok(Report { keys, rows, passwords })
 }
 
-/// Create a shell session on `control` and time `keys` single-byte echoes.
-async fn measure(control: &Control, keys: usize) -> anyhow::Result<Stats> {
-    let spec = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(200, 24)) };
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: spec }).await?;
-    let mut mirror = Mirror::new();
-    let mut stream = DataStream::open(control, &created.block_id, None).await?;
-    mirror.begin(&stream.welcome)?;
-    // Wait for the prompt, then for output to settle.
-    while recv(&mut stream, &mut mirror, T).await?.is_none() {}
-    while timeout(Duration::from_millis(200), recv(&mut stream, &mut mirror, T)).await.is_ok() {}
+/// `(name, command)` of the bench programs; zsh only where installed.
+fn programs() -> Vec<(&'static str, &'static [&'static str])> {
+    let mut out: Vec<(&'static str, &'static [&'static str])> = vec![("cat", &["/bin/cat"])];
+    if Path::new("/bin/zsh").exists() {
+        out.push(("zsh", &["/bin/zsh", "-f"]));
+    }
+    out
+}
 
-    let mut samples = Vec::with_capacity(keys);
-    for i in 0..keys {
-        let key = b'a' + (i % 26) as u8;
-        let sent = Instant::now();
-        stream.send(&ClientData::Input(vec![key]));
-        // TODO(P5-2): `predictor.input(&[key], frame)`; stamp `t_pred` when the overlay first shows the cell.
-        let deadline = sent + T;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if recv(&mut stream, &mut mirror, left).await?.is_some_and(|bytes| bytes.contains(&key)) {
-                break;
+/// A row from measured keys; `rtt` is `None` for the unix baseline.
+fn row(link: &str, rtt: Option<u64>, program: &str, keys: &[Key]) -> Row {
+    let echo = Stats::from_samples(&keys.iter().map(|k| k.echo).collect::<Vec<_>>());
+    let predicted = keys.iter().filter(|k| k.predicted).count();
+    let pred = (predicted > 0).then(|| Stats::from_samples(&keys.iter().map(|k| k.visible).collect::<Vec<_>>()));
+    let mispredicted = keys.iter().filter(|k| k.wrong).count();
+    let bypassed = rtt.is_some_and(|rtt| echo.p50 < rtt as f64);
+    Row { link: link.into(), rtt_ms: rtt, program: program.into(), echo, pred, predicted, mispredicted, bypassed }
+}
+
+/// Every program over `control` (`keys` letters, Enter every `LINE` keys,
+/// then a backspace burst), and the `read -s` check.
+async fn measure(control: &Control, link: &str, rtt: Option<u64>, keys: usize) -> anyhow::Result<(Vec<Row>, Password)> {
+    let predictor = || if rtt.is_some() { Predictor::remote(None) } else { Predictor::local() };
+    let mut rows = Vec::new();
+    for (program, command) in programs() {
+        let mut session = Session::open(control, command, predictor()).await?;
+        let mut typed = Vec::with_capacity(keys + BURST.len());
+        for i in 0..keys {
+            if i > 0 && i % LINE == 0 {
+                session.enter().await?;
             }
+            typed.push(session.key(b'a' + (i % 26) as u8).await?);
+            tokio::time::sleep(KEY_GAP).await;
         }
-        samples.push(sent.elapsed());
-        stream.ack(&mut mirror, true);
-        tokio::time::sleep(KEY_GAP).await;
+        for &byte in BURST {
+            typed.push(session.key(byte).await?);
+        }
+        session.close();
+        rows.push(row(link, rtt, program, &typed));
     }
-    stream.send(&ClientData::Input(b"\x15exit\n".to_vec()));
-    Ok(Stats::from_samples(&samples))
-}
-
-/// Apply the next server frame; returns the bytes when it was output.
-async fn recv(stream: &mut DataStream, mirror: &mut Mirror, wait: Duration) -> anyhow::Result<Option<Vec<u8>>> {
-    let data = timeout(wait, stream.rx.recv()).await.context("timed out waiting for output")?.ok_or_else(|| anyhow!("data stream closed"))?;
-    // TODO(P5-2): `predictor.server(&data)` and `predictor.judge(frame, mirror.next_offset())` after apply.
-    let bytes = match &data {
-        ServerData::Output { bytes, .. } => Some(bytes.clone()),
-        _ => None,
-    };
-    mirror.apply(data)?;
-    Ok(bytes)
+    let mut session = Session::open(control, &["/bin/sh", "-c", "read -s x"], predictor()).await?;
+    let wait = Duration::from_millis(rtt.unwrap_or(0) + 50);
+    let enabled = session.blind(b"secret", wait).await?;
+    session.close();
+    Ok((rows, Password { link: link.into(), shown: session.max_shown, enabled }))
 }
 
 /// A fresh invite and the server's IPv4 loopback endpoint address.
@@ -195,7 +275,14 @@ fn temp_home() -> PathBuf {
 }
 
 async fn start(home: &Path) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let config = silo_server::Config {
+        home: home.to_owned(),
+        idle_exit: None,
+        relay: RelayConfig::Disabled,
+        mdns: false,
+        pin_initial_path: true,
+        ..Default::default()
+    };
     let task = tokio::spawn(async move { silo_server::run(config).await });
     for _ in 0..500 {
         if silo_client::server_running(home).await {

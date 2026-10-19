@@ -6,14 +6,17 @@ mod control;
 mod data;
 mod mirror;
 pub mod mismatch;
+mod predict;
 mod remote;
 mod spawn;
+pub mod tunnel;
 
 pub use control::{BuildMismatch, Control, Events, Offline, Unauthorized, Upgrading};
 pub use remote::{client_identity, pair};
 pub use mismatch::DifferentBuild;
 pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};
+pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
 pub use spawn::{connect_or_spawn, server_running};
 
 pub use silo_proto as proto;

@@ -131,6 +131,7 @@ pub fn exit_edge(pane: Bounds<Pixels>, body: Bounds<Pixels>) -> Edge {
 pub struct TabGhost {
     pub id: String,
     pub title: String,
+    pub icon: &'static str,
     pub index: usize,
     pub started: Instant,
 }

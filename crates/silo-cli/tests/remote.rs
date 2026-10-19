@@ -61,7 +61,7 @@ async fn pair_then_remote_ls() {
     let task = start(&server_home).await;
     let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
-    owner.call_value(Method::SessionCreate { name: Some("remote-one".into()), spawn }).await.unwrap();
+    owner.call_value(Method::SessionCreate { name: Some("remote-one".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
     let options = NetOptions { relay: RelayConfig::Disabled, mdns: false };
 
     // Unpaired: a clear refusal, nothing stored.

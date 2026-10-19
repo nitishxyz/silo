@@ -42,6 +42,7 @@ enum Input {
     RenameSession(String),
     RenameTab(String),
     HostName(usize),
+    OpenUrl(String),
 }
 
 impl Input {
@@ -50,6 +51,7 @@ impl Input {
             Self::RenameSession(_) => "Rename session".into(),
             Self::RenameTab(_) => "Rename tab (empty to reset)".into(),
             Self::HostName(_) => "Rename host".into(),
+            Self::OpenUrl(_) => "Open in a new browser".into(),
         }
     }
 
@@ -57,6 +59,7 @@ impl Input {
         match self {
             Self::RenameSession(_) | Self::RenameTab(_) => "New name",
             Self::HostName(_) => "Host name",
+            Self::OpenUrl(_) => "Address",
         }
     }
 }
@@ -152,6 +155,16 @@ impl Workspace {
             Command::FocusPaneUp => self.focus_direction(crate::focus::Direction::Up, window, cx),
             Command::FocusPaneDown => self.focus_direction(crate::focus::Direction::Down, window, cx),
             Command::ZoomPane => self.toggle_zoom(window, cx),
+            Command::NewBrowser => {
+                if let Some(block) = block {
+                    self.split_browser(block, None);
+                }
+            }
+            Command::OpenUrl => {
+                if let Some(block) = block {
+                    self.open_palette_step(Step::Input(Input::OpenUrl(block)), String::new(), window, cx);
+                }
+            }
             Command::AddHost => {
                 self.close_palette(window, cx);
                 self.open_add_host(None, None, window, cx);
@@ -164,18 +177,25 @@ impl Workspace {
                 }
             }
             Command::Copy => {
-                if let Some(pane) = self.focused_pane(window, cx) {
+                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                    browser.read(cx).forward_chord("c");
+                } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.copy(cx));
                 }
             }
             Command::Paste => {
-                if let Some(pane) = self.focused_pane(window, cx) {
+                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                    let text = cx.read_from_clipboard().and_then(|i| i.text());
+                    browser.update(cx, |pane, _| pane.paste(text.as_deref()));
+                } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.paste(cx));
                 }
             }
             Command::SelectAll => {
                 self.close_palette(window, cx);
-                if let Some(pane) = self.focused_pane(window, cx) {
+                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                    browser.read(cx).forward_chord("a");
+                } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.select_all(cx));
                 }
             }
@@ -262,6 +282,8 @@ impl Workspace {
             | Command::RenameTab
             | Command::SplitRight
             | Command::SplitDown
+            | Command::NewBrowser
+            | Command::OpenUrl
             | Command::ClosePane
             | Command::ClearScrollback
             | Command::ResetTerminal => connected && self.view.is_some(),
@@ -317,7 +339,7 @@ impl Workspace {
         }
         let Some(current) = self.focused_block(window, cx) else { return };
         let rect = |b: gpui::Bounds<gpui::Pixels>| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
-        let Some(from) = self.panes.get(&current).and_then(|(p, _)| p.read(cx).bounds()).map(rect) else { return };
+        let Some(from) = self.block_bounds(&current, cx).map(rect) else { return };
         let Some(layout) = self.active_window().map(|w| w.layout.clone()) else { return };
         let mut ids = Vec::new();
         let mut rects = Vec::new();
@@ -325,7 +347,7 @@ impl Workspace {
             if id == current {
                 continue;
             }
-            if let Some(r) = self.panes.get(&id).and_then(|(p, _)| p.read(cx).bounds()) {
+            if let Some(r) = self.block_bounds(&id, cx) {
                 ids.push(id);
                 rects.push(rect(r));
             }
@@ -507,6 +529,13 @@ impl Workspace {
             }
             Input::RenameTab(window_id) => {
                 self.call(Method::WindowRename { window_id, name: (!text.is_empty()).then_some(text) });
+                self.close_palette(window, cx);
+            }
+            Input::OpenUrl(block) => {
+                let Some(url) = silo_proto::model::browser_url(&text) else {
+                    return fail(self, "Enter an address.".into(), cx);
+                };
+                self.split_browser(block, Some(url));
                 self.close_palette(window, cx);
             }
             Input::HostName(index) => match self.rename_host(index, text) {

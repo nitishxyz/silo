@@ -9,7 +9,7 @@ use std::{
 use silo_client::Control;
 use silo_proto::{
     control::{Capture, Created, Method, SpawnSpec},
-    model::{Axis, BlockInfo, Lifecycle, SessionView, TermSize},
+    model::{Axis, BlockInfo, BlockKind, Lifecycle, SessionView, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -92,10 +92,10 @@ fn snapshot_dir(home: &Path, block: &str) -> PathBuf {
 
 /// One session with a split and a second window, each block with output.
 async fn populate(control: &Control) -> (Created, Created, Created) {
-    let main: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell() }).await.unwrap();
+    let main: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created =
-        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Horizontal, spawn: shell() }).await.unwrap();
-    let window: Created = control.call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell() }).await.unwrap();
+        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let window: Created = control.call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     control.call_value(Method::WindowRename { window_id: window.window_id.clone(), name: Some("logs".into()) }).await.unwrap();
     // Explicit OSC titles: the process-derived default ("sh"/"bash") is
     // polled and may change after the tree is captured.
@@ -155,7 +155,7 @@ async fn clean_shutdown_restores_tree_and_screens() {
 
     // Restored blocks ignore input; new blocks work normally.
     let fresh: Created =
-        control.call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell() }).await.unwrap();
+        control.call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     assert!(before.blocks.iter().all(|b| b.id != fresh.block_id));
     send(&control, &fresh.block_id, "echo fresh-$((2+3))\n").await;
     wait_output(&control, &fresh.block_id, "\nfresh-5").await;
@@ -194,7 +194,7 @@ async fn exited_block_stays_and_survives_restart() {
     let home = temp_home("exited");
     let task = start(&home).await;
     let control = connect(&home).await;
-    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     send(&control, &main.block_id, "echo bye-$((6*7)); exit 3\n").await;
     wait_for("exit", async || block(&view(&control, &main.session_id).await, &main.block_id).lifecycle == Lifecycle::Exited).await;
     let before = view(&control, &main.session_id).await;
@@ -215,9 +215,9 @@ async fn closed_block_snapshots_are_collected() {
     let home = temp_home("close");
     let task = start(&home).await;
     let control = connect(&home).await;
-    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created =
-        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell() }).await.unwrap();
+        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     send(&control, &split.block_id, "echo doomed\n").await;
     wait_output(&control, &split.block_id, "\ndoomed").await;
     let dir = snapshot_dir(&home, &split.block_id);

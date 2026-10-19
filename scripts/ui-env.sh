@@ -17,7 +17,8 @@ if [[ ! -x "$DRIVER" || "$(cat "$DRIVER.sum" 2>/dev/null)" != "$_driver_sum" ]];
 fi
 export SILO_HOME="${SILO_HOME:-/tmp/silo-ui}"
 case "$SILO_HOME" in /tmp/* | /private/tmp/*) ;; *) echo "ui-env: SILO_HOME must be under /tmp" >&2; return 1 ;; esac
-APP_BIN="${APP_BIN:-target/debug/silo-app}"
+# Browser panes need CEF's bundle layout: run the app from a dev bundle.
+APP_BIN="${APP_BIN:-$(scripts/dev-bundle.sh)}" || return 1
 APP_LOG="${APP_LOG:-/tmp/silo-ui.log}"
 APP_PID="${APP_PID:-}"
 

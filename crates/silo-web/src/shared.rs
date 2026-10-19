@@ -1,5 +1,6 @@
 //! State shared between a `Browser` handle and its CEF handlers.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::frame::Frame;
@@ -63,6 +64,8 @@ pub(crate) struct Shared {
     pub(crate) browser: Mutex<Option<cef::Browser>>,
     pub(crate) events: Mutex<Vec<Event>>,
     pub(crate) notify: Notify,
+    /// Last `Browser::set_focus`; re-applied to each new page's widget.
+    pub(crate) focused: AtomicBool,
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

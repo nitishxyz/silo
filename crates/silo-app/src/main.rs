@@ -4,6 +4,7 @@ mod add_host;
 mod appearance;
 mod assets;
 mod blink;
+mod browser_pane;
 mod cache;
 mod commands;
 mod composition;
@@ -14,6 +15,7 @@ mod fonts;
 mod hosts;
 mod incompatible;
 mod keys;
+mod latency;
 mod layout;
 mod motion;
 mod palette;
@@ -29,6 +31,7 @@ mod text_field;
 mod theme;
 mod titlebar;
 mod tooltip;
+mod web;
 mod workspace;
 
 use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
@@ -39,6 +42,10 @@ use crate::{
 };
 
 fn main() {
+    // CEF subprocesses (`<App> Helper*.app` are copies of this binary).
+    if std::env::args().any(|arg| arg.starts_with("--type=")) {
+        std::process::exit(silo_web::run_helper());
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
 
@@ -76,6 +83,11 @@ fn main() {
         cx.set_reduce_motion(reduce_motion());
         commands::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_app_quit(|_| {
+            web::shutdown();
+            async {}
+        })
+        .detach();
         cx.set_menus(vec![
             Menu {
                 name: "Silo".into(),

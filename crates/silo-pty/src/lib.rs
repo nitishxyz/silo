@@ -25,7 +25,7 @@ use threads::IoThreads;
 use rustix::{
     fs::{Mode, OFlags, open},
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
-    termios::{Winsize, tcsetwinsize},
+    termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,6 +399,16 @@ impl Pty {
         (pgrp > 0).then_some(pgrp)
     }
 
+    /// The line discipline's `(ECHO, ICANON)` flags, read from the master
+    /// (which reflects the slave's termios on macOS and Linux).
+    ///
+    /// # Errors
+    /// `tcgetattr` failures.
+    pub fn line_mode(&self) -> io::Result<(bool, bool)> {
+        let local = tcgetattr(&*self.master)?.local_modes;
+        Ok((local.contains(LocalModes::ECHO), local.contains(LocalModes::ICANON)))
+    }
+
     /// Send `signal` to the child's process group unless it was reaped.
     pub fn signal(&self, signal: i32) {
         if !self.child.exited.load(Ordering::Acquire) {
@@ -509,6 +519,27 @@ mod tests {
         assert!(text.contains("got:hello"), "{text}");
         let status = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn line_mode_tracks_the_slave() {
+        let config = SpawnConfig {
+            command: vec!["/bin/sh".into(), "-c".into(), "read a; stty -echo -icanon; echo raw; read b".into()],
+            ..Default::default()
+        };
+        let pty = Pty::spawn(&config, PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 }, |_| {}).unwrap();
+        let (mut reader, mut writer) = (pty.reader().unwrap(), pty.writer().unwrap());
+        assert_eq!(pty.line_mode().unwrap(), (true, true));
+        writer.write_all(b"x\n").unwrap();
+        let mut output = Vec::new();
+        let mut buf = [0u8; 256];
+        while !String::from_utf8_lossy(&output).contains("raw") {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+            }
+        }
+        assert_eq!(pty.line_mode().unwrap(), (false, false));
     }
 
     #[test]

@@ -366,6 +366,8 @@ pub fn tab_hover_on(surface: u32) -> u32 {
 }
 /// Overlay that dims inactive panes: the background at this alpha.
 pub const INACTIVE_DIM: f32 = 0.38;
+/// The same overlay over a web page: lighter, since pages are mostly bright.
+pub const INACTIVE_DIM_PAGE: f32 = 0.14;
 
 #[must_use]
 pub fn tab_hover() -> u32 {

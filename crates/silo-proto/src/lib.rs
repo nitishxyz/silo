@@ -52,4 +52,8 @@ pub mod kind {
     /// JSON [`crate::model::TerminalConfig`]: the effective config from
     /// this point of the output stream on.
     pub const CONFIGURED: u8 = 0x89;
+    /// `count: u64 LE | offset: u64 LE`, see [`crate::data::ServerData::InputAck`].
+    pub const INPUT_ACK: u8 = 0x8a;
+    /// `offset: u64 LE | flags: u8` (bit 0 echo, bit 1 icanon).
+    pub const TTY_MODE: u8 = 0x8b;
 }
