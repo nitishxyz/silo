@@ -1,4 +1,4 @@
-//! Directional pane focus (⌘H/J/K/L): pick the geometric neighbour of the
+//! Directional pane focus (⌘H/J/L, ⌥⌘arrows): pick the geometric neighbour of the
 //! focused pane in the split layout.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

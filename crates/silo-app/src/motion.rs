@@ -9,18 +9,21 @@
 //! offset or a width/opacity change on top of it.
 
 use std::{
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use gpui::{Bounds, Pixels};
+use gpui::{Bounds, Pixels, point, size};
 use silo_render::PreparedFrame;
 
 pub const TAB_ENTER: Duration = Duration::from_millis(190);
 pub const TAB_EXIT: Duration = Duration::from_millis(180);
 pub const PANE_ENTER: Duration = Duration::from_millis(210);
 pub const PANE_EXIT: Duration = Duration::from_millis(200);
+pub const PANE_ZOOM: Duration = Duration::from_millis(220);
 pub const CLOSE_BUTTON: Duration = Duration::from_millis(140);
 
 /// Cubic ease-out.
@@ -144,6 +147,41 @@ pub struct PaneGhost {
     pub started: Instant,
 }
 
+/// A pane growing from its tiled slot to the whole pane area (zoom), or
+/// shrinking back (unzoom). The terminal keeps the zoomed size until the
+/// pane lands in its slot, so its grid resizes once.
+pub struct Zoom {
+    pub block: String,
+    pub expanding: bool,
+    pub started: Instant,
+}
+
+impl Zoom {
+    /// How far the pane covers the pane area (0 = its slot, 1 = all).
+    pub fn extent(&self, now: Instant) -> Option<f32> {
+        progress(self.started, PANE_ZOOM, now).map(|p| if self.expanding { p } else { 1.0 - p })
+    }
+}
+
+/// Window-space bounds from the last paint, for geometry the next frame
+/// animates between.
+#[derive(Clone, Default)]
+pub struct Measured {
+    /// The pane area: what a zoomed pane fills.
+    pub area: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Each tiled pane's slot.
+    pub cells: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+}
+
+/// `from` moved `t` of the way towards `to`.
+pub fn lerp(from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+    let mix = |a: Pixels, b: Pixels| a + (b - a) * t;
+    Bounds::new(
+        point(mix(from.origin.x, to.origin.x), mix(from.origin.y, to.origin.y)),
+        size(mix(from.size.width, to.size.width), mix(from.size.height, to.size.height)),
+    )
+}
+
 /// All running motion of one workspace window.
 #[derive(Default)]
 pub struct Motion {
@@ -153,6 +191,8 @@ pub struct Motion {
     pub pane_enter: HashMap<String, (Instant, Edge)>,
     pub tab_ghosts: Vec<TabGhost>,
     pub pane_ghosts: Vec<PaneGhost>,
+    pub zoom: Option<Zoom>,
+    pub measured: Measured,
     hover: Option<(String, Instant)>,
     unhover: Option<(String, Instant)>,
 }
@@ -166,6 +206,8 @@ impl Motion {
         self.pane_enter.clear();
         self.tab_ghosts.clear();
         self.pane_ghosts.clear();
+        self.zoom = None;
+        self.measured.cells.borrow_mut().clear();
     }
 
     /// Drop finished animations; true while anything still moves.
@@ -174,6 +216,9 @@ impl Motion {
         self.pane_enter.retain(|_, (s, _)| progress(*s, PANE_ENTER, now).is_some());
         self.tab_ghosts.retain(|g| progress(g.started, TAB_EXIT, now).is_some());
         self.pane_ghosts.retain(|g| progress(g.started, PANE_EXIT, now).is_some());
+        if self.zoom.as_ref().is_some_and(|z| z.extent(now).is_none()) {
+            self.zoom = None;
+        }
         if self.unhover.as_ref().is_some_and(|(_, s)| progress(*s, CLOSE_BUTTON, now).is_none()) {
             self.unhover = None;
         }
@@ -184,6 +229,34 @@ impl Motion {
             || !self.pane_enter.is_empty()
             || !self.tab_ghosts.is_empty()
             || !self.pane_ghosts.is_empty()
+            || self.zoom.is_some()
+    }
+
+    /// Drop what is kept for blocks that left the session.
+    pub fn forget_blocks(&mut self, removed: &[String]) {
+        self.measured.cells.borrow_mut().retain(|id, _| !removed.contains(id));
+        if self.zoom.as_ref().is_some_and(|z| removed.contains(&z.block)) {
+            self.zoom = None;
+        }
+    }
+
+    /// Zoom (`expanding`) or unzoom `block`, continuing from the current
+    /// extent when it is already moving.
+    pub fn start_zoom(&mut self, block: String, expanding: bool, now: Instant) {
+        let current = self.zoom.as_ref().filter(|z| z.block == block).and_then(|z| z.extent(now));
+        let start = current.map_or(0.0, |extent| if expanding { extent } else { 1.0 - extent });
+        let elapsed = PANE_ZOOM.mul_f32(slowdown()).mul_f32(linear_for(start));
+        self.zoom = Some(Zoom { block, expanding, started: now.checked_sub(elapsed).unwrap_or(now) });
+    }
+
+    /// The running zoom animation's block and current clip rect within the
+    /// pane area, once the pane area and the block's slot were measured.
+    pub fn zoom_frame(&self, now: Instant) -> Option<(&str, Bounds<Pixels>, Bounds<Pixels>)> {
+        let zoom = self.zoom.as_ref()?;
+        let extent = zoom.extent(now)?;
+        let area = self.measured.area.get()?;
+        let slot = self.measured.cells.borrow().get(&zoom.block).copied()?;
+        Some((zoom.block.as_str(), lerp(slot, area, extent), area))
     }
 
     /// Hover entered or left tab `id`. Leaving only affects the tab that
@@ -307,5 +380,38 @@ mod tests {
         let t0 = Instant::now() + Duration::from_secs(1);
         m.set_hover("a", true, t0, false);
         assert_eq!(m.close_button("a", t0), 1.0);
+    }
+
+    #[test]
+    fn zoom_reverses_from_its_current_extent() {
+        let mut m = Motion::default();
+        let t0 = Instant::now() + Duration::from_secs(1);
+        m.start_zoom("a".into(), true, t0);
+        assert!(m.zoom_frame(t0).is_none(), "nothing to draw before the slot was measured");
+        let slot = Bounds::new(point(px(500.), px(0.)), size(px(500.), px(600.)));
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.)));
+        m.measured.area.set(Some(area));
+        m.measured.cells.borrow_mut().insert("a".into(), slot);
+        assert_eq!(m.zoom_frame(t0), Some(("a", slot, area)));
+        let mid = t0 + PANE_ZOOM / 2;
+        let (_, rect, _) = m.zoom_frame(mid).unwrap();
+        m.start_zoom("a".into(), false, mid);
+        let (_, reversed, _) = m.zoom_frame(mid).unwrap();
+        assert!(f32::from((reversed.origin.x - rect.origin.x).abs()) < 0.5, "unzoom starts where zoom was");
+        assert!(m.prune(mid));
+        assert!(!m.prune(mid + PANE_ZOOM));
+        assert!(m.zoom.is_none());
+        m.start_zoom("a".into(), true, mid);
+        m.forget_blocks(&["a".into()]);
+        assert!(m.zoom.is_none() && m.measured.cells.borrow().is_empty());
+    }
+
+    #[test]
+    fn lerp_moves_between_bounds() {
+        let a = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(50.)));
+        let b = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(150.)));
+        assert_eq!(lerp(a, b, 0.0), a);
+        assert_eq!(lerp(a, b, 1.0), b);
+        assert_eq!(lerp(a, b, 0.5), Bounds::new(point(px(50.), px(25.)), size(px(200.), px(100.))));
     }
 }

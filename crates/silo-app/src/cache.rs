@@ -79,6 +79,7 @@ fn open(root: &Path, identity: &str) -> anyhow::Result<(Cache, Option<CachedTree
 
 enum Job {
     Tree(Box<CachedTree>),
+    ClearTree,
     Block(String, Box<MirrorCheckpoint>),
     Forget(Vec<String>),
     Gc(Vec<String>),
@@ -99,6 +100,7 @@ pub fn start(root: &Path, identity: &str) -> anyhow::Result<(CacheWriter, Option
         for job in rx {
             let result = match job {
                 Job::Tree(tree) => cache.save_tree(&*tree),
+                Job::ClearTree => cache.clear_tree(),
                 Job::Block(id, checkpoint) => cache.save_checkpoint(&id, &checkpoint),
                 Job::Forget(ids) => ids.iter().try_for_each(|id| cache.forget_block(id)),
                 Job::Gc(live) => cache.gc(live.iter().map(String::as_str)),
@@ -138,6 +140,10 @@ pub fn open_host(root: &Path, identity: &str) -> Option<HostCache> {
 impl CacheWriter {
     pub fn save_tree(&self, tree: CachedTree) {
         let _ = self.jobs.send(Job::Tree(Box::new(tree)));
+    }
+
+    pub fn clear_tree(&self) {
+        let _ = self.jobs.send(Job::ClearTree);
     }
 
     pub fn save_block(&self, id: String, checkpoint: MirrorCheckpoint) {
@@ -301,7 +307,15 @@ mod tests {
         writer.flush(Duration::from_secs(5));
         drop(writer);
         let (_, cached, _) = start(&root, "/tmp/sock").unwrap();
-        assert_eq!(cached, Some(tree));
+        assert_eq!(cached, Some(tree.clone()));
+        let (writer, _, _) = start(&root, "/tmp/sock").unwrap();
+        writer.save_block("a".into(), checkpoint());
+        writer.clear_tree();
+        writer.flush(Duration::from_secs(5));
+        drop(writer);
+        let (_, cached, blocks) = start(&root, "/tmp/sock").unwrap();
+        assert!(cached.is_none(), "a closed session's tree is gone");
+        assert_eq!(blocks.len(), 1, "clearing the tree keeps block checkpoints");
         let _ = std::fs::remove_dir_all(&root);
     }
 

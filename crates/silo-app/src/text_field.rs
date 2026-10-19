@@ -2,9 +2,14 @@
 //! backspace (cmd: line, option/ctrl: word), select all / copy / paste, and
 //! navigation keys reported as events. ⌘A selects the whole text (there is
 //! no partial selection); typing, Backspace or Paste then replace it.
+//! The caret is overlaid (it never shifts the text or placeholder) and
+//! blinks while the field is focused in the active window.
 
-use gpui::{Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, Render, SharedString, Window, div, prelude::*, px, rgb};
+use std::time::Instant;
 
+use gpui::{Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, Render, SharedString, Task, Window, div, prelude::*, px, rgb};
+
+use crate::blink::Blink;
 use crate::theme;
 use crate::theme::Continuous as _;
 
@@ -22,6 +27,10 @@ pub struct TextField {
     pub focus: FocusHandle,
     /// The whole text is selected (⌘A).
     all: bool,
+    blink: Blink,
+    /// The last render showed a caret; the blink timer runs while it does.
+    caret: bool,
+    blink_task: Option<Task<()>>,
 }
 
 /// One edit of the field's text.
@@ -59,7 +68,15 @@ impl EventEmitter<FieldEvent> for TextField {}
 
 impl TextField {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        Self { text: String::new(), placeholder: placeholder.into(), focus: cx.focus_handle(), all: false }
+        Self {
+            text: String::new(),
+            placeholder: placeholder.into(),
+            focus: cx.focus_handle(),
+            all: false,
+            blink: Blink::default(),
+            caret: false,
+            blink_task: None,
+        }
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -71,12 +88,14 @@ impl TextField {
     pub fn replace_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
         self.all = false;
+        self.blink.reset();
         cx.notify();
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
         self.all = false;
+        self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
         cx.notify();
     }
@@ -89,13 +108,57 @@ impl TextField {
 
     fn edit(&mut self, edit: Edit<'_>, cx: &mut Context<Self>) {
         apply(&mut self.text, &mut self.all, edit);
+        self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
         cx.notify();
+    }
+
+    /// Whether the caret is drawn this frame, starting or stopping the
+    /// blink timer as needed.
+    fn caret_phase(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
+        if shown && !self.caret {
+            self.blink.reset();
+        }
+        self.caret = shown;
+        if !shown {
+            return false;
+        }
+        if self.blink_task.is_none() {
+            self.blink_task = Some(cx.spawn(async move |this, cx| {
+                let next = |field: &mut TextField| {
+                    if field.caret {
+                        Some(field.blink.until_next(Instant::now()))
+                    } else {
+                        field.blink_task = None;
+                        None
+                    }
+                };
+                let mut wait = match this.update(cx, |field, _| next(field)) {
+                    Ok(Some(wait)) => wait,
+                    _ => return,
+                };
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    wait = match this.update(cx, |field, cx| {
+                        let wait = next(field);
+                        if wait.is_some() {
+                            cx.notify();
+                        }
+                        wait
+                    }) {
+                        Ok(Some(wait)) => wait,
+                        _ => return,
+                    };
+                }
+            }));
+        }
+        self.blink.visible_at(Instant::now())
     }
 
     fn key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let k = &event.keystroke;
         let m = k.modifiers;
+        self.blink.reset();
         // Any key other than a bare modifier or a ⌘/⌃ chord drops the
         // select-all highlight; edits below consume it first.
         let selected = self.all;
@@ -148,7 +211,18 @@ impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         let empty = self.text.is_empty();
-        let caret = div().w(px(1.5)).h(px(15.0)).bg(rgb(theme::accent())).flex_none();
+        let caret = self.caret_phase(focused && window.is_window_active() && !self.all, cx).then(|| {
+            let caret = div().absolute().top(px(1.0)).bottom(px(1.0)).w(px(1.5)).bg(rgb(theme::accent()));
+            if empty { caret.left_0() } else { caret.right(px(-2.0)) }
+        });
+        let content = if empty {
+            div().text_color(rgb(theme::muted())).child(self.placeholder.clone())
+        } else {
+            div()
+                .text_color(rgb(theme::foreground()))
+                .when(self.all, |el| el.continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)))
+                .child(self.text.clone())
+        };
         div()
             .id("text-field")
             .key_context("TextField")
@@ -180,16 +254,7 @@ impl Render for TextField {
                     cx.stop_propagation();
                 }
             }))
-            .when(!empty, |el| {
-                el.child(
-                    div()
-                        .text_color(rgb(theme::foreground()))
-                        .when(self.all, |el| el.continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)))
-                        .child(self.text.clone()),
-                )
-            })
-            .when(focused && !self.all, |el| el.child(caret))
-            .when(empty, |el| el.child(div().text_color(rgb(theme::muted())).child(self.placeholder.clone())))
+            .child(div().relative().flex_none().child(content).children(caret))
     }
 }
 

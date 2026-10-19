@@ -168,7 +168,7 @@ impl Workspace {
             Command::DockPane => self.dock_block(window, cx),
             Command::NewBrowser => {
                 if let Some(block) = block {
-                    self.split_browser(block, None);
+                    self.new_browser(block, window, cx);
                 }
             }
             Command::OpenUrl => {
@@ -288,8 +288,8 @@ impl Workspace {
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
-            Command::NewSession
-            | Command::RenameSession
+            Command::NewSession => connected,
+            Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
             | Command::CloseTab
@@ -345,7 +345,7 @@ impl Workspace {
         self.open_session(host, id, window, cx);
     }
 
-    /// Focus the geometric neighbour of the focused pane (⌘H/J/K/L).
+    /// Focus the geometric neighbour of the focused pane (⌘H/J/L, ⌥⌘arrows).
     /// No neighbour, or an open overlay, is a no-op.
     fn focus_direction(&mut self, direction: crate::focus::Direction, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() || self.palette.is_some() || self.add_host.is_some() || self.picker.is_some() {

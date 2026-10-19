@@ -957,4 +957,29 @@ mod tests {
         reg.remove_block("b");
         assert_eq!(reg.sessions[0].windows.len(), 2, "an empty window closes");
     }
+
+    #[test]
+    fn closing_the_last_block_closes_the_session() {
+        let (mut reg, mut rx) = registry();
+        reg.close_window("w2").unwrap();
+        reg.close_window("w3").unwrap();
+        for block in ["a", "b"] {
+            reg.close_block(block).unwrap();
+        }
+        while rx.try_recv().is_ok() {}
+        reg.close_block("c").unwrap();
+        assert!(reg.sessions.is_empty());
+        let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|frame| match frame.parse::<ServerMessage>().unwrap() {
+                ServerMessage::Event { event, .. } => *event,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert!(
+            matches!(&events[..], [Event::SessionClosed { session_id }, Event::SessionsChanged { sessions }] if session_id == "s" && sessions.is_empty())
+        );
+        let (_, tree_dirty) = reg.take_dirty(false);
+        assert!(tree_dirty, "the emptied tree is committed");
+        assert_eq!(reg.close_block("c").unwrap_err().code, "not_found");
+    }
 }

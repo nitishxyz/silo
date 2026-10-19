@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, IntoElement, Window, div, prelude::*, px, relative, rgb};
+use gpui::{AnyElement, Context, IntoElement, Window, canvas, div, prelude::*, px, relative, rgb};
 use silo_proto::{
     control::Method,
     model::{Axis, BlockInfo, Layout, WindowInfo},
@@ -66,21 +66,69 @@ impl Workspace {
         // Compact panes are flush: the window clips them itself.
         let corner = if comfortable { radius::window_corner(window) } else { None };
         let place = Placement { window: corner, left: true, right: true, bottom: true };
-        let content = if w.zoomed {
+        let zoom = self.motion.zoom_frame(now).filter(|(block, ..)| w.layout.blocks().iter().any(|b| b == block));
+        let content = if zoom.is_some() {
+            // Siblings stay tiled under the pane growing over them.
+            let focused = self.focused_block(window, cx);
+            self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
+        } else if w.zoomed {
             self.render_layout(&Layout::block(w.focused.clone()), Some(&w.focused), false, true, None, place, now, cx)
         } else {
             let focused = self.focused_block(window, cx);
             self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
         };
+        let zoom = zoom.map(|(block, rect, area)| self.render_zoom(block, w.zoomed, rect, area, place, now, cx));
+        let area = self.motion.measured.area.clone();
         let floats = self.render_floats(w, now, window, cx);
         div()
             .relative()
             .size_full()
             .min_h_0()
             .when(comfortable, |el| el.px(px(OUTER)).pb(px(OUTER)))
-            .child(content)
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .child(content)
+                    .child(canvas(move |bounds, _, _| area.set(Some(bounds)), |_, (), _, _| {}).absolute().top_0().left_0().size_full())
+                    .children(zoom),
+            )
             .children(floats)
             .on_drag_move(cx.listener(Self::float_drag_move))
+            .into_any_element()
+    }
+
+    /// The pane being zoomed or unzoomed, clipped to `rect`, between its
+    /// slot and the whole pane `area`. Inside, it keeps the zoomed size;
+    /// the clip is rectangular, so a corner ring rounds it like a card.
+    #[allow(clippy::too_many_arguments)]
+    fn render_zoom(
+        &self,
+        block: &str,
+        zoomed: bool,
+        rect: gpui::Bounds<gpui::Pixels>,
+        area: gpui::Bounds<gpui::Pixels>,
+        place: Placement,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let corners = place.corners();
+        let cell = self.render_cell(block, true, false, zoomed, None, corners, now, cx);
+        let ring = (self.density() == Density::Comfortable).then(|| corner_ring(corners));
+        div()
+            .absolute()
+            .left(rect.origin.x - area.origin.x)
+            .top(rect.origin.y - area.origin.y)
+            .w(rect.size.width)
+            .h(rect.size.height)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .child(div().absolute().top_0().left_0().w(area.size.width).h(area.size.height).child(cell)),
+            )
+            .children(ring.into_iter().flatten())
             .into_any_element()
     }
 
@@ -99,8 +147,29 @@ impl Workspace {
         match layout {
             Layout::Block { id } => {
                 let active = focused == Some(id.as_str());
-                // No focus ring: inactive panes get a translucent wash.
-                self.render_cell(id, active, multiple && !active, zoomed, swap, place.corners(), now, cx)
+                // A zooming pane is drawn over the layout; its slot stays empty.
+                let cell = if self.motion.zoom_frame(now).is_some_and(|(block, ..)| block == id) {
+                    div().size_full().into_any_element()
+                } else {
+                    // No focus ring: inactive panes get a translucent wash.
+                    self.render_cell(id, active, multiple && !active, zoomed, swap, place.corners(), now, cx)
+                };
+                let cells = self.motion.measured.cells.clone();
+                let id = id.clone();
+                div()
+                    .relative()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(cell)
+                    .child(
+                        canvas(move |bounds, _, _| _ = cells.borrow_mut().insert(id, bounds), |_, (), _, _| {})
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                    )
+                    .into_any_element()
             }
             Layout::Split { axis, ratio, first, second } => {
                 let ratio = ratio.clamp(0.05, 0.95);
@@ -217,19 +286,7 @@ impl Workspace {
         };
         // The page surface is clipped to a rectangle: a ring of window
         // colour just outside the card's rounded shape hides its corners.
-        let caps = (comfortable && entering.is_none() && self.browsers.contains_key(id)).then(|| {
-            let ring = |r: f32| r + CAP;
-            let outer = CardCorners {
-                top_left: ring(corners.top_left),
-                top_right: ring(corners.top_right),
-                bottom_right: ring(corners.bottom_right),
-                bottom_left: ring(corners.bottom_left),
-            };
-            let ring =
-                div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
-            let outline = div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline())).continuous_corners(corners);
-            [ring.continuous_corners(outer), outline]
-        });
+        let caps = (comfortable && entering.is_none() && self.browsers.contains_key(id)).then(|| corner_ring(corners));
         div()
             .relative()
             .size_full()
@@ -492,6 +549,21 @@ fn swap_window(w: &WindowInfo) -> Option<&str> {
 /// Whether `dragged` may be dropped on pane `target` of window `window`.
 fn can_swap(dragged: &DraggedPane, window: &str, target: &str) -> bool {
     dragged.window_id == window && dragged.block_id != target
+}
+
+/// A ring of window colour just outside a card's rounded shape, and its
+/// outline: rounds content clipped to the card's rectangle.
+fn corner_ring(corners: CardCorners) -> [gpui::Div; 2] {
+    let ring = |r: f32| r + CAP;
+    let outer = CardCorners {
+        top_left: ring(corners.top_left),
+        top_right: ring(corners.top_right),
+        bottom_right: ring(corners.bottom_right),
+        bottom_left: ring(corners.bottom_left),
+    };
+    let ring = div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
+    let outline = div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline())).continuous_corners(corners);
+    [ring.continuous_corners(outer), outline]
 }
 
 /// Hover group of one pane card (header actions appear on hover).

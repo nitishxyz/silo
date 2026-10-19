@@ -915,10 +915,38 @@ impl crate::workspace::Workspace {
 
     /// Split `block` with a new browser (popup, New Browser, Open URL).
     pub(crate) fn split_browser(&mut self, block: String, url: Option<String>) {
-        let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-        let axis = silo_proto::model::Axis::Horizontal;
-        self.call(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url });
+        self.call(browser_split(block, url));
     }
+
+    /// New Browser: a blank browser beside `block`, address bar focused.
+    pub(crate) fn new_browser(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(control) = self.control() else { return };
+        let task = self.rt.spawn(async move { control.call::<silo_proto::control::Created>(browser_split(block, None)).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update_in(cx, |this, window, cx| match created {
+                Ok(created) => {
+                    this.address_pending = Some(created.block_id);
+                    this.focus_new_browser(window, cx);
+                }
+                Err(error) => tracing::warn!("new browser: {error:#}"),
+            });
+        })
+        .detach();
+    }
+
+    /// Focus the pending new browser's address bar once its pane exists.
+    pub(crate) fn focus_new_browser(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(pane) = self.address_pending.as_ref().and_then(|b| self.browsers.get(b)).map(|(p, _)| p.clone()) else { return };
+        self.address_pending = None;
+        pane.update(cx, |pane, cx| pane.focus_address(window, cx));
+    }
+}
+
+fn browser_split(block: String, url: Option<String>) -> Method {
+    let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
+    let axis = silo_proto::model::Axis::Horizontal;
+    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url }
 }
 
 /// ⌘L / ⌘[ / ⌘] / ⌘R while the page has focus. Intercepted ahead of the

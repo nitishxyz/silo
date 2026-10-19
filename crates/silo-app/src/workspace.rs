@@ -55,11 +55,17 @@ pub struct Workspace {
     pub(crate) ahead_of: Option<u64>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
+    /// The shown session was closed and none replaced it: (re)connecting
+    /// keeps the empty state instead of creating a session.
+    emptied: bool,
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
     /// Browser blocks' panes (terminal blocks are in `panes`).
     pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
+    /// A blank browser this client created: its address bar gets focus
+    /// once its pane exists.
+    pub(crate) address_pending: Option<String>,
     pub(crate) focus: FocusHandle,
     pub(crate) switcher: Option<Switcher>,
     pub(crate) add_host: Option<AddHostSheet>,
@@ -134,9 +140,11 @@ impl Workspace {
             view: None,
             ahead_of: None,
             wanted_session,
+            emptied: false,
             panes: HashMap::new(),
             browsers: HashMap::new(),
             server_focus: None,
+            address_pending: None,
             focus: cx.focus_handle(),
             switcher: None,
             add_host: None,
@@ -307,8 +315,16 @@ impl Workspace {
             }
             ConnEvent::Event(Event::SessionClosed { session_id }) => {
                 if self.view.as_ref().is_some_and(|v| v.session.id == *session_id) {
+                    // Its blocks are gone with it: nothing to disown.
+                    self.panes.clear();
+                    self.browsers.clear();
                     self.view = None;
-                    self.choose_session(None, window, cx);
+                    self.server_focus = None;
+                    self.address_pending = None;
+                    self.emptied = true;
+                    self.motion.reset();
+                    self.focus.focus(window, cx);
+                    self.choose_session(None, false, window, cx);
                 }
             }
             ConnEvent::Event(Event::BlockChanged { block }) => {
@@ -362,7 +378,7 @@ impl Workspace {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
-        self.choose_session(preferred, window, cx);
+        self.choose_session(preferred, !self.emptied, window, cx);
     }
 
     /// Show `session_id` on `host`, detaching the current session's blocks.
@@ -386,7 +402,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.choose_session(Some(session_id), window, cx);
+        self.choose_session(Some(session_id), false, window, cx);
     }
 
     /// Show `host` (its cached tree until it connects, then its last or
@@ -403,7 +419,7 @@ impl Workspace {
         self.show_cached(window, cx);
         if self.control().is_some() {
             let wanted = self.wanted_session.take();
-            self.choose_session(wanted, window, cx);
+            self.choose_session(wanted, !self.emptied, window, cx);
         }
         cx.notify();
     }
@@ -426,6 +442,7 @@ impl Workspace {
         self.browsers.clear();
         self.view = None;
         self.server_focus = None;
+        self.address_pending = None;
         self.motion.reset();
         if !blocks.is_empty() {
             self.call(Method::DisownBlock { block_ids: blocks });
@@ -469,8 +486,9 @@ impl Workspace {
         self.call(Method::SessionRename { session_id, name });
     }
 
-    /// Attach to `preferred`, else the newest session, else a new one.
-    pub(crate) fn choose_session(&mut self, preferred: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Attach to `preferred`, else the newest session, else a new one
+    /// (`create`) or none.
+    pub(crate) fn choose_session(&mut self, preferred: Option<String>, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(control) = self.control() else {
             return;
         };
@@ -482,18 +500,29 @@ impl Workspace {
                 .map(|s| s.id.clone());
             let id = match pick {
                 Some(id) => id,
-                None => {
+                None if create => {
                     let home = std::env::var("HOME").ok();
                     let spawn = SpawnSpec { cwd: home, command: Vec::new(), size: None };
                     let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await?;
                     created.session_id
                 }
+                None => return Ok(None),
             };
-            control.call::<SessionView>(Method::SessionView { session_id: id }).await
+            control.call::<SessionView>(Method::SessionView { session_id: id }).await.map(Some)
         });
         cx.spawn_in(window, async move |this, cx| {
             let view = match task.await {
-                Ok(Ok(view)) => view,
+                Ok(Ok(Some(view))) => view,
+                Ok(Ok(None)) => {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.view.is_none() {
+                            window.set_window_title("silo");
+                            this.status = Some("No sessions. Press ⇧⌘N to start one.".into());
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
                         tracing::warn!("open session: {error:#}");
@@ -524,6 +553,7 @@ impl Workspace {
 
     fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
         self.ahead_of = None;
+        self.emptied = false;
         window.set_window_title(&format!("{} — silo", view.session.name));
         if self.active_host == 0 {
             let id = view.session.id.clone();
@@ -600,6 +630,7 @@ impl Workspace {
                 self.focus_block(&focused, window, cx);
             }
         }
+        self.focus_new_browser(window, cx);
         self.save_tree(cx);
         cx.notify();
     }
@@ -612,6 +643,7 @@ impl Workspace {
         let scope = view.session.id.clone();
         let windows = self.motion.windows.sync(&scope, view.session.windows.iter().map(|w| w.id.clone()).collect());
         let blocks = self.motion.blocks.sync(&scope, view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect());
+        self.motion.forget_blocks(&blocks.removed);
         if !(windows.added.is_empty() && windows.removed.is_empty() && blocks.added.is_empty() && blocks.removed.is_empty()) {
             tracing::debug!(?windows, ?blocks, reduce_motion = cx.reduce_motion(), "motion");
         }
@@ -632,10 +664,22 @@ impl Workspace {
         for id in &windows.added {
             self.motion.tab_enter.insert(id.clone(), now);
         }
+        let new_active = view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first());
+        // Zoom and unzoom grow the pane over its siblings and back.
+        if let (Some(old), Some(new)) = (self.active_window(), new_active)
+            && old.id == new.id
+            && old.zoomed != new.zoomed
+        {
+            let block = if new.zoomed { new.focused.clone() } else { old.focused.clone() };
+            let blocks = new.layout.blocks();
+            if blocks.len() > 1 && blocks.contains(&block) {
+                tracing::debug!(%block, zoomed = new.zoomed, "zoom motion");
+                self.motion.start_zoom(block, new.zoomed, now);
+            }
+        }
         // Pane motion only inside a window that stays active and unzoomed;
         // tab motion covers whole windows coming and going.
         let old_active = self.active_window().filter(|w| !w.zoomed).cloned();
-        let new_active = view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first());
         let (Some(old_active), Some(new_active)) = (old_active, new_active) else {
             return;
         };

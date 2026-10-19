@@ -262,6 +262,30 @@ async fn closed_block_snapshots_are_collected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn closing_the_last_exited_block_deletes_the_session() {
+    let home = temp_home("last");
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    send(&control, &main.block_id, "exit 0\n").await;
+    wait_for("exit", async || block(&view(&control, &main.session_id).await, &main.block_id).lifecycle == Lifecycle::Exited).await;
+    let dir = snapshot_dir(&home, &main.block_id);
+    wait_for("checkpoint", async || dir.is_dir()).await;
+
+    control.call_value(Method::BlockClose { block_id: main.block_id.clone() }).await.unwrap();
+    let sessions: Vec<serde_json::Value> = control.call(Method::SessionList {}).await.unwrap();
+    assert!(sessions.is_empty(), "{sessions:?}");
+    shutdown(control, task).await;
+
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let sessions: Vec<serde_json::Value> = control.call(Method::SessionList {}).await.unwrap();
+    assert!(sessions.is_empty(), "closed session came back: {sessions:?}");
+    shutdown(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn corrupt_snapshot_restores_that_block_empty() {
     let home = temp_home("corrupt");
     let task = start(&home).await;

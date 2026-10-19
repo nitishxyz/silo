@@ -68,7 +68,7 @@ commands! {
     NewWindow => "New Window…", "Sessions", ["cmd-n"], "Open a session in another window";
     RenameSession => "Rename Session…", "Sessions", [];
     CloseSession => "Close Session", "Sessions", [], "Ends every process in the session";
-    SwitchSession => "Switch to Session…", "Sessions", ["cmd-shift-k"];
+    SwitchSession => "Switch to Session…", "Sessions", ["cmd-k"];
     NextSession => "Next Session", "Sessions", ["cmd-alt-]"];
     PreviousSession => "Previous Session", "Sessions", ["cmd-alt-["];
     // Tabs
@@ -85,7 +85,7 @@ commands! {
     FocusPreviousPane => "Focus Previous Pane", "Panes", ["cmd-["];
     FocusPaneLeft => "Focus Pane Left", "Panes", ["cmd-h", "cmd-alt-left"];
     FocusPaneRight => "Focus Pane Right", "Panes", ["cmd-l", "cmd-alt-right"];
-    FocusPaneUp => "Focus Pane Up", "Panes", ["cmd-k", "cmd-alt-up"];
+    FocusPaneUp => "Focus Pane Up", "Panes", ["cmd-alt-up"];
     FocusPaneDown => "Focus Pane Down", "Panes", ["cmd-j", "cmd-alt-down"];
     ZoomPane => "Zoom Pane", "Panes", ["cmd-shift-enter"], "Toggle";
     FloatPane => "Float Pane", "Panes", [], "Lift it above the layout";
@@ -243,9 +243,9 @@ mod tests {
         assert_eq!(key_hint("cmd-shift-enter"), "⇧⌘↩");
         assert_eq!(Command::NewSession.hint().as_deref(), Some("⇧⌘N"));
         assert_eq!(Command::RenameSession.hint(), None);
-        assert_eq!(Command::SwitchSession.hint().as_deref(), Some("⇧⌘K"));
+        assert_eq!(Command::SwitchSession.hint().as_deref(), Some("⌘K"));
         assert_eq!(Command::FocusPaneLeft.hint().as_deref(), Some("⌘H"));
-        assert_eq!(Command::FocusPaneUp.hint().as_deref(), Some("⌘K"));
+        assert_eq!(Command::FocusPaneUp.hint().as_deref(), Some("⌥⌘↑"));
     }
 
     #[test]

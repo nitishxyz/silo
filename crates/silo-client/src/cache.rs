@@ -137,6 +137,17 @@ impl Cache {
         self.collect()
     }
 
+    /// Drop the cached session tree (its session is gone).
+    ///
+    /// # Errors
+    /// Write failure.
+    pub fn clear_tree(&mut self) -> anyhow::Result<()> {
+        let Some(previous) = self.manifest.tree.take() else {
+            return Ok(());
+        };
+        self.commit(&[]).inspect_err(|_| self.manifest.tree = Some(previous))
+    }
+
     /// Checkpoint `mirror` as block `id`. Returns `false` (and keeps any
     /// previous checkpoint) when the mirror is not coherent.
     ///

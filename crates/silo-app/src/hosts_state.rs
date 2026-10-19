@@ -140,6 +140,24 @@ impl HostsState {
         owned.tree = Some(tree);
     }
 
+    /// `session` was deleted on `host`: never paint it again, nor list it
+    /// offline.
+    fn forget_session(&mut self, host: usize, session: &str) {
+        let owned = &mut self.owned[host];
+        let Some(tree) = owned.tree.as_mut() else { return };
+        if tree.view.session.id == session {
+            owned.tree = None;
+            if let Some(writer) = &owned.cache {
+                writer.clear_tree();
+            }
+        } else if tree.sessions.iter().any(|s| s.id == session) {
+            tree.sessions.retain(|s| s.id != session);
+            if let Some(writer) = &owned.cache {
+                writer.save_tree(tree.clone());
+            }
+        }
+    }
+
     pub fn take_restored(&mut self, host: usize, block: &str) -> Option<silo_client::Mirror> {
         self.owned[host].restored.remove(block)
     }
@@ -225,7 +243,10 @@ impl HostsState {
                 sessions.sort_by_key(|s| s.created_at);
                 entry.sessions.clone_from(sessions);
             }
-            ConnEvent::Event(Event::SessionClosed { .. }) => self.gc_cache(host),
+            ConnEvent::Event(Event::SessionClosed { session_id }) => {
+                self.forget_session(host, session_id);
+                self.gc_cache(host);
+            }
             ConnEvent::Event(_) => {}
         }
         cx.emit(HostEvent { host, event });
