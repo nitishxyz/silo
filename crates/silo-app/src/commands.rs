@@ -65,6 +65,7 @@ macro_rules! commands {
 commands! {
     // Sessions
     NewSession => "New Session", "Sessions", ["cmd-shift-n"];
+    NewWindow => "New Window…", "Sessions", ["cmd-n"], "Open a session in another window";
     RenameSession => "Rename Session…", "Sessions", [];
     CloseSession => "Close Session", "Sessions", [], "Ends every process in the session";
     SwitchSession => "Switch to Session…", "Sessions", ["cmd-shift-k"];
@@ -112,6 +113,7 @@ commands! {
     ShowPaneHeaders => "Show Pane Headers", "View", [];
     HidePaneHeaders => "Hide Pane Headers", "View", [];
     ToggleFullScreen => "Toggle Full Screen", "View", ["ctrl-cmd-f"];
+    CycleWindows => "Cycle Through Windows", "View", ["cmd-`"];
     OpenSettings => "Settings…", "App", ["cmd-,"];
     ReloadTerminalSettings => "Reload Terminal Settings", "App", [], "Apply changes made by hand";
     OpenTerminalSettingsFile => "Open Terminal Settings File", "App", [];

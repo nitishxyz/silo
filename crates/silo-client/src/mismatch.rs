@@ -44,8 +44,11 @@ impl DifferentBuild {
     /// The headline and what to do.
     #[must_use]
     pub fn message(&self) -> String {
-        format!("{} Upgrade it to use this build; sessions keep running.", self.headline())
+        format!("{} Upgrade it to use this build.", self.headline())
     }
+
+    /// What [`upgrade`] costs, in one line.
+    pub const UPGRADE_NOTE: &str = "Sessions keep running; a very old server's sessions end.";
 }
 
 impl std::fmt::Display for DifferentBuild {
@@ -62,16 +65,22 @@ pub fn is_mismatch(error: &anyhow::Error) -> bool {
     error.downcast_ref::<BuildMismatch>().is_some()
 }
 
+/// The server of another build for `home`, if `error` (from a local
+/// connect) is a build rejection and a server holds the state directory.
+pub async fn different_build(home: &Path, error: &anyhow::Error) -> Option<DifferentBuild> {
+    if is_mismatch(error) && server_lock_held(home) { Some(inspect(home).await) } else { None }
+}
+
 /// Describe the server that rejected our build: `runtime.json`, plus a
 /// best-effort session count.
 pub async fn inspect(home: &Path) -> DifferentBuild {
     let runtime = read_runtime(home);
-    let sessions = match &runtime {
-        Some(r) => count_sessions(home, &r.build).await,
+    let sessions = match runtime.as_ref().and_then(|r| r.build.as_deref()) {
+        Some(build) => count_sessions(home, build).await,
         None => None,
     };
     DifferentBuild {
-        build: runtime.as_ref().map(|r| r.build.clone()),
+        build: runtime.as_ref().and_then(|r| r.build.clone()),
         pid: runtime.as_ref().map(|r| r.pid),
         version: runtime.map(|r| r.version),
         sessions,
@@ -90,7 +99,17 @@ async fn count_sessions(home: &Path, build: &str) -> Option<usize> {
     listed.ok()?.ok()?.as_array().map(Vec::len)
 }
 
-fn read_runtime(home: &Path) -> Option<paths::Runtime> {
+/// What describing and stopping another build's server needs from its
+/// `runtime.json`. Builds before the build handshake wrote no `build`.
+#[derive(serde::Deserialize)]
+struct Holder {
+    pid: u32,
+    socket: std::path::PathBuf,
+    version: String,
+    build: Option<String>,
+}
+
+fn read_runtime(home: &Path) -> Option<Holder> {
     serde_json::from_slice(&std::fs::read(paths::runtime(home)).ok()?).ok()
 }
 
@@ -129,14 +148,41 @@ pub async fn stop(home: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Replace the different-build server with this build's `server_exe`,
-/// live: `server --takeover --daemon` takes every session, programs
-/// included, from it. Returns once this build answers on the socket;
-/// clients then reconnect. On failure the old server keeps serving.
+/// Replace the different-build server with this build's `server_exe`:
+/// live where it can (`server --takeover` takes every session, programs
+/// included), else, for a server from before live upgrade, [`stop`] it
+/// (its sessions end) and start this build's. Returns once this build
+/// answers on the socket; clients then reconnect. On failure the old
+/// server keeps serving.
 ///
 /// # Errors
-/// The successor could not be started or did not take over in time.
-pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
+/// The successor could not take over, or the old server could not be
+/// stopped or this build's started.
+pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<Upgraded> {
+    match take_over(home, server_exe, server).await {
+        Ok(()) => Ok(Upgraded::Live),
+        Err(error) if error.is::<NotUpgradable>() => {
+            tracing::info!(pid = ?server.pid, "the server predates live upgrade; restarting it");
+            stop(home, server).await?;
+            drop(crate::connect_or_spawn(home, server_exe, NAME).await?);
+            Ok(Upgraded::Restarted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// How [`upgrade`] replaced the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Upgraded {
+    /// Taken over live; every session kept running.
+    Live,
+    /// It predated live upgrade: stopped (its sessions ended) and this
+    /// build's server started.
+    Restarted,
+}
+
+/// The live takeover; [`NotUpgradable`] if the server predates it.
+async fn take_over(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
     let mut child = crate::spawn::spawn_server(home, server_exe, &["--takeover", "--idle-exit", "10"])?;
     let socket = paths::socket(home);
     let deadline = Instant::now() + UPGRADE_TIMEOUT;
@@ -153,6 +199,9 @@ pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) ->
             return Ok(());
         }
         if let Ok(Some(status)) = child.try_wait() {
+            if status.code() == Some(silo_proto::EXIT_NOT_UPGRADABLE) {
+                return Err(NotUpgradable.into());
+            }
             return Err(failed(format!("successor exited ({status})")));
         }
         if Instant::now() >= deadline {
@@ -162,6 +211,19 @@ pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) ->
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// The running server predates live upgrade: it closed on the upgrade
+/// request and keeps serving. Only a restart ([`stop`]) replaces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NotUpgradable;
+
+impl std::fmt::Display for NotUpgradable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the server predates live upgrade")
+    }
+}
+
+impl std::error::Error for NotUpgradable {}
 
 /// Generous: the successor restores every block's snapshot first.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -214,10 +276,7 @@ mod tests {
 
     #[test]
     fn describes_server() {
-        assert_eq!(
-            server(Some(3)).message(),
-            "A different Silo server build is running (3 sessions). Upgrade it to use this build; sessions keep running."
-        );
+        assert_eq!(server(Some(3)).message(), "A different Silo server build is running (3 sessions). Upgrade it to use this build.");
         assert_eq!(server(Some(1)).headline(), "A different Silo server build is running (1 session).");
         assert_eq!(server(None).headline(), "A different Silo server build is running.");
     }
@@ -310,6 +369,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// A server from before the build handshake: holds the lock, accepts
+    /// the socket and answers the hello as connection `n % 4` says (hang
+    /// up as the real one does, an unknown error code, its old hello
+    /// shape, garbage). Its `runtime.json` has no build; its pid is a
+    /// process named `silo`, and the lock goes once that exits.
+    fn old_server(home: &Path) -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, u32, tokio::task::JoinHandle<()>) {
+        use silo_proto::{Frame, kind, read_frame, write_frame};
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::os::unix::fs::symlink("/bin/sleep", home.join("bin/silo")).unwrap();
+        let mut child = std::process::Command::new(home.join("bin/silo")).arg("60").spawn().unwrap();
+        let pid = child.id();
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
+        rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        std::thread::spawn(move || drop((child.wait(), lock)));
+        let runtime = serde_json::json!({"pid": pid, "socket": paths::socket(home), "version": "0.1.0", "ghostty_rev": "x", "started_at": 0});
+        std::fs::write(paths::runtime(home), runtime.to_string()).unwrap();
+        let listener = tokio::net::UnixListener::bind(paths::socket(home)).unwrap();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = connections.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                read_frame(&mut stream).await.unwrap();
+                let reply = match n % 4 {
+                    0 => continue,
+                    1 => {
+                        let error = silo_proto::control::RpcError::new("protocol", "server speaks protocol 1");
+                        Frame::json(kind::CONTROL, &silo_proto::control::ServerMessage::Response { id: 0, result: None, error: Some(error) })
+                    }
+                    2 => Frame::json(kind::CONTROL_HELLO, &serde_json::json!({"protocol": 1, "client_id": 1, "server": {"version": "0.1.0"}})),
+                    _ => Ok(Frame::new(kind::CONTROL_HELLO, b"\xff garbage".to_vec())),
+                };
+                write_frame(&mut stream, &reply.unwrap()).await.unwrap();
+            }
+        });
+        (connections, pid, task)
+    }
+
+    #[tokio::test]
+    async fn old_server_is_a_different_build_not_respawned_and_stopped() {
+        let home = std::env::temp_dir().join(format!("silo-mismatch-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let (connections, pid, task) = old_server(&home);
+        let expected = DifferentBuild { build: None, pid: Some(pid), version: Some("0.1.0".into()), sessions: None };
+        for n in 1..=4 {
+            let error = crate::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "test").await.err().expect("an old server must not connect");
+            assert_eq!(error.downcast_ref::<DifferentBuild>(), Some(&expected), "reply {}: {error:#}", n - 1);
+            assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), n, "one hello each, no session lookup");
+        }
+        // It closes on the upgrade request, so the takeover exits 3: one
+        // upgrade stops it and starts this build (`server --daemon`).
+        let successor = home.join("bin/successor");
+        let started = home.join("started");
+        let script = format!("#!/bin/sh\n[ \"$2\" = --takeover ] && exit {}\ntouch '{}'\n", silo_proto::EXIT_NOT_UPGRADABLE, started.display());
+        std::fs::write(&successor, script).unwrap();
+        std::fs::set_permissions(&successor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let new_server = tokio::spawn(this_build_when(started, paths::socket(&home)));
+        assert_eq!(upgrade(&home, &successor, &expected).await.unwrap(), Upgraded::Restarted);
+        assert!(!server_lock_held(&home), "the old server was stopped");
+        task.abort();
+        new_server.abort();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Once `marker` exists, serve this build's hello on `socket` (a fresh
+    /// bind, as a newly started server does).
+    async fn this_build_when(marker: std::path::PathBuf, socket: std::path::PathBuf) {
+        use silo_proto::{Frame, control::ServerHello, kind, read_frame, write_frame};
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                read_frame(&mut stream).await.unwrap();
+                let server =
+                    serde_json::from_value(serde_json::json!({"version": "", "pid": 0, "server_id": "", "started_at": 0, "endpoint_id": ""}))
+                        .unwrap();
+                let hello = ServerHello { build: silo_proto::BUILD.to_owned(), client_id: 1, server };
+                write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+        }
+    }
+
     /// The live path needs a real successor binary (see `silo-server`'s
     /// `tests/upgrade.rs`); here: a missing one fails at once and leaves
     /// the other server serving.
@@ -360,7 +507,7 @@ mod tests {
         }
         let control = connected.expect("same build connects");
         assert_eq!(control.hello().build, silo_proto::BUILD);
-        assert_eq!(read_runtime(&home).unwrap().build, silo_proto::BUILD);
+        assert_eq!(read_runtime(&home).unwrap().build.as_deref(), Some(silo_proto::BUILD));
 
         let error =
             Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "forged", false, OTHER).await.err().expect("forged build rejected");

@@ -149,31 +149,29 @@ impl Workspace {
     }
 
     /// Forget a remote host (hosts.json and the switcher).
-    pub(crate) fn remove_host(&mut self, index: usize) -> Result<String, String> {
-        let entry = self.hosts.get_mut(index).ok_or("No such host.")?;
+    pub(crate) fn remove_host(&mut self, index: usize, cx: &mut Context<Self>) -> Result<String, String> {
+        let entry = self.hosts.get(index).ok_or("No such host.")?;
         let Some(id) = entry.info.transport.remote_id() else { return Err("This Mac cannot be removed.".into()) };
         let saved: Vec<RemoteHost> = hosts::load(&self.home).into_iter().filter(|h| h.id != id).collect();
         hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
-        self.rt.spawn(crate::web::close_tunnel(id));
-        let entry = &mut self.hosts[index];
-        entry.removed = true;
-        entry.conn = None;
-        entry.control = None;
-        Ok(entry.info.name.clone())
+        self.shared.update(cx, |shared, cx| shared.forget(index, cx));
+        self.sync_hosts(cx);
+        Ok(self.hosts[index].info.name.clone())
     }
 
     /// Give a remote host a new name.
-    pub(crate) fn rename_host(&mut self, index: usize, name: String) -> Result<(), String> {
+    pub(crate) fn rename_host(&mut self, index: usize, name: String, cx: &mut Context<Self>) -> Result<(), String> {
         let name = name.trim().to_owned();
         if name.is_empty() {
             return Err("Enter a name.".into());
         }
-        let entry = self.hosts.get_mut(index).ok_or("No such host.")?;
+        let entry = self.hosts.get(index).ok_or("No such host.")?;
         let Some(id) = entry.info.transport.remote_id() else { return Err("This Mac cannot be renamed.".into()) };
         let mut saved = hosts::load(&self.home);
         saved.iter_mut().filter(|h| h.id == id).for_each(|h| h.name.clone_from(&name));
         hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
-        entry.info.name = name;
+        self.shared.update(cx, |shared, cx| shared.rename(index, name, cx));
+        self.sync_hosts(cx);
         Ok(())
     }
 
@@ -182,15 +180,10 @@ impl Workspace {
         let mut saved: Vec<RemoteHost> = hosts::load(&self.home).into_iter().filter(|h| h.id != host.id).collect();
         saved.push(host.clone());
         hosts::save(&self.home, &saved).map_err(|e| format!("Could not save: {e:#}"))?;
-        if let Some(entry) = replace.and_then(|i| self.hosts.get_mut(i)) {
-            if let Some(id) = entry.info.transport.remote_id() {
-                self.rt.spawn(crate::web::close_tunnel(id));
-            }
-            entry.removed = true;
-            entry.conn = None;
-            entry.control = None;
+        if let Some(index) = replace.filter(|i| *i < self.hosts.len()) {
+            self.shared.update(cx, |shared, cx| shared.forget(index, cx));
         }
-        self.add_host_entry(HostInfo::remote(self.home.clone(), &host), window, cx);
+        self.add_host_entry(HostInfo::remote(self.home.clone(), &host), cx);
         if replace.is_some() {
             self.switch_host(self.hosts.len() - 1, window, cx);
         }

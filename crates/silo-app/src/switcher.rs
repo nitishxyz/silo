@@ -397,7 +397,7 @@ pub(crate) fn state_label(state: &HostState, local: bool) -> Option<&'static str
     }
 }
 
-fn state_color(state: &HostState) -> u32 {
+pub(crate) fn state_color(state: &HostState) -> u32 {
     match state {
         HostState::Connected => theme::accent(),
         HostState::Connecting => theme::muted(),

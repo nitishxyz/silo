@@ -14,6 +14,7 @@ mod floats;
 mod focus;
 mod fonts;
 mod hosts;
+mod hosts_state;
 mod incompatible;
 mod keys;
 mod latency;
@@ -33,12 +34,13 @@ mod theme;
 mod titlebar;
 mod tooltip;
 mod web;
+mod window_picker;
 mod workspace;
 
-use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
+use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, point, prelude::*, px, size};
 
 use crate::{
-    commands::act::{CommandPalette, NewSession, OpenSettings, Quit},
+    commands::act::{CommandPalette, CycleWindows, NewSession, NewWindow, OpenSettings, Quit},
     workspace::Workspace,
 };
 
@@ -72,6 +74,15 @@ fn main() {
             let _ = urls_tx.send(url);
         }
     });
+    // "Open Silo" (menu bar, Dock) on a running app: the frontmost window.
+    application.on_reopen(|cx| match frontmost(cx) {
+        Some(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        None => {
+            let _ = open_window(None, cx).inspect_err(|e| tracing::warn!("open window: {e:#}"));
+        }
+    });
     application.run(move |cx: &mut App| {
         theme::apply_font(cx);
         theme::warm_fonts(cx);
@@ -93,9 +104,14 @@ fn main() {
             },
             Menu {
                 name: "Session".into(),
-                items: vec![MenuItem::action("New Session", NewSession), MenuItem::action("Command Palette", CommandPalette)],
+                items: vec![
+                    MenuItem::action("New Session", NewSession),
+                    MenuItem::action("New Window…", NewWindow),
+                    MenuItem::action("Command Palette", CommandPalette),
+                ],
                 disabled: false,
             },
+            Menu { name: "Window".into(), items: vec![MenuItem::action("Cycle Through Windows", CycleWindows)], disabled: false },
         ]);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -103,31 +119,14 @@ fn main() {
             }
         })
         .detach();
-        let bounds = Bounds::centered(None, size(px(1000.), px(680.)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("silo".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(16.))),
-                }),
-                window_min_size: Some(size(px(420.), px(240.))),
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Workspace::new(rt.clone(), home.clone(), exe.clone(), window, cx)),
-        );
-        let handle = match opened {
-            Ok(handle) => handle,
-            Err(error) => {
-                eprintln!("silo: cannot open window: {error:#}");
-                cx.quit();
-                return;
-            }
-        };
+        hosts_state::HostsState::install(rt.clone(), home.clone(), exe.clone(), cx);
+        if let Err(error) = open_window(None, cx) {
+            eprintln!("silo: cannot open window: {error:#}");
+            cx.quit();
+            return;
+        }
         if std::env::var("SILO_OPEN").is_ok_and(|v| v == "settings") {
-            let _ = handle.update(cx, |workspace, window, cx| workspace.open_settings(window, cx));
+            show_settings(cx);
         }
         cx.spawn(async move |cx| {
             while let Some(url) = urls.recv().await {
@@ -135,17 +134,48 @@ fn main() {
                     tracing::info!(url, "ignoring URL");
                     continue;
                 }
-                let _ = handle.update(cx, |workspace, window, cx| {
-                    window.activate_window();
-                    workspace.open_settings(window, cx);
-                });
-                cx.update(|cx| cx.activate(true));
+                cx.update(show_settings);
             }
         })
         .detach();
         cx.activate(true);
     });
     drop(runtime);
+}
+
+/// The frontmost Silo window, if any.
+fn frontmost(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().find_map(|w| w.downcast::<Workspace>())
+}
+
+/// Settings in the frontmost window (a new one if none is open).
+fn show_settings(cx: &mut App) {
+    let Some(handle) = frontmost(cx).or_else(|| open_window(None, cx).ok()) else { return };
+    let _ = handle.update(cx, |workspace, window, cx| {
+        window.activate_window();
+        workspace.open_settings(window, cx);
+    });
+    cx.activate(true);
+}
+
+/// Open a window showing `session` (host index, session id), or this
+/// Mac's last session. Windows cascade 28 px from the active one.
+pub fn open_window(session: Option<(usize, String)>, cx: &mut App) -> anyhow::Result<WindowHandle<Workspace>> {
+    let current = cx.active_window().or_else(|| cx.windows().last().copied());
+    let bounds = match current.and_then(|w| w.update(cx, |_, window, _| window.bounds()).ok()) {
+        Some(b) => Bounds { origin: b.origin + point(px(28.), px(28.)), size: b.size },
+        None => Bounds::centered(None, size(px(1000.), px(680.)), cx),
+    };
+    let titlebar = TitlebarOptions { title: Some("silo".into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(16.))) };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(titlebar),
+        window_min_size: Some(size(px(420.), px(240.))),
+        app_owns_titlebar_drag: true,
+        ..Default::default()
+    };
+    let hosts = hosts_state::HostsState::global(cx);
+    cx.open_window(options, |window, cx| cx.new(|cx| Workspace::new(hosts, session, window, cx)))
 }
 
 /// `SILO_LOG` (default `info`) with GPUI's per-face font warnings muted,

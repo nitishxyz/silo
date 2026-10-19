@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::Context;
 use serde::de::DeserializeOwned;
 use silo_proto::{
     BUILD, Frame,
@@ -102,6 +102,26 @@ fn typed(error: RpcError) -> anyhow::Error {
     }
 }
 
+/// The server does not speak `build`'s hello.
+fn not_this_build() -> anyhow::Error {
+    BuildMismatch { message: "the server did not complete this build's hello".into() }.into()
+}
+
+/// `build`'s hello reply. Any other shape, an unknown rejection or another
+/// build's hello comes from a server of another build: [`BuildMismatch`].
+fn server_hello(reply: &Frame, build: &str) -> anyhow::Result<ServerHello> {
+    if reply.kind == kind::CONTROL_HELLO {
+        return reply.parse::<ServerHello>().ok().filter(|h| h.build == build).ok_or_else(not_this_build);
+    }
+    match reply.parse::<ServerMessage>() {
+        Ok(ServerMessage::Response { error: Some(error), .. }) => match typed(error) {
+            e if e.is::<RpcError>() => Err(not_this_build()),
+            e => Err(e),
+        },
+        _ => Err(not_this_build()),
+    }
+}
+
 /// A control connection. Cheap to clone; all clones share one stream.
 #[derive(Clone)]
 pub struct Control {
@@ -172,14 +192,12 @@ impl Control {
         let hello = ClientHello { build: build.to_owned(), client_name: client_name.to_owned(), token: None, passive, invite };
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;
-        let reply = read_frame(&mut stream).await?.ok_or_else(|| anyhow!("server closed during hello"))?;
-        if reply.kind != kind::CONTROL_HELLO {
-            if let Ok(ServerMessage::Response { error: Some(error), .. }) = reply.parse::<ServerMessage>() {
-                return Err(typed(error));
-            }
-            bail!("unexpected hello reply");
-        }
-        let hello: ServerHello = reply.parse()?;
+        let hello = match read_frame(&mut stream).await {
+            Ok(Some(reply)) => server_hello(&reply, build)?,
+            Ok(None) => return Err(not_this_build()),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Err(not_this_build()),
+            Err(e) => return Err(e.into()),
+        };
         let (reader, mut writer) = tokio::io::split(stream);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
@@ -422,6 +440,19 @@ mod tests {
         assert!(err.is::<TimedOut>());
         assert!(control.inner.pending.lock().unwrap().as_ref().unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn foreign_hellos_are_build_mismatches() {
+        let mismatch = |frame: Frame| server_hello(&frame, BUILD).unwrap_err().is::<BuildMismatch>();
+        let rejected =
+            |code: &str| Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(RpcError::new(code, "x")) }).unwrap();
+        assert!(mismatch(rejected("protocol")));
+        assert!(mismatch(Frame::json(kind::CONTROL_HELLO, &serde_json::json!({"protocol": 1, "client_id": 1})).unwrap()));
+        assert!(mismatch(Frame::new(kind::CONTROL_HELLO, b"garbage".to_vec())));
+        assert!(mismatch(Frame::new(kind::CONTROL, b"garbage".to_vec())));
+        assert!(server_hello(&rejected(RpcError::UNAUTHORIZED), BUILD).unwrap_err().is::<Unauthorized>());
+        assert!(server_hello(&rejected("upgrading"), BUILD).unwrap_err().is::<Upgrading>());
     }
 
     #[test]

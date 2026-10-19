@@ -121,11 +121,11 @@ pub(crate) fn spawn_server(home: &Path, server_exe: &Path, args: &[&str]) -> any
         })
 }
 
-/// Turn a build rejection into [`mismatch::DifferentBuild`]; other errors
-/// pass.
+/// Turn a build rejection by the server holding `home` into
+/// [`mismatch::DifferentBuild`]; other errors pass.
 async fn incompatible(home: &Path, error: &anyhow::Error) -> anyhow::Result<()> {
-    if mismatch::is_mismatch(error) {
-        return Err(mismatch::inspect(home).await.into());
+    match mismatch::different_build(home, error).await {
+        Some(server) => Err(server.into()),
+        None => Ok(()),
     }
-    Ok(())
 }

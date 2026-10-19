@@ -172,7 +172,7 @@ fn yes() -> bool {
 
 /// App-side state and settings remembered across launches
 /// (`$SILO_HOME/app.json`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
     #[serde(default)]
     pub last_session: Option<String>,

@@ -23,6 +23,10 @@ pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 /// protocol versioning.
 pub const BUILD: &str = env!("SILO_BUILD_ID");
 
+/// Exit status of `silo server --takeover` when the running server closed
+/// on the upgrade request: it predates live upgrade and keeps serving.
+pub const EXIT_NOT_UPGRADABLE: i32 = 3;
+
 /// Upper bound for any single frame.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 

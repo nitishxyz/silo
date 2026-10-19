@@ -83,7 +83,15 @@ impl Workspace {
             }
             return;
         }
-        // Upgrading an incompatible server keeps every session.
+        // The window picker is modal the same way; ⌘W closes it.
+        if self.picker.is_some() && !crate::window_picker::allowed_while_open(command) {
+            if matches!(command, Command::ClosePane | Command::CloseTab) {
+                self.close_picker(window, cx);
+            }
+            return;
+        }
+        // Restart Server on an incompatible server is the upgrade, which
+        // keeps sessions when it can and says so when it could not.
         let upgrade = matches!(command, Command::RestartServer) && self.incompatible().is_some();
         if command.destructive() && !upgrade {
             self.open_palette_step(Step::Confirm(command), String::new(), window, cx);
@@ -95,7 +103,7 @@ impl Workspace {
     /// A command's palette subtitle in the current state.
     fn subtitle(&self, command: Command) -> Option<&'static str> {
         match command {
-            Command::RestartServer if self.incompatible().is_some() => Some("Upgrades it, keeping sessions"),
+            Command::RestartServer if self.incompatible().is_some() => Some("Upgrades it to this build"),
             other => other.subtitle(),
         }
     }
@@ -116,6 +124,8 @@ impl Workspace {
                 self.close_switcher(window, cx);
                 self.create_session(None, window, cx);
             }
+            Command::NewWindow => self.toggle_picker(window, cx),
+            Command::CycleWindows => crate::window_picker::cycle_windows(window, cx),
             Command::RenameSession => {
                 if let Some(view) = &self.view {
                     let (id, name) = (view.session.id.clone(), view.session.name.clone());
@@ -338,7 +348,7 @@ impl Workspace {
     /// Focus the geometric neighbour of the focused pane (⌘H/J/K/L).
     /// No neighbour, or an open overlay, is a no-op.
     fn focus_direction(&mut self, direction: crate::focus::Direction, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher.is_some() || self.palette.is_some() || self.add_host.is_some() {
+        if self.switcher.is_some() || self.palette.is_some() || self.add_host.is_some() || self.picker.is_some() {
             return;
         }
         let Some(current) = self.focused_block(window, cx) else { return };
@@ -531,7 +541,7 @@ impl Workspace {
                 self.split_browser(block, Some(url));
                 self.close_palette(window, cx);
             }
-            Input::HostName(index) => match self.rename_host(index, text) {
+            Input::HostName(index) => match self.rename_host(index, text, cx) {
                 Ok(()) => {
                     self.close_palette(window, cx);
                     self.refresh_settings(None, cx);
@@ -550,7 +560,7 @@ impl Workspace {
             }
             Entry::Confirm(command) => self.execute(command, window, cx),
             Entry::Back => self.open_palette_step(Step::Search, String::new(), window, cx),
-            Entry::RemoveHost(index) => match self.remove_host(index) {
+            Entry::RemoveHost(index) => match self.remove_host(index, cx) {
                 Ok(name) => {
                     self.flash(format!("Removed host “{name}”."), cx);
                     self.close_palette(window, cx);

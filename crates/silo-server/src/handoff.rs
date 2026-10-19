@@ -154,7 +154,7 @@ pub type Received = (Transfer, Vec<Vec<u8>>, Vec<OwnedFd>, [OwnedFd; 2]);
 /// # Errors
 /// Socket failures or malformed data.
 pub fn recv(sock: &mut UnixStream) -> io::Result<Received> {
-    let transfer: Transfer = serde_json::from_slice(&read_frame(sock)?)?;
+    let transfer: Transfer = serde_json::from_slice(&read_frame(sock).map_err(refused)?)?;
     let checkpoints = (0..transfer.blocks.len()).map(|_| read_frame(sock)).collect::<io::Result<Vec<_>>>()?;
     let want = transfer.blocks.iter().filter_map(|b| b.pty.as_ref()).count();
     let mut fds = Vec::with_capacity(want);
@@ -175,6 +175,27 @@ pub fn recv(sock: &mut UnixStream) -> io::Result<Received> {
         return Err(invalid("expected the server lock and socket"));
     }
     Ok((transfer, checkpoints, fds, server))
+}
+
+/// The running server closed on [`MAGIC`]: a build from before live
+/// upgrade. Nothing was transferred; it keeps serving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotUpgradable;
+
+impl std::fmt::Display for NotUpgradable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the running server does not support live upgrade")
+    }
+}
+
+impl std::error::Error for NotUpgradable {}
+
+/// The old server hung up before answering [`MAGIC`] is [`NotUpgradable`].
+fn refused(error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => io::Error::other(NotUpgradable),
+        _ => error,
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -342,11 +363,12 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
         silo_pty::handoff::check_peer_uid(&sock)?;
         sock.set_read_timeout(Some(STEP_TIMEOUT))?;
         sock.set_write_timeout(Some(STEP_TIMEOUT))?;
-        sock.write_all(MAGIC)?;
+        sock.write_all(MAGIC).map_err(refused)?;
         let (transfer, checkpoints, fds, server) = recv(&mut sock)?;
         Ok((sock, transfer, checkpoints, fds, server))
     })
-    .await??;
+    .await?
+    .map_err(|e| if e.get_ref().is_some_and(|e| e.is::<NotUpgradable>()) { anyhow::Error::from(NotUpgradable) } else { e.into() })?;
     let persist = persist::Persist::attach(home, transfer.server_id.clone())?;
     if fail_before_ready {
         anyhow::bail!("upgrade aborted before READY (test hook)");

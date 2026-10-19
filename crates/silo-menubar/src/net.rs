@@ -135,7 +135,7 @@ async fn run(config: Config, shared: Arc<Shared>, mut cmds: mpsc::UnboundedRecei
             }
             Err(error) => {
                 // Another build: describe it, never start a second server.
-                let incompatible = if mismatch::is_mismatch(&error) { Some(mismatch::inspect(&config.home).await) } else { None };
+                let incompatible = mismatch::different_build(&config.home, &error).await;
                 let changed = shared.state.lock().is_ok_and(|s| s.incompatible != incompatible || s.unresponsive);
                 if changed {
                     shared.update(|s| {

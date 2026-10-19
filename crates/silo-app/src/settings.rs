@@ -97,7 +97,7 @@ impl Workspace {
             has_log: silo_proto::paths::log(&self.home).exists(),
             can_start: paused,
             can_stop: connected.is_some(),
-            can_restart: connected.is_some() || incompatible.is_some(),
+            can_restart: connected.is_some(),
             endpoint_id: connected.map(|c| c.hello().server.endpoint_id.clone()).filter(|id| !id.is_empty()),
             remote_error: connected.and_then(|c| c.hello().server.remote_error.as_deref()).map(without_paths),
             devices: self
@@ -420,7 +420,7 @@ impl Workspace {
                 self.open_rename_host(index, window, cx);
                 return;
             }
-            SettingsEvent::RemoveHost(id) => match id.parse::<usize>().map_err(|e| e.to_string()).and_then(|i| self.remove_host(i)) {
+            SettingsEvent::RemoveHost(id) => match id.parse::<usize>().map_err(|e| e.to_string()).and_then(|i| self.remove_host(i, cx)) {
                 Ok(name) => Some(format!("Removed host “{name}”.")),
                 Err(error) => Some(error),
             },
@@ -502,7 +502,7 @@ fn host_status(state: &HostState, paused: bool) -> String {
 /// else would act on the hidden terminal and is swallowed (⌘W closes the
 /// panel instead).
 pub(crate) fn allowed_while_open(command: Command) -> bool {
-    matches!(command, Command::OpenSettings | Command::Quit | Command::ToggleFullScreen)
+    matches!(command, Command::OpenSettings | Command::Quit | Command::ToggleFullScreen | Command::CycleWindows)
 }
 
 fn short(rev: &str) -> &str {

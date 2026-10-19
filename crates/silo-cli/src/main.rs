@@ -322,7 +322,13 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             }
             let config = silo_server::Config { home: paths::home(), idle_exit, relay, mdns: !no_mdns, port, ..Default::default() };
             if takeover {
-                takeover_reporting(config, status).await?;
+                if let Err(error) = takeover_reporting(config, status).await {
+                    if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
+                        tracing::warn!("takeover: {error:#}");
+                        return Ok(silo_proto::EXIT_NOT_UPGRADABLE);
+                    }
+                    return Err(error);
+                }
             } else {
                 silo_server::run(config).await?;
             }
@@ -637,10 +643,13 @@ async fn connect(host: Option<&str>) -> anyhow::Result<(Control, Events, Option<
 }
 
 async fn connect_existing() -> anyhow::Result<(Option<Control>, Option<Events>)> {
-    match Control::connect(&paths::socket(&paths::home()), &client_name()).await {
+    let home = paths::home();
+    match Control::connect(&paths::socket(&home), &client_name()).await {
         Ok((control, events)) => Ok((Some(control), Some(events))),
-        Err(error) if silo_client::mismatch::is_mismatch(&error) => Err(silo_client::mismatch::inspect(&paths::home()).await.into()),
-        Err(_) => Ok((None, None)),
+        Err(error) => match silo_client::mismatch::different_build(&home, &error).await {
+            Some(server) => Err(server.into()),
+            None => Ok((None, None)),
+        },
     }
 }
 
