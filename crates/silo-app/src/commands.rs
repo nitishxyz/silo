@@ -78,6 +78,7 @@ commands! {
     NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
     PreviousTab => "Previous Tab", "Tabs", ["cmd-{", "cmd-shift-["];
     // Panes
+    NewPane => "New Pane", "Panes", ["cmd-enter"], "Beside the focused pane, along its longer side";
     SplitRight => "Split Right", "Panes", ["cmd-d"];
     SplitDown => "Split Down", "Panes", ["cmd-shift-d"];
     ClosePane => "Close Pane", "Panes", ["cmd-w"];
@@ -87,6 +88,13 @@ commands! {
     FocusPaneRight => "Focus Pane Right", "Panes", ["cmd-l", "cmd-alt-right"];
     FocusPaneUp => "Focus Pane Up", "Panes", ["cmd-alt-up"];
     FocusPaneDown => "Focus Pane Down", "Panes", ["cmd-j", "cmd-alt-down"];
+    GrowPane => "Grow Pane", "Panes", ["ctrl-cmd-]"];
+    ShrinkPane => "Shrink Pane", "Panes", ["ctrl-cmd-["];
+    MovePaneEdgeLeft => "Move Pane Edge Left", "Panes", ["ctrl-cmd-left"];
+    MovePaneEdgeRight => "Move Pane Edge Right", "Panes", ["ctrl-cmd-right"];
+    MovePaneEdgeUp => "Move Pane Edge Up", "Panes", ["ctrl-cmd-up"];
+    MovePaneEdgeDown => "Move Pane Edge Down", "Panes", ["ctrl-cmd-down"];
+    EqualizePanes => "Equalize Panes", "Panes", ["ctrl-cmd-="];
     ZoomPane => "Zoom Pane", "Panes", ["cmd-shift-enter"], "Toggle";
     FloatPane => "Float Pane", "Panes", [], "Lift it above the layout";
     DockPane => "Dock Pane", "Panes", [], "Put it back in the layout";
@@ -246,6 +254,10 @@ mod tests {
         assert_eq!(Command::SwitchSession.hint().as_deref(), Some("⌘K"));
         assert_eq!(Command::FocusPaneLeft.hint().as_deref(), Some("⌘H"));
         assert_eq!(Command::FocusPaneUp.hint().as_deref(), Some("⌥⌘↑"));
+        assert_eq!(Command::GrowPane.hint().as_deref(), Some("⌃⌘]"));
+        assert_eq!(Command::MovePaneEdgeLeft.hint().as_deref(), Some("⌃⌘←"));
+        assert_eq!(Command::EqualizePanes.hint().as_deref(), Some("⌃⌘="));
+        assert_eq!(Command::NewPane.hint().as_deref(), Some("⌘↩"));
     }
 
     #[test]

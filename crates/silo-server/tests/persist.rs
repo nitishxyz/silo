@@ -135,8 +135,8 @@ async fn populate(control: &Control) -> (Created, Created, Created) {
     (main, split, window)
 }
 
-/// The restored tree equals `before` apart from block lifecycles, and every
-/// block kept its screen and history.
+/// The restored tree equals `before`, running blocks got a new shell, and
+/// every block kept its screen and history.
 async fn assert_restored(control: &Control, before: &SessionView, marks: &[(&str, &str)]) {
     let after = view(control, &before.session.id).await;
     let sessions: Vec<serde_json::Value> = control.call(Method::SessionList {}).await.unwrap();
@@ -148,9 +148,10 @@ async fn assert_restored(control: &Control, before: &SessionView, marks: &[(&str
     assert_eq!(after.blocks.len(), before.blocks.len());
     for old in &before.blocks {
         let new = block(&after, &old.id);
-        assert_eq!(new.lifecycle, Lifecycle::Restored);
-        assert_eq!((new.title.as_str(), new.session_id.as_str(), new.size), (old.title.as_str(), old.session_id.as_str(), old.size));
-        assert_eq!((new.pid, new.owner), (None, None));
+        assert_eq!(new.lifecycle, old.lifecycle);
+        assert_eq!(new.title, old.title);
+        assert_eq!((new.session_id.as_str(), new.size, new.exited, new.owner), (old.session_id.as_str(), old.size, old.exited, None));
+        assert_eq!(new.pid.is_some(), old.lifecycle == Lifecycle::Running);
     }
     for (block, mark) in marks {
         let text = capture(control, block).await;
@@ -174,7 +175,8 @@ async fn clean_shutdown_restores_tree_and_screens() {
     let history = capture(&control, &main.block_id).await;
     assert!(history.contains("\nhist-1\n") && history.contains("\nhist-300\n"), "history lost:\n{history}");
 
-    // Restored blocks ignore input; new blocks work normally.
+    send(&control, &main.block_id, "echo again-$((1+1))\n").await;
+    wait_output(&control, &main.block_id, "\nagain-2").await;
     let fresh: Created = control
         .call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
         .await
@@ -229,6 +231,52 @@ async fn exited_block_stays_and_survives_restart() {
     let task = start(&home).await;
     let control = connect(&home).await;
     assert_restored(&control, &before, &[(main.block_id.as_str(), "bye-42")]).await;
+    shutdown(control, task).await;
+
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    assert_restored(&control, &before, &[(main.block_id.as_str(), "bye-42")]).await;
+    shutdown(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_block_gets_a_shell_in_its_cwd() {
+    let home = temp_home("revive");
+    let work = home.join("work dir");
+    std::fs::create_dir_all(&work).unwrap();
+    let work = std::fs::canonicalize(&work).unwrap().to_string_lossy().into_owned();
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let spawn = SpawnSpec { cwd: Some(work.clone()), ..shell() };
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: spawn.clone(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn, kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    send(&control, &main.block_id, "echo old-$((2*3))\n").await;
+    wait_output(&control, &main.block_id, "\nold-6").await;
+    wait_for("cwd", async || block(&view(&control, &main.session_id).await, &main.block_id).cwd.as_deref() == Some(work.as_str())).await;
+    let before = view(&control, &main.session_id).await;
+    shutdown(control, task).await;
+
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let after = view(&control, &main.session_id).await;
+    assert_eq!(after.session.windows, before.session.windows);
+    assert_eq!(after.session.windows[0].layout.blocks(), [main.block_id.as_str(), split.block_id.as_str()]);
+    for id in [&main.block_id, &split.block_id] {
+        let info = block(&after, id);
+        assert_eq!(info.lifecycle, Lifecycle::Running);
+        assert!(info.pid.is_some());
+    }
+    send(&control, &main.block_id, "echo \"cwd-$(pwd)\"\n").await;
+    let want = format!("\ncwd-{work}");
+    wait_output(&control, &main.block_id, &want).await;
+    let text = capture(&control, &main.block_id).await;
+    let old = text.find("\nold-6").unwrap_or_else(|| panic!("old output lost:\n{text}"));
+    let separator = text.find("\u{2014} restored ").unwrap_or_else(|| panic!("no separator:\n{text}"));
+    assert!(old < separator && separator < text.find(&want).unwrap(), "out of order:\n{text}");
     shutdown(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -317,7 +365,7 @@ async fn corrupt_snapshot_restores_that_block_empty() {
     let marks = [(main.block_id.as_str(), "mark-main"), (window.block_id.as_str(), "mark-window")];
     assert_restored(&control, &before, &marks).await;
     let text = capture(&control, &split.block_id).await;
-    assert!(!text.contains("mark-split") && text.trim().is_empty(), "expected empty screen:\n{text}");
+    assert!(!text.contains("mark-split") && text.contains("\u{2014} restored "), "expected empty screen:\n{text}");
     shutdown(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -345,7 +393,7 @@ async fn floats_survive_restart() {
     let control = connect(&home).await;
     let after = view(&control, &main.session_id).await;
     assert_eq!(after.session.windows, before.session.windows);
-    assert_eq!(block(&after, &split.block_id).lifecycle, Lifecycle::Restored);
+    assert_eq!(block(&after, &split.block_id).lifecycle, Lifecycle::Running);
     wait_output(&control, &split.block_id, "\nfloat-20").await;
     shutdown(control, task).await;
     let _ = std::fs::remove_dir_all(&home);

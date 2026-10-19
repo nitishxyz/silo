@@ -26,19 +26,20 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::net::{Cmd, Shared};
 
-/// Opens the Silo app: the enclosing `.app` bundle when bundled, else the
-/// `silo-app` binary next to this one (development).
+/// Opens the Silo app: the enclosing `.app` bundle when bundled, the
+/// `silo-app` binary next to this one (development), else the installed
+/// app by bundle id (run from the runtime directory).
 #[derive(Clone, Debug)]
 pub enum AppLauncher {
     Bundle(PathBuf),
     Binary(PathBuf),
-    None,
+    Installed,
 }
 
 impl AppLauncher {
     fn find() -> Self {
         let Ok(exe) = std::env::current_exe() else {
-            return Self::None;
+            return Self::Installed;
         };
         let exe = exe.canonicalize().unwrap_or(exe);
         // .../Silo.app/Contents/MacOS/silo-menubar
@@ -47,18 +48,21 @@ impl AppLauncher {
         }
         match exe.parent().map(|d| d.join("silo-app")).filter(|p| p.is_file()) {
             Some(app) => Self::Binary(app),
-            None => Self::None,
+            None => Self::Installed,
         }
     }
 
     /// Open the app; with `settings`, at its Settings panel.
     pub fn open(&self, settings: bool) {
         let mut command = match self {
-            Self::Bundle(bundle) => {
+            Self::Bundle(_) | Self::Installed => {
                 // `silo://settings` reaches a running app as well as a
                 // launching one (CFBundleURLTypes in the bundle).
                 let mut c = std::process::Command::new("/usr/bin/open");
-                c.arg("-a").arg(bundle);
+                match self {
+                    Self::Bundle(bundle) => c.arg("-a").arg(bundle),
+                    _ => c.args(["-b", BUNDLE_ID]),
+                };
                 if settings {
                     c.arg(SETTINGS_URL);
                 }
@@ -77,7 +81,6 @@ impl AppLauncher {
                 c.env("SILO_NO_MENUBAR", "1");
                 c
             }
-            Self::None => return,
         };
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if let Err(error) = command.spawn() {
@@ -87,6 +90,7 @@ impl AppLauncher {
 }
 
 const SETTINGS_URL: &str = "silo://settings";
+const BUNDLE_ID: &str = "xyz.nitish.silo";
 
 fn activate_running(name: &str) -> bool {
     let script = format!(
@@ -242,12 +246,40 @@ fn symbol_image(name: &str) -> Option<Retained<NSImage>> {
     Some(image)
 }
 
-/// Held for the agent's lifetime; a second instance exits at once.
+/// Held for the agent's lifetime, recording `<pid> <build> <exe>`. A
+/// second agent of this build exits at once; one of another build asks the
+/// recorded agent to quit (if that pid still runs that `silo-menubar`) and
+/// takes over, so no old agent keeps an old Silo.app in use.
 fn single_instance(home: &Path) -> Option<std::fs::File> {
+    use std::io::{Read, Seek, Write};
     std::fs::create_dir_all(home).ok()?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(home.join("menubar.lock")).ok()?;
-    rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
+    let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(home.join("menubar.lock")).ok()?;
+    let lock = |file: &std::fs::File| rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
+    if !lock(&file) {
+        let mut record = String::new();
+        file.read_to_string(&mut record).ok()?;
+        let pid = stale_holder(&record, silo_proto::BUILD, silo_client::runtime::exe_of)?;
+        tracing::info!(pid, "replacing the menu-bar agent of another build");
+        let _ = rustix::process::kill_process(rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?, rustix::process::Signal::TERM);
+        (0..50).find(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            lock(&file)
+        })?;
+    }
+    let me = silo_client::runtime::exe_of(std::process::id()).unwrap_or_default();
+    file.set_len(0).ok()?;
+    file.rewind().ok()?;
+    write!(file, "{} {} {}", std::process::id(), silo_proto::BUILD, me.display()).ok()?;
     Some(file)
+}
+
+/// The pid of the agent `record` names, if it is of another build than
+/// `build` and still runs the recorded `silo-menubar`.
+fn stale_holder(record: &str, build: &str, exe_of: impl Fn(u32) -> Option<PathBuf>) -> Option<u32> {
+    let mut parts = record.splitn(3, ' ');
+    let (pid, holder_build, exe) = (parts.next()?.parse().ok()?, parts.next()?, Path::new(parts.next()?));
+    let ours = holder_build == build || pid == std::process::id();
+    (!ours && exe.file_name()? == "silo-menubar" && exe_of(pid).as_deref() == Some(exe)).then_some(pid)
 }
 
 fn main() {
@@ -278,7 +310,25 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::quit_warning;
+    use std::path::{Path, PathBuf};
+
+    use super::{quit_warning, stale_holder};
+
+    #[test]
+    fn replaces_only_a_live_agent_of_another_build() {
+        let old = "/h/runtime/old b/silo-menubar";
+        let running = |pid: u32| (pid == 10).then(|| PathBuf::from(old));
+        assert_eq!(stale_holder(&format!("10 oldbuild {old}"), "new", running), Some(10));
+        // Same build (dev, a second launch): leave it.
+        assert_eq!(stale_holder(&format!("10 new {old}"), "new", running), None);
+        // The pid is gone or now runs something else.
+        assert_eq!(stale_holder(&format!("11 oldbuild {old}"), "new", running), None);
+        assert_eq!(stale_holder("10 oldbuild /h/runtime/old b/vim", "new", |_| Some(Path::new("/h/runtime/old b/vim").to_owned())), None);
+        assert_eq!(stale_holder("10 oldbuild /elsewhere/silo-menubar", "new", running), None);
+        // No or a garbled record.
+        assert_eq!(stale_holder("", "new", running), None);
+        assert_eq!(stale_holder("x oldbuild a", "new", running), None);
+    }
 
     #[test]
     fn quit_confirmation_only_with_sessions() {

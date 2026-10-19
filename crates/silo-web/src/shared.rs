@@ -8,15 +8,20 @@ use crate::frame::Frame;
 /// Engine-side changes, drained by the app with `Browser::take_events`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    UrlChanged(String),
+    /// The main frame's committed URL; `back_forward` when the engine's own
+    /// history navigation committed it.
+    UrlChanged {
+        url: String,
+        back_forward: bool,
+    },
     TitleChanged(String),
     /// `data:image/png;base64,…` of the page's 32 px favicon.
     FaviconChanged(String),
-    Loading {
-        loading: bool,
-        can_go_back: bool,
-        can_go_forward: bool,
-    },
+    Loading(bool),
+    /// Page load progress, 0.0–1.0.
+    Progress(f64),
+    /// Whether the page's focused element takes text (field, contenteditable).
+    EditableFocus(bool),
     /// The page asked for a new window; open it as a new browser block.
     Popup(String),
     CursorChanged(Cursor),

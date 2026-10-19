@@ -1,4 +1,6 @@
-//! Exposing the bundled `silo` CLI to shells spawned by an app-bundled server.
+//! Exposing `silo` to shells spawned by a server run from its runtime
+//! directory (`<SILO_HOME>/runtime/<build>/silo`, installed by the app),
+//! through the stable `<SILO_HOME>/bin/silo` link that survives upgrades.
 
 use std::{
     ffi::OsString,
@@ -6,26 +8,26 @@ use std::{
     sync::OnceLock,
 };
 
-/// `…/X.app/Contents/Resources/bin` for an executable at
-/// `…/X.app/Contents/MacOS/<exe>`; `None` outside an app bundle.
+/// `exe`'s directory when it is `home`'s runtime directory for `build`.
 #[must_use]
-pub fn bin_dir(exe: &Path) -> Option<PathBuf> {
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    let app = contents.parent()?;
-    let is_app = app.extension().is_some_and(|e| e == "app");
-    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && is_app).then(|| contents.join("Resources/bin"))
+pub fn runtime_dir(exe: &Path, home: &Path, build: &str) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    (exe.file_name()? == "silo" && dir == home.join("runtime").join(build)).then(|| dir.to_owned())
 }
 
-/// Environment for spawned shells: the bundle's bin dir on `PATH` when this
-/// server runs from an app bundle (first as passed; shell startup files may
+/// Environment for spawned shells of a runtime-directory server:
+/// `<SILO_HOME>/bin` first on `PATH` (as passed; shell startup files may
 /// reorder it).
 pub fn shell_env() -> &'static [(OsString, OsString)] {
     static ENV: OnceLock<Vec<(OsString, OsString)>> = OnceLock::new();
     ENV.get_or_init(|| {
-        let Some(dir) = std::env::current_exe().and_then(|e| e.canonicalize()).ok().as_deref().and_then(bin_dir) else {
+        let home = silo_proto::paths::home();
+        let home = home.canonicalize().unwrap_or(home);
+        let exe = std::env::current_exe().and_then(|e| e.canonicalize()).ok();
+        if exe.and_then(|exe| runtime_dir(&exe, &home, silo_proto::BUILD)).is_none() {
             return Vec::new();
-        };
+        }
+        let dir = home.join("bin");
         let rest = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&rest))).unwrap_or(rest);
         vec![("PATH".into(), path)]
@@ -37,29 +39,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_server_maps_to_resources_bin() {
-        assert_eq!(
-            bin_dir(Path::new("/Applications/Silo.app/Contents/MacOS/silo-server")),
-            Some(PathBuf::from("/Applications/Silo.app/Contents/Resources/bin"))
-        );
-        assert_eq!(
-            bin_dir(Path::new("/tmp/My Apps/FakeSilo.app/Contents/MacOS/silo-server")),
-            Some(PathBuf::from("/tmp/My Apps/FakeSilo.app/Contents/Resources/bin"))
-        );
+    fn runtime_server_is_recognized() {
+        let home = Path::new("/Users/bat/Library/Application Support/silo");
+        assert_eq!(runtime_dir(&home.join("runtime/abc/silo"), home, "abc"), Some(home.join("runtime/abc")));
     }
 
     #[test]
-    fn unbundled_server_has_no_bin_dir() {
+    fn other_servers_add_nothing() {
+        let home = Path::new("/h");
         for exe in [
+            "/h/runtime/old/silo",
+            "/h/runtime/abc/silo-menubar",
+            "/h/abc/silo",
+            "/Applications/Silo.app/Contents/MacOS/silo-server",
             "/Users/me/dev/term/target/debug/silo",
-            "/usr/local/bin/silo",
-            "/Silo.app/MacOS/silo-server",
-            "/x/Silo/Contents/MacOS/silo-server",
-            "/x/Silo.app/Contents/Resources/silo-server",
             "silo",
             "/",
         ] {
-            assert_eq!(bin_dir(Path::new(exe)), None, "{exe}");
+            assert_eq!(runtime_dir(Path::new(exe), home, "abc"), None, "{exe}");
         }
     }
 }

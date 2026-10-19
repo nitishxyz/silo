@@ -63,6 +63,9 @@ pub fn lifecycle_label(lifecycle: Lifecycle, exited: Option<i32>) -> Option<Stri
     }
 }
 
+/// Quiet time after the last grid change before the PTY is resized.
+const SIZE_SETTLE: Duration = Duration::from_millis(120);
+
 pub struct Pane {
     pub block_id: String,
     rt: tokio::runtime::Handle,
@@ -90,6 +93,9 @@ pub struct Pane {
     content_bounds: Option<Bounds<Pixels>>,
     /// Grid this client wants for the block (from its pixel layout).
     grid: Option<GridSize>,
+    /// Sends `grid` once the layout settles, so held resize keys or a live
+    /// window resize signal the PTY once.
+    size_task: Option<Task<()>>,
     pub focus: FocusHandle,
     composition: Composition,
     input_gate: InputGate,
@@ -183,6 +189,7 @@ impl Pane {
             last_frame: None,
             content_bounds: None,
             grid: None,
+            size_task: None,
             focus,
             composition: Composition::default(),
             input_gate: InputGate::default(),
@@ -771,14 +778,21 @@ impl Pane {
 
     // ---- layout & paint ----
 
-    fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics) {
+    fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics, cx: &mut Context<Self>) {
         self.content_bounds = Some(bounds);
         let grid = metrics.grid(f32::from(bounds.size.width), f32::from(bounds.size.height));
         if self.grid != Some(grid) {
             tracing::debug!(block = %self.block_id, columns = grid.columns, rows = grid.rows, "pane grid");
-            self.grid = Some(grid);
+            let first = self.grid.replace(grid).is_none();
             self.mirror.set_cell_size(grid.cell_width, grid.cell_height);
-            self.send_size();
+            if first {
+                self.send_size();
+            } else {
+                self.size_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SIZE_SETTLE).await;
+                    let _ = this.update(cx, |this, _| this.send_size());
+                }));
+            }
         }
     }
 
@@ -1159,7 +1173,7 @@ fn input_canvas(entity: Entity<Pane>, metrics: CellMetrics) -> impl IntoElement 
             (entity, ImeLayout { text, line, origin: point(x, y), bounds, height })
         },
         move |bounds, (entity, layout), window, cx| {
-            entity.update(cx, |pane, _| pane.layout(bounds, metrics));
+            entity.update(cx, |pane, cx| pane.layout(bounds, metrics, cx));
             capture_drag(&entity, bounds, window);
             if !layout.text.is_empty() {
                 window.paint_quad(fill(Bounds::new(layout.origin, size(layout.line.width(), layout.height)), rgb(theme::tab_active())));

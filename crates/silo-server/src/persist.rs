@@ -19,7 +19,7 @@ use crate::{
     Server,
     block::{self, BlockHandle, Checkpoint, Note},
     browser::{Block, BrowserBlock},
-    registry::Session,
+    registry::{self, Session},
 };
 
 pub const STATE_DIR: &str = "state";
@@ -96,9 +96,10 @@ pub struct Restored {
     pub blocks: HashMap<BlockId, Block>,
 }
 
-/// Open `<home>/state` and rebuild the last committed tree. Blocks come back
-/// process-less as [`Lifecycle::Restored`]; one whose checkpoint is missing or
-/// unreadable comes back with an empty screen.
+/// Open `<home>/state` and rebuild the last committed tree. Terminal blocks
+/// come back with a fresh shell below their saved screen, exited ones stay
+/// exited; one whose checkpoint is missing or unreadable comes back with an
+/// empty screen.
 ///
 /// # Errors
 /// The key or store cannot be opened, or the manifest is unreadable.
@@ -128,7 +129,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
             .generation
             .and_then(|g| snapshots.remove(&(id.clone(), g)).map(|bytes| (g, bytes)))
             .context("no readable checkpoint")
-            .and_then(|(g, bytes)| Ok((g, block::spawn_restored(record.info.clone(), decode(&bytes)?, notes.clone())?)));
+            .and_then(|(g, bytes)| Ok((g, revive(record.info.clone(), decode(&bytes)?, notes)?)));
         let handle = match restored {
             Ok((generation, handle)) => {
                 generations.insert(id.clone(), (generation, None));
@@ -137,7 +138,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
             Err(error) => {
                 tracing::warn!(block = %id, "restoring block with an empty screen: {error:#}");
                 let size = record.info.size;
-                block::spawn_restored(record.info, empty_checkpoint(size)?, notes.clone())?
+                revive(record.info, empty_checkpoint(size)?, notes)?
             }
         };
         blocks.insert(id, Block::Terminal(handle));
@@ -149,6 +150,20 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
     }
     let persist = Persist { store: Arc::new(store), server_id: manifest.server_id, generations };
     Ok((persist, Restored { sessions: manifest.sessions, blocks }))
+}
+
+/// A block whose program exited stays exited; any other gets a fresh shell
+/// in its last cwd below the restored screen, or stays process-less if the
+/// shell cannot start.
+fn revive(info: BlockInfo, checkpoint: Checkpoint, notes: &UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+    if checkpoint.lifecycle == Lifecycle::Exited {
+        return block::spawn_restored(info, checkpoint, notes.clone());
+    }
+    let config = registry::spawn_config(&[], info.cwd.as_deref());
+    block::spawn_resumed(info.clone(), checkpoint.clone(), &config, notes.clone()).or_else(|error| {
+        tracing::warn!(block = %info.id, "restoring block without a shell: {error:#}");
+        block::spawn_restored(info, checkpoint, notes.clone())
+    })
 }
 
 pub(crate) fn empty_checkpoint(size: TermSize) -> anyhow::Result<Checkpoint> {

@@ -17,6 +17,12 @@ pub struct KeyInput<'a> {
 
 /// Events to send for one transition: RAWKEYDOWN (+ CHAR when it types) on down, KEYUP on up.
 pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
+    let line_edge = line_edge(input);
+    let input = &KeyInput {
+        key: line_edge.unwrap_or(input.key),
+        modifiers: Modifiers { command: input.modifiers.command && line_edge.is_none(), ..input.modifiers },
+        ..input.clone()
+    };
     let typed = typed_char(input);
     let Some(code) = windows_key_code(input.key).or(typed.map(|_| 0)) else {
         return Vec::new();
@@ -42,6 +48,20 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
         events.push(KeyEvent { type_: KeyEventType::CHAR, ..base });
     }
     events
+}
+
+/// ⌘← / ⌘→ (⇧ to select) as Home / End: Chromium on macOS moves the caret to the line
+/// edge from AppKit edit commands, which windowless key events don't carry.
+fn line_edge(input: &KeyInput) -> Option<&'static str> {
+    let m = input.modifiers;
+    if !m.command || m.control || m.alt {
+        return None;
+    }
+    match input.key {
+        "left" => Some("home"),
+        "right" => Some("end"),
+        _ => None,
+    }
 }
 
 /// The UTF-16 unit this key types, if it is a single BMP character.
@@ -228,6 +248,19 @@ mod tests {
         let events = key_events(&input("c", Some("c"), command, true));
         assert_eq!(events.len(), 1);
         assert_ne!(events[0].modifiers & command.flags(), 0);
+    }
+
+    #[test]
+    fn command_arrows_are_line_edges() {
+        let command = Modifiers { command: true, ..Default::default() };
+        let home = key_events(&input("left", None, command, true));
+        assert_eq!((home[0].windows_key_code, home[0].native_key_code, home[0].modifiers & command.flags()), (0x24, 0x73, 0));
+        let select = Modifiers { shift: true, ..command };
+        let end = key_events(&input("right", None, select, true));
+        assert_eq!(end[0].windows_key_code, 0x23);
+        assert_ne!(end[0].modifiers & select.flags(), 0);
+        let word = Modifiers { alt: true, ..command };
+        assert_eq!(key_events(&input("left", None, word, true))[0].windows_key_code, 0x25);
     }
 
     #[test]

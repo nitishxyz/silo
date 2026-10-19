@@ -36,6 +36,9 @@ pub struct Window {
     pub name: Option<String>,
     pub layout: Layout,
     pub focused: BlockId,
+    /// Blocks by most recent focus, `focused` first.
+    #[serde(default)]
+    pub history: Vec<BlockId>,
     pub zoomed: bool,
     /// Back to front; the last is topmost.
     pub floats: Vec<Float>,
@@ -44,7 +47,21 @@ pub struct Window {
 impl Window {
     /// A window holding the one tiled block `block`.
     pub fn new(id: WindowId, block: &str) -> Self {
-        Self { id, name: None, layout: Layout::block(block), focused: block.to_owned(), zoomed: false, floats: Vec::new() }
+        Self {
+            id,
+            name: None,
+            layout: Layout::block(block),
+            focused: block.to_owned(),
+            history: vec![block.to_owned()],
+            zoomed: false,
+            floats: Vec::new(),
+        }
+    }
+
+    pub fn focus(&mut self, block: &str) {
+        block.clone_into(&mut self.focused);
+        self.history.retain(|b| b != block);
+        self.history.insert(0, block.to_owned());
     }
 
     /// Tiled blocks in reading order, then floats back to front.
@@ -61,6 +78,19 @@ impl Window {
     /// Index of `block` in `floats`.
     pub fn floating(&self, block: &str) -> Option<usize> {
         self.floats.iter().position(|f| f.id == block)
+    }
+}
+
+/// The leaf of `layout` nearest to `target` in the subtree that takes over
+/// its space when it is removed.
+fn sibling(layout: &Layout, target: &str) -> Option<BlockId> {
+    let Layout::Split { first, second, .. } = layout else {
+        return None;
+    };
+    match (&**first, &**second) {
+        (Layout::Block { id }, other) if id == target => other.blocks().into_iter().next(),
+        (other, Layout::Block { id }) if id == target => other.blocks().pop(),
+        _ => sibling(first, target).or_else(|| sibling(second, target)),
     }
 }
 
@@ -402,11 +432,7 @@ impl Registry {
             self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
             return Ok(id);
         }
-        let config = SpawnConfig {
-            command: spawn.command.iter().map(Into::into).collect(),
-            cwd: spawn.cwd.as_ref().map(|c| expand_home(c).into()).filter(|p: &std::path::PathBuf| p.is_dir()),
-            env: crate::bundle::shell_env().to_vec(),
-        };
+        let config = spawn_config(&spawn.command, spawn.cwd.as_deref());
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
         self.blocks.insert(id.clone(), Block::Terminal(handle));
         Ok(id)
@@ -498,7 +524,7 @@ impl Registry {
         let new = self.spawn_block(&sid, &New { spawn: &spawn, ..*new }, fallback)?;
         let window = &mut self.sessions[si].windows[wi];
         window.layout.split(block_id, new.clone(), axis);
-        window.focused = new.clone();
+        window.focus(&new);
         window.zoomed = false;
         let window_id = window.id.clone();
         self.session_changed(si);
@@ -515,7 +541,7 @@ impl Registry {
             window.floats.push(float);
             changed = true;
         }
-        window.focused = block_id.to_owned();
+        window.focus(block_id);
         session.active_window = window.id.clone();
         if changed {
             self.session_changed(si);
@@ -526,7 +552,7 @@ impl Registry {
     pub fn zoom(&mut self, block_id: &str, zoomed: bool) -> Result<(), RpcError> {
         let (si, wi) = self.locate_tiled(block_id)?;
         let window = &mut self.sessions[si].windows[wi];
-        window.focused = block_id.to_owned();
+        window.focus(block_id);
         window.zoomed = zoomed;
         self.session_changed(si);
         Ok(())
@@ -559,7 +585,7 @@ impl Registry {
         let layout = std::mem::replace(&mut window.layout, Layout::block(""));
         window.layout = layout.remove(block_id).expect("a split keeps a leaf");
         window.floats.push(Float { id: block_id.to_owned(), rect: rect.unwrap_or_default().clamped() });
-        window.focused = block_id.to_owned();
+        window.focus(block_id);
         window.zoomed = false;
         self.session_changed(si);
         Ok(())
@@ -582,7 +608,7 @@ impl Registry {
                 }
                 window.floats.remove(index);
                 window.layout.split(&target, block_id.to_owned(), axis);
-                window.focused = block_id.to_owned();
+                window.focus(block_id);
                 window.zoomed = false;
             }
             _ => return Err(RpcError::bad_request("exactly one of rect and dock")),
@@ -682,13 +708,15 @@ impl Registry {
 
     /// Remove a closed block from the layout or floats, collapsing empty
     /// windows and sessions. A tree emptied while floats remain takes the
-    /// topmost float as its root.
+    /// topmost float as its root. Focus returns to the most recently focused
+    /// remaining block, else the block taking over the closed one's space.
     pub fn remove_block(&mut self, block_id: &str) {
         self.blocks.remove(block_id);
         let Ok((si, wi)) = self.locate(block_id) else {
             return;
         };
         let window = &mut self.sessions[si].windows[wi];
+        let sibling = sibling(&window.layout, block_id);
         if let Some(i) = window.floating(block_id) {
             window.floats.remove(i);
         } else {
@@ -702,9 +730,18 @@ impl Registry {
                 (None, None) => return self.drop_window(si, wi),
             }
         }
+        window.history.retain(|b| b != block_id);
         let tiled = window.layout.blocks();
         if window.focused == block_id {
-            window.focused = tiled[0].clone();
+            let next = window
+                .history
+                .iter()
+                .find(|b| window.contains(b))
+                .cloned()
+                .or(sibling)
+                .or_else(|| window.floats.last().map(|f| f.id.clone()))
+                .unwrap_or_else(|| tiled[0].clone());
+            window.focus(&next);
         }
         window.zoomed &= tiled.len() > 1;
         self.session_changed(si);
@@ -819,6 +856,15 @@ impl Registry {
     }
 }
 
+/// How a terminal block runs `command` (the login shell if empty) in `cwd`.
+pub fn spawn_config(command: &[String], cwd: Option<&str>) -> SpawnConfig {
+    SpawnConfig {
+        command: command.iter().map(Into::into).collect(),
+        cwd: cwd.map(|c| std::path::PathBuf::from(expand_home(c))).filter(|p| p.is_dir()),
+        env: crate::bundle::shell_env().to_vec(),
+    }
+}
+
 fn expand_home(path: &str) -> String {
     match path.strip_prefix('~') {
         Some(rest) => format!("{}{rest}", silo_pty::home_dir().display()),
@@ -844,6 +890,7 @@ mod tests {
             name: None,
             layout,
             focused: focused.into(),
+            history: vec![focused.into()],
             zoomed: false,
             floats: Vec::new(),
         };
@@ -966,6 +1013,58 @@ mod tests {
         assert_eq!((w.layout, w.floats.len()), (Layout::block("b"), 0));
         reg.remove_block("b");
         assert_eq!(reg.sessions[0].windows.len(), 2, "an empty window closes");
+    }
+
+    fn focused(reg: &Registry, wi: usize) -> (&str, Vec<&str>) {
+        let w = &reg.sessions[0].windows[wi];
+        (w.focused.as_str(), w.history.iter().map(String::as_str).collect())
+    }
+
+    #[test]
+    fn closing_focus_returns_to_the_previous_block() {
+        let (mut reg, _rx) = registry();
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+        let mut chain = vec!["d".to_owned()];
+        for _ in 0..3 {
+            let last = chain.last().unwrap().clone();
+            chain.push(reg.split(&last, Axis::Horizontal, &new).unwrap().block_id);
+        }
+        let [d, x, y, z] = [&chain[0], &chain[1], &chain[2], &chain[3]].map(String::as_str);
+        assert_eq!(focused(&reg, 1), (z, vec![z, y, x, d]));
+        reg.close_block(z).unwrap();
+        assert_eq!(focused(&reg, 1), (y, vec![y, x, d]), "focus returns to the block it was split from");
+        reg.focus(d).unwrap();
+        reg.close_block(d).unwrap();
+        assert_eq!(focused(&reg, 1), (y, vec![y, x]), "focus returns to the block used before");
+        reg.close_block(x).unwrap();
+        assert_eq!(focused(&reg, 1), (y, vec![y]), "closing an unfocused block prunes history only");
+    }
+
+    #[test]
+    fn closing_a_focused_float_returns_to_the_previous_block() {
+        let (mut reg, _rx) = registry();
+        reg.focus("c").unwrap();
+        reg.float("b", None).unwrap();
+        assert_eq!(focused(&reg, 0), ("b", vec!["b", "c", "a"]));
+        reg.remove_block("b");
+        assert_eq!(focused(&reg, 0), ("c", vec!["c", "a"]));
+    }
+
+    #[test]
+    fn closing_focus_without_history_takes_the_sibling() {
+        let (mut reg, _rx) = registry();
+        reg.focus("c").unwrap();
+        reg.sessions[0].windows[0].history.clear();
+        reg.remove_block("c");
+        assert_eq!(focused(&reg, 0), ("b", vec!["b"]), "b takes over c's space");
+        reg.sessions[0].windows[0].history.clear();
+        reg.remove_block("b");
+        assert_eq!(focused(&reg, 0), ("a", vec!["a"]));
+
+        let (mut reg, _rx) = registry();
+        reg.sessions[0].windows[0].history.clear();
+        reg.remove_block("a");
+        assert_eq!(focused(&reg, 0), ("b", vec!["b"]), "the nearest leaf of the subtree taking a's space");
     }
 
     #[test]

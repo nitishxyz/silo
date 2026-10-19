@@ -229,12 +229,17 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
 
 - The server crate builds both a library and the `<name>` binary, which is server and CLI in one.
 - **macOS app:**
-  - Bundles it and runs it from the bundle. A running server is unaffected by an app update; moving to the new
-    build is a hot upgrade.
-  - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications with the default state dir installs or
-    refreshes the launchd agent for its bundled CLI (shared `silo_client::service`), taking over or adopting a running
-    server live, and links `~/.local/bin/silo` when that dir exists. Anything else (`SILO_HOME`, dev
-    and debug builds, a disk image) starts a plain server; Stop disables the agent until the next launch.
+  - Bundles it. Under launchd the app copies the server and menu-bar agent to `<SILO_HOME>/runtime/<build>/`
+    (`silo`, `silo-menubar`) and the agent runs them from there, so nothing holds Silo.app open and Finder can
+    replace it while the server runs; moving to the new build is a hot upgrade. Once this build's job serves, runtime
+    dirs of other builds that no process runs from and nothing touched in 5 minutes are removed (under
+    `runtime.lock`). A new menu-bar agent replaces the one `menubar.lock` records if that is of another build.
+  - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications, on a disk image or translocated, with the
+    default state dir installs or refreshes the launchd agent for its runtime `silo` (shared `silo_client::service`),
+    taking over or adopting a running server live, points `<SILO_HOME>/bin/silo` at that `silo` and links
+    `~/.local/bin/silo` to it when that dir exists. Shells of a runtime-dir server get `<SILO_HOME>/bin` on `PATH`.
+    Anything else (`SILO_HOME`, dev and debug builds, a bundle in a cargo target dir) starts a plain server; Stop
+    disables the agent until the next launch.
 - **Server modes:**
   - Personal: auto-exits about 10 s after the last session and client, unless started explicitly.
   - Shared and login modes come later.

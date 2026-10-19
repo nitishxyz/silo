@@ -93,8 +93,6 @@ pub struct HostsState {
     pub(crate) offers: crate::offers::Offers,
     /// hosts.json's last seen (mtime, length); see `watch_hosts`.
     hosts_stamp: Option<(std::time::SystemTime, u64)>,
-    /// Suggest moving Silo to Applications, once (see `conn::local_service`).
-    pub move_hint: bool,
     _watch: Option<Task<()>>,
     _quit: Subscription,
 }
@@ -108,13 +106,7 @@ impl Global for GlobalHosts {}
 
 impl HostsState {
     /// Create the process's hosts (local, then saved remotes) and connect.
-    pub fn install(
-        rt: tokio::runtime::Handle,
-        home: PathBuf,
-        service: Result<silo_client::service::Service, String>,
-        move_hint: bool,
-        cx: &mut App,
-    ) -> Entity<Self> {
+    pub fn install(rt: tokio::runtime::Handle, home: PathBuf, service: Result<silo_client::service::Service, String>, cx: &mut App) -> Entity<Self> {
         let hosts = cx.new(|cx| {
             let quit = cx.on_app_quit(|this: &mut Self, _| {
                 let writers: Vec<CacheWriter> = this.owned.iter().filter_map(|h| h.cache.clone()).collect();
@@ -136,7 +128,6 @@ impl HostsState {
                 state,
                 offers,
                 hosts_stamp: hosts::stamp(&home),
-                move_hint,
                 _watch: None,
                 _quit: quit,
             };

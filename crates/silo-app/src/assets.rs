@@ -34,6 +34,7 @@ icons!(
     "back",
     "forward",
     "reload",
+    "spinner",
     "settings-hard-drive",
     "settings-info",
     "settings-keyboard",

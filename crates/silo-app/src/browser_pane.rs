@@ -69,20 +69,97 @@ impl Debounce {
     }
 }
 
-/// Follow the engine's committed URL in `state`'s history: a neighbour entry
-/// means back/forward, the current one a reload or same-page change,
+/// The block's history entries `lo..=hi` the live engine reaches with its
+/// own back/forward; outside them an entry is loaded afresh (`jump`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Span {
+    lo: usize,
+    hi: usize,
+    jump: Option<usize>,
+}
+
+impl Span {
+    /// An engine just opened at entry `index`.
+    #[must_use]
+    pub fn at(index: usize) -> Self {
+        Self { lo: index, hi: index, jump: None }
+    }
+}
+
+/// How Back (`-1`) or Forward (`1`) moves through the block's history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The engine has the entry: its own back/forward.
+    Engine,
+    /// Load this entry.
+    Load(usize),
+}
+
+/// Back/Forward are bounded by the block's history alone.
+#[must_use]
+pub fn step(state: &BrowserState, span: Span, delta: isize) -> Option<Step> {
+    let target = state.index.checked_add_signed(delta).filter(|&i| i < state.history.len())?;
+    Some(if (span.lo..=span.hi).contains(&target) { Step::Engine } else { Step::Load(target) })
+}
+
+/// Follow the engine's committed URL in `state`'s history: the loaded
+/// entry of a jump (a redirect replaces it), a neighbour entry for the
+/// engine's back/forward, the current one a reload or same-page change,
 /// anything else a new navigation.
-pub fn follow_url(state: &mut BrowserState, url: &str) {
+pub fn follow_url(state: &mut BrowserState, span: &mut Span, url: &str, back_forward: bool) {
+    if let Some(target) = span.jump.take().filter(|&t| t < state.history.len()) {
+        #[allow(clippy::cast_possible_wrap)]
+        state.go(target as isize - state.index as isize);
+        if state.url != url {
+            url.clone_into(&mut state.history[target].url);
+            url.clone_into(&mut state.url);
+        }
+        *span = Span::at(target);
+        return;
+    }
     if state.url == url {
         return;
     }
-    let at = |i: Option<usize>| i.and_then(|i| state.history.get(i)).is_some_and(|e: &HistoryEntry| e.url == url);
+    let engine = span.lo..=span.hi;
+    let at = |i: Option<usize>| {
+        back_forward && i.filter(|i| engine.contains(i)).and_then(|i| state.history.get(i)).is_some_and(|e: &HistoryEntry| e.url == url)
+    };
     if at(state.index.checked_sub(1)) {
         state.go(-1);
+        span.lo = span.lo.min(state.index);
     } else if at(state.index.checked_add(1)) {
         state.go(1);
+        span.hi = span.hi.max(state.index);
     } else {
+        let removed = (state.index + 2).saturating_sub(BrowserState::HISTORY);
         state.push(url.to_owned());
+        *span = Span { lo: span.lo.saturating_sub(removed), hi: state.index, jump: None };
+    }
+}
+
+/// An app chord on a focused page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chord {
+    Address,
+    Back,
+    Forward,
+    Reload,
+    Stop,
+}
+
+/// ⌘L / ⌘R / ⌘. on the page, and ⌘← / ⌘→ unless a page text field has
+/// focus (there they move the caret). Nothing for the address bar.
+fn page_chord(key: &str, m: gpui::Modifiers, page_focused: bool, editable: bool) -> Option<Chord> {
+    if !page_focused || !(m.platform && !m.shift && !m.control && !m.alt) {
+        return None;
+    }
+    match key {
+        "l" => Some(Chord::Address),
+        "r" => Some(Chord::Reload),
+        "." => Some(Chord::Stop),
+        "left" if !editable => Some(Chord::Back),
+        "right" if !editable => Some(Chord::Forward),
+        _ => None,
     }
 }
 
@@ -146,8 +223,11 @@ pub struct BrowserPane {
     cursor: silo_web::Cursor,
     /// The address strip has focus: server/engine URLs don't overwrite it.
     editing: bool,
-    can_back: bool,
-    can_forward: bool,
+    span: Span,
+    /// A page text field has focus.
+    editable: bool,
+    /// Load progress, 0.0–1.0.
+    progress: f64,
     debounce: Debounce,
     report_task: Option<gpui::Task<()>>,
     error: Option<String>,
@@ -203,8 +283,9 @@ impl BrowserPane {
             ime_rect: None,
             cursor: silo_web::Cursor::Arrow,
             editing: false,
-            can_back: false,
-            can_forward: false,
+            span: Span::default(),
+            editable: false,
+            progress: 1.0,
             debounce: Debounce::default(),
             report_task: None,
             error: None,
@@ -239,6 +320,7 @@ impl BrowserPane {
             && let Some(server) = server
         {
             let fresh = self.state.is_none();
+            self.span = Span::at(server.index);
             self.state = Some(server);
             self.sync_address(cx);
             if fresh {
@@ -357,6 +439,7 @@ impl BrowserPane {
                 let page = std::rc::Rc::new(page);
                 crate::web::register(page.clone(), dirty, cx.weak_entity());
                 self.page = Some(page);
+                self.span = Span::at(state.index);
                 self.error = None;
                 tracing::info!(block = %self.block_id, url = %state.url, "browser opened");
             }
@@ -374,8 +457,8 @@ impl BrowserPane {
         for event in page.take_events() {
             let Some(state) = self.state.as_mut() else { break };
             match event {
-                silo_web::Event::UrlChanged(url) => {
-                    follow_url(state, &url);
+                silo_web::Event::UrlChanged { url, back_forward } => {
+                    follow_url(state, &mut self.span, &url, back_forward);
                     changed = true;
                 }
                 silo_web::Event::TitleChanged(title) => {
@@ -386,12 +469,22 @@ impl BrowserPane {
                     state.favicon = (icon.len() <= BrowserState::FAVICON).then_some(icon);
                     changed = true;
                 }
-                silo_web::Event::Loading { loading, can_go_back, can_go_forward } => {
+                silo_web::Event::Loading(loading) => {
                     // Zoom is per page in CEF: re-apply the block's level.
                     page.set_zoom(f64::from(state.zoom));
-                    (state.loading, self.can_back, self.can_forward) = (loading, can_go_back, can_go_forward);
+                    state.loading = loading;
+                    if loading {
+                        self.progress = 0.0;
+                    } else {
+                        self.span.jump = None;
+                    }
                     changed = true;
                 }
+                silo_web::Event::Progress(progress) => {
+                    self.progress = progress;
+                    cx.notify();
+                }
+                silo_web::Event::EditableFocus(editable) => self.editable = editable,
                 silo_web::Event::Popup(url) => cx.emit(BrowserPaneEvent::Popup(url)),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
@@ -479,33 +572,42 @@ impl BrowserPane {
     }
 
     pub fn back(&self) {
-        self.send(Method::BrowserBack { block_id: self.block_id.clone() });
+        if self.history_step(-1) {
+            self.send(Method::BrowserBack { block_id: self.block_id.clone() });
+        }
     }
 
     pub fn forward(&self) {
-        self.send(Method::BrowserForward { block_id: self.block_id.clone() });
+        if self.history_step(1) {
+            self.send(Method::BrowserForward { block_id: self.block_id.clone() });
+        }
     }
 
     pub fn reload(&self) {
         self.send(Method::BrowserReload { block_id: self.block_id.clone(), ignore_cache: false });
     }
 
-    fn load_entry(&self, delta: isize, page: &silo_web::Browser) {
-        let state = self.state.as_ref();
-        let entry = state.and_then(|s| s.index.checked_add_signed(delta).and_then(|i| s.history.get(i)));
+    fn load_entry(&mut self, target: usize, page: &silo_web::Browser) {
+        let entry = self.state.as_ref().and_then(|s| s.history.get(target));
         if let Some(url) = entry.and_then(|e| silo_proto::model::browser_url(&e.url)) {
+            self.span.jump = Some(target);
             page.navigate(&url);
         }
     }
 
+    pub fn stop(&mut self) {
+        self.span.jump = None;
+        if let Some(page) = &self.page {
+            page.stop();
+        }
+    }
+
     fn history_step(&self, delta: isize) -> bool {
-        let engine = if delta < 0 { self.can_back } else { self.can_forward };
-        engine
-            || self
-                .state
-                .as_ref()
-                .and_then(|s| s.index.checked_add_signed(delta))
-                .is_some_and(|i| i < self.state.as_ref().map_or(0, |s| s.history.len()))
+        self.state.as_ref().is_some_and(|s| step(s, self.span, delta).is_some())
+    }
+
+    pub(crate) fn loading(&self) -> bool {
+        self.page.is_some() && self.state.as_ref().is_some_and(|s| s.loading)
     }
 
     /// `browser.command` from the server.
@@ -527,12 +629,15 @@ impl BrowserPane {
         let Some(page) = self.page.clone() else { return };
         match command {
             BrowserCommand::Navigate { .. } => page.navigate(url.as_deref().unwrap_or_default()),
-            // A page reopened from server state has a one-entry engine
-            // history: step through the block's history instead.
-            BrowserCommand::Back if !self.can_back => self.load_entry(-1, &page),
-            BrowserCommand::Forward if !self.can_forward => self.load_entry(1, &page),
-            BrowserCommand::Back => page.back(),
-            BrowserCommand::Forward => page.forward(),
+            BrowserCommand::Back | BrowserCommand::Forward => {
+                let delta = if matches!(command, BrowserCommand::Back) { -1 } else { 1 };
+                match self.state.as_ref().and_then(|s| step(s, self.span, delta)) {
+                    Some(Step::Engine) if delta < 0 => page.back(),
+                    Some(Step::Engine) => page.forward(),
+                    Some(Step::Load(target)) => self.load_entry(target, &page),
+                    None => {}
+                }
+            }
             BrowserCommand::Reload { ignore_cache } => page.reload(*ignore_cache),
             BrowserCommand::Zoom { zoom } => {
                 page.set_zoom(f64::from(*zoom));
@@ -794,7 +899,7 @@ impl BrowserPane {
     fn strip(&self, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use crate::theme::Continuous as _;
         use gpui::{div, prelude::*, px, rgb};
-        let button = |id: &'static str, glyph: &'static str, enabled: bool| {
+        let button = |id: &'static str, glyph: &'static str, tip: &'static str, enabled: bool| {
             div()
                 .id(id)
                 .flex()
@@ -804,10 +909,22 @@ impl BrowserPane {
                 .size(px(22.0))
                 .continuous(crate::radius::CONTROL)
                 .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(rgb(crate::theme::tab_hover_on(crate::theme::background())))))
+                .tooltip(crate::tooltip::Tooltip::text(tip))
                 .child(crate::assets::icon(glyph, 13.0, if enabled { crate::theme::foreground() } else { crate::theme::muted() }))
         };
+        let loading = self.loading();
         let favicon = self.favicon().and_then(|f| favicon_image(&f));
+        let reload = if loading {
+            button("browser-reload", "close", "Stop  ⌘.", true).on_click(cx.listener(|this, _, _, _| this.stop()))
+        } else {
+            button("browser-reload", "reload", "Reload  ⌘R", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload()))
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let progress = (loading && self.progress < 1.0).then(|| {
+            div().absolute().left_0().bottom_0().h(px(2.0)).w(gpui::relative(self.progress.max(0.05) as f32)).bg(rgb(crate::theme::accent()))
+        });
         div()
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -817,9 +934,9 @@ impl BrowserPane {
             .border_b_1()
             .border_color(rgb(crate::theme::border()))
             .text_size(px(12.0))
-            .child(button("browser-back", "back", self.history_step(-1)).on_click(cx.listener(|this, _, _, _| this.back())))
-            .child(button("browser-forward", "forward", self.history_step(1)).on_click(cx.listener(|this, _, _, _| this.forward())))
-            .child(button("browser-reload", "reload", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload())))
+            .child(button("browser-back", "back", "Back  ⌘←", self.history_step(-1)).on_click(cx.listener(|this, _, _, _| this.back())))
+            .child(button("browser-forward", "forward", "Forward  ⌘→", self.history_step(1)).on_click(cx.listener(|this, _, _, _| this.forward())))
+            .child(reload)
             .child(
                 div()
                     .flex()
@@ -831,7 +948,24 @@ impl BrowserPane {
                     .children(favicon.map(|f| gpui::img(f).size(px(14.0)).flex_none()))
                     .child(self.address.clone()),
             )
+            .children(progress)
     }
+}
+
+/// The loading spinner, in an icon's bounds: one turn a second, still
+/// under Reduce Motion.
+pub(crate) fn spinner(id: &str, size: f32, color: u32, cx: &gpui::App) -> gpui::AnyElement {
+    use gpui::{AnimationExt as _, IntoElement as _};
+    let icon = crate::assets::icon("spinner", size, color);
+    if cx.reduce_motion() {
+        return icon.into_any_element();
+    }
+    icon.with_animation(
+        gpui::ElementId::Name(format!("spinner-{id}").into()),
+        gpui::Animation::new(Duration::from_secs(1)).repeat_synced(),
+        |icon, delta| icon.with_transformation(gpui::Transformation::rotate(gpui::radians(delta * std::f32::consts::TAU))),
+    )
+    .into_any_element()
 }
 
 impl gpui::Render for BrowserPane {
@@ -873,6 +1007,9 @@ impl gpui::Render for BrowserPane {
                     }),
                 );
         }
+        let page = page
+            .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Back), cx.listener(|this, _, _, _| this.back()))
+            .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward), cx.listener(|this, _, _, _| this.forward()));
         let page = page.child(page_canvas(cx.entity())).when_some(self.error.clone(), |el, _| {
             el.child(
                 div().absolute().inset_0().flex().items_center().justify_center().text_color(rgb(crate::theme::muted())).child("Can't open the page"),
@@ -915,13 +1052,15 @@ impl crate::workspace::Workspace {
 
     /// Split `block` with a new browser (popup, New Browser, Open URL).
     pub(crate) fn split_browser(&mut self, block: String, url: Option<String>) {
-        self.call(browser_split(block, url));
+        let axis = self.auto_axis(&block);
+        self.call(browser_split(block, axis, url));
     }
 
     /// New Browser: a blank browser beside `block`, address bar focused.
     pub(crate) fn new_browser(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(control) = self.control() else { return };
-        let task = self.rt.spawn(async move { control.call::<silo_proto::control::Created>(browser_split(block, None)).await });
+        let method = browser_split(block.clone(), self.auto_axis(&block), None);
+        let task = self.rt.spawn(async move { control.call::<silo_proto::control::Created>(method).await });
         cx.spawn_in(window, async move |this, cx| {
             let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| match created {
@@ -943,30 +1082,23 @@ impl crate::workspace::Workspace {
     }
 }
 
-fn browser_split(block: String, url: Option<String>) -> Method {
+fn browser_split(block: String, axis: silo_proto::model::Axis, url: Option<String>) -> Method {
     let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-    let axis = silo_proto::model::Axis::Horizontal;
     Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url }
 }
 
-/// ⌘L / ⌘[ / ⌘] / ⌘R while the page has focus. Intercepted ahead of the
-/// keymap: the same chords focus panes everywhere else.
+/// Page chords ([`page_chord`]), intercepted ahead of the keymap and the page.
 fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::Subscription {
     cx.intercept_keystrokes(move |event, window, cx| {
         let k = &event.keystroke;
-        let m = k.modifiers;
-        if !(m.platform && !m.shift && !m.control && !m.alt) || !matches!(k.key.as_str(), "l" | "[" | "]" | "r") {
-            return;
-        }
         let _ = pane.update(cx, |pane, cx| {
-            if !pane.focus.is_focused(window) {
-                return;
-            }
-            match k.key.as_str() {
-                "l" => pane.focus_address(window, cx),
-                "[" => pane.back(),
-                "]" => pane.forward(),
-                _ => pane.reload(),
+            let Some(chord) = page_chord(&k.key, k.modifiers, pane.focus.is_focused(window), pane.editable) else { return };
+            match chord {
+                Chord::Address => pane.focus_address(window, cx),
+                Chord::Back => pane.back(),
+                Chord::Forward => pane.forward(),
+                Chord::Reload => pane.reload(),
+                Chord::Stop => pane.stop(),
             }
             cx.stop_propagation();
         });
@@ -1044,15 +1176,109 @@ mod tests {
     #[test]
     fn engine_urls_follow_history() {
         let mut s = BrowserState::new("a".into());
-        follow_url(&mut s, "b");
-        follow_url(&mut s, "c");
-        follow_url(&mut s, "b");
+        let mut span = Span::at(0);
+        follow_url(&mut s, &mut span, "b", false);
+        follow_url(&mut s, &mut span, "c", false);
+        follow_url(&mut s, &mut span, "b", true);
         assert_eq!((s.index, s.history.len()), (1, 3), "back");
-        follow_url(&mut s, "c");
+        follow_url(&mut s, &mut span, "c", true);
         assert_eq!(s.index, 2, "forward");
         follow_title(&mut s, "C");
         assert_eq!(s.history[2].title, "C");
-        follow_url(&mut s, "d");
+        follow_url(&mut s, &mut span, "d", false);
         assert_eq!((s.index, s.url.as_str()), (3, "d"));
+        assert_eq!(span, Span::at(0).with_hi(3));
+    }
+
+    #[test]
+    fn a_link_to_the_previous_page_is_a_new_entry() {
+        let mut s = BrowserState::new("a".into());
+        let mut span = Span::at(0);
+        follow_url(&mut s, &mut span, "b", false);
+        follow_url(&mut s, &mut span, "a", false);
+        assert_eq!((s.index, s.history.len()), (2, 3));
+    }
+
+    impl Span {
+        fn with_hi(mut self, hi: usize) -> Self {
+            self.hi = hi;
+            self
+        }
+    }
+
+    /// A block reopened at the last of a/b/c: its engine has one entry.
+    fn reopened() -> (BrowserState, Span) {
+        let mut s = BrowserState::new("a".into());
+        s.push("b".into());
+        s.push("c".into());
+        let span = Span::at(s.index);
+        (s, span)
+    }
+
+    /// Simulates a client: Back/Forward and the engine's URL commits.
+    fn go(s: &mut BrowserState, span: &mut Span, engine: &mut Vec<String>, at: &mut usize, delta: isize) -> bool {
+        let Some(step) = step(s, *span, delta) else { return false };
+        match step {
+            Step::Engine => *at = at.checked_add_signed(delta).unwrap(),
+            Step::Load(target) => {
+                span.jump = Some(target);
+                engine.truncate(*at + 1);
+                engine.push(s.history[target].url.clone());
+                *at = engine.len() - 1;
+            }
+        }
+        let url = engine[*at].clone();
+        follow_url(s, span, &url, step == Step::Engine);
+        true
+    }
+
+    #[test]
+    fn back_is_bounded_by_the_block_history() {
+        let (mut s, mut span) = reopened();
+        let (mut engine, mut at) = (vec!["c".to_owned()], 0);
+        assert!(go(&mut s, &mut span, &mut engine, &mut at, -1));
+        assert_eq!(s.url, "b");
+        assert!(go(&mut s, &mut span, &mut engine, &mut at, -1));
+        assert_eq!((s.url.as_str(), s.index), ("a", 0));
+        assert!(!go(&mut s, &mut span, &mut engine, &mut at, -1), "first entry");
+        assert_eq!(step(&s, span, -1), None);
+        assert_eq!(s.history.len(), 3);
+        assert!(go(&mut s, &mut span, &mut engine, &mut at, 1));
+        assert!(go(&mut s, &mut span, &mut engine, &mut at, 1));
+        assert_eq!((s.url.as_str(), s.index, s.history.len()), ("c", 2, 3));
+        assert_eq!(step(&s, span, 1), None);
+    }
+
+    #[test]
+    fn live_engine_history_is_used_directly() {
+        let mut s = BrowserState::new("a".into());
+        let mut span = Span::at(0);
+        follow_url(&mut s, &mut span, "b", false);
+        assert_eq!(step(&s, span, -1), Some(Step::Engine));
+        assert_eq!(step(&s, span, 1), None);
+        let (mut s, mut span) = reopened();
+        follow_url(&mut s, &mut span, "b", false);
+        assert_eq!((s.index, s.history.len()), (3, 4), "typing the previous entry's URL in a reopened page is a new entry");
+        let (mut s, span) = reopened();
+        assert_eq!(step(&s, span, -1), Some(Step::Load(1)));
+        let mut span = Span { jump: Some(1), ..span };
+        follow_url(&mut s, &mut span, "redirected", false);
+        assert_eq!((s.index, s.history[1].url.as_str(), s.history.len(), span), (1, "redirected", 3, Span::at(1)), "a redirect replaces the entry");
+    }
+
+    #[test]
+    fn page_chords_respect_text_fields_and_the_address_bar() {
+        let cmd = gpui::Modifiers { platform: true, ..Default::default() };
+        assert_eq!(page_chord("left", cmd, true, false), Some(Chord::Back));
+        assert_eq!(page_chord("right", cmd, true, false), Some(Chord::Forward));
+        assert_eq!(page_chord("left", cmd, true, true), None, "caret in a page field");
+        assert_eq!(page_chord("right", cmd, true, true), None);
+        assert_eq!(page_chord("left", cmd, false, false), None, "address bar");
+        assert_eq!(page_chord("l", cmd, true, true), Some(Chord::Address));
+        assert_eq!(page_chord(".", cmd, true, false), Some(Chord::Stop));
+        assert_eq!(page_chord("[", cmd, true, false), None, "pane focus");
+        assert_eq!(page_chord("]", cmd, true, false), None);
+        let shift = gpui::Modifiers { shift: true, ..cmd };
+        assert_eq!(page_chord("left", shift, true, false), None);
     }
 }

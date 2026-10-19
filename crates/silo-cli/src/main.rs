@@ -887,21 +887,19 @@ async fn takeover_reporting(config: silo_server::Config, status: Option<std::fs:
     }
 }
 
-/// Launch the bundled menu-bar agent when this binary lives in Silo.app
-/// (it exits at once if one is already running for this state dir).
+/// Launch the menu-bar agent next to this binary when it runs from its
+/// runtime directory (it exits at once if one already runs for this state dir).
 #[cfg(target_os = "macos")]
 fn start_menubar() {
     if std::env::var_os("SILO_NO_MENUBAR").is_some() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = std::env::current_exe().and_then(|e| e.canonicalize()) else {
         return;
     };
-    let exe = exe.canonicalize().unwrap_or(exe);
-    if !exe.to_string_lossy().contains(".app/Contents/MacOS/") {
-        return;
-    }
-    let Some(agent) = exe.parent().map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
+    let home = paths::home();
+    let home = home.canonicalize().unwrap_or(home);
+    let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home, silo_proto::BUILD).map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
         return;
     };
     let _ = std::process::Command::new(agent)

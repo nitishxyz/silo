@@ -5,7 +5,7 @@
 
 use std::os::raw::c_int;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cef::rc::Rc as _;
 use cef::*;
@@ -13,6 +13,29 @@ use cef::*;
 use crate::frame::Frame as SurfaceFrame;
 use crate::profile::{SharedTunnel, proxy_credentials};
 use crate::shared::{Cursor, Event, Shared, lock};
+
+/// Console messages from `FOCUS_SCRIPT`, swallowed by the display handler.
+const FOCUS_TAG: &str = "\u{1}silo-editable:";
+
+/// Run in every frame on load: reports whether the focused element takes
+/// text. A frame whose focus is in a child frame leaves the report to it.
+const FOCUS_SCRIPT: &str = r"(() => {
+if (window.__siloFocus) return;
+window.__siloFocus = true;
+const log = console.log.bind(console);
+const report = () => {
+  if (window !== top && !document.hasFocus()) return;
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  if (a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME')) return;
+  const text = !!a && (a.isContentEditable || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT'
+    || (a.tagName === 'INPUT' && !/^(button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/i.test(a.type)));
+  log('\u0001silo-editable:' + (text ? 1 : 0));
+};
+addEventListener('focusin', report, true);
+addEventListener('focusout', () => setTimeout(report), true);
+report();
+})()";
 
 wrap_render_handler! {
     pub(crate) struct ViewHandler {
@@ -72,19 +95,56 @@ wrap_render_handler! {
     }
 }
 
+wrap_navigation_entry_visitor! {
+    struct BackForward {
+        found: Arc<AtomicBool>,
+    }
+
+    impl NavigationEntryVisitor {
+        fn visit(&self, entry: Option<&mut NavigationEntry>, _current: c_int, _index: c_int, _total: c_int) -> c_int {
+            let flag = TransitionType::FORWARD_BACK_FLAG.get_raw();
+            let back_forward = entry.is_some_and(|entry| entry.transition_type().get_raw() & flag != 0);
+            self.found.store(back_forward, Ordering::Relaxed);
+            0
+        }
+    }
+}
+
+/// Whether the browser's current entry was committed by its back/forward.
+fn back_forward(browser: Option<&mut Browser>) -> bool {
+    let Some(host) = browser.and_then(|browser| browser.host()) else { return false };
+    let found = Arc::new(AtomicBool::new(false));
+    host.navigation_entries(Some(&mut BackForward::new(Arc::clone(&found))), 1);
+    found.load(Ordering::Relaxed)
+}
+
 wrap_display_handler! {
     pub(crate) struct PageDisplayHandler {
         shared: Arc<Shared>,
     }
 
     impl DisplayHandler {
-        fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
+        fn on_address_change(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
             if frame.is_some_and(|frame| frame.is_main() == 0) {
                 return;
             }
             if let Some(url) = url {
-                self.shared.push(Event::UrlChanged(url.to_string()));
+                self.shared.push(Event::UrlChanged { url: url.to_string(), back_forward: back_forward(browser) });
             }
+        }
+
+        fn on_console_message(
+            &self,
+            _browser: Option<&mut Browser>,
+            _level: LogSeverity,
+            message: Option<&CefString>,
+            _source: Option<&CefString>,
+            _line: c_int,
+        ) -> c_int {
+            let Some(message) = message.map(ToString::to_string) else { return 0 };
+            let Some(state) = message.strip_prefix(FOCUS_TAG) else { return 0 };
+            self.shared.push(Event::EditableFocus(state == "1"));
+            1
         }
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
@@ -102,6 +162,10 @@ wrap_display_handler! {
         ) -> c_int {
             self.shared.push(Event::CursorChanged(cursor(type_)));
             1
+        }
+
+        fn on_loading_progress_change(&self, _browser: Option<&mut Browser>, progress: f64) {
+            self.shared.push(Event::Progress(progress));
         }
 
         fn on_favicon_urlchange(&self, browser: Option<&mut Browser>, icon_urls: Option<&mut CefStringList>) {
@@ -150,14 +214,19 @@ wrap_load_handler! {
     }
 
     impl LoadHandler {
-        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: c_int, back: c_int, forward: c_int) {
-            self.shared.push(Event::Loading { loading: loading != 0, can_go_back: back != 0, can_go_forward: forward != 0 });
+        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: c_int, _back: c_int, _forward: c_int) {
+            self.shared.push(Event::Loading(loading != 0));
         }
 
         // A cross-document navigation gets a new render widget that starts unfocused, and Blink
         // drops IME input (not key events) for unfocused widgets, so re-apply the focus.
         fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
-            let main = frame.is_some_and(|frame| frame.is_main() != 0);
+            let Some(frame) = frame else { return };
+            frame.execute_java_script(Some(&CefString::from(FOCUS_SCRIPT)), None, 0);
+            let main = frame.is_main() != 0;
+            if main {
+                self.shared.push(Event::EditableFocus(false));
+            }
             if main && self.shared.focused.load(Ordering::Relaxed)
                 && let Some(host) = browser.and_then(|browser| browser.host())
             {

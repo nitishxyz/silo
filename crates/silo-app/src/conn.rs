@@ -15,6 +15,7 @@ use std::{
 use silo_client::{
     Control, DifferentBuild,
     mismatch::Upgraded,
+    runtime,
     service::{self, Action, Manager, Service},
 };
 use silo_proto::control::Event;
@@ -124,8 +125,6 @@ enum Launch {
     Launchd,
     /// A plain server for this app's state directory.
     Plain,
-    /// Plain, as Silo runs from outside Applications (a disk image, Downloads).
-    Unmoved,
 }
 
 /// What decides [`Launch`].
@@ -139,8 +138,10 @@ struct Origin<'a> {
     user_home: &'a Path,
 }
 
-/// launchd only for a release Silo.app in (~)/Applications running its own
-/// bundled server for the default state directory.
+/// launchd for a release Silo.app running its own server for the default
+/// state directory from where users run apps: (~)/Applications, a disk
+/// image, App Translocation (the job runs a runtime copy, never the
+/// bundle). Elsewhere (a cargo target dir) a plain server.
 fn launch(o: &Origin) -> Launch {
     if o.silo_home.is_some_and(|h| !h.is_empty()) || !o.release {
         return Launch::Plain;
@@ -149,10 +150,10 @@ fn launch(o: &Origin) -> Launch {
     if o.server_exe != app.join("Contents/MacOS/silo-server") || o.bundle_id != Some(BUNDLE_ID) {
         return Launch::Plain;
     }
-    match app.parent() {
-        Some(dir) if dir == Path::new("/Applications") || dir == o.user_home.join("Applications") => Launch::Launchd,
-        _ => Launch::Unmoved,
-    }
+    let dir = app.parent().unwrap_or(app);
+    let installed = dir == Path::new("/Applications") || dir == o.user_home.join("Applications");
+    let mounted = app.starts_with("/Volumes") || app.components().any(|c| c.as_os_str() == "AppTranslocation");
+    if installed || mounted { Launch::Launchd } else { Launch::Plain }
 }
 
 /// `X.app` for `X.app/Contents/MacOS/Silo`.
@@ -169,9 +170,8 @@ fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
     Some(rest[start..start + rest[start..].find("</string>")?].trim())
 }
 
-/// This Mac's server: who runs it (or why it can't be started), and
-/// whether to suggest moving Silo to Applications.
-pub fn local_service(home: &Path, server_exe: PathBuf) -> (Result<Service, String>, bool) {
+/// This Mac's server: who runs it, or why it can't be started.
+pub fn local_service(home: &Path, server_exe: PathBuf) -> Result<Service, String> {
     let app_exe = std::env::current_exe().and_then(|e| e.canonicalize()).unwrap_or_default();
     let user_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let plist = bundle_of(&app_exe).and_then(|app| std::fs::read_to_string(app.join("Contents/Info.plist")).ok()).unwrap_or_default();
@@ -187,20 +187,32 @@ pub fn local_service(home: &Path, server_exe: PathBuf) -> (Result<Service, Strin
     let launch = launch(&origin);
     let manager = if launch == Launch::Launchd { service::detect(&service::System) } else { Manager::None };
     tracing::info!(?launch, ?manager, "server launch");
-    let service = Service::local(manager, server_exe, home.to_owned()).map_err(|e| {
+    let exe = if manager == Manager::Launchd { managed_exe(home, &server_exe) } else { Ok(server_exe) };
+    exe.map_err(anyhow::Error::from).and_then(|exe| Service::local(manager, exe, home.to_owned())).map_err(|e| {
         tracing::warn!("server: {e:#}");
         "Silo's server is missing".to_owned()
-    });
-    (service, launch == Launch::Unmoved)
+    })
+}
+
+/// The launchd job's `silo`: this build's runtime copy of the bundled server.
+fn managed_exe(home: &Path, server_exe: &Path) -> std::io::Result<PathBuf> {
+    runtime::install(home, server_exe.parent().unwrap_or(Path::new("/")))
 }
 
 /// `service::up` on a blocking thread (launchctl and the waits stay off
-/// the network runtime); its notes.
+/// the network runtime); its notes. Under launchd, then drops the runtime
+/// copies of other builds nothing runs from.
 async fn up(svc: &Service) -> anyhow::Result<Vec<String>> {
     let svc = svc.clone();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        rt.block_on(async { service::up(&svc, &service::System, &client_name()).await.map(|up| up.notes) })
+        let notes = rt.block_on(async { service::up(&svc, &service::System, &client_name()).await.map(|up| up.notes) })?;
+        if svc.manager == Manager::Launchd
+            && let Some(dir) = svc.exe.parent()
+        {
+            runtime::collect(&svc.silo_home, dir);
+        }
+        Ok(notes)
     })
     .await?
 }
@@ -471,32 +483,34 @@ mod tests {
     }
 
     #[test]
-    fn launchd_only_for_an_installed_release_bundle() {
+    fn launchd_for_a_release_bundle_where_users_run_apps() {
         let app = Path::new("/Applications/Silo.app/Contents/MacOS/Silo");
         let server = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
         let home = Path::new("/Users/bat");
         let base = Origin { silo_home: None, release: true, app_exe: app, server_exe: server, bundle_id: Some(BUNDLE_ID), user_home: home };
         assert_eq!(launch(&base), Launch::Launchd);
         assert_eq!(launch(&Origin { silo_home: Some(OsStr::new("")), ..base }), Launch::Launchd);
-        let mine = Path::new("/Users/bat/Applications/Silo.app/Contents/MacOS/Silo");
-        let mine_server = Path::new("/Users/bat/Applications/Silo.app/Contents/MacOS/silo-server");
-        assert_eq!(launch(&Origin { app_exe: mine, server_exe: mine_server, ..base }), Launch::Launchd);
+        let at = |dir: &str| (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/MacOS/silo-server"));
+        for dir in ["/Users/bat/Applications", "/Volumes/Silo", "/private/var/folders/x/T/AppTranslocation/1234/d"] {
+            let (exe, server) = at(dir);
+            assert_eq!(launch(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&server), ..base }), Launch::Launchd, "{dir}");
+        }
+        // A cargo target dir, Downloads, a subfolder: a plain server.
+        for dir in ["/Users/bat/dev/term/target", "/Users/bat/Downloads", "/Applications/Utilities"] {
+            let (exe, server) = at(dir);
+            assert_eq!(launch(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&server), ..base }), Launch::Plain, "{dir}");
+        }
         // Dev homes, debug builds, other bundles or servers: a plain server.
         assert_eq!(launch(&Origin { silo_home: Some(OsStr::new("/tmp/silo-ui")), ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { release: false, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { bundle_id: Some("xyz.nitish.silo.dev"), ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { bundle_id: None, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { server_exe: Path::new("/usr/local/bin/silo"), ..base }), Launch::Plain);
+        assert_eq!(launch(&Origin { server_exe: Path::new("/Volumes/Silo/Silo.app/Contents/MacOS/silo-server"), ..base }), Launch::Plain);
         let dev = Path::new("/w/target/debug/SiloDev.app/Contents/MacOS/SiloDev");
         assert_eq!(launch(&Origin { app_exe: dev, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { app_exe: Path::new("/w/target/release/silo-app"), ..base }), Launch::Plain);
-        // Run from a disk image, Downloads or App Translocation: suggest moving it.
-        for dir in ["/Volumes/Silo", "/Users/bat/Downloads", "/private/var/folders/x/AppTranslocation/1234/d", "/Applications/Utilities"] {
-            let (exe, server) = (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/MacOS/silo-server"));
-            assert_eq!(launch(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&server), ..base }), Launch::Unmoved, "{dir}");
-        }
     }
-
     #[test]
     fn reads_bundle_id() {
         let plist =
@@ -510,6 +524,24 @@ mod tests {
         let svc =
             Service::new(manager, "/Applications/Silo.app/Contents/MacOS/silo-server".into(), home.join("state"), home.to_owned(), 501, "bat".into());
         service::plan_up(&svc.unwrap().probe(runner, server).unwrap())
+    }
+
+    #[test]
+    fn launchd_job_runs_the_runtime_copy() {
+        let base = std::env::temp_dir().join(format!("silo-managed-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, macos) = (base.join("home"), base.join("Silo.app/Contents/MacOS"));
+        std::fs::create_dir_all(&macos).unwrap();
+        for name in ["silo-server", "silo-menubar"] {
+            std::fs::write(macos.join(name), name).unwrap();
+        }
+        let exe = managed_exe(&home, &macos.join("silo-server")).unwrap();
+        assert_eq!(exe, home.join("runtime").join(silo_proto::BUILD).join("silo"));
+        let svc = Service::new(Manager::Launchd, exe.clone(), home.clone(), base.clone(), 501, "bat".into()).unwrap();
+        let plist = svc.unit_text().unwrap();
+        assert!(plist.contains(&format!("<string>{}</string>\n\t\t<string>server</string>", exe.display())));
+        assert!(!plist.contains("Silo.app"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

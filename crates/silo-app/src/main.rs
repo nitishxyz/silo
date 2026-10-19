@@ -59,17 +59,25 @@ fn main() {
     let home = silo_proto::paths::home();
     let exe = conn::server_exe();
     tracing::info!(home = %home.display(), server = %exe.display(), "starting Silo");
-    let (service, move_hint) = conn::local_service(&home, exe);
-    if service.as_ref().is_ok_and(|s| s.manager == silo_client::service::Manager::Launchd) {
-        rt.spawn_blocking(cli_link::refresh);
+    let service = conn::local_service(&home, exe);
+    let managed = service.as_ref().ok().filter(|s| s.manager == silo_client::service::Manager::Launchd);
+    if let Some(svc) = managed {
+        let (home, silo) = (home.clone(), svc.exe.clone());
+        rt.spawn_blocking(move || cli_link::refresh(&home, &silo));
     }
+    let agent = match managed {
+        Some(svc) => svc.exe.parent().map(|dir| dir.join("silo-menubar")),
+        None => conn::sibling(&["silo-menubar"]),
+    };
     let loaded = terminal_prefs::load(&home);
     if let Some(problem) = &loaded.problem {
         tracing::warn!("{problem}");
     }
     tracing::info!(theme = %loaded.prefs.theme, font = %loaded.prefs.font_family, "terminal preferences");
     theme::install(loaded.prefs, loaded.problem);
-    start_menubar(&home);
+    if let Some(agent) = agent {
+        start_menubar(&agent, &home);
+    }
 
     // `silo://settings` (sent by the menu-bar agent) opens Settings, in a
     // running app or at launch.
@@ -125,7 +133,7 @@ fn main() {
             }
         })
         .detach();
-        hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), move_hint, cx);
+        hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), cx);
         if let Err(error) = open_window(None, cx) {
             eprintln!("silo: cannot open window: {error:#}");
             cx.quit();
@@ -207,15 +215,12 @@ fn reduce_motion() -> bool {
         .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "1")
 }
 
-/// Launch the bundled menu-bar agent (`silo-menubar`) if it is next to us
-/// and not already running for this state directory; it outlives the app.
-fn start_menubar(home: &std::path::Path) {
+/// Launch the menu-bar agent unless one already runs for this state
+/// directory; it outlives the app.
+fn start_menubar(agent: &std::path::Path, home: &std::path::Path) {
     if std::env::var_os("SILO_NO_MENUBAR").is_some() {
         return;
     }
-    let Some(agent) = conn::sibling(&["silo-menubar"]) else {
-        return;
-    };
     let mut command = std::process::Command::new(agent);
     command.env("SILO_HOME", home).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     // The agent exits at once when another instance holds its lock.

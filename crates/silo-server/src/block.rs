@@ -655,23 +655,79 @@ fn pty_size(size: TermSize) -> PtySize {
 /// Spawn a terminal block and its actor thread.
 pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let size = TermSize { columns: info.size.columns.clamp(1, 512), rows: info.size.rows.clamp(1, 256), ..info.size };
+    let mut vt = TerminalCore::new(grid(size)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let terminal = TerminalConfig::default();
+    install_config(&mut vt, &terminal);
+    launch(BlockInfo { size, ..info }, vt, terminal, 0, String::new(), config, notes)
+}
+
+/// Rebuild a block from a [`Checkpoint`] around a fresh program: the
+/// restored screen and history stay above a separator line. The stream
+/// starts a new epoch.
+///
+/// # Errors
+/// Fails if the snapshot cannot be restored or the program not spawned.
+pub fn spawn_resumed(info: BlockInfo, checkpoint: Checkpoint, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+    let (mut vt, terminal) = restore_vt(&checkpoint)?;
+    let banner = resume_banner(&mut vt)?;
+    vt.write_output(banner.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut info = info;
+    info.size = checkpoint.size;
+    info.owner = None;
+    info.owner_name = None;
+    info.exited = None;
+    launch(info, vt, terminal, checkpoint.offset, checkpoint.osc_title, config, notes)
+}
+
+/// Leave whatever modes the old program set, then a dim separator line
+/// below the cursor.
+fn resume_banner(vt: &mut TerminalCore) -> anyhow::Result<String> {
+    let frame = vt.frame().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let leave_alt = if frame.alt_screen { "\x1b[?1049l" } else { "" };
+    let reset = "\x1b[!p\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[<99u\x1b[=0u";
+    let newline = if frame.alt_screen || frame.cursor.column > 0 { "\r\n" } else { "\r" };
+    Ok(format!("{leave_alt}{reset}{newline}\x1b[2m\u{2014} restored {} \u{2014}\x1b[0m\r\n", local_time()))
+}
+
+/// `YYYY-MM-DD HH:MM` in local time.
+#[allow(unsafe_code)]
+fn local_time() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let now = libc::time_t::try_from(now).unwrap_or_default();
+    // SAFETY: `localtime_r` only writes the `tm` it is given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&raw const now, &raw mut tm);
+        tm
+    };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
+/// Run `config`'s program in a PTY behind `vt`, whose stream starts at
+/// `offset`; `osc_title` is the title until the program sets one.
+fn launch(
+    mut info: BlockInfo,
+    vt: TerminalCore,
+    terminal: TerminalConfig,
+    offset: u64,
+    osc_title: String,
+    config: &SpawnConfig,
+    notes: UnboundedSender<Note>,
+) -> anyhow::Result<BlockHandle> {
     let (tx, rx) = mpsc::channel();
     let exit_tx = tx.clone();
-    let mut pty = Pty::spawn(config, pty_size(size), move |status| {
+    let mut pty = Pty::spawn(config, pty_size(info.size), move |status| {
         let _ = exit_tx.send(BlockMsg::ChildExited(status.code()));
     })?;
     let gate = Arc::new(ReadGate::default());
     let input = start_io(&mut pty, &info.id, &tx, &gate)?;
-
-    let mut info = info;
-    info.size = size;
     info.pid = Some(pty.pid());
     info.lifecycle = Lifecycle::Running;
-    let mut vt = TerminalCore::new(grid(size)).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let config = TerminalConfig::default();
-    install_config(&mut vt, &config);
-    let mut actor = Actor::new(&info, vt, config, notes);
+    let mut actor = Actor::new(&info, vt, terminal, notes);
     actor.gate = gate;
+    actor.ring_start = offset;
+    actor.log.floor = offset;
+    actor.osc_title = osc_title;
     actor.pty = Some(pty);
     actor.input = Some(input);
     actor.tx = Some(tx.clone());
@@ -679,23 +735,29 @@ pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>
 }
 
 /// Rebuild a block from a [`Checkpoint`] without a process: its contents are
-/// readable, input is ignored. The stream starts a new epoch.
+/// readable, input is ignored. An exited program stays [`Lifecycle::Exited`]
+/// with its code, anything else becomes [`Lifecycle::Restored`]. The stream
+/// starts a new epoch.
 ///
 /// # Errors
 /// Fails if the snapshot cannot be restored.
 pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let (vt, config) = restore_vt(&checkpoint)?;
+    let exited = checkpoint.lifecycle == Lifecycle::Exited;
+    let lifecycle = if exited { Lifecycle::Exited } else { Lifecycle::Restored };
+    let exit_code = checkpoint.exit_code.filter(|_| exited);
     let size = checkpoint.size;
     let mut info = info;
     info.size = size;
     info.pid = None;
     info.owner = None;
     info.owner_name = None;
-    info.lifecycle = Lifecycle::Restored;
-    info.exited = None;
+    info.lifecycle = lifecycle;
+    info.exited = exit_code;
     restore_osc(&mut info, &checkpoint);
     let mut actor = Actor::new(&info, vt, config, notes);
-    actor.lifecycle = Lifecycle::Restored;
+    actor.lifecycle = lifecycle;
+    actor.exit_code = exit_code;
     actor.ring_start = checkpoint.offset;
     actor.log.floor = checkpoint.offset;
     (actor.osc_title, actor.osc_pwd) = (checkpoint.osc_title, checkpoint.osc_pwd);

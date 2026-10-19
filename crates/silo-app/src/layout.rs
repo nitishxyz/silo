@@ -30,6 +30,8 @@ const BUTTON: f32 = 22.0;
 /// come from [`radius`].
 const OUTER: f32 = 8.0;
 const GAP: f32 = 6.0;
+/// Pointer target of a divider, centred on it.
+const DIVIDER_HIT: f32 = 6.0;
 /// Width of the corner ring over browser surfaces: covers a corner of
 /// radius ≤ 12 (r·(√2−1)) and stays inside the gap between cards.
 const CAP: f32 = 5.0;
@@ -70,12 +72,12 @@ impl Workspace {
         let content = if zoom.is_some() {
             // Siblings stay tiled under the pane growing over them.
             let focused = self.focused_block(window, cx);
-            self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
+            self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
         } else if w.zoomed {
-            self.render_layout(&Layout::block(w.focused.clone()), Some(&w.focused), false, true, None, place, now, cx)
+            self.render_layout(&Layout::block(w.focused.clone()), &[], Some(&w.focused), false, true, None, place, now, cx)
         } else {
             let focused = self.focused_block(window, cx);
-            self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
+            self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
         };
         let zoom = zoom.map(|(block, rect, area)| self.render_zoom(block, w.zoomed, rect, area, place, now, cx));
         let area = self.motion.measured.area.clone();
@@ -136,6 +138,7 @@ impl Workspace {
     fn render_layout(
         &self,
         layout: &Layout,
+        path: &[usize],
         focused: Option<&str>,
         multiple: bool,
         zoomed: bool,
@@ -174,26 +177,42 @@ impl Workspace {
             Layout::Split { axis, ratio, first, second } => {
                 let ratio = ratio.clamp(0.05, 0.95);
                 let (place_a, place_b) = place.split(*axis);
-                let a = self.render_layout(first, focused, multiple, zoomed, swap, place_a, now, cx);
-                let b = self.render_layout(second, focused, multiple, zoomed, swap, place_b, now, cx);
+                let child = |i: usize| [path, &[i]].concat();
+                let a = self.render_layout(first, &child(0), focused, multiple, zoomed, swap, place_a, now, cx);
+                let b = self.render_layout(second, &child(1), focused, multiple, zoomed, swap, place_b, now, cx);
                 // Compact: a neutral hairline. Comfortable: empty space.
                 let (size, fill) = match self.density() {
                     Density::Compact => (1.0, Some(theme::border())),
                     Density::Comfortable => (GAP, None),
                 };
-                let container = div().size_full().min_w_0().min_h_0().flex();
+                // Double-click a divider to even out its split. Its hit area
+                // is wider than a Compact hairline and overlays both panes.
+                let split = path.to_vec();
+                let divider = div().flex_none().when_some(fill, |el, c| el.bg(rgb(c)));
+                let hit = div().id(gpui::ElementId::Name(format!("divider-{split:?}").into())).absolute().occlude().on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                        let Some(w) = this.active_window().filter(|_| e.click_count == 2) else { return };
+                        let (window_id, change) = (w.id.clone(), even_split(&w.layout, &split));
+                        this.set_ratios(&window_id, change.into_iter().collect(), cx);
+                    }),
+                );
+                let inset = px((size - DIVIDER_HIT) / 2.0);
+                let container = div().relative().size_full().min_w_0().min_h_0().flex();
                 match axis {
                     Axis::Horizontal => container
                         .flex_row()
                         .child(div().h_full().w(relative(ratio)).flex_none().min_w_0().child(a))
-                        .child(div().h_full().w(px(size)).flex_none().when_some(fill, |el, c| el.bg(rgb(c))))
+                        .child(divider.h_full().w(px(size)))
                         .child(div().h_full().flex_1().min_w_0().child(b))
+                        .child(hit.top_0().bottom_0().left(relative(ratio)).ml(inset).w(px(DIVIDER_HIT)))
                         .into_any_element(),
                     Axis::Vertical => container
                         .flex_col()
                         .child(div().w_full().h(relative(ratio)).flex_none().min_h_0().child(a))
-                        .child(div().w_full().h(px(size)).flex_none().when_some(fill, |el, c| el.bg(rgb(c))))
+                        .child(divider.w_full().h(px(size)))
                         .child(div().w_full().flex_1().min_h_0().child(b))
+                        .child(hit.left_0().right_0().top(relative(ratio)).mt(inset).h(px(DIVIDER_HIT)))
                         .into_any_element(),
                 }
             }
@@ -305,6 +324,7 @@ impl Workspace {
             .and_then(|(p, _)| p.read(cx).info.clone())
             .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
         let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
+        let loading = self.browsers.get(id).is_some_and(|(p, _)| p.read(cx).loading());
         let glyph = self.block_icon(id);
         let (name, cwd) = match browser {
             Some(title) => (title, None),
@@ -357,7 +377,10 @@ impl Workspace {
             .gap(px(6.0))
             .font_family(theme::ui_font())
             .text_size(px(11.5))
-            .child(icon(glyph, 12.0, if active { theme::accent() } else { theme::muted() }))
+            .child({
+                let color = if active { theme::accent() } else { theme::muted() };
+                if loading { crate::browser_pane::spinner(id, 12.0, color, cx) } else { icon(glyph, 12.0, color).into_any_element() }
+            })
             .child(
                 div()
                     .flex()
@@ -610,6 +633,131 @@ pub(crate) fn sibling_side(layout: &Layout, id: &str) -> Option<Edge> {
     }
 }
 
+/// Axis of an automatic split of a pane laid out at `rect`: right when it
+/// is wider than tall, down otherwise; right before its first layout.
+pub(crate) fn auto_axis(rect: Option<gpui::Bounds<gpui::Pixels>>) -> Axis {
+    match rect {
+        Some(r) if r.size.height >= r.size.width => Axis::Vertical,
+        _ => Axis::Horizontal,
+    }
+}
+
+impl Workspace {
+    /// [`auto_axis`] of `block`'s slot as last laid out.
+    pub(crate) fn auto_axis(&self, block: &str) -> Axis {
+        auto_axis(self.motion.measured.cells.borrow().get(block).copied())
+    }
+}
+
+/// Smallest share either side of a split keeps (as `Layout::set_ratio`).
+const MIN_RATIO: f32 = 0.05;
+/// How far one resize step moves a divider.
+pub(crate) const RESIZE_STEP: f32 = 0.05;
+
+/// A split's new ratio, by its path from the root (0 = first child).
+pub(crate) type RatioChange = (Vec<usize>, f32);
+
+/// The path from the root to leaf `id`.
+fn leaf_path(layout: &Layout, id: &str) -> Option<Vec<usize>> {
+    match layout {
+        Layout::Block { id: b } => (b == id).then(Vec::new),
+        Layout::Split { first, second, .. } => [first, second].into_iter().enumerate().find_map(|(i, child)| {
+            let mut path = leaf_path(child, id)?;
+            path.insert(0, i);
+            Some(path)
+        }),
+    }
+}
+
+fn node_at<'a>(layout: &'a Layout, path: &[usize]) -> Option<&'a Layout> {
+    match (layout, path.split_first()) {
+        (_, None) => Some(layout),
+        (Layout::Split { first, .. }, Some((0, rest))) => node_at(first, rest),
+        (Layout::Split { second, .. }, Some((_, rest))) => node_at(second, rest),
+        (Layout::Block { .. }, Some(_)) => None,
+    }
+}
+
+fn split_ratio(layout: &Layout, path: &[usize]) -> Option<(Axis, f32)> {
+    match node_at(layout, path)? {
+        Layout::Split { axis, ratio, .. } => Some((*axis, *ratio)),
+        Layout::Block { .. } => None,
+    }
+}
+
+fn change(path: &[usize], old: f32, new: f32) -> Option<RatioChange> {
+    let new = new.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+    ((new - old).abs() > 1e-4).then(|| (path.to_vec(), new))
+}
+
+/// Same tree of splits and blocks, ratios aside.
+pub(crate) fn same_shape(a: &Layout, b: &Layout) -> bool {
+    match (a, b) {
+        (Layout::Block { id: x }, Layout::Block { id: y }) => x == y,
+        (Layout::Split { axis: ax, first: a1, second: a2, .. }, Layout::Split { axis: bx, first: b1, second: b2, .. }) => {
+            ax == bx && same_shape(a1, b1) && same_shape(a2, b2)
+        }
+        _ => false,
+    }
+}
+
+/// Grow (`delta > 0`) or shrink pane `id`'s share of its own split.
+pub(crate) fn resize_share(layout: &Layout, id: &str, delta: f32) -> Option<RatioChange> {
+    let path = leaf_path(layout, id)?;
+    let (&side, parent) = path.split_last()?;
+    let (_, ratio) = split_ratio(layout, parent)?;
+    change(parent, ratio, if side == 0 { ratio + delta } else { ratio - delta })
+}
+
+/// Move pane `id`'s edge on the `direction` side one step that way: the
+/// nearest enclosing split along that axis whose divider is that edge.
+pub(crate) fn move_edge(layout: &Layout, id: &str, direction: crate::focus::Direction) -> Option<RatioChange> {
+    use crate::focus::Direction;
+    let (axis, side, delta) = match direction {
+        Direction::Left => (Axis::Horizontal, 1, -RESIZE_STEP),
+        Direction::Right => (Axis::Horizontal, 0, RESIZE_STEP),
+        Direction::Up => (Axis::Vertical, 1, -RESIZE_STEP),
+        Direction::Down => (Axis::Vertical, 0, RESIZE_STEP),
+    };
+    let path = leaf_path(layout, id)?;
+    let depth = (0..path.len()).rev().find(|&d| path[d] == side && split_ratio(layout, &path[..d]).is_some_and(|(a, _)| a == axis))?;
+    let (_, ratio) = split_ratio(layout, &path[..depth])?;
+    change(&path[..depth], ratio, ratio + delta)
+}
+
+/// Panes a subtree lines up along `axis`.
+fn weight(layout: &Layout, axis: Axis) -> u32 {
+    match layout {
+        Layout::Split { axis: a, first, second, .. } if *a == axis => weight(first, axis) + weight(second, axis),
+        _ => 1,
+    }
+}
+
+/// The ratio giving every pane along the split at `path` an even share.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn even_split(layout: &Layout, path: &[usize]) -> Option<RatioChange> {
+    let Layout::Split { axis, ratio, first, second } = node_at(layout, path)? else { return None };
+    let (a, b) = (weight(first, *axis), weight(second, *axis));
+    change(path, *ratio, a as f32 / (a + b) as f32)
+}
+
+/// Every split of `layout` evened out.
+pub(crate) fn equalize(layout: &Layout) -> Vec<RatioChange> {
+    fn walk(root: &Layout, node: &Layout, path: &mut Vec<usize>, out: &mut Vec<RatioChange>) {
+        if let Layout::Split { first, second, .. } = node {
+            out.extend(even_split(root, path));
+            for (i, child) in [first, second].into_iter().enumerate() {
+                path.push(i);
+                walk(root, child, path, out);
+                path.pop();
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(layout, layout, &mut Vec::new(), &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +788,88 @@ mod tests {
         assert_eq!(parent_axis(&layout, "a"), Some(Axis::Horizontal));
         assert_eq!(parent_axis(&layout, "c"), Some(Axis::Vertical));
         assert_eq!(parent_axis(&block("a"), "a"), None);
+    }
+
+    fn ratio(axis: Axis, ratio: f32, first: Layout, second: Layout) -> Layout {
+        Layout::Split { axis, ratio, first: Box::new(first), second: Box::new(second) }
+    }
+
+    fn close(change: Option<RatioChange>, path: &[usize], expected: f32) {
+        let (p, r) = change.expect("a change");
+        assert_eq!(p, path);
+        assert!((r - expected).abs() < 1e-5, "{r} != {expected}");
+    }
+
+    #[test]
+    fn automatic_splits_follow_the_longer_side() {
+        let rect = |w: f32, h: f32| Some(gpui::Bounds::new(gpui::point(px(10.0), px(20.0)), gpui::size(px(w), px(h))));
+        assert_eq!(auto_axis(rect(800.0, 600.0)), Axis::Horizontal);
+        assert_eq!(auto_axis(rect(400.0, 600.0)), Axis::Vertical);
+        assert_eq!(auto_axis(rect(500.0, 500.0)), Axis::Vertical);
+        assert_eq!(auto_axis(None), Axis::Horizontal);
+    }
+
+    #[test]
+    fn grow_and_shrink_change_the_focused_share_of_its_split() {
+        // a | (b / c)
+        let layout = split(Axis::Horizontal, block("a"), split(Axis::Vertical, block("b"), block("c")));
+        close(resize_share(&layout, "a", RESIZE_STEP), &[], 0.55);
+        close(resize_share(&layout, "a", -RESIZE_STEP), &[], 0.45);
+        close(resize_share(&layout, "b", RESIZE_STEP), &[1], 0.55);
+        close(resize_share(&layout, "c", RESIZE_STEP), &[1], 0.45);
+        assert_eq!(resize_share(&block("a"), "a", RESIZE_STEP), None);
+        // Clamped to the minimum pane size; no change at the limit.
+        let tight = ratio(Axis::Horizontal, 0.92, block("a"), block("b"));
+        close(resize_share(&tight, "a", RESIZE_STEP), &[], 0.95);
+        let full = ratio(Axis::Horizontal, 0.95, block("a"), block("b"));
+        assert_eq!(resize_share(&full, "a", RESIZE_STEP), None);
+        close(resize_share(&full, "b", RESIZE_STEP), &[], 0.9);
+    }
+
+    #[test]
+    fn edges_move_on_the_nearest_split_bounding_that_side() {
+        use crate::focus::Direction::*;
+        // (a | b) | c, with b split vertically into b / d.
+        let layout = split(Axis::Horizontal, split(Axis::Horizontal, block("a"), split(Axis::Vertical, block("b"), block("d"))), block("c"));
+        close(move_edge(&layout, "b", Right), &[], 0.55);
+        close(move_edge(&layout, "b", Left), &[0], 0.45);
+        close(move_edge(&layout, "b", Down), &[0, 1], 0.55);
+        assert_eq!(move_edge(&layout, "b", Up), None);
+        close(move_edge(&layout, "d", Up), &[0, 1], 0.45);
+        assert_eq!(move_edge(&layout, "a", Left), None);
+        close(move_edge(&layout, "a", Right), &[0], 0.55);
+        close(move_edge(&layout, "c", Left), &[], 0.45);
+        assert_eq!(move_edge(&layout, "c", Right), None);
+        let edge = ratio(Axis::Horizontal, 0.05, block("a"), block("b"));
+        assert_eq!(move_edge(&edge, "b", Left), None, "clamped");
+    }
+
+    #[test]
+    fn equalize_gives_every_pane_along_an_axis_an_even_share() {
+        // a | (b | c) | ... with an unrelated vertical split in c.
+        let layout =
+            ratio(Axis::Horizontal, 0.7, block("a"), ratio(Axis::Horizontal, 0.2, block("b"), ratio(Axis::Vertical, 0.9, block("c"), block("d"))));
+        let changes = equalize(&layout);
+        assert_eq!(changes.len(), 3);
+        close(changes.first().cloned(), &[], 1.0 / 3.0);
+        close(changes.get(1).cloned(), &[1], 0.5);
+        close(changes.get(2).cloned(), &[1, 1], 0.5);
+        let mut even = layout.clone();
+        for (path, r) in &changes {
+            even.set_ratio(path, *r);
+        }
+        assert!(equalize(&even).is_empty());
+        close(even_split(&layout, &[1, 1]), &[1, 1], 0.5);
+        assert_eq!(even_split(&layout, &[0]), None);
+    }
+
+    #[test]
+    fn shape_ignores_ratios_but_not_splits() {
+        let a = ratio(Axis::Horizontal, 0.3, block("a"), block("b"));
+        assert!(same_shape(&a, &ratio(Axis::Horizontal, 0.6, block("a"), block("b"))));
+        assert!(!same_shape(&a, &ratio(Axis::Vertical, 0.3, block("a"), block("b"))));
+        assert!(!same_shape(&a, &ratio(Axis::Horizontal, 0.3, block("a"), ratio(Axis::Vertical, 0.5, block("b"), block("c")))));
+        assert!(!same_shape(&a, &block("a")));
     }
 
     #[test]

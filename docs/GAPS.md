@@ -99,11 +99,12 @@ pub floats: Vec<Float>,   // back-to-front; last = topmost
   machinery (`layout.rs:481`), with an edge zone instead of the centre.
 
 **Focus.** Clicking a float raises it and focuses it. Directional `cmd-alt-arrow` navigation stays tiled-only.
-Floats join the reading-order cycle (whatever `cmd-alt-[`/`]` is bound to today; check `commands.rs`) after
+Floats join the reading-order cycle (`cmd-[`/`]`, in every pane including browsers) after
 the tiled blocks. New palette commands: "Float Pane" and "Dock Pane". No new shortcut.
 
 **Persistence.** Free: `registry::Window` is serialized into the manifest. Add no `#[serde(default)]`: there is
 no compat path, so an older manifest fails to load. That is acceptable in dev; call it out in the commit.
+Exception: `Window::history` (focus history) is `#[serde(default)]` on purpose, so existing saved state keeps loading.
 
 **Files.** `silo-proto/src/{model.rs,control.rs}`, `silo-server/src/{registry.rs,conn.rs}`,
 `silo-app/src/{layout.rs,commands.rs,palette.rs,floats.rs (new)}`, `silo-cli/src/main.rs` (`silo float <block>`).

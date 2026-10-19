@@ -53,6 +53,10 @@ pub struct Workspace {
     /// Revision an optimistic local layout change was applied on top of;
     /// snapshots up to it are stale and ignored. See `call_optimistic`.
     pub(crate) ahead_of: Option<u64>,
+    /// Split ratios applied locally but not yet sent (window, path, ratio);
+    /// `ratio_flush` sends them once resizing pauses.
+    pub(crate) pending_ratios: Vec<crate::palette::PendingRatio>,
+    pub(crate) ratio_flush: Option<Task<()>>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
     /// The shown session was closed and none replaced it: (re)connecting
@@ -107,7 +111,6 @@ impl Workspace {
     pub fn new(shared: Entity<HostsState>, session: Option<(usize, String)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (rt, home) = (shared.read(cx).rt.clone(), shared.read(cx).home.clone());
         let state = shared.read(cx).app_state().clone();
-        let move_hint = shared.update(cx, |hosts, _| std::mem::take(&mut hosts.move_hint));
         let last = || std::env::var("SILO_SESSION").ok().filter(|s| !s.is_empty()).or_else(|| state.last_session.clone());
         let requested = session.as_ref().map(|(_, id)| id.clone());
         let (active_host, wanted_session) = session.map_or_else(|| (0, last()), |(host, id)| (host, Some(id)));
@@ -139,9 +142,11 @@ impl Workspace {
             active_host,
             status: Some("connecting to server…".into()),
             upgrading: false,
-            notice: move_hint.then(|| "Move Silo to Applications to keep it running in the background.".into()),
+            notice: None,
             view: None,
             ahead_of: None,
+            pending_ratios: Vec::new(),
+            ratio_flush: None,
             wanted_session,
             emptied: false,
             panes: HashMap::new(),
@@ -307,7 +312,8 @@ impl Workspace {
             ConnEvent::Event(Event::SessionChanged { view }) => {
                 let stale = self.ahead_of.is_some_and(|base| view.session.revision <= base);
                 if !stale && self.view.as_ref().is_some_and(|v| v.session.id == view.session.id) {
-                    self.set_view(view.clone(), window, cx);
+                    let view = self.with_pending_ratios(view.clone());
+                    self.set_view(view, window, cx);
                 }
             }
             ConnEvent::Event(Event::SessionClosed { session_id }) => {

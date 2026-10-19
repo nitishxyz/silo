@@ -9,8 +9,27 @@ use gpui::{
 use silo_proto::{control::Method, model::Axis};
 
 use crate::theme::Continuous as _;
+
+/// Quiet time after the last resize step before ratios go to the server.
+const RATIO_FLUSH: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// A split ratio applied locally, not yet sent; `shape` is its window's
+/// layout when set, so the path only applies to that same tree.
+pub(crate) struct PendingRatio {
+    window_id: String,
+    path: Vec<usize>,
+    ratio: f32,
+    shape: silo_proto::model::Layout,
+}
+
+impl PendingRatio {
+    fn fits(&self, windows: &[silo_proto::model::WindowInfo]) -> bool {
+        windows.iter().any(|w| w.id == self.window_id && crate::layout::same_shape(&w.layout, &self.shape))
+    }
+}
 use crate::{
     commands::{Command, fuzzy},
+    focus::Direction,
     hosts::HostState,
     text_field::{FieldEvent, TextField},
     theme,
@@ -156,9 +175,30 @@ impl Workspace {
             Command::PreviousTab => self.step_tab(-1),
             Command::SplitRight => self.split(Axis::Horizontal, window, cx),
             Command::SplitDown => self.split(Axis::Vertical, window, cx),
+            Command::NewPane => {
+                if let Some(block) = block {
+                    let axis = self.auto_axis(&block);
+                    self.split_block(block, axis, cx);
+                }
+            }
             Command::ClosePane => self.close_block(window, cx),
             Command::FocusNextPane => self.cycle_focus(1, window, cx),
             Command::FocusPreviousPane => self.cycle_focus(-1, window, cx),
+            Command::GrowPane | Command::ShrinkPane => {
+                let delta = if command == Command::GrowPane { crate::layout::RESIZE_STEP } else { -crate::layout::RESIZE_STEP };
+                self.resize_focused(|layout, id| crate::layout::resize_share(layout, id, delta).into_iter().collect(), window, cx);
+            }
+            Command::MovePaneEdgeLeft => {
+                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Left).into_iter().collect(), window, cx)
+            }
+            Command::MovePaneEdgeRight => {
+                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Right).into_iter().collect(), window, cx)
+            }
+            Command::MovePaneEdgeUp => self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Up).into_iter().collect(), window, cx),
+            Command::MovePaneEdgeDown => {
+                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Down).into_iter().collect(), window, cx)
+            }
+            Command::EqualizePanes => self.resize_focused(|l, _| crate::layout::equalize(l), window, cx),
             Command::FocusPaneLeft => self.focus_direction(crate::focus::Direction::Left, window, cx),
             Command::FocusPaneRight => self.focus_direction(crate::focus::Direction::Right, window, cx),
             Command::FocusPaneUp => self.focus_direction(crate::focus::Direction::Up, window, cx),
@@ -292,6 +332,13 @@ impl Workspace {
             | Command::FocusPaneRight
             | Command::FocusPaneUp
             | Command::FocusPaneDown
+            | Command::GrowPane
+            | Command::ShrinkPane
+            | Command::MovePaneEdgeLeft
+            | Command::MovePaneEdgeRight
+            | Command::MovePaneEdgeUp
+            | Command::MovePaneEdgeDown
+            | Command::EqualizePanes
             | Command::ZoomPane => panes > 1,
             Command::RemoveHost => self.hosts.iter().any(|h| !h.info.local && !h.removed),
             // On the server's focused block: tiled with a sibling, or floating.
@@ -306,6 +353,7 @@ impl Workspace {
             | Command::RenameTab
             | Command::SplitRight
             | Command::SplitDown
+            | Command::NewPane
             | Command::NewBrowser
             | Command::OpenUrl
             | Command::ClosePane
@@ -380,6 +428,59 @@ impl Workspace {
             let id = ids[index].clone();
             self.focus_block(&id, window, cx);
         }
+    }
+
+    /// Resize splits of the active, unzoomed window around the focused pane.
+    fn resize_focused(
+        &mut self,
+        changes: impl FnOnce(&silo_proto::model::Layout, &str) -> Vec<crate::layout::RatioChange>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(focused) = self.focused_block(window, cx) else { return };
+        let Some(w) = self.active_window().filter(|w| !w.zoomed) else { return };
+        let window_id = w.id.clone();
+        let changes = changes(&w.layout, &focused);
+        self.set_ratios(&window_id, changes, cx);
+    }
+
+    /// Apply split ratios locally at once; the server gets them once
+    /// resizing pauses, so held keys resize the PTYs only at the end.
+    pub(crate) fn set_ratios(&mut self, window_id: &str, changes: Vec<crate::layout::RatioChange>, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else { return };
+        let Some(w) = view.session.windows.iter_mut().find(|w| w.id == window_id) else { return };
+        for (path, ratio) in changes {
+            if w.layout.set_ratio(&path, ratio) {
+                self.pending_ratios.retain(|p| !(p.window_id == window_id && p.path == path));
+                self.pending_ratios.push(PendingRatio { window_id: window_id.to_owned(), path, ratio, shape: w.layout.clone() });
+            }
+        }
+        self.ratio_flush = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RATIO_FLUSH).await;
+            let _ = this.update(cx, |this, cx| this.flush_ratios(cx));
+        }));
+        cx.notify();
+    }
+
+    fn flush_ratios(&mut self, cx: &mut Context<Self>) {
+        self.ratio_flush = None;
+        let windows = self.view.as_ref().map(|v| v.session.windows.as_slice()).unwrap_or_default();
+        let pending: Vec<_> = std::mem::take(&mut self.pending_ratios).into_iter().filter(|p| p.fits(windows)).collect();
+        for PendingRatio { window_id, path, ratio, .. } in pending {
+            self.call_optimistic(Method::LayoutRatio { window_id, path, ratio }, "Couldn't resize panes", |_| {}, cx);
+        }
+    }
+
+    /// A server snapshot with the not yet sent ratios applied on top; those
+    /// whose window changed shape (split, close) are dropped.
+    pub(crate) fn with_pending_ratios(&mut self, mut view: silo_proto::model::SessionView) -> silo_proto::model::SessionView {
+        self.pending_ratios.retain(|p| p.fits(&view.session.windows));
+        for p in &self.pending_ratios {
+            if let Some(w) = view.session.windows.iter_mut().find(|w| w.id == p.window_id) {
+                w.layout.set_ratio(&p.path, p.ratio);
+            }
+        }
+        view
     }
 
     // ---- palette UI ----
