@@ -27,10 +27,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Corrupt => write!(f, "sealed data is malformed or truncated"),
-            Error::AuthFailed => write!(
-                f,
-                "sealed data failed authentication (wrong key or tampered)"
-            ),
+            Error::AuthFailed => write!(f, "sealed data failed authentication (wrong key or tampered)"),
             Error::InsecureKey { path, reason } => {
                 write!(f, "refusing key file {}: {reason}", path.display())
             }

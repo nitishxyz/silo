@@ -34,21 +34,12 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
         ..Default::default()
     };
     if !input.down {
-        return vec![KeyEvent {
-            type_: KeyEventType::KEYUP,
-            ..base
-        }];
+        return vec![KeyEvent { type_: KeyEventType::KEYUP, ..base }];
     }
-    let mut events = vec![KeyEvent {
-        type_: KeyEventType::RAWKEYDOWN,
-        ..base.clone()
-    }];
+    let mut events = vec![KeyEvent { type_: KeyEventType::RAWKEYDOWN, ..base.clone() }];
     let shortcut = input.modifiers.command || input.modifiers.control;
     if typed.is_some() && !shortcut {
-        events.push(KeyEvent {
-            type_: KeyEventType::CHAR,
-            ..base
-        });
+        events.push(KeyEvent { type_: KeyEventType::CHAR, ..base });
     }
     events
 }
@@ -168,14 +159,11 @@ fn windows_key_code(key: &str) -> Option<i32> {
 /// from it.
 fn mac_key_code(windows: i32) -> i32 {
     const LETTERS: [i32; 26] = [
-        0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F,
-        0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06,
+        0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F, 0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D,
+        0x07, 0x10, 0x06,
     ];
     const DIGITS: [i32; 10] = [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19];
-    const FKEYS: [i32; 20] = [
-        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71,
-        0x6A, 0x40, 0x4F, 0x50, 0x5A,
-    ];
+    const FKEYS: [i32; 20] = [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A];
     match windows {
         0x41..=0x5A => LETTERS[(windows - 0x41) as usize],
         0x30..=0x39 => DIGITS[(windows - 0x30) as usize],
@@ -219,19 +207,8 @@ fn mac_key_code(windows: i32) -> i32 {
 mod tests {
     use super::*;
 
-    fn input<'a>(
-        key: &'a str,
-        key_char: Option<&'a str>,
-        modifiers: Modifiers,
-        down: bool,
-    ) -> KeyInput<'a> {
-        KeyInput {
-            key,
-            key_char,
-            modifiers,
-            down,
-            repeat: false,
-        }
+    fn input<'a>(key: &'a str, key_char: Option<&'a str>, modifiers: Modifiers, down: bool) -> KeyInput<'a> {
+        KeyInput { key, key_char, modifiers, down, repeat: false }
     }
 
     #[test]
@@ -247,10 +224,7 @@ mod tests {
 
     #[test]
     fn command_shortcut_has_no_char_and_carries_the_flag() {
-        let command = Modifiers {
-            command: true,
-            ..Default::default()
-        };
+        let command = Modifiers { command: true, ..Default::default() };
         let events = key_events(&input("c", Some("c"), command, true));
         assert_eq!(events.len(), 1);
         assert_ne!(events[0].modifiers & command.flags(), 0);
@@ -258,10 +232,7 @@ mod tests {
 
     #[test]
     fn shifted_punctuation_maps_to_the_base_key() {
-        let shift = Modifiers {
-            shift: true,
-            ..Default::default()
-        };
+        let shift = Modifiers { shift: true, ..Default::default() };
         let events = key_events(&input("?", Some("?"), shift, true));
         assert_eq!(events[0].windows_key_code, 0xBF);
         assert_eq!(events[0].native_key_code, 0x2C);
@@ -271,22 +242,13 @@ mod tests {
     #[test]
     fn named_keys_and_release() {
         let up = key_events(&input("enter", None, Modifiers::default(), false));
-        assert_eq!(
-            (up.len(), up[0].type_, up[0].native_key_code),
-            (1, KeyEventType::KEYUP, 0x24)
-        );
+        assert_eq!((up.len(), up[0].type_, up[0].native_key_code), (1, KeyEventType::KEYUP, 0x24));
         let f5 = key_events(&input("f5", None, Modifiers::default(), true));
-        assert_eq!(
-            (f5[0].windows_key_code, f5[0].native_key_code),
-            (0x74, 0x60)
-        );
+        assert_eq!((f5[0].windows_key_code, f5[0].native_key_code), (0x74, 0x60));
         let left = key_events(&input("left", None, Modifiers::default(), true));
         assert_eq!((left.len(), left[0].native_key_code), (1, 0x7B));
         let e_acute = key_events(&input("é", Some("é"), Modifiers::default(), true));
-        assert_eq!(
-            (e_acute[0].windows_key_code, e_acute[1].character),
-            (0, 0xE9)
-        );
+        assert_eq!((e_acute[0].windows_key_code, e_acute[1].character), (0, 0xE9));
         assert!(key_events(&input("unknownkey", None, Modifiers::default(), true)).is_empty());
     }
 }

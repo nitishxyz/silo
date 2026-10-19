@@ -42,10 +42,7 @@ fn sample_ticket() -> PairTicket {
         .with_relay_url("https://relay.example.com./".parse().unwrap())
         .with_ip_addr("192.168.1.7:4433".parse::<SocketAddr>().unwrap())
         .with_ip_addr("[fe80::1]:4433".parse::<SocketAddr>().unwrap());
-    PairTicket {
-        addr,
-        secret: [7u8; 32],
-    }
+    PairTicket { addr, secret: [7u8; 32] }
 }
 
 #[test]

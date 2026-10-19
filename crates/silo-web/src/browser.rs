@@ -14,10 +14,7 @@ use crate::{Profile, Runtime};
 
 /// `CefRange::InvalidRange()`: "no range". libcef rejects a null `const CefRange&`, so the
 /// optional-in-spirit IME ranges must be passed explicitly.
-const NO_RANGE: Range = Range {
-    from: u32::MAX,
-    to: u32::MAX,
-};
+const NO_RANGE: Range = Range { from: u32::MAX, to: u32::MAX };
 
 pub struct BrowserOptions<'a> {
     pub url: &'a str,
@@ -42,28 +39,13 @@ impl Runtime {
             notify: options.notify,
             focused: AtomicBool::new(false),
         });
-        let window_info = WindowInfo {
-            windowless_rendering_enabled: 1,
-            shared_texture_enabled: 1,
-            runtime_style: RuntimeStyle::ALLOY,
-            ..Default::default()
-        };
-        let settings = BrowserSettings {
-            windowless_frame_rate: 60,
-            background_color: 0xFFFF_FFFF,
-            ..Default::default()
-        };
+        let window_info =
+            WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
+        let settings = BrowserSettings { windowless_frame_rate: 60, background_color: 0xFFFF_FFFF, ..Default::default() };
         let mut client = crate::handlers::client(&shared, &options.profile.tunnel);
         let mut context = options.profile.context.clone();
         let url = CefString::from(options.url);
-        let created = browser_host_create_browser(
-            Some(&window_info),
-            Some(&mut client),
-            Some(&url),
-            Some(&settings),
-            None,
-            Some(&mut context),
-        );
+        let created = browser_host_create_browser(Some(&window_info), Some(&mut client), Some(&url), Some(&settings), None, Some(&mut context));
         if created != 1 {
             bail!("browser_host_create_browser failed");
         }
@@ -111,11 +93,7 @@ impl Browser {
 
     pub fn reload(&self, ignore_cache: bool) {
         if let Some(page) = self.page() {
-            if ignore_cache {
-                page.reload_ignore_cache()
-            } else {
-                page.reload()
-            }
+            if ignore_cache { page.reload_ignore_cache() } else { page.reload() }
         }
     }
 
@@ -179,24 +157,11 @@ impl Browser {
         }
     }
 
-    pub fn mouse_button(
-        &self,
-        x: f32,
-        y: f32,
-        button: MouseButton,
-        down: bool,
-        clicks: u32,
-        mods: Modifiers,
-    ) {
+    pub fn mouse_button(&self, x: f32, y: f32, button: MouseButton, down: bool, clicks: u32, mods: Modifiers) {
         let held: &[MouseButton] = if down { &[button] } else { &[] };
         let event = mouse_event(x, y, mods, held);
         if let Some(host) = self.host() {
-            host.send_mouse_click_event(
-                Some(&event),
-                button.cef(),
-                i32::from(!down),
-                clicks.max(1) as i32,
-            );
+            host.send_mouse_click_event(Some(&event), button.cef(), i32::from(!down), clicks.max(1) as i32);
         }
     }
 
@@ -227,25 +192,14 @@ impl Browser {
     /// Marked (composing) IME text with the caret/selection at `selection` (UTF-16 units).
     pub fn ime_set_composition(&self, text: &str, selection: std::ops::Range<u32>) {
         let underline = CompositionUnderline {
-            range: Range {
-                from: 0,
-                to: text.encode_utf16().count() as u32,
-            },
+            range: Range { from: 0, to: text.encode_utf16().count() as u32 },
             color: 0xFF00_0000,
             background_color: 0,
             ..Default::default()
         };
-        let selection = Range {
-            from: selection.start,
-            to: selection.end,
-        };
+        let selection = Range { from: selection.start, to: selection.end };
         if let Some(host) = self.host() {
-            host.ime_set_composition(
-                Some(&CefString::from(text)),
-                Some(&[underline]),
-                Some(&NO_RANGE),
-                Some(&selection),
-            );
+            host.ime_set_composition(Some(&CefString::from(text)), Some(&[underline]), Some(&NO_RANGE), Some(&selection));
         }
     }
 

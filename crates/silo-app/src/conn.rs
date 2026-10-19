@@ -117,9 +117,7 @@ pub fn sibling(names: &[&str]) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
     let dir = exe.parent()?;
-    names.iter().map(|name| dir.join(name)).find(|candidate| {
-        candidate.is_file() && candidate.canonicalize().ok().as_deref() != Some(exe.as_path())
-    })
+    names.iter().map(|name| dir.join(name)).find(|candidate| candidate.is_file() && candidate.canonicalize().ok().as_deref() != Some(exe.as_path()))
 }
 
 /// Start a host connection loop. While `paused` is set (Stop Server) the
@@ -159,7 +157,10 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
             let _ = tx.send(ConnEvent::Quit);
             return;
         }
-        match transport.connect(&name).await {
+        // A stopped server accepts the socket but never answers the hello.
+        let limit = if remote { silo_client::PING_TIMEOUT_IROH } else { silo_client::PING_TIMEOUT_LOCAL };
+        let connected = tokio::time::timeout(limit, transport.connect(&name)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("server not responding")));
+        match connected {
             Ok((control, mut events)) => {
                 attempt = 0;
                 remote_build = false;
@@ -175,6 +176,9 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                 // Remote: read the server's current route now and every few
                 // minutes, so a restart or port change stays reachable.
                 let mut info = tokio::time::interval(ADDR_REFRESH);
+                let heartbeat = control.clone().heartbeat();
+                tokio::pin!(heartbeat);
+                let mut hung = false;
                 loop {
                     tokio::select! {
                         event = events.recv() => {
@@ -182,6 +186,11 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                             if tx.send(ConnEvent::Event(event)).is_err() {
                                 return;
                             }
+                        }
+                        () = &mut heartbeat => {
+                            tracing::warn!(pid, "server not responding");
+                            hung = true;
+                            break;
                         }
                         _ = info.tick(), if remote => {
                             if let Some(addr) = server_addr(&control).await
@@ -202,7 +211,13 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                     let _ = tx.send(ConnEvent::Quit);
                     return;
                 }
-                let reason = if paused.load(Ordering::Acquire) { "server stopped" } else { "connection closed" };
+                let reason = if hung {
+                    "server not responding"
+                } else if paused.load(Ordering::Acquire) {
+                    "server stopped"
+                } else {
+                    "connection closed"
+                };
                 if tx.send(ConnEvent::Disconnected(reason.into())).is_err() {
                     return;
                 }

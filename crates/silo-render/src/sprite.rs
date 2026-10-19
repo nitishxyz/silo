@@ -45,14 +45,7 @@ pub(super) fn is_sprite(c: char) -> bool {
 
 /// Geometry for `c` drawn into the cell at (`x`, `y`) of the given size.
 /// `None` when `c` is not a sprite code point.
-pub(super) fn sprite(
-    c: char,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    scale: f32,
-) -> Option<Sprite> {
+pub(super) fn sprite(c: char, x: f32, y: f32, width: f32, height: f32, scale: f32) -> Option<Sprite> {
     let cell = Cell::new(x, y, width, height, scale);
     let mut out = Sprite::default();
     match c {
@@ -76,25 +69,13 @@ struct Cell {
 
 impl Cell {
     fn new(x: f32, y: f32, width: f32, height: f32, scale: f32) -> Self {
-        let scale = if scale.is_finite() {
-            scale.max(0.5)
-        } else {
-            1.0
-        };
+        let scale = if scale.is_finite() { scale.max(0.5) } else { 1.0 };
         let device = 1.0 / scale;
         Self {
             x,
             y,
-            w: if width.is_finite() {
-                width.max(device)
-            } else {
-                device
-            },
-            h: if height.is_finite() {
-                height.max(device)
-            } else {
-                device
-            },
+            w: if width.is_finite() { width.max(device) } else { device },
+            h: if height.is_finite() { height.max(device) } else { device },
             scale,
         }
     }
@@ -117,10 +98,7 @@ impl Cell {
     }
 
     fn stroke(&self, fraction: f32) -> f32 {
-        self.snap(self.w * fraction)
-            .max(self.device())
-            .min(self.w)
-            .min(self.h)
+        self.snap(self.w * fraction).max(self.device()).min(self.w).min(self.h)
     }
 
     fn light(&self) -> f32 {
@@ -152,13 +130,7 @@ impl Cell {
 
 fn push_rect(out: &mut Sprite, x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) {
     if x1 > x0 && y1 > y0 {
-        out.quads.push(Quad {
-            x: x0,
-            y: y0,
-            width: x1 - x0,
-            height: y1 - y0,
-            alpha,
-        });
+        out.quads.push(Quad { x: x0, y: y0, width: x1 - x0, height: y1 - y0, alpha });
     }
 }
 
@@ -174,12 +146,7 @@ fn segment(out: &mut Sprite, p: (f32, f32), q: (f32, f32), t: f32) {
         return;
     }
     let (nx, ny) = (-dy / len * t / 2.0, dx / len * t / 2.0);
-    out.polygons.push(Polygon(vec![
-        (p.0 + nx, p.1 + ny),
-        (q.0 + nx, q.1 + ny),
-        (q.0 - nx, q.1 - ny),
-        (p.0 - nx, p.1 - ny),
-    ]));
+    out.polygons.push(Polygon(vec![(p.0 + nx, p.1 + ny), (q.0 + nx, q.1 + ny), (q.0 - nx, q.1 - ny), (p.0 - nx, p.1 - ny)]));
 }
 
 /// A stroked elliptical arc, centre (`cx`, `cy`), radii (`rx`, `ry`),
@@ -193,19 +160,11 @@ fn arc(out: &mut Sprite, (cx, cy): (f32, f32), (rx, ry): (f32, f32), from: f32, 
     for step in 0..STEPS {
         let a0 = from + (to - from) * fraction(step, STEPS);
         let a1 = from + (to - from) * fraction(step + 1, STEPS);
-        out.polygons.push(Polygon(vec![
-            at(a0, t / 2.0),
-            at(a1, t / 2.0),
-            at(a1, -t / 2.0),
-            at(a0, -t / 2.0),
-        ]));
+        out.polygons.push(Polygon(vec![at(a0, t / 2.0), at(a1, t / 2.0), at(a1, -t / 2.0), at(a0, -t / 2.0)]));
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "step and dash counts are tiny and exactly representable"
-)]
+#[allow(clippy::cast_precision_loss, reason = "step and dash counts are tiny and exactly representable")]
 fn to_f32(count: usize) -> f32 {
     count as f32
 }
@@ -237,20 +196,8 @@ fn block(c: char, cell: &Cell, out: &mut Sprite) {
         '\u{2591}' => push_rect(out, x, y, right, bottom, 0.25),
         '\u{2592}' => push_rect(out, x, y, right, bottom, 0.5),
         '\u{2593}' => push_rect(out, x, y, right, bottom, 0.75),
-        '\u{2594}' => rect(
-            out,
-            x,
-            y,
-            right,
-            y + cell.snap(cell.h / 8.0).max(cell.device()),
-        ),
-        '\u{2595}' => rect(
-            out,
-            right - cell.snap(cell.w / 8.0).max(cell.device()),
-            y,
-            right,
-            bottom,
-        ),
+        '\u{2594}' => rect(out, x, y, right, y + cell.snap(cell.h / 8.0).max(cell.device())),
+        '\u{2595}' => rect(out, right - cell.snap(cell.w / 8.0).max(cell.device()), y, right, bottom),
         '\u{2596}'..='\u{259F}' => {
             // Bits: upper-left 1, upper-right 2, lower-left 4, lower-right 8.
             const QUADRANTS: [u8; 10] = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14];
@@ -287,12 +234,7 @@ struct Arms {
 }
 
 const fn arms(up: Weight, down: Weight, left: Weight, right: Weight) -> Arms {
-    Arms {
-        up,
-        down,
-        left,
-        right,
-    }
+    Arms { up, down, left, right }
 }
 
 /// Single-stroke (light/heavy) line pieces, indexed by code point.
@@ -401,12 +343,7 @@ fn thickness(cell: &Cell, weight: Weight) -> f32 {
 /// Arms run from the cell edge to a shared junction box; the junction is one
 /// separate rectangle so nothing overlaps (overlaps would double faint alpha).
 fn draw_arms(cell: &Cell, arms: Arms, out: &mut Sprite) {
-    let Arms {
-        up,
-        down,
-        left,
-        right,
-    } = arms;
+    let Arms { up, down, left, right } = arms;
     let vertical = [up, down]
         .into_iter()
         .filter(|w| *w != Weight::None)
@@ -500,16 +437,8 @@ struct Doubles {
 
 fn double_arms(c: char) -> Option<Doubles> {
     use Kind::{Double as D, Single as S};
-    let d = |up, down, left, right| Doubles {
-        up,
-        down,
-        left,
-        right,
-    };
-    #[allow(
-        clippy::match_same_arms,
-        reason = "one row per code point keeps the table auditable"
-    )]
+    let d = |up, down, left, right| Doubles { up, down, left, right };
+    #[allow(clippy::match_same_arms, reason = "one row per code point keeps the table auditable")]
     Some(match c {
         '\u{2550}' => d(None, None, Some(D), Some(D)),
         '\u{2551}' => d(Some(D), Some(D), None, None),
@@ -548,10 +477,7 @@ fn double_arms(c: char) -> Option<Doubles> {
 /// Double-line pieces. Vertical strokes own the junction corners and
 /// horizontal strokes stop at vertical stroke edges, so nothing overlaps and
 /// double corners keep their open inner corner.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one exhaustive junction table is clearer than scattered helpers"
-)]
+#[allow(clippy::too_many_lines, reason = "one exhaustive junction table is clearer than scattered helpers")]
 fn draw_doubles(cell: &Cell, pieces: Doubles, out: &mut Sprite) {
     let t = cell.light();
     let (x, y, right, bottom) = (cell.x, cell.y, cell.right(), cell.bottom());
@@ -575,12 +501,7 @@ fn draw_doubles(cell: &Cell, pieces: Doubles, out: &mut Sprite) {
     let vert = |out: &mut Sprite, lx: f32, y0: f32, y1: f32| rect(out, lx, y0, lx + t, y1);
     let horiz = |out: &mut Sprite, ly: f32, x0: f32, x1: f32| rect(out, x0, ly, x1, ly + t);
 
-    let has = (
-        pieces.up.is_some(),
-        pieces.down.is_some(),
-        pieces.left.is_some(),
-        pieces.right.is_some(),
-    );
+    let has = (pieces.up.is_some(), pieces.down.is_some(), pieces.left.is_some(), pieces.right.is_some());
     match has {
         (false, false, false, false) => {}
         (true, true, true, true) => match (vkind, hkind) {
@@ -686,11 +607,7 @@ fn draw_doubles(cell: &Cell, pieces: Doubles, out: &mut Sprite) {
             match (vkind, hkind) {
                 (Kind::Double, Kind::Double) => {
                     for (index, lx) in vstrokes.iter().enumerate() {
-                        let ly = if index == outer_v {
-                            hstrokes[outer_h]
-                        } else {
-                            hstrokes[1 - outer_h]
-                        };
+                        let ly = if index == outer_v { hstrokes[outer_h] } else { hstrokes[1 - outer_h] };
                         vert_to(out, *lx, ly, true);
                         horiz_from(out, ly, *lx);
                     }
@@ -757,10 +674,7 @@ fn box_drawing(c: char, cell: &Cell, out: &mut Sprite) {
             } else {
                 rect(out, cell.x, ys, cx - r, ys + light);
             }
-            let centre = (
-                if right_arm { cx + r } else { cx - r },
-                if down { cy + r } else { cy - r },
-            );
+            let centre = (if right_arm { cx + r } else { cx - r }, if down { cy + r } else { cy - r });
             let (from, to) = match (down, right_arm) {
                 (true, true) => (180.0, 270.0),
                 (true, false) => (0.0, -90.0),
@@ -786,19 +700,10 @@ fn box_drawing(c: char, cell: &Cell, out: &mut Sprite) {
 
 fn braille(c: char, cell: &Cell, out: &mut Sprite) {
     let bits = u32::from(c) - 0x2800;
-    let dot = cell
-        .snap((cell.w / 4.0).min(cell.h / 8.0))
-        .max(cell.device());
-    for (bit, column, row) in [
-        (0x01_u32, 0_u8, 0_u8),
-        (0x02, 0, 1),
-        (0x04, 0, 2),
-        (0x08, 1, 0),
-        (0x10, 1, 1),
-        (0x20, 1, 2),
-        (0x40, 0, 3),
-        (0x80, 1, 3),
-    ] {
+    let dot = cell.snap((cell.w / 4.0).min(cell.h / 8.0)).max(cell.device());
+    for (bit, column, row) in
+        [(0x01_u32, 0_u8, 0_u8), (0x02, 0, 1), (0x04, 0, 2), (0x08, 1, 0), (0x10, 1, 1), (0x20, 1, 2), (0x40, 0, 3), (0x80, 1, 3)]
+    {
         if (bits & bit) == 0 {
             continue;
         }
@@ -823,25 +728,18 @@ fn powerline(c: char, cell: &Cell, out: &mut Sprite) {
         let points = (0..=STEPS)
             .map(|step| {
                 let angle = (from + (to - from) * fraction(step, STEPS)).to_radians();
-                (
-                    centre_x + sign * cell.w * angle.cos(),
-                    cy + cell.h / 2.0 * angle.sin(),
-                )
+                (centre_x + sign * cell.w * angle.cos(), cy + cell.h / 2.0 * angle.sin())
             })
             .collect();
         out.polygons.push(Polygon(points));
     };
     match c {
-        '\u{E0B0}' => out
-            .polygons
-            .push(Polygon(vec![(x, y), (right, cy), (x, bottom)])),
+        '\u{E0B0}' => out.polygons.push(Polygon(vec![(x, y), (right, cy), (x, bottom)])),
         '\u{E0B1}' => {
             segment(out, (x, y), (right, cy), t);
             segment(out, (right, cy), (x, bottom), t);
         }
-        '\u{E0B2}' => out
-            .polygons
-            .push(Polygon(vec![(right, y), (x, cy), (right, bottom)])),
+        '\u{E0B2}' => out.polygons.push(Polygon(vec![(right, y), (x, cy), (right, bottom)])),
         '\u{E0B3}' => {
             segment(out, (right, y), (x, cy), t);
             segment(out, (x, cy), (right, bottom), t);
@@ -850,20 +748,12 @@ fn powerline(c: char, cell: &Cell, out: &mut Sprite) {
         '\u{E0B5}' => arc(out, (x, cy), (cell.w, cell.h / 2.0), -90.0, 90.0, t),
         '\u{E0B6}' => half(out, right, -1.0, -90.0, 90.0),
         '\u{E0B7}' => arc(out, (right, cy), (cell.w, cell.h / 2.0), 90.0, 270.0, t),
-        '\u{E0B8}' => out
-            .polygons
-            .push(Polygon(vec![(x, y), (right, bottom), (x, bottom)])),
+        '\u{E0B8}' => out.polygons.push(Polygon(vec![(x, y), (right, bottom), (x, bottom)])),
         '\u{E0B9}' | '\u{E0BF}' => segment(out, (x, y), (right, bottom), t),
-        '\u{E0BA}' => out
-            .polygons
-            .push(Polygon(vec![(right, y), (right, bottom), (x, bottom)])),
+        '\u{E0BA}' => out.polygons.push(Polygon(vec![(right, y), (right, bottom), (x, bottom)])),
         '\u{E0BB}' | '\u{E0BD}' => segment(out, (right, y), (x, bottom), t),
-        '\u{E0BC}' => out
-            .polygons
-            .push(Polygon(vec![(x, y), (right, y), (x, bottom)])),
-        '\u{E0BE}' => out
-            .polygons
-            .push(Polygon(vec![(x, y), (right, y), (right, bottom)])),
+        '\u{E0BC}' => out.polygons.push(Polygon(vec![(x, y), (right, y), (x, bottom)])),
+        '\u{E0BE}' => out.polygons.push(Polygon(vec![(x, y), (right, y), (right, bottom)])),
         _ => {}
     }
 }
@@ -890,22 +780,13 @@ pub(crate) struct SpriteCache {
 impl SpriteCache {
     /// Geometry for `c` in a cell of this size, with the cell origin at
     /// (0, 0); `None` when `c` is not a sprite code point.
-    pub(crate) fn geometry(
-        &mut self,
-        c: char,
-        width: f32,
-        height: f32,
-        scale: f32,
-    ) -> Option<&Sprite> {
+    pub(crate) fn geometry(&mut self, c: char, width: f32, height: f32, scale: f32) -> Option<&Sprite> {
         let key = (height.to_bits(), scale.to_bits());
         if key != self.key {
             self.entries.clear();
             self.key = key;
         }
-        self.entries
-            .entry((c, width.to_bits()))
-            .or_insert_with(|| sprite(c, 0.0, 0.0, width, height, scale))
-            .as_ref()
+        self.entries.entry((c, width.to_bits())).or_insert_with(|| sprite(c, 0.0, 0.0, width, height, scale)).as_ref()
     }
 
     #[cfg(test)]
@@ -923,24 +804,15 @@ mod tests {
     }
 
     fn quad(x: f32, y: f32, width: f32, height: f32) -> Quad {
-        Quad {
-            x,
-            y,
-            width,
-            height,
-            alpha: 1.0,
-        }
+        Quad { x, y, width, height, alpha: 1.0 }
     }
 
     fn same(actual: &[Quad], expected: &[Quad]) -> bool {
         actual.len() == expected.len()
-            && actual.iter().zip(expected).all(|(a, e)| {
-                near(a.x, e.x)
-                    && near(a.y, e.y)
-                    && near(a.width, e.width)
-                    && near(a.height, e.height)
-                    && near(a.alpha, e.alpha)
-            })
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| near(a.x, e.x) && near(a.y, e.y) && near(a.width, e.width) && near(a.height, e.height) && near(a.alpha, e.alpha))
     }
 
     fn quads(c: char, x: f32, y: f32) -> Vec<Quad> {
@@ -948,12 +820,7 @@ mod tests {
     }
 
     fn within(sprite: &Sprite, x: f32, y: f32, w: f32, h: f32) -> bool {
-        sprite.quads.iter().all(|q| {
-            q.x >= x - 1e-4
-                && q.y >= y - 1e-4
-                && q.x + q.width <= x + w + 1e-4
-                && q.y + q.height <= y + h + 1e-4
-        })
+        sprite.quads.iter().all(|q| q.x >= x - 1e-4 && q.y >= y - 1e-4 && q.x + q.width <= x + w + 1e-4 && q.y + q.height <= y + h + 1e-4)
     }
 
     #[test]
@@ -965,11 +832,7 @@ mod tests {
         assert_eq!(code_point("⣿"), Some('⣿'));
         assert_eq!(code_point("A"), None);
         assert_eq!(code_point(""), None);
-        assert_eq!(
-            code_point("█\u{0301}"),
-            None,
-            "combining sequences use the font"
-        );
+        assert_eq!(code_point("█\u{0301}"), None, "combining sequences use the font");
         assert!(!is_sprite('\u{24FF}'));
         assert!(!is_sprite('\u{25A0}'));
         assert!(!is_sprite('\u{E0C0}'));
@@ -978,10 +841,7 @@ mod tests {
 
     #[test]
     fn full_and_half_blocks_fill_exact_cell_fractions() {
-        assert!(same(
-            &quads('█', 16.0, 40.0),
-            &[quad(16.0, 40.0, 8.0, 20.0)]
-        ));
+        assert!(same(&quads('█', 16.0, 40.0), &[quad(16.0, 40.0, 8.0, 20.0)]));
         assert!(same(&quads('▀', 0.0, 0.0), &[quad(0.0, 0.0, 8.0, 10.0)]));
         assert!(same(&quads('▄', 0.0, 0.0), &[quad(0.0, 10.0, 8.0, 10.0)]));
         assert!(same(&quads('▌', 0.0, 0.0), &[quad(0.0, 0.0, 4.0, 20.0)]));
@@ -990,27 +850,12 @@ mod tests {
         assert!(same(&quads('▁', 0.0, 0.0), &[quad(0.0, 17.0, 8.0, 3.0)]));
         assert!(same(&quads('▏', 0.0, 0.0), &[quad(0.0, 0.0, 1.0, 20.0)]));
         let shade = quads('▒', 0.0, 0.0);
-        assert!(same(
-            &shade,
-            &[Quad {
-                x: 0.0,
-                y: 0.0,
-                width: 8.0,
-                height: 20.0,
-                alpha: 0.5
-            }]
-        ));
+        assert!(same(&shade, &[Quad { x: 0.0, y: 0.0, width: 8.0, height: 20.0, alpha: 0.5 }]));
         assert!(near(quads('░', 0.0, 0.0)[0].alpha, 0.25));
         assert!(near(quads('▓', 0.0, 0.0)[0].alpha, 0.75));
         // ▚ = upper-left + lower-right, ▛ merges the full upper row.
-        assert!(same(
-            &quads('▚', 0.0, 0.0),
-            &[quad(0.0, 0.0, 4.0, 10.0), quad(4.0, 10.0, 4.0, 10.0)]
-        ));
-        assert!(same(
-            &quads('▛', 0.0, 0.0),
-            &[quad(0.0, 0.0, 8.0, 10.0), quad(0.0, 10.0, 4.0, 10.0)]
-        ));
+        assert!(same(&quads('▚', 0.0, 0.0), &[quad(0.0, 0.0, 4.0, 10.0), quad(4.0, 10.0, 4.0, 10.0)]));
+        assert!(same(&quads('▛', 0.0, 0.0), &[quad(0.0, 0.0, 8.0, 10.0), quad(0.0, 10.0, 4.0, 10.0)]));
     }
 
     #[test]
@@ -1027,25 +872,12 @@ mod tests {
     fn corners_join_arms_through_a_single_junction_square() {
         // ┌: down arm below the junction, right arm right of it, junction square.
         let corner = quads('┌', 0.0, 0.0);
-        assert!(same(
-            &corner,
-            &[
-                quad(4.0, 11.0, 1.0, 9.0),
-                quad(5.0, 10.0, 3.0, 1.0),
-                quad(4.0, 10.0, 1.0, 1.0),
-            ]
-        ));
+        assert!(same(&corner, &[quad(4.0, 11.0, 1.0, 9.0), quad(5.0, 10.0, 3.0, 1.0), quad(4.0, 10.0, 1.0, 1.0),]));
         let cross = quads('┼', 0.0, 0.0);
         assert_eq!(cross.len(), 5);
-        assert!(
-            cross
-                .iter()
-                .any(|q| near(q.x, 4.0) && near(q.y, 10.0) && near(q.width, 1.0))
-        );
+        assert!(cross.iter().any(|q| near(q.x, 4.0) && near(q.y, 10.0) && near(q.width, 1.0)));
         // Every piece stays inside the cell.
-        for c in [
-            '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╋', '╬', '╭', '╯',
-        ] {
+        for c in ['┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╋', '╬', '╭', '╯'] {
             let s = sprite(c, 3.0, 5.0, 8.0, 20.0, 1.0).expect("sprite");
             assert!(within(&s, 3.0, 5.0, 8.0, 20.0), "{c}: {s:?}");
         }
@@ -1053,45 +885,18 @@ mod tests {
 
     #[test]
     fn double_lines_are_two_light_strokes_with_open_corners() {
-        assert!(same(
-            &quads('═', 0.0, 0.0),
-            &[quad(0.0, 9.0, 8.0, 1.0), quad(0.0, 11.0, 8.0, 1.0)]
-        ));
-        assert!(same(
-            &quads('║', 0.0, 0.0),
-            &[quad(3.0, 0.0, 1.0, 20.0), quad(5.0, 0.0, 1.0, 20.0)]
-        ));
+        assert!(same(&quads('═', 0.0, 0.0), &[quad(0.0, 9.0, 8.0, 1.0), quad(0.0, 11.0, 8.0, 1.0)]));
+        assert!(same(&quads('║', 0.0, 0.0), &[quad(3.0, 0.0, 1.0, 20.0), quad(5.0, 0.0, 1.0, 20.0)]));
         // ╔: outer strokes (x=3, y=9) meet, inner strokes (x=5, y=11) meet.
         let corner = quads('╔', 0.0, 0.0);
-        assert!(same(
-            &corner,
-            &[
-                quad(3.0, 9.0, 1.0, 11.0),
-                quad(4.0, 9.0, 4.0, 1.0),
-                quad(5.0, 11.0, 1.0, 9.0),
-                quad(6.0, 11.0, 2.0, 1.0),
-            ]
-        ));
+        assert!(same(&corner, &[quad(3.0, 9.0, 1.0, 11.0), quad(4.0, 9.0, 4.0, 1.0), quad(5.0, 11.0, 1.0, 9.0), quad(6.0, 11.0, 2.0, 1.0),]));
         // No quad overlaps another (faint alpha would otherwise double up).
-        for c in [
-            '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬', '╪', '╫', '╒', '╓', '╕', '╖', '╘', '╙',
-            '╛', '╜', '╞', '╟', '╡', '╢', '╤', '╥', '╧', '╨',
-        ] {
+        for c in
+            ['╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬', '╪', '╫', '╒', '╓', '╕', '╖', '╘', '╙', '╛', '╜', '╞', '╟', '╡', '╢', '╤', '╥', '╧', '╨']
+        {
             let pieces = quads(c, 0.0, 0.0);
             assert!(!pieces.is_empty(), "{c}");
-            assert!(
-                within(
-                    &Sprite {
-                        quads: pieces.clone(),
-                        polygons: Vec::new()
-                    },
-                    0.0,
-                    0.0,
-                    8.0,
-                    20.0
-                ),
-                "{c}: {pieces:?}"
-            );
+            assert!(within(&Sprite { quads: pieces.clone(), polygons: Vec::new() }, 0.0, 0.0, 8.0, 20.0), "{c}: {pieces:?}");
             for (index, first) in pieces.iter().enumerate() {
                 for second in &pieces[index + 1..] {
                     let overlap = first.x < second.x + second.width - 1e-4
@@ -1120,16 +925,10 @@ mod tests {
         // A corner's arm reaches the neighbouring line's stroke.
         let corner = quads('┌', 0.0, 0.0);
         let line = quads('─', 8.0, 0.0);
-        let arm = corner
-            .iter()
-            .find(|q| near(q.y, 10.0) && near(q.width, 3.0))
-            .expect("right arm");
+        let arm = corner.iter().find(|q| near(q.y, 10.0) && near(q.width, 3.0)).expect("right arm");
         assert!(near(arm.x + arm.width, line[0].x));
         let down = quads('│', 0.0, 20.0);
-        let stem = corner
-            .iter()
-            .find(|q| near(q.height, 9.0))
-            .expect("down arm");
+        let stem = corner.iter().find(|q| near(q.height, 9.0)).expect("down arm");
         assert!(near(stem.y + stem.height, down[0].y));
         assert!(near(stem.x, down[0].x));
     }
@@ -1138,30 +937,17 @@ mod tests {
     fn fractional_scale_snaps_to_device_pixels_without_seams() {
         let scale = 1.25;
         let (width, height) = (8.8, 20.0); // 11 x 25 device pixels
-        let lower = sprite('▄', 0.0, 0.0, width, height, scale)
-            .expect("sprite")
-            .quads;
-        let upper = sprite('▀', 0.0, height, width, height, scale)
-            .expect("sprite")
-            .quads;
+        let lower = sprite('▄', 0.0, 0.0, width, height, scale).expect("sprite").quads;
+        let upper = sprite('▀', 0.0, height, width, height, scale).expect("sprite").quads;
         assert!(near(lower[0].y + lower[0].height, upper[0].y));
         assert!(near((lower[0].y * scale).fract(), 0.0), "{}", lower[0].y);
-        let line = sprite('─', 8.8, 0.0, width, height, scale)
-            .expect("sprite")
-            .quads;
-        let prev = sprite('─', 0.0, 0.0, width, height, scale)
-            .expect("sprite")
-            .quads;
+        let line = sprite('─', 8.8, 0.0, width, height, scale).expect("sprite").quads;
+        let prev = sprite('─', 0.0, 0.0, width, height, scale).expect("sprite").quads;
         assert!(near(prev[0].x + prev[0].width, line[0].x));
-        assert!(near(
-            line[0].height * scale,
-            (line[0].height * scale).round()
-        ));
+        assert!(near(line[0].height * scale, (line[0].height * scale).round()));
         assert!(line[0].height * scale >= 1.0);
         assert!(near((line[0].y * scale).fract(), 0.0), "{}", line[0].y);
-        let heavy = sprite('┃', 0.0, 0.0, width, height, scale)
-            .expect("sprite")
-            .quads;
+        let heavy = sprite('┃', 0.0, 0.0, width, height, scale).expect("sprite").quads;
         assert!(near(heavy[0].width * scale, 3.0));
         let tiny = sprite('│', 0.0, 0.0, 3.0, 6.0, 2.0).expect("sprite").quads;
         assert!(near(tiny[0].width, 0.5), "min one device pixel");
@@ -1171,13 +957,7 @@ mod tests {
     fn powerline_and_diagonals_use_polygons_and_braille_uses_dots() {
         let arrow = sprite('\u{E0B0}', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite");
         let expected = [(0.0, 0.0), (8.0, 10.0), (0.0, 20.0)];
-        assert!(
-            arrow.polygons[0]
-                .0
-                .iter()
-                .zip(expected)
-                .all(|(point, want)| near(point.0, want.0) && near(point.1, want.1))
-        );
+        assert!(arrow.polygons[0].0.iter().zip(expected).all(|(point, want)| near(point.0, want.0) && near(point.1, want.1)));
         assert!(arrow.quads.is_empty());
         let thin = sprite('\u{E0B1}', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite");
         assert_eq!(thin.polygons.len(), 2);
@@ -1186,25 +966,14 @@ mod tests {
         assert!(near(round.polygons[0].0[0].0, 0.0) && near(round.polygons[0].0[0].1, 0.0));
         let diagonal = sprite('╱', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite");
         assert_eq!(diagonal.polygons.len(), 1);
-        assert_eq!(
-            sprite('╳', 0.0, 0.0, 8.0, 20.0, 1.0)
-                .expect("sprite")
-                .polygons
-                .len(),
-            2
-        );
+        assert_eq!(sprite('╳', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite").polygons.len(), 2);
         let arc = sprite('╭', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite");
         assert_eq!(arc.polygons.len(), 8);
         assert!(within(&arc, 0.0, 0.0, 8.0, 20.0));
         // The arc's horizontal end lands on the cell edge at the light line's y.
         let end = arc.polygons[7].0[1];
         assert!(near(end.0, 8.0) && near(end.1, 10.0), "{end:?}");
-        assert!(
-            sprite('\u{2800}', 0.0, 0.0, 8.0, 20.0, 1.0)
-                .expect("sprite")
-                .quads
-                .is_empty()
-        );
+        assert!(sprite('\u{2800}', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite").quads.is_empty());
         let full = sprite('⣿', 0.0, 0.0, 8.0, 20.0, 1.0).expect("sprite");
         assert_eq!(full.quads.len(), 8);
         assert!(within(&full, 0.0, 0.0, 8.0, 20.0));
@@ -1218,26 +987,12 @@ mod tests {
         for c in ['⣿', '⢰', '█', '▒', '┼', '╭', '\u{E0B0}'] {
             let direct = sprite(c, 24.0, 60.0, 8.0, 20.0, 2.0).expect("sprite");
             let cached = cache.geometry(c, 8.0, 20.0, 2.0).expect("cached sprite");
-            let moved: Vec<Quad> = cached
-                .quads
-                .iter()
-                .map(|q| Quad {
-                    x: q.x + 24.0,
-                    y: q.y + 60.0,
-                    ..*q
-                })
-                .collect();
+            let moved: Vec<Quad> = cached.quads.iter().map(|q| Quad { x: q.x + 24.0, y: q.y + 60.0, ..*q }).collect();
             assert!(same(&moved, &direct.quads), "{c} quads");
             assert_eq!(cached.polygons.len(), direct.polygons.len(), "{c} polygons");
             for (cached, direct) in cached.polygons.iter().zip(&direct.polygons) {
                 assert!(
-                    cached.0.iter().zip(&direct.0).all(|(cached, direct)| near(
-                        cached.0 + 24.0,
-                        direct.0
-                    ) && near(
-                        cached.1 + 60.0,
-                        direct.1
-                    )),
+                    cached.0.iter().zip(&direct.0).all(|(cached, direct)| near(cached.0 + 24.0, direct.0) && near(cached.1 + 60.0, direct.1)),
                     "{c} polygon vertices"
                 );
             }

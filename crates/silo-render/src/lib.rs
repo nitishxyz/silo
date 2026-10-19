@@ -12,9 +12,6 @@ mod span_geometry;
 mod sprite;
 mod surface;
 
-pub use geometry::{
-    CellMetrics, FontSettings, font_generation, set_terminal_font, terminal_font,
-    terminal_font_size,
-};
+pub use geometry::{CellMetrics, FontSettings, font_generation, set_terminal_font, terminal_font, terminal_font_size};
 pub use prepare::{FrameOptions, FramePreparer, PreparedFrame};
 pub use surface::{Overlay, Predicted, terminal_canvas};

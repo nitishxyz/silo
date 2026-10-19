@@ -184,9 +184,31 @@ impl BrowserPane {
             cx.emit(BrowserPaneEvent::Activated);
         }));
         Self {
-            block_id, rt, control, route, home, info: None, state: None, page: None, starting: false, focus, address,
-            bounds: None, scale: 2.0, held: Vec::new(), composing: None, gate: Default::default(), ime_rect: None, cursor: silo_web::Cursor::Arrow, editing: false, can_back: false, can_forward: false,
-            debounce: Debounce::default(), report_task: None, error: None, _subs: subs,
+            block_id,
+            rt,
+            control,
+            route,
+            home,
+            info: None,
+            state: None,
+            page: None,
+            starting: false,
+            focus,
+            address,
+            bounds: None,
+            scale: 2.0,
+            held: Vec::new(),
+            composing: None,
+            gate: Default::default(),
+            ime_rect: None,
+            cursor: silo_web::Cursor::Arrow,
+            editing: false,
+            can_back: false,
+            can_forward: false,
+            debounce: Debounce::default(),
+            report_task: None,
+            error: None,
+            _subs: subs,
         }
     }
 }
@@ -478,7 +500,12 @@ impl BrowserPane {
 
     fn history_step(&self, delta: isize) -> bool {
         let engine = if delta < 0 { self.can_back } else { self.can_forward };
-        engine || self.state.as_ref().and_then(|s| s.index.checked_add_signed(delta)).is_some_and(|i| i < self.state.as_ref().map_or(0, |s| s.history.len()))
+        engine
+            || self
+                .state
+                .as_ref()
+                .and_then(|s| s.index.checked_add_signed(delta))
+                .is_some_and(|i| i < self.state.as_ref().map_or(0, |s| s.history.len()))
     }
 
     /// `browser.command` from the server.
@@ -615,20 +642,21 @@ impl BrowserPane {
             }
         }
         // RAWKEYDOWN + CHAR: the key event types its own text.
-        let input = silo_web::KeyInput {
-            key: &key.key,
-            key_char: key.key_char.as_deref(),
-            modifiers: mods(key.modifiers),
-            down: !release,
-            repeat: false,
-        };
+        let input =
+            silo_web::KeyInput { key: &key.key, key_char: key.key_char.as_deref(), modifiers: mods(key.modifiers), down: !release, repeat: false };
         page.key(&input);
         true
     }
 }
 
 impl gpui::EntityInputHandler for BrowserPane {
-    fn text_for_range(&mut self, range: std::ops::Range<usize>, adjusted: &mut Option<std::ops::Range<usize>>, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted: &mut Option<std::ops::Range<usize>>,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> Option<String> {
         let text = self.composing.as_deref()?;
         let units: Vec<u16> = text.encode_utf16().collect();
         let range = range.start.min(units.len())..range.end.min(units.len());
@@ -660,7 +688,14 @@ impl gpui::EntityInputHandler for BrowserPane {
         }
     }
 
-    fn replace_and_mark_text_in_range(&mut self, _: Option<std::ops::Range<usize>>, text: &str, selected: Option<std::ops::Range<usize>>, _: &mut gpui::Window, _: &mut gpui::Context<Self>) {
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        selected: Option<std::ops::Range<usize>>,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) {
         let Some(page) = &self.page else { return };
         let len = text.encode_utf16().count();
         let selected = selected.unwrap_or(len..len);
@@ -669,10 +704,19 @@ impl gpui::EntityInputHandler for BrowserPane {
         self.composing = (!text.is_empty()).then(|| text.to_owned());
     }
 
-    fn bounds_for_range(&mut self, _: std::ops::Range<usize>, _: gpui::Bounds<gpui::Pixels>, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> Option<gpui::Bounds<gpui::Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
         let (b, (x, y, w, h)) = (self.bounds?, self.ime_rect?);
         #[allow(clippy::cast_precision_loss)]
-        let rect = gpui::Bounds::new(b.origin + gpui::point(gpui::px(x as f32), gpui::px(y as f32)), gpui::size(gpui::px(w.max(1) as f32), gpui::px(h.max(1) as f32)));
+        let rect = gpui::Bounds::new(
+            b.origin + gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+            gpui::size(gpui::px(w.max(1) as f32), gpui::px(h.max(1) as f32)),
+        );
         Some(rect)
     }
 
@@ -777,7 +821,13 @@ impl BrowserPane {
             .child(button("browser-forward", "forward", self.history_step(1)).on_click(cx.listener(|this, _, _, _| this.forward())))
             .child(button("browser-reload", "reload", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload())))
             .child(
-                div().flex().items_center().gap(px(6.0)).flex_1().min_w_0().px(px(6.0))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(6.0))
                     .children(favicon.map(|f| gpui::img(f).size(px(14.0)).flex_none()))
                     .child(self.address.clone()),
             )
@@ -795,31 +845,40 @@ impl gpui::Render for BrowserPane {
             .flex_1()
             .min_h_0()
             .cursor(cursor_style(self.cursor))
-            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| if this.key(&e.keystroke, false) { cx.stop_propagation() }))
-            .on_key_up(cx.listener(|this, e: &gpui::KeyUpEvent, _, cx| if this.key(&e.keystroke, true) { cx.stop_propagation() }))
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                if this.key(&e.keystroke, false) {
+                    cx.stop_propagation()
+                }
+            }))
+            .on_key_up(cx.listener(|this, e: &gpui::KeyUpEvent, _, cx| {
+                if this.key(&e.keystroke, true) {
+                    cx.stop_propagation()
+                }
+            }))
             .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, _| this.mouse_move(e.position, e.modifiers)))
             .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, _| this.wheel(e)));
         for b in [gpui::MouseButton::Left, gpui::MouseButton::Right, gpui::MouseButton::Middle] {
             page = page
-                .on_mouse_down(b, cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.focus.focus(window, cx);
-                    this.mouse_button(e.position, e.button, true, e.click_count, e.modifiers);
-                }))
-                .on_mouse_up(b, cx.listener(|this, e: &gpui::MouseUpEvent, _, _| {
-                    this.mouse_button(e.position, e.button, false, e.click_count, e.modifiers);
-                }));
+                .on_mouse_down(
+                    b,
+                    cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                        this.focus.focus(window, cx);
+                        this.mouse_button(e.position, e.button, true, e.click_count, e.modifiers);
+                    }),
+                )
+                .on_mouse_up(
+                    b,
+                    cx.listener(|this, e: &gpui::MouseUpEvent, _, _| {
+                        this.mouse_button(e.position, e.button, false, e.click_count, e.modifiers);
+                    }),
+                );
         }
         let page = page.child(page_canvas(cx.entity())).when_some(self.error.clone(), |el, _| {
-            el.child(div().absolute().inset_0().flex().items_center().justify_center().text_color(rgb(crate::theme::muted())).child("Can't open the page"))
+            el.child(
+                div().absolute().inset_0().flex().items_center().justify_center().text_color(rgb(crate::theme::muted())).child("Can't open the page"),
+            )
         });
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .child(self.strip(cx))
-            .child(page)
+        div().flex().flex_col().size_full().min_w_0().min_h_0().child(self.strip(cx)).child(page)
     }
 }
 
@@ -904,8 +963,17 @@ mod tests {
 
     fn info(kind: BlockKind) -> BlockInfo {
         BlockInfo {
-            id: "b".into(), session_id: "s".into(), kind, title: String::new(), cwd: None, exited: None,
-            lifecycle: Lifecycle::Running, size: TermSize::new(80, 24), owner: None, pid: None,
+            id: "b".into(),
+            session_id: "s".into(),
+            kind,
+            title: String::new(),
+            cwd: None,
+            exited: None,
+            lifecycle: Lifecycle::Running,
+            size: TermSize::new(80, 24),
+            owner: None,
+            owner_name: None,
+            pid: None,
             browser: (kind == BlockKind::Browser).then(|| BrowserState::new("about:blank".into())),
         }
     }

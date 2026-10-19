@@ -13,24 +13,14 @@ impl GridSize {
     /// Rejects empty grids and grids exceeding the allocation limits.
     pub fn new(columns: u16, rows: u16) -> Result<Self, TerminalError> {
         if columns == 0 || rows == 0 || columns > 512 || rows > 256 {
-            return Err(TerminalError(
-                "grid must be 1..512 columns by 1..256 rows".into(),
-            ));
+            return Err(TerminalError("grid must be 1..512 columns by 1..256 rows".into()));
         }
-        Ok(Self {
-            columns,
-            rows,
-            cell_width: 8,
-            cell_height: 18,
-        })
+        Ok(Self { columns, rows, cell_width: 8, cell_height: 18 })
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent VT style attributes can be combined arbitrarily"
-)]
+#[allow(clippy::struct_excessive_bools, reason = "Independent VT style attributes can be combined arbitrarily")]
 pub struct Cell {
     pub text: String,
     pub foreground: u32,
@@ -229,10 +219,7 @@ pub struct Frame {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent physical modifier keys, not mutually exclusive states"
-)]
+#[allow(clippy::struct_excessive_bools, reason = "Independent physical modifier keys, not mutually exclusive states")]
 pub struct Modifiers {
     pub shift: bool,
     pub control: bool,

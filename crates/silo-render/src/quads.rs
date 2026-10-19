@@ -35,10 +35,7 @@ pub(crate) fn joins(last: Rect, next: Rect) -> bool {
 
 /// `last` extended to cover `next`.
 pub(crate) fn join(last: Rect, next: Rect) -> Rect {
-    Rect {
-        width: next.x + next.width - last.x,
-        ..last
-    }
+    Rect { width: next.x + next.width - last.x, ..last }
 }
 
 #[cfg(test)]
@@ -46,12 +43,7 @@ mod tests {
     use super::{Rect, join, joins};
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
+        Rect { x, y, width, height }
     }
 
     #[test]

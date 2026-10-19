@@ -122,11 +122,7 @@ fn prepare_home(home: &Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn lock(home: &Path) -> anyhow::Result<std::fs::File> {
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(paths::server_lock(home))?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home))?;
     rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| anyhow::anyhow!("another silo server is running for {}", home.display()))?;
     Ok(lock)
@@ -230,13 +226,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         remote_error,
         endpoint_addr: None,
     };
-    let runtime = paths::Runtime {
-        pid: info.pid,
-        socket: socket.clone(),
-        version: info.version.clone(),
-        build: silo_proto::BUILD.to_owned(),
-        started_at,
-    };
+    let runtime =
+        paths::Runtime { pid: info.pid, socket: socket.clone(), version: info.version.clone(), build: silo_proto::BUILD.to_owned(), started_at };
     // Not fatal: a server that took over must not end its programs here.
     let written = serde_json::to_vec_pretty(&runtime).map_err(std::io::Error::from).and_then(|j| std::fs::write(paths::runtime(&home), j));
     if let Err(error) = written {

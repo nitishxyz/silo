@@ -66,22 +66,37 @@ pub enum ServerData {
     SnapshotHead(Vec<u8>),
     SnapshotHistory(Vec<u8>),
     SnapshotDone,
-    Output { offset: u64, bytes: Vec<u8> },
+    Output {
+        offset: u64,
+        bytes: Vec<u8>,
+    },
     /// The PTY was resized at this point of the output stream.
-    Resized { offset: u64, size: TermSize },
+    Resized {
+        offset: u64,
+        size: TermSize,
+    },
     /// The program is gone; `code` is `None` when unknown (a block restored
     /// from disk). The stream stays open: the block remains readable.
-    Exited { code: Option<i32> },
+    Exited {
+        code: Option<i32>,
+    },
     /// The effective terminal configuration from this point of the output
     /// stream on (sent after `Welcome` and whenever it changes).
     Configured(TerminalConfig),
     /// The first `count` `Input` frames of this stream were written to the
     /// PTY while the output ring ended at `offset`; their echo, if any, is
     /// at `>= offset`. Cumulative.
-    InputAck { count: u64, offset: u64 },
+    InputAck {
+        count: u64,
+        offset: u64,
+    },
     /// The PTY line discipline flags from this point of the output stream on
     /// (sent after `Welcome` and whenever they change).
-    TtyMode { offset: u64, echo: bool, icanon: bool },
+    TtyMode {
+        offset: u64,
+        echo: bool,
+        icanon: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,7 +261,8 @@ mod tests {
         // Out-of-range values are clamped, missing optional fields default.
         let frame = Frame::new(
             kind::CONFIG,
-            br#"{"foreground":4294967295,"background":0,"cursor":0,"palette":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"scrollback_lines":99999999999}"#.to_vec(),
+            br#"{"foreground":4294967295,"background":0,"cursor":0,"palette":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"scrollback_lines":99999999999}"#
+                .to_vec(),
         );
         let ClientData::Config(config) = ClientData::from_frame(frame).unwrap() else { panic!() };
         assert_eq!(config.foreground, 0x00ff_ffff);

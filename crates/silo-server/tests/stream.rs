@@ -10,9 +10,7 @@ use silo_proto::{
     model::{BlockInfo, BlockKind, Lifecycle, TermSize, TerminalConfig},
 };
 use silo_pty::SpawnConfig;
-use silo_server::block::{
-    self, Attach, BlockHandle, BlockMsg, HISTORY_CHUNK, Note, PUMP_WINDOW, RING_CAP, Sink, SubscriberStats,
-};
+use silo_server::block::{self, Attach, BlockHandle, BlockMsg, HISTORY_CHUNK, Note, PUMP_WINDOW, RING_CAP, Sink, SubscriberStats};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn info(id: &str, size: TermSize) -> BlockInfo {
@@ -26,6 +24,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
         lifecycle: Lifecycle::Running,
         size,
         owner: None,
+        owner_name: None,
         pid: None,
         browser: None,
     }
@@ -34,11 +33,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
 fn spawn(id: &str, size: TermSize, script: &str) -> (BlockHandle, UnboundedReceiver<Note>) {
     let (notes, rx) = unbounded_channel();
     let dir = std::env::temp_dir();
-    let config = SpawnConfig {
-        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
-        cwd: Some(dir),
-        env: Vec::new(),
-    };
+    let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], cwd: Some(dir), env: Vec::new() };
     (block::spawn(info(id, size), &config, notes).expect("spawn"), rx)
 }
 
@@ -199,7 +194,7 @@ async fn resume_preserves_resize_and_config_order() {
 
     let config = |background| TerminalConfig { background, ..TerminalConfig::default() };
     let inject = |text: &str| BlockMsg::Inject { bytes: text.as_bytes().to_vec(), input: Vec::new() };
-    let resize = |columns| BlockMsg::Desired { client_id: 9, client_name: "t".into(), size: TermSize::new(columns, 12) };
+    let resize = |columns| BlockMsg::Desired { client_id: 9, client_name: "t".into(), label: "t".into(), size: TermSize::new(columns, 12) };
     for msg in [
         inject("one"),
         resize(50),
@@ -395,12 +390,117 @@ async fn dirty_note_once_per_checkpoint() {
     assert_eq!(dirty(&mut notes), 1, "first change only");
 
     block.send(inject("d"));
-    block.send(BlockMsg::Desired { client_id: 9, client_name: "t".into(), size: TermSize::new(50, 12) });
+    block.send(BlockMsg::Desired { client_id: 9, client_name: "t".into(), label: "t".into(), size: TermSize::new(50, 12) });
     block.checkpoint().await.unwrap();
     assert_eq!(dirty(&mut notes), 1, "re-armed by the checkpoint");
 
-    block.send(BlockMsg::Desired { client_id: 9, client_name: "t".into(), size: TermSize::new(60, 12) });
+    block.send(BlockMsg::Desired { client_id: 9, client_name: "t".into(), label: "t".into(), size: TermSize::new(60, 12) });
     block.checkpoint().await.unwrap();
     assert_eq!(dirty(&mut notes), 1, "resize alone dirties");
     block.send(BlockMsg::Shutdown);
+}
+
+mod control {
+    use std::{path::PathBuf, time::Duration};
+
+    use silo_client::Control;
+    use silo_proto::{
+        control::{Created, Method, MethodDescription, OwnMode, SpawnSpec},
+        model::{BlockInfo, BlockKind, SessionView, TermSize},
+        paths,
+    };
+
+    /// A server in a temp home; the home is removed on drop.
+    struct Server {
+        home: PathBuf,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Server {
+        async fn start(name: &str) -> Self {
+            let home = PathBuf::from(format!("/tmp/silo-stream-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            let config = silo_server::Config {
+                home: home.clone(),
+                idle_exit: None,
+                relay: silo_server::RelayConfig::Disabled,
+                mdns: false,
+                ..Default::default()
+            };
+            let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
+            for _ in 0..300 {
+                if silo_client::server_running(&home).await {
+                    return Self { home, task };
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("server did not start");
+        }
+
+        async fn connect(&self, name: &str) -> Control {
+            Control::connect(&paths::socket(&self.home), name).await.unwrap().0
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.task.abort();
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    async fn info(control: &Control, created: &Created) -> BlockInfo {
+        let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+        view.blocks.into_iter().find(|b| b.id == created.block_id).unwrap()
+    }
+
+    async fn wait_owner(control: &Control, created: &Created, owner: u64, name: &str) {
+        for _ in 0..500 {
+            let info = info(control, created).await;
+            if info.owner == Some(owner) && info.owner_name.as_deref() == Some(name) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("owner never became {owner} ({name}): {:?}", info(control, created).await);
+    }
+
+    async fn own(control: &Control, created: &Created, columns: u16) {
+        let size = TermSize::new(columns, 20);
+        control.call_value(Method::TerminalResize { block_id: created.block_id.clone(), size }).await.unwrap();
+        control.call_value(Method::OwnBlock { block_ids: vec![created.block_id.clone()], mode: OwnMode::Take }).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_name_follows_take_and_fallback() {
+        let server = Server::start("owner").await;
+        let a = server.connect("Silo 0.1.0 (macOS, pid 1)").await;
+        let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: None };
+        let created: Created = a.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
+        own(&a, &created, 70).await;
+        wait_owner(&a, &created, a.client_id(), "Silo").await;
+
+        let b = server.connect("silo cli").await;
+        own(&b, &created, 90).await;
+        wait_owner(&a, &created, b.client_id(), "silo cli").await;
+        assert_eq!(info(&a, &created).await.size.columns, 90);
+
+        drop(b);
+        wait_owner(&a, &created, a.client_id(), "Silo").await;
+        assert_eq!(info(&a, &created).await.size.columns, 70);
+        a.call_value(Method::ServerShutdown {}).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ping_and_api_describe() {
+        let server = Server::start("api").await;
+        let control = server.connect("silo cli").await;
+        assert_eq!(control.call_value(Method::Ping {}).await.unwrap(), serde_json::json!({}));
+        let d: MethodDescription = control.call(Method::ApiDescribe { method: "block.float".into() }).await.unwrap();
+        assert_eq!(d.example["method"], "block.float");
+        assert!(d.params_schema["properties"]["block_id"].is_object(), "{}", d.params_schema);
+        let err = control.call_value(Method::ApiDescribe { method: "nope".into() }).await.unwrap_err();
+        assert!(err.to_string().contains("not_found"), "{err}");
+        control.call_value(Method::ServerShutdown {}).await.unwrap();
+    }
 }

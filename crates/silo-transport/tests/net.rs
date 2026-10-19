@@ -4,9 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use common::TempDir;
-use silo_transport::{
-    Conn, EndpointAddr, Identity, Net, NetOptions, RelayConfig, RemoteConn, TransportAddr,
-};
+use silo_transport::{Conn, EndpointAddr, Identity, Net, NetOptions, RelayConfig, RemoteConn, TransportAddr};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
@@ -28,12 +26,7 @@ async fn read_frame(r: &mut (impl AsyncRead + Unpin)) -> (u8, Vec<u8>) {
 }
 
 fn loopback_addr(net: &Net) -> EndpointAddr {
-    let port = net
-        .bound_sockets()
-        .into_iter()
-        .find(SocketAddr::is_ipv4)
-        .expect("ipv4 socket")
-        .port();
+    let port = net.bound_sockets().into_iter().find(SocketAddr::is_ipv4).expect("ipv4 socket").port();
     EndpointAddr::new(net.id()).with_ip_addr((Ipv4Addr::LOCALHOST, port).into())
 }
 
@@ -47,10 +40,7 @@ async fn ctl_connect_streams_and_close() {
     assert_eq!(server.id(), sid.id());
     let (mut incoming, _tunnels) = server.serve(4).unwrap();
 
-    let rc = timeout(T, client.dial(loopback_addr(&server)))
-        .await
-        .unwrap()
-        .unwrap();
+    let rc = timeout(T, client.dial(loopback_addr(&server))).await.unwrap().unwrap();
     assert_eq!(rc.remote_id(), sid.id());
     let conn = Conn::Iroh(rc.clone());
 
@@ -61,28 +51,19 @@ async fn ctl_connect_streams_and_close() {
     assert_eq!(src.remote_id(), cid.id());
     assert_eq!(read_frame(&mut first).await, (1, b"hello".to_vec()));
     write_frame(&mut first, 2, b"welcome").await;
-    assert_eq!(
-        timeout(T, read_frame(&mut s1)).await.unwrap(),
-        (2, b"welcome".to_vec())
-    );
+    assert_eq!(timeout(T, read_frame(&mut s1)).await.unwrap(), (2, b"welcome".to_vec()));
 
     let mut s2 = conn.open_stream().await.unwrap();
     write_frame(&mut s2, 3, b"data").await;
     let mut second = timeout(T, src.accept_stream()).await.unwrap().unwrap();
     assert_eq!(read_frame(&mut second).await, (3, b"data".to_vec()));
     write_frame(&mut second, 4, b"ack").await;
-    assert_eq!(
-        timeout(T, read_frame(&mut s2)).await.unwrap(),
-        (4, b"ack".to_vec())
-    );
+    assert_eq!(timeout(T, read_frame(&mut s2)).await.unwrap(), (4, b"ack".to_vec()));
 
     // Stream shutdown is seen as EOF by the peer.
     s2.shutdown().await.unwrap();
     let mut rest = Vec::new();
-    timeout(T, second.read_to_end(&mut rest))
-        .await
-        .unwrap()
-        .unwrap();
+    timeout(T, second.read_to_end(&mut rest)).await.unwrap().unwrap();
     assert!(rest.is_empty());
 
     timeout(T, client.close()).await.unwrap().unwrap();
@@ -139,23 +120,14 @@ async fn delay_proxy(target: SocketAddr, delay: Duration) -> SocketAddr {
 }
 
 async fn bind_pinned(id: &Identity, pin: bool) -> Net {
-    let opts = NetOptions {
-        relay: RelayConfig::Disabled,
-        mdns: false,
-        pin_initial_path: pin,
-        port: None,
-    };
+    let opts = NetOptions { relay: RelayConfig::Disabled, mdns: false, pin_initial_path: pin, port: None };
     Net::bind_with(id, opts).await.unwrap()
 }
 
 type Paths = Vec<(TransportAddr, bool, Duration)>;
 
 fn ip_paths(rc: &RemoteConn) -> Paths {
-    rc.paths()
-        .iter()
-        .filter(|p| p.is_ip())
-        .map(|p| (p.remote_addr().clone(), p.is_selected(), p.rtt()))
-        .collect()
+    rc.paths().iter().filter(|p| p.is_ip()).map(|p| (p.remote_addr().clone(), p.is_selected(), p.rtt())).collect()
 }
 
 /// Connects through a 50 ms RTT proxy, pings ~3 s, returns (dialed, client, server) paths.

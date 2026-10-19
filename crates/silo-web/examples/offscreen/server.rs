@@ -32,8 +32,7 @@ pub fn spawn(html: String, proxy_auth: Option<&str>) -> std::io::Result<TestServ
     let port = listener.local_addr()?.port();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&requests);
-    let expected =
-        proxy_auth.map(|auth| format!("Basic {}", data_encoding::BASE64.encode(auth.as_bytes())));
+    let expected = proxy_auth.map(|auth| format!("Basic {}", data_encoding::BASE64.encode(auth.as_bytes())));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let (html, log, expected) = (html.clone(), Arc::clone(&log), expected.clone());
@@ -45,12 +44,7 @@ pub fn spawn(html: String, proxy_auth: Option<&str>) -> std::io::Result<TestServ
 
 /// Logs each request line, prefixed `[proxy-auth]`/`[bad-proxy-auth]`/`[auth]` when it carried
 /// the matching credential header. `/private` answers a (non-proxy) 401 Basic challenge.
-fn serve(
-    stream: TcpStream,
-    html: &str,
-    log: &Mutex<Vec<String>>,
-    expected: Option<&str>,
-) -> std::io::Result<()> {
+fn serve(stream: TcpStream, html: &str, log: &Mutex<Vec<String>>, expected: Option<&str>) -> std::io::Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut tunnelled = false;
     loop {
@@ -78,9 +72,7 @@ fn serve(
             (None, true) => "[auth] ",
             (None, false) => "",
         };
-        log.lock()
-            .unwrap()
-            .push(format!("{tag}{}", line.trim_end()));
+        log.lock().unwrap().push(format!("{tag}{}", line.trim_end()));
         if let Some(expected) = expected
             && !tunnelled
             && proxy_auth.as_deref() != Some(expected)
@@ -105,30 +97,20 @@ fn serve(
             );
         }
         let (kind, body) = if line.contains("favicon") {
-            (
-                "image/png",
-                data_encoding::BASE64.decode(ICON.as_bytes()).unwrap(),
-            )
+            ("image/png", data_encoding::BASE64.decode(ICON.as_bytes()).unwrap())
         } else {
             ("text/html", html.as_bytes().to_vec())
         };
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         return (&stream).write_all(&[head.as_bytes(), &body].concat());
     }
 }
 
 /// Completes the upgrade, sends one unmasked text frame `hello`, then holds the socket briefly.
 fn websocket(mut stream: &TcpStream, key: &str) -> std::io::Result<()> {
-    let digest =
-        sha1_smol::Sha1::from(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).digest();
+    let digest = sha1_smol::Sha1::from(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).digest();
     let accept = data_encoding::BASE64.encode(&digest.bytes());
-    write!(
-        stream,
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-    )?;
+    write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")?;
     stream.write_all(&[0x81, 5])?;
     stream.write_all(b"hello")?;
     std::thread::sleep(Duration::from_secs(2));

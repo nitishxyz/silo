@@ -25,11 +25,7 @@ pub struct Tunnel {
 
 impl fmt::Debug for Tunnel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Tunnel {{ port: {}, user: {:?}, pass: <redacted> }}",
-            self.port, self.user
-        )
+        write!(f, "Tunnel {{ port: {}, user: {:?}, pass: <redacted> }}", self.port, self.user)
     }
 }
 
@@ -56,8 +52,7 @@ const ANSWERS_PER_SECOND: u32 = 4;
 pub(crate) fn private_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod 0700 {}", dir.display()))
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).with_context(|| format!("chmod 0700 {}", dir.display()))
 }
 
 /// A browser profile: its own cookies, storage and proxy settings.
@@ -70,16 +65,7 @@ pub struct Profile {
 
 /// Directory name for a profile (`"<server>/<name>"` → `"<server>_<name>"`).
 pub(crate) fn dir_name(name: &str) -> Result<String> {
-    let dir: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let dir: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
     if dir.is_empty() || dir.chars().all(|c| c == '.') {
         bail!("invalid profile name {name:?}");
     }
@@ -94,11 +80,7 @@ fn apply_proxy(context: &RequestContext, port: Option<u16>) -> Result<()> {
     let server = port.map(|port| format!("127.0.0.1:{port}"));
     let entries = match &server {
         // `<-loopback>` removes Chromium's implicit localhost/127/8/[::1] bypass.
-        Some(server) => vec![
-            ("mode", "fixed_servers"),
-            ("server", server),
-            ("bypass_list", "<-loopback>"),
-        ],
+        Some(server) => vec![("mode", "fixed_servers"), ("server", server), ("bypass_list", "<-loopback>")],
         None => vec![("mode", "direct")],
     };
     for (key, value) in entries {
@@ -110,10 +92,7 @@ fn apply_proxy(context: &RequestContext, port: Option<u16>) -> Result<()> {
     // `CefString::default()` marshals as a null pointer and libcef rejects a null `error` out-param.
     let mut error = CefString::from("-");
     if context.set_preference(Some(&name), Some(&mut value), Some(&mut error)) == 0 {
-        let (has, can) = (
-            context.has_preference(Some(&name)),
-            context.can_set_preference(Some(&name)),
-        );
+        let (has, can) = (context.has_preference(Some(&name)), context.can_set_preference(Some(&name)));
         bail!("set proxy preference failed (has={has} can_set={can}): {error}");
     }
     Ok(())
@@ -145,33 +124,21 @@ impl Profile {
         let context = request_context_get_global_context().context("no global request context")?;
         let tunnel = SharedTunnel::default();
         lock(&tunnel).initialized = true;
-        Ok(Profile {
-            name: DEFAULT.to_owned(),
-            context,
-            tunnel,
-        })
+        Ok(Profile { name: DEFAULT.to_owned(), context, tunnel })
     }
 
     /// Creates the context in `profiles/<name>`; the proxy is applied once it initializes.
     pub(crate) fn create(profiles: &Path, name: &str, tunnel: Option<Tunnel>) -> Result<Profile> {
         let path = profiles.join(dir_name(name)?);
         private_dir(&path)?;
-        let settings = RequestContextSettings {
-            cache_path: CefString::from(path.to_string_lossy().as_ref()),
-            persist_session_cookies: 1,
-            ..Default::default()
-        };
+        let settings =
+            RequestContextSettings { cache_path: CefString::from(path.to_string_lossy().as_ref()), persist_session_cookies: 1, ..Default::default() };
         let shared = SharedTunnel::default();
         lock(&shared).set(tunnel);
         let tunnel = shared;
         let mut handler = ProxyOnInit::new(Arc::clone(&tunnel));
-        let context = request_context_create_context(Some(&settings), Some(&mut handler))
-            .context("request_context_create_context")?;
-        Ok(Profile {
-            name: name.to_owned(),
-            context,
-            tunnel,
-        })
+        let context = request_context_create_context(Some(&settings), Some(&mut handler)).context("request_context_create_context")?;
+        Ok(Profile { name: name.to_owned(), context, tunnel })
     }
 
     /// Re-points the tunnel proxy and its credentials (e.g. after the local proxy restarts), or
@@ -201,11 +168,7 @@ impl TunnelAuth {
 
     /// New tunnel (or none); resets the answer budget, keeps `initialized`.
     fn set(&mut self, tunnel: Option<Tunnel>) {
-        *self = TunnelAuth {
-            tunnel,
-            initialized: self.initialized,
-            ..TunnelAuth::default()
-        };
+        *self = TunnelAuth { tunnel, initialized: self.initialized, ..TunnelAuth::default() };
     }
 
     /// Credentials for a proxy challenge from `host:port` at `now`: only the profile's own
@@ -215,10 +178,7 @@ impl TunnelAuth {
         if host != "127.0.0.1" || port != i32::from(tunnel.port) {
             return None;
         }
-        if self
-            .window
-            .is_none_or(|start| now.duration_since(start) >= Duration::from_secs(1))
-        {
+        if self.window.is_none_or(|start| now.duration_since(start) >= Duration::from_secs(1)) {
             (self.window, self.answers) = (Some(now), 0);
         }
         self.answers += 1;
@@ -226,11 +186,7 @@ impl TunnelAuth {
     }
 }
 
-pub(crate) fn proxy_credentials(
-    tunnel: &SharedTunnel,
-    host: &str,
-    port: i32,
-) -> Option<(String, String)> {
+pub(crate) fn proxy_credentials(tunnel: &SharedTunnel, host: &str, port: i32) -> Option<(String, String)> {
     lock(tunnel).answer(host, port, Instant::now())
 }
 
@@ -243,21 +199,9 @@ mod tests {
         let now = Instant::now();
         let mut auth = TunnelAuth::default();
         assert_eq!(auth.answer("127.0.0.1", 4000, now), None);
-        auth.set(Some(Tunnel {
-            port: 4000,
-            user: "u".into(),
-            pass: "p".into(),
-        }));
-        assert_eq!(
-            auth.answer("127.0.0.1", 4000, now),
-            Some(("u".into(), "p".into()))
-        );
-        for (host, port) in [
-            ("127.0.0.1", 4001),
-            ("localhost", 4000),
-            ("10.0.0.1", 4000),
-            ("", 4000),
-        ] {
+        auth.set(Some(Tunnel { port: 4000, user: "u".into(), pass: "p".into() }));
+        assert_eq!(auth.answer("127.0.0.1", 4000, now), Some(("u".into(), "p".into())));
+        for (host, port) in [("127.0.0.1", 4001), ("localhost", 4000), ("10.0.0.1", 4000), ("", 4000)] {
             assert_eq!(auth.answer(host, port, now), None, "{host}:{port}");
         }
         assert!(!format!("{auth:?}").contains("\"p\""));
@@ -267,19 +211,10 @@ mod tests {
     fn proxy_answers_are_rate_limited() {
         let now = Instant::now();
         let mut auth = TunnelAuth::default();
-        auth.set(Some(Tunnel {
-            port: 1,
-            user: "u".into(),
-            pass: "p".into(),
-        }));
-        let answered = (0..10)
-            .filter(|_| auth.answer("127.0.0.1", 1, now).is_some())
-            .count();
+        auth.set(Some(Tunnel { port: 1, user: "u".into(), pass: "p".into() }));
+        let answered = (0..10).filter(|_| auth.answer("127.0.0.1", 1, now).is_some()).count();
         assert_eq!(answered, ANSWERS_PER_SECOND as usize);
-        assert!(
-            auth.answer("127.0.0.1", 1, now + Duration::from_secs(1))
-                .is_some()
-        );
+        assert!(auth.answer("127.0.0.1", 1, now + Duration::from_secs(1)).is_some());
         auth.set(auth.tunnel.clone());
         assert!(auth.answer("127.0.0.1", 1, now).is_some());
     }

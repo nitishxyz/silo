@@ -139,11 +139,7 @@ impl Predictor {
     /// Prediction may run for this frame (§4.1-4.3).
     #[must_use]
     pub fn enabled(&self, frame: &Frame) -> bool {
-        self.remote
-            && self.rtt.on()
-            && !frame.alt_screen
-            && !frame.mouse_tracking
-            && self.tty.is_some_and(|(echo, icanon)| echo || !icanon)
+        self.remote && self.rtt.on() && !frame.alt_screen && !frame.mouse_tracking && self.tty.is_some_and(|(echo, icanon)| echo || !icanon)
     }
 
     /// Drop every prediction and start a new (tentative) epoch.
@@ -185,10 +181,7 @@ impl Predictor {
                     self.clear();
                 }
             }
-            ServerData::SnapshotHead(_)
-            | ServerData::Resized { .. }
-            | ServerData::Configured(_)
-            | ServerData::Exited { .. } => self.clear(),
+            ServerData::SnapshotHead(_) | ServerData::Resized { .. } | ServerData::Configured(_) | ServerData::Exited { .. } => self.clear(),
             ServerData::SnapshotHistory(_) | ServerData::SnapshotDone | ServerData::Output { .. } => {}
         }
     }
@@ -283,8 +276,7 @@ impl Predictor {
     /// the mirror's, while any prediction is shown.
     #[must_use]
     pub fn overlay(&self) -> (Vec<PredCell>, Option<(u16, u16)>) {
-        let shown: Vec<PredCell> =
-            self.cells.iter().filter(|p| p.epoch <= self.confirmed_epoch).map(|p| p.cell.clone()).collect();
+        let shown: Vec<PredCell> = self.cells.iter().filter(|p| p.epoch <= self.confirmed_epoch).map(|p| p.cell.clone()).collect();
         let cursor = if shown.is_empty() { None } else { self.cursor };
         (shown, cursor)
     }
@@ -292,10 +284,7 @@ impl Predictor {
 
 #[cfg(test)]
 mod tests {
-    use silo_proto::{
-        data::StartMode,
-        model::TermSize,
-    };
+    use silo_proto::{data::StartMode, model::TermSize};
     use silo_vt::{GridSize, TerminalCore};
 
     use super::*;

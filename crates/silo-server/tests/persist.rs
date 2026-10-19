@@ -9,7 +9,7 @@ use std::{
 use silo_client::Control;
 use silo_proto::{
     control::{Capture, Created, Method, SpawnSpec},
-    model::{Axis, BlockInfo, BlockKind, Lifecycle, SessionView, TermSize},
+    model::{Axis, BlockInfo, BlockKind, Float, FloatRect, Lifecycle, SessionView, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -24,7 +24,14 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> JoinHandle<()> {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, checkpoint_interval: INTERVAL, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let config = silo_server::Config {
+        home: home.to_owned(),
+        idle_exit: None,
+        checkpoint_interval: INTERVAL,
+        relay: silo_server::RelayConfig::Disabled,
+        mdns: false,
+        ..Default::default()
+    };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     for _ in 0..300 {
         if silo_client::server_running(home).await {
@@ -92,10 +99,16 @@ fn snapshot_dir(home: &Path, block: &str) -> PathBuf {
 
 /// One session with a split and a second window, each block with output.
 async fn populate(control: &Control) -> (Created, Created, Created) {
-    let main: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split: Created =
-        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let window: Created = control.call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let main: Created =
+        control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    let window: Created = control
+        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     control.call_value(Method::WindowRename { window_id: window.window_id.clone(), name: Some("logs".into()) }).await.unwrap();
     // Explicit OSC titles: the process-derived default ("sh"/"bash") is
     // polled and may change after the tree is captured.
@@ -154,8 +167,10 @@ async fn clean_shutdown_restores_tree_and_screens() {
     assert!(history.contains("\nhist-1\n") && history.contains("\nhist-300\n"), "history lost:\n{history}");
 
     // Restored blocks ignore input; new blocks work normally.
-    let fresh: Created =
-        control.call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let fresh: Created = control
+        .call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     assert!(before.blocks.iter().all(|b| b.id != fresh.block_id));
     send(&control, &fresh.block_id, "echo fresh-$((2+3))\n").await;
     wait_output(&control, &fresh.block_id, "\nfresh-5").await;
@@ -216,8 +231,10 @@ async fn closed_block_snapshots_are_collected() {
     let task = start(&home).await;
     let control = connect(&home).await;
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split: Created =
-        control.call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     send(&control, &split.block_id, "echo doomed\n").await;
     wait_output(&control, &split.block_id, "\ndoomed").await;
     let dir = snapshot_dir(&home, &split.block_id);
@@ -269,6 +286,35 @@ async fn corrupt_snapshot_restores_that_block_empty() {
     assert_restored(&control, &before, &marks).await;
     let text = capture(&control, &split.block_id).await;
     assert!(!text.contains("mark-split") && text.trim().is_empty(), "expected empty screen:\n{text}");
+    shutdown(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn floats_survive_restart() {
+    let home = temp_home("floats");
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    send(&control, &split.block_id, "echo float-$((4*5))\n").await;
+    wait_output(&control, &split.block_id, "\nfloat-20").await;
+    let rect = FloatRect { x: 0.1, y: 0.2, w: 0.5, h: 0.4 };
+    control.call_value(Method::BlockFloat { block_id: split.block_id.clone(), rect: Some(rect) }).await.unwrap();
+    let before = view(&control, &main.session_id).await;
+    assert_eq!(before.session.windows[0].floats, [Float { id: split.block_id.clone(), rect }]);
+    assert_eq!(before.session.windows[0].layout.blocks(), [main.block_id.as_str()]);
+    shutdown(control, task).await;
+
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let after = view(&control, &main.session_id).await;
+    assert_eq!(after.session.windows, before.session.windows);
+    assert_eq!(block(&after, &split.block_id).lifecycle, Lifecycle::Restored);
+    wait_output(&control, &split.block_id, "\nfloat-20").await;
     shutdown(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }

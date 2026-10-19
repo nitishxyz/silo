@@ -22,11 +22,8 @@ impl Identity {
     /// the iroh identity (e.g. `<home>/state/iroh`), never the snapshot key dir.
     pub fn load_or_create(dir: impl AsRef<Path>) -> Result<Identity> {
         let dir = dir.as_ref();
-        let key = HostKey::load_or_create(dir)
-            .with_context(|| format!("load iroh identity from {}", dir.display()))?;
-        Ok(Identity {
-            secret: SecretKey::from_bytes(key.as_bytes()),
-        })
+        let key = HostKey::load_or_create(dir).with_context(|| format!("load iroh identity from {}", dir.display()))?;
+        Ok(Identity { secret: SecretKey::from_bytes(key.as_bytes()) })
     }
 
     pub fn id(&self) -> EndpointId {

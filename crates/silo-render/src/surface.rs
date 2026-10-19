@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{
-    App, Bounds, Hsla, IntoElement, Path, Pixels, Point, Rgba, TextAlign, TextRun, Window, canvas,
-    fill, point, prelude::*, px, rgb, size,
-};
+use gpui::{App, Bounds, Hsla, IntoElement, Path, Pixels, Point, Rgba, TextAlign, TextRun, Window, canvas, fill, point, prelude::*, px, rgb, size};
 use silo_vt::Span;
 
 use crate::geometry::CellMetrics;
@@ -41,26 +38,10 @@ pub struct Predicted {
 }
 
 impl Overlay {
-    fn span_bounds(
-        span: Span,
-        bounds: Bounds<Pixels>,
-        columns: u16,
-        rows: u16,
-        metrics: CellMetrics,
-    ) -> Option<Bounds<Pixels>> {
-        let (x, y, width, height) = crate::span_geometry::span_rectangle(
-            span.row,
-            span.start,
-            span.end,
-            columns,
-            rows,
-            metrics.width,
-            metrics.height,
-        )?;
-        Some(Bounds::new(
-            point(bounds.left() + px(x), bounds.top() + px(y)),
-            size(px(width), px(height)),
-        ))
+    fn span_bounds(span: Span, bounds: Bounds<Pixels>, columns: u16, rows: u16, metrics: CellMetrics) -> Option<Bounds<Pixels>> {
+        let (x, y, width, height) =
+            crate::span_geometry::span_rectangle(span.row, span.start, span.end, columns, rows, metrics.width, metrics.height)?;
+        Some(Bounds::new(point(bounds.left() + px(x), bounds.top() + px(y)), size(px(width), px(height))))
     }
 
     /// Cell and underline bounds of every predicted cell inside the grid.
@@ -71,15 +52,12 @@ impl Overlay {
         rows: u16,
         metrics: CellMetrics,
     ) -> Vec<(&Predicted, Bounds<Pixels>, Bounds<Pixels>)> {
-        let place = |(x, y, w, h): crate::predict_geometry::Rect| {
-            Bounds::new(point(bounds.left() + px(x), bounds.top() + px(y)), size(px(w), px(h)))
-        };
+        let place = |(x, y, w, h): crate::predict_geometry::Rect| Bounds::new(point(bounds.left() + px(x), bounds.top() + px(y)), size(px(w), px(h)));
         self.predicted
             .iter()
             .filter_map(|p| {
-                let (cell, line) = crate::predict_geometry::predicted_rects(
-                    p.row, p.column, columns, rows, metrics.width, metrics.height, metrics.scale,
-                )?;
+                let (cell, line) =
+                    crate::predict_geometry::predicted_rects(p.row, p.column, columns, rows, metrics.width, metrics.height, metrics.scale)?;
                 Some((p, place(cell), place(line)))
             })
             .collect()
@@ -102,12 +80,7 @@ fn polygon_path(points: &[Point<Pixels>]) -> Option<Path<Pixels>> {
 
 /// Mirrors GPUI's own line painting (baseline from the line height and the
 /// layout's ascent/descent), but positions each cluster at its cell.
-fn paint_text(
-    text: &PreparedText,
-    origin: Point<Pixels>,
-    metrics: CellMetrics,
-    window: &mut Window,
-) {
+fn paint_text(text: &PreparedText, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window) {
     let layout = &text.layout;
     let padding_top = (px(metrics.height) - layout.ascent - layout.descent) / 2.0;
     let baseline = origin.y + text.origin.y + padding_top + layout.ascent;
@@ -118,10 +91,7 @@ fn paint_text(
         for glyph in &run.glyphs {
             // Glyph order may differ from byte order (bidi), so look the
             // color up by byte rather than walking segments forward.
-            let segment = text
-                .colors
-                .partition_point(|(end, _)| *end <= glyph.index)
-                .min(text.colors.len().saturating_sub(1));
+            let segment = text.colors.partition_point(|(end, _)| *end <= glyph.index).min(text.colors.len().saturating_sub(1));
             let color = text.colors.get(segment).map_or_else(Hsla::default, |c| c.1);
             if !text.starts.is_empty() {
                 let owner = crate::runs::cell_of(&text.starts, glyph.index);
@@ -131,11 +101,7 @@ fn paint_text(
                     placed = true;
                 }
             }
-            let x = origin.x
-                + text.origin.x
-                + text.inset
-                + px(grid_offset(cell) * metrics.width)
-                + (glyph.position.x - cluster_x);
+            let x = origin.x + text.origin.x + text.inset + px(grid_offset(cell) * metrics.width) + (glyph.position.x - cluster_x);
             let glyph_origin = point(x, baseline + glyph.position.y);
             let _ = if glyph.is_emoji {
                 window.paint_emoji(glyph_origin, run.font_id, glyph.id, layout.font_size)
@@ -146,14 +112,7 @@ fn paint_text(
     }
 }
 
-fn paint(
-    prepared: &PreparedFrame,
-    overlay: &Overlay,
-    bounds: Bounds<Pixels>,
-    metrics: CellMetrics,
-    selection: Rgba,
-    window: &mut Window,
-) {
+fn paint(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels>, metrics: CellMetrics, selection: Rgba, window: &mut Window) {
     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
         // One paint layer for the whole grid. GPUI otherwise assigns every
         // primitive its own z-order by inserting its bounds into the scene's
@@ -171,19 +130,11 @@ fn paint(
     });
 }
 
-fn paint_grid(
-    prepared: &PreparedFrame,
-    overlay: &Overlay,
-    bounds: Bounds<Pixels>,
-    metrics: CellMetrics,
-    selection: Rgba,
-    window: &mut Window,
-) {
+fn paint_grid(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels>, metrics: CellMetrics, selection: Rgba, window: &mut Window) {
     let origin = bounds.origin;
     let cell = prepared.metrics;
     let frame = &prepared.frame;
-    let span_bounds =
-        |span: Span| Overlay::span_bounds(span, bounds, frame.size.columns, frame.size.rows, cell);
+    let span_bounds = |span: Span| Overlay::span_bounds(span, bounds, frame.size.columns, frame.size.rows, cell);
     for (quad, color) in &prepared.backgrounds {
         window.paint_quad(fill(shift(*quad, origin), *color));
     }
@@ -197,8 +148,7 @@ fn paint_grid(
         window.paint_quad(fill(shift(*quad, origin), *color));
     }
     for (polygon, color) in &prepared.sprite_polygons {
-        let translated: Vec<Point<Pixels>> =
-            polygon.iter().map(|vertex| *vertex + origin).collect();
+        let translated: Vec<Point<Pixels>> = polygon.iter().map(|vertex| *vertex + origin).collect();
         if let Some(path) = polygon_path(&translated) {
             window.paint_path(path, *color);
         }
@@ -213,17 +163,8 @@ fn paint_grid(
         && let Some(link) = span_bounds(span)
     {
         let columns = usize::from(frame.size.columns).max(1);
-        let color = frame
-            .cells
-            .get(usize::from(span.row) * columns + usize::from(span.start))
-            .map_or(0xffff_ffff, |cell| cell.foreground);
-        window.paint_quad(fill(
-            Bounds::new(
-                point(link.left(), link.bottom() - px(2.0)),
-                size(link.size.width, px(1.0 / metrics.scale)),
-            ),
-            rgb(color),
-        ));
+        let color = frame.cells.get(usize::from(span.row) * columns + usize::from(span.start)).map_or(0xffff_ffff, |cell| cell.foreground);
+        window.paint_quad(fill(Bounds::new(point(link.left(), link.bottom() - px(2.0)), size(link.size.width, px(1.0 / metrics.scale))), rgb(color)));
     }
 }
 
@@ -237,18 +178,27 @@ fn paint_predicted(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<P
         return;
     }
     let mask = Some(gpui::ContentMask { bounds });
-    window.with_content_mask(mask, |window| window.paint_layer(bounds, |window| {
-        for (cell, quad, line) in quads {
-            window.paint_quad(fill(quad, rgb(frame.background)));
-            window.paint_quad(fill(line, overlay.predicted_underline));
-            if cell.text.is_empty() {
-                continue;
+    window.with_content_mask(mask, |window| {
+        window.paint_layer(bounds, |window| {
+            for (cell, quad, line) in quads {
+                window.paint_quad(fill(quad, rgb(frame.background)));
+                window.paint_quad(fill(line, overlay.predicted_underline));
+                if cell.text.is_empty() {
+                    continue;
+                }
+                let run = TextRun {
+                    len: cell.text.len(),
+                    font: crate::terminal_font(),
+                    color: overlay.predicted_foreground.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = window.text_system().shape_line(cell.text.clone().into(), px(prepared.metrics.font_size), &[run], None);
+                let _ = shaped.paint(quad.origin, quad.size.height, TextAlign::Left, None, window, cx);
             }
-            let run = TextRun { len: cell.text.len(), font: crate::terminal_font(), color: overlay.predicted_foreground.into(), background_color: None, underline: None, strikethrough: None };
-            let shaped = window.text_system().shape_line(cell.text.clone().into(), px(prepared.metrics.font_size), &[run], None);
-            let _ = shaped.paint(quad.origin, quad.size.height, TextAlign::Left, None, window, cx);
-        }
-    }));
+        })
+    });
 }
 
 /// One canvas for the complete grid; no GPUI element or event handler per
@@ -272,11 +222,7 @@ pub fn terminal_canvas(
             let started = profile::start();
             paint(&prepared, &overlay, bounds, metrics, selection, window);
             paint_predicted(&prepared, &overlay, bounds, window, cx);
-            let (quads, glyphs) = if profile::enabled() {
-                prepared.primitives()
-            } else {
-                (0, 0)
-            };
+            let (quads, glyphs) = if profile::enabled() { prepared.primitives() } else { (0, 0) };
             profile::record_painted(started, quads, glyphs);
             let mut caret = prepared.frame.cursor;
             if let Some((row, column)) = overlay.predicted_cursor {

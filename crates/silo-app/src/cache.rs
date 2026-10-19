@@ -55,7 +55,7 @@ pub fn closed_blocks(old: &SessionView, new: &SessionView) -> Vec<String> {
 /// Every block in `view`'s layouts.
 #[must_use]
 pub fn live_blocks(view: &SessionView) -> Vec<String> {
-    view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect()
+    view.session.windows.iter().flat_map(crate::floats::window_blocks).collect()
 }
 
 /// Open the cache for `identity`; a corrupt one is wiped and reopened.
@@ -182,9 +182,16 @@ mod tests {
             .map(|b| Layout::Block { id: (*b).to_owned() })
             .reduce(|a, b| Layout::Split { axis: Axis::Horizontal, ratio: 0.5, first: Box::new(a), second: Box::new(b) })
             .unwrap();
-        let window = WindowInfo { id: "w".into(), name: None, layout, focused: blocks[0].into(), zoomed: false };
+        let window = WindowInfo { id: "w".into(), name: None, layout, focused: blocks[0].into(), zoomed: false, floats: Vec::new() };
         SessionView {
-            session: SessionInfo { id: session.into(), name: "main".into(), windows: vec![window], active_window: "w".into(), revision: 1, created_at: 0 },
+            session: SessionInfo {
+                id: session.into(),
+                name: "main".into(),
+                windows: vec![window],
+                active_window: "w".into(),
+                revision: 1,
+                created_at: 0,
+            },
             blocks: Vec::new(),
         }
     }
@@ -202,6 +209,15 @@ mod tests {
         assert!(closed_blocks(&view(&["a"]), &view(&["a", "b"])).is_empty());
         // Switching sessions closes nothing.
         assert!(closed_blocks(&view_of("s", &["a"]), &view_of("t", &["x"])).is_empty());
+    }
+
+    #[test]
+    fn floating_a_block_keeps_its_checkpoint() {
+        let mut floated = view(&["a"]);
+        let rect = silo_proto::model::FloatRect { x: 0.1, y: 0.1, w: 0.5, h: 0.5 };
+        floated.session.windows[0].floats.push(silo_proto::model::Float { id: "b".into(), rect });
+        assert_eq!(live_blocks(&floated), vec!["a".to_owned(), "b".to_owned()]);
+        assert!(closed_blocks(&view(&["a", "b"]), &floated).is_empty());
     }
 
     fn checkpoint() -> MirrorCheckpoint {
@@ -236,7 +252,8 @@ mod tests {
         mirror.apply(ServerData::SnapshotDone).unwrap();
         let mut offset = 0;
         for chunk in 0..100 {
-            let bytes: Vec<u8> = (0..1000).flat_map(|i| format!("line {chunk}-{i} the quick brown fox jumps over the lazy dog\r\n").into_bytes()).collect();
+            let bytes: Vec<u8> =
+                (0..1000).flat_map(|i| format!("line {chunk}-{i} the quick brown fox jumps over the lazy dog\r\n").into_bytes()).collect();
             let len = bytes.len() as u64;
             mirror.apply(ServerData::Output { offset, bytes }).unwrap();
             offset += len;

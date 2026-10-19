@@ -1,9 +1,7 @@
 //! Session switcher popover (opened from the titlebar pill): filter or
 //! create, sessions grouped by host, new session, add remote host.
 
-use gpui::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb,
-};
+use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
 
 use crate::theme::Continuous as _;
 use crate::{
@@ -85,10 +83,8 @@ impl Workspace {
         let host = self.active_host;
         let items = self.items();
         if let Some(switcher) = self.switcher.as_mut() {
-            switcher.selected = items
-                .iter()
-                .position(|i| matches!(i, Item::Session { host: h, id } if *h == host && Some(id) == current.as_ref()))
-                .unwrap_or(0);
+            switcher.selected =
+                items.iter().position(|i| matches!(i, Item::Session { host: h, id } if *h == host && Some(id) == current.as_ref())).unwrap_or(0);
         }
     }
 
@@ -135,10 +131,7 @@ impl Workspace {
 
     /// Visible session rows in order; ⌘1–9 address the first nine.
     fn session_rows(&self) -> Vec<(usize, String)> {
-        self.items()
-            .into_iter()
-            .filter_map(|i| if let Item::Session { host, id } = i { Some((host, id)) } else { None })
-            .collect()
+        self.items().into_iter().filter_map(|i| if let Item::Session { host, id } = i { Some((host, id)) } else { None }).collect()
     }
 
     pub(crate) fn switch_to_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -310,7 +303,15 @@ impl Workspace {
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(popover).into_any_element())
     }
 
-    fn render_item(&self, item: Item, selected: bool, index: usize, number: Option<usize>, current: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_item(
+        &self,
+        item: Item,
+        selected: bool,
+        index: usize,
+        number: Option<usize>,
+        current: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (glyph, label, hint, checked): (Option<&'static str>, String, Option<String>, bool) = match &item {
             Item::Session { host, id } => {
                 let sessions = &self.hosts[*host].sessions;

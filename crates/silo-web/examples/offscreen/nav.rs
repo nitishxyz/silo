@@ -42,18 +42,11 @@ pub fn run(runtime: &Runtime, browser: &Browser) -> Result<()> {
     let origin = server::spawn(CYAN_PAGE.to_owned(), None)?;
     browser.navigate(&format!("http://127.0.0.1:{}/", origin.port));
     wait_for(runtime, browser, CYAN, SIZE, "navigate")?;
-    wait_event(runtime, browser, "favicon", |e| {
-        matches!(e, Event::FaviconChanged(_))
-    })?;
+    wait_event(runtime, browser, "favicon", |e| matches!(e, Event::FaviconChanged(_)))?;
     let none = Modifiers::default();
     browser.mouse_button(100.0, 50.0, MouseButton::Left, true, 1, none);
     browser.mouse_button(100.0, 50.0, MouseButton::Left, false, 1, none);
-    wait_event(
-        runtime,
-        browser,
-        "popup",
-        |e| matches!(e, Event::Popup(url) if url.contains("popup.silo-test")),
-    )?;
+    wait_event(runtime, browser, "popup", |e| matches!(e, Event::Popup(url) if url.contains("popup.silo-test")))?;
     browser.navigate(YELLOW_PAGE);
     wait_for(runtime, browser, YELLOW, SIZE, "navigate again")?;
     browser.back();
@@ -78,9 +71,7 @@ pub fn run(runtime: &Runtime, browser: &Browser) -> Result<()> {
     browser.insert_text("hi");
     wait_for(runtime, browser, BLUE, SIZE, "insert_text")?;
     browser.ime_set_composition("\u{306b}\u{307b}\u{3093}", 3..3);
-    wait_event(runtime, browser, "IME composing", |e| {
-        matches!(e, Event::ImeBounds { .. })
-    })?;
+    wait_event(runtime, browser, "IME composing", |e| matches!(e, Event::ImeBounds { .. }))?;
     browser.ime_finish();
     wait_for(runtime, browser, PURPLE, SIZE, "IME composition")?;
     Ok(())

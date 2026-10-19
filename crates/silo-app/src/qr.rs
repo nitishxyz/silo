@@ -44,7 +44,8 @@ pub fn render(text: &str) -> Option<AnyElement> {
     for (y, row) in rows.iter().enumerate() {
         for &(x, len) in row {
             #[allow(clippy::cast_precision_loss)]
-            let quad = div().absolute().left(px(x as f32 * MODULE)).top(px(y as f32 * MODULE)).w(px(len as f32 * MODULE)).h(px(MODULE)).bg(rgb(0x0000_0000));
+            let quad =
+                div().absolute().left(px(x as f32 * MODULE)).top(px(y as f32 * MODULE)).w(px(len as f32 * MODULE)).h(px(MODULE)).bg(rgb(0x0000_0000));
             grid = grid.child(quad);
         }
     }

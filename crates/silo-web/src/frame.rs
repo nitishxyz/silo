@@ -4,19 +4,13 @@ use std::ffi::c_void;
 
 use anyhow::{Result, bail};
 use core_foundation::base::{TCFType, kCFAllocatorDefault};
-use core_video::pixel_buffer::{
-    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferRef, kCVPixelBufferLock_ReadOnly,
-};
+use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferRef, kCVPixelBufferLock_ReadOnly};
 use core_video::r#return::kCVReturnSuccess;
 
 #[link(name = "CoreVideo", kind = "framework")]
 unsafe extern "C" {
-    fn CVPixelBufferCreateWithIOSurface(
-        allocator: *const c_void,
-        surface: *mut c_void,
-        attributes: *const c_void,
-        out: *mut CVPixelBufferRef,
-    ) -> i32;
+    fn CVPixelBufferCreateWithIOSurface(allocator: *const c_void, surface: *mut c_void, attributes: *const c_void, out: *mut CVPixelBufferRef)
+    -> i32;
 }
 
 /// `'BGRA'`, the only format CEF's accelerated paint produces on macOS.
@@ -40,14 +34,7 @@ impl Frame {
             bail!("accelerated paint without an IOSurface");
         }
         let mut raw: CVPixelBufferRef = std::ptr::null_mut();
-        let status = unsafe {
-            CVPixelBufferCreateWithIOSurface(
-                kCFAllocatorDefault.cast(),
-                surface,
-                std::ptr::null(),
-                &mut raw,
-            )
-        };
+        let status = unsafe { CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault.cast(), surface, std::ptr::null(), &mut raw) };
         if status != kCVReturnSuccess || raw.is_null() {
             bail!("CVPixelBufferCreateWithIOSurface failed: {status}");
         }
@@ -56,11 +43,7 @@ impl Frame {
         if buffer.get_pixel_format() != BGRA {
             bail!("unexpected pixel format {:#x}", buffer.get_pixel_format());
         }
-        Ok(Frame {
-            buffer,
-            width,
-            height,
-        })
+        Ok(Frame { buffer, width, height })
     }
 }
 

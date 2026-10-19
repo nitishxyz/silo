@@ -3,13 +3,10 @@
 //! navigation keys reported as events. ⌘A selects the whole text (there is
 //! no partial selection); typing, Backspace or Paste then replace it.
 
-use gpui::{
-    Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, Render, SharedString, Window, div, prelude::*, px,
-    rgb,
-};
+use gpui::{Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, Render, SharedString, Window, div, prelude::*, px, rgb};
 
-use crate::theme::Continuous as _;
 use crate::theme;
+use crate::theme::Continuous as _;
 
 pub enum FieldEvent {
     Changed(String),

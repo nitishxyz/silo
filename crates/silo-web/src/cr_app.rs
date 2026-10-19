@@ -30,9 +30,7 @@ extern "C-unwind" fn set_handling_send_event(_this: *mut AnyObject, _cmd: Sel, v
 }
 
 extern "C-unwind" fn send_event(this: *mut AnyObject, cmd: Sel, event: *mut AnyObject) {
-    let original = ORIGINAL_SEND_EVENT
-        .get()
-        .expect("sendEvent: swizzled without original");
+    let original = ORIGINAL_SEND_EVENT.get().expect("sendEvent: swizzled without original");
     let original = unsafe { std::mem::transmute::<Imp, SendEventFn>(*original) };
     let previous = HANDLING.swap(true, Ordering::Relaxed);
     unsafe { original(this, cmd, event) };
@@ -57,42 +55,21 @@ pub(crate) fn install(class: &AnyClass) -> Result<()> {
         if inherited.is_null() {
             bail!("{} has no sendEvent:", class.name().to_string_lossy());
         }
-        if ORIGINAL_SEND_EVENT
-            .set((*inherited).implementation())
-            .is_err()
-        {
+        if ORIGINAL_SEND_EVENT.set((*inherited).implementation()).is_err() {
             bail!("CrAppControlProtocol already installed");
         }
         let get: GetFn = is_handling_send_event;
         let set: SetFn = set_handling_send_event;
         let wrap: WrapFn = send_event;
-        add(
-            cls,
-            sel!(isHandlingSendEvent),
-            std::mem::transmute::<GetFn, Imp>(get),
-            c"B@:",
-        )?;
-        add(
-            cls,
-            sel!(setHandlingSendEvent:),
-            std::mem::transmute::<SetFn, Imp>(set),
-            c"v@:B",
-        )?;
-        ffi::class_replaceMethod(
-            cls,
-            send,
-            std::mem::transmute::<WrapFn, Imp>(wrap),
-            c"v@:@".as_ptr(),
-        );
+        add(cls, sel!(isHandlingSendEvent), std::mem::transmute::<GetFn, Imp>(get), c"B@:")?;
+        add(cls, sel!(setHandlingSendEvent:), std::mem::transmute::<SetFn, Imp>(set), c"v@:B")?;
+        ffi::class_replaceMethod(cls, send, std::mem::transmute::<WrapFn, Imp>(wrap), c"v@:@".as_ptr());
         for name in [c"CrAppProtocol", c"CrAppControlProtocol"] {
             ffi::class_addProtocol(cls, protocol(name)?);
         }
     }
     if !class.conforms_to(control) {
-        bail!(
-            "{} does not conform to CrAppControlProtocol",
-            class.name().to_string_lossy()
-        );
+        bail!("{} does not conform to CrAppControlProtocol", class.name().to_string_lossy());
     }
     Ok(())
 }

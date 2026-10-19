@@ -62,12 +62,7 @@ mod tests {
     use silo_vt::{GridSize, KeyEvent, Modifiers, TerminalCore};
 
     fn encode(vt: &mut TerminalCore, key: &str, chord: Chord, release: bool) -> Vec<u8> {
-        let modifiers = Modifiers {
-            super_key: chord == Chord::Cmd,
-            control: chord == Chord::Ctrl,
-            alt: chord == Chord::Alt,
-            shift: false,
-        };
+        let modifiers = Modifiers { super_key: chord == Chord::Cmd, control: chord == Chord::Ctrl, alt: chord == Chord::Alt, shift: false };
         let event = KeyEvent { key: key.into(), text: String::new(), modifiers, release };
         vt.encode_key(&event).unwrap()
     }

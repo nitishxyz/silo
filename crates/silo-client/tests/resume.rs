@@ -22,7 +22,8 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start_server(home: &Path) {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let config =
+        silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
     tokio::spawn(async move {
         silo_server::run(config).await.unwrap();
     });
@@ -41,7 +42,10 @@ async fn setup(name: &str) -> (Control, Events, String) {
     start_server(&home).await;
     let (control, events) = Control::connect(&paths::socket(&home), name).await.unwrap();
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = control
+        .call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     (control, events, created.block_id)
 }
 

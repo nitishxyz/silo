@@ -13,12 +13,54 @@ const RETURN: u16 = 36;
 
 /// US ANSI layout, unshifted then shifted, in macOS virtual keycode order.
 const LAYOUT: [(u8, u8); 48] = [
-    (b'a', b'A'), (b's', b'S'), (b'd', b'D'), (b'f', b'F'), (b'h', b'H'), (b'g', b'G'), (b'z', b'Z'), (b'x', b'X'),
-    (b'c', b'C'), (b'v', b'V'), (0, 0), (b'b', b'B'), (b'q', b'Q'), (b'w', b'W'), (b'e', b'E'), (b'r', b'R'),
-    (b'y', b'Y'), (b't', b'T'), (b'1', b'!'), (b'2', b'@'), (b'3', b'#'), (b'4', b'$'), (b'6', b'^'), (b'5', b'%'),
-    (b'=', b'+'), (b'9', b'('), (b'7', b'&'), (b'-', b'_'), (b'8', b'*'), (b'0', b')'), (b']', b'}'), (b'o', b'O'),
-    (b'u', b'U'), (b'[', b'{'), (b'i', b'I'), (b'p', b'P'), (0, 0), (b'l', b'L'), (b'j', b'J'), (b'\'', b'"'),
-    (b'k', b'K'), (b';', b':'), (b'\\', b'|'), (b',', b'<'), (b'/', b'?'), (b'n', b'N'), (b'm', b'M'), (b'.', b'>'),
+    (b'a', b'A'),
+    (b's', b'S'),
+    (b'd', b'D'),
+    (b'f', b'F'),
+    (b'h', b'H'),
+    (b'g', b'G'),
+    (b'z', b'Z'),
+    (b'x', b'X'),
+    (b'c', b'C'),
+    (b'v', b'V'),
+    (0, 0),
+    (b'b', b'B'),
+    (b'q', b'Q'),
+    (b'w', b'W'),
+    (b'e', b'E'),
+    (b'r', b'R'),
+    (b'y', b'Y'),
+    (b't', b'T'),
+    (b'1', b'!'),
+    (b'2', b'@'),
+    (b'3', b'#'),
+    (b'4', b'$'),
+    (b'6', b'^'),
+    (b'5', b'%'),
+    (b'=', b'+'),
+    (b'9', b'('),
+    (b'7', b'&'),
+    (b'-', b'_'),
+    (b'8', b'*'),
+    (b'0', b')'),
+    (b']', b'}'),
+    (b'o', b'O'),
+    (b'u', b'U'),
+    (b'[', b'{'),
+    (b'i', b'I'),
+    (b'p', b'P'),
+    (0, 0),
+    (b'l', b'L'),
+    (b'j', b'J'),
+    (b'\'', b'"'),
+    (b'k', b'K'),
+    (b';', b':'),
+    (b'\\', b'|'),
+    (b',', b'<'),
+    (b'/', b'?'),
+    (b'n', b'N'),
+    (b'm', b'M'),
+    (b'.', b'>'),
 ];
 
 /// The virtual keycode for an ASCII byte and whether it needs shift.
@@ -28,9 +70,9 @@ fn keycode(byte: u8) -> Option<(u16, bool)> {
         b'`' => Some((50, false)),
         b'~' => Some((50, true)),
         0 => None,
-        _ => (0u16..).zip(LAYOUT).find_map(|(code, (plain, shifted))| {
-            (byte == plain).then_some((code, false)).or((byte == shifted).then_some((code, true)))
-        }),
+        _ => (0u16..)
+            .zip(LAYOUT)
+            .find_map(|(code, (plain, shifted))| (byte == plain).then_some((code, false)).or((byte == shifted).then_some((code, true)))),
     }
 }
 

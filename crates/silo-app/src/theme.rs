@@ -3,7 +3,10 @@
 //! (titlebar, tabs, pill, popovers) derived from the terminal background and
 //! foreground so the window reads as one surface.
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock, RwLock},
+};
 
 use silo_proto::model::TerminalConfig;
 
@@ -49,11 +52,7 @@ fn ui_slot() -> &'static RwLock<UiFont> {
 /// when Settings re-reads the installed fonts). Callers refresh the window.
 pub fn apply_ui_font(preferred: &str, cx: &gpui::App) -> UiFont {
     let preferred = preferred.trim();
-    let resolved = if preferred.is_empty() {
-        fonts::resolve_ui("", &[])
-    } else {
-        fonts::resolve_ui(preferred, &font_names(cx))
-    };
+    let resolved = if preferred.is_empty() { fonts::resolve_ui("", &[]) } else { fonts::resolve_ui(preferred, &font_names(cx)) };
     if resolved.missing {
         tracing::warn!("{}", fonts::missing_problem(preferred, "the system font"));
     }
@@ -126,8 +125,7 @@ impl Theme {
     pub fn from_prefs(prefs: TerminalPrefs) -> Self {
         let effective = prefs.effective();
         // Until `apply_font` resolves it against the installed families.
-        let font_in_use =
-            if effective.font_family.is_empty() { fonts::FALLBACK_FONT.to_owned() } else { effective.font_family.clone() };
+        let font_in_use = if effective.font_family.is_empty() { fonts::FALLBACK_FONT.to_owned() } else { effective.font_family.clone() };
         Self { prefs, effective, font_in_use, load_problem: None, font_problem: None }
     }
 }
@@ -187,11 +185,7 @@ pub fn apply_font(cx: &gpui::App) -> Option<String> {
     if let Some(problem) = &problem {
         tracing::warn!("{problem}");
     }
-    let font = silo_render::FontSettings {
-        family: resolved.family,
-        size: theme.effective.font_size,
-        ..Default::default()
-    };
+    let font = silo_render::FontSettings { family: resolved.family, size: theme.effective.font_size, ..Default::default() };
     let in_use = font.family.clone();
     silo_render::set_terminal_font(font);
     let mut slot = slot().write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -204,14 +198,21 @@ pub fn apply_font(cx: &gpui::App) -> Option<String> {
     problem
 }
 
-/// Installed families, read from the system once and on [`refresh_fonts`];
-/// the picker lists (monospaced for the terminal, text faces for the UI)
-/// are computed lazily, once per catalog.
+/// Installed families, read from the system once and on [`refresh_fonts`],
+/// and what probing each one found. A family is probed once per run, so
+/// GPUI loads (and warns about) each face at most once.
 #[derive(Default)]
 struct FontCatalog {
     names: Vec<String>,
-    monospace: Option<Vec<String>>,
-    ui: Option<Vec<String>>,
+    probed: HashMap<String, Probe>,
+}
+
+/// `usable`: the text system loads the family itself rather than a
+/// fallback; unusable families are never resolved again.
+#[derive(Clone, Copy)]
+struct Probe {
+    usable: bool,
+    monospace: bool,
 }
 
 static FONTS: OnceLock<RwLock<FontCatalog>> = OnceLock::new();
@@ -221,13 +222,46 @@ fn fonts_slot() -> &'static RwLock<FontCatalog> {
 }
 
 /// Re-read the installed families (fonts may be added or removed while
-/// running); called when Settings opens and on reload.
+/// running); called when Settings opens and on reload. Only added
+/// families are probed.
 pub fn refresh_fonts(cx: &gpui::App) {
     let names = cx.text_system().all_font_names();
-    let mut catalog = fonts_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if catalog.names != names {
-        *catalog = FontCatalog { names, monospace: None, ui: None };
-    }
+    fonts_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner).names = names;
+}
+
+/// Probe the installed families on a background thread at launch, so
+/// Settings opens with its font lists ready.
+pub fn warm_fonts(cx: &gpui::App) {
+    let names = font_names(cx);
+    let text = cx.text_system().clone();
+    cx.background_executor().spawn(async move { probe(&text, &names) }).detach();
+}
+
+fn probe(text: &gpui::TextSystem, names: &[String]) {
+    let todo = fonts::to_probe(&fonts_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner).probed, names);
+    let size = gpui::px(16.0);
+    let found: Vec<(String, Probe)> = todo
+        .into_iter()
+        .map(|name| {
+            let probe = if name.starts_with('.') {
+                Probe { usable: false, monospace: false }
+            } else if fonts::NERD_FONT_CANDIDATES.iter().any(|c| fonts::key(c) == fonts::key(&name)) {
+                Probe { usable: true, monospace: true }
+            } else {
+                // `resolve_font` substitutes a fallback face for unusable families.
+                let id = text.resolve_font(&gpui::font(name.as_str()));
+                let usable = text.get_font_for_id(id).is_some_and(|f| fonts::key(&f.family) == fonts::key(&name));
+                let advances: Vec<f32> = ['i', 'M', 'W', '0']
+                    .iter()
+                    .filter(|_| usable)
+                    .filter_map(|c| text.advance(id, size, *c).ok().map(|s| f32::from(s.width)))
+                    .collect();
+                Probe { usable, monospace: advances.len() == 4 && fonts::is_monospace(&advances) }
+            };
+            (name, probe)
+        })
+        .collect();
+    fonts_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner).probed.extend(found);
 }
 
 /// Installed family names (system spelling).
@@ -239,69 +273,28 @@ pub fn font_names(cx: &gpui::App) -> Vec<String> {
     fonts_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner).names.clone()
 }
 
+/// Installed families that pass `keep`, probing any not probed yet.
+fn probed_fonts(cx: &gpui::App, keep: impl Fn(&str, Probe) -> bool) -> Vec<String> {
+    let names = font_names(cx);
+    probe(cx.text_system(), &names);
+    let catalog = fonts_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    names.into_iter().filter(|name| catalog.probed.get(name).is_some_and(|p| keep(name, *p))).collect()
+}
+
 /// Installed monospaced families suitable for the terminal, in picker
-/// order (supported Nerd Fonts first). Measured once per catalog: a family
-/// is monospaced when `i`, `M`, `W` and `0` advance equally.
+/// order (supported Nerd Fonts first). A family is monospaced when `i`,
+/// `M`, `W` and `0` advance equally.
 #[must_use]
 pub fn monospace_fonts(cx: &gpui::App) -> Vec<String> {
-    let names = font_names(cx);
-    if let Some(mono) = &fonts_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner).monospace {
-        return mono.clone();
-    }
-    let text = cx.text_system();
-    let size = gpui::px(16.0);
-    let mono: Vec<String> = names
-        .iter()
-        .filter(|name| !name.starts_with('.'))
-        .filter(|name| {
-            if fonts::NERD_FONT_CANDIDATES.iter().any(|c| fonts::key(c) == fonts::key(name)) {
-                return true;
-            }
-            let id = text.resolve_font(&gpui::font(name.as_str()));
-            // `resolve_font` substitutes a fallback face for unusable families.
-            if text.get_font_for_id(id).is_none_or(|f| fonts::key(&f.family) != fonts::key(name)) {
-                return false;
-            }
-            let advances: Vec<f32> =
-                ['i', 'M', 'W', '0'].iter().filter_map(|c| text.advance(id, size, *c).ok().map(|s| f32::from(s.width))).collect();
-            advances.len() == 4 && fonts::is_monospace(&advances)
-        })
-        .cloned()
-        .collect();
-    let mono = fonts::picker_order(mono);
-    let mut catalog = fonts_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if catalog.names == names {
-        catalog.monospace = Some(mono.clone());
-    }
-    mono
+    fonts::picker_order(probed_fonts(cx, |_, p| p.monospace))
 }
 
 /// Installed text families for the UI font picker, alphabetically
 /// (monospaced ones included; hidden, symbol and emoji families and ones
-/// the text system cannot load are not). Computed once per catalog.
+/// the text system cannot load are not).
 #[must_use]
 pub fn ui_fonts(cx: &gpui::App) -> Vec<String> {
-    let names = font_names(cx);
-    if let Some(ui) = &fonts_slot().read().unwrap_or_else(std::sync::PoisonError::into_inner).ui {
-        return ui.clone();
-    }
-    let text = cx.text_system();
-    let usable: Vec<String> = names
-        .iter()
-        .filter(|name| fonts::is_ui_candidate(name))
-        .filter(|name| {
-            // `resolve_font` substitutes a fallback face for unusable families.
-            let id = text.resolve_font(&gpui::font(name.as_str()));
-            text.get_font_for_id(id).is_some_and(|f| fonts::key(&f.family) == fonts::key(name))
-        })
-        .cloned()
-        .collect();
-    let ui = fonts::ui_picker_order(usable);
-    let mut catalog = fonts_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if catalog.names == names {
-        catalog.ui = Some(ui.clone());
-    }
-    ui
+    fonts::ui_picker_order(probed_fonts(cx, |name, p| p.usable && fonts::is_ui_candidate(name)))
 }
 
 // ---- color math ----
@@ -336,11 +329,6 @@ pub fn background() -> u32 {
 #[must_use]
 pub fn foreground() -> u32 {
     current().effective.config.foreground
-}
-/// Titlebar: the same surface as the terminal.
-#[must_use]
-pub fn chrome() -> u32 {
-    background()
 }
 /// Window surface: titlebar, Comfortable gutters and pane headers all use
 /// the terminal's own background, so the window reads as one surface.

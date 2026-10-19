@@ -110,8 +110,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
     for error in &report.errors {
         tracing::warn!(block = %error.id, generation = error.generation, "checkpoint unreadable: {}", error.error);
     }
-    let mut snapshots: HashMap<(String, u64), Vec<u8>> =
-        report.snapshots.into_iter().map(|s| ((s.id, s.generation), s.bytes)).collect();
+    let mut snapshots: HashMap<(String, u64), Vec<u8>> = report.snapshots.into_iter().map(|s| ((s.id, s.generation), s.bytes)).collect();
     let manifest = report.manifest.unwrap_or_else(|| Manifest {
         server_id: format!("{:016x}", rand::random::<u64>()),
         sessions: Vec::new(),
@@ -179,10 +178,8 @@ impl Persist {
         let key = HostKey::load_or_create(&dir).with_context(|| format!("host key in {}", dir.display()))?;
         let store = Store::open(&dir, key).with_context(|| format!("open {}", dir.display()))?;
         let report = store.load::<Manifest>().with_context(|| format!("load {}", store.manifest_path().display()))?;
-        let generations = report
-            .manifest
-            .map(|m| m.blocks.into_iter().filter_map(|b| Some((b.info.id, (b.generation?, None)))).collect())
-            .unwrap_or_default();
+        let generations =
+            report.manifest.map(|m| m.blocks.into_iter().filter_map(|b| Some((b.info.id, (b.generation?, None)))).collect()).unwrap_or_default();
         Ok(Self { store: Arc::new(store), server_id, generations })
     }
 
@@ -202,7 +199,9 @@ impl Persist {
             let ids: Vec<BlockId> = sessions.iter().flat_map(Session::blocks).collect();
             let mut targets = Vec::new();
             for id in &ids {
-                let Some(Block::Terminal(handle)) = reg.blocks.get(id) else { continue };
+                let Some(Block::Terminal(handle)) = reg.blocks.get(id) else {
+                    continue;
+                };
                 let running = handle.info.lock().is_ok_and(|i| i.lifecycle.is_running());
                 if dirty.contains(id) || !self.generations.contains_key(id) || (full && running) {
                     targets.push((id.clone(), BlockHandle { tx: handle.tx.clone(), info: handle.info.clone() }));
@@ -263,8 +262,7 @@ impl Persist {
         };
         let store = self.store.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let refs: Vec<(&str, u64)> =
-                manifest.blocks.iter().filter_map(|b| b.generation.map(|g| (b.info.id.as_str(), g))).collect();
+            let refs: Vec<(&str, u64)> = manifest.blocks.iter().filter_map(|b| b.generation.map(|g| (b.info.id.as_str(), g))).collect();
             let snaps: Vec<(&str, u64, &[u8])> = writes.iter().map(|(i, g, b)| (i.as_str(), *g, b.as_slice())).collect();
             store.commit(&snaps, &refs, &manifest)?;
             store.gc(refs.iter().copied())?;

@@ -98,7 +98,9 @@ fn read_runtime(home: &Path) -> Option<paths::Runtime> {
 /// starting, or not answering). Spawning another one would only fail.
 #[must_use]
 pub fn server_lock_held(home: &Path) -> bool {
-    let Ok(file) = std::fs::OpenOptions::new().write(true).open(paths::server_lock(home)) else { return false };
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(paths::server_lock(home)) else {
+        return false;
+    };
     rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err()
 }
 
@@ -165,7 +167,9 @@ pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) ->
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn ask_shutdown(home: &Path, build: &str) -> bool {
-    let Some(control) = connect(home, build).await else { return false };
+    let Some(control) = connect(home, build).await else {
+        return false;
+    };
     let asked = tokio::time::timeout(Duration::from_secs(2), control.call_value(Method::ServerShutdown {})).await;
     if !matches!(asked, Ok(Ok(_))) {
         return false;
@@ -246,13 +250,7 @@ mod tests {
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
         rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         let listener = tokio::net::UnixListener::bind(paths::socket(home)).unwrap();
-        let runtime = paths::Runtime {
-            pid: 4242,
-            socket: paths::socket(home),
-            version: "0.0.1".into(),
-            build: OTHER.into(),
-            started_at: 0,
-        };
+        let runtime = paths::Runtime { pid: 4242, socket: paths::socket(home), version: "0.0.1".into(), build: OTHER.into(), started_at: 0 };
         std::fs::write(paths::runtime(home), serde_json::to_vec(&runtime).unwrap()).unwrap();
         let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = connections.clone();
@@ -301,15 +299,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         let (connections, task) = other_server(&home).await;
         // A missing server binary: any spawn attempt would fail differently.
-        let error = crate::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "test")
-            .await
-            .err()
-            .expect("a different build must not connect");
+        let error = crate::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "test").await.err().expect("a different build must not connect");
         let found = error.downcast_ref::<DifferentBuild>().expect("different build, not a spawn failure");
-        assert_eq!(
-            found,
-            &DifferentBuild { build: Some(OTHER.into()), pid: Some(4242), version: Some("0.0.1".into()), sessions: Some(2) }
-        );
+        assert_eq!(found, &DifferentBuild { build: Some(OTHER.into()), pid: Some(4242), version: Some("0.0.1".into()), sessions: Some(2) });
         // One rejected hello plus one best-effort look at its sessions.
         assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
         stop(&home, found).await.unwrap();
@@ -354,7 +346,8 @@ mod tests {
     async fn handshake_requires_same_build() {
         let home = std::env::temp_dir().join(format!("silo-mismatch-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let config = silo_server::Config { home: home.clone(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
+        let config =
+            silo_server::Config { home: home.clone(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
         let server = tokio::spawn(silo_server::run(config));
         let socket = paths::socket(&home);
         let mut connected = None;
@@ -369,7 +362,8 @@ mod tests {
         assert_eq!(control.hello().build, silo_proto::BUILD);
         assert_eq!(read_runtime(&home).unwrap().build, silo_proto::BUILD);
 
-        let error = Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "forged", false, OTHER).await.err().expect("forged build rejected");
+        let error =
+            Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "forged", false, OTHER).await.err().expect("forged build rejected");
         let rejected = error.downcast_ref::<BuildMismatch>().expect("a build mismatch");
         assert!(rejected.message.contains(silo_proto::BUILD) && rejected.message.contains(OTHER), "{rejected}");
 

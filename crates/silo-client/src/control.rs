@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, Mutex, atomic::AtomicU64},
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -14,8 +15,40 @@ use silo_proto::{
 use silo_transport::Conn;
 use tokio::{
     io::AsyncWriteExt,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
+
+/// How often [`Control::heartbeat`] pings an answering server.
+pub const PING_EVERY: Duration = Duration::from_secs(5);
+/// A ping unanswered this long is a miss on a local socket; two in a row
+/// and the server is not responding.
+pub const PING_TIMEOUT_LOCAL: Duration = Duration::from_secs(3);
+/// As [`PING_TIMEOUT_LOCAL`], over iroh.
+pub const PING_TIMEOUT_IROH: Duration = Duration::from_secs(10);
+
+/// A [`Control::call_timeout`] got no reply in time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimedOut;
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("server did not reply in time")
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+/// A call on a closed connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closed;
+
+impl std::fmt::Display for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("connection closed")
+    }
+}
+
+impl std::error::Error for Closed {}
 
 /// Waiting calls; `None` once the connection closed so late calls fail
 /// instead of waiting forever.
@@ -82,7 +115,9 @@ struct Inner {
     hello: ServerHello,
     conn: Conn,
     client_name: String,
-    closed: tokio::sync::watch::Receiver<bool>,
+    closed: watch::Receiver<bool>,
+    /// Set to stop the reader and writer: the connection closes locally.
+    shutdown: watch::Sender<bool>,
 }
 
 impl Drop for Inner {
@@ -126,7 +161,13 @@ impl Control {
     }
 
     /// Hello over a fresh stream on `conn`, then start the reader/writer.
-    pub(crate) async fn handshake(conn: Conn, client_name: &str, passive: bool, build: &str, invite: Option<String>) -> anyhow::Result<(Self, Events)> {
+    pub(crate) async fn handshake(
+        conn: Conn,
+        client_name: &str,
+        passive: bool,
+        build: &str,
+        invite: Option<String>,
+    ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
         let hello = ClientHello { build: build.to_owned(), client_name: client_name.to_owned(), token: None, passive, invite };
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
@@ -142,8 +183,15 @@ impl Control {
         let (reader, mut writer) = tokio::io::split(stream);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+        let (shutdown, mut writer_stop) = watch::channel(false);
+        let mut reader_stop = shutdown.subscribe();
         tokio::spawn(async move {
-            while let Some(frame) = rx.recv().await {
+            loop {
+                let frame = tokio::select! {
+                    frame = rx.recv() => frame,
+                    _ = writer_stop.wait_for(|stop| *stop) => None,
+                };
+                let Some(frame) = frame else { break };
                 if write_frame(&mut writer, &frame).await.is_err() || writer.flush().await.is_err() {
                     break;
                 }
@@ -152,7 +200,7 @@ impl Control {
         });
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
+        let (closed_tx, closed_rx) = watch::channel(false);
         let reader_pending = pending.clone();
         let mut frames = spawn_reader(reader, 256);
         let remote = match &conn {
@@ -171,6 +219,7 @@ impl Control {
                 let frame = tokio::select! {
                     frame = frames.recv() => frame,
                     () = &mut conn_closed => break,
+                    _ = reader_stop.wait_for(|stop| *stop) => break,
                 };
                 let Some(Ok(frame)) = frame else { break };
                 match frame.parse::<ServerMessage>() {
@@ -184,7 +233,7 @@ impl Control {
                         }
                     }
                     Ok(ServerMessage::Event { seq, event }) => {
-                        let _ = events_tx.send((seq, event));
+                        let _ = events_tx.send((seq, *event));
                     }
                     Err(e) => tracing::warn!("bad control message: {e}"),
                 }
@@ -192,15 +241,7 @@ impl Control {
             reader_pending.lock().unwrap().take();
             let _ = closed_tx.send(true);
         });
-        let inner = Inner {
-            tx,
-            pending,
-            next_id: AtomicU64::new(1),
-            hello,
-            conn,
-            client_name: client_name.to_owned(),
-            closed: closed_rx,
-        };
+        let inner = Inner { tx, pending, next_id: AtomicU64::new(1), hello, conn, client_name: client_name.to_owned(), closed: closed_rx, shutdown };
         Ok((Self { inner: Arc::new(inner) }, events_rx))
     }
 
@@ -240,28 +281,90 @@ impl Control {
         }
     }
 
+    /// How long a ping may go unanswered on this route.
+    #[must_use]
+    pub fn ping_timeout(&self) -> Duration {
+        match self.inner.conn {
+            Conn::Unix(_) => PING_TIMEOUT_LOCAL,
+            Conn::Iroh(_) => PING_TIMEOUT_IROH,
+        }
+    }
+
+    /// Pings every [`PING_EVERY`]; resolves once two pings in a row go
+    /// unanswered for [`Control::ping_timeout`], having started closing
+    /// this connection (calls then fail and [`Control::closed`] resolves).
+    /// Polled in the same `select!` as the event stream it wins over the
+    /// stream ending. Never resolves if the connection closes another way.
+    pub async fn heartbeat(self) {
+        let timeout = self.ping_timeout();
+        let mut missed = 0;
+        loop {
+            match self.call_timeout(Method::Ping {}, timeout).await {
+                Err(e) if e.is::<TimedOut>() => missed += 1,
+                Err(e) if e.is::<Closed>() => return std::future::pending().await,
+                _ => missed = 0,
+            }
+            if missed >= 2 {
+                break;
+            }
+            if missed == 0 {
+                tokio::time::sleep(PING_EVERY).await;
+            }
+        }
+        self.inner.shutdown.send_replace(true);
+        if let Conn::Iroh(rc) = &self.inner.conn {
+            rc.close(b"server not responding");
+        }
+    }
+
     /// Call a method and return its raw JSON result.
     ///
     /// # Errors
     /// Server error responses or a closed connection.
     pub async fn call_value(&self, method: Method) -> anyhow::Result<serde_json::Value> {
+        let (_, rx) = self.send(method)?;
+        Self::reply(rx).await
+    }
+
+    /// [`Control::call_value`] giving up after `timeout` with [`TimedOut`];
+    /// the abandoned call is forgotten.
+    ///
+    /// # Errors
+    /// [`TimedOut`], server error responses or a closed connection.
+    pub async fn call_timeout(&self, method: Method, timeout: Duration) -> anyhow::Result<serde_json::Value> {
+        let (id, rx) = self.send(method)?;
+        if let Ok(reply) = tokio::time::timeout(timeout, Self::reply(rx)).await {
+            return reply;
+        }
+        if let Some(pending) = self.inner.pending.lock().unwrap().as_mut() {
+            pending.remove(&id);
+        }
+        Err(TimedOut.into())
+    }
+
+    /// Register a call and queue its request.
+    fn send(&self, method: Method) -> anyhow::Result<(u64, oneshot::Receiver<Result<serde_json::Value, RpcError>>)> {
         let id = self.inner.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (reply, rx) = oneshot::channel();
         match self.inner.pending.lock().unwrap().as_mut() {
             Some(pending) => pending.insert(id, reply),
-            None => bail!("connection closed"),
+            None => return Err(Closed.into()),
         };
         let frame = Frame::json(kind::CONTROL, &Request { id, method })?;
         if self.inner.tx.send(frame).is_err() {
             if let Some(pending) = self.inner.pending.lock().unwrap().as_mut() {
                 pending.remove(&id);
             }
-            bail!("connection closed");
+            return Err(Closed.into());
         }
+        Ok((id, rx))
+    }
+
+    async fn reply(rx: oneshot::Receiver<Result<serde_json::Value, RpcError>>) -> anyhow::Result<serde_json::Value> {
         match rx.await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(typed(error)),
-            Err(_) => bail!("connection closed"),
+            Err(_) => Err(Closed.into()),
         }
     }
 
@@ -289,6 +392,36 @@ mod tests {
 
     fn code(code: &str) -> anyhow::Error {
         typed(RpcError::new(code, "why"))
+    }
+
+    #[tokio::test]
+    async fn call_timeout_forgets_the_call() {
+        let dir = std::env::temp_dir().join(format!("silo-ct-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_frame(&mut stream).await.unwrap();
+            let info = silo_proto::control::ServerInfo {
+                version: String::new(),
+                pid: 0,
+                server_id: String::new(),
+                started_at: 0,
+                endpoint_id: String::new(),
+                remote_error: None,
+                endpoint_addr: None,
+            };
+            let hello = ServerHello { build: BUILD.to_owned(), client_id: 1, server: info };
+            write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (control, _events) = Control::connect(&socket, "test").await.unwrap();
+        let err = control.call_timeout(Method::Ping {}, Duration::from_millis(50)).await.unwrap_err();
+        assert!(err.is::<TimedOut>());
+        assert!(control.inner.pending.lock().unwrap().as_ref().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

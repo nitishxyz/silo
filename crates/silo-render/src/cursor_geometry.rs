@@ -19,74 +19,27 @@ pub(super) struct Rect {
 
 /// One logical pixel snapped to whole device pixels: 1 px at 1x, 2 px at 2x.
 pub(super) fn stroke(scale: f32) -> f32 {
-    let scale = if scale.is_finite() {
-        scale.max(0.5)
-    } else {
-        1.0
-    };
+    let scale = if scale.is_finite() { scale.max(0.5) } else { 1.0 };
     scale.round().max(1.0) / scale
 }
 
 /// Rectangles for a cursor occupying the cell at (`x`, `y`) with the given
 /// cell size. Every shape stays inside that one cell: the block is exactly
 /// the glyph cell, the bar hugs its left edge, the underline its bottom edge.
-pub(super) fn rectangles(
-    shape: Shape,
-    focused: bool,
-    x: f32,
-    y: f32,
-    cell_width: f32,
-    cell_height: f32,
-    scale: f32,
-) -> Vec<Rect> {
+pub(super) fn rectangles(shape: Shape, focused: bool, x: f32, y: f32, cell_width: f32, cell_height: f32, scale: f32) -> Vec<Rect> {
     let w = cell_width.max(1.0);
     let h = cell_height.max(1.0);
     let stroke = stroke(scale).min(w).min(h);
     let shape = if focused { shape } else { Shape::Hollow };
     match shape {
-        Shape::Bar => vec![Rect {
-            x,
-            y,
-            width: stroke,
-            height: h,
-        }],
-        Shape::Underline => vec![Rect {
-            x,
-            y: y + h - stroke,
-            width: w,
-            height: stroke,
-        }],
-        Shape::Block => vec![Rect {
-            x,
-            y,
-            width: w,
-            height: h,
-        }],
+        Shape::Bar => vec![Rect { x, y, width: stroke, height: h }],
+        Shape::Underline => vec![Rect { x, y: y + h - stroke, width: w, height: stroke }],
+        Shape::Block => vec![Rect { x, y, width: w, height: h }],
         Shape::Hollow => vec![
-            Rect {
-                x,
-                y,
-                width: w,
-                height: stroke,
-            },
-            Rect {
-                x,
-                y: y + h - stroke,
-                width: w,
-                height: stroke,
-            },
-            Rect {
-                x,
-                y,
-                width: stroke,
-                height: h,
-            },
-            Rect {
-                x: x + w - stroke,
-                y,
-                width: stroke,
-                height: h,
-            },
+            Rect { x, y, width: w, height: stroke },
+            Rect { x, y: y + h - stroke, width: w, height: stroke },
+            Rect { x, y, width: stroke, height: h },
+            Rect { x: x + w - stroke, y, width: stroke, height: h },
         ],
     }
 }
@@ -100,12 +53,9 @@ mod tests {
     }
 
     fn within(rects: &[Rect], x: f32, y: f32, w: f32, h: f32) -> bool {
-        rects.iter().all(|rect| {
-            rect.x >= x - 1e-4
-                && rect.y >= y - 1e-4
-                && rect.x + rect.width <= x + w + 1e-4
-                && rect.y + rect.height <= y + h + 1e-4
-        })
+        rects
+            .iter()
+            .all(|rect| rect.x >= x - 1e-4 && rect.y >= y - 1e-4 && rect.x + rect.width <= x + w + 1e-4 && rect.y + rect.height <= y + h + 1e-4)
     }
 
     #[test]
@@ -114,10 +64,7 @@ mod tests {
         for shape in [Shape::Bar, Shape::Block, Shape::Underline, Shape::Hollow] {
             for focused in [true, false] {
                 let rects = rectangles(shape, focused, x, y, w, h, 1.0);
-                assert!(
-                    within(&rects, x, y, w, h),
-                    "{shape:?} focused={focused}: {rects:?}"
-                );
+                assert!(within(&rects, x, y, w, h), "{shape:?} focused={focused}: {rects:?}");
             }
         }
     }
@@ -125,15 +72,7 @@ mod tests {
     #[test]
     fn block_matches_the_cell_and_bar_and_underline_are_one_device_pixel() {
         let block = rectangles(Shape::Block, true, 0.0, 0.0, 8.0, 20.0, 1.0);
-        assert_eq!(
-            block,
-            vec![Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 8.0,
-                height: 20.0
-            }]
-        );
+        assert_eq!(block, vec![Rect { x: 0.0, y: 0.0, width: 8.0, height: 20.0 }]);
         let bar = rectangles(Shape::Bar, true, 0.0, 0.0, 8.0, 20.0, 1.0);
         assert!(near(bar[0].width, 1.0));
         assert!(near(bar[0].height, 20.0));

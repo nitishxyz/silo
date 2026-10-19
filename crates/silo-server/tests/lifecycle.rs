@@ -24,6 +24,7 @@ fn info(id: &str) -> BlockInfo {
         lifecycle: Lifecycle::Running,
         size: TermSize::new(40, 10),
         owner: None,
+        owner_name: None,
         pid: None,
         browser: None,
     }
@@ -31,11 +32,7 @@ fn info(id: &str) -> BlockInfo {
 
 fn spawn(id: &str, script: &str) -> (BlockHandle, UnboundedReceiver<Note>) {
     let (notes, rx) = unbounded_channel();
-    let config = SpawnConfig {
-        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
-        cwd: Some(std::env::temp_dir()),
-        env: Vec::new(),
-    };
+    let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], cwd: Some(std::env::temp_dir()), env: Vec::new() };
     (block::spawn(info(id), &config, notes).expect("spawn"), rx)
 }
 

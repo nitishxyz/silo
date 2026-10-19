@@ -11,12 +11,14 @@ mod remote;
 mod spawn;
 pub mod tunnel;
 
-pub use control::{BuildMismatch, Control, Events, Offline, Unauthorized, Upgrading};
-pub use remote::{client_identity, pair};
-pub use mismatch::DifferentBuild;
+pub use control::{
+    BuildMismatch, Closed, Control, Events, Offline, PING_EVERY, PING_TIMEOUT_IROH, PING_TIMEOUT_LOCAL, TimedOut, Unauthorized, Upgrading,
+};
 pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};
+pub use mismatch::DifferentBuild;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
+pub use remote::{client_identity, pair};
 pub use spawn::{connect_or_spawn, server_running};
 
 pub use silo_proto as proto;

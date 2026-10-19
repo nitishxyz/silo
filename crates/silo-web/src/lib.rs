@@ -32,10 +32,7 @@ pub fn run_helper() -> i32 {
     };
     let loader = cef::library_loader::LibraryLoader::new(&exe, true);
     if !loader.load() {
-        eprintln!(
-            "silo-web helper: cannot load CEF framework relative to {}",
-            exe.display()
-        );
+        eprintln!("silo-web helper: cannot load CEF framework relative to {}", exe.display());
         return 1;
     }
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);

@@ -23,22 +23,10 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let tmp = dir.join(format!(
-        "{TMP_PREFIX}{}.{}.{}",
-        name.to_string_lossy(),
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    let name = path.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = dir.join(format!("{TMP_PREFIX}{}.{}.{}", name.to_string_lossy(), std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
     let res = (|| -> io::Result<()> {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)?;
+        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.write_all(bytes)?;
         f.sync_all()?;
@@ -53,12 +41,7 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Seal `plaintext` with `aad` and write it atomically to `path`.
-pub fn write_sealed(
-    path: impl AsRef<Path>,
-    key: &HostKey,
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<()> {
+pub fn write_sealed(path: impl AsRef<Path>, key: &HostKey, aad: &[u8], plaintext: &[u8]) -> Result<()> {
     write_atomic(path, &envelope::seal(key, aad, plaintext))?;
     Ok(())
 }

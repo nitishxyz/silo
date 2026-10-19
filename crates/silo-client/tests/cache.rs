@@ -55,7 +55,10 @@ async fn setup(name: &str) -> (Control, String) {
     start_server(&home).await;
     let (control, _events) = Control::connect(&paths::socket(&home), name).await.unwrap();
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = control
+        .call(Method::SessionCreate { name: Some("main".into()), spawn, kind: silo_proto::model::BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     (control, created.block_id)
 }
 
@@ -163,10 +166,7 @@ async fn checkpoint_restores_offline_and_resumes() {
     tokio::time::timeout(TIMEOUT, async {
         while !b.screen_text().contains("\nwhile-away\n$") {
             let data = stream_b.rx.recv().await.expect("stream closed");
-            assert!(
-                !matches!(data, ServerData::SnapshotHead(_) | ServerData::SnapshotHistory(_) | ServerData::SnapshotDone),
-                "snapshot on resume"
-            );
+            assert!(!matches!(data, ServerData::SnapshotHead(_) | ServerData::SnapshotHistory(_) | ServerData::SnapshotDone), "snapshot on resume");
             b.apply(data).unwrap();
         }
     })

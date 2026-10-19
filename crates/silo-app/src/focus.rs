@@ -32,9 +32,8 @@ pub fn neighbour(current: Rect, candidates: &[Rect], direction: Direction) -> Op
         };
         // Smaller is better on every component.
         let key = (overlap <= 0.0, gap.max(0.0), -overlap, offset);
-        let better = best.as_ref().is_none_or(|(_, k)| {
-            (key.0, key.1, key.2, key.3).partial_cmp(&(k.0, k.1, k.2, k.3)).is_some_and(std::cmp::Ordering::is_lt)
-        });
+        let better =
+            best.as_ref().is_none_or(|(_, k)| (key.0, key.1, key.2, key.3).partial_cmp(&(k.0, k.1, k.2, k.3)).is_some_and(std::cmp::Ordering::is_lt));
         if better {
             best = Some((index, key));
         }

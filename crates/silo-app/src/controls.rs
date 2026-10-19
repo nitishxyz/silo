@@ -15,12 +15,12 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, App, ElementId, FocusHandle, IntoElement, RenderOnce, Role, SharedString, Toggled,
-    Window, div, ease_out_quint, prelude::*, px, relative, rgb,
+    Animation, AnimationExt as _, App, ElementId, FocusHandle, IntoElement, RenderOnce, Role, SharedString, Toggled, Window, div, ease_out_quint,
+    prelude::*, px, relative, rgb,
 };
 
-use crate::theme::Continuous as _;
 use crate::theme;
+use crate::theme::Continuous as _;
 
 /// The kit's `SWITCH_ANIMATION_DURATION`.
 const SWITCH_DURATION: Duration = Duration::from_millis(180);
@@ -91,9 +91,7 @@ fn slide_state(id: &ElementId, window: &mut Window, cx: &mut App) -> Rc<Slide> {
 /// One focus handle per segment, so arrow keys move focus with the selection.
 fn segment_focus(id: &ElementId, window: &mut Window, cx: &mut App) -> Rc<Vec<FocusHandle>> {
     window
-        .use_keyed_state((id.clone(), "segment-focus"), cx, |_, cx| {
-            Rc::new((0..3).map(|_| cx.focus_handle().tab_index(0)).collect::<Vec<_>>())
-        })
+        .use_keyed_state((id.clone(), "segment-focus"), cx, |_, cx| Rc::new((0..3).map(|_| cx.focus_handle().tab_index(0)).collect::<Vec<_>>()))
         .read(cx)
         .clone()
 }
@@ -134,19 +132,11 @@ impl RenderOnce for Toggle {
         let animate = from != usize::from(on);
         let accent = theme::accent();
 
-        let active_track = div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .capsule()
-            .border_1()
-            .border_color(rgb(accent))
-            .bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(rgb(theme::accent_highlight()), 0.0),
-                gpui::linear_color_stop(rgb(accent), 1.0),
-            ));
+        let active_track = div().absolute().top_0().left_0().size_full().capsule().border_1().border_color(rgb(accent)).bg(gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(rgb(theme::accent_highlight()), 0.0),
+            gpui::linear_color_stop(rgb(accent), 1.0),
+        ));
         let thumb_fill = div().size_full().capsule().bg(rgb(theme::on_accent()));
         let thumb = div().absolute().top(px(THUMB_INSET)).size(px(THUMB)).capsule().bg(rgb(theme::muted()));
         let travel = TRACK_W - 2.0 * THUMB_INSET - THUMB - 2.0;
@@ -277,19 +267,9 @@ impl RenderOnce for Segmented {
         let accent = theme::accent();
         let count_f = count as f32;
 
-        let thumb = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(relative(1.0 / count_f))
-            .capsule()
-            .border_1()
-            .border_color(rgb(accent))
-            .bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(rgb(theme::accent_highlight()), 0.0),
-                gpui::linear_color_stop(rgb(accent), 1.0),
-            ));
+        let thumb = div().absolute().top_0().bottom_0().w(relative(1.0 / count_f)).capsule().border_1().border_color(rgb(accent)).bg(
+            gpui::linear_gradient(180.0, gpui::linear_color_stop(rgb(theme::accent_highlight()), 0.0), gpui::linear_color_stop(rgb(accent), 1.0)),
+        );
         let thumb = if from == selected {
             thumb.left(relative(selected as f32 / count_f)).into_any_element()
         } else {

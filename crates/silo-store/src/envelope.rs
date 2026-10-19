@@ -22,15 +22,7 @@ fn cipher(key: &HostKey) -> XChaCha20Poly1305 {
 /// Encrypt `plaintext`, authenticating `aad`, with a fresh random nonce.
 pub fn seal(key: &HostKey, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ct = cipher(key)
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .expect("XChaCha20Poly1305 encryption cannot fail for in-memory buffers");
+    let ct = cipher(key).encrypt(&nonce, Payload { msg: plaintext, aad }).expect("XChaCha20Poly1305 encryption cannot fail for in-memory buffers");
     let mut out = Vec::with_capacity(HEADER_LEN + ct.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&nonce);
@@ -48,13 +40,5 @@ pub fn open(key: &HostKey, aad: &[u8], bytes: &[u8]) -> Result<Vec<u8>> {
         return Err(Error::Corrupt);
     }
     let nonce = XNonce::from_slice(&bytes[MAGIC.len()..HEADER_LEN]);
-    cipher(key)
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &bytes[HEADER_LEN..],
-                aad,
-            },
-        )
-        .map_err(|_| Error::AuthFailed)
+    cipher(key).decrypt(nonce, Payload { msg: &bytes[HEADER_LEN..], aad }).map_err(|_| Error::AuthFailed)
 }

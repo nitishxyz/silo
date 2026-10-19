@@ -152,13 +152,7 @@ pub fn peer_uid(sock: &UnixStream) -> io::Result<u32> {
         unsafe {
             let mut cred: libc::ucred = std::mem::zeroed();
             let mut len = size_of::<libc::ucred>() as libc::socklen_t;
-            let rc = libc::getsockopt(
-                sock.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                (&raw mut cred).cast(),
-                &raw mut len,
-            );
+            let rc = libc::getsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &raw mut len);
             if rc < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -184,9 +178,5 @@ pub fn check_peer_uid(sock: &UnixStream) -> io::Result<()> {
     // SAFETY: geteuid cannot fail.
     let ours = unsafe { libc::geteuid() };
     let theirs = peer_uid(sock)?;
-    if theirs == ours {
-        Ok(())
-    } else {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("peer uid {theirs} is not {ours}")))
-    }
+    if theirs == ours { Ok(()) } else { Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("peer uid {theirs} is not {ours}"))) }
 }

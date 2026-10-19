@@ -74,8 +74,7 @@ impl Proxy {
     /// Socket bind/connect failure.
     pub async fn spawn(listen: SocketAddr, upstream: SocketAddr, config: ProxyConfig) -> io::Result<Proxy> {
         let front = Arc::new(UdpSocket::bind(listen).await?);
-        let back_bind: SocketAddr =
-            if upstream.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
+        let back_bind: SocketAddr = if upstream.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
         let back = Arc::new(UdpSocket::bind(back_bind).await?);
         back.connect(upstream).await?;
         let addr = front.local_addr()?;

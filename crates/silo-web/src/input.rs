@@ -60,9 +60,5 @@ impl MouseButton {
 /// A mouse event at `(x, y)` in view points (DIP), with the buttons currently held.
 pub(crate) fn mouse_event(x: f32, y: f32, mods: Modifiers, held: &[MouseButton]) -> MouseEvent {
     let buttons = held.iter().fold(0, |acc, b| acc | b.flag());
-    MouseEvent {
-        x: x.round() as i32,
-        y: y.round() as i32,
-        modifiers: mods.flags() | buttons,
-    }
+    MouseEvent { x: x.round() as i32, y: y.round() as i32, modifiers: mods.flags() | buttons }
 }

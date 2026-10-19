@@ -2,11 +2,7 @@
 /// glyph by rounding upward. Only the font's advance, not its ink box, sets width.
 pub(super) fn cell_width(advance: f32, scale: f32) -> f32 {
     let scale = sane_scale(scale);
-    let advance = if advance.is_finite() {
-        advance.max(1.0)
-    } else {
-        8.0
-    };
+    let advance = if advance.is_finite() { advance.max(1.0) } else { 8.0 };
     (advance * scale).round().max(1.0) / scale
 }
 
@@ -16,20 +12,12 @@ pub(super) fn cell_width(advance: f32, scale: f32) -> f32 {
 /// stretch the cursor beyond the glyph cell.
 pub(super) fn cell_height(ascent: f32, descent: f32, scale: f32) -> f32 {
     let scale = sane_scale(scale);
-    let extent = if ascent.is_finite() && descent.is_finite() {
-        (ascent + descent).max(1.0)
-    } else {
-        18.0
-    };
+    let extent = if ascent.is_finite() && descent.is_finite() { (ascent + descent).max(1.0) } else { 18.0 };
     (extent * scale).ceil().max(1.0) / scale
 }
 
 fn sane_scale(scale: f32) -> f32 {
-    if scale.is_finite() {
-        scale.max(0.5)
-    } else {
-        1.0
-    }
+    if scale.is_finite() { scale.max(0.5) } else { 1.0 }
 }
 
 #[cfg(test)]
@@ -49,10 +37,7 @@ mod tests {
         // Noto Sans Mono at 14 px: ascent 14.97, descent 4.10.
         let height = cell_height(14.97, 4.10, 1.0);
         assert!((height - 20.0).abs() < f32::EPSILON, "{height}");
-        assert!(
-            height < 24.0,
-            "the former +4 px leading made rows and cursor too tall"
-        );
+        assert!(height < 24.0, "the former +4 px leading made rows and cursor too tall");
         let scaled = cell_height(14.97, 4.10, 2.0);
         assert!((scaled - 19.5).abs() < f32::EPSILON, "{scaled}");
         assert!((scaled * 2.0).fract().abs() < f32::EPSILON);

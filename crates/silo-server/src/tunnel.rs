@@ -38,9 +38,7 @@ pub async fn accept_loop(server: Arc<Server>, mut incoming: TunnelIncoming) {
             continue;
         }
         track(&server, &live, &rc);
-        let limit = limits
-            .entry(peer)
-            .or_insert_with(|| Arc::new(Semaphore::new(MAX_STREAMS_PER_PEER)));
+        let limit = limits.entry(peer).or_insert_with(|| Arc::new(Semaphore::new(MAX_STREAMS_PER_PEER)));
         let permit = limit.clone().try_acquire_owned().ok();
         tokio::spawn(async move {
             let Some(_permit) = permit else {
@@ -55,30 +53,20 @@ pub async fn accept_loop(server: Arc<Server>, mut incoming: TunnelIncoming) {
 
 /// Register the connection with `Auth` so revoking the device closes it.
 fn track(server: &Arc<Server>, live: &Arc<Mutex<HashSet<u64>>>, rc: &RemoteConn) {
-    if !live
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(rc.id())
-    {
+    if !live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(rc.id()) {
         return;
     }
-    server
-        .auth()
-        .add_live(rc.remote_id().to_string(), rc.clone());
+    server.auth().add_live(rc.remote_id().to_string(), rc.clone());
     let (server, live, rc) = (server.clone(), live.clone(), rc.clone());
     tokio::spawn(async move {
         rc.closed().await;
         server.auth().remove_live(rc.id());
-        live.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&rc.id());
+        live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&rc.id());
     });
 }
 
 async fn handle(mut stream: BiStream) {
-    let Ok(Ok(open)) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, tunnel::read_open(&mut stream)).await
-    else {
+    let Ok(Ok(open)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, tunnel::read_open(&mut stream)).await else {
         let _ = tunnel::reply(&mut stream, Err(TunnelErrCode::BadRequest)).await;
         return;
     };
@@ -102,14 +90,9 @@ async fn connect(host: &str, port: u16) -> Result<TcpStream, TunnelErrCode> {
     if !tunnel::is_private_host(host) {
         return Err(TunnelErrCode::Forbidden);
     }
-    let bare = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     let attempt = async {
-        let addrs = tokio::net::lookup_host((bare, port))
-            .await
-            .map_err(|_| TunnelErrCode::ConnectFailed)?;
+        let addrs = tokio::net::lookup_host((bare, port)).await.map_err(|_| TunnelErrCode::ConnectFailed)?;
         let addrs: Vec<SocketAddr> = addrs.filter(|a| tunnel::is_private_ip(a.ip())).collect();
         if addrs.is_empty() {
             return Err(TunnelErrCode::Forbidden);
@@ -121,7 +104,5 @@ async fn connect(host: &str, port: u16) -> Result<TcpStream, TunnelErrCode> {
         }
         Err(TunnelErrCode::ConnectFailed)
     };
-    tokio::time::timeout(CONNECT_TIMEOUT, attempt)
-        .await
-        .unwrap_or(Err(TunnelErrCode::ConnectFailed))
+    tokio::time::timeout(CONNECT_TIMEOUT, attempt).await.unwrap_or(Err(TunnelErrCode::ConnectFailed))
 }

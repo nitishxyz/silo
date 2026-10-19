@@ -8,11 +8,7 @@ pub struct TempDir(PathBuf);
 impl TempDir {
     pub fn new() -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "silo-transport-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
+        let p = std::env::temp_dir().join(format!("silo-transport-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();

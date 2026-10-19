@@ -200,23 +200,18 @@ impl Workspace {
     pub(crate) fn render_add_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.add_host.as_ref()?;
         let field = |label: &'static str, input: &Entity<TextField>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(label))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(34.0))
-                        .px(px(10.0))
-                        .continuous(8.0)
-                        .bg(rgb(theme::background()))
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .child(input.clone()),
-                )
+            div().flex().flex_col().gap(px(6.0)).child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(label)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .continuous(8.0)
+                    .bg(rgb(theme::background()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .child(input.clone()),
+            )
         };
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -245,13 +240,12 @@ impl Workspace {
             .shadow_xl()
             .font_family(theme::ui_font())
             .text_size(px(13.0))
-            .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).child(if sheet.replace.is_some() { "Pair Again" } else { "Add Remote Host" }))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme::muted()))
-                    .child("On the other Mac: Settings › Server › Pair a device…"),
-            )
+            .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).child(if sheet.replace.is_some() {
+                "Pair Again"
+            } else {
+                "Add Remote Host"
+            }))
+            .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child("On the other Mac: Settings › Server › Pair a device…"))
             .child(field("Ticket", &sheet.ticket))
             .child(field("Name", &sheet.name))
             .children(sheet.error.clone().map(|e| div().text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)))

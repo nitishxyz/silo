@@ -19,7 +19,8 @@ cargo_flags=()
 app_flags=(--no-default-features)
 [[ -n "$features" ]] && app_flags+=(--features "$features")
 
-cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar -p silo-web --bin silo-web-helper
+cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar
+cargo build "${cargo_flags[@]}" -p silo-web --bin silo-web-helper
 cargo build "${cargo_flags[@]}" -p silo-app "${app_flags[@]}"
 
 out="$root/target/$profile"

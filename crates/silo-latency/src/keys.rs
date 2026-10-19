@@ -66,10 +66,8 @@ impl Session {
 
     /// Apply the next server frame and judge predictions against it.
     async fn recv(&mut self, wait: Duration) -> anyhow::Result<()> {
-        let data: ServerData = timeout(wait, self.stream.rx.recv())
-            .await
-            .context("timed out waiting for output")?
-            .ok_or_else(|| anyhow!("data stream closed"))?;
+        let data: ServerData =
+            timeout(wait, self.stream.rx.recv()).await.context("timed out waiting for output")?.ok_or_else(|| anyhow!("data stream closed"))?;
         self.predictor.server(&data);
         self.mirror.apply(data)?;
         let next_offset = self.mirror.next_offset();

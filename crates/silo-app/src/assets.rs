@@ -16,8 +16,29 @@ macro_rules! icons {
 }
 
 icons!(
-    "laptop", "globe", "check", "filter", "new-session", "add-host", "close", "plus", "terminal", "chevron", "split-right", "split-down",
-    "zoom", "unzoom", "eye", "back", "forward", "reload", "settings-hard-drive", "settings-info", "settings-keyboard", "settings-search", "settings-shapes"
+    "laptop",
+    "globe",
+    "check",
+    "filter",
+    "new-session",
+    "add-host",
+    "close",
+    "plus",
+    "terminal",
+    "chevron",
+    "split-right",
+    "split-down",
+    "zoom",
+    "unzoom",
+    "eye",
+    "back",
+    "forward",
+    "reload",
+    "settings-hard-drive",
+    "settings-info",
+    "settings-keyboard",
+    "settings-search",
+    "settings-shapes"
 );
 
 #[cfg(test)]

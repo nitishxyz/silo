@@ -12,8 +12,8 @@ use crate::{
     fonts,
     hosts::HostState,
     settings_panel::{
-        CARD_RADIUS, ServerAction, SettingsDevice, SettingsEvent, SettingsHost, SettingsPanel, SettingsServer, SettingsShortcut,
-        SettingsSnapshot, TerminalSettings, UiFontSettings,
+        CARD_RADIUS, ServerAction, SettingsDevice, SettingsEvent, SettingsHost, SettingsPanel, SettingsServer, SettingsShortcut, SettingsSnapshot,
+        TerminalSettings, UiFontSettings,
     },
     terminal_prefs::{self, TerminalPrefs},
     theme,
@@ -78,10 +78,7 @@ impl Workspace {
                 removable: !h.info.local,
             })
             .collect();
-        let shortcuts = Command::ALL
-            .iter()
-            .filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? }))
-            .collect();
+        let shortcuts = Command::ALL.iter().filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? })).collect();
         let local = self.hosts.first();
         let paused = local.is_some_and(|h| h.paused.load(std::sync::atomic::Ordering::Acquire));
         let connected = local.and_then(|h| h.control.as_ref());
@@ -91,12 +88,12 @@ impl Workspace {
                 (Some(_), _, _) => "Running".into(),
                 (None, _, _) if incompatible.is_some() => silo_client::DifferentBuild::LABEL.into(),
                 (None, true, _) => "Stopped".into(),
-                (None, false, Some(HostState::Unreachable(reason))) => format!("Unavailable: {reason}"),
+                (None, false, Some(HostState::Unreachable(reason))) => {
+                    format!("Unavailable: {reason}")
+                }
                 _ => "Connecting…".into(),
             },
-            version: connected
-                .map(|c| c.hello().server.version.clone())
-                .or_else(|| incompatible.and_then(|s| s.version.clone())),
+            version: connected.map(|c| c.hello().server.version.clone()).or_else(|| incompatible.and_then(|s| s.version.clone())),
             has_log: silo_proto::paths::log(&self.home).exists(),
             can_start: paused,
             can_stop: connected.is_some(),
@@ -123,11 +120,7 @@ impl Workspace {
         // A missing font is flagged on its own row.
         terminal.problems = theme::load_problem().into_iter().collect();
         let ui = theme::ui_font_state();
-        let ui_font = UiFontSettings {
-            family: self.ui_font_family().to_owned(),
-            choices: theme::ui_fonts(cx),
-            missing: ui.missing,
-        };
+        let ui_font = UiFontSettings { family: self.ui_font_family().to_owned(), choices: theme::ui_fonts(cx), missing: ui.missing };
         SettingsSnapshot {
             density: self.density(),
             show_pane_headers: self.pane_headers(),
@@ -150,7 +143,9 @@ impl Workspace {
         apply: impl FnOnce(&mut Self, anyhow::Result<T>) -> Refresh + 'static,
         cx: &mut Context<Self>,
     ) {
-        let Some(control) = self.hosts.first().and_then(|h| h.control.clone()) else { return };
+        let Some(control) = self.hosts.first().and_then(|h| h.control.clone()) else {
+            return;
+        };
         let task = self.rt.spawn(async move { control.call::<T>(method).await });
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
@@ -167,43 +162,55 @@ impl Workspace {
 
     pub(crate) fn refresh_devices(&mut self, cx: &mut Context<Self>) {
         use silo_proto::control::{Method, PairedDevices};
-        self.pairing_call(Method::PairList {}, |this, result: anyhow::Result<PairedDevices>| {
-            let devices = result.inspect_err(|e| tracing::debug!("pair.list: {e:#}")).ok()?.devices;
-            if devices == this.pairing.devices {
-                return None;
-            }
-            this.pairing.devices = devices;
-            Some(None)
-        }, cx);
+        self.pairing_call(
+            Method::PairList {},
+            |this, result: anyhow::Result<PairedDevices>| {
+                let devices = result.inspect_err(|e| tracing::debug!("pair.list: {e:#}")).ok()?.devices;
+                if devices == this.pairing.devices {
+                    return None;
+                }
+                this.pairing.devices = devices;
+                Some(None)
+            },
+            cx,
+        );
     }
 
     fn create_invite(&mut self, cx: &mut Context<Self>) {
         use silo_proto::control::{Method, PairInvite};
-        self.pairing_call(Method::PairCreate { ttl_secs: 600 }, |this, result: anyhow::Result<PairInvite>| match result {
-            Ok(invite) => {
-                this.pairing.invite = Some(invite.ticket);
-                Some(None)
-            }
-            Err(error) if error.downcast_ref::<silo_client::Offline>().is_some() => Some(Some("Not online yet. Try again shortly.".into())),
-            Err(error) => {
-                tracing::warn!("pair.create: {error:#}");
-                Some(Some("Could not create a ticket.".into()))
-            }
-        }, cx);
+        self.pairing_call(
+            Method::PairCreate { ttl_secs: 600 },
+            |this, result: anyhow::Result<PairInvite>| match result {
+                Ok(invite) => {
+                    this.pairing.invite = Some(invite.ticket);
+                    Some(None)
+                }
+                Err(error) if error.downcast_ref::<silo_client::Offline>().is_some() => Some(Some("Not online yet. Try again shortly.".into())),
+                Err(error) => {
+                    tracing::warn!("pair.create: {error:#}");
+                    Some(Some("Could not create a ticket.".into()))
+                }
+            },
+            cx,
+        );
     }
 
     fn revoke_device(&mut self, id: String, cx: &mut Context<Self>) {
         let method = silo_proto::control::Method::PairRevoke { id: id.clone() };
-        self.pairing_call(method, move |this, result: anyhow::Result<serde_json::Value>| match result {
-            Ok(_) => {
-                this.pairing.devices.retain(|d| d.id != id);
-                Some(None)
-            }
-            Err(error) => {
-                tracing::warn!("pair.revoke: {error:#}");
-                Some(Some("Could not revoke the device.".into()))
-            }
-        }, cx);
+        self.pairing_call(
+            method,
+            move |this, result: anyhow::Result<serde_json::Value>| match result {
+                Ok(_) => {
+                    this.pairing.devices.retain(|d| d.id != id);
+                    Some(None)
+                }
+                Err(error) => {
+                    tracing::warn!("pair.revoke: {error:#}");
+                    Some(Some("Could not revoke the device.".into()))
+                }
+            },
+            cx,
+        );
     }
 
     /// ⌘, / "Settings…": open the panel, or focus it if already open.
@@ -274,9 +281,7 @@ impl Workspace {
         change(&mut prefs);
         let (prefs, problems) = prefs.validated();
         let saved = terminal_prefs::save(&self.home, &prefs);
-        let save_problem = saved.err().map(|e| {
-            format!("Applied, but could not save terminal settings: {e}")
-        });
+        let save_problem = saved.err().map(|e| format!("Applied, but could not save terminal settings: {e}"));
         theme::install(prefs, save_problem.clone());
         self.apply_terminal_theme(window, cx);
         let mut messages: Vec<String> = save_problem.into_iter().chain(problems).collect();
@@ -369,10 +374,9 @@ impl Workspace {
                 let lines = *lines;
                 self.update_terminal_prefs(|p| p.scrollback_lines = lines, window, cx)
             }
-            SettingsEvent::ResetTerminal => {
-                self.update_terminal_prefs(|p| *p = TerminalPrefs::default(), window, cx)
-                    .or_else(|| Some("Terminal settings restored to defaults.".into()))
-            }
+            SettingsEvent::ResetTerminal => self
+                .update_terminal_prefs(|p| *p = TerminalPrefs::default(), window, cx)
+                .or_else(|| Some("Terminal settings restored to defaults.".into())),
             SettingsEvent::ReloadTerminal => {
                 self.execute(Command::ReloadTerminalSettings, window, cx);
                 theme::problems().first().cloned().or_else(|| Some("Terminal settings reloaded.".into()))
@@ -409,7 +413,9 @@ impl Workspace {
                 return;
             }
             SettingsEvent::RenameHost(id) => {
-                let Ok(index) = id.parse::<usize>() else { return };
+                let Ok(index) = id.parse::<usize>() else {
+                    return;
+                };
                 self.close_settings(window, cx);
                 self.open_rename_host(index, window, cx);
                 return;
@@ -538,8 +544,11 @@ mod tests {
 
     #[test]
     fn every_bound_command_is_listed_as_a_shortcut() {
-        let listed: Vec<String> =
-            Command::ALL.iter().filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? })).map(|s| s.label).collect();
+        let listed: Vec<String> = Command::ALL
+            .iter()
+            .filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? }))
+            .map(|s| s.label)
+            .collect();
         assert!(listed.contains(&"Settings…".to_owned()));
         assert!(listed.contains(&"Split Right".to_owned()));
         assert!(!listed.contains(&"Rename Session…".to_owned()), "unbound commands have no shortcut row");

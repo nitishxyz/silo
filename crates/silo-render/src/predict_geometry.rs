@@ -7,24 +7,8 @@ pub(crate) type Rect = (f32, f32, f32, f32);
 /// cell's own underline: 2 px above the bottom, one device pixel thick), or
 /// `None` outside the grid.
 #[must_use]
-pub(crate) fn predicted_rects(
-    row: u16,
-    column: u16,
-    columns: u16,
-    rows: u16,
-    cell_width: f32,
-    cell_height: f32,
-    scale: f32,
-) -> Option<(Rect, Rect)> {
-    let cell = crate::span_geometry::span_rectangle(
-        row,
-        column,
-        column.saturating_add(1),
-        columns,
-        rows,
-        cell_width,
-        cell_height,
-    )?;
+pub(crate) fn predicted_rects(row: u16, column: u16, columns: u16, rows: u16, cell_width: f32, cell_height: f32, scale: f32) -> Option<(Rect, Rect)> {
+    let cell = crate::span_geometry::span_rectangle(row, column, column.saturating_add(1), columns, rows, cell_width, cell_height)?;
     let underline = (cell.0, cell.1 + cell.3 - 2.0, cell.2, 1.0 / scale.max(0.5));
     Some((cell, underline))
 }

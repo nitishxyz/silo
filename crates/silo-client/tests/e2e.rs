@@ -1,7 +1,10 @@
 //! End-to-end: in-process server, real PTYs, snapshot attach, resume,
 //! ownership and exit over the unix socket.
 
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
@@ -35,7 +38,8 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start_server(home: &Path) {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let config =
+        silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
     tokio::spawn(async move {
         silo_server::run(config).await.unwrap();
     });
@@ -50,6 +54,41 @@ async fn start_server(home: &Path) {
 
 async fn connect(home: &Path, name: &str) -> (Control, Events) {
     Control::connect(&paths::socket(home), name).await.unwrap()
+}
+
+const CHILD_HOME: &str = "SILO_TEST_CHILD_HOME";
+
+/// The server process for `heartbeat_detects_stopped_server`; a no-op
+/// unless that test runs this binary with [`CHILD_HOME`] set.
+#[tokio::test]
+async fn heartbeat_server_child() {
+    let Some(home) = std::env::var_os(CHILD_HOME) else {
+        return;
+    };
+    let config =
+        silo_server::Config { home: home.into(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
+    silo_server::run(config).await.unwrap();
+}
+
+/// A server child process, killed on drop.
+struct ServerProcess(std::process::Child);
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        // Resume a stopped server so it can handle SIGTERM and shut down cleanly.
+        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::CONT);
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        }
+        let _ = self.0.wait();
+    }
+}
+
+impl ServerProcess {
+    fn signal(&self, signal: &str) {
+        let status = std::process::Command::new("kill").arg(signal).arg(self.0.id().to_string()).status().unwrap();
+        assert!(status.success());
+    }
 }
 
 /// Apply frames until `predicate` holds for the mirror.
@@ -94,7 +133,8 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     start_server(&home).await;
     let (control, events) = connect(&home, "test-a").await;
     control.subscribe().await.unwrap();
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created =
+        control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let block = created.block_id.clone();
 
     // Live attach + input + output.
@@ -158,7 +198,10 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(a.screen_text(), b.screen_text());
 
     // Splits and windows.
-    let split: Created = control.call(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     assert_eq!(view.session.windows[0].layout.blocks(), [block.clone(), split.block_id.clone()]);
     assert_eq!(view.blocks.len(), 2);
@@ -236,8 +279,14 @@ async fn block_swap_and_window_move_body() {
     let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let sid = created.session_id.clone();
     let a = created.block_id.clone();
-    let b: Created = control.call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let c: Created = control.call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let b: Created = control
+        .call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    let c: Created = control
+        .call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
     let (b, c) = (b.block_id, c.block_id);
     control.call_value(Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await.unwrap();
     control.call_value(Method::BlockFocus { block_id: a.clone() }).await.unwrap();
@@ -258,7 +307,8 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
 
     // Cross-window swaps are rejected and change nothing.
-    let other: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let other: Created =
+        control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let after_create = next_view(&mut events, &sid).await;
     let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await.unwrap_err();
     assert!(err.to_string().contains("different windows"), "{err}");
@@ -268,7 +318,8 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(unchanged.session.revision, after_create.session.revision);
 
     // window.move: order changes for every client.
-    let third: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let third: Created =
+        control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     next_view(&mut events, &sid).await;
     control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await.unwrap();
     let view = next_view(&mut events, &sid).await;
@@ -518,4 +569,41 @@ async fn resume_across_config_change_body() {
     assert_eq!(background(&mut b), 0x0012_3456, "program override survives");
     assert_eq!(a.screen_text(), b.screen_text());
     control.call_value(Method::ServerShutdown {}).await.unwrap();
+}
+
+#[tokio::test]
+async fn heartbeat_detects_stopped_server() {
+    guarded("heartbeat_detects_stopped_server", heartbeat_body()).await;
+}
+
+async fn heartbeat_body() {
+    let home = temp_home("heartbeat");
+    let server = ServerProcess(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["heartbeat_server_child", "--exact", "--nocapture"])
+            .env(CHILD_HOME, &home)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::timeout(TIMEOUT, async {
+        while !silo_client::server_running(&home).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("server did not start");
+    let (control, _events) = connect(&home, "heartbeat").await;
+    let heartbeat = tokio::spawn(control.clone().heartbeat());
+    server.signal("-STOP");
+    let limit = 2 * control.ping_timeout() + silo_client::PING_EVERY + Duration::from_secs(1);
+    tokio::time::timeout(limit, heartbeat).await.expect("heartbeat did not fire").unwrap();
+    tokio::time::timeout(TIMEOUT, control.closed()).await.expect("not closed");
+    assert!(control.call_value(Method::Ping {}).await.unwrap_err().is::<silo_client::Closed>());
+
+    server.signal("-CONT");
+    let (again, _events) = connect(&home, "heartbeat").await;
+    again.call_value(Method::Ping {}).await.unwrap();
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
 }

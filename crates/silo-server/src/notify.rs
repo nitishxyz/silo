@@ -6,7 +6,9 @@ use std::{io, path::Path};
 /// Send `state` (e.g. `READY=1`) to the service manager. A no-op without
 /// `NOTIFY_SOCKET`; failures are logged, never fatal.
 pub fn notify(state: &str) {
-    let Some(socket) = std::env::var_os("NOTIFY_SOCKET").filter(|s| !s.is_empty()) else { return };
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET").filter(|s| !s.is_empty()) else {
+        return;
+    };
     if let Err(error) = send(Path::new(&socket), state) {
         tracing::warn!("sd_notify {state:?}: {error}");
     }

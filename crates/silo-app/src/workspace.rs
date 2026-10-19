@@ -5,8 +5,7 @@
 use std::{collections::HashMap, path::PathBuf, time::Instant};
 
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, Render, Subscription, Task, Window, actions, div,
-    point, prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, Render, Subscription, Task, Window, actions, div, point, prelude::*, px, rgb, size,
 };
 use silo_client::Control;
 use silo_proto::{
@@ -22,7 +21,7 @@ use crate::{
     motion::{self, Edge, Motion, PaneGhost, TabGhost},
     pane::{Pane, PaneEvent},
     switcher::Switcher,
-    theme,
+    theme::{self, Continuous as _},
 };
 
 actions!(
@@ -94,6 +93,7 @@ pub struct Workspace {
     pub(crate) tab_drop: Option<(usize, bool)>,
     /// The tab being dragged (window id), while its drag lasts.
     pub(crate) tab_dragging: Option<String>,
+    pub(crate) float_drag: Option<crate::floats::FloatDrag>,
     /// A press on empty titlebar space that moves the window once dragged.
     pub(crate) titlebar_move: bool,
     state: AppState,
@@ -143,7 +143,7 @@ impl Workspace {
             add_host: None,
             palette: None,
             motion: Motion::default(),
-            appearance_menu: crate::appearance::AppearanceMenu::default(),
+            appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
             settings: None,
             pairing: crate::settings::Pairing::default(),
             last_fullscreen: std::cell::Cell::new(None),
@@ -152,6 +152,7 @@ impl Workspace {
             tab_reveal: std::cell::RefCell::new(None),
             tab_drop: None,
             tab_dragging: None,
+            float_drag: None,
             titlebar_move: false,
             state,
             _checkpoints: checkpoints,
@@ -207,7 +208,9 @@ impl Workspace {
     }
 
     fn checkpoint_block(&mut self, id: &str, cx: &mut Context<Self>) {
-        let (Some(writer), Some((pane, _))) = (self.active_cache(), self.panes.get(id)) else { return };
+        let (Some(writer), Some((pane, _))) = (self.active_cache(), self.panes.get(id)) else {
+            return;
+        };
         if let Some(checkpoint) = pane.update(cx, |pane, _| pane.checkpoint()) {
             writer.save_block(id.to_owned(), checkpoint);
             self.checkpointed.insert(id.to_owned(), Instant::now());
@@ -232,7 +235,9 @@ impl Workspace {
     /// against every block of every session.
     fn gc_cache(&self, host: usize) {
         let entry = &self.hosts[host];
-        let (Some(writer), Some(control)) = (entry.cache.clone(), entry.control.clone()) else { return };
+        let (Some(writer), Some(control)) = (entry.cache.clone(), entry.control.clone()) else {
+            return;
+        };
         self.rt.spawn(async move {
             let all = async {
                 let sessions: Vec<SessionSummary> = control.call(Method::SessionList {}).await?;
@@ -280,7 +285,9 @@ impl Workspace {
 
     /// Paint the active host's last known tree until its server answers.
     fn show_cached(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tree) = self.hosts[self.active_host].tree.clone() else { return };
+        let Some(tree) = self.hosts[self.active_host].tree.clone() else {
+            return;
+        };
         self.status = Some(OFFLINE.into());
         self.set_view(tree.view, window, cx);
     }
@@ -424,7 +431,9 @@ impl Workspace {
     }
 
     fn refresh_sessions(&mut self, host: usize, cx: &mut Context<Self>) {
-        let Some(control) = self.hosts[host].control.clone() else { return };
+        let Some(control) = self.hosts[host].control.clone() else {
+            return;
+        };
         let task = self.rt.spawn(async move { control.call::<Vec<SessionSummary>>(Method::SessionList {}).await });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(mut sessions)) = task.await {
@@ -507,10 +516,19 @@ impl Workspace {
     /// Create a session (named, or numbered by the server) and show it.
     pub(crate) fn create_session(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.active_host;
-        let Some(control) = self.control() else { return };
+        let Some(control) = self.control() else {
+            return;
+        };
         let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx)).or_else(|| std::env::var("HOME").ok());
         let task = self.rt.spawn(async move {
-            control.call::<Created>(Method::SessionCreate { name, spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None }).await
+            control
+                .call::<Created>(Method::SessionCreate {
+                    name,
+                    spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
+                    kind: BlockKind::Terminal,
+                    url: None,
+                })
+                .await
         });
         cx.spawn_in(window, async move |this, cx| match task.await {
             Ok(Ok(created)) => {
@@ -534,7 +552,9 @@ impl Workspace {
 
     /// Attach to `preferred`, else the newest session, else a new one.
     pub(crate) fn choose_session(&mut self, preferred: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(control) = self.control() else { return };
+        let Some(control) = self.control() else {
+            return;
+        };
         let task = self.rt.spawn(async move {
             let sessions: Vec<SessionSummary> = control.call(Method::SessionList {}).await?;
             let pick = preferred
@@ -591,25 +611,28 @@ impl Workspace {
         }
         self.track_motion(&view, window, cx);
         let live = self.control().is_some();
-        if live
-            && let (Some(old), Some(writer)) = (&self.view, self.active_cache())
-        {
+        if live && let (Some(old), Some(writer)) = (&self.view, self.active_cache()) {
             writer.forget(cache::closed_blocks(old, &view));
         }
         self.view = Some(view);
         let view = self.view.clone().expect("view");
         // Panes for every block of the active window; keep panes of other
         // windows that are still alive, drop the rest.
-        let all: Vec<String> = view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect();
+        let all: Vec<String> = view.session.windows.iter().flat_map(crate::floats::window_blocks).collect();
         self.panes.retain(|id, _| all.contains(id));
         self.browsers.retain(|id, _| all.contains(id));
         if live {
             self.hosts[self.active_host].restored.retain(|id, _| all.contains(id));
         }
         let active = self.active_window().cloned();
-        let browsers: Vec<String> = view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == crate::browser_pane::Kind::Browser).map(|b| b.id.clone()).collect();
+        let browsers: Vec<String> = view
+            .blocks
+            .iter()
+            .filter(|b| crate::browser_pane::kind_of(Some(b)) == crate::browser_pane::Kind::Browser)
+            .map(|b| b.id.clone())
+            .collect();
         if let Some(active) = &active {
-            for block in active.layout.blocks() {
+            for block in crate::floats::window_blocks(active) {
                 if browsers.contains(&block) {
                     self.ensure_browser(&block, window, cx);
                 } else if !self.panes.contains_key(&block) {
@@ -649,7 +672,10 @@ impl Workspace {
         {
             let focused = active.focused.clone();
             let local = self.panes.values().any(|(p, _)| p.read(cx).focus.is_focused(window))
-                || self.browsers.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window));
+                || self
+                    .browsers
+                    .values()
+                    .any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window));
             if self.server_focus.as_deref() != Some(&focused) || !local {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
@@ -691,7 +717,9 @@ impl Workspace {
         // tab motion covers whole windows coming and going.
         let old_active = self.active_window().filter(|w| !w.zoomed).cloned();
         let new_active = view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first());
-        let (Some(old_active), Some(new_active)) = (old_active, new_active) else { return };
+        let (Some(old_active), Some(new_active)) = (old_active, new_active) else {
+            return;
+        };
         if old_active.id != new_active.id || new_active.zoomed {
             return;
         }
@@ -756,7 +784,9 @@ impl Workspace {
     }
 
     pub(crate) fn call(&self, method: Method) {
-        let Some(control) = self.control() else { return };
+        let Some(control) = self.control() else {
+            return;
+        };
         self.rt.spawn(async move {
             if let Err(error) = control.call_value(method).await {
                 tracing::warn!("request failed: {error:#}");
@@ -767,8 +797,16 @@ impl Workspace {
     /// Sends a layout change already applied to the local view. Older
     /// snapshots are ignored until the server's confirms it; if the call
     /// fails, `revert` undoes it (unless a newer snapshot replaced it).
-    pub(crate) fn call_optimistic(&mut self, method: Method, failure: &'static str, revert: impl FnOnce(&mut Self) + 'static, cx: &mut Context<Self>) {
-        let Some(control) = self.control() else { return revert(self) };
+    pub(crate) fn call_optimistic(
+        &mut self,
+        method: Method,
+        failure: &'static str,
+        revert: impl FnOnce(&mut Self) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(control) = self.control() else {
+            return revert(self);
+        };
         let base = self.view.as_ref().map(|v| v.session.revision);
         self.ahead_of = base;
         let task = self.rt.spawn(async move { control.call_value(method).await });
@@ -809,11 +847,18 @@ impl Workspace {
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
         let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None });
+        self.call(Method::WindowCreate {
+            session_id: view.session.id.clone(),
+            spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
+            kind: BlockKind::Terminal,
+            url: None,
+        });
     }
 
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(block) = self.focused_block(window, cx) else { return };
+        let Some(block) = self.focused_block(window, cx) else {
+            return;
+        };
         self.split_block(block, axis, cx);
     }
 
@@ -821,7 +866,13 @@ impl Workspace {
     pub(crate) fn split_block(&mut self, block: String, axis: Axis, cx: &gpui::App) {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
-        self.call(Method::BlockSplit { block_id: block, axis, spawn: SpawnSpec { cwd, command: Vec::new(), size: None }, kind: BlockKind::Terminal, url: None });
+        self.call(Method::BlockSplit {
+            block_id: block,
+            axis,
+            spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
+            kind: BlockKind::Terminal,
+            url: None,
+        });
     }
 
     pub(crate) fn close_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -836,20 +887,45 @@ impl Workspace {
     }
 
     /// Replace a block without a process by a fresh shell in its slot:
-    /// split it, then close it so the new block takes the whole slot.
-    pub(crate) fn new_shell(&mut self, block: String, cx: &gpui::App) {
-        let Some(control) = self.control() else { return };
+    /// split it, then close it so the new block takes the whole slot. A
+    /// float can't be split, so its window's first tiled block is, and the
+    /// new block is floated where the old one was.
+    pub(crate) fn new_shell(&mut self, block: String, cx: &mut Context<Self>) {
+        let Some(control) = self.control() else {
+            return;
+        };
+        let Some(view) = &self.view else { return };
+        let Some(w) = view.session.windows.iter().find(|w| crate::floats::window_blocks(w).contains(&block)) else {
+            return;
+        };
+        let float = w.floats.iter().find(|f| f.id == block).map(|f| f.rect);
+        let Some(anchor) = (if float.is_some() { w.layout.blocks().into_iter().next() } else { Some(block.clone()) }) else {
+            return;
+        };
         let cwd = self.cwd_of(&block, cx);
-        self.rt.spawn(async move {
+        let task = self.rt.spawn(async move {
             let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-            if let Err(error) = control.call_value(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None }).await {
-                tracing::warn!("new shell: {error:#}");
-                return;
+            let created: Created =
+                control.call(Method::BlockSplit { block_id: anchor, axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None }).await?;
+            if let Some(rect) = float {
+                control.call_value(Method::BlockFloat { block_id: created.block_id, rect: Some(rect) }).await?;
             }
-            if let Err(error) = control.call_value(Method::BlockClose { block_id: block }).await {
-                tracing::warn!("new shell: {error:#}");
-            }
+            control.call_value(Method::BlockClose { block_id: block }).await?;
+            anyhow::Ok(())
         });
+        cx.spawn(async move |this, cx| {
+            let error = match task.await {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => format!("{error:#}"),
+                Err(error) => error.to_string(),
+            };
+            tracing::warn!("new shell: {error}");
+            let _ = this.update(cx, |this, cx| {
+                this.flash("Couldn't start a new shell".into(), cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Zoom `block` (the server also focuses it), or unzoom the window.
@@ -917,8 +993,10 @@ impl Workspace {
     }
 
     pub(crate) fn cycle_focus(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = self.active_window() else { return };
-        let blocks = active.layout.blocks();
+        let Some(active) = self.active_window() else {
+            return;
+        };
+        let blocks = crate::floats::window_blocks(active);
         if blocks.is_empty() {
             return;
         }
@@ -935,16 +1013,16 @@ impl Workspace {
         }
     }
 
-    /// ⌘1–9: the n-th tab, or the n-th session row while the switcher is
-    /// open.
+    /// ⌘1–8: the n-th tab, ⌘9 the last one; the n-th session row while the
+    /// switcher is open.
     fn number_key(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_some() {
             return;
         }
         if self.switcher.is_some() {
             self.switch_to_row(index, window, cx);
-        } else {
-            self.select_window(index);
+        } else if let Some(view) = &self.view {
+            self.select_window(tab_index(index, view.session.windows.len()));
         }
     }
 
@@ -967,12 +1045,7 @@ impl Workspace {
             return pane.read(cx).title();
         }
         self.panes.get(&w.focused).map_or_else(
-            || {
-                self.view
-                    .as_ref()
-                    .and_then(|v| v.blocks.iter().find(|b| b.id == w.focused))
-                    .map_or_else(|| "shell".into(), crate::pane::block_title)
-            },
+            || self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == w.focused)).map_or_else(|| "shell".into(), crate::pane::block_title),
             |(p, _)| p.read(cx).title(),
         )
     }
@@ -992,6 +1065,7 @@ impl Render for Workspace {
             && self.palette.is_none()
             && self.settings.is_none()
             && self.add_host.is_none()
+            && !self.appearance_menu.open
             && self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused) || self.browsers.contains_key(&w.focused))
         {
             cx.defer_in(window, |this, window, cx| {
@@ -1001,6 +1075,7 @@ impl Render for Workspace {
                     && this.palette.is_none()
                     && this.add_host.is_none()
                     && this.settings.is_none()
+                    && !this.appearance_menu.open
                 {
                     this.refocus_terminal(window, cx);
                 }
@@ -1017,15 +1092,7 @@ impl Render for Workspace {
                     .relative()
                     .size_full()
                     .child(self.render_body(&w, now, window, cx))
-                    .child(
-                        div()
-                            .id("incompatible-scrim")
-                            .occlude()
-                            .absolute()
-                            .inset_0()
-                            .bg(gpui::rgba((theme::surface() << 8) | 0xd8))
-                            .child(card),
-                    )
+                    .child(div().id("incompatible-scrim").occlude().absolute().inset_0().bg(gpui::rgba((theme::surface() << 8) | 0xd8)).child(card))
                     .into_any_element(),
                 None => self.render_body(&w, now, window, cx),
             },
@@ -1074,15 +1141,18 @@ impl Render for Workspace {
             .child(div().flex_1().min_h_0().child(body))
             .when_some(self.status_bar(), |el, status| {
                 el.child(
-                    div()
-                        .h(px(22.0))
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .bg(rgb(theme::chrome()))
-                        .text_size(px(11.0))
-                        .text_color(rgb(theme::muted()))
-                        .child(status),
+                    div().absolute().bottom(px(8.0)).left_0().right_0().flex().justify_center().child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .continuous(8.0)
+                            .bg(rgb(theme::popover()))
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme::muted()))
+                            .child(status),
+                    ),
                 )
             })
             .children(ghosts)
@@ -1108,4 +1178,19 @@ pub fn bind_number_keys(cx: &mut gpui::App) {
         KeyBinding::new("cmd-8", SelectWindow8, None),
         KeyBinding::new("cmd-9", SelectWindow9, None),
     ]);
+}
+
+/// The tab for number key `index` (0-based): ⌘9 is always the last tab.
+fn tab_index(index: usize, tabs: usize) -> usize {
+    if index == 8 { tabs.saturating_sub(1) } else { index }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cmd_nine_is_the_last_tab() {
+        assert_eq!(super::tab_index(8, 3), 2);
+        assert_eq!(super::tab_index(8, 12), 11);
+        assert_eq!(super::tab_index(1, 3), 1);
+    }
 }

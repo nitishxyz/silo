@@ -19,10 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui::{
-    Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, Pixels, Point, TextRun, TextSystem,
-    WindowTextSystem, point, px, rgb, size,
-};
+use gpui::{Bounds, Font, FontStyle, FontWeight, Hsla, LineLayout, Pixels, Point, TextRun, TextSystem, WindowTextSystem, point, px, rgb, size};
 use silo_vt::{Cell, Frame};
 
 use crate::{
@@ -77,21 +74,8 @@ impl PreparedFrame {
     /// Quads and glyphs the UI thread will issue for this frame.
     pub(crate) fn primitives(&self) -> (u64, u64) {
         let quads = self.backgrounds.len() + self.selection.len() + self.sprite_quads.len();
-        let glyphs: usize = self
-            .text
-            .iter()
-            .map(|text| {
-                text.layout
-                    .runs
-                    .iter()
-                    .map(|run| run.glyphs.len())
-                    .sum::<usize>()
-            })
-            .sum();
-        (
-            u64::try_from(quads + self.lines.len()).unwrap_or(u64::MAX),
-            u64::try_from(glyphs).unwrap_or(u64::MAX),
-        )
+        let glyphs: usize = self.text.iter().map(|text| text.layout.runs.iter().map(|run| run.glyphs.len()).sum::<usize>()).sum();
+        (u64::try_from(quads + self.lines.len()).unwrap_or(u64::MAX), u64::try_from(glyphs).unwrap_or(u64::MAX))
     }
 }
 
@@ -118,20 +102,11 @@ impl FramePreparer {
     /// font ids resolve to the same faces the window paints with.
     #[must_use]
     pub fn new(text: Arc<TextSystem>) -> Self {
-        Self {
-            layouts: LayoutCache::new(text),
-            sprites: sprite::SpriteCache::default(),
-            font: crate::font_generation(),
-        }
+        Self { layouts: LayoutCache::new(text), sprites: sprite::SpriteCache::default(), font: crate::font_generation() }
     }
 
     #[must_use]
-    pub fn prepare(
-        &mut self,
-        frame: &Arc<Frame>,
-        metrics: CellMetrics,
-        options: FrameOptions,
-    ) -> PreparedFrame {
+    pub fn prepare(&mut self, frame: &Arc<Frame>, metrics: CellMetrics, options: FrameOptions) -> PreparedFrame {
         let started = profile::start();
         let mut cost = profile::Prepared::default();
         // A configured font family changes the faces without changing the
@@ -180,25 +155,12 @@ impl FramePreparer {
                 match single {
                     Single::Sprite(_) => {
                         let sprites = profile::start();
-                        push_sprite_cell(
-                            &mut out,
-                            &mut self.sprites,
-                            &cells[column],
-                            clip,
-                            selection,
-                        );
+                        push_sprite_cell(&mut out, &mut self.sprites, &cells[column], clip, selection);
                         profile::add(&mut cost.sprites, sprites);
                     }
                     Single::Glyph(_) => {
                         let shaping = profile::start();
-                        let text = shape_single(
-                            &mut self.layouts,
-                            &cells[column],
-                            clip,
-                            metrics,
-                            selection,
-                            &mut cost,
-                        );
+                        let text = shape_single(&mut self.layouts, &cells[column], clip, metrics, selection, &mut cost);
                         profile::add(&mut cost.shape, shaping);
                         out.text.push(text);
                     }
@@ -265,14 +227,7 @@ impl LayoutCache {
         }
     }
 
-    fn layout(
-        &mut self,
-        text: &str,
-        bold: bool,
-        italic: bool,
-        font_size: f32,
-        cost: &mut profile::Prepared,
-    ) -> Arc<LineLayout> {
+    fn layout(&mut self, text: &str, bold: bool, italic: bool, font_size: f32, cost: &mut profile::Prepared) -> Arc<LineLayout> {
         if (self.font_size - font_size).abs() > f32::EPSILON {
             self.font_size = font_size;
             self.current.clear();
@@ -313,15 +268,7 @@ impl LayoutCache {
             strikethrough: None,
         };
         let layout = self.text.layout_line(text, px(font_size), &[run], None);
-        self.current.insert(
-            key,
-            Entry {
-                text: text.to_owned(),
-                bold,
-                italic,
-                layout: layout.clone(),
-            },
-        );
+        self.current.insert(key, Entry { text: text.to_owned(), bold, italic, layout: layout.clone() });
         layout
     }
 
@@ -387,17 +334,11 @@ fn rect_of(bounds: Bounds<Pixels>) -> quads::Rect {
 }
 
 fn bounds_of(rect: quads::Rect) -> Bounds<Pixels> {
-    Bounds::new(
-        point(px(rect.x), px(rect.y)),
-        size(px(rect.width), px(rect.height)),
-    )
+    Bounds::new(point(px(rect.x), px(rect.y)), size(px(rect.width), px(rect.height)))
 }
 
 fn cell_bounds(y: Pixels, column: usize, cells: usize, metrics: CellMetrics) -> Bounds<Pixels> {
-    Bounds::new(
-        point(px(grid_offset(column) * metrics.width), y),
-        size(px(grid_offset(cells) * metrics.width), px(metrics.height)),
-    )
+    Bounds::new(point(px(grid_offset(column) * metrics.width), y), size(px(grid_offset(cells) * metrics.width), px(metrics.height)))
 }
 
 fn push_backgrounds(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: CellMetrics) {
@@ -409,18 +350,11 @@ fn push_backgrounds(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics:
         }
         let color = cells[start].background;
         let mut end = start + 1;
-        while end < cells.len() && cells[end].background_explicit && cells[end].background == color
-        {
+        while end < cells.len() && cells[end].background_explicit && cells[end].background == color {
             end += 1;
         }
         out.backgrounds.push((
-            Bounds::new(
-                point(px(grid_offset(start) * metrics.width), y),
-                size(
-                    px(grid_offset(end - start) * metrics.width),
-                    px(metrics.height),
-                ),
-            ),
+            Bounds::new(point(px(grid_offset(start) * metrics.width), y), size(px(grid_offset(end - start) * metrics.width), px(metrics.height))),
             rgb(color).into(),
         ));
         start = end;
@@ -443,10 +377,7 @@ fn push_selection(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: C
         }
         out.selection.push(Bounds::new(
             point(px(grid_offset(start) * metrics.width), y),
-            size(
-                px(grid_offset(end - start) * metrics.width),
-                px(metrics.height),
-            ),
+            size(px(grid_offset(end - start) * metrics.width), px(metrics.height)),
         ));
         start = end;
     }
@@ -454,32 +385,19 @@ fn push_selection(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: C
 
 /// Underline and strikethrough are hairline quads per cell span, painted
 /// after the text so they are independent of how cells were batched.
-fn push_decorations(
-    out: &mut PreparedFrame,
-    cells: &[Cell],
-    y: Pixels,
-    metrics: CellMetrics,
-    selection: Option<u32>,
-) {
+fn push_decorations(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: CellMetrics, selection: Option<u32>) {
     for (column, cell) in cells.iter().enumerate() {
         if cell.width == 0 || !(cell.underline || cell.strikethrough) {
             continue;
         }
         let clip = cell_bounds(y, column, usize::from(cell.width), metrics);
-        for line_y in [
-            cell.underline.then_some(clip.bottom() - px(2.0)),
-            cell.strikethrough
-                .then_some(clip.top() + px(metrics.height * 0.55)),
-        ]
-        .into_iter()
-        .flatten()
+        for line_y in [cell.underline.then_some(clip.bottom() - px(2.0)), cell.strikethrough.then_some(clip.top() + px(metrics.height * 0.55))]
+            .into_iter()
+            .flatten()
         {
             push_joined(
                 &mut out.lines,
-                Bounds::new(
-                    point(clip.left(), line_y),
-                    size(clip.size.width, px(1.0 / metrics.scale)),
-                ),
+                Bounds::new(point(clip.left(), line_y), size(clip.size.width, px(1.0 / metrics.scale))),
                 rgb(cell_foreground(cell, selection)).into(),
             );
         }
@@ -498,24 +416,13 @@ fn cell_foreground(cell: &Cell, selection: Option<u32>) -> u32 {
 /// Block, box-drawing, Braille and Powerline cells are exact cell geometry,
 /// never font glyphs, so rows and columns tile without seams. The shape is
 /// cached per (code point, cell size) and translated into the cell here.
-fn push_sprite_cell(
-    out: &mut PreparedFrame,
-    cache: &mut sprite::SpriteCache,
-    cell: &Cell,
-    clip: Bounds<Pixels>,
-    selection: Option<u32>,
-) {
+fn push_sprite_cell(out: &mut PreparedFrame, cache: &mut sprite::SpriteCache, cell: &Cell, clip: Bounds<Pixels>, selection: Option<u32>) {
     let color = text_color(cell_foreground(cell, selection), cell.faint);
     let metrics = out.metrics;
     let Some(code) = sprite::code_point(&cell.text) else {
         return;
     };
-    let Some(shape) = cache.geometry(
-        code,
-        f32::from(clip.size.width),
-        metrics.height,
-        metrics.scale,
-    ) else {
+    let Some(shape) = cache.geometry(code, f32::from(clip.size.width), metrics.height, metrics.scale) else {
         return;
     };
     for quad in &shape.quads {
@@ -525,22 +432,12 @@ fn push_sprite_cell(
         // joins onto the rectangle its neighbour just pushed.
         push_joined(
             &mut out.sprite_quads,
-            Bounds::new(
-                point(clip.left() + px(quad.x), clip.top() + px(quad.y)),
-                size(px(quad.width), px(quad.height)),
-            ),
+            Bounds::new(point(clip.left() + px(quad.x), clip.top() + px(quad.y)), size(px(quad.width), px(quad.height))),
             color,
         );
     }
     for polygon in &shape.polygons {
-        out.sprite_polygons.push((
-            polygon
-                .0
-                .iter()
-                .map(|(x, y)| point(clip.left() + px(*x), clip.top() + px(*y)))
-                .collect(),
-            color,
-        ));
+        out.sprite_polygons.push((polygon.0.iter().map(|(x, y)| point(clip.left() + px(*x), clip.top() + px(*y))).collect(), color));
     }
 }
 
@@ -556,24 +453,12 @@ fn shape_single(
     let color = text_color(cell_foreground(cell, selection), cell.faint);
     let layout = layouts.layout(&cell.text, cell.bold, cell.italic, metrics.font_size, cost);
     let inset = px(((f32::from(clip.size.width) - f32::from(layout.width)) / 2.0).max(0.0));
-    PreparedText {
-        layout,
-        origin: clip.origin,
-        inset,
-        starts: Vec::new(),
-        colors: vec![(cell.text.len(), color)],
-    }
+    PreparedText { layout, origin: clip.origin, inset, starts: Vec::new(), colors: vec![(cell.text.len(), color)] }
 }
 
 /// A run of narrow cells is shaped as one line; `starts` lets paint put
 /// every cluster back on its own column.
-fn shape_run(
-    layouts: &mut LayoutCache,
-    run: Run,
-    origin: Point<Pixels>,
-    metrics: CellMetrics,
-    cost: &mut profile::Prepared,
-) -> PreparedText {
+fn shape_run(layouts: &mut LayoutCache, run: Run, origin: Point<Pixels>, metrics: CellMetrics, cost: &mut profile::Prepared) -> PreparedText {
     let mut colors = Vec::with_capacity(run.segments.len());
     let mut end = 0;
     for segment in &run.segments {
@@ -581,11 +466,5 @@ fn shape_run(
         colors.push((end, text_color(segment.foreground, segment.faint)));
     }
     let layout = layouts.layout(&run.text, run.bold, run.italic, metrics.font_size, cost);
-    PreparedText {
-        layout,
-        origin,
-        inset: px(0.0),
-        starts: run.starts,
-        colors,
-    }
+    PreparedText { layout, origin, inset: px(0.0), starts: run.starts, colors }
 }

@@ -19,10 +19,7 @@ pub struct PairTicket {
 
 impl fmt::Debug for PairTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PairTicket")
-            .field("addr", &self.addr)
-            .field("secret", &"<redacted>")
-            .finish()
+        f.debug_struct("PairTicket").field("addr", &self.addr).field("secret", &"<redacted>").finish()
     }
 }
 
@@ -35,18 +32,11 @@ impl PairTicket {
 
     pub fn decode(s: &str) -> Result<PairTicket> {
         let s = s.trim();
-        let Some(body) = s
-            .get(..TICKET_PREFIX.len())
-            .filter(|p| p.eq_ignore_ascii_case(TICKET_PREFIX))
-            .map(|_| &s[TICKET_PREFIX.len()..])
-        else {
+        let Some(body) = s.get(..TICKET_PREFIX.len()).filter(|p| p.eq_ignore_ascii_case(TICKET_PREFIX)).map(|_| &s[TICKET_PREFIX.len()..]) else {
             bail!("invalid pairing ticket: missing {TICKET_PREFIX:?} prefix");
         };
-        let bytes = BASE32_NOPAD_NOCASE
-            .decode(body.as_bytes())
-            .context("invalid pairing ticket: bad base32")?;
-        let (ticket, rest): (PairTicket, _) =
-            postcard::take_from_bytes(&bytes).context("invalid pairing ticket: bad payload")?;
+        let bytes = BASE32_NOPAD_NOCASE.decode(body.as_bytes()).context("invalid pairing ticket: bad base32")?;
+        let (ticket, rest): (PairTicket, _) = postcard::take_from_bytes(&bytes).context("invalid pairing ticket: bad payload")?;
         if !rest.is_empty() {
             bail!("invalid pairing ticket: {} trailing bytes", rest.len());
         }

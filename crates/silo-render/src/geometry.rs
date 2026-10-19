@@ -46,18 +46,14 @@ static FONT: OnceLock<RwLock<FontSettings>> = OnceLock::new();
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 fn settings() -> RwLockReadGuard<'static, FontSettings> {
-    FONT.get_or_init(|| RwLock::new(FontSettings::default()))
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    FONT.get_or_init(|| RwLock::new(FontSettings::default())).read().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Install the configured font. Returns whether anything changed, so the
 /// caller can repaint only then.
 pub fn set_terminal_font(font: FontSettings) -> bool {
     let cell = FONT.get_or_init(|| RwLock::new(FontSettings::default()));
-    let mut current = cell
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut current = cell.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     if *current == font {
         return false;
     }
@@ -105,13 +101,7 @@ impl CellMetrics {
         let scale = window.scale_factor().max(0.5);
         let (font_size, width_scale, width_offset, height_scale, height_offset) = {
             let settings = settings();
-            (
-                settings.size,
-                settings.width_scale,
-                settings.width_offset,
-                settings.height_scale,
-                settings.height_offset,
-            )
+            (settings.size, settings.width_scale, settings.width_offset, settings.height_scale, settings.height_offset)
         };
         let run = gpui::TextRun {
             len: 1,
@@ -122,14 +112,9 @@ impl CellMetrics {
             underline: None,
             strikethrough: None,
         };
-        let line = window
-            .text_system()
-            .shape_line("M".into(), gpui::px(font_size), &[run], None);
+        let line = window.text_system().shape_line("M".into(), gpui::px(font_size), &[run], None);
         Self {
-            width: crate::cell_geometry::cell_width(
-                f32::from(line.width()).mul_add(width_scale, width_offset),
-                scale,
-            ),
+            width: crate::cell_geometry::cell_width(f32::from(line.width()).mul_add(width_scale, width_offset), scale),
             height: crate::cell_geometry::cell_height(
                 f32::from(line.ascent).mul_add(height_scale, height_offset),
                 f32::from(line.descent) * height_scale,
@@ -144,13 +129,7 @@ impl CellMetrics {
     #[must_use]
     pub fn new(scale: f32) -> Self {
         let scale = scale.max(0.5);
-        Self {
-            width: (9.0 * scale).ceil() / scale,
-            height: (20.0 * scale).ceil() / scale,
-            font_size: 14.0,
-            scale,
-            font: font_generation(),
-        }
+        Self { width: (9.0 * scale).ceil() / scale, height: (20.0 * scale).ceil() / scale, font_size: 14.0, scale, font: font_generation() }
     }
 
     #[must_use]
@@ -212,11 +191,7 @@ mod tests {
     #[test]
     fn installing_a_font_bumps_the_generation_only_when_it_changed() {
         let before = font_generation();
-        let settings = FontSettings {
-            family: "Iosevka Term".to_string(),
-            size: 13.0,
-            ..FontSettings::default()
-        };
+        let settings = FontSettings { family: "Iosevka Term".to_string(), size: 13.0, ..FontSettings::default() };
         assert!(set_terminal_font(settings.clone()));
         assert_ne!(font_generation(), before);
         let generation = font_generation();

@@ -143,7 +143,9 @@ impl Cache {
     /// # Errors
     /// Snapshot encoding or write failure.
     pub fn save_block(&mut self, id: &str, mirror: &mut Mirror) -> anyhow::Result<bool> {
-        let Some(checkpoint) = MirrorCheckpoint::capture(mirror)? else { return Ok(false) };
+        let Some(checkpoint) = MirrorCheckpoint::capture(mirror)? else {
+            return Ok(false);
+        };
         self.save_checkpoint(id, &checkpoint)?;
         Ok(true)
     }
@@ -166,7 +168,9 @@ impl Cache {
     /// # Errors
     /// Write failure.
     pub fn forget_block(&mut self, id: &str) -> anyhow::Result<()> {
-        let Some(previous) = self.manifest.blocks.remove(id) else { return Ok(()) };
+        let Some(previous) = self.manifest.blocks.remove(id) else {
+            return Ok(());
+        };
         self.commit(&[]).inspect_err(|_| self.restore_meta(id, Some(previous)))?;
         self.collect()
     }

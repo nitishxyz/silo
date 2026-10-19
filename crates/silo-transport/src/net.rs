@@ -53,30 +53,16 @@ pub struct NetOptions {
 
 impl Net {
     pub async fn bind(identity: &Identity, relay: RelayConfig, mdns: bool) -> Result<Net> {
-        let opts = NetOptions {
-            relay,
-            mdns,
-            pin_initial_path: false,
-            port: None,
-        };
+        let opts = NetOptions { relay, mdns, pin_initial_path: false, port: None };
         Net::bind_with(identity, opts).await
     }
 
     pub async fn bind_with(identity: &Identity, opts: NetOptions) -> Result<Net> {
-        let NetOptions {
-            relay,
-            mdns,
-            pin_initial_path,
-            port,
-        } = opts;
+        let NetOptions { relay, mdns, pin_initial_path, port } = opts;
         let builder = match relay {
             RelayConfig::Default => Endpoint::builder(presets::N0),
-            RelayConfig::Custom(url) => {
-                Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([url]))
-            }
-            RelayConfig::Disabled => {
-                Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
-            }
+            RelayConfig::Custom(url) => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([url])),
+            RelayConfig::Disabled => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
         };
         let mut builder = builder.secret_key(identity.secret().clone());
         if mdns {
@@ -93,10 +79,7 @@ impl Net {
                 .context("bind address")?;
         }
         let endpoint = builder.bind().await.context("bind iroh endpoint")?;
-        Ok(Net {
-            endpoint,
-            router: None,
-        })
+        Ok(Net { endpoint, router: None })
     }
 
     pub fn id(&self) -> EndpointId {
@@ -129,11 +112,7 @@ impl Net {
 
     async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<RemoteConn> {
         let id = addr.id;
-        let conn = self
-            .endpoint
-            .connect(addr, alpn)
-            .await
-            .with_context(|| format!("connect to {id}"))?;
+        let conn = self.endpoint.connect(addr, alpn).await.with_context(|| format!("connect to {id}"))?;
         Ok(RemoteConn { conn })
     }
 
@@ -146,10 +125,8 @@ impl Net {
         }
         let (tx, rx) = mpsc::channel(backlog.max(1));
         let (tunnel_tx, tunnel_rx) = mpsc::channel(backlog.max(1));
-        let router = Router::builder(self.endpoint.clone())
-            .accept(CTL_ALPN, CtlHandler { tx })
-            .accept(TUNNEL_ALPN, TunnelHandler { tx: tunnel_tx })
-            .spawn();
+        let router =
+            Router::builder(self.endpoint.clone()).accept(CTL_ALPN, CtlHandler { tx }).accept(TUNNEL_ALPN, TunnelHandler { tx: tunnel_tx }).spawn();
         self.router = Some(router);
         Ok((CtlIncoming { rx }, TunnelIncoming { rx: tunnel_rx }))
     }

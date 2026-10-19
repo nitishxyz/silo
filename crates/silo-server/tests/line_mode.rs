@@ -23,14 +23,11 @@ fn spawn(id: &str, script: &str) -> BlockHandle {
         lifecycle: Lifecycle::Running,
         size: TermSize::new(40, 10),
         owner: None,
+        owner_name: None,
         pid: None,
         browser: None,
     };
-    let config = SpawnConfig {
-        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
-        cwd: Some(std::env::temp_dir()),
-        env: Vec::new(),
-    };
+    let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], cwd: Some(std::env::temp_dir()), env: Vec::new() };
     let (notes, _) = unbounded_channel();
     block::spawn(info, &config, notes).expect("spawn")
 }

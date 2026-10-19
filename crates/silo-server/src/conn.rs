@@ -5,10 +5,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use silo_proto::{
-    BUILD, Frame,
-    control::{BrowserCommand, ClientHello, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage},
+    BUILD, Frame, api,
+    control::{
+        ApiMethod, BrowserCommand, ClientHello, Empty, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage,
+    },
     data::{ClientData, DataHello, Reject},
-    kind, read_frame, spawn_reader, write_frame,
+    kind,
+    model::short_client_name,
+    read_frame, spawn_reader, write_frame,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -139,7 +143,14 @@ where
     (sink, task)
 }
 
-async fn control<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W, peer: Peer, on_admit: Option<tokio::sync::oneshot::Sender<()>>) -> std::io::Result<()>
+async fn control<R, W>(
+    server: Arc<Server>,
+    hello: Frame,
+    reader: R,
+    writer: W,
+    peer: Peer,
+    on_admit: Option<tokio::sync::oneshot::Sender<()>>,
+) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -162,22 +173,23 @@ where
         Ok(())
     };
     if let Err(error) = admitted {
-        tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response {
-            id: 0,
-            result: None,
-            error: Some(error),
-        })?);
+        tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) })?);
         drop(tx);
         let _ = writer_task.await;
         return Ok(());
     }
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
+    let device = match &peer {
+        Peer::Remote { endpoint_id, .. } => server.auth().devices().into_iter().find(|d| d.id == *endpoint_id).map(|d| d.name),
+        Peer::Local => None,
+    };
     let client_id = {
         let mut reg = server.registry.lock().unwrap();
         let id = reg.add_client(hello.client_name.clone(), hello.passive);
         if let Some(entry) = reg.clients.get_mut(&id) {
             entry.close = Some(close_tx);
             entry.origin = peer.conn_id();
+            entry.label = label(&hello.client_name, device.as_deref());
         }
         id
     };
@@ -218,7 +230,10 @@ where
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
                 let shutdown = matches!(request.method, Method::ServerShutdown {});
-                let read_only = matches!(request.method, Method::ServerInfo {} | Method::ApiList {} | Method::EventsSubscribe {} | Method::SessionList {} | Method::SessionView { .. });
+                let read_only = matches!(
+                    request.method,
+                    Method::ServerInfo {} | Method::ApiList {} | Method::ApiDescribe { .. } | Method::Ping {} | Method::EventsSubscribe {} | Method::SessionList {} | Method::SessionView { .. }
+                );
                 let result = if server.upgrading.load(Ordering::SeqCst) && !read_only {
                     Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
                 } else {
@@ -237,6 +252,16 @@ where
     drop(tx);
     let _ = writer_task.await;
     result
+}
+
+/// A client's short name, with a remote peer's paired device name
+/// appended when it adds anything.
+fn label(client_name: &str, device: Option<&str>) -> String {
+    let short = short_client_name(client_name);
+    match device.map(short_client_name).filter(|d| !d.is_empty() && !short.contains(d)) {
+        Some(device) => format!("{short} · {device}"),
+        None => short.to_owned(),
+    }
 }
 
 fn respond(tx: &Sink, id: u64, result: Result<Value, RpcError>) {
@@ -278,7 +303,15 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
     match method {
         Method::ServerInfo {} => to_value(server.info_now().await),
         Method::ServerShutdown {} => Ok(json!({})),
-        Method::ApiList {} => Ok(json!(METHODS.iter().map(|(name, description)| json!({"name": name, "description": description})).collect::<Vec<_>>())),
+        Method::ApiList {} => to_value(
+            METHODS.iter().map(|(name, description)| ApiMethod { name: (*name).into(), description: (*description).into() }).collect::<Vec<_>>(),
+        ),
+        Method::ApiDescribe { method } => to_value(api::describe(&method).ok_or_else(|| RpcError::not_found(format!("method {method}")))?),
+        // Touch shared state, so a wedged registry reads as unresponsive.
+        Method::Ping {} => {
+            drop(server.registry.lock().unwrap());
+            to_value(Empty {})
+        }
         Method::EventsSubscribe {} => Ok(json!({})),
         Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries()),
         Method::SessionCreate { name, spawn, kind, url } => {
@@ -334,6 +367,14 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().swap(&block_id, &other_block_id)?;
             Ok(json!({}))
         }
+        Method::BlockFloat { block_id, rect } => {
+            server.registry.lock().unwrap().float(&block_id, rect)?;
+            Ok(json!({}))
+        }
+        Method::BlockMove { block_id, rect, dock } => {
+            server.registry.lock().unwrap().move_block(&block_id, rect, dock)?;
+            Ok(json!({}))
+        }
         Method::LayoutRatio { window_id, path, ratio } => {
             server.registry.lock().unwrap().set_ratio(&window_id, &path, ratio)?;
             Ok(json!({}))
@@ -370,7 +411,8 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             }
             let reg = server.registry.lock().unwrap();
             let client_name = reg.client_name(client_id);
-            reg.block(&block_id)?.send(BlockMsg::Desired { client_id, client_name, size });
+            let label = reg.client_label(client_id);
+            reg.block(&block_id)?.send(BlockMsg::Desired { client_id, client_name, label, size });
             Ok(json!({}))
         }
         Method::OwnBlock { block_ids, mode } => {
@@ -444,9 +486,9 @@ where
     } else if let Some((block_id, client_id)) = redeemed {
         let block = {
             let reg = server.registry.lock().unwrap();
-            reg.blocks.get(&block_id).and_then(Block::terminal).map(|b| (b.tx.clone(), reg.client_name(client_id)))
+            reg.blocks.get(&block_id).and_then(Block::terminal).map(|b| (b.tx.clone(), reg.client_name(client_id), reg.client_label(client_id)))
         };
-        if let Some((block, client_name)) = block {
+        if let Some((block, client_name, label)) = block {
             let sub_id = rand::random::<u64>();
             let cancelled = tx.cancelled();
             let remote = matches!(peer, Peer::Remote { .. });
@@ -470,7 +512,7 @@ where
                         let _ = block.send(BlockMsg::StreamInput { sub_id, bytes });
                     }
                     Ok(ClientData::Resize(size)) if size.columns > 0 && size.rows > 0 => {
-                        let _ = block.send(BlockMsg::Desired { client_id, client_name: client_name.clone(), size });
+                        let _ = block.send(BlockMsg::Desired { client_id, client_name: client_name.clone(), label: label.clone(), size });
                     }
                     Ok(ClientData::Config(config)) => {
                         let _ = block.send(BlockMsg::Config { client_id, config });
@@ -499,10 +541,26 @@ mod tests {
     #[test]
     fn paired_devices_may_drive_browsers() {
         let remote = Peer::Remote { endpoint_id: "peer".into(), conn_id: 1 };
-        let report = Method::BrowserReport { block_id: "b".into(), url: "u".into(), title: String::new(), favicon: None, loading: false, history: Vec::new(), index: 0 };
+        let report = Method::BrowserReport {
+            block_id: "b".into(),
+            url: "u".into(),
+            title: String::new(),
+            favicon: None,
+            loading: false,
+            history: Vec::new(),
+            index: 0,
+        };
         for method in [Method::BrowserNavigate { block_id: "b".into(), url: "u".into() }, Method::BrowserBack { block_id: "b".into() }, report] {
             assert!(permitted(&remote, &method).is_ok());
         }
         assert_eq!(permitted(&remote, &Method::ServerShutdown {}).unwrap_err().code, RpcError::FORBIDDEN);
+    }
+
+    #[test]
+    fn label_is_short_with_a_distinct_device_name() {
+        assert_eq!(label("Silo 0.1.0 (macOS, pid 7)", None), "Silo");
+        assert_eq!(label("Silo 0.1.0 (macOS, pid 9)", Some("Silo 0.1.0 (macOS, pid 7)")), "Silo");
+        assert_eq!(label("silo cli", Some("work laptop")), "silo cli · work laptop");
+        assert_eq!(label("silo cli on mini", Some("silo cli on mini")), "silo cli on mini");
     }
 }

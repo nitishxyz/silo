@@ -23,27 +23,18 @@ impl std::fmt::Debug for HostKey {
 }
 
 fn insecure(path: &Path, reason: impl Into<String>) -> Error {
-    Error::InsecureKey {
-        path: path.to_path_buf(),
-        reason: reason.into(),
-    }
+    Error::InsecureKey { path: path.to_path_buf(), reason: reason.into() }
 }
 
 fn check_owner_mode(path: &Path, meta: &fs::Metadata) -> Result<()> {
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
     if meta.uid() != euid {
-        return Err(insecure(
-            path,
-            format!("owned by uid {}, expected {euid}", meta.uid()),
-        ));
+        return Err(insecure(path, format!("owned by uid {}, expected {euid}", meta.uid())));
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
-        return Err(insecure(
-            path,
-            format!("permissions {mode:o} allow group/other access"),
-        ));
+        return Err(insecure(path, format!("permissions {mode:o} allow group/other access")));
     }
     Ok(())
 }
@@ -97,10 +88,7 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
             check_owner_mode(dir, &meta)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)?;
+            fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
             // Enforce 0700 regardless of umask.
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
             Ok(())
@@ -118,17 +106,11 @@ fn load_existing(path: &PathBuf) -> Result<HostKey> {
         return Err(insecure(path, "key file is not a regular file"));
     }
     check_owner_mode(path, &meta)?;
-    let mut f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let mut f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
     let mut buf = Vec::with_capacity(KEY_LEN + 1);
     (&mut f).take(KEY_LEN as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() != KEY_LEN {
-        return Err(insecure(
-            path,
-            format!("wrong length {} (expected {KEY_LEN})", buf.len()),
-        ));
+        return Err(insecure(path, format!("wrong length {} (expected {KEY_LEN})", buf.len())));
     }
     let mut out = [0u8; KEY_LEN];
     out.copy_from_slice(&buf);
@@ -136,12 +118,7 @@ fn load_existing(path: &PathBuf) -> Result<HostKey> {
 }
 
 fn create_new(dir: &Path, path: &Path) -> Result<HostKey> {
-    let mut f: File = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let mut f: File = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)?;
     let key = HostKey::generate();
     let res = (|| -> std::io::Result<()> {
         f.set_permissions(fs::Permissions::from_mode(0o600))?;

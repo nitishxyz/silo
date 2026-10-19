@@ -9,11 +9,7 @@ use silo_web::layout::{FRAMEWORK, HELPER_SUFFIXES};
 pub const NAME: &str = "SiloWebOffscreen";
 
 fn plist(exe: &str, id: &str, helper: bool) -> String {
-    let ui = if helper {
-        "<key>LSUIElement</key><string>1</string>"
-    } else {
-        ""
-    };
+    let ui = if helper { "<key>LSUIElement</key><string>1</string>" } else { "" };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,17 +43,8 @@ pub fn assemble(dir: &Path, bin: &Path, cef_dir: &Path) -> Result<PathBuf> {
     let frameworks = dir.join(format!("{NAME}.app/Contents/Frameworks"));
     fs::create_dir_all(&frameworks)?;
     for suffix in HELPER_SUFFIXES {
-        let id = format!(
-            "dev.silo.web-offscreen.helper{}",
-            suffix.to_lowercase().replace([' ', '(', ')'], "")
-        );
-        app(
-            &frameworks,
-            &format!("{NAME} Helper{suffix}"),
-            &id,
-            bin,
-            true,
-        )?;
+        let id = format!("dev.silo.web-offscreen.helper{}", suffix.to_lowercase().replace([' ', '(', ')'], ""));
+        app(&frameworks, &format!("{NAME} Helper{suffix}"), &id, bin, true)?;
     }
     let link = frameworks.join(FRAMEWORK);
     if fs::symlink_metadata(&link).is_err() {

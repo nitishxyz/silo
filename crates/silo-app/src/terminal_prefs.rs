@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 use silo_proto::model::{CursorShape, TerminalConfig};
 
 pub const FILE: &str = "terminal.json";
-/// 2: an empty `font_family` means Automatic (see [`crate::fonts`]).
-pub const VERSION: u32 = 2;
 pub const DEFAULT_THEME: &str = "silo-dark";
 /// The default font preference: Automatic (first installed supported Nerd
 /// Font, else Menlo), stored as an empty family.
@@ -48,8 +46,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x00e8_e9ec,
         selection: 0x0074_bdf8,
         ansi: [
-            0x001d_1f21, 0x00e0_6c75, 0x0098_c379, 0x00e5_c07b, 0x0061_afef, 0x00c6_78dd, 0x0056_b6c2, 0x00ab_b2bf,
-            0x005c_6370, 0x00ef_7b84, 0x00a9_d48a, 0x00f0_cd8c, 0x0074_bdf8, 0x00d5_8ae8, 0x0066_c7d3, 0x00e6_e9ef,
+            0x001d_1f21,
+            0x00e0_6c75,
+            0x0098_c379,
+            0x00e5_c07b,
+            0x0061_afef,
+            0x00c6_78dd,
+            0x0056_b6c2,
+            0x00ab_b2bf,
+            0x005c_6370,
+            0x00ef_7b84,
+            0x00a9_d48a,
+            0x00f0_cd8c,
+            0x0074_bdf8,
+            0x00d5_8ae8,
+            0x0066_c7d3,
+            0x00e6_e9ef,
         ],
     },
     Palette {
@@ -60,8 +72,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x0052_6fff,
         selection: 0x0052_6fff,
         ansi: [
-            0x0038_3a42, 0x00e4_5649, 0x0050_a14f, 0x00c1_8401, 0x0001_84bc, 0x00a6_26a4, 0x0009_97b3, 0x00a0_a1a7,
-            0x004f_525e, 0x00e0_6c75, 0x0040_9140, 0x00b0_7a00, 0x0052_6fff, 0x00b0_5fc0, 0x0000_8b9c, 0x00ff_ffff,
+            0x0038_3a42,
+            0x00e4_5649,
+            0x0050_a14f,
+            0x00c1_8401,
+            0x0001_84bc,
+            0x00a6_26a4,
+            0x0009_97b3,
+            0x00a0_a1a7,
+            0x004f_525e,
+            0x00e0_6c75,
+            0x0040_9140,
+            0x00b0_7a00,
+            0x0052_6fff,
+            0x00b0_5fc0,
+            0x0000_8b9c,
+            0x00ff_ffff,
         ],
     },
     Palette {
@@ -72,8 +98,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x00e6_b450,
         selection: 0x0040_9fff,
         ansi: [
-            0x0011_151c, 0x00ea_6c73, 0x007f_d962, 0x00f9_af4f, 0x0053_bdfa, 0x00cd_a1fa, 0x0090_e1c6, 0x00c7_c7c7,
-            0x0068_6868, 0x00f0_7178, 0x00aa_d94c, 0x00ff_b454, 0x0059_c2ff, 0x00d2_a6ff, 0x0095_e6cb, 0x00ff_ffff,
+            0x0011_151c,
+            0x00ea_6c73,
+            0x007f_d962,
+            0x00f9_af4f,
+            0x0053_bdfa,
+            0x00cd_a1fa,
+            0x0090_e1c6,
+            0x00c7_c7c7,
+            0x0068_6868,
+            0x00f0_7178,
+            0x00aa_d94c,
+            0x00ff_b454,
+            0x0059_c2ff,
+            0x00d2_a6ff,
+            0x0095_e6cb,
+            0x00ff_ffff,
         ],
     },
     Palette {
@@ -84,8 +124,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x00f5_e0dc,
         selection: 0x0089_b4fa,
         ansi: [
-            0x0045_475a, 0x00f3_8ba8, 0x00a6_e3a1, 0x00f9_e2af, 0x0089_b4fa, 0x00f5_c2e7, 0x0094_e2d5, 0x00ba_c2de,
-            0x0058_5b70, 0x00f3_8ba8, 0x00a6_e3a1, 0x00f9_e2af, 0x0089_b4fa, 0x00f5_c2e7, 0x0094_e2d5, 0x00a6_adc8,
+            0x0045_475a,
+            0x00f3_8ba8,
+            0x00a6_e3a1,
+            0x00f9_e2af,
+            0x0089_b4fa,
+            0x00f5_c2e7,
+            0x0094_e2d5,
+            0x00ba_c2de,
+            0x0058_5b70,
+            0x00f3_8ba8,
+            0x00a6_e3a1,
+            0x00f9_e2af,
+            0x0089_b4fa,
+            0x00f5_c2e7,
+            0x0094_e2d5,
+            0x00a6_adc8,
         ],
     },
     Palette {
@@ -96,8 +150,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x00dc_8a78,
         selection: 0x001e_66f5,
         ansi: [
-            0x005c_5f77, 0x00d2_0f39, 0x0040_a02b, 0x00df_8e1d, 0x001e_66f5, 0x00ea_76cb, 0x0017_9299, 0x00ac_b0be,
-            0x006c_6f85, 0x00d2_0f39, 0x0040_a02b, 0x00df_8e1d, 0x001e_66f5, 0x00ea_76cb, 0x0017_9299, 0x00bc_c0cc,
+            0x005c_5f77,
+            0x00d2_0f39,
+            0x0040_a02b,
+            0x00df_8e1d,
+            0x001e_66f5,
+            0x00ea_76cb,
+            0x0017_9299,
+            0x00ac_b0be,
+            0x006c_6f85,
+            0x00d2_0f39,
+            0x0040_a02b,
+            0x00df_8e1d,
+            0x001e_66f5,
+            0x00ea_76cb,
+            0x0017_9299,
+            0x00bc_c0cc,
         ],
     },
     Palette {
@@ -108,8 +176,22 @@ pub const THEMES: &[Palette] = &[
         cursor: 0x00d8_dee9,
         selection: 0x0088_c0d0,
         ansi: [
-            0x003b_4252, 0x00bf_616a, 0x00a3_be8c, 0x00eb_cb8b, 0x0081_a1c1, 0x00b4_8ead, 0x0088_c0d0, 0x00e5_e9f0,
-            0x004c_566a, 0x00bf_616a, 0x00a3_be8c, 0x00eb_cb8b, 0x0081_a1c1, 0x00b4_8ead, 0x008f_bcbb, 0x00ec_eff4,
+            0x003b_4252,
+            0x00bf_616a,
+            0x00a3_be8c,
+            0x00eb_cb8b,
+            0x0081_a1c1,
+            0x00b4_8ead,
+            0x0088_c0d0,
+            0x00e5_e9f0,
+            0x004c_566a,
+            0x00bf_616a,
+            0x00a3_be8c,
+            0x00eb_cb8b,
+            0x0081_a1c1,
+            0x00b4_8ead,
+            0x008f_bcbb,
+            0x00ec_eff4,
         ],
     },
 ];
@@ -180,7 +262,6 @@ impl ColorOverrides {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalPrefs {
-    pub version: u32,
     pub theme: String,
     /// Exact installed family name, or empty for Automatic.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -195,7 +276,6 @@ pub struct TerminalPrefs {
 impl Default for TerminalPrefs {
     fn default() -> Self {
         Self {
-            version: VERSION,
             theme: DEFAULT_THEME.into(),
             font_family: DEFAULT_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
@@ -222,15 +302,6 @@ impl TerminalPrefs {
     #[must_use]
     pub fn validated(mut self) -> (Self, Vec<String>) {
         let mut problems = Vec::new();
-        if self.version > VERSION {
-            problems.push(format!("written by a newer Silo (version {}); unknown settings ignored", self.version));
-        }
-        // Version 1 always wrote its built-in default, Menlo; that becomes
-        // Automatic so the Nerd Font default applies.
-        if self.version < 2 && self.font_family.trim() == crate::fonts::FALLBACK_FONT {
-            self.font_family = DEFAULT_FONT.into();
-        }
-        self.version = VERSION;
         if palette(&self.theme).is_none() {
             problems.push(format!("theme \"{}\" is not built in; using Silo Dark", self.theme));
             self.theme = DEFAULT_THEME.into();
@@ -305,8 +376,12 @@ pub fn load(home: &Path) -> Loaded {
     let path = path(home);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded { prefs: TerminalPrefs::default(), problem: None },
-        Err(e) => return Loaded { prefs: TerminalPrefs::default(), problem: Some(format!("Could not read terminal settings: {e}")) },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Loaded { prefs: TerminalPrefs::default(), problem: None };
+        }
+        Err(e) => {
+            return Loaded { prefs: TerminalPrefs::default(), problem: Some(format!("Could not read terminal settings: {e}")) };
+        }
     };
     match serde_json::from_slice::<TerminalPrefs>(&bytes) {
         Ok(prefs) => {
@@ -414,7 +489,14 @@ mod tests {
     #[test]
     fn round_trip_and_atomic_save() {
         let home = temp_home("roundtrip");
-        let mut prefs = TerminalPrefs { theme: "nord".into(), font_size: 15.0, cursor_shape: CursorShape::Bar, cursor_blink: false, scrollback_lines: 50_000, ..TerminalPrefs::default() };
+        let mut prefs = TerminalPrefs {
+            theme: "nord".into(),
+            font_size: 15.0,
+            cursor_shape: CursorShape::Bar,
+            cursor_blink: false,
+            scrollback_lines: 50_000,
+            ..TerminalPrefs::default()
+        };
         prefs.colors.set(ColorSlot::Background, Some(0x0010_2030));
         save(&home, &prefs).unwrap();
         let loaded = load(&home);
@@ -483,27 +565,8 @@ mod tests {
         assert!(loaded.problem.is_none());
         // A family that is not installed is kept as written; the renderer
         // flags it and falls back (see `fonts::resolve`).
-        std::fs::write(path(&home), r#"{"version":2,"font_family":"Removed Mono"}"#).unwrap();
+        std::fs::write(path(&home), r#"{"font_family":"Removed Mono"}"#).unwrap();
         assert_eq!(load(&home).prefs.font_family, "Removed Mono");
-        let _ = std::fs::remove_dir_all(home);
-    }
-
-    #[test]
-    fn version_one_menlo_default_becomes_automatic() {
-        let home = temp_home("v1");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(path(&home), r#"{"version":1,"font_family":"Menlo","theme":"nord"}"#).unwrap();
-        let loaded = load(&home);
-        assert_eq!(loaded.prefs.font_family, DEFAULT_FONT);
-        assert_eq!(loaded.prefs.theme, "nord");
-        assert_eq!(loaded.prefs.version, VERSION);
-        assert!(loaded.problem.is_none());
-        // Another explicit version-1 family is kept.
-        std::fs::write(path(&home), r#"{"version":1,"font_family":"Monaco"}"#).unwrap();
-        assert_eq!(load(&home).prefs.font_family, "Monaco");
-        // From version 2 on, Menlo is an explicit choice.
-        std::fs::write(path(&home), r#"{"version":2,"font_family":"Menlo"}"#).unwrap();
-        assert_eq!(load(&home).prefs.font_family, "Menlo");
         let _ = std::fs::remove_dir_all(home);
     }
 

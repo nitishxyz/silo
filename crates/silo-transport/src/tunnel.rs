@@ -57,11 +57,7 @@ impl std::fmt::Display for TunnelErr {
 
 impl std::error::Error for TunnelErr {}
 
-async fn write_json<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    kind: u8,
-    value: &impl Serialize,
-) -> io::Result<()> {
+async fn write_json<W: AsyncWrite + Unpin>(w: &mut W, kind: u8, value: &impl Serialize) -> io::Result<()> {
     let payload = serde_json::to_vec(value)?;
     let mut out = Vec::with_capacity(5 + payload.len());
     out.extend_from_slice(&((payload.len() + 1) as u32).to_le_bytes());
@@ -76,10 +72,7 @@ async fn read_raw<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(u8, Vec<u8>)> 
     r.read_exact(&mut len).await?;
     let len = u32::from_le_bytes(len) as usize;
     if len == 0 || len > MAX_HANDSHAKE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("bad tunnel frame length {len}"),
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad tunnel frame length {len}")));
     }
     let mut buf = vec![0; len];
     r.read_exact(&mut buf).await?;
@@ -93,20 +86,8 @@ fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error 
 
 /// Client side: request `host:port` and wait for the verdict. A
 /// [`TunnelErr`] is returned inside the `io::Error` (`get_ref`).
-pub async fn open<S: AsyncRead + AsyncWrite + Unpin>(
-    s: &mut S,
-    host: &str,
-    port: u16,
-) -> io::Result<()> {
-    write_json(
-        s,
-        kind::OPEN,
-        &TunnelOpen {
-            host: host.to_owned(),
-            port,
-        },
-    )
-    .await?;
+pub async fn open<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, host: &str, port: u16) -> io::Result<()> {
+    write_json(s, kind::OPEN, &TunnelOpen { host: host.to_owned(), port }).await?;
     match read_raw(s).await? {
         (kind::OK, _) => Ok(()),
         (kind::ERR, payload) => {
@@ -121,17 +102,12 @@ pub async fn open<S: AsyncRead + AsyncWrite + Unpin>(
 pub async fn read_open<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<TunnelOpen> {
     match read_raw(r).await? {
         (kind::OPEN, payload) => serde_json::from_slice(&payload).map_err(invalid),
-        (other, _) => Err(invalid(format!(
-            "expected tunnel open, got kind {other:#x}"
-        ))),
+        (other, _) => Err(invalid(format!("expected tunnel open, got kind {other:#x}"))),
     }
 }
 
 /// Server side: answer the handshake.
-pub async fn reply<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    verdict: Result<(), TunnelErrCode>,
-) -> io::Result<()> {
+pub async fn reply<W: AsyncWrite + Unpin>(w: &mut W, verdict: Result<(), TunnelErrCode>) -> io::Result<()> {
     match verdict {
         Ok(()) => write_json(w, kind::OK, &serde_json::json!({})).await,
         Err(code) => write_json(w, kind::ERR, &TunnelErr { code }).await,
@@ -159,23 +135,14 @@ where
         let Ok((from_a, read)) = step.await else {
             return;
         };
-        let done = if from_a {
-            forward(read, &abuf, &mut a_open, &mut bw).await
-        } else {
-            forward(read, &bbuf, &mut b_open, &mut aw).await
-        };
+        let done = if from_a { forward(read, &abuf, &mut a_open, &mut bw).await } else { forward(read, &bbuf, &mut b_open, &mut aw).await };
         if done.is_err() {
             return;
         }
     }
 }
 
-async fn forward<W: AsyncWrite + Unpin>(
-    read: io::Result<usize>,
-    buf: &[u8],
-    open: &mut bool,
-    w: &mut W,
-) -> io::Result<()> {
+async fn forward<W: AsyncWrite + Unpin>(read: io::Result<usize>, buf: &[u8], open: &mut bool, w: &mut W) -> io::Result<()> {
     match read? {
         0 => {
             *open = false;
@@ -192,10 +159,7 @@ pub fn is_private_host(host: &str) -> bool {
     if h == "localhost" || h.ends_with(".localhost") {
         return true;
     }
-    let literal = h
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(&h);
+    let literal = h.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(&h);
     literal.parse::<IpAddr>().is_ok_and(is_private_ip)
 }
 
@@ -270,17 +234,7 @@ mod tests {
 
     #[test]
     fn non_public_ips() {
-        for ip in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "169.254.169.254",
-            "0.0.0.0",
-            "::",
-            "::1",
-            "fe80::1",
-            "fd00::1",
-            "::ffff:169.254.1.1",
-        ] {
+        for ip in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "0.0.0.0", "::", "::1", "fe80::1", "fd00::1", "::ffff:169.254.1.1"] {
             assert!(is_non_public_ip(ip.parse().unwrap()), "{ip}");
         }
         for ip in ["8.8.8.8", "172.32.0.1", "2001:db8::1", "::ffff:1.1.1.1"] {
@@ -293,28 +247,12 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(256);
         let srv = tokio::spawn(async move {
             let open = read_open(&mut server).await.unwrap();
-            assert_eq!(
-                open,
-                TunnelOpen {
-                    host: "localhost".into(),
-                    port: 80
-                }
-            );
-            reply(&mut server, Err(TunnelErrCode::Forbidden))
-                .await
-                .unwrap();
+            assert_eq!(open, TunnelOpen { host: "localhost".into(), port: 80 });
+            reply(&mut server, Err(TunnelErrCode::Forbidden)).await.unwrap();
         });
         let err = open(&mut client, "localhost", 80).await.unwrap_err();
-        let err = err
-            .get_ref()
-            .and_then(|e| e.downcast_ref::<TunnelErr>())
-            .copied();
-        assert_eq!(
-            err,
-            Some(TunnelErr {
-                code: TunnelErrCode::Forbidden
-            })
-        );
+        let err = err.get_ref().and_then(|e| e.downcast_ref::<TunnelErr>()).copied();
+        assert_eq!(err, Some(TunnelErr { code: TunnelErrCode::Forbidden }));
         srv.await.unwrap();
     }
 }

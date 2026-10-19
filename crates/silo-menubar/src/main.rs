@@ -18,8 +18,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu,
-    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, NSTimer};
 use tokio::sync::mpsc::UnboundedSender;
@@ -37,7 +37,9 @@ pub enum AppLauncher {
 
 impl AppLauncher {
     fn find() -> Self {
-        let Ok(exe) = std::env::current_exe() else { return Self::None };
+        let Ok(exe) = std::env::current_exe() else {
+            return Self::None;
+        };
         let exe = exe.canonicalize().unwrap_or(exe);
         // .../Silo.app/Contents/MacOS/silo-menubar
         if let Some(bundle) = exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|e| e == "app")) {
@@ -167,7 +169,9 @@ impl Controller {
     /// Ask before "Quit Silo" ends running sessions; true to go ahead.
     fn confirm_quit(&self) -> bool {
         let sessions = self.ivars().shared.state.lock().map_or(0, |s| s.running_sessions());
-        let Some(warning) = quit_warning(sessions) else { return true };
+        let Some(warning) = quit_warning(sessions) else {
+            return true;
+        };
         let mtm = MainThreadMarker::from(self);
         let alert = NSAlert::new(mtm);
         alert.setAlertStyle(NSAlertStyle::Warning);
@@ -263,21 +267,12 @@ fn main() {
     let cmds = net::spawn(net::Config { home }, shared.clone());
     let controller = Controller::new(
         mtm,
-        Ivars {
-            shared,
-            cmds,
-            app: launcher,
-            item: RefCell::new(None),
-            actions: RefCell::new(Vec::new()),
-            seen: Cell::new(u64::MAX),
-        },
+        Ivars { shared, cmds, app: launcher, item: RefCell::new(None), actions: RefCell::new(Vec::new()), seen: Cell::new(u64::MAX) },
     );
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     *controller.ivars().item.borrow_mut() = Some(item);
     controller.rebuild();
-    let _timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, &controller, sel!(tick:), None, true)
-    };
+    let _timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, &controller, sel!(tick:), None, true) };
     app.run();
 }
 

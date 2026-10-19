@@ -33,7 +33,7 @@ jobs:
       - name: Build libghostty-vt
         run: ZIG="$(command -v zig)" bash scripts/build-ghostty.sh
       - name: Test
-        run: cargo test -p silo-pty -p silo-store -p silo-proto -p silo-server -p silo-client -p silo-transport -p silo-cli
+        run: cargo test -p silo-vt -p silo-pty -p silo-store -p silo-proto -p silo-server -p silo-client -p silo-transport -p silo-cli
       - name: Build silo
         run: cargo build -p silo-cli --release
       - uses: actions/upload-artifact@v4

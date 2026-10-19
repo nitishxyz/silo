@@ -14,9 +14,7 @@ pub fn home() -> PathBuf {
     if cfg!(target_os = "macos") {
         return user_home.join("Library/Application Support/silo");
     }
-    std::env::var_os("XDG_STATE_HOME")
-        .map_or_else(|| user_home.join(".local/state"), PathBuf::from)
-        .join("silo")
+    std::env::var_os("XDG_STATE_HOME").map_or_else(|| user_home.join(".local/state"), PathBuf::from).join("silo")
 }
 
 #[must_use]

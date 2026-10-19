@@ -77,13 +77,10 @@ pub fn is_nerd(name: &str) -> bool {
 /// Font candidate (installed spelling), else the fallback.
 #[must_use]
 pub fn automatic(installed: &[String]) -> Automatic {
-    NERD_FONT_CANDIDATES
-        .iter()
-        .find_map(|c| find(c, installed))
-        .map_or_else(
-            || Automatic { family: find(FALLBACK_FONT, installed).cloned().unwrap_or_else(|| FALLBACK_FONT.into()), nerd: false },
-            |family| Automatic { family: family.clone(), nerd: true },
-        )
+    NERD_FONT_CANDIDATES.iter().find_map(|c| find(c, installed)).map_or_else(
+        || Automatic { family: find(FALLBACK_FONT, installed).cloned().unwrap_or_else(|| FALLBACK_FONT.into()), nerd: false },
+        |family| Automatic { family: family.clone(), nerd: true },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +150,9 @@ pub fn ui_picker_order(mut families: Vec<String>) -> Vec<String> {
 /// Advances of `i`, `M`, `W` and `0` in one face: equal for monospaced.
 #[must_use]
 pub fn is_monospace(advances: &[f32]) -> bool {
-    let Some(first) = advances.first() else { return false };
+    let Some(first) = advances.first() else {
+        return false;
+    };
     *first > 0.0 && advances.iter().all(|a| (a - first).abs() <= 0.01 * first.max(1.0))
 }
 
@@ -176,9 +175,22 @@ pub fn picker_order(mut families: Vec<String>) -> Vec<String> {
     families
 }
 
+/// Installed families not probed yet (`cached` maps probed names).
+#[must_use]
+pub fn to_probe<V>(cached: &std::collections::HashMap<String, V>, installed: &[String]) -> Vec<String> {
+    installed.iter().filter(|name| !cached.contains_key(*name)).cloned().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_added_families_are_probed() {
+        let cached: std::collections::HashMap<String, ()> = [("Menlo".to_owned(), ()), ("Gone".to_owned(), ())].into();
+        assert_eq!(to_probe(&cached, &installed(&["Menlo", "Monaco", "Hack"])), installed(&["Monaco", "Hack"]));
+        assert!(to_probe(&cached, &installed(&["Menlo"])).is_empty());
+    }
 
     fn installed(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| (*s).to_owned()).collect()

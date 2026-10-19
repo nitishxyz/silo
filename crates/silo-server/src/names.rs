@@ -2,19 +2,17 @@
 //! hyphenated ("mellow-otter", "jhatpat-badal").
 
 const FIRST: &[&str] = &[
-    "mellow", "fuzzy", "jolly", "breezy", "cosy", "dizzy", "gentle", "happy", "lazy", "lucky", "merry", "nimble",
-    "peppy", "quiet", "rusty", "snappy", "sunny", "tiny", "witty", "zesty", "bouncy", "cheeky", "dapper", "fizzy",
-    "giddy", "humble", "jumpy", "plucky", "spry", "toasty", "wobbly", "zippy", "chatpata", "jhatpat", "masti",
-    "tez", "chulbul", "nakhra", "dhoom", "jugaadu", "khatta", "meetha", "tadka", "rangeela", "chamak", "fataft",
-    "gol", "halka", "mast", "shaant", "jhakkas", "bindaas", "chillax", "nifty", "brisk", "crisp", "dandy", "keen",
+    "mellow", "fuzzy", "jolly", "breezy", "cosy", "dizzy", "gentle", "happy", "lazy", "lucky", "merry", "nimble", "peppy", "quiet", "rusty",
+    "snappy", "sunny", "tiny", "witty", "zesty", "bouncy", "cheeky", "dapper", "fizzy", "giddy", "humble", "jumpy", "plucky", "spry", "toasty",
+    "wobbly", "zippy", "chatpata", "jhatpat", "masti", "tez", "chulbul", "nakhra", "dhoom", "jugaadu", "khatta", "meetha", "tadka", "rangeela",
+    "chamak", "fataft", "gol", "halka", "mast", "shaant", "jhakkas", "bindaas", "chillax", "nifty", "brisk", "crisp", "dandy", "keen",
 ];
 
 const SECOND: &[&str] = &[
-    "otter", "lantern", "badal", "pakora", "samosa", "panda", "kettle", "pebble", "comet", "mango", "noodle",
-    "pickle", "rocket", "teacup", "walrus", "biscuit", "cactus", "dhimkana", "falooda", "jalebi", "kulfi", "ladoo",
-    "chai", "tota", "bandar", "titli", "machli", "chidiya", "patang", "bulbul", "dhaba", "rickshaw", "tamasha",
-    "barfi", "gulab", "chandni", "sitara", "toofan", "jhoola", "lassi", "parrot", "badger", "maple", "acorn",
-    "harbor", "meadow", "pretzel", "quokka", "sparrow", "tortoise", "waffle", "yak", "zebra", "puffin", "fennel",
+    "otter", "lantern", "badal", "pakora", "samosa", "panda", "kettle", "pebble", "comet", "mango", "noodle", "pickle", "rocket", "teacup", "walrus",
+    "biscuit", "cactus", "dhimkana", "falooda", "jalebi", "kulfi", "ladoo", "chai", "tota", "bandar", "titli", "machli", "chidiya", "patang",
+    "bulbul", "dhaba", "rickshaw", "tamasha", "barfi", "gulab", "chandni", "sitara", "toofan", "jhoola", "lassi", "parrot", "badger", "maple",
+    "acorn", "harbor", "meadow", "pretzel", "quokka", "sparrow", "tortoise", "waffle", "yak", "zebra", "puffin", "fennel",
 ];
 
 /// A random name; `taken` rejects names already in use.
@@ -29,12 +27,8 @@ pub fn generate(taken: impl Fn(&str) -> bool) -> String {
     }
     // Practically unreachable (3000+ combinations); add a suffix.
     loop {
-        let name = format!(
-            "{}-{}-{}",
-            FIRST[rand::random_range(0..FIRST.len())],
-            SECOND[rand::random_range(0..SECOND.len())],
-            rand::random_range(2..1000)
-        );
+        let name =
+            format!("{}-{}-{}", FIRST[rand::random_range(0..FIRST.len())], SECOND[rand::random_range(0..SECOND.len())], rand::random_range(2..1000));
         if !taken(&name) {
             return name;
         }

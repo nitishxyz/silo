@@ -29,24 +29,13 @@ impl Layout {
         let contents = macos.parent().context("exe not inside Contents/MacOS")?;
         let app = contents.parent().context("exe not inside a .app")?;
         if macos.file_name() != Some("MacOS".as_ref()) || app.extension() != Some("app".as_ref()) {
-            bail!(
-                "{} is not inside <Name>.app/Contents/MacOS (CEF needs the bundle layout)",
-                exe.display()
-            );
+            bail!("{} is not inside <Name>.app/Contents/MacOS (CEF needs the bundle layout)", exe.display());
         }
-        let name = app
-            .file_stem()
-            .context("bundle name")?
-            .to_string_lossy()
-            .into_owned();
+        let name = app.file_stem().context("bundle name")?.to_string_lossy().into_owned();
         let frameworks = contents.join("Frameworks");
         let helper_name = format!("{name} Helper");
         let helper = frameworks.join(format!("{helper_name}.app/Contents/MacOS/{helper_name}"));
-        Ok(Layout {
-            app: app.to_path_buf(),
-            frameworks,
-            helper,
-        })
+        Ok(Layout { app: app.to_path_buf(), frameworks, helper })
     }
 
     pub fn framework(&self) -> PathBuf {

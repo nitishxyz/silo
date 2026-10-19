@@ -17,12 +17,7 @@ pub(crate) fn span_rectangle(
         return None;
     }
     let end = end.min(columns);
-    Some((
-        f32::from(start) * cell_width,
-        f32::from(row) * cell_height,
-        f32::from(end - start) * cell_width,
-        cell_height,
-    ))
+    Some((f32::from(start) * cell_width, f32::from(row) * cell_height, f32::from(end - start) * cell_width, cell_height))
 }
 
 #[cfg(test)]
@@ -31,15 +26,8 @@ mod tests {
 
     #[test]
     fn spans_are_clipped_to_the_grid_and_empty_spans_are_skipped() {
-        assert_eq!(
-            span_rectangle(2, 3, 7, 80, 24, 8.0, 20.0),
-            Some((24.0, 40.0, 32.0, 20.0))
-        );
-        assert_eq!(
-            span_rectangle(0, 78, 90, 80, 24, 8.0, 20.0),
-            Some((624.0, 0.0, 16.0, 20.0)),
-            "clipped to the last column"
-        );
+        assert_eq!(span_rectangle(2, 3, 7, 80, 24, 8.0, 20.0), Some((24.0, 40.0, 32.0, 20.0)));
+        assert_eq!(span_rectangle(0, 78, 90, 80, 24, 8.0, 20.0), Some((624.0, 0.0, 16.0, 20.0)), "clipped to the last column");
         assert_eq!(span_rectangle(24, 0, 1, 80, 24, 8.0, 20.0), None);
         assert_eq!(span_rectangle(0, 80, 81, 80, 24, 8.0, 20.0), None);
         assert_eq!(span_rectangle(0, 5, 5, 80, 24, 8.0, 20.0), None);

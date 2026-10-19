@@ -24,7 +24,14 @@ fn temp_home(name: &str) -> PathBuf {
 
 fn config(home: &Path) -> silo_server::Config {
     let interval = Duration::from_millis(200);
-    silo_server::Config { home: home.to_owned(), idle_exit: None, checkpoint_interval: interval, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() }
+    silo_server::Config {
+        home: home.to_owned(),
+        idle_exit: None,
+        checkpoint_interval: interval,
+        relay: silo_server::RelayConfig::Disabled,
+        mdns: false,
+        ..Default::default()
+    }
 }
 
 async fn start(home: &Path) -> JoinHandle<anyhow::Result<()>> {
@@ -59,7 +66,13 @@ async fn stop(control: Control, task: JoinHandle<anyhow::Result<()>>) {
 async fn browser(control: &Control, url: &str) -> Created {
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
     let main: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split = Method::BlockSplit { block_id: main.block_id, axis: Axis::Horizontal, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some(url.into()) };
+    let split = Method::BlockSplit {
+        block_id: main.block_id,
+        axis: Axis::Horizontal,
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Browser,
+        url: Some(url.into()),
+    };
     control.call(split).await.unwrap()
 }
 
@@ -79,7 +92,15 @@ fn code(error: &anyhow::Error) -> &str {
 fn report(created: &Created, urls: &[&str], index: usize) -> Method {
     let history = urls.iter().map(|u| HistoryEntry { url: (*u).into(), title: format!("t-{u}") }).collect();
     let url = urls.get(index).copied().unwrap_or_default();
-    Method::BrowserReport { block_id: created.block_id.clone(), url: url.into(), title: format!("t-{url}"), favicon: None, loading: false, history, index }
+    Method::BrowserReport {
+        block_id: created.block_id.clone(),
+        url: url.into(),
+        title: format!("t-{url}"),
+        favicon: None,
+        loading: false,
+        history,
+        index,
+    }
 }
 
 /// The next browser command event.
@@ -121,7 +142,13 @@ async fn split_creates_browser_and_commands_edit_history() {
         let error = control.call_value(Method::BrowserNavigate { block_id: id.clone(), url: url.into() }).await.unwrap_err();
         assert_eq!(code(&error), "bad_request", "{url}");
     }
-    let split = Method::BlockSplit { block_id: id.clone(), axis: Axis::Vertical, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some("file:///".into()) };
+    let split = Method::BlockSplit {
+        block_id: id.clone(),
+        axis: Axis::Vertical,
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Browser,
+        url: Some("file:///".into()),
+    };
     assert_eq!(code(&control.call_value(split).await.unwrap_err()), "bad_request");
     assert_eq!(state(&control, &created).await.url, "https://example.com", "rejected urls change nothing");
     control.call_value(Method::BrowserForward { block_id: id.clone() }).await.unwrap();
@@ -179,7 +206,15 @@ async fn report_is_owner_only() {
     let error = a.call_value(report(&created, &["https://x.test"], 1)).await.unwrap_err();
     assert_eq!(code(&error), "bad_request");
     let long = format!("https://x.test/{}", "a".repeat(8 * 1024));
-    let long_title = Method::BrowserReport { block_id: created.block_id.clone(), url: "https://x.test".into(), title: "t".repeat(8 * 1024 + 1), favicon: None, loading: false, history: vec![HistoryEntry { url: "https://x.test".into(), title: String::new() }], index: 0 };
+    let long_title = Method::BrowserReport {
+        block_id: created.block_id.clone(),
+        url: "https://x.test".into(),
+        title: "t".repeat(8 * 1024 + 1),
+        favicon: None,
+        loading: false,
+        history: vec![HistoryEntry { url: "https://x.test".into(), title: String::new() }],
+        index: 0,
+    };
     for method in [report(&created, &[&long], 0), report(&created, &["https://x.test", &long], 0), long_title] {
         assert_eq!(code(&a.call_value(method).await.unwrap_err()), "bad_request");
     }

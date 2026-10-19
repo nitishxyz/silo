@@ -5,14 +5,35 @@
 //! left, the selected page on the right made of grouped, aligned rows.
 
 use gpui::{
-    Anchor, AnyElement, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render,
-    ScrollHandle, Subscription, Window, anchored, deferred, div, prelude::*, px, rgb,
+    Anchor, AnyElement, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render, ScrollHandle, Subscription,
+    Window, anchored, deferred, div, prelude::*, px, rgb,
 };
 
 pub use crate::hosts::Density;
 pub use crate::terminal_prefs::ColorSlot;
-pub use silo_proto::model::CursorShape;
 use crate::theme::Continuous as _;
+pub use silo_proto::model::CursorShape;
+
+type TriggerBounds = std::rc::Rc<std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>)>>>;
+
+/// The font menu's anchor and window position: left-aligned under the
+/// trigger, or above it when it does not fit below and there is more room
+/// above.
+fn font_menu_place(
+    trigger: gpui::Bounds<gpui::Pixels>,
+    viewport: gpui::Size<gpui::Pixels>,
+    menu_height: gpui::Pixels,
+) -> (Anchor, gpui::Point<gpui::Pixels>) {
+    const GAP: f32 = 4.0;
+    const MARGIN: f32 = 8.0;
+    let below = viewport.height - trigger.bottom() - px(GAP + MARGIN);
+    let above = trigger.top() - px(GAP + MARGIN);
+    if below < menu_height && above > below {
+        (Anchor::BottomLeft, gpui::point(trigger.left(), trigger.top() - px(GAP)))
+    } else {
+        (Anchor::TopLeft, gpui::point(trigger.left(), trigger.bottom() + px(GAP)))
+    }
+}
 use crate::{
     assets::icon,
     controls::{Segmented, Toggle},
@@ -393,6 +414,9 @@ pub struct SettingsPanel {
     font_query: String,
     font_highlight: usize,
     font_scroll: ScrollHandle,
+    /// Window bounds of each font trigger (terminal, UI) and the viewport
+    /// size, from the last prepaint: where the font menu opens.
+    font_triggers: [TriggerBounds; 2],
     color_fields: Vec<(ColorSlot, Entity<TextField>)>,
     scrollback_field: Entity<TextField>,
     /// Input that could not be applied (bad hex, number out of range).
@@ -489,6 +513,7 @@ impl SettingsPanel {
             font_query: String::new(),
             font_highlight: 0,
             font_scroll: ScrollHandle::new(),
+            font_triggers: Default::default(),
             color_fields,
             scrollback_field,
             field_error: None,
@@ -614,23 +639,47 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn emit_button(
-        id: impl Into<gpui::ElementId>,
-        label: &'static str,
-        event: SettingsEvent,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn emit_button(id: impl Into<gpui::ElementId>, label: &'static str, event: SettingsEvent, cx: &mut Context<Self>) -> AnyElement {
         Self::button(id, label, ButtonKind::Secondary, move |_, cx| cx.emit(event.clone()), cx)
+    }
+
+    /// `terminal.json` with reveal, edit and reload icon buttons.
+    fn config_line(&self, cx: &mut Context<Self>) -> AnyElement {
+        let action = |id: &'static str, glyph: &'static str, tip: &'static str, event: SettingsEvent, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .size(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .continuous(6.0)
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(theme::tab_hover())))
+                .tooltip(crate::tooltip::Tooltip::text(tip))
+                .child(icon(glyph, 13.0, theme::muted()))
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .flex_1()
+                    .font_family(self.snapshot.terminal.font_in_use.clone())
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme::muted()))
+                    .child(terminal_prefs::FILE),
+            )
+            .child(action("settings-terminal-reveal", "settings-search", "Show in Finder", SettingsEvent::RevealConfig, cx))
+            .child(action("settings-terminal-config", "forward", "Edit", SettingsEvent::OpenConfig, cx))
+            .child(action("settings-terminal-reload", "reload", "Reload", SettingsEvent::ReloadTerminal, cx))
+            .into_any_element()
     }
 
     /// One aligned preference row: title (and optional description) on the
     /// left, control on the right; stacks when the content is narrow.
-    fn row(
-        title: impl Into<gpui::SharedString>,
-        description: Option<gpui::SharedString>,
-        control: Option<AnyElement>,
-        narrow: bool,
-    ) -> AnyElement {
+    fn row(title: impl Into<gpui::SharedString>, description: Option<gpui::SharedString>, control: Option<AnyElement>, narrow: bool) -> AnyElement {
         div()
             .w_full()
             .min_h(px(ROW_MIN_H))
@@ -648,9 +697,7 @@ impl SettingsPanel {
                     .flex_col()
                     .gap(px(2.0))
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).child(title.into()))
-                    .children(description.map(|d| {
-                        div().text_size(px(11.5)).line_height(px(15.0)).text_color(rgb(theme::muted())).child(d)
-                    })),
+                    .children(description.map(|d| div().text_size(px(11.5)).line_height(px(15.0)).text_color(rgb(theme::muted())).child(d))),
             )
             .children(control.map(|c| div().flex_none().max_w_full().flex().items_center().gap(px(6.0)).child(c)))
             .into_any_element()
@@ -692,14 +739,7 @@ impl SettingsPanel {
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .children(title.map(|t| {
-                div()
-                    .px(px(4.0))
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::muted()))
-                    .child(t)
-            }))
+            .children(title.map(|t| div().px(px(4.0)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::muted())).child(t)))
             .child(card)
             .into_any_element()
     }
@@ -709,13 +749,7 @@ impl SettingsPanel {
     }
 
     /// The kit-style animated switch; reports the requested state.
-    fn switch(
-        id: &'static str,
-        label: &'static str,
-        on: bool,
-        event: fn(bool) -> SettingsEvent,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn switch(id: &'static str, label: &'static str, on: bool, event: fn(bool) -> SettingsEvent, cx: &mut Context<Self>) -> AnyElement {
         let panel = cx.entity().downgrade();
         Toggle::new(id, label, on)
             .on_toggle(move |value, _, cx| {
@@ -776,14 +810,7 @@ impl SettingsPanel {
     }
 
     fn swatch(color: u32, size: f32) -> AnyElement {
-        div()
-            .flex_none()
-            .size(px(size))
-            .continuous(5.0)
-            .bg(rgb(color))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .into_any_element()
+        div().flex_none().size(px(size)).continuous(5.0).bg(rgb(color)).border_1().border_color(rgb(theme::border())).into_any_element()
     }
 
     /// A small rendering of the effective terminal colors in the chosen
@@ -992,9 +1019,11 @@ impl SettingsPanel {
             // Escape the card's clipping: draw above everything, anchored
             // under the trigger's right edge, kept inside the window.
             root = root.child(
-                div().absolute().top(px(32.0)).right_0().child(deferred(
-                    anchored().anchor(Anchor::TopRight).snap_to_window_with_margin(px(8.0)).child(list),
-                ).with_priority(1)),
+                div()
+                    .absolute()
+                    .top(px(32.0))
+                    .right_0()
+                    .child(deferred(anchored().anchor(Anchor::TopRight).snap_to_window_with_margin(px(8.0)).child(list)).with_priority(1)),
             );
         }
         root.into_any_element()
@@ -1023,8 +1052,7 @@ impl SettingsPanel {
         self.font_menu = Some(target);
         self.font_query.clear();
         self.font_search.update(cx, |f, cx| f.replace_text("", cx));
-        self.font_highlight =
-            self.font_entries(target, "").iter().position(|e| self.font_selected(target, e.as_deref())).unwrap_or(0);
+        self.font_highlight = self.font_entries(target, "").iter().position(|e| self.font_selected(target, e.as_deref())).unwrap_or(0);
         self.font_scroll.scroll_to_item(self.font_highlight);
         let focus = self.font_search.read(cx).focus.clone();
         focus.focus(window, cx);
@@ -1119,30 +1147,25 @@ impl SettingsPanel {
             .border_color(rgb(border))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(theme::row_active())))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_size(px(12.5))
-                    .child(label),
-            )
+            .child(div().flex_1().min_w_0().text_ellipsis().whitespace_nowrap().overflow_hidden().text_size(px(12.5)).child(label))
             .child(icon("chevron", 11.0, theme::muted()))
             .on_click(cx.listener(move |this, _, window, cx| this.open_font_menu(target, window, cx)));
 
-        let mut root = div().relative().child(trigger);
+        let placed = self.font_triggers[usize::from(target == FontTarget::Ui)].clone();
+        let last = placed.get();
+        let mut root = div().relative().child(trigger).on_children_prepainted(move |bounds, window, _| {
+            let now = bounds.first().map(|b| (*b, window.viewport_size()));
+            if placed.get() != now {
+                placed.set(now);
+                window.refresh();
+            }
+        });
         if open {
             let entries = self.font_entries(target, &self.font_query);
-            let mut list = div()
-                .id("settings-font-list")
-                .max_h(px(264.0))
-                .overflow_y_scroll()
-                .track_scroll(&self.font_scroll)
-                .p(px(4.0))
-                .flex()
-                .flex_col();
+            #[allow(clippy::cast_precision_loss)]
+            let menu_height = px(36.0 + (entries.len().max(1) as f32 * 26.0 + 8.0).min(264.0));
+            let mut list =
+                div().id("settings-font-list").max_h(px(264.0)).overflow_y_scroll().track_scroll(&self.font_scroll).p(px(4.0)).flex().flex_col();
             if entries.is_empty() {
                 list = list.child(div().px(px(8.0)).py(px(6.0)).text_size(px(12.0)).text_color(rgb(theme::muted())).child("No matching fonts"));
             }
@@ -1150,9 +1173,7 @@ impl SettingsPanel {
                 let selected = self.font_selected(target, entry.as_deref());
                 let highlighted = index == self.font_highlight;
                 let (name, detail, face): (String, Option<String>, gpui::SharedString) = match (&entry, target) {
-                    (None, FontTarget::Terminal) => {
-                        ("Automatic".into(), Some(self.snapshot.terminal.font_automatic.clone()), theme::ui_font())
-                    }
+                    (None, FontTarget::Terminal) => ("Automatic".into(), Some(self.snapshot.terminal.font_automatic.clone()), theme::ui_font()),
                     (None, FontTarget::Ui) => ("Automatic".into(), Some("System font".into()), crate::fonts::UI_SYSTEM_FONT.into()),
                     (Some(family), FontTarget::Terminal) => {
                         (family.clone(), crate::fonts::is_nerd(family).then(|| "Nerd Font".into()), family.clone().into())
@@ -1205,7 +1226,7 @@ impl SettingsPanel {
             }
             let menu = div()
                 .id("settings-font-menu")
-                .w(px(300.0))
+                .w(last.map_or(px(260.0), |(b, _)| b.size.width.max(px(260.0))))
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -1232,11 +1253,12 @@ impl SettingsPanel {
                         .child(self.font_search.clone()),
                 )
                 .child(list);
-            root = root.child(
-                div().absolute().top(px(32.0)).right_0().child(
-                    deferred(anchored().anchor(Anchor::TopRight).snap_to_window_with_margin(px(8.0)).child(menu)).with_priority(1),
-                ),
-            );
+            let mut place = anchored().snap_to_window_with_margin(px(8.0));
+            if let Some((trigger, viewport)) = last {
+                let (anchor, at) = font_menu_place(trigger, viewport, menu_height);
+                place = place.position_mode(gpui::AnchoredPositionMode::Window).anchor(anchor).position(at);
+            }
+            root = root.child(div().absolute().top(px(32.0)).left_0().child(deferred(place.child(menu)).with_priority(1)));
         }
         root.into_any_element()
     }
@@ -1263,6 +1285,7 @@ impl SettingsPanel {
             out.push(banner.into_any_element());
         }
         out.push(self.terminal_preview());
+        out.push(self.config_line(cx));
 
         out.push(Self::group(None, vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-terminal-theme", cx)), false)]));
 
@@ -1321,7 +1344,12 @@ impl SettingsPanel {
                     )),
                     narrow,
                 ),
-                Self::row("Blinking", None, Some(Self::switch("settings-cursor-blink", "Cursor blinking", blink, SettingsEvent::SetCursorBlink, cx)), false),
+                Self::row(
+                    "Blinking",
+                    None,
+                    Some(Self::switch("settings-cursor-blink", "Cursor blinking", blink, SettingsEvent::SetCursorBlink, cx)),
+                    false,
+                ),
             ],
         ));
 
@@ -1352,24 +1380,6 @@ impl SettingsPanel {
                 false,
             )],
         ));
-
-        out.push(Self::group(
-            Some("Settings file"),
-            vec![Self::row(
-                "terminal.json",
-                None,
-                Some(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .child(Self::emit_button("settings-terminal-reveal", "Show in Finder", SettingsEvent::RevealConfig, cx))
-                        .child(Self::emit_button("settings-terminal-config", "Edit", SettingsEvent::OpenConfig, cx))
-                        .child(Self::emit_button("settings-terminal-reload", "Reload", SettingsEvent::ReloadTerminal, cx))
-                        .into_any_element(),
-                ),
-                narrow,
-            )],
-        ));
         out
     }
 
@@ -1384,49 +1394,27 @@ impl SettingsPanel {
                 out.push(Self::group(
                     Some("Layout"),
                     vec![
-                        Self::row(
-                            "Pane density",
-                            None,
-                            Some(self.density_control(cx)),
-                            narrow,
-                        ),
+                        Self::row("Pane density", None, Some(self.density_control(cx)), narrow),
                         Self::row(
                             "Pane headers",
                             None,
-                            Some(Self::switch(
-                                "settings-headers",
-                                "Pane headers",
-                                s.show_pane_headers,
-                                SettingsEvent::SetPaneHeaders,
-                                cx,
-                            )),
+                            Some(Self::switch("settings-headers", "Pane headers", s.show_pane_headers, SettingsEvent::SetPaneHeaders, cx)),
                             false,
                         ),
                     ],
                 ));
                 out.push(Self::group(
                     Some("Colors"),
-                    vec![Self::row(
-                        "Theme",
-                        None,
-                        Some(self.theme_dropdown("settings-appearance-theme", cx)),
-                        false,
-                    )],
+                    vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)],
                 ));
                 out.push(Self::group(
                     Some("Font"),
-                    vec![Self::row(
-                        "Interface font",
-                        s.ui_font.font_status().map(Into::into),
-                        Some(self.font_dropdown(FontTarget::Ui, cx)),
-                        narrow,
-                    )],
+                    vec![Self::row("Interface font", s.ui_font.font_status().map(Into::into), Some(self.font_dropdown(FontTarget::Ui, cx)), narrow)],
                 ));
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
             Section::Keyboard => {
-                let show_all = self.query.is_empty()
-                    || self.text_matches(&format!("{} {}", section.label(), section.keywords()));
+                let show_all = self.query.is_empty() || self.text_matches(&format!("{} {}", section.label(), section.keywords()));
                 let rows: Vec<AnyElement> = s
                     .shortcuts
                     .iter()
@@ -1535,12 +1523,7 @@ impl SettingsPanel {
                 let status = if s.server.status.is_empty() { "Unknown".to_owned() } else { s.server.status.clone() };
                 let mut rows = vec![
                     Self::row("Status", None, Some(Self::value(status)), false),
-                    Self::row(
-                        "Version",
-                        None,
-                        Some(Self::value(s.server.version.clone().unwrap_or_else(|| "Unknown".into()))),
-                        false,
-                    ),
+                    Self::row("Version", None, Some(Self::value(s.server.version.clone().unwrap_or_else(|| "Unknown".into()))), false),
                 ];
                 if s.server.has_log {
                     rows.push(Self::row(
@@ -1678,7 +1661,11 @@ impl SettingsPanel {
         }
         if let Some(ticket) = s.invite.clone() {
             let code = crate::qr::render(&ticket);
-            let control = div().flex().items_center().gap(px(6.0)).child(div().max_w(px(180.0)).child(Self::value(ticket.clone()))).child(copy("settings-copy-ticket", ticket, cx));
+            let control = div().flex().items_center().gap(px(6.0)).child(div().max_w(px(180.0)).child(Self::value(ticket.clone()))).child(copy(
+                "settings-copy-ticket",
+                ticket,
+                cx,
+            ));
             rows.push(Self::row("Ticket", None, Some(control.into_any_element()), narrow));
             rows.extend(code.map(|qr| div().w_full().flex().justify_center().py(px(12.0)).child(qr).into_any_element()));
         }
@@ -1706,15 +1693,11 @@ impl SettingsPanel {
                     .when(!selected, |s| s.hover(|s| s.bg(rgb(theme::tab_hover()))))
                     .when(dimmed, |s| s.opacity(0.45))
                     .child(
-                        div()
-                            .size(px(22.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .continuous(6.0)
-                            .bg(rgb(section.tint()))
-                            .child(icon(section.icon(), 13.0, 0x00ff_ffff)),
+                        div().size(px(22.0)).flex_none().flex().items_center().justify_center().continuous(6.0).bg(rgb(section.tint())).child(icon(
+                            section.icon(),
+                            13.0,
+                            0x00ff_ffff,
+                        )),
                     )
                     .child(
                         div()
@@ -1810,10 +1793,8 @@ impl Render for SettingsPanel {
         let narrow = panel_width - sidebar_width < 480.0;
         let searching = !self.query.is_empty();
 
-        let sections: Vec<_> = Section::ALL
-            .into_iter()
-            .filter(|section| if searching { self.matches(*section) } else { *section == self.selected })
-            .collect();
+        let sections: Vec<_> =
+            Section::ALL.into_iter().filter(|section| if searching { self.matches(*section) } else { *section == self.selected }).collect();
         let mut content = div().w_full().max_w(px(620.0)).flex().flex_col().gap(px(14.0)).pb(px(28.0));
         if let Some(message) = self.snapshot.message.clone() {
             content = content.child(
@@ -1828,18 +1809,12 @@ impl Render for SettingsPanel {
             );
         }
         if sections.is_empty() {
-            content = content.child(
-                div().pt(px(40.0)).flex().justify_center().text_color(rgb(theme::muted())).child("No matching settings"),
-            );
+            content = content.child(div().pt(px(40.0)).flex().justify_center().text_color(rgb(theme::muted())).child("No matching settings"));
         }
         for (i, section) in sections.into_iter().enumerate() {
             // The toolbar names a single page; search results get headings.
             if searching {
-                let heading = div()
-                    .when(i > 0, |h| h.pt(px(12.0)))
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(section.label());
+                let heading = div().when(i > 0, |h| h.pt(px(12.0))).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(section.label());
                 content = content.child(heading);
             }
             content = content.children(self.page(section, narrow, cx));
@@ -1950,6 +1925,16 @@ impl Render for SettingsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_menu_opens_below_left_aligned_and_flips_near_the_bottom() {
+        let viewport = gpui::size(px(800.0), px(600.0));
+        let trigger = |y: f32| gpui::Bounds::new(gpui::point(px(400.0), px(y)), gpui::size(px(220.0), px(28.0)));
+        let (anchor, at) = font_menu_place(trigger(100.0), viewport, px(300.0));
+        assert_eq!((anchor, at), (Anchor::TopLeft, gpui::point(px(400.0), px(132.0))));
+        let (anchor, at) = font_menu_place(trigger(500.0), viewport, px(300.0));
+        assert_eq!((anchor, at), (Anchor::BottomLeft, gpui::point(px(400.0), px(496.0))));
+    }
 
     #[test]
     fn defaults_only_offer_supported_layout_preferences() {

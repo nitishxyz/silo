@@ -20,13 +20,7 @@ fn shape(shape: CursorShape) -> Shape {
     }
 }
 
-pub(super) fn paint(
-    cursor: Cursor,
-    presentation: CursorPresentation,
-    bounds: Bounds<Pixels>,
-    metrics: CellMetrics,
-    window: &mut Window,
-) {
+pub(super) fn paint(cursor: Cursor, presentation: CursorPresentation, bounds: Bounds<Pixels>, metrics: CellMetrics, window: &mut Window) {
     if !cursor.visible || (presentation.focused && !presentation.phase_visible) {
         return;
     }
@@ -37,21 +31,7 @@ pub(super) fn paint(
     if presentation.focused && shape == Shape::Block {
         color.a = 0.45;
     }
-    for rect in rectangles(
-        shape,
-        presentation.focused,
-        x,
-        y,
-        metrics.width,
-        metrics.height,
-        metrics.scale,
-    ) {
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(rect.x), px(rect.y)),
-                size(px(rect.width), px(rect.height)),
-            ),
-            color,
-        ));
+    for rect in rectangles(shape, presentation.focused, x, y, metrics.width, metrics.height, metrics.scale) {
+        window.paint_quad(fill(Bounds::new(point(px(rect.x), px(rect.y)), size(px(rect.width), px(rect.height))), color));
     }
 }

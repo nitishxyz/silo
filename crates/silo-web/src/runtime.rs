@@ -106,8 +106,7 @@ impl Runtime {
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         crate::cr_app::install(ns_app_class()?)?;
 
-        std::fs::create_dir_all(&config.root)
-            .with_context(|| format!("create {}", config.root.display()))?;
+        std::fs::create_dir_all(&config.root).with_context(|| format!("create {}", config.root.display()))?;
         // CEF compares cache paths literally, so resolve symlinks like /var → /private/var.
         let root = config.root.canonicalize()?;
         // Chromium profiles must be direct children of `root_cache_path`.
@@ -130,21 +129,10 @@ impl Runtime {
         };
         let mut app = BrowserApp::new(PumpHandler::new(config.schedule), config.switches);
         let args = args::Args::new();
-        if initialize(
-            Some(args.as_main_args()),
-            Some(&settings),
-            Some(&mut app),
-            std::ptr::null_mut(),
-        ) != 1
-        {
+        if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
             bail!("cef::initialize failed (see {}/cef.log)", root.display());
         }
-        Ok(Runtime {
-            profiles_dir: profiles,
-            profiles: Default::default(),
-            _args: args,
-            _loader: loader,
-        })
+        Ok(Runtime { profiles_dir: profiles, profiles: Default::default(), _args: args, _loader: loader })
     }
 }
 
@@ -172,9 +160,7 @@ impl Runtime {
             }
             (_, tunnel) => crate::Profile::create(&self.profiles_dir, name, tunnel)?,
         };
-        self.profiles
-            .borrow_mut()
-            .insert(name.to_owned(), profile.clone());
+        self.profiles.borrow_mut().insert(name.to_owned(), profile.clone());
         Ok(profile)
     }
 
@@ -183,10 +169,7 @@ impl Runtime {
         let deadline = Instant::now() + timeout;
         while Self::live_browsers() > 0 {
             if Instant::now() > deadline {
-                bail!(
-                    "{} browsers still open; CEF not shut down",
-                    Self::live_browsers()
-                );
+                bail!("{} browsers still open; CEF not shut down", Self::live_browsers());
             }
             do_message_loop_work();
             std::thread::sleep(Duration::from_millis(5));

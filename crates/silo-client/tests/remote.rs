@@ -29,13 +29,7 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> JoinHandle<()> {
-    let config = silo_server::Config {
-        home: home.to_owned(),
-        idle_exit: None,
-        relay: RelayConfig::Disabled,
-        mdns: false,
-        ..Default::default()
-    };
+    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     for _ in 0..500 {
         if silo_client::server_running(home).await {
@@ -112,7 +106,8 @@ async fn pair_reconnect_and_attach() {
 
     let (remote, _) = Control::connect_remote(&net, ticket.addr.clone(), "laptop", false, None).await.unwrap();
     assert!(matches!(remote.conn(), Conn::Iroh(_)));
-    let created: Created = remote.call(Method::SessionCreate { name: None, spawn: shell(), kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created =
+        remote.call(Method::SessionCreate { name: None, spawn: shell(), kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
 
     // Two data streams on the one connection.
     let (mut a, mut b) = (Mirror::new(), Mirror::new());

@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
     control::{Capture, DesiredSize, OwnMode, SizeInfo},
@@ -20,7 +21,6 @@ use silo_proto::{
     model::{BlockId, BlockInfo, ClientId, CursorShape, Lifecycle, TermSize, TerminalConfig},
 };
 use silo_pty::{Pty, PtyEvent, PtyInput, PtySize, SpawnConfig};
-use serde::{Deserialize, Serialize};
 use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -159,30 +159,67 @@ pub enum BlockMsg {
     Input(Vec<u8>),
     /// Input from data stream `sub_id`: counted and acknowledged with
     /// `INPUT_ACK` on that stream.
-    StreamInput { sub_id: u64, bytes: Vec<u8> },
+    StreamInput {
+        sub_id: u64,
+        bytes: Vec<u8>,
+    },
     Attach(Box<Attach>),
     Detach(u64),
     /// Subscriber `sub_id` applied every output byte below `offset`.
-    Ack { sub_id: u64, offset: u64 },
+    Ack {
+        sub_id: u64,
+        offset: u64,
+    },
     /// Flow-control state of one subscriber (diagnostics and tests).
-    Subscriber { sub_id: u64, reply: tokio::sync::oneshot::Sender<Option<SubscriberStats>> },
-    Desired { client_id: ClientId, client_name: String, size: TermSize },
+    Subscriber {
+        sub_id: u64,
+        reply: tokio::sync::oneshot::Sender<Option<SubscriberStats>>,
+    },
+    /// `label` is the client's short name, shown as `owner_name`.
+    Desired {
+        client_id: ClientId,
+        client_name: String,
+        label: String,
+        size: TermSize,
+    },
     /// A client's desired terminal configuration; effective while it owns
     /// the block (or, unowned, when it is the most recent).
-    Config { client_id: ClientId, config: TerminalConfig },
-    Own { client_id: ClientId, mode: OwnMode },
-    Disown { client_id: ClientId },
-    ClientGone { client_id: ClientId },
-    Capture { history: bool, reply: tokio::sync::oneshot::Sender<Capture> },
-    SizeInfo { reply: tokio::sync::oneshot::Sender<SizeInfo> },
+    Config {
+        client_id: ClientId,
+        config: TerminalConfig,
+    },
+    Own {
+        client_id: ClientId,
+        mode: OwnMode,
+    },
+    Disown {
+        client_id: ClientId,
+    },
+    ClientGone {
+        client_id: ClientId,
+    },
+    Capture {
+        history: bool,
+        reply: tokio::sync::oneshot::Sender<Capture>,
+    },
+    SizeInfo {
+        reply: tokio::sync::oneshot::Sender<SizeInfo>,
+    },
     /// Splice `bytes` into the output stream (all clients and the server
     /// terminal see them in the same order) at the next parser-ground
     /// boundary, then write `input` to the program.
-    Inject { bytes: Vec<u8>, input: Vec<u8> },
+    Inject {
+        bytes: Vec<u8>,
+        input: Vec<u8>,
+    },
     /// Capture a [`Checkpoint`] between mutations.
-    Checkpoint { reply: tokio::sync::oneshot::Sender<Result<Checkpoint, String>> },
+    Checkpoint {
+        reply: tokio::sync::oneshot::Sender<Result<Checkpoint, String>>,
+    },
     /// Release the PTY and end the actor; see [`BlockHandle::handoff`].
-    Handoff { reply: tokio::sync::oneshot::Sender<Result<Handoff, String>> },
+    Handoff {
+        reply: tokio::sync::oneshot::Sender<Result<Handoff, String>>,
+    },
     Shutdown,
 }
 
@@ -277,10 +314,17 @@ pub struct SubscriberStats {
 enum Out {
     Frame(Frame),
     /// Snapshot history, sent as `SNAPSHOT_HISTORY` chunks from `pos`.
-    History { bytes: Vec<u8>, pos: usize },
+    History {
+        bytes: Vec<u8>,
+        pos: usize,
+    },
     /// Ring bytes starting at output offset `offset`, sent as `OUTPUT`
     /// chunks from `pos`.
-    Output { offset: u64, bytes: Vec<u8>, pos: usize },
+    Output {
+        offset: u64,
+        bytes: Vec<u8>,
+        pos: usize,
+    },
 }
 
 struct Subscriber {
@@ -353,7 +397,9 @@ impl Subscriber {
     /// if the stream is gone.
     fn pump(&mut self) -> bool {
         while self.sink.backlog() < PUMP_WINDOW {
-            let Some(front) = self.pending.front_mut() else { break };
+            let Some(front) = self.pending.front_mut() else {
+                break;
+            };
             let frame = match front {
                 Out::Frame(_) => {
                     let Some(Out::Frame(frame)) = self.pending.pop_front() else { unreachable!() };
@@ -410,13 +456,7 @@ impl Subscriber {
     }
 
     fn stats(&self) -> SubscriberStats {
-        SubscriberStats {
-            sent: self.sent,
-            acked: self.acked,
-            queued: self.sink.backlog(),
-            pending: self.pending_live,
-            bulk: self.pending_bulk,
-        }
+        SubscriberStats { sent: self.sent, acked: self.acked, queued: self.sink.backlog(), pending: self.pending_live, bulk: self.pending_bulk }
     }
 }
 
@@ -431,6 +471,7 @@ fn output_end(frame: &Frame) -> Option<u64> {
 
 struct Desired {
     name: String,
+    label: String,
     size: TermSize,
     updated_at: u64,
 }
@@ -580,9 +621,7 @@ impl TransitionLog {
     }
 }
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 fn grid(size: TermSize) -> GridSize {
@@ -600,11 +639,7 @@ fn pty_size(size: TermSize) -> PtySize {
 }
 
 /// Spawn a terminal block and its actor thread.
-pub fn spawn(
-    info: BlockInfo,
-    config: &SpawnConfig,
-    notes: UnboundedSender<Note>,
-) -> anyhow::Result<BlockHandle> {
+pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let size = TermSize { columns: info.size.columns.clamp(1, 512), rows: info.size.rows.clamp(1, 256), ..info.size };
     let (tx, rx) = mpsc::channel();
     let exit_tx = tx.clone();
@@ -641,6 +676,7 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
     info.size = size;
     info.pid = None;
     info.owner = None;
+    info.owner_name = None;
     info.lifecycle = Lifecycle::Restored;
     info.exited = None;
     restore_osc(&mut info, &checkpoint);
@@ -660,24 +696,21 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
 ///
 /// # Errors
 /// Fails if the snapshot cannot be restored or the PTY not adopted.
-pub fn spawn_adopted(
-    info: BlockInfo,
-    checkpoint: Checkpoint,
-    pty: silo_pty::Detached,
-    notes: UnboundedSender<Note>,
-) -> anyhow::Result<BlockHandle> {
+pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Detached, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let (vt, config) = match restore_vt(&checkpoint) {
         Ok(restored) => restored,
-        Err(error) => return Err(AdoptFailed { error, detached: pty }.into()),
+        Err(error) => {
+            return Err(AdoptFailed { error, detached: pty }.into());
+        }
     };
     let (tx, rx) = mpsc::channel();
     let gate = Arc::new(ReadGate::default());
-    let (pty, input) = adopt_pty(&info.id, pty, &tx, &gate)
-        .map_err(|e| AdoptFailed { error: e.error.into(), detached: e.detached })?;
+    let (pty, input) = adopt_pty(&info.id, pty, &tx, &gate).map_err(|e| AdoptFailed { error: e.error.into(), detached: e.detached })?;
     let mut info = info;
     info.size = checkpoint.size;
     info.pid = Some(pty.pid());
     info.owner = None;
+    info.owner_name = None;
     info.lifecycle = Lifecycle::Running;
     info.exited = None;
     restore_osc(&mut info, &checkpoint);
@@ -721,12 +754,7 @@ impl std::error::Error for AdoptFailed {}
 
 /// Adopt a detached PTY whose exit and I/O feed the actor's channel. On
 /// failure the master comes back inside the error, still open.
-fn adopt_pty(
-    id: &str,
-    pty: silo_pty::Detached,
-    tx: &mpsc::Sender<BlockMsg>,
-    gate: &Arc<ReadGate>,
-) -> Result<(Pty, PtyInput), silo_pty::AdoptError> {
+fn adopt_pty(id: &str, pty: silo_pty::Detached, tx: &mpsc::Sender<BlockMsg>, gate: &Arc<ReadGate>) -> Result<(Pty, PtyInput), silo_pty::AdoptError> {
     let (exit_tx, io_tx, gate) = (tx.clone(), tx.clone(), gate.clone());
     Pty::adopt_with_io(
         pty,
@@ -863,12 +891,10 @@ impl Actor {
                 self.poll_mode();
             }
             self.pump();
-            if self.child_exited
-                && self.lifecycle.is_running()
-                && (self.reader_closed || exit_deadline.is_some_and(|d| Instant::now() >= d)) {
-                    self.finish();
-                    exit_deadline = None;
-                }
+            if self.child_exited && self.lifecycle.is_running() && (self.reader_closed || exit_deadline.is_some_and(|d| Instant::now() >= d)) {
+                self.finish();
+                exit_deadline = None;
+            }
             if self.lifecycle.is_running() && self.last_probe.elapsed() >= PROBE_INTERVAL {
                 self.probe();
             }
@@ -913,10 +939,13 @@ impl Actor {
             BlockMsg::Subscriber { sub_id, reply } => {
                 let _ = reply.send(self.subscribers.get(&sub_id).map(Subscriber::stats));
             }
-            BlockMsg::Desired { client_id, client_name, size } => {
-                self.desired.insert(client_id, Desired { name: client_name, size, updated_at: now_ms() });
+            BlockMsg::Desired { client_id, client_name, label, size } => {
+                let fresh = self.desired.insert(client_id, Desired { name: client_name, label, size, updated_at: now_ms() }).is_none();
                 if self.owner.is_none() || self.owner == Some(client_id) {
                     self.apply_size(size);
+                }
+                if fresh && self.owner == Some(client_id) {
+                    self.publish();
                 }
             }
             BlockMsg::Config { client_id, config } => {
@@ -1080,7 +1109,9 @@ impl Actor {
     /// Apply pending injections at a ground boundary (or after waiting
     /// `INJECT_WAIT` for one).
     fn flush_injects(&mut self) {
-        let Some(since) = self.inject_since else { return };
+        let Some(since) = self.inject_since else {
+            return;
+        };
         if !self.vt.at_ground().unwrap_or(true) && since.elapsed() < INJECT_WAIT {
             return;
         }
@@ -1107,7 +1138,9 @@ impl Actor {
     /// of the output stream, so every mirror switches between the same two
     /// bytes the server terminal did. Program OSC overrides survive.
     fn flush_config(&mut self) {
-        let Some((config, since)) = self.pending_config else { return };
+        let Some((config, since)) = self.pending_config else {
+            return;
+        };
         if !self.vt.at_ground().unwrap_or(true) && since.elapsed() < INJECT_WAIT {
             return;
         }
@@ -1173,7 +1206,9 @@ impl Actor {
     /// end of the output stream to remote streams.
     fn poll_mode(&mut self) {
         self.last_mode_poll = Instant::now();
-        let Some(mode) = self.pty.as_ref().and_then(|pty| pty.line_mode().ok()) else { return };
+        let Some(mode) = self.pty.as_ref().and_then(|pty| pty.line_mode().ok()) else {
+            return;
+        };
         if self.tty_mode.replace(mode) != Some(mode) {
             let (echo, icanon) = mode;
             let frame = ServerData::TtyMode { offset: self.ring_end(), echo, icanon }.to_frame();
@@ -1223,7 +1258,9 @@ impl Actor {
 
     fn send_ring(&self, sub: &mut Subscriber, from: u64, to: u64) {
         let index = |at: u64| at.checked_sub(self.ring_start).and_then(|i| usize::try_from(i).ok());
-        let (Some(start), Some(end)) = (index(from), index(to)) else { return };
+        let (Some(start), Some(end)) = (index(from), index(to)) else {
+            return;
+        };
         let end = end.min(self.ring.len());
         if start >= end {
             return;
@@ -1372,13 +1409,13 @@ impl Actor {
     fn probe(&mut self) {
         self.last_probe = Instant::now();
         // A dead child has no foreground process to inspect.
-        let Some(pty) = self.pty.as_ref().filter(|_| !self.child_exited) else { return };
+        let Some(pty) = self.pty.as_ref().filter(|_| !self.child_exited) else {
+            return;
+        };
         let foreground = pty.foreground_pid();
         let pid = pty.pid();
         let title = if self.osc_title.is_empty() {
-            foreground
-                .and_then(silo_pty::process_name)
-                .unwrap_or_else(|| "shell".to_owned())
+            foreground.and_then(silo_pty::process_name).unwrap_or_else(|| "shell".to_owned())
         } else {
             self.osc_title.clone()
         };
@@ -1388,7 +1425,9 @@ impl Actor {
             .and_then(pwd_path)
             .or_else(|| silo_pty::process_cwd(foreground.unwrap_or(pid)).map(|p| p.to_string_lossy().into_owned()));
         let changed = {
-            let Ok(mut info) = self.info.lock() else { return };
+            let Ok(mut info) = self.info.lock() else {
+                return;
+            };
             let changed = info.title != title || info.cwd != cwd;
             info.title = title;
             info.cwd = cwd;
@@ -1400,9 +1439,11 @@ impl Actor {
     }
 
     fn publish(&mut self) {
+        let owner_name = self.owner.and_then(|o| self.desired.get(&o)).map(|d| d.label.clone());
         if let Ok(mut info) = self.info.lock() {
             info.size = self.size;
             info.owner = self.owner;
+            info.owner_name = owner_name;
         }
         let _ = self.notes.send(Note::Changed(self.id.clone()));
     }
@@ -1467,12 +1508,14 @@ fn pwd_path(pwd: &str) -> Option<String> {
     let bytes = path.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&path[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&path[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
         out.push(bytes[i]);
         i += 1;
     }

@@ -73,6 +73,7 @@ impl BrowserBlock {
     pub fn restore(mut info: BlockInfo) -> anyhow::Result<Self> {
         let state = info.browser.take().ok_or_else(|| anyhow::anyhow!("browser block {} has no state", info.id))?;
         info.owner = None;
+        info.owner_name = None;
         Ok(Self::new(info, state))
     }
 
@@ -88,10 +89,16 @@ impl BrowserBlock {
     pub fn command(&mut self, command: &BrowserCommand) -> Result<(), RpcError> {
         match command {
             BrowserCommand::Navigate { url } => self.state.push(url.clone()),
-            BrowserCommand::Back if !self.state.go(-1) => return Err(RpcError::bad_request("no page to go back to")),
-            BrowserCommand::Forward if !self.state.go(1) => return Err(RpcError::bad_request("no page to go forward to")),
+            BrowserCommand::Back if !self.state.go(-1) => {
+                return Err(RpcError::bad_request("no page to go back to"));
+            }
+            BrowserCommand::Forward if !self.state.go(1) => {
+                return Err(RpcError::bad_request("no page to go forward to"));
+            }
             BrowserCommand::Back | BrowserCommand::Forward | BrowserCommand::Reload { .. } => {}
-            BrowserCommand::Zoom { zoom } if !zoom.is_finite() => return Err(RpcError::bad_request("zoom must be finite")),
+            BrowserCommand::Zoom { zoom } if !zoom.is_finite() => {
+                return Err(RpcError::bad_request("zoom must be finite"));
+            }
             BrowserCommand::Zoom { zoom } => self.state.zoom = *zoom,
         }
         Ok(())
@@ -128,14 +135,16 @@ impl BrowserBlock {
         Ok(())
     }
 
-    /// Take ownership; true if the owner changed.
-    pub fn own(&mut self, client: ClientId, mode: OwnMode) -> bool {
+    /// Take ownership as `label` (the client's short name); true if the
+    /// owner changed.
+    pub fn own(&mut self, client: ClientId, label: String, mode: OwnMode) -> bool {
         let take = match mode {
             OwnMode::Take => self.base.owner != Some(client),
             OwnMode::Request => self.base.owner.is_none(),
         };
         if take {
             self.base.owner = Some(client);
+            self.base.owner_name = Some(label);
         }
         take
     }
@@ -145,6 +154,7 @@ impl BrowserBlock {
         let owned = self.base.owner == Some(client);
         if owned {
             self.base.owner = None;
+            self.base.owner_name = None;
         }
         owned
     }

@@ -10,7 +10,7 @@ use silo_client::{Control, DataStream};
 use silo_proto::{
     control::{Created, Method, SpawnSpec},
     data::{ClientData, Resume, ServerData, StartMode},
-    model::{Axis, BlockInfo, BlockKind, Layout, Lifecycle, SessionView, TermSize},
+    model::{Axis, BlockInfo, BlockKind, Lifecycle, SessionView, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -24,7 +24,14 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 fn config(home: &Path) -> silo_server::Config {
-    silo_server::Config { home: home.to_owned(), idle_exit: None, checkpoint_interval: Duration::from_millis(200), relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() }
+    silo_server::Config {
+        home: home.to_owned(),
+        idle_exit: None,
+        checkpoint_interval: Duration::from_millis(200),
+        relay: silo_server::RelayConfig::Disabled,
+        mdns: false,
+        ..Default::default()
+    }
 }
 
 async fn start(home: &Path) -> JoinHandle<anyhow::Result<()>> {
@@ -72,7 +79,9 @@ async fn pump(stream: &mut DataStream, tail: &mut Tail, done: impl Fn(&Tail) -> 
         if done(tail) {
             return true;
         }
-        let Some(data) = tokio::time::timeout(TIMEOUT, stream.rx.recv()).await.expect("output") else { return false };
+        let Some(data) = tokio::time::timeout(TIMEOUT, stream.rx.recv()).await.expect("output") else {
+            return false;
+        };
         if let ServerData::Output { offset, bytes } = data {
             assert_eq!(offset, tail.next, "output continues without gap or overlap");
             tail.next += bytes.len() as u64;
@@ -105,8 +114,10 @@ async fn reconnect(home: &Path) -> Control {
 
 /// A session with a split of two counters, streaming the first block.
 async fn populate(control: &Control) -> (Created, SessionView, DataStream, Tail) {
-    let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: counter(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split = Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: counter(), kind: BlockKind::Terminal, url: None };
+    let created: Created =
+        control.call(Method::SessionCreate { name: Some("main".into()), spawn: counter(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split =
+        Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: counter(), kind: BlockKind::Terminal, url: None };
     let _: Created = control.call(split).await.unwrap();
     let before = view(control, &created.session_id).await;
     let mut stream = DataStream::open(control, &created.block_id, None).await.unwrap();
@@ -162,15 +173,28 @@ async fn takeover_keeps_programs_streams_and_layout() {
 /// counter block in session `s1`, reads READY, then dies without COMMIT.
 /// Returns the program's pid and the thread.
 async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<()>) {
+    use silo_server::{
+        block, handoff,
+        registry::{Session, Window},
+    };
     use std::os::fd::AsFd;
-    use silo_server::{block, handoff, registry::{Session, Window}};
     std::fs::create_dir_all(home).unwrap();
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
     rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(paths::socket(home)).unwrap();
     let info = BlockInfo {
-        id: "b1".into(), session_id: "s1".into(), kind: BlockKind::Terminal, title: "shell".into(), cwd: None,
-        exited: None, lifecycle: Lifecycle::Running, size: TermSize::new(80, 24), owner: None, pid: None, browser: None,
+        id: "b1".into(),
+        session_id: "s1".into(),
+        kind: BlockKind::Terminal,
+        title: "shell".into(),
+        cwd: None,
+        exited: None,
+        lifecycle: Lifecycle::Running,
+        size: TermSize::new(80, 24),
+        owner: None,
+        owner_name: None,
+        pid: None,
+        browser: None,
     };
     let spec = counter();
     let config = silo_pty::SpawnConfig { command: spec.command.iter().map(Into::into).collect(), ..Default::default() };
@@ -179,7 +203,7 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
     let pty = released.pty.unwrap();
     let (pid, s) = (pty.pid, pty.size);
     let record = handoff::PtyRecord { fd: 0, pid, columns: s.columns, rows: s.rows, cell_width: s.cell_width, cell_height: s.cell_height };
-    let window = Window { id: "w1".into(), name: None, layout: Layout::block("b1"), focused: "b1".into(), zoomed: false };
+    let window = Window::new("w1".into(), "b1");
     let session = Session { id: "s1".into(), name: "main".into(), windows: vec![window], active_window: "w1".into(), revision: 1, created_at: 0 };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
     let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new() };
@@ -232,9 +256,7 @@ async fn concurrent_connect_or_spawn_never_spawns() {
     let mut clients = Vec::new();
     for _ in 0..20 {
         let home = home.clone();
-        clients.push(tokio::spawn(async move {
-            silo_client::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "race").await.map(|(c, _)| c)
-        }));
+        clients.push(tokio::spawn(async move { silo_client::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "race").await.map(|(c, _)| c) }));
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().unwrap();

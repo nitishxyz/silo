@@ -1,10 +1,11 @@
 //! JSON control plane: requests, responses and sequenced events.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{
-    Axis, BlockId, BlockInfo, BlockKind, ClientId, HistoryEntry, SessionId, SessionSummary, SessionView, TermSize, WindowId,
+    Axis, BlockId, BlockInfo, BlockKind, ClientId, FloatRect, HistoryEntry, SessionId, SessionSummary, SessionView, TermSize, WindowId,
 };
 
 /// First frame on a control stream.
@@ -37,7 +38,7 @@ pub struct ServerHello {
     pub server: ServerInfo,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ServerInfo {
     pub version: String,
     pub pid: u32,
@@ -56,7 +57,7 @@ pub struct ServerInfo {
     pub endpoint_addr: Option<Value>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OwnMode {
     /// Become the owner, displacing any current owner.
@@ -66,7 +67,7 @@ pub enum OwnMode {
     Request,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SpawnSpec {
     #[serde(default)]
     pub cwd: Option<String>,
@@ -77,7 +78,7 @@ pub struct SpawnSpec {
     pub size: Option<TermSize>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params")]
 pub enum Method {
     #[serde(rename = "server.info")]
@@ -86,6 +87,12 @@ pub enum Method {
     ServerShutdown {},
     #[serde(rename = "api.list")]
     ApiList {},
+    /// Params and result JSON Schemas and an example request.
+    #[serde(rename = "api.describe")]
+    ApiDescribe { method: String },
+    /// Liveness probe; answers only once the server's state is reachable.
+    #[serde(rename = "ping")]
+    Ping {},
     #[serde(rename = "events.subscribe")]
     EventsSubscribe {},
 
@@ -151,6 +158,14 @@ pub enum Method {
     /// Exchange two blocks' positions in their (shared) window layout.
     #[serde(rename = "block.swap")]
     BlockSwap { block_id: BlockId, other_block_id: BlockId },
+    /// Move a tiled block out of the layout into the window's floats, on
+    /// top (`rect` defaults to centred 60% × 60%).
+    #[serde(rename = "block.float")]
+    BlockFloat { block_id: BlockId, rect: Option<FloatRect> },
+    /// Set a float's `rect` and raise it, or `dock` it into the layout.
+    /// Exactly one of `rect` and `dock`.
+    #[serde(rename = "block.move")]
+    BlockMove { block_id: BlockId, rect: Option<FloatRect>, dock: Option<Dock> },
     #[serde(rename = "layout.ratio")]
     LayoutRatio { window_id: WindowId, path: Vec<usize>, ratio: f32 },
 
@@ -233,6 +248,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("api.list", "List control methods."),
+    ("api.describe", "A method's params and result JSON Schemas and an example request."),
+    ("ping", "Liveness probe; answers once the server's state is reachable."),
     ("events.subscribe", "Start receiving sequenced events on this connection."),
     ("session.list", "List sessions."),
     ("session.create", "Create a session with one window running a shell, command or browser."),
@@ -249,6 +266,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("block.focus", "Focus a block within its window."),
     ("block.zoom", "Zoom or unzoom a block within its window."),
     ("block.swap", "Swap two blocks' positions within the same window layout."),
+    ("block.float", "Float a tiled block above its window's layout."),
+    ("block.move", "Move and raise a float (rect), or dock it next to a tiled block (dock)."),
     ("layout.ratio", "Change the ratio of a split in a window layout."),
     ("terminal.send", "Write text to a terminal as if typed."),
     ("terminal.capture", "Plain-text contents of a terminal."),
@@ -293,8 +312,7 @@ impl TryFrom<RawRequest> for Request {
 
     fn try_from(raw: RawRequest) -> Result<Self, Self::Error> {
         let params = raw.params.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let method = serde_json::from_value(serde_json::json!({ "method": raw.method, "params": params }))
-            .map_err(|e| e.to_string())?;
+        let method = serde_json::from_value(serde_json::json!({ "method": raw.method, "params": params })).map_err(|e| e.to_string())?;
         Ok(Self { id: raw.id, method })
     }
 }
@@ -359,7 +377,7 @@ pub enum ServerMessage {
     Event {
         seq: u64,
         #[serde(flatten)]
-        event: Event,
+        event: Box<Event>,
     },
 }
 
@@ -395,21 +413,51 @@ pub enum BrowserCommand {
 
 // Typed results.
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// `block.move` docking target: split `target` along `axis`, the docked
+/// block second.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Dock {
+    pub target: BlockId,
+    pub axis: Axis,
+}
+
+/// The `{}` result of methods that only acknowledge.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Empty {}
+
+/// Element of `api.list`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ApiMethod {
+    pub name: String,
+    pub description: String,
+}
+
+/// Result of `api.describe`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MethodDescription {
+    pub description: String,
+    pub params_schema: Value,
+    pub result_schema: Value,
+    /// A request, `{method, params}`, whose params match `params_schema`.
+    pub example: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Created {
     pub session_id: SessionId,
     pub window_id: WindowId,
     pub block_id: BlockId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DataTicket {
     /// Hex-encoded 16-byte single-use ticket.
     pub ticket: String,
     pub expires_in_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DesiredSize {
     pub client_id: ClientId,
     pub client_name: String,
@@ -417,21 +465,21 @@ pub struct DesiredSize {
     pub updated_at: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SizeInfo {
     pub size: TermSize,
     pub owner: Option<ClientId>,
     pub desired: Vec<DesiredSize>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Capture {
     pub text: String,
     pub size: TermSize,
 }
 
 /// Result of `pair.create`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PairInvite {
     /// Encoded `PairTicket` (`silo1…`).
     pub ticket: String,
@@ -439,7 +487,7 @@ pub struct PairInvite {
 }
 
 /// Element of `pair.list`'s `devices`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct PairedDevice {
     /// The device's iroh EndpointId.
     pub id: String,
@@ -451,7 +499,7 @@ pub struct PairedDevice {
 }
 
 /// Result of `pair.list`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PairedDevices {
     pub devices: Vec<PairedDevice>,
 }
@@ -462,7 +510,8 @@ mod tests {
 
     #[test]
     fn request_and_messages_round_trip() {
-        let method = Method::BlockSplit { block_id: "b".into(), axis: Axis::Vertical, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+        let method =
+            Method::BlockSplit { block_id: "b".into(), axis: Axis::Vertical, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: None };
         let request = Request { id: 3, method };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"method\":\"block.split\""), "{json}");
@@ -474,9 +523,9 @@ mod tests {
 
         let response: ServerMessage = serde_json::from_str(r#"{"id":4,"result":{"x":1}}"#).unwrap();
         assert!(matches!(response, ServerMessage::Response { id: 4, .. }));
-        let event = ServerMessage::Event { seq: 9, event: Event::BlockBell { block_id: "b".into() } };
+        let event = ServerMessage::Event { seq: 9, event: Box::new(Event::BlockBell { block_id: "b".into() }) };
         let json = serde_json::to_string(&event).unwrap();
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ServerMessage::Event { seq: 9, event: Event::BlockBell { .. } }), "{json}");
+        assert!(matches!(back, ServerMessage::Event { seq: 9, event } if matches!(*event, Event::BlockBell { .. })), "{json}");
     }
 }

@@ -24,18 +24,10 @@ fn main() {
     );
     let stamp = runtime.join("silo-revision");
     if fs::read_to_string(&stamp).unwrap_or_default().trim() != revision {
-        let status = Command::new("bash")
-            .arg(root.join("scripts/build-ghostty.sh"))
-            .args(cross)
-            .status()
-            .expect("run scripts/build-ghostty.sh");
+        let status = Command::new("bash").arg(root.join("scripts/build-ghostty.sh")).args(cross).status().expect("run scripts/build-ghostty.sh");
         assert!(status.success(), "building libghostty-vt failed");
     }
-    assert_eq!(
-        fs::read_to_string(&stamp).unwrap_or_default().trim(),
-        revision,
-        "libghostty-vt runtime missing; run scripts/build-ghostty.sh"
-    );
+    assert_eq!(fs::read_to_string(&stamp).unwrap_or_default().trim(), revision, "libghostty-vt runtime missing; run scripts/build-ghostty.sh");
     if let Some(target) = cross {
         let built_for = fs::read_to_string(runtime.join("silo-target")).unwrap_or_default();
         assert_eq!(
@@ -57,11 +49,7 @@ fn main() {
     // ld64 prefers a dylib over an archive with the same name in one search
     // directory, so link a private copy of the archive.
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    fs::copy(
-        runtime.join("lib/libghostty-vt.a"),
-        out.join("libsilo_ghostty_vt.a"),
-    )
-    .expect("copy libghostty-vt.a");
+    fs::copy(runtime.join("lib/libghostty-vt.a"), out.join("libsilo_ghostty_vt.a")).expect("copy libghostty-vt.a");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=silo_ghostty_vt");
     println!("cargo:include={}", runtime.join("include").display());

@@ -13,10 +13,7 @@ const SIZE: PtySize = PtySize { columns: 80, rows: 24, cell_width: 8, cell_heigh
 const LOOP: &str = "stty -echo; echo ready; while read x; do echo got:$x; done";
 
 fn shell(script: &str, on_exit: impl FnOnce(std::process::ExitStatus) + Send + 'static) -> Pty {
-    let config = SpawnConfig {
-        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
-        ..Default::default()
-    };
+    let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], ..Default::default() };
     Pty::spawn(&config, SIZE, on_exit).unwrap()
 }
 
@@ -144,9 +141,14 @@ fn failed_adopt_hands_master_back() {
     assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "shell was hung up");
     let detached = silo_pty::Detached { pid, ..err.detached };
     let (tx, rx) = mpsc::channel();
-    let (_adopted, input) = Pty::adopt_with_io(detached, "test", |_| {}, move |event| {
-        let _ = tx.send(event);
-    })
+    let (_adopted, input) = Pty::adopt_with_io(
+        detached,
+        "test",
+        |_| {},
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
     .unwrap();
     assert!(input.send(b"alive\n".to_vec()));
     wait_for(&rx, "got:alive");

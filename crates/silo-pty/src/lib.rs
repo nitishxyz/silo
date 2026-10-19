@@ -57,9 +57,10 @@ pub fn user_shell() -> PathBuf {
         if !pw.is_null() && !(*pw).pw_shell.is_null() {
             let shell = std::ffi::CStr::from_ptr((*pw).pw_shell);
             if let Ok(shell) = shell.to_str()
-                && !shell.is_empty() {
-                    return shell.into();
-                }
+                && !shell.is_empty()
+            {
+                return shell.into();
+            }
         }
     }
     PathBuf::from("/bin/zsh")
@@ -138,22 +139,14 @@ impl Pty {
     ///
     /// # Errors
     /// PTY allocation or spawn failures.
-    pub fn spawn(
-        config: &SpawnConfig,
-        size: PtySize,
-        on_exit: impl FnOnce(ExitStatus) + Send + 'static,
-    ) -> io::Result<Self> {
+    pub fn spawn(config: &SpawnConfig, size: PtySize, on_exit: impl FnOnce(ExitStatus) + Send + 'static) -> io::Result<Self> {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
         // macOS posix_openpt has no O_CLOEXEC; set it before spawning anything.
         rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
         grantpt(&master)?;
         unlockpt(&master)?;
         let name = ptsname(&master, Vec::new())?;
-        let slave = File::from(open(
-            name.as_c_str(),
-            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?);
+        let slave = File::from(open(name.as_c_str(), OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())?);
         set_size(&master, size)?;
 
         let (program, args, login) = if config.command.is_empty() {
@@ -166,9 +159,7 @@ impl Pty {
         if login {
             // A leading dash makes the shell a login shell, so a daemon
             // started from a GUI app still gets the user's PATH.
-            let base = std::path::Path::new(&program)
-                .file_name()
-                .unwrap_or(OsStr::new("sh"));
+            let base = std::path::Path::new(&program).file_name().unwrap_or(OsStr::new("sh"));
             let mut arg0 = OsString::from("-");
             arg0.push(base);
             command.arg0(arg0);
@@ -211,20 +202,18 @@ impl Pty {
         let worker = state.clone();
         // The child is reaped even after `detach` (to avoid zombies), but its
         // exit is then no longer reported here.
-        std::thread::Builder::new()
-            .name("silo-pty-child".into())
-            .spawn(move || {
-                let status = child.wait();
-                worker.exited.store(true, Ordering::Release);
-                if let Ok(status) = status {
-                    if let Ok(mut slot) = worker.status.lock() {
-                        *slot = Some(status);
-                    }
-                    if worker.notify.swap(false, Ordering::AcqRel) {
-                        on_exit(status);
-                    }
+        std::thread::Builder::new().name("silo-pty-child".into()).spawn(move || {
+            let status = child.wait();
+            worker.exited.store(true, Ordering::Release);
+            if let Ok(status) = status {
+                if let Ok(mut slot) = worker.status.lock() {
+                    *slot = Some(status);
                 }
-            })?;
+                if worker.notify.swap(false, Ordering::AcqRel) {
+                    on_exit(status);
+                }
+            }
+        })?;
         Ok(Self::new(master, state, size, None))
     }
 
@@ -243,12 +232,7 @@ impl Pty {
     /// Fails if `pid` is invalid, the descriptor is not a usable terminal or
     /// a thread cannot be spawned. On failure the master is handed back
     /// unharmed in [`AdoptError`], so the program is not hung up.
-    pub fn adopt(
-        master: OwnedFd,
-        pid: i32,
-        size: PtySize,
-        on_exit: impl FnOnce(Option<i32>) + Send + 'static,
-    ) -> Result<Self, AdoptError> {
+    pub fn adopt(master: OwnedFd, pid: i32, size: PtySize, on_exit: impl FnOnce(Option<i32>) + Send + 'static) -> Result<Self, AdoptError> {
         let fail = |error, master| Err(AdoptError { error, detached: Detached { master, pid, size } });
         if pid <= 0 {
             return fail(io::Error::new(io::ErrorKind::InvalidInput, "invalid pid"), master);
@@ -494,10 +478,8 @@ mod tests {
     #[test]
     fn spawns_echoes_resizes_and_reports_exit() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let config = SpawnConfig {
-            command: vec!["/bin/sh".into(), "-c".into(), "stty size; read x; echo got:$x; exit 3".into()],
-            ..Default::default()
-        };
+        let config =
+            SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "stty size; read x; echo got:$x; exit 3".into()], ..Default::default() };
         let size = PtySize { columns: 91, rows: 33, cell_width: 8, cell_height: 16 };
         let pty = Pty::spawn(&config, size, move |status| {
             let _ = tx.send(status);
@@ -523,10 +505,8 @@ mod tests {
 
     #[test]
     fn line_mode_tracks_the_slave() {
-        let config = SpawnConfig {
-            command: vec!["/bin/sh".into(), "-c".into(), "read a; stty -echo -icanon; echo raw; read b".into()],
-            ..Default::default()
-        };
+        let config =
+            SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "read a; stty -echo -icanon; echo raw; read b".into()], ..Default::default() };
         let pty = Pty::spawn(&config, PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 }, |_| {}).unwrap();
         let (mut reader, mut writer) = (pty.reader().unwrap(), pty.writer().unwrap());
         assert_eq!(pty.line_mode().unwrap(), (true, true));
@@ -545,10 +525,7 @@ mod tests {
     #[test]
     fn foreground_pid_is_none_after_child_killed() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let config = SpawnConfig {
-            command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
-            ..Default::default()
-        };
+        let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() };
         let size = PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 };
         let pty = Pty::spawn(&config, size, move |status| {
             let _ = tx.send(status);

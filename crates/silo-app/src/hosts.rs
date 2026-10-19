@@ -55,11 +55,7 @@ fn hosts_path(home: &Path) -> PathBuf {
 
 #[must_use]
 pub fn load(home: &Path) -> Vec<RemoteHost> {
-    std::fs::read(hosts_path(home))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<HostsFile>(&b).ok())
-        .map(|f| f.hosts)
-        .unwrap_or_default()
+    std::fs::read(hosts_path(home)).ok().and_then(|b| serde_json::from_slice::<HostsFile>(&b).ok()).map(|f| f.hosts).unwrap_or_default()
 }
 
 /// # Errors
@@ -221,9 +217,7 @@ pub(crate) mod tests {
     /// A fresh endpoint address with a relay and a direct address.
     pub(crate) fn addr(dir: &Path) -> EndpointAddr {
         let id = silo_client::client_identity(dir).unwrap().id();
-        EndpointAddr::new(id)
-            .with_relay_url("https://relay.example.org".parse().unwrap())
-            .with_ip_addr("192.168.1.7:4433".parse().unwrap())
+        EndpointAddr::new(id).with_relay_url("https://relay.example.org".parse().unwrap()).with_ip_addr("192.168.1.7:4433".parse().unwrap())
     }
 
     #[test]

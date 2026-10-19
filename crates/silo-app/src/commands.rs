@@ -87,6 +87,8 @@ commands! {
     FocusPaneUp => "Focus Pane Up", "Panes", ["cmd-k", "cmd-alt-up"];
     FocusPaneDown => "Focus Pane Down", "Panes", ["cmd-j", "cmd-alt-down"];
     ZoomPane => "Zoom Pane", "Panes", ["cmd-shift-enter"], "Toggle";
+    FloatPane => "Float Pane", "Panes", [], "Lift it above the layout";
+    DockPane => "Dock Pane", "Panes", [], "Put it back in the layout";
     // Browser
     NewBrowser => "New Browser", "Browser", [];
     OpenUrl => "Open URL…", "Browser", [];

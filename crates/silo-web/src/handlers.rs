@@ -285,14 +285,8 @@ fn cursor(kind: CursorType) -> Cursor {
         CursorType::CROSS | CursorType::CELL => Cursor::Crosshair,
         CursorType::WAIT | CursorType::PROGRESS => Cursor::Wait,
         CursorType::NOTALLOWED | CursorType::NODROP => Cursor::NotAllowed,
-        CursorType::EASTRESIZE
-        | CursorType::WESTRESIZE
-        | CursorType::EASTWESTRESIZE
-        | CursorType::COLUMNRESIZE => Cursor::ResizeColumn,
-        CursorType::NORTHRESIZE
-        | CursorType::SOUTHRESIZE
-        | CursorType::NORTHSOUTHRESIZE
-        | CursorType::ROWRESIZE => Cursor::ResizeRow,
+        CursorType::EASTRESIZE | CursorType::WESTRESIZE | CursorType::EASTWESTRESIZE | CursorType::COLUMNRESIZE => Cursor::ResizeColumn,
+        CursorType::NORTHRESIZE | CursorType::SOUTHRESIZE | CursorType::NORTHSOUTHRESIZE | CursorType::ROWRESIZE => Cursor::ResizeRow,
         CursorType::GRAB => Cursor::Grab,
         CursorType::GRABBING => Cursor::Grabbing,
         CursorType::MOVE => Cursor::Move,

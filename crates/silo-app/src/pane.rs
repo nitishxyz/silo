@@ -11,9 +11,8 @@ use std::{
 };
 
 use gpui::{
-    Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, ImeTextBatch,
-    IntoElement, Keystroke, Pixels, Point, Render, ShapedLine, Task, TextInputPurpose, TextRun, UTF16Selection, Window,
-    canvas, div, fill, point, prelude::*, px, rgb, size,
+    Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, ImeTextBatch, IntoElement, Keystroke, Pixels, Point,
+    Render, ShapedLine, Task, TextInputPurpose, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use silo_client::{Applied, Control, DataSender, DataStream, Mirror, Predictor, cache::MirrorCheckpoint, transport::Conn};
 use silo_proto::{
@@ -134,7 +133,14 @@ impl ImeLayout {
 
 impl Pane {
     /// `restored`: a mirror from the cache, shown until the stream resumes.
-    pub fn new(block_id: String, rt: tokio::runtime::Handle, control: Option<Control>, restored: Option<Mirror>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        block_id: String,
+        rt: tokio::runtime::Handle,
+        control: Option<Control>,
+        restored: Option<Mirror>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         cx.on_focus(&focus, window, |this, _, cx| {
             this.blink.reset();
@@ -269,7 +275,9 @@ impl Pane {
         if self.own_requested.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
             return;
         }
-        let Some(control) = self.control.clone() else { return };
+        let Some(control) = self.control.clone() else {
+            return;
+        };
         self.own_requested = Some(Instant::now());
         let block = self.block_id.clone();
         self.rt.spawn(async move {
@@ -278,7 +286,9 @@ impl Pane {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        let Some(control) = self.control.clone() else { return };
+        let Some(control) = self.control.clone() else {
+            return;
+        };
         self.attempt += 1;
         let attempt = self.attempt;
         self.status = Status::Connecting;
@@ -410,7 +420,8 @@ impl Pane {
         }
     }
 
-    fn send_input(&mut self, bytes: Vec<u8>) {
+    /// `key`: typed input (a key press or committed text), stamped by the latency trace.
+    fn send_input(&mut self, bytes: Vec<u8>, key: bool) {
         if bytes.is_empty() || !matches!(self.status, Status::Live) || !self.running() {
             return;
         }
@@ -419,11 +430,13 @@ impl Pane {
         if !self.remote() && self.trace.is_none() {
             return;
         }
-        let Some(frame) = self.mirror.terminal().and_then(|vt| vt.frame().ok()) else { return };
+        let Some(frame) = self.mirror.terminal().and_then(|vt| vt.frame().ok()) else {
+            return;
+        };
         let target = self.predictor.overlay().1.unwrap_or((frame.cursor.row, frame.cursor.column));
         self.predictor.input(&bytes, &frame);
-        if let (Some(trace), [byte @ 0x20..=0x7e]) = (&self.trace, bytes.as_slice()) {
-            trace.borrow_mut().key(char::from(*byte), target);
+        if let Some(trace) = self.trace.as_ref().filter(|_| key) {
+            trace.borrow_mut().key(&bytes, target);
         }
     }
 
@@ -431,7 +444,7 @@ impl Pane {
         if let Some(vt) = self.mirror.terminal()
             && let Ok(bytes) = vt.encode_focus(focused)
         {
-            self.send_input(bytes);
+            self.send_input(bytes, false);
         }
     }
 
@@ -457,7 +470,9 @@ impl Pane {
         self.own(OwnMode::Take);
         // The prediction overlay changed with the input just sent.
         cx.notify();
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         let mut changed = vt.clear_selection();
         if vt.scroll_state().is_ok_and(|s| !s.at_bottom()) {
             vt.scroll_to_row(u64::MAX);
@@ -485,10 +500,8 @@ impl Pane {
         if !self.accepts_input(window) {
             return true;
         }
-        let printable = key.key_char.as_ref().is_some_and(|t| !t.is_empty())
-            && !key.modifiers.control
-            && !key.modifiers.alt
-            && !key.modifiers.platform;
+        let printable =
+            key.key_char.as_ref().is_some_and(|t| !t.is_empty()) && !key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform;
         match self.input_gate.route(&key.key, printable, release, self.composition.is_active()) {
             RawDisposition::Encode => self.encode_key(key, release, cx),
             RawDisposition::PlatformText => return false,
@@ -524,7 +537,9 @@ impl Pane {
             },
             release,
         };
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         let encoded = vt.encode_key(&event).map(|bytes| {
             // macOS editing chords whose legacy encoding shells ignore.
             match crate::keys::edit_override(&key.key, crate::keys::Chord::of(&key.modifiers), &bytes) {
@@ -535,7 +550,7 @@ impl Pane {
         if let Ok(bytes) = encoded
             && !bytes.is_empty()
         {
-            self.send_input(bytes);
+            self.send_input(bytes, !release);
             if !release {
                 self.typed(cx);
             }
@@ -547,9 +562,11 @@ impl Pane {
             return;
         }
         let event = KeyEvent { key: String::new(), text: text.to_owned(), modifiers: Modifiers::default(), release: false };
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         if let Ok(bytes) = vt.encode_key(&event) {
-            self.send_input(bytes);
+            self.send_input(bytes, true);
             self.typed(cx);
         }
     }
@@ -557,7 +574,9 @@ impl Pane {
     // ---- clipboard ----
 
     pub fn copy(&mut self, cx: &mut Context<Self>) {
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         if let Ok(text) = vt.copy_selection()
             && !text.is_empty()
         {
@@ -597,10 +616,14 @@ impl Pane {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         if let Ok(bytes) = vt.paste(&text) {
-            self.send_input(bytes);
+            self.send_input(bytes, false);
             self.typed(cx);
         }
     }
@@ -608,11 +631,23 @@ impl Pane {
     // ---- pointer ----
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn pointer(&mut self, position: Point<Pixels>, action: MouseAction, button: MouseButton, modifiers: gpui::Modifiers, scale: f32, cx: &mut Context<Self>) {
-        let Some(bounds) = self.content_bounds else { return };
+    fn pointer(
+        &mut self,
+        position: Point<Pixels>,
+        action: MouseAction,
+        button: MouseButton,
+        modifiers: gpui::Modifiers,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.content_bounds else {
+            return;
+        };
         let scale = scale.max(0.5);
         let exited = !self.running();
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         let grid = vt.size();
         let max_x = (f32::from(grid.columns) * f32::from(grid.cell_width) - 1.0).max(0.0);
         let max_y = (f32::from(grid.rows) * f32::from(grid.cell_height) - 1.0).max(0.0);
@@ -654,7 +689,7 @@ impl Pane {
         if let Ok(bytes) = vt.encode_mouse_at(event, Instant::now())
             && !exited
         {
-            self.send_input(bytes);
+            self.send_input(bytes, false);
         }
         if matches!(action, MouseAction::Release) {
             self.autoscroll = 0;
@@ -753,7 +788,9 @@ impl Pane {
             return;
         }
         let offset = self.mirror.next_offset();
-        let Some(vt) = self.mirror.terminal() else { return };
+        let Some(vt) = self.mirror.terminal() else {
+            return;
+        };
         let Ok(frame) = vt.frame() else { return };
         let frame = Arc::new(frame);
         self.last_frame = Some(frame.clone());
@@ -853,7 +890,8 @@ impl Pane {
         self.status == Status::Live
             && self.running()
             && self.grid.is_some_and(|g| g.columns != applied.columns || g.rows != applied.rows)
-            && self.info.as_ref().is_some_and(|i| i.owner.is_some()) && !self.is_owner()
+            && self.info.as_ref().is_some_and(|i| i.owner.is_some())
+            && !self.is_owner()
     }
 }
 
@@ -866,17 +904,18 @@ fn predictor_for(control: Option<&Control>) -> Predictor {
 }
 
 /// Tab title: a program's title or foreground command, else the
-/// abbreviated cwd while a shell sits at its prompt.
+/// cwd's last component (`~` for home, `/` for root) while a shell sits at
+/// its prompt.
 pub fn block_title(info: &BlockInfo) -> String {
-    let shell = info.title.is_empty()
-        || matches!(info.title.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "nu" | "shell" | "login");
+    let shell = info.title.is_empty() || matches!(info.title.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "nu" | "shell" | "login");
     match info.cwd.as_deref() {
         Some(cwd) if shell => {
             let home = std::env::var("HOME").unwrap_or_default();
-            match cwd.strip_prefix(home.as_str()) {
-                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                _ => cwd.to_owned(),
+            let cwd = cwd.trim_end_matches('/');
+            if !home.is_empty() && cwd == home.trim_end_matches('/') {
+                return "~".into();
             }
+            cwd.rsplit('/').next().filter(|last| !last.is_empty()).unwrap_or("/").to_owned()
         }
         _ => info.title.clone(),
     }
@@ -902,6 +941,11 @@ impl Render for Pane {
         let status = self.status_text();
         let lifecycle = self.lifecycle_text();
         let sized_elsewhere = self.sized_elsewhere();
+        // Another client's smaller grid: rule off and fill what is not ours.
+        let applied = self.mirror.size();
+        let edge_x = self.grid.filter(|g| sized_elsewhere && applied.columns < g.columns).map(|_| px(f32::from(applied.columns) * metrics.width));
+        let edge_y = self.grid.filter(|g| sized_elsewhere && applied.rows < g.rows).map(|_| px(f32::from(applied.rows) * metrics.height));
+        let outside = || div().absolute().bg(rgb(theme::surface())).border_color(rgb(theme::border()));
         let (cells, predicted_cursor) = self.predictor.overlay();
         let overlay = Overlay {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
@@ -963,13 +1007,27 @@ impl Render for Pane {
                         if event.button == gpui::MouseButton::Left {
                             this.dragging = true;
                         }
-                        this.pointer(event.position, MouseAction::Press, mouse_button(Some(event.button)), event.modifiers, window.scale_factor(), cx);
+                        this.pointer(
+                            event.position,
+                            MouseAction::Press,
+                            mouse_button(Some(event.button)),
+                            event.modifiers,
+                            window.scale_factor(),
+                            cx,
+                        );
                     }),
                 )
                 .on_mouse_up(
                     button,
                     cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
-                        this.pointer(event.position, MouseAction::Release, mouse_button(Some(event.button)), event.modifiers, window.scale_factor(), cx);
+                        this.pointer(
+                            event.position,
+                            MouseAction::Release,
+                            mouse_button(Some(event.button)),
+                            event.modifiers,
+                            window.scale_factor(),
+                            cx,
+                        );
                         if event.button == gpui::MouseButton::Left {
                             this.end_drag();
                         }
@@ -983,9 +1041,20 @@ impl Render for Pane {
                 .when_some(self.prepared.clone(), |el, prepared| {
                     el.child(div().absolute().top_0().left_0().size_full().child(terminal_canvas(prepared, metrics, cursor, selection, overlay)))
                 })
-                .when_some(trace, |el, (trace, prepared, predicted)| {
-                    el.child(crate::latency::paint_probe(trace, prepared, predicted))
+                .when_some(edge_x, |el, x| {
+                    el.child(outside().top_0().right_0().left(x).border_l_1().map(|d| match edge_y {
+                        Some(y) => d.h(y),
+                        None => d.bottom_0(),
+                    }))
                 })
+                .when_some(edge_y, |el, y| {
+                    el.child(outside().left_0().bottom_0().top(y).border_t_1().map(|d| match edge_x {
+                        Some(x) => d.w(x),
+                        None => d.right_0(),
+                    }))
+                })
+                .when_some(edge_x.zip(edge_y), |el, (x, y)| el.child(outside().left(x).top(y).right_0().bottom_0()))
+                .when_some(trace, |el, (trace, prepared, predicted)| el.child(crate::latency::paint_probe(trace, prepared, predicted)))
                 .child(input_canvas(entity, metrics))
                 .when_some(status.filter(|_| lifecycle.is_none()), |el, text| {
                     el.child(
@@ -1032,24 +1101,34 @@ impl Render for Pane {
                     )
                 })
                 .when(sized_elsewhere, |el| {
+                    let owner = self.info.as_ref().and_then(|i| i.owner_name.clone()).unwrap_or_else(|| "another client".into());
                     el.child(
                         div()
-                            .id("take-size")
                             .absolute()
                             .top(px(2.0))
                             .right(px(2.0))
+                            .flex()
+                            .gap(px(6.0))
                             .px(px(6.0))
                             .py(px(2.0))
                             .continuous(4.0)
                             .bg(rgb(theme::tab_active()))
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
-                            .cursor_pointer()
-                            .child("sized by another client · take size")
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.own_requested = None;
-                                this.own(OwnMode::Take);
-                            })),
+                            .child(format!("sized by {owner}"))
+                            .child("·")
+                            .child(
+                                div()
+                                    .id("take-size")
+                                    .text_color(rgb(theme::foreground()))
+                                    .cursor_pointer()
+                                    .child("Take size")
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.own_requested = None;
+                                        this.own(OwnMode::Take);
+                                    })),
+                            ),
                     )
                 }),
         )
@@ -1143,7 +1222,13 @@ impl EntityInputHandler for Pane {
         TextInputPurpose::Terminal
     }
 
-    fn text_for_range(&mut self, range: Range<usize>, adjusted: &mut Option<Range<usize>>, window: &mut Window, _: &mut Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted: &mut Option<Range<usize>>,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
         if !self.accepts_input(window) {
             return None;
         }
@@ -1190,7 +1275,14 @@ impl EntityInputHandler for Pane {
         self.composition_changed(window, cx);
     }
 
-    fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.accepts_input(window) {
             self.unmark_text(window, cx);
             return;
@@ -1261,9 +1353,28 @@ mod tests {
             lifecycle,
             size: TermSize::new(80, 24),
             owner: None,
+            owner_name: None,
             pid: None,
             browser: None,
         }
+    }
+
+    #[test]
+    fn block_title_shows_last_cwd_component() {
+        let shell = |title: &str, cwd: &str| BlockInfo { title: title.into(), cwd: Some(cwd.into()), ..info(Lifecycle::Running, None) };
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(block_title(&shell("-zsh", &home)), "~");
+        assert_eq!(block_title(&shell("zsh", &format!("{home}/dev/term/crates"))), "crates");
+        assert_eq!(block_title(&shell("", "/")), "/");
+        assert_eq!(block_title(&shell("", "/usr/local/")), "local");
+        assert_eq!(block_title(&shell("vim notes.md", "/tmp")), "vim notes.md");
+    }
+
+    #[test]
+    fn badge_names_the_owner_briefly() {
+        use silo_proto::model::short_client_name;
+        assert_eq!(short_client_name("Silo 0.1.0 (macOS, pid 42)"), "Silo");
+        assert_eq!(short_client_name("silo cli"), "silo cli");
     }
 
     #[test]

@@ -47,10 +47,7 @@ struct Policy {
     direct_ok: fn(IpAddr) -> bool,
 }
 
-const POLICY: Policy = Policy {
-    tunneled: tunnel::is_private_host,
-    direct_ok: |ip| !tunnel::is_non_public_ip(ip),
-};
+const POLICY: Policy = Policy { tunneled: tunnel::is_private_host, direct_ok: |ip| !tunnel::is_non_public_ip(ip) };
 
 impl TunnelProxy {
     /// Listen on `127.0.0.1:0`; tunnel server-private hosts to the server at
@@ -66,27 +63,15 @@ impl TunnelProxy {
         Self::start_with(net, addr, POLICY).await
     }
 
-    async fn start_with<N>(
-        net: N,
-        addr: EndpointAddr,
-        policy: Policy,
-    ) -> anyhow::Result<TunnelProxy>
+    async fn start_with<N>(net: N, addr: EndpointAddr, policy: Policy) -> anyhow::Result<TunnelProxy>
     where
         N: Deref<Target = Net> + Send + Sync + 'static,
     {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .context("bind tunnel proxy")?;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("bind tunnel proxy")?;
         let port = listener.local_addr()?.port();
         let password = HEXLOWER.encode(&rand::random::<[u8; 32]>());
         let expected = BASE64.encode(format!("{PROXY_USER}:{password}").as_bytes());
-        let dialer = Arc::new(Dialer {
-            net,
-            addr,
-            conn: Mutex::new(None),
-            policy,
-            expected,
-        });
+        let dialer = Arc::new(Dialer { net, addr, conn: Mutex::new(None), policy, expected });
         let task = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 let dialer = dialer.clone();
@@ -97,11 +82,7 @@ impl TunnelProxy {
                 });
             }
         });
-        Ok(TunnelProxy {
-            port,
-            password,
-            task,
-        })
+        Ok(TunnelProxy { port, password, task })
     }
 
     #[must_use]
@@ -140,11 +121,7 @@ impl<N: Deref<Target = Net>> Dialer<N> {
             match &*cached {
                 Some(rc) => rc.clone(),
                 None => {
-                    let rc = self
-                        .net
-                        .dial_tunnel(self.addr.clone())
-                        .await
-                        .map_err(io::Error::other)?;
+                    let rc = self.net.dial_tunnel(self.addr.clone()).await.map_err(io::Error::other)?;
                     cached.insert(rc).clone()
                 }
             }
@@ -168,9 +145,7 @@ impl<N: Deref<Target = Net>> Dialer<N> {
 }
 
 fn refusal(e: &io::Error) -> Option<TunnelErrCode> {
-    e.get_ref()
-        .and_then(|e| e.downcast_ref::<TunnelErr>())
-        .map(|e| e.code)
+    e.get_ref().and_then(|e| e.downcast_ref::<TunnelErr>()).map(|e| e.code)
 }
 
 fn status_for(e: &io::Error) -> &'static str {
@@ -181,10 +156,7 @@ fn status_for(e: &io::Error) -> &'static str {
     }
 }
 
-async fn proxy<N: Deref<Target = Net>>(
-    dialer: &Dialer<N>,
-    mut tcp: TcpStream,
-) -> anyhow::Result<()> {
+async fn proxy<N: Deref<Target = Net>>(dialer: &Dialer<N>, mut tcp: TcpStream) -> anyhow::Result<()> {
     let (head, rest) = read_head(&mut tcp).await?;
     if !authorized(&head, &dialer.expected) {
         let reply = "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"silo\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -214,16 +186,9 @@ async fn proxy<N: Deref<Target = Net>>(
 /// Resolve once, refuse if any address is not public (a public name must
 /// not reach this machine's or its LAN's services), then connect only to
 /// the vetted addresses so a second lookup can't change the answer.
-async fn direct(
-    host: &str,
-    port: u16,
-    ok: fn(IpAddr) -> bool,
-) -> Result<TcpStream, (&'static str, anyhow::Error)> {
+async fn direct(host: &str, port: u16, ok: fn(IpAddr) -> bool) -> Result<TcpStream, (&'static str, anyhow::Error)> {
     let bad_gateway = |e: anyhow::Error| ("502 Bad Gateway", e);
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| bad_gateway(e.into()))?
-        .collect();
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.map_err(|e| bad_gateway(e.into()))?.collect();
     if addrs.is_empty() {
         return Err(bad_gateway(anyhow::anyhow!("{host} has no addresses")));
     }
@@ -271,20 +236,12 @@ async fn refuse(mut tcp: TcpStream, status: &str, error: anyhow::Error) -> anyho
 }
 
 /// Answer CONNECT (or forward the origin-form head), then splice.
-async fn relay<S>(
-    mut tcp: TcpStream,
-    mut upstream: S,
-    req: &Request,
-    rest: &[u8],
-) -> anyhow::Result<()>
+async fn relay<S>(mut tcp: TcpStream, mut upstream: S, req: &Request, rest: &[u8]) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     match &req.forward {
-        None => {
-            tcp.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                .await?
-        }
+        None => tcp.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?,
         Some(head) => upstream.write_all(head.as_bytes()).await?,
     }
     upstream.write_all(rest).await?;
@@ -298,10 +255,7 @@ async fn read_head(tcp: &mut TcpStream) -> anyhow::Result<(String, Vec<u8>)> {
     loop {
         if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             let rest = buf.split_off(end + 4);
-            return Ok((
-                String::from_utf8(buf).context("non-utf8 request head")?,
-                rest,
-            ));
+            return Ok((String::from_utf8(buf).context("non-utf8 request head")?, rest));
         }
         anyhow::ensure!(buf.len() < MAX_HEAD, "request head too large");
         let mut chunk = [0u8; 4096];
@@ -327,28 +281,16 @@ impl Request {
         let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
         if method.eq_ignore_ascii_case("CONNECT") {
             let (host, port) = split_host_port(target, None)?;
-            return Some(Request {
-                host,
-                port,
-                forward: None,
-            });
+            return Some(Request { host, port, forward: None });
         }
-        let rest = target
-            .strip_prefix("http://")
-            .or_else(|| target.strip_prefix("ws://"))?;
-        let (authority, path) = rest
-            .find('/')
-            .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
+        let rest = target.strip_prefix("http://").or_else(|| target.strip_prefix("ws://"))?;
+        let (authority, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
         let (host, port) = split_host_port(authority, Some(80))?;
-        let upgrade = headers.lines().any(|h| {
-            h.split_once(':')
-                .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case("upgrade"))
-        });
+        let upgrade = headers.lines().any(|h| h.split_once(':').is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case("upgrade")));
         let mut forward = format!("{method} {path} {version}\r\n");
         for h in headers.lines().filter(|h| !h.is_empty()) {
             let name = h.split_once(':').map_or(h, |(n, _)| n).trim();
-            let hop = name.eq_ignore_ascii_case("proxy-connection")
-                || name.eq_ignore_ascii_case("proxy-authorization");
+            let hop = name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("proxy-authorization");
             // One upstream per client connection: only the first head is
             // parsed; everything after it is spliced to that same upstream,
             // which is told `Connection: close`. So `Content-Length` /
@@ -365,11 +307,7 @@ impl Request {
             forward.push_str("Connection: close\r\n");
         }
         forward.push_str("\r\n");
-        Some(Request {
-            host,
-            port,
-            forward: Some(forward),
-        })
+        Some(Request { host, port, forward: Some(forward) })
     }
 }
 
@@ -404,10 +342,7 @@ mod tests {
             while let Ok((mut tcp, _)) = listener.accept().await {
                 tokio::spawn(async move {
                     let (head, _) = read_head(&mut tcp).await.unwrap();
-                    let reply = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{head}",
-                        head.len()
-                    );
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{head}", head.len());
                     tcp.write_all(reply.as_bytes()).await.unwrap();
                 });
             }
@@ -419,42 +354,22 @@ mod tests {
         let mut tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         tcp.write_all(send).await.unwrap();
         let mut out = String::new();
-        tokio::time::timeout(Duration::from_secs(10), tcp.read_to_string(&mut out))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), tcp.read_to_string(&mut out)).await.unwrap().unwrap();
         out
     }
 
     /// A proxy whose (unreachable) server is never dialed: nothing is
     /// tunneled. `direct_ok` decides which resolved addresses are public.
     async fn direct_proxy(name: &str, direct_ok: fn(IpAddr) -> bool) -> (TunnelProxy, String) {
-        let dir = std::path::PathBuf::from(format!(
-            "/tmp/silo-client-tunnel-{name}-{}",
-            std::process::id()
-        ));
+        let dir = std::path::PathBuf::from(format!("/tmp/silo-client-tunnel-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let id = crate::client_identity(&dir).unwrap();
-        let net = Net::bind(&id, silo_transport::RelayConfig::Disabled, false)
-            .await
-            .unwrap();
-        let server = EndpointAddr::new(
-            silo_transport::Identity::load_or_create(dir.join("srv"))
-                .unwrap()
-                .id(),
-        );
-        let policy = Policy {
-            tunneled: |_| false,
-            direct_ok,
-        };
-        let proxy = TunnelProxy::start_with(Arc::new(net), server, policy)
-            .await
-            .unwrap();
+        let net = Net::bind(&id, silo_transport::RelayConfig::Disabled, false).await.unwrap();
+        let server = EndpointAddr::new(silo_transport::Identity::load_or_create(dir.join("srv")).unwrap().id());
+        let policy = Policy { tunneled: |_| false, direct_ok };
+        let proxy = TunnelProxy::start_with(Arc::new(net), server, policy).await.unwrap();
         let (user, pass) = proxy.credentials();
-        let auth = format!(
-            "Proxy-Authorization: Basic {}\r\n",
-            BASE64.encode(format!("{user}:{pass}").as_bytes())
-        );
+        let auth = format!("Proxy-Authorization: Basic {}\r\n", BASE64.encode(format!("{user}:{pass}").as_bytes()));
         let _ = std::fs::remove_dir_all(&dir);
         (proxy, auth)
     }
@@ -464,22 +379,13 @@ mod tests {
         let (proxy, auth) = direct_proxy("direct", |_| true).await;
         let web = head_echo_server().await;
 
-        let get = format!(
-            "GET http://127.0.0.1:{web}/p?q HTTP/1.1\r\nHost: x\r\n{auth}Proxy-Connection: keep-alive\r\n\r\n"
-        );
+        let get = format!("GET http://127.0.0.1:{web}/p?q HTTP/1.1\r\nHost: x\r\n{auth}Proxy-Connection: keep-alive\r\n\r\n");
         let out = roundtrip(proxy.port(), get.as_bytes()).await;
-        assert!(
-            out.ends_with("\r\n\r\nGET /p?q HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
-            "{out}"
-        );
+        assert!(out.ends_with("\r\n\r\nGET /p?q HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"), "{out}");
 
-        let connect =
-            format!("CONNECT 127.0.0.1:{web} HTTP/1.1\r\n{auth}\r\nGET /raw HTTP/1.1\r\n\r\n");
+        let connect = format!("CONNECT 127.0.0.1:{web} HTTP/1.1\r\n{auth}\r\nGET /raw HTTP/1.1\r\n\r\n");
         let out = roundtrip(proxy.port(), connect.as_bytes()).await;
-        assert!(
-            out.starts_with("HTTP/1.1 200 Connection Established\r\n\r\nHTTP/1.1 200 OK"),
-            "{out}"
-        );
+        assert!(out.starts_with("HTTP/1.1 200 Connection Established\r\n\r\nHTTP/1.1 200 OK"), "{out}");
         assert!(out.ends_with("GET /raw HTTP/1.1\r\n\r\n"), "{out}");
     }
 
@@ -487,37 +393,18 @@ mod tests {
     async fn requires_proxy_auth() {
         let (proxy, auth) = direct_proxy("auth", |_| true).await;
         let web = head_echo_server().await;
-        let wrong = format!(
-            "Proxy-Authorization: Basic {}\r\n",
-            BASE64.encode(b"silo:wrong")
-        );
+        let wrong = format!("Proxy-Authorization: Basic {}\r\n", BASE64.encode(b"silo:wrong"));
         for creds in ["", wrong.as_str(), "Proxy-Authorization: Bearer x\r\n"] {
-            for req in [
-                format!("GET http://127.0.0.1:{web}/ HTTP/1.1\r\n{creds}\r\n"),
-                format!("CONNECT 127.0.0.1:{web} HTTP/1.1\r\n{creds}\r\n"),
-            ] {
+            for req in [format!("GET http://127.0.0.1:{web}/ HTTP/1.1\r\n{creds}\r\n"), format!("CONNECT 127.0.0.1:{web} HTTP/1.1\r\n{creds}\r\n")] {
                 let out = roundtrip(proxy.port(), req.as_bytes()).await;
                 assert!(out.starts_with("HTTP/1.1 407 "), "{req:?}: {out}");
-                assert!(
-                    out.contains("\r\nProxy-Authenticate: Basic realm=\"silo\"\r\n"),
-                    "{out}"
-                );
+                assert!(out.contains("\r\nProxy-Authenticate: Basic realm=\"silo\"\r\n"), "{out}");
             }
         }
-        let ok = roundtrip(
-            proxy.port(),
-            format!("GET http://127.0.0.1:{web}/ HTTP/1.1\r\n{auth}\r\n").as_bytes(),
-        )
-        .await;
+        let ok = roundtrip(proxy.port(), format!("GET http://127.0.0.1:{web}/ HTTP/1.1\r\n{auth}\r\n").as_bytes()).await;
         assert!(ok.starts_with("HTTP/1.1 200 OK"), "{ok}");
-        assert!(
-            !ok.contains("Proxy-Authorization"),
-            "credentials leaked upstream: {ok}"
-        );
-        assert_ne!(
-            proxy.credentials().1,
-            direct_proxy("auth2", |_| true).await.0.credentials().1
-        );
+        assert!(!ok.contains("Proxy-Authorization"), "credentials leaked upstream: {ok}");
+        assert_ne!(proxy.credentials().1, direct_proxy("auth2", |_| true).await.0.credentials().1);
     }
 
     #[tokio::test]
@@ -548,50 +435,27 @@ mod tests {
             "GET http://127.0.0.1:{a}/1 HTTP/1.1\r\n{auth}Content-Length: 0\r\nConnection: keep-alive\r\n\r\nGET http://127.0.0.1:{bport}/2 HTTP/1.1\r\n{auth}\r\n"
         );
         let out = roundtrip(proxy.port(), req.as_bytes()).await;
-        assert!(
-            out.ends_with("GET /1 HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
-            "{out}"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), b.accept())
-                .await
-                .is_err(),
-            "second host was dialed"
-        );
+        assert!(out.ends_with("GET /1 HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), "{out}");
+        assert!(tokio::time::timeout(Duration::from_millis(200), b.accept()).await.is_err(), "second host was dialed");
     }
 
     #[test]
     fn parses_connect_and_absolute_form() {
-        let connect =
-            Request::parse("CONNECT localhost:3000 HTTP/1.1\r\nHost: localhost:3000\r\n\r\n")
-                .unwrap();
-        assert_eq!(
-            connect,
-            Request {
-                host: "localhost".into(),
-                port: 3000,
-                forward: None
-            }
-        );
+        let connect = Request::parse("CONNECT localhost:3000 HTTP/1.1\r\nHost: localhost:3000\r\n\r\n").unwrap();
+        assert_eq!(connect, Request { host: "localhost".into(), port: 3000, forward: None });
         let v6 = Request::parse("CONNECT [::1]:443 HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!((v6.host.as_str(), v6.port), ("::1", 443));
 
-        let get = Request::parse("GET http://localhost:3000/a?b HTTP/1.1\r\nHost: localhost:3000\r\nProxy-Connection: keep-alive\r\nConnection: keep-alive\r\n\r\n").unwrap();
-        assert_eq!((get.host.as_str(), get.port), ("localhost", 3000));
-        assert_eq!(
-            get.forward.unwrap(),
-            "GET /a?b HTTP/1.1\r\nHost: localhost:3000\r\nConnection: close\r\n\r\n"
-        );
-
-        let ws = Request::parse(
-            "GET http://10.0.0.2/ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+        let get = Request::parse(
+            "GET http://localhost:3000/a?b HTTP/1.1\r\nHost: localhost:3000\r\nProxy-Connection: keep-alive\r\nConnection: keep-alive\r\n\r\n",
         )
         .unwrap();
+        assert_eq!((get.host.as_str(), get.port), ("localhost", 3000));
+        assert_eq!(get.forward.unwrap(), "GET /a?b HTTP/1.1\r\nHost: localhost:3000\r\nConnection: close\r\n\r\n");
+
+        let ws = Request::parse("GET http://10.0.0.2/ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").unwrap();
         assert_eq!(ws.port, 80);
-        assert_eq!(
-            ws.forward.unwrap(),
-            "GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
-        );
+        assert_eq!(ws.forward.unwrap(), "GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
 
         assert!(Request::parse("GET /origin-form HTTP/1.1\r\n\r\n").is_none());
     }

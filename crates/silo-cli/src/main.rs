@@ -11,7 +11,10 @@ use std::{
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use silo_cli::{NetOptions, hosts::Hosts, parse_duration, parse_relay};
-use silo_client::{Control, Events, transport::{Net, RelayConfig}};
+use silo_client::{
+    Control, Events,
+    transport::{Net, RelayConfig},
+};
 use silo_proto::{
     control::{Capture, Created, Method, SpawnSpec},
     model::{BlockKind, SessionSummary, SessionView, TermSize},
@@ -129,6 +132,8 @@ enum Command {
         #[arg(long)]
         history: bool,
     },
+    /// Float a block (or a session's focused block) over its window.
+    Float { target: String },
     /// Close a session and its processes.
     Kill { target: String },
     /// Stop the server and every process it runs.
@@ -166,6 +171,8 @@ enum HostsCommand {
 enum ApiCommand {
     /// List methods.
     List,
+    /// Describe a method: params and result JSON Schema and an example.
+    Describe { method: String },
     /// Call a method with JSON params.
     Call { method: String, params: Option<String> },
 }
@@ -173,7 +180,9 @@ enum ApiCommand {
 #[derive(Subcommand)]
 enum BrowserCmd {
     /// Load a URL (bare hosts get https://, localhost and private IPs http://).
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     Back,
     Forward,
     Reload {
@@ -291,7 +300,12 @@ fn init_tracing() {
 
 async fn run(command: Command, host: Option<String>, status: Option<std::fs::File>) -> anyhow::Result<i32> {
     let host = host.as_deref();
-    if host.is_some() && matches!(command, Command::Server { .. } | Command::KillServer | Command::Pair { .. } | Command::Devices { .. } | Command::Id | Command::Hosts { .. }) {
+    if host.is_some()
+        && matches!(
+            command,
+            Command::Server { .. } | Command::KillServer | Command::Pair { .. } | Command::Devices { .. } | Command::Id | Command::Hosts { .. }
+        )
+    {
         bail!("--host is not supported for this command");
     }
     match command {
@@ -388,6 +402,12 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             writeln!(out, "{}", capture.text)?;
             Ok(0)
         }
+        Command::Float { target } => {
+            let (control, _, _net) = connect(host).await?;
+            let block = resolve_block(&control, Some(&target)).await?;
+            control.call_value(Method::BlockFloat { block_id: block, rect: None }).await?;
+            Ok(0)
+        }
         Command::Kill { target } => {
             let (control, _, _net) = connect(host).await?;
             let session = resolve_session(&control, Some(&target)).await?;
@@ -429,6 +449,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             let (control, _, _net) = connect(host).await?;
             let value = match command {
                 ApiCommand::List => control.call_value(Method::ApiList {}).await?,
+                ApiCommand::Describe { method } => control.call_value(Method::ApiDescribe { method }).await?,
                 ApiCommand::Call { method, params } => {
                     let params: serde_json::Value = match params {
                         Some(text) => serde_json::from_str(&text).context("params must be JSON")?,
@@ -555,7 +576,10 @@ async fn takeover_reporting(config: silo_server::Config, status: Option<std::fs:
     let runtime = paths::runtime(&config.home);
     let committed = async {
         loop {
-            let ours = std::fs::read(&runtime).ok().and_then(|b| serde_json::from_slice::<paths::Runtime>(&b).ok()).is_some_and(|r| r.pid == std::process::id());
+            let ours = std::fs::read(&runtime)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<paths::Runtime>(&b).ok())
+                .is_some_and(|r| r.pid == std::process::id());
             if ours {
                 return;
             }
@@ -583,12 +607,16 @@ fn start_menubar() {
     if std::env::var_os("SILO_NO_MENUBAR").is_some() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     let exe = exe.canonicalize().unwrap_or(exe);
     if !exe.to_string_lossy().contains(".app/Contents/MacOS/") {
         return;
     }
-    let Some(agent) = exe.parent().map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else { return };
+    let Some(agent) = exe.parent().map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
+        return;
+    };
     let _ = std::process::Command::new(agent)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -611,9 +639,7 @@ async fn connect(host: Option<&str>) -> anyhow::Result<(Control, Events, Option<
 async fn connect_existing() -> anyhow::Result<(Option<Control>, Option<Events>)> {
     match Control::connect(&paths::socket(&paths::home()), &client_name()).await {
         Ok((control, events)) => Ok((Some(control), Some(events))),
-        Err(error) if silo_client::mismatch::is_mismatch(&error) => {
-            Err(silo_client::mismatch::inspect(&paths::home()).await.into())
-        }
+        Err(error) if silo_client::mismatch::is_mismatch(&error) => Err(silo_client::mismatch::inspect(&paths::home()).await.into()),
         Err(_) => Ok((None, None)),
     }
 }
@@ -685,7 +711,17 @@ mod tests {
         assert!(Cli::try_parse_from(["silo", "pair", "--ttl", "soon"]).is_err());
         let cli = Cli::parse_from(["silo", "ls", "--host", "work"]);
         assert_eq!(cli.host.as_deref(), Some("work"));
-        assert!(matches!(Cli::parse_from(["silo", "devices", "revoke", "ab12"]).command, Some(Command::Devices { command: Some(DevicesCommand::Revoke { .. }) })));
+        assert!(matches!(
+            Cli::parse_from(["silo", "devices", "revoke", "ab12"]).command,
+            Some(Command::Devices { command: Some(DevicesCommand::Revoke { .. }) })
+        ));
+    }
+
+    #[test]
+    fn float_and_describe_commands() {
+        assert!(matches!(Cli::parse_from(["silo", "float", "b1"]).command, Some(Command::Float { target }) if target == "b1"));
+        let cli = Cli::parse_from(["silo", "api", "describe", "ping"]);
+        assert!(matches!(cli.command, Some(Command::Api { command: ApiCommand::Describe { method } }) if method == "ping"));
     }
 
     #[test]

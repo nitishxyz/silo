@@ -1,6 +1,7 @@
 //! Session tree: sessions contain windows (tabs); a window's layout is a
 //! binary split tree whose leaves are blocks.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub type SessionId = String;
@@ -8,7 +9,7 @@ pub type WindowId = String;
 pub type BlockId = String;
 pub type ClientId = u64;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TermSize {
     pub columns: u16,
     pub rows: u16,
@@ -103,8 +104,22 @@ impl Default for TerminalConfig {
             background: 0x0016_1719,
             cursor: 0x00e8_e9ec,
             palette: [
-                0x001d_1f21, 0x00e0_6c75, 0x0098_c379, 0x00e5_c07b, 0x0061_afef, 0x00c6_78dd, 0x0056_b6c2, 0x00ab_b2bf,
-                0x005c_6370, 0x00ef_7b84, 0x00a9_d48a, 0x00f0_cd8c, 0x0074_bdf8, 0x00d5_8ae8, 0x0066_c7d3, 0x00e6_e9ef,
+                0x001d_1f21,
+                0x00e0_6c75,
+                0x0098_c379,
+                0x00e5_c07b,
+                0x0061_afef,
+                0x00c6_78dd,
+                0x0056_b6c2,
+                0x00ab_b2bf,
+                0x005c_6370,
+                0x00ef_7b84,
+                0x00a9_d48a,
+                0x00f0_cd8c,
+                0x0074_bdf8,
+                0x00d5_8ae8,
+                0x0066_c7d3,
+                0x00e6_e9ef,
             ],
             cursor_shape: CursorShape::Block,
             cursor_blink: true,
@@ -114,14 +129,14 @@ impl Default for TerminalConfig {
 }
 
 /// `Horizontal` places children side by side; `Vertical` stacks them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Axis {
     Horizontal,
     Vertical,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Layout {
     Block {
@@ -173,18 +188,11 @@ impl Layout {
         match self {
             Self::Block { id } if id == target => {
                 let old = Self::block(id.clone());
-                *self = Self::Split {
-                    axis,
-                    ratio: 0.5,
-                    first: Box::new(old),
-                    second: Box::new(Self::block(new)),
-                };
+                *self = Self::Split { axis, ratio: 0.5, first: Box::new(old), second: Box::new(Self::block(new)) };
                 true
             }
             Self::Block { .. } => false,
-            Self::Split { first, second, .. } => {
-                first.split(target, new.clone(), axis) || second.split(target, new, axis)
-            }
+            Self::Split { first, second, .. } => first.split(target, new.clone(), axis) || second.split(target, new, axis),
         }
     }
 
@@ -195,14 +203,12 @@ impl Layout {
         match self {
             Self::Block { ref id } if id == target => None,
             Self::Block { .. } => Some(self),
-            Self::Split { axis, ratio, first, second } => {
-                match ((*first).remove(target), (*second).remove(target)) {
-                    (Some(a), Some(b)) => Some(Self::Split { axis, ratio, first: Box::new(a), second: Box::new(b) }),
-                    (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(b),
-                    (None, None) => None,
-                }
-            }
+            Self::Split { axis, ratio, first, second } => match ((*first).remove(target), (*second).remove(target)) {
+                (Some(a), Some(b)) => Some(Self::Split { axis, ratio, first: Box::new(a), second: Box::new(b) }),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            },
         }
     }
 
@@ -236,25 +242,70 @@ impl Layout {
                 true
             }
             (Self::Split { first, second, .. }, Some((&index, rest))) => {
-                if index == 0 { first.set_ratio(rest, ratio) } else { second.set_ratio(rest, ratio) }
+                if index == 0 {
+                    first.set_ratio(rest, ratio)
+                } else {
+                    second.set_ratio(rest, ratio)
+                }
             }
             _ => false,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowInfo {
     pub id: WindowId,
     #[serde(default)]
     pub name: Option<String>,
     pub layout: Layout,
+    /// A tiled block or a float.
     pub focused: BlockId,
+    /// Tiled blocks only.
     #[serde(default)]
     pub zoomed: bool,
+    /// Back to front; the last is topmost.
+    pub floats: Vec<Float>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A block floating above a window's layout; the block id is the float id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Float {
+    pub id: BlockId,
+    pub rect: FloatRect,
+}
+
+/// Fractions of the window body, 0..1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FloatRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl FloatRect {
+    pub const MIN: f32 = 0.15;
+
+    /// `w,h` within `[MIN, 1]` and the rect inside `0..1`; non-finite
+    /// values take the default's.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let d = Self::default();
+        let fix = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        let (w, h) = (fix(self.w, d.w).clamp(Self::MIN, 1.0), fix(self.h, d.h).clamp(Self::MIN, 1.0));
+        Self { x: fix(self.x, d.x).clamp(0.0, 1.0 - w), y: fix(self.y, d.y).clamp(0.0, 1.0 - h), w, h }
+    }
+}
+
+impl Default for FloatRect {
+    /// Centred, 60% × 60%.
+    fn default() -> Self {
+        Self { x: 0.2, y: 0.2, w: 0.6, h: 0.6 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionInfo {
     pub id: SessionId,
     pub name: String,
@@ -264,7 +315,7 @@ pub struct SessionInfo {
     pub created_at: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BlockKind {
     #[default]
@@ -273,7 +324,7 @@ pub enum BlockKind {
 }
 
 /// Whether a block still has a process behind it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Lifecycle {
     /// A live PTY and program; input is delivered.
@@ -293,7 +344,7 @@ impl Lifecycle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BlockInfo {
     pub id: BlockId,
     pub session_id: SessionId,
@@ -311,6 +362,9 @@ pub struct BlockInfo {
     pub size: TermSize,
     #[serde(default)]
     pub owner: Option<ClientId>,
+    /// The owner's short client name (`Silo`, `silo cli`), with the
+    /// paired device's name appended for remote owners.
+    pub owner_name: Option<String>,
     #[serde(default)]
     pub pid: Option<i32>,
     /// Engine state; `Some` exactly when `kind` is [`BlockKind::Browser`].
@@ -318,7 +372,18 @@ pub struct BlockInfo {
     pub browser: Option<BrowserState>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A client name up to its first ` (`, without a trailing version:
+/// `Silo 0.1.0 (macOS, pid 7)` gives `Silo`; `silo cli on mini` stays.
+#[must_use]
+pub fn short_client_name(name: &str) -> &str {
+    let name = name.split(" (").next().unwrap_or_default().trim();
+    match name.rsplit_once(' ') {
+        Some((head, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => head,
+        _ => name,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryEntry {
     pub url: String,
     #[serde(default)]
@@ -327,7 +392,7 @@ pub struct HistoryEntry {
 
 /// Server-held state of a browser block. The owning client's engine reports
 /// it; commands edit it directly so the next client opens there.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserState {
     /// Committed URL of the current entry.
     pub url: String,
@@ -371,7 +436,9 @@ impl BrowserState {
 
     /// Move `delta` entries through history; false at either end.
     pub fn go(&mut self, delta: isize) -> bool {
-        let Some(index) = self.index.checked_add_signed(delta).filter(|&i| i < self.history.len()) else { return false };
+        let Some(index) = self.index.checked_add_signed(delta).filter(|&i| i < self.history.len()) else {
+            return false;
+        };
         self.index = index;
         let entry = &self.history[index];
         (self.url, self.title) = (entry.url.clone(), entry.title.clone());
@@ -392,8 +459,7 @@ pub fn browser_url(input: &str) -> Option<String> {
         return None;
     }
     if let Some((scheme, rest)) = input.split_once(':') {
-        let token = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
+        let token = scheme.starts_with(|c: char| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
         // `host:port` is not a scheme.
         if token && !rest.starts_with(|c: char| c.is_ascii_digit()) {
             let scheme = scheme.to_ascii_lowercase();
@@ -429,13 +495,13 @@ pub fn private_host(host: &str) -> bool {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionView {
     pub session: SessionInfo,
     pub blocks: Vec<BlockInfo>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: SessionId,
     pub name: String,
@@ -463,7 +529,16 @@ mod tests {
         assert_eq!(browser_url("WSS://h/s").as_deref(), Some("WSS://h/s"));
         assert_eq!(browser_url("data:text/html,hi").as_deref(), Some("data:text/html,hi"));
         assert_eq!(browser_url("example.com:8080/x").as_deref(), Some("https://example.com:8080/x"));
-        for bad in ["file:///etc/passwd", "file:/etc/passwd", "chrome://settings", "devtools://devtools", "javascript:alert(1)", "about:config", "http:example.com", "view-source:https://x"] {
+        for bad in [
+            "file:///etc/passwd",
+            "file:/etc/passwd",
+            "chrome://settings",
+            "devtools://devtools",
+            "javascript:alert(1)",
+            "about:config",
+            "http:example.com",
+            "view-source:https://x",
+        ] {
             assert_eq!(browser_url(bad), None, "{bad}");
         }
     }
@@ -485,6 +560,24 @@ mod tests {
         assert_eq!(state.history.len(), BrowserState::HISTORY);
         assert_eq!((state.index, state.url.as_str()), (BrowserState::HISTORY - 1, "u99"));
         assert!(!state.go(1));
+    }
+
+    #[test]
+    fn short_client_name_drops_details_and_version() {
+        assert_eq!(short_client_name("Silo 0.1.0 (macOS, pid 7)"), "Silo");
+        assert_eq!(short_client_name("Silo 0.1.0"), "Silo");
+        assert_eq!(short_client_name("silo cli"), "silo cli");
+        assert_eq!(short_client_name("silo cli on mini"), "silo cli on mini");
+        assert_eq!(short_client_name(""), "");
+    }
+
+    #[test]
+    fn float_rect_clamped_keeps_size_and_bounds() {
+        let r = |x, y, w, h| FloatRect { x, y, w, h };
+        assert_eq!(FloatRect::default().clamped(), FloatRect::default());
+        assert_eq!(r(0.9, -0.5, 0.5, 0.05).clamped(), r(0.5, 0.0, 0.5, FloatRect::MIN));
+        assert_eq!(r(-1.0, 2.0, 3.0, 1.0).clamped(), r(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(r(f32::NAN, 0.1, f32::INFINITY, 0.3).clamped(), r(0.2, 0.1, 0.6, 0.3));
     }
 
     #[test]

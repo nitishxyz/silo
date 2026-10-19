@@ -25,7 +25,13 @@ impl Control {
     /// Dial or handshake failure; a refused device is
     /// [`Unauthorized`](crate::Unauthorized), another build is
     /// [`BuildMismatch`](crate::BuildMismatch).
-    pub async fn connect_remote(net: &Net, addr: EndpointAddr, client_name: &str, passive: bool, invite: Option<&PairTicket>) -> anyhow::Result<(Self, Events)> {
+    pub async fn connect_remote(
+        net: &Net,
+        addr: EndpointAddr,
+        client_name: &str,
+        passive: bool,
+        invite: Option<&PairTicket>,
+    ) -> anyhow::Result<(Self, Events)> {
         let rc = net.dial(addr).await.context("dial server")?;
         let invite = invite.map(PairTicket::encode);
         Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, invite).await

@@ -108,13 +108,14 @@ pub fn explain(error: anyhow::Error) -> anyhow::Error {
 /// Unknown host, dial failure, or a typed refusal (see [`explain`]).
 pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, client_name: &str) -> anyhow::Result<Remote> {
     let net = bind(home, options).await?;
-    let result = if host.get(..silo_client::transport::TICKET_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(silo_client::transport::TICKET_PREFIX)) {
-        let ticket = PairTicket::decode(host)?;
-        silo_client::pair(&net, &ticket, client_name).await
-    } else {
-        let addr = Hosts::load(home)?.find(host)?.addr.clone();
-        Control::connect_remote(&net, addr, client_name, false, None).await
-    };
+    let result =
+        if host.get(..silo_client::transport::TICKET_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(silo_client::transport::TICKET_PREFIX)) {
+            let ticket = PairTicket::decode(host)?;
+            silo_client::pair(&net, &ticket, client_name).await
+        } else {
+            let addr = Hosts::load(home)?.find(host)?.addr.clone();
+            Control::connect_remote(&net, addr, client_name, false, None).await
+        };
     match result {
         Ok((control, events)) => {
             refresh_host(home, &control).await?;
@@ -170,7 +171,9 @@ pub async fn current_addr(control: &Control) -> anyhow::Result<Option<EndpointAd
 /// # Errors
 /// RPC failure or `hosts.json` I/O.
 pub async fn refresh_host(home: &Path, control: &Control) -> anyhow::Result<()> {
-    let Some(addr) = current_addr(control).await? else { return Ok(()) };
+    let Some(addr) = current_addr(control).await? else {
+        return Ok(());
+    };
     let mut hosts = Hosts::load(home)?;
     let id = addr.id.to_string();
     if hosts.hosts.iter().any(|h| h.id == id && h.addr != addr) {

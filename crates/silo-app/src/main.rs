@@ -8,8 +8,9 @@ mod browser_pane;
 mod cache;
 mod commands;
 mod composition;
-mod controls;
 mod conn;
+mod controls;
+mod floats;
 mod focus;
 mod fonts;
 mod hosts;
@@ -46,15 +47,10 @@ fn main() {
     if std::env::args().any(|arg| arg.starts_with("--type=")) {
         std::process::exit(silo_web::run_helper());
     }
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
+    let filter = tracing_subscriber::EnvFilter::try_new(log_filter(std::env::var("SILO_LOG").ok())).unwrap_or_else(|_| log_filter(None).into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("silo-net")
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("silo-net").enable_all().build().expect("tokio runtime");
     let rt = runtime.handle().clone();
     let home = silo_proto::paths::home();
     let exe = conn::server_exe();
@@ -78,6 +74,7 @@ fn main() {
     });
     application.run(move |cx: &mut App| {
         theme::apply_font(cx);
+        theme::warm_fonts(cx);
         // System Settings › Accessibility › Display › Reduce motion, read
         // once at launch (toggling it needs an app restart).
         cx.set_reduce_motion(reduce_motion());
@@ -151,6 +148,14 @@ fn main() {
     drop(runtime);
 }
 
+/// `SILO_LOG` (default `info`) with GPUI's per-face font warnings muted,
+/// unless the spec names that target itself.
+fn log_filter(spec: Option<String>) -> String {
+    const FONTS: &str = "gpui_macos::text_system";
+    let spec = spec.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "info".into());
+    if spec.contains(FONTS) { spec } else { format!("{spec},{FONTS}=error") }
+}
+
 /// `silo://settings` (any trailing slash or query).
 fn opens_settings(url: &str) -> bool {
     url.strip_prefix("silo://settings").is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
@@ -172,13 +177,11 @@ fn start_menubar(home: &std::path::Path) {
     if std::env::var_os("SILO_NO_MENUBAR").is_some() {
         return;
     }
-    let Some(agent) = conn::sibling(&["silo-menubar"]) else { return };
+    let Some(agent) = conn::sibling(&["silo-menubar"]) else {
+        return;
+    };
     let mut command = std::process::Command::new(agent);
-    command
-        .env("SILO_HOME", home)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    command.env("SILO_HOME", home).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     // The agent exits at once when another instance holds its lock.
     use std::os::unix::process::CommandExt;
     command.process_group(0);

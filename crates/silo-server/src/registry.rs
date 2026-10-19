@@ -9,12 +9,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{BrowserCommand, Created, DataTicket, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
+    control::{BrowserCommand, Created, DataTicket, Dock, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
     data::ticket_hex,
     kind,
     model::{
-        Axis, BlockId, BlockInfo, BlockKind, BrowserState, ClientId, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary,
-        SessionView, TermSize, WindowId, WindowInfo, browser_url,
+        Axis, BlockId, BlockInfo, BlockKind, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary,
+        SessionView, TermSize, WindowId, WindowInfo, browser_url, short_client_name,
     },
 };
 use silo_pty::SpawnConfig;
@@ -37,6 +37,31 @@ pub struct Window {
     pub layout: Layout,
     pub focused: BlockId,
     pub zoomed: bool,
+    /// Back to front; the last is topmost.
+    pub floats: Vec<Float>,
+}
+
+impl Window {
+    /// A window holding the one tiled block `block`.
+    pub fn new(id: WindowId, block: &str) -> Self {
+        Self { id, name: None, layout: Layout::block(block), focused: block.to_owned(), zoomed: false, floats: Vec::new() }
+    }
+
+    /// Tiled blocks in reading order, then floats back to front.
+    pub fn blocks(&self) -> Vec<BlockId> {
+        let mut blocks = self.layout.blocks();
+        blocks.extend(self.floats.iter().map(|f| f.id.clone()));
+        blocks
+    }
+
+    pub fn contains(&self, block: &str) -> bool {
+        self.layout.contains(block) || self.floating(block).is_some()
+    }
+
+    /// Index of `block` in `floats`.
+    pub fn floating(&self, block: &str) -> Option<usize> {
+        self.floats.iter().position(|f| f.id == block)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -63,6 +88,7 @@ impl Session {
                     layout: w.layout.clone(),
                     focused: w.focused.clone(),
                     zoomed: w.zoomed,
+                    floats: w.floats.clone(),
                 })
                 .collect(),
             active_window: self.active_window.clone(),
@@ -72,12 +98,14 @@ impl Session {
     }
 
     pub fn blocks(&self) -> Vec<BlockId> {
-        self.windows.iter().flat_map(|w| w.layout.blocks()).collect()
+        self.windows.iter().flat_map(Window::blocks).collect()
     }
 }
 
 pub struct ClientEntry {
     pub name: String,
+    /// Short name shown as a block's `owner_name`.
+    pub label: String,
     pub passive: bool,
     pub events: Option<Sink>,
     pub close: Option<tokio::sync::oneshot::Sender<()>>,
@@ -186,8 +214,8 @@ impl Registry {
     fn fresh_id(&self, prefix: char) -> String {
         loop {
             let id = new_id(prefix);
-            let taken = self.blocks.contains_key(&id)
-                || self.sessions.iter().any(|s| s.id == id || s.windows.iter().any(|w| w.id == id || w.layout.contains(&id)));
+            let taken =
+                self.blocks.contains_key(&id) || self.sessions.iter().any(|s| s.id == id || s.windows.iter().any(|w| w.id == id || w.contains(&id)));
             if !taken {
                 return id;
             }
@@ -197,7 +225,8 @@ impl Registry {
     pub fn add_client(&mut self, name: String, passive: bool) -> ClientId {
         let id = self.next_client;
         self.next_client += 1;
-        self.clients.insert(id, ClientEntry { name, passive, events: None, close: None, attached: 0, origin: None });
+        let label = short_client_name(&name).to_owned();
+        self.clients.insert(id, ClientEntry { name, label, passive, events: None, close: None, attached: 0, origin: None });
         id
     }
 
@@ -224,10 +253,16 @@ impl Registry {
         self.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default()
     }
 
+    pub fn client_label(&self, id: ClientId) -> String {
+        self.clients.get(&id).map(|c| c.label.clone()).unwrap_or_default()
+    }
+
     pub fn emit(&mut self, event: Event) {
         self.seq += 1;
-        let message = ServerMessage::Event { seq: self.seq, event };
-        let Ok(frame) = Frame::json(kind::CONTROL, &message) else { return };
+        let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
+        let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
+            return;
+        };
         for client in self.clients.values_mut() {
             let Some(sink) = &client.events else { continue };
             let overflow = sink.queued.load(std::sync::atomic::Ordering::Acquire) > EVENT_BACKLOG;
@@ -307,12 +342,21 @@ impl Registry {
     fn locate(&self, block: &str) -> Result<(usize, usize), RpcError> {
         for (si, session) in self.sessions.iter().enumerate() {
             for (wi, window) in session.windows.iter().enumerate() {
-                if window.layout.contains(block) {
+                if window.contains(block) {
                     return Ok((si, wi));
                 }
             }
         }
         Err(RpcError::not_found(format!("block {block}")))
+    }
+
+    /// Like [`Self::locate`]; `bad_request` for a float.
+    fn locate_tiled(&self, block: &str) -> Result<(usize, usize), RpcError> {
+        let (si, wi) = self.locate(block)?;
+        if self.sessions[si].windows[wi].floating(block).is_some() {
+            return Err(RpcError::bad_request(format!("block {block} is floating")));
+        }
+        Ok((si, wi))
     }
 
     fn locate_window(&self, window: &str) -> Result<(usize, usize), RpcError> {
@@ -338,11 +382,13 @@ impl Registry {
             lifecycle: Lifecycle::Running,
             size,
             owner: None,
+            owner_name: None,
             pid: None,
             browser: None,
         };
         if new.kind == BlockKind::Browser {
-            let url = browser_url(new.url.unwrap_or("about:blank")).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+            let url = browser_url(new.url.unwrap_or("about:blank"))
+                .ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
             let info = BlockInfo { size: TermSize::default(), ..info };
             self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
             return Ok(id);
@@ -376,9 +422,7 @@ impl Registry {
         let session_id = self.fresh_id('s');
         let block_id = self.spawn_block(&session_id, new, TermSize::new(80, 24))?;
         let window_id = self.fresh_id('w');
-        let name = name
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
+        let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
         if self.sessions.iter().any(|s| s.name == name) {
             self.kill_block(&block_id);
             return Err(RpcError::new("conflict", format!("session {name} already exists")));
@@ -386,7 +430,7 @@ impl Registry {
         self.sessions.push(Session {
             id: session_id.clone(),
             name,
-            windows: vec![Window { id: window_id.clone(), name: None, layout: Layout::block(&block_id), focused: block_id.clone(), zoomed: false }],
+            windows: vec![Window::new(window_id.clone(), &block_id)],
             active_window: window_id.clone(),
             revision: 1,
             created_at: now_ms(),
@@ -400,16 +444,11 @@ impl Registry {
     pub fn create_window(&mut self, session_id: &str, new: &New<'_>) -> Result<Created, RpcError> {
         let session = self.session(session_id)?;
         let sid = session.id.clone();
-        let fallback = session
-            .windows
-            .iter()
-            .find(|w| w.id == session.active_window)
-            .map(|w| self.window_size(w))
-            .unwrap_or(TermSize::new(80, 24));
+        let fallback = session.windows.iter().find(|w| w.id == session.active_window).map(|w| self.window_size(w)).unwrap_or(TermSize::new(80, 24));
         let block_id = self.spawn_block(&sid, new, fallback)?;
         let window_id = self.fresh_id('w');
         let session = self.session_mut(&sid)?;
-        session.windows.push(Window { id: window_id.clone(), name: None, layout: Layout::block(&block_id), focused: block_id.clone(), zoomed: false });
+        session.windows.push(Window::new(window_id.clone(), &block_id));
         session.active_window = window_id.clone();
         let si = self.sessions.iter().position(|s| s.id == sid).unwrap_or(0);
         self.session_changed(si);
@@ -431,11 +470,12 @@ impl Registry {
                 }
             }
         }
-        size(&window.layout, self).unwrap_or(TermSize::new(80, 24))
+        let float = || window.floats.iter().rev().find_map(|f| size(&Layout::block(&f.id), self));
+        size(&window.layout, self).or_else(float).unwrap_or(TermSize::new(80, 24))
     }
 
     pub fn split(&mut self, block_id: &str, axis: Axis, new: &New<'_>) -> Result<Created, RpcError> {
-        let (si, wi) = self.locate(block_id)?;
+        let (si, wi) = self.locate_tiled(block_id)?;
         let sid = self.sessions[si].id.clone();
         let base = self.block_info(block_id).map(|i| i.size).filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(TermSize::new(80, 24));
         let fallback = match axis {
@@ -459,9 +499,15 @@ impl Registry {
     pub fn focus(&mut self, block_id: &str) -> Result<(), RpcError> {
         let (si, wi) = self.locate(block_id)?;
         let session = &mut self.sessions[si];
-        let changed = session.windows[wi].focused != block_id || session.active_window != session.windows[wi].id;
-        session.windows[wi].focused = block_id.to_owned();
-        session.active_window = session.windows[wi].id.clone();
+        let window = &mut session.windows[wi];
+        let mut changed = window.focused != block_id || session.active_window != window.id;
+        if let Some(i) = window.floating(block_id).filter(|&i| i + 1 != window.floats.len()) {
+            let float = window.floats.remove(i);
+            window.floats.push(float);
+            changed = true;
+        }
+        window.focused = block_id.to_owned();
+        session.active_window = window.id.clone();
         if changed {
             self.session_changed(si);
         }
@@ -469,7 +515,7 @@ impl Registry {
     }
 
     pub fn zoom(&mut self, block_id: &str, zoomed: bool) -> Result<(), RpcError> {
-        let (si, wi) = self.locate(block_id)?;
+        let (si, wi) = self.locate_tiled(block_id)?;
         let window = &mut self.sessions[si].windows[wi];
         window.focused = block_id.to_owned();
         window.zoomed = zoomed;
@@ -480,8 +526,8 @@ impl Registry {
     /// Exchange the positions of two blocks of one window. Ratios stay, so
     /// each block's grid changes only if the two slots differ in size.
     pub fn swap(&mut self, block_id: &str, other_block_id: &str) -> Result<(), RpcError> {
-        let (si, wi) = self.locate(block_id)?;
-        let other = self.locate(other_block_id)?;
+        let (si, wi) = self.locate_tiled(block_id)?;
+        let other = self.locate_tiled(other_block_id)?;
         if other != (si, wi) {
             return Err(RpcError::bad_request(format!("blocks {block_id} and {other_block_id} are in different windows")));
         }
@@ -489,6 +535,49 @@ impl Registry {
             return Err(RpcError::bad_request("cannot swap a block with itself"));
         }
         self.sessions[si].windows[wi].layout.swap(block_id, other_block_id);
+        self.session_changed(si);
+        Ok(())
+    }
+
+    /// Move a tiled block out of the layout into its window's floats, on
+    /// top and focused.
+    pub fn float(&mut self, block_id: &str, rect: Option<FloatRect>) -> Result<(), RpcError> {
+        let (si, wi) = self.locate_tiled(block_id)?;
+        let window = &mut self.sessions[si].windows[wi];
+        if matches!(window.layout, Layout::Block { .. }) {
+            return Err(RpcError::new("conflict", "the last tiled block cannot float"));
+        }
+        let layout = std::mem::replace(&mut window.layout, Layout::block(""));
+        window.layout = layout.remove(block_id).expect("a split keeps a leaf");
+        window.floats.push(Float { id: block_id.to_owned(), rect: rect.unwrap_or_default().clamped() });
+        window.focused = block_id.to_owned();
+        window.zoomed = false;
+        self.session_changed(si);
+        Ok(())
+    }
+
+    /// Set a float's rect and raise it, or dock it next to a tiled block of
+    /// its window.
+    pub fn move_block(&mut self, block_id: &str, rect: Option<FloatRect>, dock: Option<Dock>) -> Result<(), RpcError> {
+        let (si, wi) = self.locate(block_id)?;
+        let window = &mut self.sessions[si].windows[wi];
+        let index = window.floating(block_id).ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not floating")))?;
+        match (rect, dock) {
+            (Some(rect), None) => {
+                window.floats.remove(index);
+                window.floats.push(Float { id: block_id.to_owned(), rect: rect.clamped() });
+            }
+            (None, Some(Dock { target, axis })) => {
+                if !window.layout.contains(&target) {
+                    return Err(RpcError::bad_request(format!("block {target} is not tiled in this window")));
+                }
+                window.floats.remove(index);
+                window.layout.split(&target, block_id.to_owned(), axis);
+                window.focused = block_id.to_owned();
+                window.zoomed = false;
+            }
+            _ => return Err(RpcError::bad_request("exactly one of rect and dock")),
+        }
         self.session_changed(si);
         Ok(())
     }
@@ -548,7 +637,7 @@ impl Registry {
 
     pub fn close_window(&mut self, window_id: &str) -> Result<(), RpcError> {
         let (si, wi) = self.locate_window(window_id)?;
-        for block in self.sessions[si].windows[wi].layout.blocks() {
+        for block in self.sessions[si].windows[wi].blocks() {
             self.kill_block(&block);
         }
         self.drop_window(si, wi);
@@ -582,25 +671,34 @@ impl Registry {
         }
     }
 
-    /// Remove a closed block from the layout, collapsing
-    /// empty windows and sessions.
+    /// Remove a closed block from the layout or floats, collapsing empty
+    /// windows and sessions. A tree emptied while floats remain takes the
+    /// topmost float as its root.
     pub fn remove_block(&mut self, block_id: &str) {
         self.blocks.remove(block_id);
-        let Ok((si, wi)) = self.locate(block_id) else { return };
+        let Ok((si, wi)) = self.locate(block_id) else {
+            return;
+        };
         let window = &mut self.sessions[si].windows[wi];
-        let layout = std::mem::replace(&mut window.layout, Layout::block(""));
-        match layout.remove(block_id) {
-            Some(layout) => {
-                let blocks = layout.blocks();
-                if window.focused == block_id {
-                    window.focused = blocks.first().cloned().unwrap_or_default();
+        if let Some(i) = window.floating(block_id) {
+            window.floats.remove(i);
+        } else {
+            let layout = std::mem::replace(&mut window.layout, Layout::block(""));
+            match (layout.remove(block_id), window.floats.pop()) {
+                (Some(layout), float) => {
+                    window.layout = layout;
+                    window.floats.extend(float);
                 }
-                window.zoomed &= blocks.len() > 1;
-                window.layout = layout;
-                self.session_changed(si);
+                (None, Some(float)) => window.layout = Layout::block(float.id),
+                (None, None) => return self.drop_window(si, wi),
             }
-            None => self.drop_window(si, wi),
         }
+        let tiled = window.layout.blocks();
+        if window.focused == block_id {
+            window.focused = tiled[0].clone();
+        }
+        window.zoomed &= tiled.len() > 1;
+        self.session_changed(si);
     }
 
     fn drop_window(&mut self, si: usize, wi: usize) {
@@ -672,13 +770,14 @@ impl Registry {
     /// Take or request (`Some(mode)`) or release (`None`) ownership of
     /// blocks; a terminal also drops this client's candidacy on release.
     pub fn own(&mut self, client_id: ClientId, block_ids: &[BlockId], mode: Option<OwnMode>) -> Result<(), RpcError> {
+        let label = self.client_label(client_id);
         for id in block_ids {
             let changed = match (self.blocks.get_mut(id), mode) {
                 (Some(Block::Terminal(handle)), mode) => {
                     handle.send(mode.map_or(BlockMsg::Disown { client_id }, |mode| BlockMsg::Own { client_id, mode }));
                     false
                 }
-                (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, mode),
+                (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, label.clone(), mode),
                 (Some(Block::Browser(browser)), None) => browser.disown(client_id),
                 (None, _) => return Err(RpcError::not_found(format!("block {id}"))),
             };
@@ -693,7 +792,8 @@ impl Registry {
     /// subscriber (the owner's engine runs it; viewers follow).
     pub fn browser_command(&mut self, block_id: &str, mut command: BrowserCommand) -> Result<(), RpcError> {
         if let BrowserCommand::Navigate { url } = &mut command {
-            *url = browser_url(url).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+            *url =
+                browser_url(url).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
         }
         self.browser(block_id)?.command(&command)?;
         self.emit(Event::BrowserCommand { block_id: block_id.to_owned(), command });
@@ -729,7 +829,14 @@ mod tests {
         layout.split("a", "b".into(), Axis::Horizontal);
         layout.split("b", "c".into(), Axis::Vertical);
         layout.set_ratio(&[], 0.3);
-        let window = |id: &str, layout: Layout, focused: &str| Window { id: id.into(), name: None, layout, focused: focused.into(), zoomed: false };
+        let window = |id: &str, layout: Layout, focused: &str| Window {
+            id: id.into(),
+            name: None,
+            layout,
+            focused: focused.into(),
+            zoomed: false,
+            floats: Vec::new(),
+        };
         reg.sessions.push(Session {
             id: "s".into(),
             name: "s".into(),
@@ -747,7 +854,10 @@ mod tests {
     fn changed(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Frame>) -> SessionView {
         let frame = rx.try_recv().expect("event");
         match frame.parse::<ServerMessage>().unwrap() {
-            ServerMessage::Event { event: Event::SessionChanged { view }, .. } => view,
+            ServerMessage::Event { event, .. } => match *event {
+                Event::SessionChanged { view } => view,
+                other => panic!("unexpected {other:?}"),
+            },
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -783,5 +893,68 @@ mod tests {
         let order: Vec<_> = changed(&mut rx).session.windows.iter().map(|w| w.id.clone()).collect();
         assert_eq!(order, ["w1", "w2", "w3"]);
         assert_eq!(reg.sessions[0].revision, 3);
+    }
+
+    #[test]
+    fn float_move_dock_round_trip() {
+        let (mut reg, mut rx) = registry();
+        reg.float("b", None).unwrap();
+        let view = changed(&mut rx);
+        assert_eq!(view.session.revision, 2);
+        let w = &view.session.windows[0];
+        assert_eq!((w.layout.blocks(), w.focused.as_str()), (vec!["a".to_owned(), "c".to_owned()], "b"));
+        assert_eq!(w.floats, [Float { id: "b".into(), rect: FloatRect::default() }]);
+
+        let rect = FloatRect { x: 0.9, y: 0.0, w: 0.5, h: 0.01 };
+        reg.move_block("b", Some(rect), None).unwrap();
+        assert_eq!(changed(&mut rx).session.windows[0].floats[0].rect, rect.clamped());
+        let dock = || Some(Dock { target: "a".into(), axis: Axis::Vertical });
+        assert_eq!(reg.move_block("b", None, None).unwrap_err().code, "bad_request");
+        assert_eq!(reg.move_block("b", Some(rect), dock()).unwrap_err().code, "bad_request");
+        assert_eq!(reg.move_block("a", Some(rect), None).unwrap_err().code, "bad_request", "a is tiled");
+        assert_eq!(reg.move_block("b", None, Some(Dock { target: "d".into(), axis: Axis::Vertical })).unwrap_err().code, "bad_request");
+        assert!(rx.try_recv().is_err(), "rejected moves emit nothing");
+
+        reg.move_block("b", None, dock()).unwrap();
+        let view = changed(&mut rx);
+        let w = &view.session.windows[0];
+        assert_eq!(w.layout.blocks(), ["a", "b", "c"]);
+        assert!(w.floats.is_empty());
+        assert_eq!((w.focused.as_str(), view.session.revision), ("b", 4));
+    }
+
+    #[test]
+    fn floats_raise_refuse_and_promote() {
+        let (mut reg, mut rx) = registry();
+        assert_eq!(reg.float("d", None).unwrap_err().code, "conflict", "the last tiled block cannot float");
+        reg.float("b", None).unwrap();
+        reg.float("c", None).unwrap();
+        assert_eq!(reg.float("a", None).unwrap_err().code, "conflict");
+        assert_eq!(reg.float("b", None).unwrap_err().code, "bad_request", "already floating");
+        assert_eq!(reg.zoom("b", true).unwrap_err().code, "bad_request");
+        assert_eq!(reg.swap("a", "b").unwrap_err().code, "bad_request");
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Terminal, url: None };
+        assert_eq!(reg.split("b", Axis::Vertical, &new).unwrap_err().code, "bad_request");
+        assert_eq!(reg.sessions[0].blocks(), ["a", "b", "c", "d", "e"], "floats count as session blocks");
+        changed(&mut rx);
+        changed(&mut rx);
+
+        reg.focus("b").unwrap();
+        let view = changed(&mut rx);
+        let ids = |w: &WindowInfo| w.floats.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+        assert_eq!((ids(&view.session.windows[0]), view.session.windows[0].focused.as_str()), (vec!["c".into(), "b".into()], "b"));
+
+        reg.remove_block("a");
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert_eq!(
+            (w.layout.clone(), ids(&w), w.focused.as_str()),
+            (Layout::block("b"), vec!["c".into()], "b"),
+            "the topmost float becomes the tree"
+        );
+        reg.remove_block("c");
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert_eq!((w.layout, w.floats.len()), (Layout::block("b"), 0));
+        reg.remove_block("b");
+        assert_eq!(reg.sessions[0].windows.len(), 2, "an empty window closes");
     }
 }

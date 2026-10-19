@@ -53,15 +53,10 @@ macro_rules! counters {
     };
 }
 
-counters!(
-    PREPARE, PLAN, SPRITES, SHAPE, SHAPED, REUSED, PAINT, QUADS, GLYPHS, PREPARES, FRAMES,
-);
+counters!(PREPARE, PLAN, SPRITES, SHAPE, SHAPED, REUSED, PAINT, QUADS, GLYPHS, PREPARES, FRAMES,);
 
 fn add_ns(counter: &AtomicU64, value: Duration) {
-    counter.fetch_add(
-        u64::try_from(value.as_nanos()).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
+    counter.fetch_add(u64::try_from(value.as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
 }
 
 pub(crate) fn record_prepared(sample: &Prepared) {
@@ -92,16 +87,11 @@ pub(crate) fn record_painted(started: Option<Instant>, quads: u64, glyphs: u64) 
     report();
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Profiling report: nanosecond sums and counts as floats"
-)]
+#[allow(clippy::cast_precision_loss, reason = "Profiling report: nanosecond sums and counts as floats")]
 fn report() {
     let frames = FRAMES.swap(0, Ordering::Relaxed).max(1);
     let prepares = PREPARES.swap(0, Ordering::Relaxed).max(1);
-    let per = |counter: &AtomicU64, over: u64| {
-        counter.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0 / over as f64
-    };
+    let per = |counter: &AtomicU64, over: u64| counter.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0 / over as f64;
     let mean = |counter: &AtomicU64, over: u64| counter.swap(0, Ordering::Relaxed) / over;
     eprintln!(
         "terminal profile: {frames} painted frames, UI-thread paint {:.3} ms/frame ({} quads, {} glyphs); \

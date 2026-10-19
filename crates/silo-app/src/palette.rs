@@ -4,8 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, HighlightStyle, IntoElement, ScrollHandle, StyledText, Subscription, Window,
-    div, prelude::*, px, rgb,
+    AnyElement, Context, Entity, FontWeight, HighlightStyle, IntoElement, ScrollHandle, StyledText, Subscription, Window, div, prelude::*, px, rgb,
 };
 use silo_proto::{control::Method, model::Axis};
 
@@ -155,6 +154,8 @@ impl Workspace {
             Command::FocusPaneUp => self.focus_direction(crate::focus::Direction::Up, window, cx),
             Command::FocusPaneDown => self.focus_direction(crate::focus::Direction::Down, window, cx),
             Command::ZoomPane => self.toggle_zoom(window, cx),
+            Command::FloatPane => self.float_block(window, cx),
+            Command::DockPane => self.dock_block(window, cx),
             Command::NewBrowser => {
                 if let Some(block) = block {
                     self.split_browser(block, None);
@@ -273,6 +274,9 @@ impl Workspace {
             | Command::FocusPaneDown
             | Command::ZoomPane => panes > 1,
             Command::RemoveHost => self.hosts.iter().any(|h| !h.info.local && !h.removed),
+            // On the server's focused block: tiled with a sibling, or floating.
+            Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
+            Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
             Command::NewSession
             | Command::RenameSession
@@ -381,15 +385,8 @@ impl Workspace {
         if self.palette.is_none() {
             let field = cx.new(|cx| TextField::new("Type a command…", cx));
             let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.palette_event(event, window, cx));
-            self.palette = Some(Palette {
-                field,
-                query: String::new(),
-                selected: 0,
-                step: Step::Search,
-                scroll: ScrollHandle::new(),
-                error: None,
-                _sub: sub,
-            });
+            self.palette =
+                Some(Palette { field, query: String::new(), selected: 0, step: Step::Search, scroll: ScrollHandle::new(), error: None, _sub: sub });
         }
         let Some(palette) = self.palette.as_mut() else { return };
         palette.step = step.clone();
@@ -458,13 +455,9 @@ impl Workspace {
             }
             Step::Input(_) => Vec::new(),
             Step::Confirm(command) => vec![Entry::Confirm(*command), Entry::Back],
-            Step::RemoveHost => self
-                .hosts
-                .iter()
-                .enumerate()
-                .filter(|(_, h)| !h.info.local && !h.removed)
-                .map(|(i, _)| Entry::RemoveHost(i))
-                .collect(),
+            Step::RemoveHost => {
+                self.hosts.iter().enumerate().filter(|(_, h)| !h.info.local && !h.removed).map(|(i, _)| Entry::RemoveHost(i)).collect()
+            }
         }
     }
 
@@ -673,7 +666,14 @@ impl Workspace {
         };
         let input_step = matches!(palette.step, Step::Input(_));
         let viewport = f32::from(window.viewport_size().height);
-        let mut list = div().id("palette-list").flex().flex_col().py(px(4.0)).max_h(px((viewport - 200.0).clamp(120.0, 420.0))).overflow_y_scroll().track_scroll(&palette.scroll);
+        let mut list = div()
+            .id("palette-list")
+            .flex()
+            .flex_col()
+            .py(px(4.0))
+            .max_h(px((viewport - 200.0).clamp(120.0, 420.0)))
+            .overflow_y_scroll()
+            .track_scroll(&palette.scroll);
         for (index, entry) in entries.iter().enumerate() {
             list = list.child(self.entry_row(entry, index, index == palette.selected, cx));
         }

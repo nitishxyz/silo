@@ -20,20 +20,10 @@ impl InputGate {
         self.forwarded.clear();
     }
 
-    pub fn route(
-        &mut self,
-        key: &str,
-        printable: bool,
-        release: bool,
-        composing: bool,
-    ) -> RawDisposition {
+    pub fn route(&mut self, key: &str, printable: bool, release: bool, composing: bool) -> RawDisposition {
         if release {
             let forwarded = self.forwarded.remove(key);
-            return if forwarded && !composing {
-                RawDisposition::Encode
-            } else {
-                RawDisposition::Ignore
-            };
+            return if forwarded && !composing { RawDisposition::Encode } else { RawDisposition::Ignore };
         }
         if !composing {
             if self.forwarded.len() < 64 && key.len() <= 64 {
@@ -81,18 +71,12 @@ impl Composition {
     }
 
     pub fn select(&mut self, range: Range<usize>) -> Result<(), &'static str> {
-        byte_range(&self.text, range.clone())
-            .ok_or("IME selection splits a Unicode scalar or exceeds preedit")?;
+        byte_range(&self.text, range.clone()).ok_or("IME selection splits a Unicode scalar or exceeds preedit")?;
         self.selected = range;
         Ok(())
     }
 
-    pub fn mark(
-        &mut self,
-        range: Option<Range<usize>>,
-        text: &str,
-        selected: Option<Range<usize>>,
-    ) -> Result<(), &'static str> {
+    pub fn mark(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>) -> Result<(), &'static str> {
         let start = range.as_ref().map_or(0, |range| range.start);
         let replacement = self.replaced(range, text)?;
         let end = text.encode_utf16().count();
@@ -107,22 +91,13 @@ impl Composition {
         self.mark(Some(range), "", None)
     }
 
-    pub fn commit(
-        &mut self,
-        range: Option<Range<usize>>,
-        text: &str,
-    ) -> Result<String, &'static str> {
+    pub fn commit(&mut self, range: Option<Range<usize>>, text: &str) -> Result<String, &'static str> {
         let committed = self.replaced(range, text)?;
         self.cancel();
         Ok(committed)
     }
 
-    pub fn batch(
-        &mut self,
-        delete: Option<Range<usize>>,
-        commit: Option<&str>,
-        preedit: Option<&str>,
-    ) -> Result<Option<String>, &'static str> {
+    pub fn batch(&mut self, delete: Option<Range<usize>>, commit: Option<&str>, preedit: Option<&str>) -> Result<Option<String>, &'static str> {
         let mut next = self.clone();
         if let Some(range) = delete {
             next.delete(range)?;
@@ -140,8 +115,8 @@ impl Composition {
         if text.len() > MAX_BYTES || text.chars().any(char::is_control) {
             return Err("IME text exceeds 4096 bytes or contains control characters");
         }
-        let range = byte_range(&self.text, range.unwrap_or(0..self.len_utf16()))
-            .ok_or("IME replacement is outside preedit or splits a Unicode scalar")?;
+        let range =
+            byte_range(&self.text, range.unwrap_or(0..self.len_utf16())).ok_or("IME replacement is outside preedit or splits a Unicode scalar")?;
         if self.text.len() - range.len() + text.len() > MAX_BYTES {
             return Err("IME composition exceeds 4096 bytes");
         }
@@ -199,10 +174,7 @@ mod tests {
         state.mark(None, "\u{306b}", None).unwrap();
         state.mark(None, "\u{65e5}\u{672c}", Some(1..2)).unwrap();
         assert!(state.is_active());
-        assert_eq!(
-            state.commit(None, "\u{65e5}\u{672c}\u{8a9e}").unwrap(),
-            "\u{65e5}\u{672c}\u{8a9e}"
-        );
+        assert_eq!(state.commit(None, "\u{65e5}\u{672c}\u{8a9e}").unwrap(), "\u{65e5}\u{672c}\u{8a9e}");
         assert!(!state.is_active());
         assert_eq!(state.commit(None, "").unwrap(), "");
         state.mark(None, "pending", None).unwrap();
@@ -252,51 +224,25 @@ mod tests {
         use super::{InputGate, RawDisposition};
         let mut gate = InputGate::default();
         assert_eq!(gate.route("a", true, false, false), RawDisposition::Encode);
-        assert_eq!(
-            gate.route("dead_acute", false, false, true),
-            RawDisposition::Ignore
-        );
-        assert_eq!(
-            gate.route("eacute", true, false, true),
-            RawDisposition::PlatformText
-        );
+        assert_eq!(gate.route("dead_acute", false, false, true), RawDisposition::Ignore);
+        assert_eq!(gate.route("eacute", true, false, true), RawDisposition::PlatformText);
         // Commit cleared preedit, but its physical key release must not reach the PTY.
-        assert_eq!(
-            gate.route("eacute", true, true, false),
-            RawDisposition::Ignore
-        );
+        assert_eq!(gate.route("eacute", true, true, false), RawDisposition::Ignore);
         // XKB can name the release by physical key instead of composed keysym.
         assert_eq!(gate.route("e", true, true, false), RawDisposition::Ignore);
-        assert_eq!(
-            gate.route("dead_acute", false, true, false),
-            RawDisposition::Ignore
-        );
+        assert_eq!(gate.route("dead_acute", false, true, false), RawDisposition::Ignore);
         assert_eq!(gate.route("a", true, true, false), RawDisposition::Encode);
-        assert_eq!(
-            gate.route("escape", false, false, true),
-            RawDisposition::Cancel
-        );
-        assert_eq!(
-            gate.route("escape", false, true, false),
-            RawDisposition::Ignore
-        );
+        assert_eq!(gate.route("escape", false, false, true), RawDisposition::Cancel);
+        assert_eq!(gate.route("escape", false, true, false), RawDisposition::Ignore);
         gate.clear();
-        assert_eq!(
-            gate.route("enter", false, false, false),
-            RawDisposition::Encode
-        );
+        assert_eq!(gate.route("enter", false, false, false), RawDisposition::Encode);
     }
 
     #[test]
     fn ime_transactions_apply_delete_commit_preedit_atomically() {
         let mut state = Composition::default();
         state.mark(None, "a\u{1f600}", None).unwrap();
-        assert_eq!(
-            state
-                .batch(Some(1..3), Some("\u{65e5}"), Some("next"))
-                .unwrap(),
-            Some("\u{65e5}".into())
-        );
+        assert_eq!(state.batch(Some(1..3), Some("\u{65e5}"), Some("next")).unwrap(), Some("\u{65e5}".into()));
         assert_eq!(state.text(), "next");
         assert!(state.batch(None, Some("committed"), Some("\n")).is_err());
         assert_eq!(state.text(), "next");

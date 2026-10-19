@@ -5,9 +5,8 @@ use std::{
 };
 
 use crate::model::{
-    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link,
-    MouseAction, MouseButton, MouseEvent, ScrollState, SearchState, SearchStatus, Span,
-    TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
+    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link, MouseAction, MouseButton, MouseEvent, ScrollState,
+    SearchState, SearchStatus, Span, TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
 };
 
 #[repr(C)]
@@ -68,14 +67,7 @@ unsafe extern "C" {
     fn silo_vt_clear_selection(vt: *mut c_void) -> bool;
     fn silo_vt_select_all(vt: *mut c_void) -> bool;
     fn silo_vt_copy(vt: *mut c_void, out: *mut u8, cap: usize, written: *mut usize) -> i32;
-    fn silo_vt_mouse(
-        vt: *mut c_void,
-        fields: *const u32,
-        timestamp: u64,
-        out: *mut u8,
-        cap: usize,
-        written: *mut usize,
-    ) -> i32;
+    fn silo_vt_mouse(vt: *mut c_void, fields: *const u32, timestamp: u64, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_new(columns: u16, rows: u16, continuation_max: usize) -> *mut c_void;
     fn silo_vt_free(vt: *mut c_void);
     fn silo_vt_size(vt: *mut c_void, out: *mut u32) -> i32;
@@ -95,8 +87,7 @@ unsafe extern "C" {
     fn silo_vt_restore_next(vt: *mut c_void, rows: *mut usize) -> i32;
     fn silo_vt_write(vt: *mut c_void, data: *const u8, len: usize) -> i32;
     fn silo_vt_replies(vt: *mut c_void, out: *mut u8) -> usize;
-    fn silo_vt_resize(vt: *mut c_void, columns: u16, rows: u16, width: u16, height: u16)
-    -> i32;
+    fn silo_vt_resize(vt: *mut c_void, columns: u16, rows: u16, width: u16, height: u16) -> i32;
     fn silo_vt_frame(
         vt: *mut c_void,
         frame: *mut RawFrame,
@@ -111,28 +102,12 @@ unsafe extern "C" {
     ) -> i32;
     fn silo_vt_events(vt: *mut c_void, out: *mut RawEvents);
     fn silo_vt_clipboard(vt: *mut c_void, slot: i32, out: *mut u8, cap: usize) -> usize;
-    fn silo_vt_string(
-        vt: *mut c_void,
-        which: i32,
-        out: *mut u8,
-        cap: usize,
-        written: *mut usize,
-    ) -> i32;
+    fn silo_vt_string(vt: *mut c_void, which: i32, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_search_set(vt: *mut c_void, needle: *const u8, len: usize) -> i32;
     fn silo_vt_search_step(vt: *mut c_void, max_ticks: u32, status: *mut u32) -> i32;
     fn silo_vt_search_select(vt: *mut c_void, previous: bool) -> i32;
-    fn silo_vt_search_state(
-        vt: *mut c_void,
-        total: *mut u64,
-        selected: *mut u64,
-        status: *mut u32,
-    ) -> i32;
-    fn silo_vt_search_viewport(
-        vt: *mut c_void,
-        out: *mut u32,
-        cap: usize,
-        count: *mut usize,
-    ) -> i32;
+    fn silo_vt_search_state(vt: *mut c_void, total: *mut u64, selected: *mut u64, status: *mut u32) -> i32;
+    fn silo_vt_search_viewport(vt: *mut c_void, out: *mut u32, cap: usize, count: *mut usize) -> i32;
     fn silo_vt_key(
         vt: *mut c_void,
         key: *const c_char,
@@ -144,49 +119,17 @@ unsafe extern "C" {
         cap: usize,
         written: *mut usize,
     ) -> i32;
-    fn silo_vt_paste(
-        vt: *mut c_void,
-        text: *mut u8,
-        len: usize,
-        out: *mut u8,
-        cap: usize,
-        written: *mut usize,
-    ) -> i32;
+    fn silo_vt_paste(vt: *mut c_void, text: *mut u8, len: usize, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_scroll(vt: *mut c_void, delta: i32);
     fn silo_vt_scroll_to_row(vt: *mut c_void, row: u64);
     fn silo_vt_scrollbar(vt: *mut c_void, out: *mut u64) -> i32;
-    fn silo_vt_set_colors(
-        vt: *mut c_void,
-        colors: *const u32,
-        dark: bool,
-        out: *mut u8,
-        cap: usize,
-        written: *mut usize,
-    ) -> i32;
-    fn silo_vt_set_defaults(
-        vt: *mut c_void,
-        cursor_style: i32,
-        cursor_blink: i32,
-        scrollback_bytes: u64,
-        scrollback_lines: u64,
-    ) -> i32;
-    fn silo_vt_focus(
-        vt: *mut c_void,
-        focused: bool,
-        out: *mut u8,
-        cap: usize,
-        written: *mut usize,
-    ) -> i32;
+    fn silo_vt_set_colors(vt: *mut c_void, colors: *const u32, dark: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
+    fn silo_vt_set_defaults(vt: *mut c_void, cursor_style: i32, cursor_blink: i32, scrollback_bytes: u64, scrollback_lines: u64) -> i32;
+    fn silo_vt_focus(vt: *mut c_void, focused: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
 }
 
 fn check(result: i32) -> Result<(), TerminalError> {
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(TerminalError(format!(
-            "libghostty-vt operation failed ({result})"
-        )))
-    }
+    if result == 0 { Ok(()) } else { Err(TerminalError(format!("libghostty-vt operation failed ({result})"))) }
 }
 
 /// Default continuation limit for terminals that may be snapshotted. Large
@@ -272,14 +215,7 @@ impl TerminalCore {
         let mut bytes = vec![0; 1024 * 1024];
         let mut written = 0;
         // SAFETY: exclusive live handle and initialized bounded output allocation.
-        check(unsafe {
-            silo_vt_copy(
-                self.handle.as_ptr(),
-                bytes.as_mut_ptr(),
-                bytes.len(),
-                &raw mut written,
-            )
-        })?;
+        check(unsafe { silo_vt_copy(self.handle.as_ptr(), bytes.as_mut_ptr(), bytes.len(), &raw mut written) })?;
         bytes.truncate(written);
         String::from_utf8(bytes).map_err(|e| TerminalError(e.to_string()))
     }
@@ -296,15 +232,10 @@ impl TerminalCore {
     /// Encode with the monotonic receipt time captured before queueing.
     /// # Errors
     /// Returns upstream allocation or encoding errors.
-    pub fn encode_mouse_at(
-        &mut self,
-        event: MouseEvent,
-        received: std::time::Instant,
-    ) -> Result<Vec<u8>, TerminalError> {
+    pub fn encode_mouse_at(&mut self, event: MouseEvent, received: std::time::Instant) -> Result<Vec<u8>, TerminalError> {
         static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         let epoch = *EPOCH.get_or_init(|| received);
-        let timestamp =
-            u64::try_from(received.saturating_duration_since(epoch).as_nanos()).unwrap_or(u64::MAX);
+        let timestamp = u64::try_from(received.saturating_duration_since(epoch).as_nanos()).unwrap_or(u64::MAX);
         let width = u32::from(self.size.columns) * u32::from(self.size.cell_width);
         let height = u32::from(self.size.rows) * u32::from(self.size.cell_height);
         if u32::from(event.x) >= width || u32::from(event.y) >= height {
@@ -323,9 +254,7 @@ impl TerminalCore {
             MouseButton::WheelUp => 4,
             MouseButton::WheelDown => 5,
         };
-        let mods = u32::from(event.modifiers.shift)
-            | (u32::from(event.modifiers.control) << 1)
-            | (u32::from(event.modifiers.alt) << 2);
+        let mods = u32::from(event.modifiers.shift) | (u32::from(event.modifiers.control) << 1) | (u32::from(event.modifiers.alt) << 2);
         let fields = [
             action,
             button,
@@ -340,16 +269,7 @@ impl TerminalCore {
         let mut output = vec![0; 128];
         let mut written = 0;
         // SAFETY: nine initialized scalar fields and a bounded output buffer; synchronous exclusive handle access.
-        check(unsafe {
-            silo_vt_mouse(
-                self.handle.as_ptr(),
-                fields.as_ptr(),
-                timestamp,
-                output.as_mut_ptr(),
-                output.len(),
-                &raw mut written,
-            )
-        })?;
+        check(unsafe { silo_vt_mouse(self.handle.as_ptr(), fields.as_ptr(), timestamp, output.as_mut_ptr(), output.len(), &raw mut written) })?;
         output.truncate(written);
         Ok(output)
     }
@@ -362,15 +282,7 @@ impl TerminalCore {
         let mut output = vec![0; 8];
         let mut written = 0;
         // SAFETY: exclusive handle and bounded initialized output buffer.
-        check(unsafe {
-            silo_vt_focus(
-                self.handle.as_ptr(),
-                focused,
-                output.as_mut_ptr(),
-                output.len(),
-                &raw mut written,
-            )
-        })?;
+        check(unsafe { silo_vt_focus(self.handle.as_ptr(), focused, output.as_mut_ptr(), output.len(), &raw mut written) })?;
         output.truncate(written);
         Ok(output)
     }
@@ -386,9 +298,8 @@ impl TerminalCore {
     pub fn with_continuation(size: GridSize, continuation_max: usize) -> Result<Self, TerminalError> {
         GridSize::new(size.columns, size.rows)?;
         // SAFETY: validated dimensions; the shim returns an exclusively owned handle.
-        let handle =
-            NonNull::new(unsafe { silo_vt_new(size.columns, size.rows, continuation_max) })
-                .ok_or_else(|| TerminalError("could not create libghostty-vt terminal".into()))?;
+        let handle = NonNull::new(unsafe { silo_vt_new(size.columns, size.rows, continuation_max) })
+            .ok_or_else(|| TerminalError("could not create libghostty-vt terminal".into()))?;
         let mut core = Self::from_handle(handle, size);
         if size.cell_width > 0 && size.cell_height > 0 {
             core.resize(size)?;
@@ -397,16 +308,7 @@ impl TerminalCore {
     }
 
     fn from_handle(handle: NonNull<c_void>, size: GridSize) -> Self {
-        Self {
-            handle,
-            size,
-            raw: Vec::new(),
-            cells: None,
-            links: Vec::new(),
-            raw_links: Vec::new(),
-            searching: false,
-            restore: None,
-        }
+        Self { handle, size, raw: Vec::new(), cells: None, links: Vec::new(), raw_links: Vec::new(), searching: false, restore: None }
     }
 
     #[must_use]
@@ -481,18 +383,9 @@ impl TerminalCore {
         let mut error = 0;
         // SAFETY: `head[..split]` is valid for the call; the shim copies it.
         let handle = unsafe {
-            silo_vt_restore(
-                head.as_ptr(),
-                split,
-                options.retain_continuation,
-                options.compress_history,
-                &raw mut history_rows,
-                &raw mut error,
-            )
+            silo_vt_restore(head.as_ptr(), split, options.retain_continuation, options.compress_history, &raw mut history_rows, &raw mut error)
         };
-        let handle = NonNull::new(handle).ok_or_else(|| {
-            TerminalError(format!("snapshot restore failed ({error})"))
-        })?;
+        let handle = NonNull::new(handle).ok_or_else(|| TerminalError(format!("snapshot restore failed ({error})")))?;
         let mut core = Self::from_handle(handle, GridSize { columns: 1, rows: 1, cell_width: 0, cell_height: 0 });
         core.size = core.query_size()?;
         if core.size.cell_width == 0 {
@@ -572,15 +465,7 @@ impl TerminalCore {
     pub fn resize(&mut self, size: GridSize) -> Result<(), TerminalError> {
         GridSize::new(size.columns, size.rows)?;
         // SAFETY: exclusive live handle, scalar arguments only.
-        check(unsafe {
-            silo_vt_resize(
-                self.handle.as_ptr(),
-                size.columns,
-                size.rows,
-                size.cell_width,
-                size.cell_height,
-            )
-        })?;
+        check(unsafe { silo_vt_resize(self.handle.as_ptr(), size.columns, size.rows, size.cell_width, size.cell_height) })?;
         self.size = size;
         Ok(())
     }
@@ -612,14 +497,9 @@ impl TerminalCore {
                 &raw mut link_count,
             )
         })?;
-        let extracted =
-            |row: usize| frame.dirty == 2 || dirty_rows[row / 64] & (1 << (row % 64)) != 0;
+        let extracted = |row: usize| frame.dirty == 2 || dirty_rows[row / 64] & (1 << (row % 64)) != 0;
         if frame.dirty != 0 {
-            self.merge_links(
-                previous.is_none() || frame.dirty == 2,
-                extracted,
-                link_count,
-            )?;
+            self.merge_links(previous.is_none() || frame.dirty == 2, extracted, link_count)?;
         }
         let cells: Arc<[Cell]> = match (frame.dirty, previous) {
             (0, Some(previous)) => previous,
@@ -641,20 +521,12 @@ impl TerminalCore {
             }
         };
         self.cells = Some(cells.clone());
-        let search = if self.searching {
-            Some(self.search_state()?)
-        } else {
-            None
-        };
+        let search = if self.searching { Some(self.search_state()?) } else { None };
         Ok(Frame {
             size: self.size,
             cells,
             background: frame.background,
-            scroll: ScrollState {
-                total: frame.scroll_total,
-                offset: frame.scroll_offset,
-                len: frame.scroll_len,
-            },
+            scroll: ScrollState { total: frame.scroll_total, offset: frame.scroll_offset, len: frame.scroll_len },
             mouse_tracking: frame.mouse_tracking != 0,
             at_prompt: frame.at_prompt != 0,
             alt_screen: frame.alt_screen != 0,
@@ -680,49 +552,25 @@ impl TerminalCore {
     /// Size the reused extraction buffers to the grid.
     fn prepare_buffers(&mut self, count: usize) {
         if self.raw.len() != count {
-            self.raw = (0..count)
-                .map(|_| RawCell {
-                    text: [0; 256],
-                    len: 0,
-                    foreground: 0,
-                    background: 0,
-                    flags: 0,
-                    width: 0,
-                })
-                .collect();
+            self.raw = (0..count).map(|_| RawCell { text: [0; 256], len: 0, foreground: 0, background: 0, flags: 0, width: 0 }).collect();
         }
         if self.raw_links.len() != MAX_LINKS {
-            self.raw_links = (0..MAX_LINKS)
-                .map(|_| RawLink {
-                    row: 0,
-                    start: 0,
-                    end: 0,
-                    len: 0,
-                    uri: [0; 1024],
-                })
-                .collect();
+            self.raw_links = (0..MAX_LINKS).map(|_| RawLink { row: 0, start: 0, end: 0, len: 0, uri: [0; 1024] }).collect();
         }
     }
 
     /// Replace hyperlink spans of re-extracted rows, keeping those of rows
     /// that stayed clean (or everything when the whole grid was extracted).
-    fn merge_links(
-        &mut self,
-        all: bool,
-        extracted: impl Fn(usize) -> bool,
-        link_count: usize,
-    ) -> Result<(), TerminalError> {
+    fn merge_links(&mut self, all: bool, extracted: impl Fn(usize) -> bool, link_count: usize) -> Result<(), TerminalError> {
         if all {
             self.links.clear();
         } else {
-            self.links
-                .retain(|link| !extracted(usize::from(link.span.row)));
+            self.links.retain(|link| !extracted(usize::from(link.span.row)));
         }
         for raw in &self.raw_links[..link_count.min(MAX_LINKS)] {
             self.links.push(convert_link(raw)?);
         }
-        self.links
-            .sort_by_key(|link| (link.span.row, link.span.start));
+        self.links.sort_by_key(|link| (link.span.row, link.span.start));
         Ok(())
     }
 
@@ -737,24 +585,14 @@ impl TerminalCore {
         unsafe {
             silo_vt_events(self.handle.as_ptr(), &raw mut raw);
         }
-        let mut events = TerminalEvents {
-            bells: raw.bells,
-            title: None,
-            pwd: None,
-            clipboard: Vec::new(),
-        };
-        for (slot, location) in [
-            (0, ClipboardLocation::Standard),
-            (1, ClipboardLocation::Primary),
-        ] {
+        let mut events = TerminalEvents { bells: raw.bells, title: None, pwd: None, clipboard: Vec::new() };
+        for (slot, location) in [(0, ClipboardLocation::Standard), (1, ClipboardLocation::Primary)] {
             if raw.reserved & (1 << slot) == 0 {
                 continue;
             }
             let mut bytes = vec![0; 1024 * 1024];
             // SAFETY: exclusive handle, shim copies no more than the supplied capacity.
-            let len = unsafe {
-                silo_vt_clipboard(self.handle.as_ptr(), slot, bytes.as_mut_ptr(), bytes.len())
-            };
+            let len = unsafe { silo_vt_clipboard(self.handle.as_ptr(), slot, bytes.as_mut_ptr(), bytes.len()) };
             bytes.truncate(len);
             if let Ok(text) = String::from_utf8(bytes) {
                 events.clipboard.push((location, text));
@@ -773,15 +611,7 @@ impl TerminalCore {
         let mut bytes = vec![0; 4096];
         let mut written = 0;
         // SAFETY: exclusive handle; the shim copies at most `cap` bytes.
-        check(unsafe {
-            silo_vt_string(
-                self.handle.as_ptr(),
-                which,
-                bytes.as_mut_ptr(),
-                bytes.len(),
-                &raw mut written,
-            )
-        })?;
+        check(unsafe { silo_vt_string(self.handle.as_ptr(), which, bytes.as_mut_ptr(), bytes.len(), &raw mut written) })?;
         bytes.truncate(written);
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
@@ -797,9 +627,7 @@ impl TerminalCore {
             return Err(TerminalError("search needle exceeds 1 KiB".into()));
         }
         // SAFETY: exclusive handle; the shim copies the needle bytes.
-        check(unsafe {
-            silo_vt_search_set(self.handle.as_ptr(), needle.as_ptr(), needle.len())
-        })?;
+        check(unsafe { silo_vt_search_set(self.handle.as_ptr(), needle.as_ptr(), needle.len()) })?;
         self.searching = !needle.is_empty();
         Ok(())
     }
@@ -812,9 +640,7 @@ impl TerminalCore {
     pub fn search_step(&mut self, max_ticks: u32) -> Result<SearchStatus, TerminalError> {
         let mut status = 2;
         // SAFETY: exclusive handle; scalar in, scalar out.
-        check(unsafe {
-            silo_vt_search_step(self.handle.as_ptr(), max_ticks, &raw mut status)
-        })?;
+        check(unsafe { silo_vt_search_step(self.handle.as_ptr(), max_ticks, &raw mut status) })?;
         Ok(search_status(status))
     }
 
@@ -835,41 +661,17 @@ impl TerminalCore {
     pub fn search_state(&mut self) -> Result<SearchState, TerminalError> {
         let (mut total, mut selected, mut status) = (0_u64, u64::MAX, 2_u32);
         // SAFETY: exclusive handle; the shim writes the three scalars.
-        check(unsafe {
-            silo_vt_search_state(
-                self.handle.as_ptr(),
-                &raw mut total,
-                &raw mut selected,
-                &raw mut status,
-            )
-        })?;
+        check(unsafe { silo_vt_search_state(self.handle.as_ptr(), &raw mut total, &raw mut selected, &raw mut status) })?;
         let mut raw = vec![0_u32; MAX_VIEWPORT_MATCHES * 4];
         let mut count = 0;
         // SAFETY: exclusive handle; the shim writes four values per span and
         // at most `cap` spans.
-        check(unsafe {
-            silo_vt_search_viewport(
-                self.handle.as_ptr(),
-                raw.as_mut_ptr(),
-                MAX_VIEWPORT_MATCHES,
-                &raw mut count,
-            )
-        })?;
+        check(unsafe { silo_vt_search_viewport(self.handle.as_ptr(), raw.as_mut_ptr(), MAX_VIEWPORT_MATCHES, &raw mut count) })?;
         let mut viewport = Vec::with_capacity(count.min(MAX_VIEWPORT_MATCHES));
         for span in raw.as_chunks::<4>().0.iter().take(count) {
-            viewport.extend(viewport_spans(
-                (span[0], span[1]),
-                (span[2], span[3]),
-                self.size.columns,
-                self.size.rows,
-            ));
+            viewport.extend(viewport_spans((span[0], span[1]), (span[2], span[3]), self.size.columns, self.size.rows));
         }
-        Ok(SearchState {
-            status: search_status(status),
-            total,
-            selected: (selected != u64::MAX).then_some(selected),
-            viewport,
-        })
+        Ok(SearchState { status: search_status(status), total, selected: (selected != u64::MAX).then_some(selected), viewport })
     }
 
     /// # Errors
@@ -880,10 +682,7 @@ impl TerminalCore {
         }
         let key = CString::new(event.key.as_str()).map_err(|e| TerminalError(e.to_string()))?;
         let m = event.modifiers;
-        let mods = u32::from(m.shift)
-            | (u32::from(m.control) << 1)
-            | (u32::from(m.alt) << 2)
-            | (u32::from(m.super_key) << 3);
+        let mods = u32::from(m.shift) | (u32::from(m.control) << 1) | (u32::from(m.alt) << 2) | (u32::from(m.super_key) << 3);
         let mut out = vec![0; 8192];
         let mut written = 0;
         // SAFETY: synchronous call, exclusive handle, valid owned input/output buffers.
@@ -916,21 +715,9 @@ impl TerminalCore {
         let mut out = vec![0; data.len() + 32];
         let mut written = 0;
         // SAFETY: separate mutable buffers, lengths match allocations, exclusive handle.
-        let result = unsafe {
-            silo_vt_paste(
-                self.handle.as_ptr(),
-                data.as_mut_ptr(),
-                data.len(),
-                out.as_mut_ptr(),
-                out.len(),
-                &raw mut written,
-            )
-        };
+        let result = unsafe { silo_vt_paste(self.handle.as_ptr(), data.as_mut_ptr(), data.len(), out.as_mut_ptr(), out.len(), &raw mut written) };
         if result == -2 {
-            return Err(TerminalError(
-                "Paste refused: multiline/escape paste requires confirmation (not yet implemented)"
-                    .into(),
-            ));
+            return Err(TerminalError("Paste refused: multiline/escape paste requires confirmation (not yet implemented)".into()));
         }
         check(result)?;
         out.truncate(written);
@@ -962,11 +749,7 @@ impl TerminalCore {
         let mut out = [0_u64; 3];
         // SAFETY: exclusive live handle; the shim writes exactly three values.
         check(unsafe { silo_vt_scrollbar(self.handle.as_ptr(), out.as_mut_ptr()) })?;
-        Ok(ScrollState {
-            total: out[0],
-            offset: out[1],
-            len: out[2],
-        })
+        Ok(ScrollState { total: out[0], offset: out[1], len: out[2] })
     }
 
     /// Install theme defaults (foreground, background, cursor, ANSI 0-15) and
@@ -1017,27 +800,14 @@ impl TerminalCore {
         });
         let blink = defaults.cursor_blink.map_or(-1, i32::from);
         // SAFETY: exclusive live handle; the shim only reads these scalars.
-        check(unsafe {
-            silo_vt_set_defaults(
-                self.handle.as_ptr(),
-                style,
-                blink,
-                defaults.scrollback_bytes,
-                defaults.scrollback_lines,
-            )
-        })
+        check(unsafe { silo_vt_set_defaults(self.handle.as_ptr(), style, blink, defaults.scrollback_bytes, defaults.scrollback_lines) })
     }
 }
 
 fn convert(cell: &RawCell) -> Result<Cell, TerminalError> {
     let len = usize::try_from(cell.len).unwrap_or(usize::MAX);
-    let bytes = cell
-        .text
-        .get(..len)
-        .ok_or_else(|| TerminalError("invalid cell length".into()))?;
-    let text = std::str::from_utf8(bytes)
-        .map_err(|e| TerminalError(e.to_string()))?
-        .to_owned();
+    let bytes = cell.text.get(..len).ok_or_else(|| TerminalError("invalid cell length".into()))?;
+    let text = std::str::from_utf8(bytes).map_err(|e| TerminalError(e.to_string()))?.to_owned();
     Ok(Cell {
         text,
         foreground: cell.foreground,
@@ -1056,20 +826,12 @@ fn convert(cell: &RawCell) -> Result<Cell, TerminalError> {
 
 fn convert_link(link: &RawLink) -> Result<Link, TerminalError> {
     let len = usize::try_from(link.len).unwrap_or(usize::MAX);
-    let bytes = link
-        .uri
-        .get(..len)
-        .ok_or_else(|| TerminalError("invalid hyperlink length".into()))?;
+    let bytes = link.uri.get(..len).ok_or_else(|| TerminalError("invalid hyperlink length".into()))?;
     let narrow = |value: u32| u16::try_from(value).map_err(|e| TerminalError(e.to_string()));
     Ok(Link {
-        span: Span {
-            row: narrow(link.row)?,
-            start: narrow(link.start)?,
-            end: narrow(link.end)?,
-        },
-        uri: std::str::from_utf8(bytes)
-            .map_err(|e| TerminalError(e.to_string()))?
-            .to_owned(),
+        span: Span { row: narrow(link.row)?, start: narrow(link.start)?, end: narrow(link.end)? },
+        // OSC 8 URIs are raw program bytes; the URI is display metadata.
+        uri: String::from_utf8_lossy(bytes).into_owned(),
     })
 }
 
@@ -1083,32 +845,15 @@ fn search_status(status: u32) -> SearchStatus {
 
 /// Split an inclusive viewport range into per-row spans, normalised so the
 /// start precedes the end and clipped to the grid.
-fn viewport_spans(
-    start: (u32, u32),
-    end: (u32, u32),
-    columns: u16,
-    rows: u16,
-) -> impl Iterator<Item = Span> {
-    let (start, end) = if (start.1, start.0) <= (end.1, end.0) {
-        (start, end)
-    } else {
-        (end, start)
-    };
+fn viewport_spans(start: (u32, u32), end: (u32, u32), columns: u16, rows: u16) -> impl Iterator<Item = Span> {
+    let (start, end) = if (start.1, start.0) <= (end.1, end.0) { (start, end) } else { (end, start) };
     let last_row = u32::from(rows).saturating_sub(1);
     (start.1..=end.1.min(last_row)).filter_map(move |row| {
         let from = if row == start.1 { start.0 } else { 0 };
-        let to = if row == end.1 {
-            end.0.saturating_add(1)
-        } else {
-            u32::from(columns)
-        };
+        let to = if row == end.1 { end.0.saturating_add(1) } else { u32::from(columns) };
         let from = u16::try_from(from.min(u32::from(columns))).ok()?;
         let to = u16::try_from(to.min(u32::from(columns))).ok()?;
-        (from < to).then_some(Span {
-            row: u16::try_from(row).ok()?,
-            start: from,
-            end: to,
-        })
+        (from < to).then_some(Span { row: u16::try_from(row).ok()?, start: from, end: to })
     })
 }
 
@@ -1135,8 +880,7 @@ mod tests {
         assert_ne!(frame.cells[0].foreground, frame.cells[3].foreground);
         assert_eq!(frame.cursor.column, 3);
         assert_eq!(vt.write_output(b"\x1b[6n").unwrap(), b"\x1b[1;4R");
-        vt.write_output("\x1b[?1049h\x1b[H\u{754c}e\u{301}".as_bytes())
-            .unwrap();
+        vt.write_output("\x1b[?1049h\x1b[H\u{754c}e\u{301}".as_bytes()).unwrap();
         let frame = vt.frame().unwrap();
         assert_eq!(frame.cells[0].text, "\u{754c}");
         assert_eq!(frame.cells[0].width, 2);
@@ -1155,12 +899,7 @@ mod tests {
         vt.write_output(b"\x1b[?1004h").unwrap();
         assert_eq!(vt.encode_focus(true).unwrap(), b"\x1b[I");
         assert_eq!(vt.encode_focus(false).unwrap(), b"\x1b[O");
-        let mut key = KeyEvent {
-            key: "up".into(),
-            text: String::new(),
-            modifiers: Modifiers::default(),
-            release: false,
-        };
+        let mut key = KeyEvent { key: "up".into(), text: String::new(), modifiers: Modifiers::default(), release: false };
         assert_eq!(vt.encode_key(&key).unwrap(), b"\x1b[A");
         vt.write_output(b"\x1b[?1h").unwrap();
         assert_eq!(vt.encode_key(&key).unwrap(), b"\x1bOA");

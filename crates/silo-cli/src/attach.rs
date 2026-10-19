@@ -1,12 +1,7 @@
 //! Interactive attach: a local terminal mirror rendered onto the host
 //! terminal (row diffs with truecolor SGR), raw stdin forwarded as input.
 
-use std::{
-    fmt::Write as _,
-    io::Write,
-    os::fd::AsFd,
-    time::Duration,
-};
+use std::{fmt::Write as _, io::Write, os::fd::AsFd, time::Duration};
 
 use anyhow::Context;
 use silo_client::{Applied, Control, DataStream, Mirror};
@@ -53,7 +48,21 @@ impl Drop for RawMode {
     }
 }
 
+/// Attach until detach, exit or a lost server; a server that stops
+/// answering pings ends it with exit code 1.
 pub async fn run(control: &Control, block_id: &str, watch: bool) -> anyhow::Result<i32> {
+    // Decided before reporting, so the host terminal is restored first.
+    let outcome = tokio::select! {
+        code = session(control, block_id, watch) => Some(code),
+        () = control.clone().heartbeat() => None,
+    };
+    outcome.unwrap_or_else(|| {
+        eprintln!("silo: server not responding");
+        Ok(1)
+    })
+}
+
+async fn session(control: &Control, block_id: &str, watch: bool) -> anyhow::Result<i32> {
     let mode = if watch { OwnMode::Request } else { OwnMode::Take };
     let report_size = |control: &Control| {
         let control = control.clone();

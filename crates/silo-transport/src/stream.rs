@@ -32,24 +32,14 @@ impl BiStream {
 }
 
 impl AsyncRead for BiStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.recv).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for BiStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.send)
-            .poll_write(cx, buf)
-            .map_err(io::Error::other)
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.send).poll_write(cx, buf).map_err(io::Error::other)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -74,9 +64,7 @@ impl Conn {
     pub async fn open_stream(&self) -> Result<Stream> {
         match self {
             Conn::Unix(path) => {
-                let s = UnixStream::connect(path)
-                    .await
-                    .with_context(|| format!("connect {}", path.display()))?;
+                let s = UnixStream::connect(path).await.with_context(|| format!("connect {}", path.display()))?;
                 Ok(Box::new(s))
             }
             Conn::Iroh(rc) => Ok(Box::new(rc.open_stream().await?)),

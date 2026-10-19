@@ -6,6 +6,7 @@
 //! opens a JSON control stream, [`kind::DATA_HELLO`] attaches a binary data
 //! stream to one block using a ticket obtained over control.
 
+pub mod api;
 pub mod control;
 pub mod data;
 pub mod frame;

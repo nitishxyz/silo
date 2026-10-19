@@ -62,10 +62,9 @@ impl Workspace {
     /// The active window's panes, zoomed to the focused one if set.
     pub(crate) fn render_body(&self, w: &WindowInfo, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let comfortable = self.density() == Density::Comfortable;
-        // Cards on the bottom edge sit in the window's bottom corners unless
-        // the status bar is below them. Compact panes are flush: the window
-        // clips them itself.
-        let corner = if comfortable && self.status_bar().is_none() { radius::window_corner(window) } else { None };
+        // Cards on the bottom edge sit in the window's bottom corners.
+        // Compact panes are flush: the window clips them itself.
+        let corner = if comfortable { radius::window_corner(window) } else { None };
         let place = Placement { window: corner, left: true, right: true, bottom: true };
         let content = if w.zoomed {
             self.render_layout(&Layout::block(w.focused.clone()), Some(&w.focused), false, true, None, place, now, cx)
@@ -73,11 +72,15 @@ impl Workspace {
             let focused = self.focused_block(window, cx);
             self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
         };
+        let floats = self.render_floats(w, now, window, cx);
         div()
+            .relative()
             .size_full()
             .min_h_0()
             .when(comfortable, |el| el.px(px(OUTER)).pb(px(OUTER)))
             .child(content)
+            .children(floats)
+            .on_drag_move(cx.listener(Self::float_drag_move))
             .into_any_element()
     }
 
@@ -132,7 +135,7 @@ impl Workspace {
     /// flush (Compact). The terminal is laid out at its final size once; a
     /// new split only animates the card's offset inside its clipped slot.
     #[allow(clippy::too_many_arguments)]
-    fn render_cell(
+    pub(crate) fn render_cell(
         &self,
         id: &str,
         active: bool,
@@ -143,8 +146,11 @@ impl Workspace {
         now: Instant,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let comfortable = self.density() == Density::Comfortable;
+        // Floats are always cards, so they read as floating.
+        let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
+        let comfortable = floating || self.density() == Density::Comfortable;
         let headers = self.pane_headers();
+        let docks = if floating { Vec::new() } else { self.dock_zones(id, cx) };
         // Fills inside the 1px outline (the content mask is rectangular).
         let fill = corners.inset(1.0);
         let entering = self
@@ -203,7 +209,8 @@ impl Workspace {
             .when(headers, |el| el.child(self.render_pane_header(id, active, zoomed, swap, cx)))
             .child(content)
             .children(wash)
-            .children(drop);
+            .children(drop)
+            .children(docks);
         let card: AnyElement = match entering {
             Some((dx, dy)) => div().absolute().left(relative(dx)).top(relative(dy)).size_full().child(card).into_any_element(),
             None => card.into_any_element(),
@@ -218,7 +225,8 @@ impl Workspace {
                 bottom_right: ring(corners.bottom_right),
                 bottom_left: ring(corners.bottom_left),
             };
-            let ring = div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
+            let ring =
+                div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
             let outline = div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline())).continuous_corners(corners);
             [ring.continuous_corners(outer), outline]
         });
@@ -279,6 +287,7 @@ impl Workspace {
         let zoom = on(|this, b, _| this.zoom_block(b));
         let close = on(|this, b, _| this.close_block_id(b));
         let focus_block = block.clone();
+        let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         div()
             .id(gpui::ElementId::Name(format!("pane-header-{id}").into()))
             .flex()
@@ -319,12 +328,15 @@ impl Workspace {
                     .justify_end()
                     .items_center()
                     .when(!active, |el| el.opacity(0.0).group_hover(card_group(id), |s| s.opacity(1.0)))
-                    .child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))
-                    .child(button("split-down", "split-down", "Split Down  ⇧⌘D").on_click(split_down))
-                    .child(
-                        button("zoom", if zoomed { "unzoom" } else { "zoom" }, if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" })
-                            .on_click(zoom),
-                    )
+                    // A float can't be split or zoomed: Close only.
+                    .when(!floating, |el| {
+                        el.child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))
+                            .child(button("split-down", "split-down", "Split Down  ⇧⌘D").on_click(split_down))
+                            .child(
+                                button("zoom", if zoomed { "unzoom" } else { "zoom" }, if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" })
+                                    .on_click(zoom),
+                            )
+                    })
                     .child(button("close", "close", "Close Pane  ⌘W").on_click(close)),
             )
             // Clicking the header focuses its pane.
@@ -364,7 +376,7 @@ impl Workspace {
         let cursor = silo_render::CursorPresentation { focused: false, phase_visible: true };
         let selection = rgb(theme::selection()).opacity(0.55);
         let comfortable = self.density() == Density::Comfortable;
-        let corner = if comfortable && self.status_bar().is_none() { radius::window_corner(window) } else { None };
+        let corner = if comfortable { radius::window_corner(window) } else { None };
         let viewport = window.viewport_size();
         self.motion
             .pane_ghosts
@@ -560,7 +572,8 @@ mod tests {
 
     #[test]
     fn panes_swap_only_within_one_unzoomed_multi_pane_window() {
-        let window = |layout: Layout, zoomed: bool| WindowInfo { id: "w".into(), name: None, layout, focused: "a".into(), zoomed };
+        let window =
+            |layout: Layout, zoomed: bool| WindowInfo { id: "w".into(), name: None, layout, focused: "a".into(), zoomed, floats: Vec::new() };
         assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), false)), Some("w"));
         assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), true)), None);
         assert_eq!(swap_window(&window(block("a"), false)), None);
@@ -583,6 +596,7 @@ mod tests {
             lifecycle: silo_proto::model::Lifecycle::Running,
             size: silo_proto::model::TermSize { columns: 80, rows: 24, cell_width: 0, cell_height: 0 },
             owner: None,
+            owner_name: None,
             pid: None,
             browser: None,
         };

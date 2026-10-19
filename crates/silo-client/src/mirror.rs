@@ -301,8 +301,12 @@ impl Mirror {
     /// Visible screen as plain text lines (trailing blanks trimmed).
     #[must_use]
     pub fn screen_text(&mut self) -> String {
-        let Some(vt) = self.vt.as_mut() else { return String::new() };
-        let Ok(frame) = vt.frame() else { return String::new() };
+        let Some(vt) = self.vt.as_mut() else {
+            return String::new();
+        };
+        let Ok(frame) = vt.frame() else {
+            return String::new();
+        };
         let columns = usize::from(frame.size.columns).max(1);
         let mut lines: Vec<String> = frame
             .cells

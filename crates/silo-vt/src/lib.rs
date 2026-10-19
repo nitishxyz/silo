@@ -4,9 +4,8 @@ pub mod snapshot;
 mod sys;
 
 pub use model::{
-    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link,
-    Modifiers, MouseAction, MouseButton, MouseEvent, ScrollState, SearchState, SearchStatus, Span,
-    TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
+    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link, Modifiers, MouseAction, MouseButton, MouseEvent,
+    ScrollState, SearchState, SearchStatus, Span, TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
 };
 pub use sys::{RestoreOptions, RestoreProgress, TerminalCore};
 

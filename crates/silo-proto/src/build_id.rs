@@ -140,8 +140,7 @@ mod tests {
         assert_eq!(id(&root), base);
 
         // Real sources change it.
-        for (rel, text) in [("crates/x/src/lib.rs", "pub fn f2() {}"), ("crates/x/src/a/adapter.h", "int y;"), ("GHOSTTY_REV", "rev2")]
-        {
+        for (rel, text) in [("crates/x/src/lib.rs", "pub fn f2() {}"), ("crates/x/src/a/adapter.h", "int y;"), ("GHOSTTY_REV", "rev2")] {
             write(&root, rel, text);
             let next = id(&root);
             assert_ne!(next, base, "{rel}");

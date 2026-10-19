@@ -15,9 +15,7 @@ use anyhow::{Context, Result, bail};
 use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::{NSDate, NSObjectProtocol, NSRunLoop};
-use silo_web::{
-    Browser, BrowserOptions, Config, Event, KeyInput, Modifiers, MouseButton, Runtime, ViewSize,
-};
+use silo_web::{Browser, BrowserOptions, Config, Event, KeyInput, Modifiers, MouseButton, Runtime, ViewSize};
 
 /// Pink; a mouse press turns it green, a key press blue.
 const PAGE: &str = "data:text/html,<html><body style='margin:0;height:100vh;background:rgb(255,0,128)' \
@@ -37,9 +35,7 @@ fn main() -> Result<()> {
         let dir = exe.parent().context("exe dir")?.join("silo-web-dev");
         let bundled = bundle::assemble(&dir, &exe, &cef_dir)?;
         println!("offscreen: running from {}", bundled.display());
-        let status = std::process::Command::new(&bundled)
-            .args(std::env::args().skip(1))
-            .status()?;
+        let status = std::process::Command::new(&bundled).args(std::env::args().skip(1)).status()?;
         std::process::exit(status.code().unwrap_or(1));
     }
     run()
@@ -74,8 +70,7 @@ fn pump_once(runtime: &Runtime) {
         ready
     };
     let mut last = LAST.lock().unwrap();
-    let tick =
-        Runtime::live_browsers() > 0 && last.is_none_or(|l| now - l >= Duration::from_millis(33));
+    let tick = Runtime::live_browsers() > 0 && last.is_none_or(|l| now - l >= Duration::from_millis(33));
     if due || tick {
         *last = Some(now);
         runtime.pump();
@@ -90,12 +85,7 @@ fn pump_for(runtime: &Runtime, duration: Duration) {
 }
 
 /// Pumps until `browser` emits an event matching `pred` (other events are dropped).
-fn wait_event(
-    runtime: &Runtime,
-    browser: &Browser,
-    what: &str,
-    pred: impl Fn(&Event) -> bool,
-) -> Result<()> {
+fn wait_event(runtime: &Runtime, browser: &Browser, what: &str, pred: impl Fn(&Event) -> bool) -> Result<()> {
     let started = Instant::now();
     loop {
         pump_once(runtime);
@@ -110,27 +100,16 @@ fn wait_event(
 }
 
 /// Pumps until the latest accelerated paint is `px` pixels with centre pixel `expected`.
-fn wait_for(
-    runtime: &Runtime,
-    browser: &Browser,
-    expected: [u8; 4],
-    px: (u32, u32),
-    what: &str,
-) -> Result<()> {
+fn wait_for(runtime: &Runtime, browser: &Browser, expected: [u8; 4], px: (u32, u32), what: &str) -> Result<()> {
     let started = Instant::now();
     loop {
         pump_once(runtime);
-        let last = browser
-            .frame()
-            .map(|f| (f.width, f.height, f.pixel(f.width / 2, f.height / 2)));
+        let last = browser.frame().map(|f| (f.width, f.height, f.pixel(f.width / 2, f.height / 2)));
         if let Some((w, h, Some(pixel))) = last
             && (w, h) == px
             && pixels_match(pixel, expected)
         {
-            println!(
-                "offscreen: {what}: {w}x{h} IOSurface, centre BGRA {pixel:?} after {:?}",
-                started.elapsed()
-            );
+            println!("offscreen: {what}: {w}x{h} IOSurface, centre BGRA {pixel:?} after {:?}", started.elapsed());
             return Ok(());
         }
         if started.elapsed() > Duration::from_secs(20) {
@@ -151,12 +130,7 @@ fn run() -> Result<()> {
         schedule: Arc::new(schedule),
         switches: ["use-mock-keychain".to_owned()]
             .into_iter()
-            .chain(
-                std::env::var("SILO_WEB_SWITCHES")
-                    .ok()
-                    .into_iter()
-                    .flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>()),
-            )
+            .chain(std::env::var("SILO_WEB_SWITCHES").ok().into_iter().flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>()))
             .collect(),
     };
     let runtime = Runtime::init(config)?;
@@ -174,17 +148,8 @@ fn run() -> Result<()> {
     }
 
     let profile = runtime.profile("default", None)?;
-    let size = ViewSize {
-        width: 320,
-        height: 200,
-        scale: 2.0,
-    };
-    let options = BrowserOptions {
-        url: PAGE,
-        profile: &profile,
-        size,
-        notify: Arc::new(|| {}),
-    };
+    let size = ViewSize { width: 320, height: 200, scale: 2.0 };
+    let options = BrowserOptions { url: PAGE, profile: &profile, size, notify: Arc::new(|| {}) };
     let browser = runtime.create_browser(options)?;
 
     let result = (|| {
@@ -195,33 +160,11 @@ fn run() -> Result<()> {
         browser.mouse_button(160.0, 100.0, MouseButton::Left, false, 1, none);
         wait_for(&runtime, &browser, GREEN, (640, 400), "after mouse click")?;
         browser.set_focus(true);
-        browser.key(&KeyInput {
-            key: "a",
-            key_char: Some("a"),
-            modifiers: none,
-            down: true,
-            repeat: false,
-        });
-        browser.key(&KeyInput {
-            key: "a",
-            key_char: Some("a"),
-            modifiers: none,
-            down: false,
-            repeat: false,
-        });
+        browser.key(&KeyInput { key: "a", key_char: Some("a"), modifiers: none, down: true, repeat: false });
+        browser.key(&KeyInput { key: "a", key_char: Some("a"), modifiers: none, down: false, repeat: false });
         wait_for(&runtime, &browser, BLUE, (640, 400), "after key press")?;
-        browser.resize(ViewSize {
-            width: 200,
-            height: 100,
-            scale: 1.0,
-        });
-        wait_for(
-            &runtime,
-            &browser,
-            BLUE,
-            (200, 100),
-            "after resize to 200x100@1x",
-        )?;
+        browser.resize(ViewSize { width: 200, height: 100, scale: 1.0 });
+        wait_for(&runtime, &browser, BLUE, (200, 100), "after resize to 200x100@1x")?;
         nav::run(&runtime, &browser)
     })();
     println!("offscreen: events {:?}", browser.take_events());

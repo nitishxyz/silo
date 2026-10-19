@@ -98,10 +98,9 @@ impl Workspace {
                 .hover(|s| s.opacity(0.88))
                 .child(label)
         };
-        let actions = div().flex().child(
-            button("incompatible-upgrade", "Upgrade Server", false)
-                .on_click(cx.listener(|this, _, _, cx| this.upgrade_server(cx))),
-        );
+        let actions = div()
+            .flex()
+            .child(button("incompatible-upgrade", "Upgrade Server", false).on_click(cx.listener(|this, _, _, cx| this.upgrade_server(cx))));
         let detail: SharedString = match &server.build {
             Some(build) => format!("Server build {build}, this app {}.", silo_proto::BUILD).into(),
             None => format!("This app is build {}.", silo_proto::BUILD).into(),
@@ -123,9 +122,7 @@ impl Workspace {
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(server.message()))
                     .child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(detail))
                     .child(actions)
-                    .when_some(self.status.clone(), |el, status| {
-                        el.child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(status))
-                    }),
+                    .when_some(self.status.clone(), |el, status| el.child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(status))),
             )
             .into_any_element()
     }

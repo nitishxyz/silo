@@ -240,13 +240,11 @@ impl Workspace {
             let opaque = gpui::Hsla::from(rgb(strip));
             let clear = opaque.opacity(0.0);
             let fade = |left: bool| {
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(FADE_WIDTH))
-                    .map(|el| if left { el.left_0() } else { el.right_0() })
-                    .bg(linear_gradient(if left { 90.0 } else { 270.0 }, linear_color_stop(opaque, 0.0), linear_color_stop(clear, 1.0)))
+                div().absolute().top_0().bottom_0().w(px(FADE_WIDTH)).map(|el| if left { el.left_0() } else { el.right_0() }).bg(linear_gradient(
+                    if left { 90.0 } else { 270.0 },
+                    linear_color_stop(opaque, 0.0),
+                    linear_color_stop(clear, 1.0),
+                ))
             };
             let strip_view = div()
                 .relative()
@@ -288,47 +286,45 @@ impl Workspace {
                     }
                     cx.notify();
                 }));
-            bar = bar.child(drop_zone).child(
-                div()
-                    .id("appearance")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .ml(px(6.0))
-                    .size(px(PILL_HEIGHT))
-                    .capsule()
-                    .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
-                    .cursor_pointer()
-                    .when(menu_open, |el| el.bg(rgb(theme::tab_hover_on(strip))))
-                    .when(!menu_open, |el| {
-                        el.tooltip(crate::tooltip::Tooltip::text(if comfortable {
-                            "Appearance: Comfortable"
-                        } else {
-                            "Appearance: Compact"
-                        }))
-                    })
-                    .child(icon("eye", 15.0, theme::muted()))
-                    .map(claim_press)
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance_menu(window, cx))),
-            )
-            .child(
-                div()
-                    .id("new-tab")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .ml(px(2.0))
-                    .size(px(PILL_HEIGHT))
-                    .capsule()
-                    .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
-                    .cursor_pointer()
-                    .tooltip(crate::tooltip::Tooltip::text("New Tab  ⌘T"))
-                    .child(icon("plus", 15.0, theme::muted()))
-                    .map(claim_press)
-                    .on_click(cx.listener(|this, _, window, cx| this.new_window(window, cx))),
-            );
+            bar = bar
+                .child(drop_zone)
+                .child(
+                    div()
+                        .id("appearance")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .ml(px(6.0))
+                        .size(px(PILL_HEIGHT))
+                        .capsule()
+                        .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
+                        .cursor_pointer()
+                        .when(menu_open, |el| el.bg(rgb(theme::tab_hover_on(strip))))
+                        .when(!menu_open, |el| {
+                            el.tooltip(crate::tooltip::Tooltip::text(if comfortable { "Appearance: Comfortable" } else { "Appearance: Compact" }))
+                        })
+                        .child(icon("eye", 15.0, theme::muted()))
+                        .map(claim_press)
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance_menu(window, cx))),
+                )
+                .child(
+                    div()
+                        .id("new-tab")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .ml(px(2.0))
+                        .size(px(PILL_HEIGHT))
+                        .capsule()
+                        .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
+                        .cursor_pointer()
+                        .tooltip(crate::tooltip::Tooltip::text("New Tab  ⌘T"))
+                        .child(icon("plus", 15.0, theme::muted()))
+                        .map(claim_press)
+                        .on_click(cx.listener(|this, _, window, cx| this.new_window(window, cx))),
+                );
         }
         bar.into_any_element()
     }
@@ -338,7 +334,9 @@ impl Workspace {
     /// frames) while the tab is still growing in or not laid out yet.
     fn step_tab_reveal(&self, active_id: &str, child: Option<usize>, entering: bool, smooth: bool, window: &mut Window) {
         let mut pending = self.tab_reveal.borrow_mut();
-        let Some((id, frames)) = pending.take() else { return };
+        let Some((id, frames)) = pending.take() else {
+            return;
+        };
         if id != active_id || frames == 0 {
             return;
         }
@@ -418,29 +416,22 @@ impl Workspace {
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {
                 el.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_end()
-                        .w(px((CLOSE_GAP + CLOSE_SIZE) * close))
-                        .overflow_hidden()
-                        .opacity(close)
-                        .child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("close-{}", w.id).into()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(CLOSE_SIZE))
-                                .flex_none()
-                                .capsule()
-                                .hover(|s| s.bg(rgb(theme::tab_hover_on(hover))))
-                                .child(icon("close", 12.0, theme::muted()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.call(Method::WindowClose { window_id: window_id.clone() });
-                                })),
-                        ),
+                    div().flex().flex_none().justify_end().w(px((CLOSE_GAP + CLOSE_SIZE) * close)).overflow_hidden().opacity(close).child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("close-{}", w.id).into()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(CLOSE_SIZE))
+                            .flex_none()
+                            .capsule()
+                            .hover(|s| s.bg(rgb(theme::tab_hover_on(hover))))
+                            .child(icon("close", 12.0, theme::muted()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.call(Method::WindowClose { window_id: window_id.clone() });
+                            })),
+                    ),
                 )
             });
         let entering = appear < 1.0;
@@ -458,7 +449,7 @@ impl Workspace {
             // The source stays in place, faded, under the drag preview.
             .when(self.tab_dragging.as_ref() == Some(&w.id), |el| el.opacity(0.4))
             .text_size(px(12.0))
-            .text_color(rgb(if primary { theme::foreground() } else { theme::muted() }))
+            .text_color(rgb(theme::foreground()).opacity(if primary { 1.0 } else { 0.7 }))
             .cursor_pointer()
             .child(label)
             .when_some(insert, |el, after| {
@@ -524,15 +515,23 @@ impl Workspace {
     /// Move a tab locally for an instant drop, then on the server, whose
     /// `session.changed` confirms it; a failed call puts it back.
     fn move_tab(&mut self, window_id: &str, target: usize, after: bool, cx: &mut Context<Self>) {
-        let Some(view) = self.view.as_mut() else { return };
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
         let windows = &mut view.session.windows;
-        let Some(from) = windows.iter().position(|w| w.id == window_id) else { return };
-        let Some(to) = drop_index(from, target, after).filter(|&to| to < windows.len()) else { return };
+        let Some(from) = windows.iter().position(|w| w.id == window_id) else {
+            return;
+        };
+        let Some(to) = drop_index(from, target, after).filter(|&to| to < windows.len()) else {
+            return;
+        };
         let window = windows.remove(from);
         windows.insert(to, window);
         let id = window_id.to_owned();
         let revert = move |this: &mut Self| {
-            let Some(windows) = this.view.as_mut().map(|v| &mut v.session.windows) else { return };
+            let Some(windows) = this.view.as_mut().map(|v| &mut v.session.windows) else {
+                return;
+            };
             if let Some(at) = windows.iter().position(|w| w.id == id) {
                 let window = windows.remove(at);
                 windows.insert(from.min(windows.len()), window);
@@ -590,10 +589,13 @@ impl Workspace {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
             .map(claim_press)
             // Right-click renames the current session.
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.open_switcher_rename(window, cx);
-            }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_switcher_rename(window, cx);
+                }),
+            )
             .into_any_element()
     }
 }

@@ -451,9 +451,7 @@ pub fn expect(sock: &mut UnixStream, line: &[u8]) -> io::Result<()> {
 /// Socket failures.
 pub async fn peek_magic(stream: &tokio::net::UnixStream) -> io::Result<bool> {
     // A peer that stalls (or closes) mid-prefix never completes it.
-    tokio::time::timeout(PEEK_TIMEOUT, peek_loop(stream))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "incomplete first message"))?
+    tokio::time::timeout(PEEK_TIMEOUT, peek_loop(stream)).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "incomplete first message"))?
 }
 
 const PEEK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -528,6 +526,7 @@ mod tests {
             lifecycle: Lifecycle::Running,
             size: TermSize::new(40, 10),
             owner: None,
+            owner_name: None,
             pid: None,
             browser: None,
         };

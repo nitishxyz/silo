@@ -68,14 +68,8 @@ fn validate_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id.len() <= 128
         && !id.starts_with('.')
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::InvalidId(id.to_string()))
-    }
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
+    if ok { Ok(()) } else { Err(Error::InvalidId(id.to_string())) }
 }
 
 fn snapshot_aad(id: &str, generation: u64) -> Vec<u8> {
@@ -83,21 +77,14 @@ fn snapshot_aad(id: &str, generation: u64) -> Vec<u8> {
 }
 
 fn private_dir(dir: &Path) -> Result<()> {
-    match fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-    {
+    match fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
     let meta = fs::symlink_metadata(dir)?;
     if !meta.is_dir() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "{} is not a directory",
-            dir.display()
-        ))));
+        return Err(Error::Io(std::io::Error::other(format!("{} is not a directory", dir.display()))));
     }
     if meta.permissions().mode() & 0o077 != 0 {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
@@ -124,11 +111,7 @@ impl Store {
 
     pub fn snapshot_path(&self, id: &str, generation: u64) -> Result<PathBuf> {
         validate_id(id)?;
-        Ok(self
-            .root
-            .join(SNAPSHOTS_DIR)
-            .join(id)
-            .join(format!("{generation}.{SNAP_EXT}")))
+        Ok(self.root.join(SNAPSHOTS_DIR).join(id).join(format!("{generation}.{SNAP_EXT}")))
     }
 
     /// Seal and atomically write one snapshot generation. It only becomes
@@ -159,18 +142,11 @@ impl Store {
     /// Commit: write every snapshot in `snapshots` first, then atomically
     /// replace the manifest. `refs` lists every (id, generation) the new
     /// manifest references (including unchanged ones not rewritten here).
-    pub fn commit<T: Serialize>(
-        &self,
-        snapshots: &[(&str, u64, &[u8])],
-        refs: &[(&str, u64)],
-        data: &T,
-    ) -> Result<u64> {
+    pub fn commit<T: Serialize>(&self, snapshots: &[(&str, u64, &[u8])], refs: &[(&str, u64)], data: &T) -> Result<u64> {
         for (id, generation, _) in snapshots {
             validate_id(id)?;
             if !refs.iter().any(|(r, g)| r == id && g == generation) {
-                return Err(Error::InvalidId(format!(
-                    "{id} gen {generation} not in refs"
-                )));
+                return Err(Error::InvalidId(format!("{id} gen {generation} not in refs")));
             }
         }
         for (id, _) in refs {
@@ -183,17 +159,9 @@ impl Store {
             Some(m) => (m.commit + 1, m.refs),
             None => (1, Vec::new()),
         };
-        let file = ManifestFile {
-            commit,
-            refs: refs.iter().map(|(i, g)| (i.to_string(), *g)).collect(),
-            prev_refs,
-            data,
-        };
+        let file = ManifestFile { commit, refs: refs.iter().map(|(i, g)| (i.to_string(), *g)).collect(), prev_refs, data };
         let plain = serde_json::to_vec(&file)?;
-        write_atomic(
-            self.manifest_path(),
-            &envelope::seal(&self.key, MANIFEST_AAD, &plain),
-        )?;
+        write_atomic(self.manifest_path(), &envelope::seal(&self.key, MANIFEST_AAD, &plain))?;
         Ok(commit)
     }
 }
@@ -205,35 +173,17 @@ impl Store {
     /// item in `errors` without failing the whole load.
     pub fn load<T: DeserializeOwned>(&self) -> Result<LoadReport<T>> {
         let Some(m) = self.read_manifest::<T>()? else {
-            return Ok(LoadReport {
-                manifest: None,
-                commit: 0,
-                snapshots: Vec::new(),
-                errors: Vec::new(),
-            });
+            return Ok(LoadReport { manifest: None, commit: 0, snapshots: Vec::new(), errors: Vec::new() });
         };
         let mut snapshots = Vec::new();
         let mut errors = Vec::new();
         for (id, generation) in m.refs {
             match self.read_snapshot(&id, generation) {
-                Ok(bytes) => snapshots.push(LoadedSnapshot {
-                    id,
-                    generation,
-                    bytes,
-                }),
-                Err(error) => errors.push(SnapshotError {
-                    id,
-                    generation,
-                    error,
-                }),
+                Ok(bytes) => snapshots.push(LoadedSnapshot { id, generation, bytes }),
+                Err(error) => errors.push(SnapshotError { id, generation, error }),
             }
         }
-        Ok(LoadReport {
-            manifest: Some(m.data),
-            commit: m.commit,
-            snapshots,
-            errors,
-        })
+        Ok(LoadReport { manifest: Some(m.data), commit: m.commit, snapshots, errors })
     }
 
     /// Remove snapshot files not in `referenced`, plus stale `write_atomic`
@@ -242,10 +192,7 @@ impl Store {
     /// committed manifests are always kept. Must not run concurrently with
     /// writes to this store. Returns the number of files removed.
     pub fn gc<'a>(&self, referenced: impl IntoIterator<Item = (&'a str, u64)>) -> Result<usize> {
-        let mut keep: BTreeSet<(String, u64)> = referenced
-            .into_iter()
-            .map(|(i, g)| (i.to_string(), g))
-            .collect();
+        let mut keep: BTreeSet<(String, u64)> = referenced.into_iter().map(|(i, g)| (i.to_string(), g)).collect();
         match self.read_manifest::<serde_json::Value>() {
             Ok(Some(m)) => keep.extend(m.refs.into_iter().chain(m.prev_refs)),
             Ok(None) => {}
@@ -269,9 +216,7 @@ impl Store {
             for file in fs::read_dir(entry.path())? {
                 let file = file?;
                 let name = file.file_name().to_string_lossy().into_owned();
-                let generation = name
-                    .strip_suffix(&format!(".{SNAP_EXT}"))
-                    .and_then(|g| g.parse::<u64>().ok());
+                let generation = name.strip_suffix(&format!(".{SNAP_EXT}")).and_then(|g| g.parse::<u64>().ok());
                 let stale = match generation {
                     Some(g) => !keep.contains(&(id.clone(), g)),
                     None => name.starts_with(TMP_PREFIX),
@@ -295,9 +240,7 @@ fn remove_tmp_files(dir: &Path) -> Result<usize> {
     let mut removed = 0;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(TMP_PREFIX)
-            && entry.file_type()?.is_file()
-        {
+        if entry.file_name().to_string_lossy().starts_with(TMP_PREFIX) && entry.file_type()?.is_file() {
             fs::remove_file(entry.path())?;
             removed += 1;
         }

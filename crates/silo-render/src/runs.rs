@@ -13,10 +13,7 @@
 
 /// The renderer's view of one cell.
 #[derive(Clone, Copy, Debug)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent VT style attributes mirrored from the cell"
-)]
+#[allow(clippy::struct_excessive_bools, reason = "Independent VT style attributes mirrored from the cell")]
 pub(crate) struct CellView<'a> {
     pub text: &'a str,
     /// 0 for a wide-cell spacer, 1 narrow, 2 wide.
@@ -83,11 +80,7 @@ struct Open {
 impl Open {
     fn push(&mut self, cell: &CellView<'_>) {
         if self.gap > 0 {
-            let last = self.segments.last().copied().unwrap_or(Segment {
-                bytes: 0,
-                foreground: cell.foreground,
-                faint: cell.faint,
-            });
+            let last = self.segments.last().copied().unwrap_or(Segment { bytes: 0, foreground: cell.foreground, faint: cell.faint });
             for _ in 0..self.gap {
                 self.starts.push(self.text.len());
                 self.text.push(' ');
@@ -109,11 +102,7 @@ impl Open {
         {
             last.bytes += bytes;
         } else {
-            self.segments.push(Segment {
-                bytes,
-                foreground,
-                faint,
-            });
+            self.segments.push(Segment { bytes, foreground, faint });
         }
     }
 
@@ -151,11 +140,7 @@ pub(crate) fn plan_row(cells: &[CellView<'_>]) -> RowPlan {
             if let Some(run) = open.take() {
                 plan.runs.push(run.close());
             }
-            plan.singles.push(if cell.sprite {
-                Single::Sprite(column)
-            } else {
-                Single::Glyph(column)
-            });
+            plan.singles.push(if cell.sprite { Single::Sprite(column) } else { Single::Glyph(column) });
             continue;
         }
         match &mut open {
@@ -188,9 +173,7 @@ pub(crate) fn plan_row(cells: &[CellView<'_>]) -> RowPlan {
 /// The cell (offset from the run's first column) whose grapheme contains
 /// text byte `byte`, given the run's `starts`.
 pub(crate) fn cell_of(starts: &[usize], byte: usize) -> usize {
-    starts
-        .partition_point(|&start| start <= byte)
-        .saturating_sub(1)
+    starts.partition_point(|&start| start <= byte).saturating_sub(1)
 }
 
 #[cfg(test)]
@@ -198,28 +181,12 @@ mod tests {
     use super::{CellView, Run, Segment, Single, cell_of, plan_row};
 
     fn cell(text: &str) -> CellView<'_> {
-        CellView {
-            text,
-            width: 1,
-            sprite: false,
-            bold: false,
-            italic: false,
-            faint: false,
-            foreground: 0x00ff_ffff,
-        }
+        CellView { text, width: 1, sprite: false, bold: false, italic: false, faint: false, foreground: 0x00ff_ffff }
     }
 
     #[test]
     fn prose_with_blanks_is_one_run_without_trailing_padding() {
-        let cells = [
-            cell("l"),
-            cell("s"),
-            cell(""),
-            cell("-"),
-            cell("a"),
-            cell(""),
-            cell(""),
-        ];
+        let cells = [cell("l"), cell("s"), cell(""), cell("-"), cell("a"), cell(""), cell("")];
         let plan = plan_row(&cells);
         assert!(plan.singles.is_empty());
         assert_eq!(
@@ -230,11 +197,7 @@ mod tests {
                 text: "ls -a".into(),
                 bold: false,
                 italic: false,
-                segments: vec![Segment {
-                    bytes: 5,
-                    foreground: 0x00ff_ffff,
-                    faint: false
-                }],
+                segments: vec![Segment { bytes: 5, foreground: 0x00ff_ffff, faint: false }],
                 starts: vec![0, 1, 2, 3, 4],
             }]
         );
@@ -255,21 +218,9 @@ mod tests {
         assert_eq!(
             plan.runs[0].segments,
             vec![
-                Segment {
-                    bytes: 1,
-                    foreground: 0x00ff_ffff,
-                    faint: false
-                },
-                Segment {
-                    bytes: 1,
-                    foreground: 0x00ff_0000,
-                    faint: false
-                },
-                Segment {
-                    bytes: 1,
-                    foreground: 0x00ff_ffff,
-                    faint: true
-                },
+                Segment { bytes: 1, foreground: 0x00ff_ffff, faint: false },
+                Segment { bytes: 1, foreground: 0x00ff_0000, faint: false },
+                Segment { bytes: 1, foreground: 0x00ff_ffff, faint: true },
             ]
         );
         assert!(plan.runs[1].bold);
@@ -285,22 +236,10 @@ mod tests {
         spacer.width = 0;
         let mut sprite = cell("\u{2500}");
         sprite.sprite = true;
-        let cells = [
-            cell("a"),
-            wide,
-            spacer,
-            cell("b"),
-            sprite,
-            cell(""),
-            cell("c"),
-        ];
+        let cells = [cell("a"), wide, spacer, cell("b"), sprite, cell(""), cell("c")];
         let plan = plan_row(&cells);
         assert_eq!(plan.singles, vec![Single::Glyph(1), Single::Sprite(4)]);
-        let columns: Vec<_> = plan
-            .runs
-            .iter()
-            .map(|run| (run.column, run.text.as_str()))
-            .collect();
+        let columns: Vec<_> = plan.runs.iter().map(|run| (run.column, run.text.as_str())).collect();
         assert_eq!(columns, vec![(0, "a"), (3, "b"), (6, "c")]);
     }
 
