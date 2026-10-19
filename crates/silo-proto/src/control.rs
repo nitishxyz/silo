@@ -8,7 +8,8 @@ use crate::model::{Axis, BlockId, BlockInfo, ClientId, SessionId, SessionSummary
 /// First frame on a control stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientHello {
-    pub protocol: u32,
+    /// The client's [`crate::BUILD`]; the server rejects any other build.
+    pub build: String,
     /// Human-readable client name, e.g. "Silo 0.1.0 (macOS)" or "silo cli".
     pub client_name: String,
     /// Shared secret proving the client may adopt this server (local only).
@@ -23,7 +24,8 @@ pub struct ClientHello {
 /// Reply to [`ClientHello`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerHello {
-    pub protocol: u32,
+    /// The server's [`crate::BUILD`].
+    pub build: String,
     pub client_id: ClientId,
     pub server: ServerInfo,
 }
@@ -31,8 +33,6 @@ pub struct ServerHello {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub version: String,
-    pub ghostty_rev: String,
-    pub snapshot_version: u16,
     pub pid: u32,
     pub server_id: String,
     pub started_at: u64,
@@ -115,6 +115,9 @@ pub enum Method {
     BlockFocus { block_id: BlockId },
     #[serde(rename = "block.zoom")]
     BlockZoom { block_id: BlockId, zoomed: bool },
+    /// Exchange two blocks' positions in their (shared) window layout.
+    #[serde(rename = "block.swap")]
+    BlockSwap { block_id: BlockId, other_block_id: BlockId },
     #[serde(rename = "layout.ratio")]
     LayoutRatio { window_id: WindowId, path: Vec<usize>, ratio: f32 },
 
@@ -175,6 +178,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("block.close", "Close a block and terminate its process."),
     ("block.focus", "Focus a block within its window."),
     ("block.zoom", "Zoom or unzoom a block within its window."),
+    ("block.swap", "Swap two blocks' positions within the same window layout."),
     ("layout.ratio", "Change the ratio of a split in a window layout."),
     ("terminal.send", "Write text to a terminal as if typed."),
     ("terminal.capture", "Plain-text contents of a terminal."),
@@ -235,6 +239,12 @@ impl RpcError {
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self::new("internal", message.to_string())
     }
+    /// Hello rejection: the client is a different build than the server.
+    pub fn different_build(server: &str, client: &str) -> Self {
+        Self::new(Self::DIFFERENT_BUILD, format!("different build: server {server}, client {client}"))
+    }
+    /// Code of [`RpcError::different_build`].
+    pub const DIFFERENT_BUILD: &str = "different_build";
 }
 
 impl std::fmt::Display for RpcError {

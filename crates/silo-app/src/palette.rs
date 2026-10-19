@@ -84,11 +84,21 @@ impl Workspace {
             }
             return;
         }
-        if command.destructive() {
+        // Upgrading an incompatible server keeps every session.
+        let upgrade = matches!(command, Command::RestartServer) && self.incompatible().is_some();
+        if command.destructive() && !upgrade {
             self.open_palette_step(Step::Confirm(command), String::new(), window, cx);
             return;
         }
         self.execute(command, window, cx);
+    }
+
+    /// A command's palette subtitle in the current state.
+    fn subtitle(&self, command: Command) -> Option<&'static str> {
+        match command {
+            Command::RestartServer if self.incompatible().is_some() => Some("Upgrades it, keeping sessions"),
+            other => other.subtitle(),
+        }
     }
 
     pub(crate) fn execute(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
@@ -174,7 +184,7 @@ impl Workspace {
                     self.call(Method::TerminalReset { block_id });
                 }
             }
-            Command::RestartServer if self.incompatible().is_some() => self.restart_incompatible(cx),
+            Command::RestartServer if self.incompatible().is_some() => self.upgrade_server(cx),
             Command::RestartServer => {
                 self.status = Some("Restarting server…".into());
                 self.call(Method::ServerShutdown {});
@@ -540,7 +550,7 @@ impl Workspace {
                     .child(styled(command.title().into(), ranges))
                     .when(self.checked(*command), |el| el.child(crate::assets::icon("check", 12.0, theme::accent())))
                     .into_any_element(),
-                Some(command.subtitle().map_or_else(|| command.group().to_owned(), |s| format!("{} · {s}", command.group()))),
+                Some(self.subtitle(*command).map_or_else(|| command.group().to_owned(), |s| format!("{} · {s}", command.group()))),
                 command.hint(),
                 false,
             ),
@@ -557,7 +567,7 @@ impl Workspace {
                     }
                     other => other.title().to_owned(),
                 };
-                (div().child(label).into_any_element(), command.subtitle().map(str::to_owned), Some("↩".into()), true)
+                (div().child(label).into_any_element(), self.subtitle(*command).map(str::to_owned), Some("↩".into()), true)
             }
             Entry::Back => (div().child("Cancel").into_any_element(), None, Some("esc".into()), false),
             Entry::RemoveHost(i) => {

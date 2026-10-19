@@ -1,6 +1,6 @@
 //! Daemon monitor on a tokio thread: keeps a passive control connection,
 //! mirrors server info and the session count into [`Shared`], notices a
-//! server of another version, and runs Quit Silo.
+//! server of a different build, and runs Quit Silo.
 
 use std::{
     path::PathBuf,
@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use silo_client::{Control, Incompatible, compat};
+use silo_client::{Control, DifferentBuild, mismatch};
 use silo_proto::{
     control::{Event, Method, ServerInfo},
     model::SessionSummary,
@@ -23,8 +23,8 @@ use tokio::sync::mpsc;
 pub struct MenuState {
     pub server: Option<ServerInfo>,
     pub sessions: usize,
-    /// A server of another version holds the state directory.
-    pub incompatible: Option<Incompatible>,
+    /// A server of a different build holds the state directory.
+    pub incompatible: Option<DifferentBuild>,
     pub busy: Option<&'static str>,
     pub error: Option<String>,
 }
@@ -40,7 +40,7 @@ impl MenuState {
                 1 => "Silo — Running · 1 session".to_owned(),
                 n => format!("Silo — Running · {n} sessions"),
             },
-            (None, Some(server)) => format!("Silo — {} server running", server.age()),
+            (None, Some(_)) => format!("Silo — {}", DifferentBuild::LABEL),
             (None, None) => "Silo — Not running".to_owned(),
         }
     }
@@ -134,11 +134,9 @@ async fn run(config: Config, shared: Arc<Shared>, mut cmds: mpsc::UnboundedRecei
                 });
             }
             Err(error) => {
-                // Another version: describe it, never start a second server.
-                let incompatible = match compat::mismatch(&error) {
-                    Some(mismatch) => Some(compat::inspect(&config.home, mismatch).await),
-                    None => None,
-                };
+                // Another build: describe it, never start a second server.
+                let incompatible =
+                    if mismatch::is_mismatch(&error) { Some(mismatch::inspect(&config.home).await) } else { None };
                 let changed = shared.state.lock().is_ok_and(|s| s.incompatible != incompatible);
                 if changed {
                     shared.update(|s| s.incompatible = incompatible);
@@ -181,7 +179,7 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
                     if let Some(pid) = server.pid {
                         paths::mark_quit(&config.home, pid)?;
                     }
-                    compat::stop(&config.home, &server).await.inspect_err(|_| paths::clear_quit(&config.home, None))?;
+                    mismatch::stop(&config.home, &server).await.inspect_err(|_| paths::clear_quit(&config.home, None))?;
                 }
                 shared.quit.store(true, Ordering::Release);
             }
@@ -191,7 +189,10 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
     .await;
     shared.update(|s| {
         s.busy = None;
-        s.error = result.err().map(|e| format!("{e:#}"));
+        s.error = result.err().map(|e| {
+            tracing::warn!("menu command: {e:#}");
+            "Could not quit Silo.".to_owned()
+        });
     });
 }
 
@@ -199,8 +200,8 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
 mod tests {
     use super::*;
 
-    fn older(sessions: Option<usize>) -> Incompatible {
-        Incompatible { protocol: Some(1), pid: Some(1), version: None, sessions }
+    fn other(sessions: Option<usize>) -> DifferentBuild {
+        DifferentBuild { build: Some("0123456789abcdef".into()), pid: Some(1), version: None, sessions }
     }
 
     #[test]
@@ -208,13 +209,11 @@ mod tests {
         let mut state = MenuState::default();
         assert_eq!(state.status(), "Silo — Not running");
         assert_eq!(state.running_sessions(), 0);
-        state.incompatible = Some(older(Some(2)));
-        assert_eq!(state.status(), "Silo — Older server running");
+        state.incompatible = Some(other(Some(2)));
+        assert_eq!(state.status(), "Silo — Different server build");
         assert_eq!(state.running_sessions(), 2);
         state.server = Some(ServerInfo {
             version: "x".into(),
-            ghostty_rev: String::new(),
-            snapshot_version: 1,
             pid: 2,
             server_id: String::new(),
             started_at: 0,

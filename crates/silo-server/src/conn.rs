@@ -1,13 +1,10 @@
 //! Control and data stream handling, transport-independent.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
 use serde_json::{Value, json};
 use silo_proto::{
-    Frame, PROTOCOL_VERSION,
+    BUILD, Frame,
     control::{ClientHello, METHODS, Method, Request, RpcError, ServerHello, ServerMessage},
     data::{ClientData, DataHello, Reject},
     kind, read_frame, spawn_reader, write_frame,
@@ -20,6 +17,7 @@ use tokio::{
 use crate::{
     Server,
     block::{Attach, BlockMsg, Sink},
+    handoff,
 };
 
 /// Serve one accepted stream; its first frame selects control or data.
@@ -45,6 +43,25 @@ where
     }
 }
 
+/// Serve one accepted unix stream, or pass it on as an upgrade request when
+/// it starts with [`handoff::MAGIC`].
+pub async fn accept(server: Arc<Server>, stream: tokio::net::UnixStream, upgrades: mpsc::UnboundedSender<std::os::unix::net::UnixStream>) {
+    match handoff::peek_magic(&stream).await {
+        Ok(true) => {}
+        Ok(false) => return serve(server, stream).await,
+        Err(error) => return tracing::debug!("peek: {error}"),
+    }
+    let stream = match stream.into_std() {
+        Ok(stream) => stream,
+        Err(error) => return tracing::warn!("upgrade stream: {error}"),
+    };
+    if let Err(error) = silo_pty::handoff::check_peer_uid(&stream) {
+        return tracing::warn!("upgrade refused: {error}");
+    }
+    tracing::info!("successor requested an upgrade");
+    let _ = upgrades.send(stream);
+}
+
 /// Writer task draining a channel. Every frame must go through the returned
 /// [`Sink`] so the unsent-bytes counter stays balanced.
 fn spawn_writer<W>(mut writer: W) -> (Sink, tokio::task::JoinHandle<()>)
@@ -52,24 +69,33 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
-    let queued = Arc::new(AtomicUsize::new(0));
-    let counter = queued.clone();
+    let sink = Sink::new(tx);
+    let counter = sink.queued.clone();
+    let cancelled = sink.cancelled();
     let task = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            let len = frame.payload.len() + 5;
-            let ok = write_frame(&mut writer, &frame).await.is_ok();
-            counter.fetch_sub(len, Ordering::AcqRel);
-            if !ok {
-                break;
+        let pump = async {
+            while let Some(frame) = rx.recv().await {
+                let len = frame.payload.len() + 5;
+                let ok = write_frame(&mut writer, &frame).await.is_ok();
+                counter.fetch_sub(len, Ordering::AcqRel);
+                if !ok {
+                    return;
+                }
+                // Coalesce small frames before flushing.
+                if rx.is_empty() && writer.flush().await.is_err() {
+                    return;
+                }
             }
-            // Coalesce small frames before flushing.
-            if rx.is_empty() && writer.flush().await.is_err() {
-                break;
-            }
+            let _ = writer.shutdown().await;
+        };
+        // A cancelled stream stops even mid-write to a peer that stopped
+        // reading; unsent frames are abandoned.
+        tokio::select! {
+            () = pump => {}
+            () = cancelled => {}
         }
-        let _ = writer.shutdown().await;
     });
-    (Sink { tx, queued }, task)
+    (sink, task)
 }
 
 async fn control<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W) -> std::io::Result<()>
@@ -79,11 +105,11 @@ where
 {
     let hello: ClientHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
-    if hello.protocol != PROTOCOL_VERSION {
+    if hello.build != BUILD {
         tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response {
             id: 0,
             result: None,
-            error: Some(RpcError::new("protocol", format!("server speaks protocol {PROTOCOL_VERSION}"))),
+            error: Some(RpcError::different_build(BUILD, &hello.build)),
         })?);
         drop(tx);
         let _ = writer_task.await;
@@ -98,7 +124,7 @@ where
         }
         id
     };
-    let reply = ServerHello { protocol: PROTOCOL_VERSION, client_id, server: server.info.clone() };
+    let reply = ServerHello { build: BUILD.to_owned(), client_id, server: server.info.clone() };
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
 
@@ -128,7 +154,12 @@ where
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
                 let shutdown = matches!(request.method, Method::ServerShutdown {});
-                let result = handle(&server, client_id, request.method).await;
+                let read_only = matches!(request.method, Method::ServerInfo {} | Method::ApiList {} | Method::EventsSubscribe {} | Method::SessionList {} | Method::SessionView { .. });
+                let result = if server.upgrading.load(Ordering::SeqCst) && !read_only {
+                    Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
+                } else {
+                    handle(&server, client_id, request.method).await
+                };
                 respond(&tx, id, result);
                 if shutdown {
                     server.shutdown.notify_one();
@@ -203,6 +234,10 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
         }
         Method::BlockZoom { block_id, zoomed } => {
             server.registry.lock().unwrap().zoom(&block_id, zoomed)?;
+            Ok(json!({}))
+        }
+        Method::BlockSwap { block_id, other_block_id } => {
+            server.registry.lock().unwrap().swap(&block_id, &other_block_id)?;
             Ok(json!({}))
         }
         Method::LayoutRatio { window_id, path, ratio } => {
@@ -280,21 +315,32 @@ where
         tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason: reason.into() })?);
         Ok(())
     };
-    if hello.protocol != PROTOCOL_VERSION {
-        reject("protocol", "protocol version mismatch")?;
+    if hello.build != BUILD {
+        reject(RpcError::DIFFERENT_BUILD, &RpcError::different_build(BUILD, &hello.build).message)?;
     } else if let Some((block_id, client_id)) = redeemed {
         let block = {
             let reg = server.registry.lock().unwrap();
             reg.blocks.get(&block_id).map(|b| (b.tx.clone(), reg.client_name(client_id)))
         };
         if let Some((block, client_name)) = block {
-            let native = hello.ghostty_rev == silo_vt::GHOSTTY_REV && hello.snapshot_version == crate::SNAPSHOT_VERSION;
             let sub_id = rand::random::<u64>();
-            let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, native, sink: tx.clone() })));
+            let cancelled = tx.cancelled();
+            let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, sink: tx.clone() })));
             drop(tx);
             let mut frames = spawn_reader(reader, 256);
-            while let Some(Ok(frame)) = frames.recv().await {
+            tokio::pin!(cancelled);
+            loop {
+                // A cut-off subscriber's stream ends now: dropping both
+                // halves closes the connection so the client reconnects.
+                let frame = tokio::select! {
+                    frame = frames.recv() => frame,
+                    () = &mut cancelled => break,
+                };
+                let Some(Ok(frame)) = frame else { break };
                 match ClientData::from_frame(frame) {
+                    Ok(ClientData::Ack(offset)) => {
+                        let _ = block.send(BlockMsg::Ack { sub_id, offset });
+                    }
                     Ok(ClientData::Input(bytes)) => {
                         let _ = block.send(BlockMsg::Input(bytes));
                     }

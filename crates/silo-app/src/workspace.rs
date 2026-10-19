@@ -16,6 +16,7 @@ use silo_proto::{
 
 use crate::{
     add_host::AddHostSheet,
+    cache::{self, CacheWriter, CachedTree},
     conn::ConnEvent,
     hosts::{self, AppState, HostInfo, HostState},
     motion::{self, Edge, Motion, PaneGhost, TabGhost},
@@ -31,6 +32,9 @@ actions!(
 
 pub const TITLEBAR_HEIGHT: f32 = 46.0;
 
+/// Status bar while the shown content is the last known (cached) state.
+const OFFLINE: &str = "Offline";
+
 pub struct HostEntry {
     pub info: HostInfo,
     pub state: HostState,
@@ -39,8 +43,8 @@ pub struct HostEntry {
     pub sessions: Vec<SessionSummary>,
     /// Stop Server: the connection loop waits instead of respawning.
     pub paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// A server of another version holds this host.
-    pub incompatible: Option<silo_client::Incompatible>,
+    /// A server of a different build holds this host.
+    pub incompatible: Option<silo_client::DifferentBuild>,
     /// Removed via Remove Host…; kept so host indices stay stable.
     pub removed: bool,
     pub(crate) conn: Option<Task<()>>,
@@ -52,9 +56,10 @@ pub struct Workspace {
     pub(crate) hosts: Vec<HostEntry>,
     pub(crate) active_host: usize,
     pub(crate) status: Option<String>,
-    /// The incompatible-server card asked to confirm its Restart.
-    pub(crate) confirm_restart: bool,
     pub(crate) view: Option<SessionView>,
+    /// Revision an optimistic local layout change was applied on top of;
+    /// snapshots up to it are stale and ignored. See `call_optimistic`.
+    pub(crate) ahead_of: Option<u64>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
@@ -75,7 +80,21 @@ pub struct Workspace {
     /// scroll-into-view of the active tab (window id, frames left).
     pub(crate) tab_last_active: std::cell::RefCell<Option<String>>,
     pub(crate) tab_reveal: std::cell::RefCell<Option<(String, u16)>>,
+    /// Tab under a dragged tab and whether the drop lands after it.
+    pub(crate) tab_drop: Option<(usize, bool)>,
+    /// The tab being dragged (window id), while its drag lasts.
+    pub(crate) tab_dragging: Option<String>,
+    /// A press on empty titlebar space that moves the window once dragged.
+    pub(crate) titlebar_move: bool,
     state: AppState,
+    /// The local host's client cache (`None` if it could not be opened).
+    cache: Option<CacheWriter>,
+    /// Cached mirrors waiting for their pane.
+    restored: HashMap<String, silo_client::Mirror>,
+    _checkpoints: Task<()>,
+    /// When each block was last checkpointed.
+    checkpointed: HashMap<String, Instant>,
+    _quit: Subscription,
     _bounds: Subscription,
 }
 
@@ -84,14 +103,46 @@ impl Workspace {
         let state = hosts::load_state(&home);
         theme::apply_ui_font(&state.ui_font_family, cx);
         let wanted_session = std::env::var("SILO_SESSION").ok().filter(|s| !s.is_empty()).or_else(|| state.last_session.clone());
+        let identity = silo_proto::paths::socket(&home).to_string_lossy().into_owned();
+        let (cache, tree, restored) = match cache::start(&cache::root(), &identity) {
+            Ok((writer, tree, blocks)) => {
+                let restored = blocks
+                    .into_iter()
+                    .filter_map(|b| b.checkpoint.restore().inspect_err(|e| tracing::warn!(block = %b.id, "cached block: {e:#}")).ok().map(|m| (b.id, m)))
+                    .collect();
+                (Some(writer), tree, restored)
+            }
+            Err(error) => {
+                tracing::warn!("client cache: {error:#}");
+                (None, None, HashMap::new())
+            }
+        };
+        let checkpoints = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(cache::CHECKPOINT_TICK).await;
+                if this.update(cx, |this, cx| this.checkpoint_next(cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        let quit = cx.on_app_quit(|this, cx| {
+            this.checkpoint_all(cx);
+            let writer = this.cache.clone();
+            let rt = this.rt.clone();
+            async move {
+                if let Some(writer) = writer {
+                    let _ = rt.spawn_blocking(move || writer.flush(std::time::Duration::from_secs(2))).await;
+                }
+            }
+        });
         let mut this = Self {
             rt,
             home: home.clone(),
             hosts: Vec::new(),
             active_host: 0,
             status: Some("connecting to server…".into()),
-            confirm_restart: false,
             view: None,
+            ahead_of: None,
             wanted_session,
             panes: HashMap::new(),
             server_focus: None,
@@ -106,7 +157,15 @@ impl Workspace {
             tab_scroll: gpui::ScrollHandle::new(),
             tab_last_active: std::cell::RefCell::new(None),
             tab_reveal: std::cell::RefCell::new(None),
+            tab_drop: None,
+            tab_dragging: None,
+            titlebar_move: false,
             state,
+            cache,
+            restored,
+            _checkpoints: checkpoints,
+            checkpointed: HashMap::new(),
+            _quit: quit,
             // Fullscreen changes the titlebar inset; re-render at once.
             _bounds: cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
         };
@@ -114,7 +173,87 @@ impl Workspace {
         for remote in hosts::load(&home) {
             this.add_host_entry(HostInfo::remote(&remote), window, cx);
         }
+        // Paint the cached tree until the server answers.
+        if let Some(tree) = tree {
+            this.hosts[0].sessions = tree.sessions;
+            this.status = Some(OFFLINE.into());
+            this.set_view(tree.view, window, cx);
+        }
         this
+    }
+
+    /// Checkpoint one changed pane of the local host, the one saved
+    /// longest ago, at most every `CHECKPOINT_INTERVAL` per block. Capture
+    /// encodes the snapshot here on the UI thread; the write is queued to
+    /// the cache worker.
+    fn checkpoint_next(&mut self, cx: &mut Context<Self>) {
+        if self.cache.is_none() || self.active_host != 0 {
+            return;
+        }
+        let panes = &self.panes;
+        self.checkpointed.retain(|id, _| panes.contains_key(id));
+        let now = Instant::now();
+        let due = self
+            .panes
+            .iter()
+            .filter(|(id, (pane, _))| {
+                self.checkpointed.get(*id).is_none_or(|t| now - *t >= cache::CHECKPOINT_INTERVAL) && pane.read(cx).needs_checkpoint()
+            })
+            .min_by_key(|(id, _)| self.checkpointed.get(*id).copied())
+            .map(|(id, _)| id.clone());
+        if let Some(id) = due {
+            self.checkpoint_block(&id, cx);
+        }
+    }
+
+    /// Checkpoint every changed pane (app quit).
+    fn checkpoint_all(&mut self, cx: &mut Context<Self>) {
+        if self.active_host != 0 {
+            return;
+        }
+        let ids: Vec<String> = self.panes.keys().cloned().collect();
+        for id in ids {
+            self.checkpoint_block(&id, cx);
+        }
+    }
+
+    fn checkpoint_block(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (Some(writer), Some((pane, _))) = (&self.cache, self.panes.get(id)) else { return };
+        if let Some(checkpoint) = pane.update(cx, |pane, _| pane.checkpoint()) {
+            writer.save_block(id.to_owned(), checkpoint);
+            self.checkpointed.insert(id.to_owned(), Instant::now());
+        }
+    }
+
+    /// Cache the local host's live tree, dropping checkpoints of blocks
+    /// that are gone.
+    fn save_tree(&self) {
+        let (Some(writer), Some(view)) = (&self.cache, &self.view) else { return };
+        if self.active_host != 0 || self.hosts[0].control.is_none() {
+            return;
+        }
+        writer.save_tree(CachedTree { sessions: self.hosts[0].sessions.clone(), view: view.clone() });
+    }
+
+    /// Drop checkpoints of blocks the local server no longer has, checked
+    /// against every block of every session.
+    fn gc_cache(&self) {
+        let (Some(writer), Some(control)) = (self.cache.clone(), self.hosts[0].control.clone()) else { return };
+        self.rt.spawn(async move {
+            let all = async {
+                let sessions: Vec<SessionSummary> = control.call(Method::SessionList {}).await?;
+                let mut live = Vec::new();
+                for s in sessions {
+                    let view: SessionView = control.call(Method::SessionView { session_id: s.id }).await?;
+                    live.extend(cache::live_blocks(&view));
+                }
+                anyhow::Ok(live)
+            };
+            match all.await {
+                Ok(live) => writer.gc(live),
+                Err(error) => tracing::debug!("cache gc skipped: {error:#}"),
+            }
+        });
     }
 
     pub(crate) fn add_host_entry(&mut self, info: HostInfo, window: &mut Window, cx: &mut Context<Self>) {
@@ -152,9 +291,11 @@ impl Workspace {
                 entry.state = HostState::Connected;
                 entry.control = Some(control.clone());
                 entry.incompatible = None;
-                self.confirm_restart = false;
                 self.refresh_sessions(host, cx);
                 self.refresh_settings(None, cx);
+                if host == 0 {
+                    self.gc_cache();
+                }
                 if active {
                     // The view after a reconnect only records ids.
                     self.motion.reset();
@@ -181,13 +322,15 @@ impl Workspace {
                     self.motion.reset();
                     self.status = Some(if self.hosts[host].paused.load(std::sync::atomic::Ordering::Acquire) {
                         "Server stopped — run “Start Server” from the command palette (⌘P)".to_owned()
+                    } else if self.view.is_some() {
+                        OFFLINE.to_owned()
                     } else {
                         format!("server unavailable: {reason}")
                     });
                 }
             }
             ConnEvent::Quit => cx.quit(),
-            ConnEvent::Incompatible(server) => {
+            ConnEvent::DifferentBuild(server) => {
                 let entry = &mut self.hosts[host];
                 entry.control = None;
                 entry.sessions.clear();
@@ -195,22 +338,27 @@ impl Workspace {
                 entry.incompatible = Some(server);
                 self.refresh_settings(None, cx);
                 if active {
+                    // Keep the last content painted, read-only, under the card.
                     self.motion.reset();
-                    self.detach_view();
                     self.status = None;
                 }
             }
             ConnEvent::Event(Event::SessionsChanged { mut sessions }) => {
                 sessions.sort_by_key(|s| s.created_at);
                 self.hosts[host].sessions = sessions;
+                self.save_tree();
             }
             ConnEvent::Event(_) if !active => {}
             ConnEvent::Event(Event::SessionChanged { view }) => {
-                if self.view.as_ref().is_some_and(|v| v.session.id == view.session.id) {
+                let stale = self.ahead_of.is_some_and(|base| view.session.revision <= base);
+                if !stale && self.view.as_ref().is_some_and(|v| v.session.id == view.session.id) {
                     self.set_view(view, window, cx);
                 }
             }
             ConnEvent::Event(Event::SessionClosed { session_id }) => {
+                if host == 0 {
+                    self.gc_cache();
+                }
                 if self.view.as_ref().is_some_and(|v| v.session.id == session_id) {
                     self.view = None;
                     self.choose_session(None, window, cx);
@@ -293,7 +441,8 @@ impl Workspace {
             }
             Ok(Err(error)) => {
                 let _ = this.update(cx, |this, cx| {
-                    this.status = Some(format!("{error:#}"));
+                    tracing::warn!("create session: {error:#}");
+                    this.status = Some("Could not create the session.".into());
                     cx.notify();
                 });
             }
@@ -331,7 +480,8 @@ impl Workspace {
                 Ok(Ok(view)) => view,
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.status = Some(format!("{error:#}"));
+                        tracing::warn!("open session: {error:#}");
+                        this.status = Some("Could not open the session.".into());
                         cx.notify();
                     });
                     return;
@@ -356,18 +506,28 @@ impl Workspace {
     }
 
     fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
+        self.ahead_of = None;
         window.set_window_title(&format!("{} — silo", view.session.name));
         if self.active_host == 0 && self.state.last_session.as_deref() != Some(&view.session.id) {
             self.state.last_session = Some(view.session.id.clone());
             hosts::save_state(&self.home, &self.state);
         }
         self.track_motion(&view, window, cx);
+        let live = self.control().is_some();
+        if live
+            && let (Some(old), Some(writer)) = (&self.view, self.cache.as_ref().filter(|_| self.active_host == 0))
+        {
+            writer.forget(cache::closed_blocks(old, &view));
+        }
         self.view = Some(view);
         let view = self.view.as_ref().expect("view");
         // Panes for every block of the active window; keep panes of other
         // windows that are still alive, drop the rest.
         let all: Vec<String> = view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect();
         self.panes.retain(|id, _| all.contains(id));
+        if live {
+            self.restored.retain(|id, _| all.contains(id));
+        }
         let active = self.active_window().cloned();
         if let Some(active) = &active {
             for block in active.layout.blocks() {
@@ -375,12 +535,17 @@ impl Workspace {
                     let control = self.control();
                     let rt = self.rt.clone();
                     let id = block.clone();
-                    let pane = cx.new(|cx| Pane::new(id, rt, control, window, cx));
+                    let restored = self.restored.remove(&block);
+                    let pane = cx.new(|cx| Pane::new(id, rt, control, restored, window, cx));
                     let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, _, cx| match event {
                         PaneEvent::Activated => {
                             let block = pane.read(cx).block_id.clone();
                             this.pane_activated(block);
                             cx.notify();
+                        }
+                        PaneEvent::NewShell => {
+                            let block = pane.read(cx).block_id.clone();
+                            this.new_shell(block, cx);
                         }
                     });
                     self.panes.insert(block, (pane, subscription));
@@ -406,6 +571,7 @@ impl Workspace {
                 self.focus_block(&focused, window, cx);
             }
         }
+        self.save_tree();
         cx.notify();
     }
 
@@ -510,6 +676,30 @@ impl Workspace {
         });
     }
 
+    /// Sends a layout change already applied to the local view. Older
+    /// snapshots are ignored until the server's confirms it; if the call
+    /// fails, `revert` undoes it (unless a newer snapshot replaced it).
+    pub(crate) fn call_optimistic(&mut self, method: Method, failure: &'static str, revert: impl FnOnce(&mut Self) + 'static, cx: &mut Context<Self>) {
+        let Some(control) = self.control() else { return revert(self) };
+        let base = self.view.as_ref().map(|v| v.session.revision);
+        self.ahead_of = base;
+        let task = self.rt.spawn(async move { control.call_value(method).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(_)) = task.await {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.ahead_of.is_some() && this.ahead_of == base {
+                    this.ahead_of = None;
+                    revert(this);
+                }
+                this.flash(failure.into(), cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn focused_block(&self, window: &Window, cx: &gpui::App) -> Option<String> {
         self.panes
             .iter()
@@ -554,6 +744,23 @@ impl Workspace {
     pub(crate) fn close_block_id(&mut self, block: String) {
         tracing::debug!(%block, "close block");
         self.call(Method::BlockClose { block_id: block });
+    }
+
+    /// Replace a block without a process by a fresh shell in its slot:
+    /// split it, then close it so the new block takes the whole slot.
+    pub(crate) fn new_shell(&mut self, block: String, cx: &gpui::App) {
+        let Some(control) = self.control() else { return };
+        let cwd = self.cwd_of(&block, cx);
+        self.rt.spawn(async move {
+            let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
+            if let Err(error) = control.call_value(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn }).await {
+                tracing::warn!("new shell: {error:#}");
+                return;
+            }
+            if let Err(error) = control.call_value(Method::BlockClose { block_id: block }).await {
+                tracing::warn!("new shell: {error:#}");
+            }
+        });
     }
 
     /// Zoom `block` (the server also focuses it), or unzoom the window.
@@ -660,7 +867,7 @@ impl Workspace {
 
     /// Text of the status bar along the window's bottom edge, if shown.
     pub(crate) fn status_bar(&self) -> Option<String> {
-        self.status.clone().filter(|_| self.view.is_some())
+        self.status.clone().filter(|_| self.view.is_some() && self.incompatible().is_none())
     }
 
     pub(crate) fn window_title(&self, w: &WindowInfo, cx: &gpui::App) -> String {
@@ -708,7 +915,24 @@ impl Render for Workspace {
             });
         }
         let body: AnyElement = match self.active_window().cloned() {
-            Some(w) => self.render_body(&w, now, window, cx),
+            Some(w) => match self.incompatible().cloned() {
+                // The last content stays painted, read-only, under the card.
+                Some(server) => div()
+                    .relative()
+                    .size_full()
+                    .child(self.render_body(&w, now, window, cx))
+                    .child(
+                        div()
+                            .id("incompatible-scrim")
+                            .occlude()
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba((theme::surface() << 8) | 0xd8))
+                            .child(self.render_incompatible(&server, cx)),
+                    )
+                    .into_any_element(),
+                None => self.render_body(&w, now, window, cx),
+            },
             None => match self.incompatible().cloned() {
                 Some(server) => self.render_incompatible(&server, cx),
                 None => div()

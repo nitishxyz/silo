@@ -14,9 +14,10 @@ pub mod paths;
 
 pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 
-/// Protocol version; bumped on incompatible changes.
-/// 2: terminal configuration frames (`CONFIG`, `CONFIGURED`).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Build id: a hash of every workspace source (see `build.rs`). Server and
+/// client hellos carry it and must match exactly; there is no other
+/// protocol versioning.
+pub const BUILD: &str = env!("SILO_BUILD_ID");
 
 /// Upper bound for any single frame.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;

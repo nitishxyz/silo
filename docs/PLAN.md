@@ -154,11 +154,11 @@ Every stream (unix or iroh QUIC) carries length-prefixed frames: `u32 len | u8 k
 
 ### 3.5 Version skew
 
-The snapshot format is WIP, so `Hello` carries `ghostty_rev` + `snapshot_version`.
-- **Same version:** use the native snapshot.
-- **Mismatch:** the server sends a fallback "screen as VT" via `ghostty_formatter` (VT output with modes) plus
-  replay of the raw ring. It's lossy, and the UI shows "server version differs".
-- The desktop app bundles its own server, so local is always matched.
+No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time hash of the workspace sources,
+`Cargo.lock` and `GHOSTTY_REV`.
+- **Same build:** connect; snapshots are always native.
+- **Different build:** the server rejects the hello. The app shows "Different server build" with **Upgrade Server**,
+  which hot-upgrades the running server in place (§5), keeping every session.
 
 ### 3.6 Terminal size and multiple clients: decided (block ownership)
 
@@ -196,12 +196,21 @@ The snapshot format is WIP, so `Hello` carries `ghostty_rev` + `snapshot_version
   - The peer uid is checked with `getpeereid`/`SO_PEERCRED`, and the principal is recorded as `uid N over unix`.
   - `runtime.json` + `start.lock` for discovery (the Ohara pattern); adoption is checked with Ohara's
     HMAC challenge.
-- **Remote:** iroh `=1.3.0`. Server identity is a persistent EndpointId. One `Router` with ALPNs:
-  - `<name>/ctl/1`: the control stream. Data streams are opened as extra bi streams on the same connection,
-    each starting with `Hello(ticket)`.
-  - `<name>/tunnel/1`: port forwarding for browser blocks.
-  - Relays: n0 by default, self-hosted optional. mDNS on the LAN. Multipath handles Wi-Fi ↔ cellular.
+- **Remote:** iroh `=1.3.0` (newest release; MSRV 1.91, so `silo-transport` sets `rust-version = "1.91"`),
+  in the `silo-transport` crate. Server identity is a persistent EndpointId whose secret lives in
+  `<home>/state/iroh/key` (same 0600/no-symlink rules as the snapshot key, separate file). One endpoint per
+  process; the server runs one `Router` with ALPNs:
+  - `silo/ctl/1`: the control stream is the first bi stream. Data streams are opened as extra bi streams on the
+    same connection, each starting with `Hello(ticket)`. A QUIC stream is only visible to the peer after its
+    first write, so the opener always speaks first.
+  - `silo/tunnel/1`: port forwarding for browser blocks (reserved, not served yet).
+  - Relays: n0 by default (plus n0 DNS/pkarr lookup), one custom relay URL, or disabled (direct/mDNS only).
+    mDNS on the LAN is a separate on/off flag. Multipath handles Wi-Fi ↔ cellular.
 - **Pairing:** Ohara-style tickets, bound to `connection.remote_id()`, with owner vs paired-device permissions.
+  The invite string is `silo1` + lowercase unpadded base32 of postcard `{EndpointAddr, secret: [u8; 32]}`;
+  malformed strings are rejected.
+- **Remote build mismatch:** a remote server with a different `BUILD` is shown as "Different server build"
+  with no Upgrade button. It is updated on its own machine by running the new CLI there (CLI takeover, §5).
 - **Later:** SSH-key auth, and a login server that maps identities to unix accounts.
 
 ---
@@ -210,15 +219,17 @@ The snapshot format is WIP, so `Hello` carries `ghostty_rev` + `snapshot_version
 
 - The server crate builds both a library and the `<name>` binary, which is server and CLI in one.
 - **macOS app:**
-  - Bundles it and installs versioned copies under `Application Support/<name>/Server/Versions/<build>/`,
-    so an app update doesn't kill a running server.
+  - Bundles it and runs it from the bundle. A running server is unaffected by an app update; moving to the new
+    build is a hot upgrade.
   - **Always** adopts or spawns the detached daemon.
 - **Server modes:**
   - Personal: auto-exits about 10 s after the last session and client, unless started explicitly.
   - Shared and login modes come later.
-- **Hot upgrade:** the old server snapshots every terminal and passes the PTY master fds to the new server over
-  `SCM_RIGHTS`. The new server restores from the snapshots and continues. This is practical *because* the
-  snapshot is complete.
+- **Hot upgrade:** `silo server --takeover` connects to the running server with the fixed line `SILO-UPGRADE 1`.
+  The old server freezes every block, checkpoints it at an exact byte boundary, and passes the tree, checkpoints,
+  PTY masters, lock and listener over `SCM_RIGHTS`. The successor adopts them (same PIDs, same epochs and offsets,
+  so clients resume without a gap) and replies `READY`. Before `READY` any failure aborts and the old server
+  re-adopts everything; shells are never hung up.
 - Packaging, signing and notarization reuse Ohara's xtask. Linux uses systemd units plus deb/rpm/tarball.
 
 ---
@@ -301,7 +312,9 @@ xtask          build ghostty, package, sign/notarize, smoke tests
 - On-disk encrypted snapshots, restore after crash, hot upgrade.
 
 **Phase 4 — remote**
-- iroh, pairing, multi-server UI, relay config, Linux server + systemd.
+- iroh `=1.3.0` transport + identity (`silo-transport`), pairing, multi-server UI, relay config,
+  Linux server + systemd.
+- Remote build mismatch: "Different server build", no Upgrade button; update via the server's own CLI takeover.
 
 **Phase 5 — latency**
 - Predictive local echo (Mosh algorithm) for remote servers.

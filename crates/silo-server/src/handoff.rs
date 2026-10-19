@@ -1,0 +1,539 @@
+//! Live upgrade: a successor server takes every block (PTY masters
+//! included) from the running server without hanging up any program.
+//!
+//! Fixed across builds: [`MAGIC`] and the framing below. The payload
+//! (`Transfer`, `Session`, `BlockInfo`, encoded `Checkpoint`s) is serde of
+//! the old build's types; when the successor cannot read it, the upgrade
+//! fails before `READY` and the old server keeps serving. Over the control
+//! socket:
+//!
+//! 1. successor -> old: [`MAGIC`] (`SILO-UPGRADE 1\n`) instead of a hello.
+//! 2. old -> successor: frames of `u32 LE length` + bytes:
+//!    - one JSON [`Transfer`] (tree, block infos, fd index);
+//!    - one [`crate::persist::encode`]d checkpoint per `Transfer::blocks`
+//!      entry, in order.
+//! 3. old -> successor: the PTY masters via `SCM_RIGHTS`, in messages of at
+//!    most [`FDS_PER_MESSAGE`] descriptors, each with a 4-byte `u32 LE`
+//!    payload holding its descriptor count (`PtyRecord::fd` indexes their
+//!    concatenation); then one message (payload `2`) with the server lock
+//!    and the listening socket. `flock` follows the open file description,
+//!    so the lock never lapses, and connections queue in the shared backlog.
+//! 4. successor -> old: [`READY`] once every block runs and its state store
+//!    is open. This is the commit point.
+//! 5. old -> successor: [`COMMIT`]; the old server closes its copies and
+//!    connections and exits without hanging up anything.
+//!
+//! Anything going wrong before `READY` (including the successor closing)
+//! aborts: the successor drops its copies, the old server re-adopts its
+//! blocks and keeps serving. A master it cannot re-adopt is parked open in
+//! the registry (the block shows its restored screen) and travels with the
+//! next upgrade. The old server waits for `READY` without a timeout (the
+//! successor's steps are bounded), so both never run the same programs.
+//! After writing `READY` the successor keeps everything, even without a
+//! `COMMIT`.
+
+use std::{
+    collections::HashMap,
+    io::{self, Read, Write},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::net::UnixStream,
+    },
+    path::Path,
+    time::Duration,
+};
+
+use serde::{Deserialize, Serialize};
+use silo_proto::model::{BlockId, BlockInfo};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::{
+    Server,
+    block::{self, BlockHandle, Handoff, Note},
+    persist,
+    registry::Session,
+};
+
+pub const MAGIC: &[u8] = b"SILO-UPGRADE 1\n";
+pub const READY: &[u8] = b"READY\n";
+pub const COMMIT: &[u8] = b"COMMIT\n";
+pub const FDS_PER_MESSAGE: usize = 200;
+/// Largest frame accepted (a manifest or one checkpoint).
+const MAX_FRAME: usize = 1 << 30;
+/// Longest wait for one step of the other side (restoring many blocks).
+const STEP_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Serialize, Deserialize)]
+pub struct Transfer {
+    pub server_id: String,
+    pub sessions: Vec<Session>,
+    pub blocks: Vec<Record>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Record {
+    pub info: BlockInfo,
+    /// The running program's PTY; `None` for exited or restored blocks.
+    pub pty: Option<PtyRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PtyRecord {
+    /// Index into the transferred descriptors.
+    pub fd: usize,
+    pub pid: i32,
+    pub columns: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
+fn write_frame(sock: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+    let len = u32::try_from(bytes.len()).map_err(|_| io::Error::other("frame too large"))?;
+    sock.write_all(&len.to_le_bytes())?;
+    sock.write_all(bytes)
+}
+
+fn read_frame(sock: &mut UnixStream) -> io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    sock.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_FRAME {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+    }
+    let mut bytes = vec![0u8; len];
+    sock.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Old side: send the transfer, its checkpoints and descriptors (steps 2-3).
+///
+/// # Errors
+/// Socket failures or a checkpoint count not matching the records.
+pub fn send(sock: &mut UnixStream, transfer: &Transfer, checkpoints: &[Vec<u8>], fds: &[OwnedFd], server: ServerFds<'_>) -> io::Result<()> {
+    if checkpoints.len() != transfer.blocks.len() {
+        return Err(io::Error::other("one checkpoint per block"));
+    }
+    write_frame(sock, &serde_json::to_vec(transfer)?)?;
+    for checkpoint in checkpoints {
+        write_frame(sock, checkpoint)?;
+    }
+    sock.flush()?;
+    for chunk in fds.chunks(FDS_PER_MESSAGE) {
+        let fds: Vec<_> = chunk.iter().map(AsFd::as_fd).collect();
+        silo_pty::handoff::send_fds(sock, &(chunk.len() as u32).to_le_bytes(), &fds)?;
+    }
+    silo_pty::handoff::send_fds(sock, &2u32.to_le_bytes(), &[server.lock, server.listener])
+}
+
+/// The server lock and listening socket, sent last: `flock` follows the
+/// open file description and the socket keeps its backlog, so the server
+/// passes on without a moment where neither side holds them.
+#[derive(Clone, Copy)]
+pub struct ServerFds<'a> {
+    pub lock: std::os::fd::BorrowedFd<'a>,
+    pub listener: std::os::fd::BorrowedFd<'a>,
+}
+
+/// The transfer, one encoded checkpoint per block, the PTY masters, and the
+/// server lock and listening socket.
+pub type Received = (Transfer, Vec<Vec<u8>>, Vec<OwnedFd>, [OwnedFd; 2]);
+
+/// Successor side: receive what [`send`] sent.
+///
+/// # Errors
+/// Socket failures or malformed data.
+pub fn recv(sock: &mut UnixStream) -> io::Result<Received> {
+    let transfer: Transfer = serde_json::from_slice(&read_frame(sock)?)?;
+    let checkpoints = (0..transfer.blocks.len()).map(|_| read_frame(sock)).collect::<io::Result<Vec<_>>>()?;
+    let want = transfer.blocks.iter().filter_map(|b| b.pty.as_ref()).count();
+    let mut fds = Vec::with_capacity(want);
+    while fds.len() < want {
+        let (payload, got) = silo_pty::handoff::recv_fds(sock, FDS_PER_MESSAGE, 4)?;
+        let count = payload.try_into().map(u32::from_le_bytes).map_err(|_| invalid("short descriptor header"))?;
+        if count as usize != got.len() || got.is_empty() {
+            return Err(invalid("descriptor count mismatch"));
+        }
+        fds.extend(got);
+    }
+    if fds.len() != want || transfer.blocks.iter().filter_map(|b| b.pty.as_ref()).any(|p| p.fd >= want) {
+        return Err(invalid("descriptor index out of range"));
+    }
+    let (payload, got) = silo_pty::handoff::recv_fds(sock, 2, 4)?;
+    let server: [OwnedFd; 2] = got.try_into().map_err(|_| invalid("expected the server lock and socket"))?;
+    if payload != 2u32.to_le_bytes() {
+        return Err(invalid("expected the server lock and socket"));
+    }
+    Ok((transfer, checkpoints, fds, server))
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
+/// A block during an upgrade on the old server: released for transfer, or
+/// still running because releasing it failed.
+enum Slot {
+    Released(Box<BlockInfo>, Handoff),
+    Kept(BlockHandle),
+}
+
+/// Old side, after [`MAGIC`] was read: release every block, transfer them
+/// and wait for [`READY`]. On success the caller must commit (release the
+/// lock, then write [`COMMIT`] to the returned stream); on failure every
+/// block runs here again.
+///
+/// # Errors
+/// Releasing, transferring, or the successor not getting ready.
+pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, own: [OwnedFd; 2]) -> anyhow::Result<UnixStream> {
+    let (handles, sessions, mut parked) = {
+        let mut reg = server.registry.lock().unwrap();
+        (reg.blocks.drain().collect::<Vec<_>>(), reg.sessions.clone(), std::mem::take(&mut reg.parked))
+    };
+    let mut slots = Vec::with_capacity(handles.len());
+    let mut failed = None;
+    for (id, handle) in handles {
+        let info = Box::new(handle.info.lock().unwrap().clone());
+        if failed.is_none() {
+            match handle.handoff().await {
+                Ok(mut released) => {
+                    // A program parked here travels with its block.
+                    if released.pty.is_none() {
+                        released.pty = parked.remove(&id);
+                    }
+                    slots.push((id, Slot::Released(info, released)));
+                    continue;
+                }
+                Err(error) => failed = Some(error.context(format!("release block {id}"))),
+            }
+        }
+        slots.push((id, Slot::Kept(handle)));
+    }
+    // Kept blocks keep their parked programs.
+    server.registry.lock().unwrap().parked.extend(parked);
+    let result = match failed {
+        Some(error) => Err(error),
+        None => transfer(sock, server_id, sessions, &slots, own).await,
+    };
+    if result.is_err() {
+        readopt(&server.registry, slots);
+    }
+    result
+}
+
+async fn transfer(
+    mut sock: UnixStream,
+    server_id: String,
+    sessions: Vec<Session>,
+    slots: &[(BlockId, Slot)],
+    own: [OwnedFd; 2],
+) -> anyhow::Result<UnixStream> {
+    let mut blocks = Vec::with_capacity(slots.len());
+    let mut checkpoints = Vec::with_capacity(slots.len());
+    let mut fds = Vec::new();
+    for (_, slot) in slots {
+        let Slot::Released(info, released) = slot else { anyhow::bail!("block not released") };
+        let pty = match &released.pty {
+            Some(pty) => {
+                fds.push(pty.master.try_clone()?);
+                let s = pty.size;
+                let (columns, rows, cell_width, cell_height) = (s.columns, s.rows, s.cell_width, s.cell_height);
+                Some(PtyRecord { fd: fds.len() - 1, pid: pty.pid, columns, rows, cell_width, cell_height })
+            }
+            None => None,
+        };
+        blocks.push(Record { info: (**info).clone(), pty });
+        checkpoints.push(persist::encode(released.checkpoint.clone())?);
+    }
+    let transfer = Transfer { server_id, sessions, blocks };
+    let sock = tokio::task::spawn_blocking(move || -> io::Result<UnixStream> {
+        sock.set_nonblocking(false)?;
+        sock.set_write_timeout(Some(STEP_TIMEOUT))?;
+        sock.set_read_timeout(Some(STEP_TIMEOUT))?;
+        expect(&mut sock, MAGIC)?;
+        let [lock, listener] = &own;
+        send(&mut sock, &transfer, &checkpoints, &fds, ServerFds { lock: lock.as_fd(), listener: listener.as_fd() })?;
+        drop((fds, own));
+        // READY is the commit point, so wait for it or the successor's end
+        // (its own steps are bounded), never time out: a READY racing a
+        // timeout would leave both servers running the same programs.
+        sock.set_read_timeout(None)?;
+        expect(&mut sock, READY)?;
+        Ok(sock)
+    })
+    .await??;
+    Ok(sock)
+}
+
+/// Run every released block here again (an aborted upgrade).
+fn readopt(registry: &std::sync::Mutex<crate::registry::Registry>, slots: Vec<(BlockId, Slot)>) {
+    let mut reg = registry.lock().unwrap();
+    let notes = reg.notes();
+    for (id, slot) in slots {
+        let handle = match slot {
+            Slot::Kept(handle) => Ok(handle),
+            Slot::Released(info, Handoff { checkpoint, pty: Some(pty) }) => {
+                match block::spawn_adopted((*info).clone(), checkpoint.clone(), pty, notes.clone()) {
+                    Ok(handle) => Ok(handle),
+                    Err(error) => match error.downcast::<block::AdoptFailed>() {
+                        Ok(failed) => {
+                            tracing::error!(block = %id, "re-adopt after aborted upgrade: {:#}; program parked", failed.error);
+                            reg.parked.insert(id.clone(), failed.detached);
+                            restore(*info, checkpoint, &notes)
+                        }
+                        Err(error) => Err(error),
+                    },
+                }
+            }
+            Slot::Released(info, Handoff { checkpoint, pty: None }) => restore(*info, checkpoint, &notes),
+        };
+        match handle {
+            Ok(handle) => drop(reg.blocks.insert(id, handle)),
+            Err(error) => tracing::error!(block = %id, "re-adopt after aborted upgrade: {error:#}"),
+        }
+    }
+}
+
+/// A block without its program, showing `checkpoint`, or an empty screen
+/// if that cannot be restored.
+fn restore(info: BlockInfo, checkpoint: block::Checkpoint, notes: &UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+    block::spawn_restored(info.clone(), checkpoint, notes.clone()).or_else(|error| {
+        tracing::warn!(block = %info.id, "restoring with an empty screen: {error:#}");
+        let empty = persist::empty_checkpoint(info.size)?;
+        block::spawn_restored(info, empty, notes.clone())
+    })
+}
+
+/// What a successor took over: the tree with every block running here,
+/// and the old server's lock and listening socket.
+pub struct Taken {
+    pub server_id: String,
+    pub sessions: Vec<Session>,
+    pub blocks: HashMap<BlockId, BlockHandle>,
+    pub lock: std::fs::File,
+    pub listener: tokio::net::UnixListener,
+    pub persist: persist::Persist,
+}
+
+/// Successor side: take every block from the server of `home` and run them
+/// here. Every failure happens before [`READY`], so the old server re-adopts
+/// its blocks; with `fail_before_ready` it fails right there (a test hook).
+///
+/// # Errors
+/// No server is running, it refuses, or the transfer fails.
+pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready: bool) -> anyhow::Result<Taken> {
+    let socket = silo_proto::paths::socket(home);
+    let (sock, transfer, checkpoints, fds, [lock, listener]) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+        let mut sock = UnixStream::connect(&socket).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => io::Error::new(e.kind(), "no running server to take over"),
+            _ => e,
+        })?;
+        silo_pty::handoff::check_peer_uid(&sock)?;
+        sock.set_read_timeout(Some(STEP_TIMEOUT))?;
+        sock.set_write_timeout(Some(STEP_TIMEOUT))?;
+        sock.write_all(MAGIC)?;
+        let (transfer, checkpoints, fds, server) = recv(&mut sock)?;
+        Ok((sock, transfer, checkpoints, fds, server))
+    })
+    .await??;
+    let persist = persist::Persist::attach(home, transfer.server_id.clone())?;
+    if fail_before_ready {
+        anyhow::bail!("upgrade aborted before READY (test hook)");
+    }
+    let (lock, listener) = (std::fs::File::from(lock), std::os::unix::net::UnixListener::from(listener));
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::UnixListener::from_std(listener)?;
+    let blocks = adopt(transfer.blocks, checkpoints, fds, notes).await?;
+    let blocks = commit(sock, blocks).await?;
+    Ok(Taken { server_id: transfer.server_id, sessions: transfer.sessions, blocks, lock, listener, persist })
+}
+
+/// Write [`READY`] and wait for [`COMMIT`]. A READY that cannot be written
+/// never reached the old server, which keeps its blocks: ours are released.
+/// Once written, the blocks are ours whatever follows; a missing COMMIT
+/// (the old server died committing) is only logged, never a hangup.
+async fn commit(mut sock: UnixStream, blocks: HashMap<BlockId, BlockHandle>) -> anyhow::Result<HashMap<BlockId, BlockHandle>> {
+    let (sock, ready) = tokio::task::spawn_blocking(move || {
+        let ready = sock.write_all(READY);
+        (sock, ready)
+    })
+    .await?;
+    if let Err(error) = ready {
+        release(blocks.into_values()).await;
+        return Err(anyhow::Error::from(error).context("send READY"));
+    }
+    let mut sock = sock;
+    let answer = tokio::task::spawn_blocking(move || expect(&mut sock, COMMIT)).await;
+    if !matches!(answer, Ok(Ok(()))) {
+        tracing::warn!("no COMMIT from the old server; serving its blocks anyway");
+    }
+    Ok(blocks)
+}
+
+async fn adopt(
+    records: Vec<Record>,
+    checkpoints: Vec<Vec<u8>>,
+    fds: Vec<OwnedFd>,
+    notes: &UnboundedSender<Note>,
+) -> anyhow::Result<HashMap<BlockId, BlockHandle>> {
+    let mut fds: Vec<Option<OwnedFd>> = fds.into_iter().map(Some).collect();
+    let mut blocks = HashMap::new();
+    for (record, bytes) in records.into_iter().zip(checkpoints) {
+        let id = record.info.id.clone();
+        let spawned = persist::decode(&bytes).and_then(|checkpoint| match record.pty {
+            Some(p) => {
+                let master = fds[p.fd].take().ok_or_else(|| anyhow::anyhow!("descriptor {} reused", p.fd))?;
+                let size = silo_pty::PtySize { columns: p.columns, rows: p.rows, cell_width: p.cell_width, cell_height: p.cell_height };
+                block::spawn_adopted(record.info, checkpoint, silo_pty::Detached { master, pid: p.pid, size }, notes.clone())
+            }
+            None => block::spawn_restored(record.info, checkpoint, notes.clone()),
+        });
+        match spawned {
+            Ok(handle) => drop(blocks.insert(id, handle)),
+            // Before READY the old server holds its own copy of every master
+            // (it re-adopts them), so dropping ours, including the one in
+            // `AdoptFailed`, hangs nothing up.
+            Err(error) => {
+                release(blocks.into_values()).await;
+                return Err(error.context(format!("adopt block {id}")));
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Stop blocks adopted here without hanging up their programs, leaving
+/// them to the old server.
+async fn release(blocks: impl Iterator<Item = BlockHandle>) {
+    for handle in blocks {
+        if let Err(error) = handle.handoff().await {
+            tracing::warn!("release adopted block: {error:#}");
+        }
+    }
+}
+
+/// Read exactly `line` from `sock`.
+///
+/// # Errors
+/// Socket failures, EOF, or different bytes.
+pub fn expect(sock: &mut UnixStream, line: &[u8]) -> io::Result<()> {
+    let mut got = vec![0u8; line.len()];
+    sock.read_exact(&mut got)?;
+    if got == line { Ok(()) } else { Err(invalid("unexpected upgrade message")) }
+}
+
+/// Whether a freshly accepted stream starts with [`MAGIC`], without
+/// consuming anything. A JSON hello differs from it at the first byte.
+///
+/// # Errors
+/// Socket failures.
+pub async fn peek_magic(stream: &tokio::net::UnixStream) -> io::Result<bool> {
+    // A peer that stalls (or closes) mid-prefix never completes it.
+    tokio::time::timeout(PEEK_TIMEOUT, peek_loop(stream))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "incomplete first message"))?
+}
+
+const PEEK_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn peek_loop(stream: &tokio::net::UnixStream) -> io::Result<bool> {
+    let mut buf = [0u8; MAGIC.len()];
+    loop {
+        stream.readable().await?;
+        let n = match peek_once(stream, &mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        };
+        if n == 0 || buf[..n] != MAGIC[..n] {
+            return Ok(false);
+        }
+        if n == MAGIC.len() {
+            return Ok(true);
+        }
+        // A partial prefix stays readable; wait for the rest.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[allow(unsafe_code)]
+fn peek_once(stream: &tokio::net::UnixStream, buf: &mut [u8]) -> io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: recv writes at most `buf.len()` bytes into `buf`.
+    let n = unsafe { libc::recv(stream.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), libc::MSG_PEEK) };
+    if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn peek(bytes: &[u8]) -> bool {
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let mut a = a.into_std().unwrap();
+        a.set_nonblocking(false).unwrap();
+        a.write_all(bytes).unwrap();
+        let found = peek_magic(&b).await.unwrap();
+        let mut b = b.into_std().unwrap();
+        b.set_nonblocking(false).unwrap();
+        let mut first = vec![0u8; bytes.len()];
+        b.read_exact(&mut first).unwrap();
+        assert_eq!(first, bytes, "peeking consumes nothing");
+        found
+    }
+
+    #[tokio::test]
+    async fn magic_is_peeked_not_consumed() {
+        assert!(peek(MAGIC).await);
+        assert!(peek(b"SILO-UPGRADE 1\nmore").await);
+        assert!(!peek(b"\x10\0\0\0\x01{}").await);
+        assert!(!peek(b"SILO-UPGRADE 2\n").await);
+    }
+
+    /// A master that cannot be re-adopted after an aborted upgrade stays
+    /// open (parked); its program keeps running and the block stays.
+    #[tokio::test]
+    async fn failed_readopt_parks_and_keeps_program() {
+        use silo_proto::model::{BlockKind, Lifecycle, TermSize};
+        let (notes, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let info = BlockInfo {
+            id: "b1".into(),
+            session_id: "s1".into(),
+            kind: BlockKind::Terminal,
+            title: "shell".into(),
+            cwd: None,
+            exited: None,
+            lifecycle: Lifecycle::Running,
+            size: TermSize::new(40, 10),
+            owner: None,
+            pid: None,
+        };
+        let config = silo_pty::SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() };
+        let handle = block::spawn(info.clone(), &config, notes.clone()).unwrap();
+        let mut released = handle.handoff().await.unwrap();
+        let pid = released.pty.as_ref().unwrap().pid;
+        released.checkpoint.snapshot = b"not a snapshot".to_vec();
+        let registry = std::sync::Mutex::new(crate::registry::Registry::new(notes));
+        readopt(&registry, vec![("b1".into(), Slot::Released(Box::new(info), released))]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let reg = registry.lock().unwrap();
+            assert!(reg.parked.contains_key("b1"), "master parked");
+            assert!(reg.blocks.contains_key("b1"), "block kept");
+        }
+        assert!(rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok(), "program alive");
+        registry.lock().unwrap().shutdown();
+    }
+
+    #[tokio::test]
+    async fn stalled_or_closed_prefix_times_out() {
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let mut a = a.into_std().unwrap();
+        a.set_nonblocking(false).unwrap();
+        a.write_all(&MAGIC[..5]).unwrap();
+        let error = peek_magic(&b).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(a);
+        assert_eq!(peek_magic(&b).await.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+}

@@ -4,6 +4,7 @@ mod add_host;
 mod appearance;
 mod assets;
 mod blink;
+mod cache;
 mod commands;
 mod composition;
 mod controls;
@@ -101,6 +102,7 @@ fn main() {
                     traffic_light_position: Some(point(px(16.), px(16.))),
                 }),
                 window_min_size: Some(size(px(420.), px(240.))),
+                app_owns_titlebar_drag: true,
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Workspace::new(rt.clone(), home.clone(), exe.clone(), window, cx)),

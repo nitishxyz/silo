@@ -55,9 +55,7 @@ impl Workspace {
         let server = SettingsServer {
             status: match (connected, paused, local.map(|h| &h.state)) {
                 (Some(_), _, _) => "Running".into(),
-                (None, _, _) if incompatible.is_some() => {
-                    format!("{} server running", incompatible.map_or("Incompatible", |s| s.age()))
-                }
+                (None, _, _) if incompatible.is_some() => silo_client::DifferentBuild::LABEL.into(),
                 (None, true, _) => "Stopped".into(),
                 (None, false, Some(HostState::Unreachable(reason))) => format!("Unavailable: {reason}"),
                 _ => "Connecting…".into(),

@@ -6,7 +6,10 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, Context, IntoElement, Window, div, prelude::*, px, relative, rgb};
-use silo_proto::model::{Axis, BlockInfo, Layout, WindowInfo};
+use silo_proto::{
+    control::Method,
+    model::{Axis, BlockInfo, Layout, WindowInfo},
+};
 
 use crate::theme::Continuous as _;
 use crate::{
@@ -21,6 +24,8 @@ use crate::{
 
 /// Height of a pane header.
 pub const HEADER_HEIGHT: f32 = 28.0;
+/// Pane header action buttons.
+const BUTTON: f32 = 22.0;
 /// Comfortable: margin around the cards and gap between them. Card radii
 /// come from [`radius`].
 const OUTER: f32 = 8.0;
@@ -60,10 +65,10 @@ impl Workspace {
         let corner = if comfortable && self.status_bar().is_none() { radius::window_corner(window) } else { None };
         let place = Placement { window: corner, left: true, right: true, bottom: true };
         let content = if w.zoomed {
-            self.render_layout(&Layout::block(w.focused.clone()), Some(&w.focused), false, true, place, now, cx)
+            self.render_layout(&Layout::block(w.focused.clone()), Some(&w.focused), false, true, None, place, now, cx)
         } else {
             let focused = self.focused_block(window, cx);
-            self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, place, now, cx)
+            self.render_layout(&w.layout, focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
         };
         div()
             .size_full()
@@ -80,6 +85,7 @@ impl Workspace {
         focused: Option<&str>,
         multiple: bool,
         zoomed: bool,
+        swap: Option<&str>,
         place: Placement,
         now: Instant,
         cx: &mut Context<Self>,
@@ -88,13 +94,13 @@ impl Workspace {
             Layout::Block { id } => {
                 let active = focused == Some(id.as_str());
                 // No focus ring: inactive panes get a translucent wash.
-                self.render_cell(id, active, multiple && !active, zoomed, place.corners(), now, cx)
+                self.render_cell(id, active, multiple && !active, zoomed, swap, place.corners(), now, cx)
             }
             Layout::Split { axis, ratio, first, second } => {
                 let ratio = ratio.clamp(0.05, 0.95);
                 let (place_a, place_b) = place.split(*axis);
-                let a = self.render_layout(first, focused, multiple, zoomed, place_a, now, cx);
-                let b = self.render_layout(second, focused, multiple, zoomed, place_b, now, cx);
+                let a = self.render_layout(first, focused, multiple, zoomed, swap, place_a, now, cx);
+                let b = self.render_layout(second, focused, multiple, zoomed, swap, place_b, now, cx);
                 // Compact: a neutral hairline. Comfortable: empty space.
                 let (size, fill) = match self.density() {
                     Density::Compact => (1.0, Some(theme::border())),
@@ -129,6 +135,7 @@ impl Workspace {
         active: bool,
         dimmed: bool,
         zoomed: bool,
+        swap: Option<&str>,
         corners: CardCorners,
         now: Instant,
         cx: &mut Context<Self>,
@@ -159,6 +166,26 @@ impl Workspace {
                 .bg(rgb(theme::background()).opacity(theme::INACTIVE_DIM))
                 .when(comfortable, |el| el.continuous_corners(fill))
         });
+        // Drop target for a pane dragged by its header: an accent outline
+        // and tint while another pane of this window hovers it.
+        let drop = swap.map(|window_id| {
+            let (window_id, target) = (window_id.to_owned(), id.to_owned());
+            let check = (window_id.clone(), target.clone());
+            div()
+                .id(gpui::ElementId::Name(format!("pane-drop-{id}").into()))
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .when(comfortable, |el| el.continuous_corners(fill))
+                .can_drop(move |d, _, _| d.downcast_ref::<DraggedPane>().is_some_and(|d| can_swap(d, &check.0, &check.1)))
+                .drag_over::<DraggedPane>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent())))
+                .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
+                    if can_swap(d, &window_id, &target) {
+                        this.swap_panes(&window_id, &d.block_id, &target, cx);
+                    }
+                }))
+        });
         let card = div()
             .group(card_group(id))
             .relative()
@@ -168,9 +195,10 @@ impl Workspace {
             .overflow_hidden()
             .bg(rgb(theme::background()))
             .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline())))
-            .when(headers, |el| el.child(self.render_pane_header(id, active, zoomed, cx)))
+            .when(headers, |el| el.child(self.render_pane_header(id, active, zoomed, swap, cx)))
             .child(content)
-            .children(wash);
+            .children(wash)
+            .children(drop);
         let card: AnyElement = match entering {
             Some((dx, dy)) => div().absolute().left(relative(dx)).top(relative(dy)).size_full().child(card).into_any_element(),
             None => card.into_any_element(),
@@ -178,14 +206,21 @@ impl Workspace {
         div().relative().size_full().min_w_0().min_h_0().when(entering.is_some(), |el| el.overflow_hidden()).child(card).into_any_element()
     }
 
-    fn render_pane_header(&self, id: &str, active: bool, zoomed: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pane_header(&self, id: &str, active: bool, zoomed: bool, swap: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let info = self
             .panes
             .get(id)
             .and_then(|(p, _)| p.read(cx).info.clone())
             .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
         let (name, cwd) = header_labels(info.as_ref());
+        let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into() });
         let block = id.to_owned();
+        // Comfortable: the corner button sits inside the card's top corner,
+        // 1pt border + (header - button) / 2 in, so it nests concentrically.
+        let control = match self.density() {
+            Density::Comfortable => radius::concentric(radius::CARD, 1.0 + (HEADER_HEIGHT - BUTTON) / 2.0),
+            Density::Compact => radius::CONTROL,
+        };
         let button = |action: &'static str, glyph: &'static str, tip: &'static str| {
             div()
                 .id(gpui::ElementId::Name(format!("pane-{action}-{id}").into()))
@@ -193,8 +228,8 @@ impl Workspace {
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .size(px(22.0))
-                .continuous(radius::CONTROL)
+                .size(px(BUTTON))
+                .continuous(control)
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(theme::tab_hover_on(theme::background()))))
                 .tooltip(Tooltip::text(tip))
@@ -267,7 +302,26 @@ impl Workspace {
                     this.focus_block(&focus_block, window, cx);
                 }),
             )
+            .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), offset })))
             .into_any_element()
+    }
+
+    /// Swaps two panes of a window: locally at once, then on the server,
+    /// whose session.changed confirms it.
+    fn swap_panes(&mut self, window_id: &str, a: &str, b: &str, cx: &mut Context<Self>) {
+        let swap = {
+            let (window_id, a, b) = (window_id.to_owned(), a.to_owned(), b.to_owned());
+            move |this: &mut Self| {
+                let window = this.view.as_mut().and_then(|v| v.session.windows.iter_mut().find(|w| w.id == window_id));
+                window.is_some_and(|w| w.layout.swap(&a, &b))
+            }
+        };
+        if !swap.clone()(self) {
+            return;
+        }
+        cx.notify();
+        let method = Method::BlockSwap { block_id: a.to_owned(), other_block_id: b.to_owned() };
+        self.call_optimistic(method, "Couldn't swap panes", move |this| _ = swap(this), cx);
     }
 
     /// Closed panes sliding out of their old slots towards the outer edge,
@@ -343,6 +397,54 @@ impl Workspace {
             })
             .collect()
     }
+}
+
+/// A pane being dragged by its header to swap places with another.
+#[derive(Clone)]
+pub(crate) struct DraggedPane {
+    window_id: String,
+    block_id: String,
+    label: gpui::SharedString,
+}
+
+/// The pill following the pointer while a pane is dragged. GPUI places
+/// it at the grab point's offset; `offset` shifts it back under the pointer.
+struct PanePill {
+    label: gpui::SharedString,
+    offset: gpui::Point<gpui::Pixels>,
+}
+
+impl Render for PanePill {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .ml(self.offset.x + px(10.0))
+            .mt(self.offset.y + px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(24.0))
+            .px(px(10.0))
+            .continuous(radius::CONTROL)
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::accent()))
+            .font_family(theme::ui_font())
+            .text_size(px(11.5))
+            .text_color(rgb(theme::foreground()))
+            .child(icon("terminal", 12.0, theme::accent()))
+            .child(self.label.clone())
+    }
+}
+
+/// The window whose panes can be swapped by dragging: more than one pane
+/// and not zoomed.
+fn swap_window(w: &WindowInfo) -> Option<&str> {
+    (!w.zoomed && w.layout.blocks().len() > 1).then_some(w.id.as_str())
+}
+
+/// Whether `dragged` may be dropped on pane `target` of window `window`.
+fn can_swap(dragged: &DraggedPane, window: &str, target: &str) -> bool {
+    dragged.window_id == window && dragged.block_id != target
 }
 
 /// Hover group of one pane card (header actions appear on hover).
@@ -422,6 +524,18 @@ mod tests {
     }
 
     #[test]
+    fn panes_swap_only_within_one_unzoomed_multi_pane_window() {
+        let window = |layout: Layout, zoomed: bool| WindowInfo { id: "w".into(), name: None, layout, focused: "a".into(), zoomed };
+        assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), false)), Some("w"));
+        assert_eq!(swap_window(&window(split(Axis::Horizontal, block("a"), block("b")), true)), None);
+        assert_eq!(swap_window(&window(block("a"), false)), None);
+        let dragged = DraggedPane { window_id: "w".into(), block_id: "a".into(), label: "zsh".into() };
+        assert!(can_swap(&dragged, "w", "b"));
+        assert!(!can_swap(&dragged, "w", "a"));
+        assert!(!can_swap(&dragged, "other", "b"));
+    }
+
+    #[test]
     fn header_labels_show_program_and_short_cwd() {
         let home = std::env::var("HOME").unwrap();
         let info = |title: &str, cwd: Option<String>| BlockInfo {
@@ -431,6 +545,7 @@ mod tests {
             title: title.into(),
             cwd,
             exited: None,
+            lifecycle: silo_proto::model::Lifecycle::Running,
             size: silo_proto::model::TermSize { columns: 80, rows: 24, cell_width: 0, cell_height: 0 },
             owner: None,
             pid: None,

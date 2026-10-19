@@ -15,42 +15,80 @@ use std::{
 use silo_proto::{
     Frame,
     control::{Capture, DesiredSize, OwnMode, SizeInfo},
-    data::{Resume, ServerData, StartMode, Welcome},
+    data::{Reject, Resume, ServerData, StartMode, Welcome},
     kind,
-    model::{BlockId, BlockInfo, ClientId, CursorShape, TermSize, TerminalConfig},
+    model::{BlockId, BlockInfo, ClientId, CursorShape, Lifecycle, TermSize, TerminalConfig},
 };
-use silo_pty::{Pty, PtySize, SpawnConfig};
-use silo_vt::{ColorScheme, GridSize, TerminalColors, TerminalCore, TerminalDefaults};
+use silo_pty::{Pty, PtyEvent, PtyInput, PtySize, SpawnConfig};
+use serde::{Deserialize, Serialize};
+use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Raw output kept for resume after short disconnects.
-const RING_CAP: usize = 4 * 1024 * 1024;
-/// A subscriber whose unsent backlog exceeds this is dropped; it reconnects
-/// and is re-synchronised from a fresh snapshot (skip-ahead).
-const SUBSCRIBER_BACKLOG: usize = 16 * 1024 * 1024;
-const HISTORY_CHUNK: usize = 256 * 1024;
+pub const RING_CAP: usize = 4 * 1024 * 1024;
+/// A subscriber whose live backlog (unsent bytes plus unacknowledged output)
+/// exceeds this, or whose acked offset leaves the ring, is cut off; it
+/// reconnects and is re-synchronised from a fresh snapshot (skip-ahead).
+pub const SUBSCRIBER_BUDGET: usize = 16 * 1024 * 1024;
+/// Snapshot history and ring replay are fed to a subscriber's writer only
+/// while its unsent bytes stay below this, so large attaches never buffer
+/// more than one copy of the snapshot.
+pub const PUMP_WINDOW: usize = 1024 * 1024;
+pub const HISTORY_CHUNK: usize = 256 * 1024;
+const OUTPUT_CHUNK: usize = 256 * 1024;
 const PROBE_INTERVAL: Duration = Duration::from_millis(400);
+/// How often pending bulk sends are retried while a writer drains.
+const PUMP_INTERVAL: Duration = Duration::from_millis(5);
 /// Out-of-band output waits this long for a parser-ground boundary.
 const INJECT_WAIT: Duration = Duration::from_millis(250);
-/// Configuration transitions remembered inside the ring; older resume points
-/// fall back to a snapshot.
-const CONFIG_LOG_CAP: usize = 64;
+/// Configuration and size transitions remembered inside the ring; older
+/// resume points fall back to a snapshot.
+const TRANSITION_LOG_CAP: usize = 1024;
 
 /// Outgoing frames for one data stream; `queued` counts unsent bytes.
 #[derive(Clone)]
 pub struct Sink {
     pub tx: UnboundedSender<Frame>,
     pub queued: Arc<AtomicUsize>,
+    /// Set once the stream must end now (subscriber cut off).
+    cancel: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Sink {
+    #[must_use]
+    pub fn new(tx: UnboundedSender<Frame>) -> Self {
+        Self { tx, queued: Arc::new(AtomicUsize::new(0)), cancel: Arc::new(tokio::sync::watch::channel(false).0) }
+    }
+
     pub fn send(&self, frame: Frame) -> bool {
         self.queued.fetch_add(frame.payload.len() + 5, Ordering::AcqRel);
         self.tx.send(frame).is_ok()
     }
 
-    fn backlog(&self) -> usize {
+    #[must_use]
+    pub fn backlog(&self) -> usize {
         self.queued.load(Ordering::Acquire)
+    }
+
+    /// End the stream promptly, abandoning unsent frames.
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+
+    /// Resolves once [`Sink::cancel`] was called; never if every sink is
+    /// dropped uncancelled. Does not keep the channel open.
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut rx = self.cancel.subscribe();
+        async move {
+            if rx.wait_for(|cancelled| *cancelled).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
     }
 }
 
@@ -58,18 +96,21 @@ pub struct Attach {
     pub sub_id: u64,
     pub client_id: ClientId,
     pub resume: Option<Resume>,
-    /// Peer runs the same Ghostty revision and snapshot version.
-    pub native: bool,
     pub sink: Sink,
 }
 
 pub enum BlockMsg {
     Output(Vec<u8>),
     ReaderClosed,
-    ChildExited(i32),
+    /// The program's exit code; `None` when killed by a signal.
+    ChildExited(Option<i32>),
     Input(Vec<u8>),
     Attach(Box<Attach>),
     Detach(u64),
+    /// Subscriber `sub_id` applied every output byte below `offset`.
+    Ack { sub_id: u64, offset: u64 },
+    /// Flow-control state of one subscriber (diagnostics and tests).
+    Subscriber { sub_id: u64, reply: tokio::sync::oneshot::Sender<Option<SubscriberStats>> },
     Desired { client_id: ClientId, client_name: String, size: TermSize },
     /// A client's desired terminal configuration; effective while it owns
     /// the block (or, unowned, when it is the most recent).
@@ -83,7 +124,38 @@ pub enum BlockMsg {
     /// terminal see them in the same order) at the next parser-ground
     /// boundary, then write `input` to the program.
     Inject { bytes: Vec<u8>, input: Vec<u8> },
+    /// Capture a [`Checkpoint`] between mutations.
+    Checkpoint { reply: tokio::sync::oneshot::Sender<Result<Checkpoint, String>> },
+    /// Release the PTY and end the actor; see [`BlockHandle::handoff`].
+    Handoff { reply: tokio::sync::oneshot::Sender<Result<Handoff, String>> },
     Shutdown,
+}
+
+/// A block released for adoption by another actor (or server).
+#[derive(Debug)]
+pub struct Handoff {
+    pub checkpoint: Checkpoint,
+    /// The running program's PTY; `None` for exited or restored blocks.
+    pub pty: Option<silo_pty::Detached>,
+}
+
+/// Everything needed to rebuild a block's terminal without its process.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Ghostty snapshot of the terminal, history included.
+    pub snapshot: Vec<u8>,
+    pub size: TermSize,
+    /// Effective terminal configuration.
+    pub config: TerminalConfig,
+    pub epoch: u64,
+    /// Output offset (within `epoch`) the snapshot reflects.
+    pub offset: u64,
+    pub lifecycle: Lifecycle,
+    pub exit_code: Option<i32>,
+    /// Title set by the program (OSC 0/2); empty if none.
+    pub osc_title: String,
+    /// Working directory reported by the program (OSC 7).
+    pub osc_pwd: Option<String>,
 }
 
 /// Notifications from block actors to the registry.
@@ -92,6 +164,9 @@ pub enum Note {
     Changed(BlockId),
     Exited(BlockId),
     Bell(BlockId),
+    /// Terminal content or configuration changed for the first time since
+    /// the last [`Checkpoint`]; sent once per checkpoint.
+    Dirty(BlockId),
 }
 
 pub struct BlockHandle {
@@ -103,10 +178,182 @@ impl BlockHandle {
     pub fn send(&self, msg: BlockMsg) {
         let _ = self.tx.send(msg);
     }
+
+    /// Snapshot the block's terminal and stream position for persistence.
+    ///
+    /// # Errors
+    /// Fails if the actor is gone or the terminal cannot be snapshotted.
+    pub async fn checkpoint(&self) -> anyhow::Result<Checkpoint> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(BlockMsg::Checkpoint { reply }).map_err(|_| anyhow::anyhow!("block actor gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("block actor gone"))?.map_err(anyhow::Error::msg)
+    }
+
+    /// Stop the block without hanging up its program: detach the PTY, apply
+    /// all output read so far, checkpoint at exactly that offset, close
+    /// every subscriber's stream and end the actor.
+    ///
+    /// # Errors
+    /// Fails if the actor is gone or the terminal cannot be snapshotted (the
+    /// block then keeps running).
+    pub async fn handoff(&self) -> anyhow::Result<Handoff> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(BlockMsg::Handoff { reply }).map_err(|_| anyhow::anyhow!("block actor gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("block actor gone"))?.map_err(anyhow::Error::msg)
+    }
+}
+
+/// Flow-control state of one subscriber.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubscriberStats {
+    /// End offset of the output handed to the stream so far.
+    pub sent: u64,
+    /// Highest ACK; starts at the stream's first offset (`Welcome.offset`).
+    pub acked: u64,
+    /// Bytes handed to the writer but not yet written.
+    pub queued: usize,
+    /// Live bytes waiting behind a bulk send inside the actor.
+    pub pending: usize,
+    /// Snapshot/replay bytes not yet handed to the writer.
+    pub bulk: usize,
+}
+
+/// Frames waiting for writer capacity.
+enum Out {
+    Frame(Frame),
+    /// Snapshot history, sent as `SNAPSHOT_HISTORY` chunks from `pos`.
+    History { bytes: Vec<u8>, pos: usize },
+    /// Ring bytes starting at output offset `offset`, sent as `OUTPUT`
+    /// chunks from `pos`.
+    Output { offset: u64, bytes: Vec<u8>, pos: usize },
 }
 
 struct Subscriber {
     sink: Sink,
+    /// Frames behind a bulk send, in stream order.
+    pending: VecDeque<Out>,
+    /// Bytes of `Out::Frame`s in `pending` (live traffic).
+    pending_live: usize,
+    /// Bytes of bulk entries in `pending`.
+    pending_bulk: usize,
+    sent: u64,
+    /// Every output byte below this was applied by the client.
+    acked: u64,
+}
+
+impl Subscriber {
+    fn new(sink: Sink, start: u64) -> Self {
+        Self { sink, pending: VecDeque::new(), pending_live: 0, pending_bulk: 0, sent: start, acked: start }
+    }
+
+    /// Queue a frame behind any bulk send; returns false if the stream is
+    /// gone.
+    fn send(&mut self, frame: Frame) -> bool {
+        if let Some(end) = output_end(&frame) {
+            self.sent = self.sent.max(end);
+        }
+        if self.pending.is_empty() {
+            return self.sink.send(frame);
+        }
+        self.pending_live = self.pending_live.saturating_add(frame.payload.len() + 5);
+        self.pending.push_back(Out::Frame(frame));
+        true
+    }
+
+    fn send_bulk(&mut self, out: Out) {
+        let len = match &out {
+            Out::Frame(_) => 0,
+            Out::History { bytes, .. } => bytes.len(),
+            Out::Output { offset, bytes, .. } => {
+                self.sent = self.sent.max(offset.saturating_add(bytes.len() as u64));
+                bytes.len()
+            }
+        };
+        if len == 0 {
+            return;
+        }
+        self.pending_bulk = self.pending_bulk.saturating_add(len);
+        self.pending.push_back(out);
+    }
+
+    /// Feed pending frames to the writer while it has room; returns false
+    /// if the stream is gone.
+    fn pump(&mut self) -> bool {
+        while self.sink.backlog() < PUMP_WINDOW {
+            let Some(front) = self.pending.front_mut() else { break };
+            let frame = match front {
+                Out::Frame(_) => {
+                    let Some(Out::Frame(frame)) = self.pending.pop_front() else { unreachable!() };
+                    self.pending_live = self.pending_live.saturating_sub(frame.payload.len() + 5);
+                    frame
+                }
+                Out::History { bytes, pos } => {
+                    let end = bytes.len().min(pos.saturating_add(HISTORY_CHUNK));
+                    let frame = ServerData::SnapshotHistory(bytes[*pos..end].to_vec()).to_frame();
+                    self.pending_bulk = self.pending_bulk.saturating_sub(end - *pos);
+                    *pos = end;
+                    if end == bytes.len() {
+                        self.pending.pop_front();
+                    }
+                    frame
+                }
+                Out::Output { offset, bytes, pos } => {
+                    let end = bytes.len().min(pos.saturating_add(OUTPUT_CHUNK));
+                    let at = offset.saturating_add(*pos as u64);
+                    let frame = ServerData::Output { offset: at, bytes: bytes[*pos..end].to_vec() }.to_frame();
+                    self.pending_bulk = self.pending_bulk.saturating_sub(end - *pos);
+                    *pos = end;
+                    if end == bytes.len() {
+                        self.pending.pop_front();
+                    }
+                    frame
+                }
+            };
+            if !self.sink.send(frame) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Too far behind to keep: its oldest unapplied byte already left the
+    /// ring, or unsent plus unacknowledged bytes exceed the budget.
+    fn lagging(&self, ring_start: u64) -> bool {
+        if self.acked < ring_start {
+            return true;
+        }
+        let unacked = usize::try_from(self.sent.saturating_sub(self.acked)).unwrap_or(usize::MAX);
+        self.sink.backlog().saturating_add(self.pending_live).saturating_add(unacked) > SUBSCRIBER_BUDGET
+    }
+
+    /// Record an ACK; returns false if it is invalid (backwards or past the
+    /// output sent), which ends the stream.
+    fn ack(&mut self, offset: u64) -> bool {
+        if !(self.acked..=self.sent).contains(&offset) {
+            return false;
+        }
+        self.acked = offset;
+        true
+    }
+
+    fn stats(&self) -> SubscriberStats {
+        SubscriberStats {
+            sent: self.sent,
+            acked: self.acked,
+            queued: self.sink.backlog(),
+            pending: self.pending_live,
+            bulk: self.pending_bulk,
+        }
+    }
+}
+
+/// End offset of an `OUTPUT` frame.
+fn output_end(frame: &Frame) -> Option<u64> {
+    if frame.kind != kind::OUTPUT {
+        return None;
+    }
+    let offset = u64::from_le_bytes(frame.payload.get(..8)?.try_into().ok()?);
+    offset.checked_add((frame.payload.len() - 8) as u64)
 }
 
 struct Desired {
@@ -117,8 +364,16 @@ struct Desired {
 
 struct Actor {
     id: BlockId,
-    pty: Pty,
-    input: mpsc::Sender<Vec<u8>>,
+    /// The PTY while the program runs; `None` once exited or restored.
+    pty: Option<Pty>,
+    input: Option<PtyInput>,
+    /// The actor's own channel, held only alongside `pty` (whose threads
+    /// hold it anyway) to re-adopt a PTY after a failed handoff.
+    tx: Option<mpsc::Sender<BlockMsg>>,
+    /// A PTY released by a failed handoff that could not be re-adopted: the
+    /// program keeps running (frozen, no I/O) and the next handoff returns it.
+    parked: Option<silo_pty::Detached>,
+    lifecycle: Lifecycle,
     vt: TerminalCore,
     epoch: u64,
     ring: VecDeque<u8>,
@@ -135,6 +390,9 @@ struct Actor {
     osc_title: String,
     osc_pwd: Option<String>,
     last_probe: Instant,
+    /// The child is gone; the block becomes read-only once output drains.
+    child_exited: bool,
+    /// Its exit code; `None` when killed by a signal (or unknown).
     exit_code: Option<i32>,
     reader_closed: bool,
     /// Pending injections and when the first was queued.
@@ -146,66 +404,102 @@ struct Actor {
     config: TerminalConfig,
     /// A configuration waiting for a parser-ground boundary, and since when.
     pending_config: Option<(TerminalConfig, Instant)>,
-    /// Where configurations took effect in the output stream.
-    config_log: ConfigLog,
+    /// Where configurations and sizes took effect in the output stream.
+    log: TransitionLog,
+    /// Send [`Note::Dirty`] on the next change; re-armed by `checkpoint()`.
+    dirty_armed: bool,
 }
 
-/// Configuration transitions at their output offsets, so resume and replay
-/// switch configuration between the same two bytes the live stream did.
-struct ConfigLog {
+/// Configuration or size change at an output offset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Transition {
+    Config(TerminalConfig),
+    Resize(TermSize),
+}
+
+impl Transition {
+    fn to_data(self, offset: u64) -> ServerData {
+        match self {
+            Self::Config(config) => ServerData::Configured(config),
+            Self::Resize(size) => ServerData::Resized { offset, size },
+        }
+    }
+}
+
+/// Configuration and size in effect at some offset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StreamState {
+    config: TerminalConfig,
+    size: TermSize,
+}
+
+impl StreamState {
+    fn apply(&mut self, transition: Transition) {
+        match transition {
+            Transition::Config(config) => self.config = config,
+            Transition::Resize(size) => self.size = size,
+        }
+    }
+}
+
+/// Configuration and size transitions at their output offsets, in the order
+/// they happened, so resume and replay switch state between the same two
+/// bytes the live stream did.
+struct TransitionLog {
     /// Effective from `floor` until the first change.
-    base: TerminalConfig,
-    /// Earliest offset whose configuration is known.
+    base: StreamState,
+    /// Earliest offset whose state is known.
     floor: u64,
-    /// `(offset, config)` changes, ascending by offset.
-    changes: VecDeque<(u64, TerminalConfig)>,
+    /// `(offset, transition)`, ascending by offset, in live order.
+    changes: VecDeque<(u64, Transition)>,
 }
 
-impl ConfigLog {
-    fn new(config: TerminalConfig) -> Self {
-        Self { base: config, floor: 0, changes: VecDeque::new() }
+impl TransitionLog {
+    fn new(config: TerminalConfig, size: TermSize) -> Self {
+        Self { base: StreamState { config, size }, floor: 0, changes: VecDeque::new() }
     }
 
-    fn record(&mut self, offset: u64, config: TerminalConfig) {
+    fn record(&mut self, offset: u64, transition: Transition) {
         match self.changes.back_mut() {
-            Some(last) if last.0 == offset => last.1 = config,
-            _ => self.changes.push_back((offset, config)),
+            Some(last) if last.0 == offset && std::mem::discriminant(&last.1) == std::mem::discriminant(&transition) => {
+                last.1 = transition;
+            }
+            _ => self.changes.push_back((offset, transition)),
         }
-        if self.changes.len() > CONFIG_LOG_CAP
-            && let Some((offset, config)) = self.changes.pop_front()
+        if self.changes.len() > TRANSITION_LOG_CAP
+            && let Some((offset, transition)) = self.changes.pop_front()
         {
-            self.base = config;
-            self.floor = offset;
+            self.base.apply(transition);
+            self.floor = self.floor.max(offset);
         }
     }
 
     /// Forget changes at or before `start` (the ring's first offset).
     fn trim(&mut self, start: u64) {
-        while let Some(&(offset, config)) = self.changes.front() {
+        while let Some(&(offset, transition)) = self.changes.front() {
             if offset > start {
                 break;
             }
-            self.base = config;
+            self.base.apply(transition);
             self.changes.pop_front();
         }
         self.floor = self.floor.max(start);
     }
 
-    /// The configuration in effect at `offset` and the changes after it.
-    fn from(&self, offset: u64) -> (TerminalConfig, Vec<(u64, TerminalConfig)>) {
-        let mut config = self.base;
+    /// The state in effect at `offset` and the changes after it.
+    fn from(&self, offset: u64) -> (StreamState, Vec<(u64, Transition)>) {
+        let mut state = self.base;
         let mut later = Vec::new();
-        for &(at, c) in &self.changes {
+        for &(at, transition) in &self.changes {
             if at <= offset {
-                config = c;
+                state.apply(transition);
             } else {
-                later.push((at, c));
+                later.push((at, transition));
             }
         }
-        (config, later)
+        (state, later)
     }
 }
-
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -235,79 +529,204 @@ pub fn spawn(
     let size = TermSize { columns: info.size.columns.clamp(1, 512), rows: info.size.rows.clamp(1, 256), ..info.size };
     let (tx, rx) = mpsc::channel();
     let exit_tx = tx.clone();
-    let pty = Pty::spawn(config, pty_size(size), move |status| {
-        let code = status.code().unwrap_or(-1);
-        let _ = exit_tx.send(BlockMsg::ChildExited(code));
+    let mut pty = Pty::spawn(config, pty_size(size), move |status| {
+        let _ = exit_tx.send(BlockMsg::ChildExited(status.code()));
     })?;
-    let mut reader = pty.reader()?;
-    let read_tx = tx.clone();
-    std::thread::Builder::new().name(format!("silo-pty-read-{}", info.id)).spawn(move || {
-        use std::io::Read;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if read_tx.send(BlockMsg::Output(buf[..n].to_vec())).is_err() {
-                        return;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-        let _ = read_tx.send(BlockMsg::ReaderClosed);
-    })?;
-    let mut writer = pty.writer()?;
-    let (input, input_rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::Builder::new().name(format!("silo-pty-write-{}", info.id)).spawn(move || {
-        use std::io::Write;
-        while let Ok(bytes) = input_rx.recv() {
-            if writer.write_all(&bytes).is_err() {
-                break;
-            }
-        }
-    })?;
+    let input = start_io(&mut pty, &info.id, &tx)?;
 
     let mut info = info;
     info.size = size;
     info.pid = Some(pty.pid());
+    info.lifecycle = Lifecycle::Running;
     let mut vt = TerminalCore::new(grid(size)).map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = TerminalConfig::default();
     install_config(&mut vt, &config);
-    let shared = Arc::new(Mutex::new(info.clone()));
-    let mut actor = Actor {
-        id: info.id.clone(),
-        pty,
-        input,
-        vt,
-        epoch: rand::random(),
-        ring: VecDeque::new(),
-        ring_start: 0,
-        subscribers: HashMap::new(),
-        size,
-        desired: HashMap::new(),
-        owner: None,
-        candidates: Vec::new(),
-        info: shared.clone(),
-        notes,
-        osc_title: String::new(),
-        osc_pwd: None,
-        last_probe: Instant::now() - PROBE_INTERVAL,
-        exit_code: None,
-        reader_closed: false,
-        injects: VecDeque::new(),
-        inject_since: None,
-        configs: HashMap::new(),
-        config,
-        pending_config: None,
-        config_log: ConfigLog::new(config),
+    let mut actor = Actor::new(&info, vt, config, notes);
+    actor.pty = Some(pty);
+    actor.input = Some(input);
+    actor.tx = Some(tx.clone());
+    start(actor, &info.id, tx, rx)
+}
+
+/// Rebuild a block from a [`Checkpoint`] without a process: its contents are
+/// readable, input is ignored. The stream starts a new epoch.
+///
+/// # Errors
+/// Fails if the snapshot cannot be restored.
+pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+    let (vt, config) = restore_vt(&checkpoint)?;
+    let size = checkpoint.size;
+    let mut info = info;
+    info.size = size;
+    info.pid = None;
+    info.owner = None;
+    info.lifecycle = Lifecycle::Restored;
+    info.exited = None;
+    restore_osc(&mut info, &checkpoint);
+    let mut actor = Actor::new(&info, vt, config, notes);
+    actor.lifecycle = Lifecycle::Restored;
+    actor.ring_start = checkpoint.offset;
+    actor.log.floor = checkpoint.offset;
+    (actor.osc_title, actor.osc_pwd) = (checkpoint.osc_title, checkpoint.osc_pwd);
+    let (tx, rx) = mpsc::channel();
+    start(actor, &info.id, tx, rx)
+}
+
+/// Run a block around a program's PTY released by [`BlockHandle::handoff`],
+/// continuing its stream: epoch and offsets carry on from `checkpoint`, so
+/// clients resume at the handoff offset without a gap. The exit code of an
+/// adopted program is unknown (`None`).
+///
+/// # Errors
+/// Fails if the snapshot cannot be restored or the PTY not adopted.
+pub fn spawn_adopted(
+    info: BlockInfo,
+    checkpoint: Checkpoint,
+    pty: silo_pty::Detached,
+    notes: UnboundedSender<Note>,
+) -> anyhow::Result<BlockHandle> {
+    let (vt, config) = match restore_vt(&checkpoint) {
+        Ok(restored) => restored,
+        Err(error) => return Err(AdoptFailed { error, detached: pty }.into()),
     };
-    std::thread::Builder::new().name(format!("silo-block-{}", info.id)).spawn(move || actor.run(&rx))?;
+    let (tx, rx) = mpsc::channel();
+    let (pty, input) = adopt_pty(&info.id, pty, &tx)
+        .map_err(|e| AdoptFailed { error: e.error.into(), detached: e.detached })?;
+    let mut info = info;
+    info.size = checkpoint.size;
+    info.pid = Some(pty.pid());
+    info.owner = None;
+    info.lifecycle = Lifecycle::Running;
+    info.exited = None;
+    restore_osc(&mut info, &checkpoint);
+    let mut actor = Actor::new(&info, vt, config, notes);
+    actor.epoch = checkpoint.epoch;
+    actor.ring_start = checkpoint.offset;
+    actor.log.floor = checkpoint.offset;
+    (actor.osc_title, actor.osc_pwd) = (checkpoint.osc_title, checkpoint.osc_pwd);
+    actor.pty = Some(pty);
+    actor.input = Some(input);
+    actor.tx = Some(tx.clone());
+    start(actor, &info.id, tx, rx)
+}
+
+/// Show a checkpoint's program-set title and cwd right away.
+fn restore_osc(info: &mut BlockInfo, checkpoint: &Checkpoint) {
+    if !checkpoint.osc_title.is_empty() {
+        info.title.clone_from(&checkpoint.osc_title);
+    }
+    if let Some(cwd) = checkpoint.osc_pwd.as_deref().and_then(pwd_path) {
+        info.cwd = Some(cwd);
+    }
+}
+
+/// Why [`spawn_adopted`] failed, with the still-open PTY (no hangup);
+/// [`spawn_adopted`] errors downcast to this.
+#[derive(Debug)]
+pub struct AdoptFailed {
+    pub error: anyhow::Error,
+    pub detached: silo_pty::Detached,
+}
+
+impl std::fmt::Display for AdoptFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "adopt pid {}: {:#}", self.detached.pid, self.error)
+    }
+}
+
+impl std::error::Error for AdoptFailed {}
+
+/// Adopt a detached PTY whose exit and I/O feed the actor's channel. On
+/// failure the master comes back inside the error, still open.
+fn adopt_pty(
+    id: &str,
+    pty: silo_pty::Detached,
+    tx: &mpsc::Sender<BlockMsg>,
+) -> Result<(Pty, PtyInput), silo_pty::AdoptError> {
+    let (exit_tx, io_tx) = (tx.clone(), tx.clone());
+    Pty::adopt_with_io(
+        pty,
+        &format!("silo-pty-{id}"),
+        move |code| {
+            let _ = exit_tx.send(BlockMsg::ChildExited(code));
+        },
+        move |event| {
+            let _ = io_tx.send(match event {
+                PtyEvent::Output(bytes) => BlockMsg::Output(bytes),
+                PtyEvent::Closed => BlockMsg::ReaderClosed,
+            });
+        },
+    )
+}
+
+/// The terminal and effective configuration of a checkpoint.
+fn restore_vt(checkpoint: &Checkpoint) -> anyhow::Result<(TerminalCore, TerminalConfig)> {
+    let options = RestoreOptions { retain_continuation: true, compress_history: false };
+    let (mut vt, _) = TerminalCore::restore(&checkpoint.snapshot, options).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if vt.restoring() {
+        anyhow::bail!("truncated snapshot");
+    }
+    let config = checkpoint.config.sanitized();
+    install_config(&mut vt, &config);
+    if vt.resize(grid(checkpoint.size)).is_err() {
+        anyhow::bail!("cannot size restored terminal");
+    }
+    Ok((vt, config))
+}
+
+/// Run the PTY's owned reader/writer threads, feeding the actor's channel.
+fn start_io(pty: &mut Pty, id: &str, tx: &mpsc::Sender<BlockMsg>) -> std::io::Result<PtyInput> {
+    let tx = tx.clone();
+    pty.start_io(&format!("silo-pty-{id}"), move |event| {
+        let _ = tx.send(match event {
+            PtyEvent::Output(bytes) => BlockMsg::Output(bytes),
+            PtyEvent::Closed => BlockMsg::ReaderClosed,
+        });
+    })
+}
+
+fn start(mut actor: Actor, id: &str, tx: mpsc::Sender<BlockMsg>, rx: mpsc::Receiver<BlockMsg>) -> anyhow::Result<BlockHandle> {
+    let shared = actor.info.clone();
+    std::thread::Builder::new().name(format!("silo-block-{id}")).spawn(move || actor.run(&rx))?;
     Ok(BlockHandle { tx, info: shared })
 }
 
 impl Actor {
+    fn new(info: &BlockInfo, vt: TerminalCore, config: TerminalConfig, notes: UnboundedSender<Note>) -> Self {
+        Self {
+            id: info.id.clone(),
+            pty: None,
+            input: None,
+            tx: None,
+            parked: None,
+            lifecycle: Lifecycle::Running,
+            vt,
+            epoch: rand::random(),
+            ring: VecDeque::new(),
+            ring_start: 0,
+            subscribers: HashMap::new(),
+            size: info.size,
+            desired: HashMap::new(),
+            owner: None,
+            candidates: Vec::new(),
+            info: Arc::new(Mutex::new(info.clone())),
+            notes,
+            osc_title: String::new(),
+            osc_pwd: None,
+            last_probe: Instant::now() - PROBE_INTERVAL,
+            child_exited: false,
+            exit_code: None,
+            reader_closed: false,
+            injects: VecDeque::new(),
+            inject_since: None,
+            configs: HashMap::new(),
+            config,
+            pending_config: None,
+            log: TransitionLog::new(config, info.size),
+            dirty_armed: true,
+        }
+    }
+
     fn run(&mut self, rx: &mpsc::Receiver<BlockMsg>) {
         let mut exit_deadline: Option<Instant> = None;
         loop {
@@ -315,8 +734,20 @@ impl Actor {
             if let Some(since) = self.inject_since.or(self.pending_config.map(|(_, since)| since)) {
                 timeout = timeout.min((since + INJECT_WAIT).saturating_duration_since(Instant::now()));
             }
+            if self.subscribers.values().any(|sub| !sub.pending.is_empty()) {
+                timeout = timeout.min(PUMP_INTERVAL);
+            }
             match rx.recv_timeout(timeout) {
                 Ok(BlockMsg::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(BlockMsg::Handoff { reply }) => match self.handoff(rx) {
+                    Ok(handoff) => {
+                        let _ = reply.send(Ok(handoff));
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                },
                 Ok(msg) => {
                     if self.handle(msg) && exit_deadline.is_none() {
                         // Drain output still buffered in the PTY before
@@ -329,12 +760,14 @@ impl Actor {
             }
             self.flush_config();
             self.flush_injects();
-            if let Some(code) = self.exit_code
+            self.pump();
+            if self.child_exited
+                && self.lifecycle.is_running()
                 && (self.reader_closed || exit_deadline.is_some_and(|d| Instant::now() >= d)) {
-                    self.finish(code);
-                    break;
+                    self.finish();
+                    exit_deadline = None;
                 }
-            if self.last_probe.elapsed() >= PROBE_INTERVAL {
+            if self.lifecycle.is_running() && self.last_probe.elapsed() >= PROBE_INTERVAL {
                 self.probe();
             }
         }
@@ -343,18 +776,32 @@ impl Actor {
     /// Returns true when the child exited.
     fn handle(&mut self, msg: BlockMsg) -> bool {
         match msg {
-            BlockMsg::Output(bytes) => self.output(&bytes),
+            BlockMsg::Output(bytes) if self.lifecycle.is_running() => self.output(&bytes),
+            BlockMsg::Output(_) => {}
             BlockMsg::ReaderClosed => self.reader_closed = true,
-            BlockMsg::ChildExited(code) => {
-                self.exit_code = Some(code);
+            BlockMsg::ChildExited(code) if self.lifecycle.is_running() => {
+                self.child_exited = true;
+                self.exit_code = code;
                 return true;
             }
+            BlockMsg::ChildExited(_) => {}
             BlockMsg::Input(bytes) => {
-                let _ = self.input.send(bytes);
+                self.send_input(bytes);
             }
             BlockMsg::Attach(attach) => self.attach(*attach),
             BlockMsg::Detach(id) => {
                 self.subscribers.remove(&id);
+            }
+            BlockMsg::Ack { sub_id, offset } => {
+                let ring_start = self.ring_start;
+                if let Some(sub) = self.subscribers.get_mut(&sub_id)
+                    && (!sub.ack(offset) || sub.lagging(ring_start))
+                {
+                    self.cut(sub_id);
+                }
+            }
+            BlockMsg::Subscriber { sub_id, reply } => {
+                let _ = reply.send(self.subscribers.get(&sub_id).map(Subscriber::stats));
             }
             BlockMsg::Desired { client_id, client_name, size } => {
                 self.desired.insert(client_id, Desired { name: client_name, size, updated_at: now_ms() });
@@ -387,20 +834,104 @@ impl Actor {
                 desired.sort_by_key(|d| d.client_id);
                 let _ = reply.send(SizeInfo { size: self.size, owner: self.owner, desired });
             }
-            BlockMsg::Inject { bytes, input } => {
+            BlockMsg::Inject { bytes, input } if self.lifecycle.is_running() => {
                 self.injects.push_back((bytes, input));
                 self.inject_since.get_or_insert_with(Instant::now);
             }
-            BlockMsg::Shutdown => {}
+            BlockMsg::Inject { .. } => {}
+            BlockMsg::Checkpoint { reply } => {
+                let _ = reply.send(self.checkpoint());
+            }
+            BlockMsg::Handoff { .. } | BlockMsg::Shutdown => {}
         }
         false
     }
 
+    /// Detach the PTY (its I/O threads are joined, so every byte read is
+    /// already queued), apply that output, checkpoint and close all
+    /// streams. On failure the PTY is re-adopted and the block keeps
+    /// running, or, if that fails, parked open for the next handoff.
+    fn handoff(&mut self, rx: &mpsc::Receiver<BlockMsg>) -> Result<Handoff, String> {
+        self.input = None;
+        let detached = self.pty.take().map(Pty::detach).or_else(|| self.parked.take());
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BlockMsg::Output(bytes) if self.lifecycle.is_running() => self.output(&bytes),
+                BlockMsg::Attach(attach) => attach.sink.cancel(),
+                _ => {}
+            }
+        }
+        match self.checkpoint() {
+            Ok(checkpoint) => {
+                for (_, sub) in self.subscribers.drain() {
+                    sub.sink.cancel();
+                }
+                Ok(Handoff { checkpoint, pty: detached })
+            }
+            Err(e) => {
+                if let Some(detached) = detached {
+                    self.readopt(detached);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Resume running a PTY this actor released; if that fails, park it
+    /// (still open, no hangup) for the next handoff.
+    fn readopt(&mut self, detached: silo_pty::Detached) {
+        let Some(tx) = self.tx.clone() else {
+            self.parked = Some(detached);
+            return;
+        };
+        match adopt_pty(&self.id, detached, &tx) {
+            Ok((pty, input)) => {
+                self.pty = Some(pty);
+                self.input = Some(input);
+            }
+            Err(e) => {
+                tracing::warn!("block {}: re-adopt failed, PTY parked: {}", self.id, e.error);
+                self.parked = Some(e.detached);
+            }
+        }
+    }
+
+    /// Write to the program; dropped once it has exited (or never ran).
+    fn send_input(&self, bytes: Vec<u8>) {
+        if let Some(input) = self.input.as_ref().filter(|_| self.lifecycle.is_running()) {
+            input.send(bytes);
+        }
+    }
+
+    /// Report the first change since the last checkpoint.
+    fn mark_dirty(&mut self) {
+        if std::mem::take(&mut self.dirty_armed) {
+            let _ = self.notes.send(Note::Dirty(self.id.clone()));
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<Checkpoint, String> {
+        let snapshot = self.vt.snapshot().map_err(|e| e.to_string())?;
+        self.dirty_armed = true;
+        Ok(Checkpoint {
+            snapshot,
+            size: self.size,
+            config: self.config,
+            epoch: self.epoch,
+            offset: self.ring_end(),
+            lifecycle: self.lifecycle,
+            exit_code: self.exit_code,
+            osc_title: self.osc_title.clone(),
+            osc_pwd: self.osc_pwd.clone(),
+        })
+    }
+
     fn output(&mut self, bytes: &[u8]) {
-        let offset = self.ring_start + self.ring.len() as u64;
+        let offset = self.ring_end();
+        self.mark_dirty();
         match self.vt.write_output(bytes) {
             Ok(replies) if !replies.is_empty() => {
-                let _ = self.input.send(replies);
+                self.send_input(replies);
             }
             _ => {}
         }
@@ -408,8 +939,8 @@ impl Actor {
         if self.ring.len() > RING_CAP {
             let excess = self.ring.len() - RING_CAP;
             self.ring.drain(..excess);
-            self.ring_start += excess as u64;
-            self.config_log.trim(self.ring_start);
+            self.ring_start = self.ring_start.saturating_add(excess as u64);
+            self.log.trim(self.ring_start);
         }
         self.broadcast(&ServerData::Output { offset, bytes: bytes.to_vec() });
         if let Ok(events) = self.vt.take_events() {
@@ -442,7 +973,7 @@ impl Actor {
         while let Some((bytes, input)) = self.injects.pop_front() {
             self.output(&bytes);
             if !input.is_empty() {
-                let _ = self.input.send(input);
+                self.send_input(input);
             }
         }
     }
@@ -472,10 +1003,11 @@ impl Actor {
         let report = install_config(&mut self.vt, &config);
         if !report.is_empty() {
             // Mode 2031: the program asked to hear about scheme changes.
-            let _ = self.input.send(report);
+            self.send_input(report);
         }
         self.config = config;
-        self.config_log.record(self.ring_end(), config);
+        self.mark_dirty();
+        self.log.record(self.ring_end(), Transition::Config(config));
         self.broadcast(&ServerData::Configured(config));
     }
 
@@ -488,79 +1020,118 @@ impl Actor {
         }
     }
 
+    /// Send to every subscriber, cutting off those that fell too far behind.
+    /// Never blocks: slow subscribers only grow their own queue until cut.
     fn broadcast(&mut self, data: &ServerData) {
         if self.subscribers.is_empty() {
             return;
         }
         let frame = data.to_frame();
-        self.subscribers.retain(|_, sub| sub.sink.backlog() <= SUBSCRIBER_BACKLOG && sub.sink.send(frame.clone()));
+        let ring_start = self.ring_start;
+        let mut cut = Vec::new();
+        for (id, sub) in &mut self.subscribers {
+            if !sub.send(frame.clone()) || sub.lagging(ring_start) {
+                cut.push(*id);
+            }
+        }
+        for id in cut {
+            self.cut(id);
+        }
+    }
+
+    /// Feed bulk sends to writers with room.
+    fn pump(&mut self) {
+        let mut cut = Vec::new();
+        for (id, sub) in &mut self.subscribers {
+            if !sub.pending.is_empty() && !sub.pump() {
+                cut.push(*id);
+            }
+        }
+        for id in cut {
+            self.cut(id);
+        }
+    }
+
+    /// Drop a subscriber and end its stream now; the client reconnects and,
+    /// its resume point most likely gone, gets a fresh snapshot.
+    fn cut(&mut self, id: u64) {
+        if let Some(sub) = self.subscribers.remove(&id) {
+            tracing::debug!("block {}: cutting off slow subscriber {id}", self.id);
+            sub.sink.cancel();
+        }
     }
 
     fn ring_end(&self) -> u64 {
-        self.ring_start + self.ring.len() as u64
+        self.ring_start.saturating_add(self.ring.len() as u64)
     }
 
-    /// Send ring output from `from` to the end, preceded by the configuration
-    /// effective at `from` and interleaved with later changes at their offsets.
-    fn send_ring_from(&self, sink: &Sink, from: u64) {
-        let (config, changes) = self.config_log.from(from);
-        sink.send(ServerData::Configured(config).to_frame());
+    /// Queue ring output from `from` to the end, interleaved with later
+    /// transitions at their offsets. `from` must lie within the ring.
+    fn send_ring_from(&self, sub: &mut Subscriber, from: u64, changes: Vec<(u64, Transition)>) {
         let mut pos = from;
-        for (at, config) in changes {
-            self.send_ring(sink, pos, at);
-            sink.send(ServerData::Configured(config).to_frame());
-            pos = at;
+        for (at, transition) in changes {
+            self.send_ring(sub, pos, at);
+            sub.send(transition.to_data(at).to_frame());
+            pos = pos.max(at);
         }
-        self.send_ring(sink, pos, self.ring_end());
+        self.send_ring(sub, pos, self.ring_end());
     }
 
-    fn send_ring(&self, sink: &Sink, from: u64, to: u64) {
-        let range = (from - self.ring_start) as usize..(to - self.ring_start) as usize;
-        let bytes: Vec<u8> = self.ring.range(range).copied().collect();
-        for (i, chunk) in bytes.chunks(256 * 1024).enumerate() {
-            let offset = from + (i * 256 * 1024) as u64;
-            sink.send(ServerData::Output { offset, bytes: chunk.to_vec() }.to_frame());
+    fn send_ring(&self, sub: &mut Subscriber, from: u64, to: u64) {
+        let index = |at: u64| at.checked_sub(self.ring_start).and_then(|i| usize::try_from(i).ok());
+        let (Some(start), Some(end)) = (index(from), index(to)) else { return };
+        let end = end.min(self.ring.len());
+        if start >= end {
+            return;
         }
+        let bytes: Vec<u8> = self.ring.range(start..end).copied().collect();
+        sub.send_bulk(Out::Output { offset: from, bytes, pos: 0 });
     }
 
     fn attach(&mut self, attach: Attach) {
-        let sink = attach.sink;
         let end = self.ring_end();
-        let welcome = |mode, offset| {
-            Frame::json(kind::WELCOME, &Welcome { epoch: self.epoch, mode, offset, size: self.size }).expect("welcome")
-        };
-        // Resume and replay need the configuration of every replayed byte;
-        // offsets before the known configuration history take a snapshot.
-        let start = self.ring_start.max(self.config_log.floor);
-        let resumable = attach
-            .resume
-            .filter(|r| r.epoch == self.epoch && r.offset >= start && r.offset <= end);
-        if let Some(resume) = resumable {
-            sink.send(welcome(StartMode::Resume, resume.offset));
-            self.send_ring_from(&sink, resume.offset);
+        let welcome = |mode, offset, size| Frame::json(kind::WELCOME, &Welcome { epoch: self.epoch, mode, offset, size }).expect("welcome");
+        // Resume needs the configuration and size of every replayed byte;
+        // offsets before the known history take a snapshot.
+        let start = self.ring_start.max(self.log.floor);
+        let resumable = attach.resume.filter(|r| r.epoch == self.epoch && (start..=end).contains(&r.offset));
+        let mut sub;
+        if let Some(Resume { offset: from, .. }) = resumable {
+            sub = Subscriber::new(attach.sink, from);
+            let (state, changes) = self.log.from(from);
+            sub.send(welcome(StartMode::Resume, from, state.size));
+            sub.send(ServerData::Configured(state.config).to_frame());
+            self.send_ring_from(&mut sub, from, changes);
         } else {
-            let snapshot = if attach.native { self.vt.snapshot().ok() } else { None };
-            match snapshot.and_then(|s| silo_vt::snapshot::head_len(&s).ok().map(|h| (s, h))) {
-                Some((bytes, head)) => {
-                    sink.send(welcome(StartMode::Snapshot, end));
-                    // The snapshot already reflects the current configuration.
-                    sink.send(ServerData::Configured(self.config).to_frame());
-                    sink.send(ServerData::SnapshotHead(bytes[..head].to_vec()).to_frame());
-                    for chunk in bytes[head..].chunks(HISTORY_CHUNK) {
-                        sink.send(ServerData::SnapshotHistory(chunk.to_vec()).to_frame());
-                    }
-                    sink.send(ServerData::SnapshotDone.to_frame());
+            let (mut head, head_len) = match self.vt.snapshot().map_err(|e| e.to_string()).and_then(|s| {
+                let head = silo_vt::snapshot::head_len(&s).map_err(|e| e.to_string())?;
+                Ok((s, head))
+            }) {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    tracing::error!("block {}: attach failed, cannot snapshot: {e}", self.id);
+                    let reject = Reject { code: "snapshot_failed".into(), reason: format!("cannot snapshot block: {e}") };
+                    let _ = attach.sink.send(Frame::json(kind::REJECT, &reject).expect("reject"));
+                    return;
                 }
-                None => {
-                    sink.send(welcome(StartMode::Replay, start));
-                    self.send_ring_from(&sink, start);
-                }
-            }
+            };
+            sub = Subscriber::new(attach.sink, end);
+            let history = head.split_off(head_len.min(head.len()));
+            sub.send(welcome(StartMode::Snapshot, end, self.size));
+            // The snapshot already reflects the current configuration.
+            sub.send(ServerData::Configured(self.config).to_frame());
+            sub.send(ServerData::SnapshotHead(head).to_frame());
+            sub.send_bulk(Out::History { bytes: history, pos: 0 });
+            sub.send(ServerData::SnapshotDone.to_frame());
         }
-        if let Some(code) = self.exit_code {
-            sink.send(ServerData::Exited { code }.to_frame());
+        if !self.lifecycle.is_running() {
+            sub.send(ServerData::Exited { code: self.exit_code }.to_frame());
         }
-        self.subscribers.insert(attach.sub_id, Subscriber { sink });
+        if sub.pump() {
+            self.subscribers.insert(attach.sub_id, sub);
+        } else {
+            sub.sink.cancel();
+        }
     }
 
     fn own(&mut self, client: ClientId, mode: OwnMode) {
@@ -604,12 +1175,16 @@ impl Actor {
         if size == self.size {
             return;
         }
-        let _ = self.pty.resize(pty_size(size));
+        if let Some(pty) = &self.pty {
+            let _ = pty.resize(pty_size(size));
+        }
         if self.vt.resize(g).is_err() {
             return;
         }
         self.size = size;
+        self.mark_dirty();
         let offset = self.ring_end();
+        self.log.record(offset, Transition::Resize(size));
         self.broadcast(&ServerData::Resized { offset, size });
         self.publish();
     }
@@ -646,7 +1221,10 @@ impl Actor {
     /// Refresh title and cwd from OSC state and the foreground process.
     fn probe(&mut self) {
         self.last_probe = Instant::now();
-        let foreground = self.pty.foreground_pid();
+        // A dead child has no foreground process to inspect.
+        let Some(pty) = self.pty.as_ref().filter(|_| !self.child_exited) else { return };
+        let foreground = pty.foreground_pid();
+        let pid = pty.pid();
         let title = if self.osc_title.is_empty() {
             foreground
                 .and_then(silo_pty::process_name)
@@ -658,7 +1236,7 @@ impl Actor {
             .osc_pwd
             .as_deref()
             .and_then(pwd_path)
-            .or_else(|| silo_pty::process_cwd(foreground.unwrap_or(self.pty.pid())).map(|p| p.to_string_lossy().into_owned()));
+            .or_else(|| silo_pty::process_cwd(foreground.unwrap_or(pid)).map(|p| p.to_string_lossy().into_owned()));
         let changed = {
             let Ok(mut info) = self.info.lock() else { return };
             let changed = info.title != title || info.cwd != cwd;
@@ -679,10 +1257,19 @@ impl Actor {
         let _ = self.notes.send(Note::Changed(self.id.clone()));
     }
 
-    fn finish(&mut self, code: i32) {
+    fn finish(&mut self) {
+        let code = self.exit_code;
+        // Stay alive as a read-only block: drop the PTY and the input path.
+        self.lifecycle = Lifecycle::Exited;
+        self.input = None;
+        self.pty = None;
+        self.tx = None;
+        self.injects.clear();
+        self.inject_since = None;
         self.broadcast(&ServerData::Exited { code });
         if let Ok(mut info) = self.info.lock() {
-            info.exited = Some(code);
+            info.exited = code;
+            info.lifecycle = Lifecycle::Exited;
         }
         let _ = self.notes.send(Note::Exited(self.id.clone()));
     }
@@ -750,24 +1337,31 @@ mod tests {
     }
 
     #[test]
-    fn config_log_places_changes_at_offsets() {
-        use silo_proto::model::TerminalConfig;
-        let c = |background| TerminalConfig { background, ..TerminalConfig::default() };
-        let mut log = super::ConfigLog::new(c(1));
+    fn transition_log_places_changes_at_offsets() {
+        use super::Transition::{Config, Resize};
+        use silo_proto::model::{TermSize, TerminalConfig};
+        let c = |background| Config(TerminalConfig { background, ..TerminalConfig::default() });
+        let base = |background| TerminalConfig { background, ..TerminalConfig::default() };
+        let s = |columns| TermSize::new(columns, 10);
+        let mut log = super::TransitionLog::new(base(1), s(40));
         log.record(10, c(2));
+        log.record(10, Resize(s(50)));
         log.record(20, c(3));
-        assert_eq!(log.from(5), (c(1), vec![(10, c(2)), (20, c(3))]));
-        assert_eq!(log.from(10), (c(2), vec![(20, c(3))]));
-        assert_eq!(log.from(25), (c(3), vec![]));
+        let (state, later) = log.from(5);
+        assert_eq!((state.config, state.size), (base(1), s(40)));
+        assert_eq!(later, vec![(10, c(2)), (10, Resize(s(50))), (20, c(3))]);
+        let (state, later) = log.from(10);
+        assert_eq!((state.config, state.size, later), (base(2), s(50), vec![(20, c(3))]));
         log.record(20, c(4));
-        assert_eq!(log.from(15), (c(2), vec![(20, c(4))]));
+        assert_eq!(log.from(15).1, vec![(20, c(4))]);
         log.trim(12);
-        assert_eq!((log.floor, log.from(12)), (12, (c(2), vec![(20, c(4))])));
-        for i in 0..super::CONFIG_LOG_CAP as u32 {
+        assert_eq!(log.floor, 12);
+        assert_eq!(log.from(12).0.size, s(50));
+        for i in 0..super::TRANSITION_LOG_CAP as u32 {
             log.record(100 + u64::from(i), c(10 + i));
         }
-        assert_eq!(log.changes.len(), super::CONFIG_LOG_CAP);
+        assert_eq!(log.changes.len(), super::TRANSITION_LOG_CAP);
         assert_eq!(log.floor, 20, "older resume points need a snapshot");
-        assert_eq!(log.from(20).0, c(4));
+        assert_eq!(log.from(20).0.config, base(4));
     }
 }

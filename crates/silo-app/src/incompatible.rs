@@ -1,6 +1,6 @@
-//! The card shown while a server of another version holds the local host,
-//! and its Restart: stop that server through a version-independent path;
-//! the connection loop then starts this version's server.
+//! The card shown while a server of a different build holds the local
+//! host, and its Upgrade: this build's server takes over the running
+//! one live, keeping every session.
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
 
@@ -8,26 +8,25 @@ use crate::{theme, theme::Continuous as _, workspace::Workspace};
 
 impl Workspace {
     /// The active host's incompatible server, if one holds it.
-    pub(crate) fn incompatible(&self) -> Option<&silo_client::Incompatible> {
+    pub(crate) fn incompatible(&self) -> Option<&silo_client::DifferentBuild> {
         self.hosts.get(self.active_host)?.incompatible.as_ref()
     }
 
-    /// Stop the incompatible server on the active (local) host. The
-    /// connection loop notices it is gone and starts ours.
-    pub(crate) fn restart_incompatible(&mut self, cx: &mut Context<Self>) {
-        self.confirm_restart = false;
+    /// Upgrade the incompatible server on the active (local) host in place.
+    pub(crate) fn upgrade_server(&mut self, cx: &mut Context<Self>) {
         let Some(server) = self.incompatible().cloned() else { return };
         let home = self.home.clone();
-        self.status = Some("Restarting the server…".into());
-        let task = self.rt.spawn(async move { silo_client::compat::stop(&home, &server).await });
+        self.status = Some("Upgrading the server…".into());
+        let exe = crate::conn::server_exe();
+        let task = self.rt.spawn(async move { silo_client::mismatch::upgrade(&home, &exe, &server).await });
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |this, cx| {
                 this.status = match result {
-                    Ok(()) => Some("Starting the server…".into()),
+                    Ok(()) => Some("Reconnecting…".into()),
                     Err(error) => {
-                        tracing::warn!("restart incompatible server: {error:#}");
-                        Some(format!("Could not restart the server: {error}"))
+                        tracing::warn!("upgrade server: {error:#}");
+                        Some("Could not upgrade the server.".into())
                     }
                 };
                 cx.notify();
@@ -37,7 +36,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn render_incompatible(&self, server: &silo_client::Incompatible, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_incompatible(&self, server: &silo_client::DifferentBuild, cx: &mut Context<Self>) -> AnyElement {
         let button = |id: &'static str, label: &'static str, danger: bool| {
             let (bg, fg) = if danger { (theme::danger(), 0x00ff_ffff) } else { (theme::tab_active(), theme::foreground()) };
             div()
@@ -58,33 +57,13 @@ impl Workspace {
                 .hover(|s| s.opacity(0.88))
                 .child(label)
         };
-        let actions = if self.confirm_restart {
-            div()
-                .flex()
-                .gap(px(8.0))
-                .child(button("incompatible-cancel", "Cancel", false).on_click(cx.listener(|this, _, _, cx| {
-                    this.confirm_restart = false;
-                    cx.notify();
-                })))
-                .child(
-                    button("incompatible-confirm", "End Sessions & Restart", true)
-                        .on_click(cx.listener(|this, _, _, cx| this.restart_incompatible(cx))),
-                )
-        } else {
-            div().flex().child(button("incompatible-restart", "Restart Server…", false).on_click(cx.listener(|this, _, _, cx| {
-                // Nothing to lose: restart at once.
-                if this.incompatible().is_some_and(|s| s.sessions == Some(0)) {
-                    this.restart_incompatible(cx);
-                } else {
-                    this.confirm_restart = true;
-                    cx.notify();
-                }
-            })))
-        };
-        let detail: SharedString = match (&server.version, self.confirm_restart) {
-            (_, true) => "All of its sessions will end. Unsaved work will be lost.".into(),
-            (Some(version), false) => format!("Server version {version}, this app {}.", env!("CARGO_PKG_VERSION")).into(),
-            (None, false) => format!("This app is version {}.", env!("CARGO_PKG_VERSION")).into(),
+        let actions = div().flex().child(
+            button("incompatible-upgrade", "Upgrade Server", false)
+                .on_click(cx.listener(|this, _, _, cx| this.upgrade_server(cx))),
+        );
+        let detail: SharedString = match &server.build {
+            Some(build) => format!("Server build {build}, this app {}.", silo_proto::BUILD).into(),
+            None => format!("This app is build {}.", silo_proto::BUILD).into(),
         };
         div()
             .size_full()

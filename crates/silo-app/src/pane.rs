@@ -13,11 +13,11 @@ use gpui::{
     IntoElement, Keystroke, Pixels, Point, Render, ShapedLine, Task, TextInputPurpose, TextRun, UTF16Selection, Window,
     canvas, div, fill, point, prelude::*, px, rgb, size,
 };
-use silo_client::{Applied, Control, DataSender, DataStream, Mirror};
+use silo_client::{Applied, Control, DataSender, DataStream, Mirror, cache::MirrorCheckpoint};
 use silo_proto::{
     control::{Method, OwnMode},
     data::{ClientData, ServerData},
-    model::{BlockInfo, TermSize},
+    model::{BlockInfo, Lifecycle, TermSize},
 };
 use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, PreparedFrame, terminal_canvas};
 use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
@@ -34,13 +34,32 @@ pub const PADDING: f32 = 6.0;
 pub enum Status {
     Connecting,
     Live,
-    Exited(i32),
     Lost,
 }
 
 pub enum PaneEvent {
     /// The user focused or typed in this pane.
     Activated,
+    /// "New shell here" on an exited or restored block.
+    NewShell,
+}
+
+/// Whether a block takes input and size ownership: only while its process
+/// runs (unknown blocks are assumed running).
+#[must_use]
+pub fn takes_input(info: Option<&BlockInfo>) -> bool {
+    info.is_none_or(|i| i.lifecycle.is_running())
+}
+
+/// The quiet status pill of a block without a process.
+#[must_use]
+pub fn lifecycle_label(lifecycle: Lifecycle, exited: Option<i32>) -> Option<String> {
+    match (lifecycle, exited) {
+        (Lifecycle::Running, _) => None,
+        (Lifecycle::Exited, Some(code)) => Some(format!("Process exited (code {code})")),
+        (Lifecycle::Exited, None) => Some("Process exited".into()),
+        (Lifecycle::Restored, _) => Some("Restored · process exited".into()),
+    }
 }
 
 pub struct Pane {
@@ -53,6 +72,9 @@ pub struct Pane {
     pub info: Option<BlockInfo>,
     /// Bumped whenever the mirror changes; preparation follows it.
     generation: u64,
+    /// Stream point and configuration of the last cache checkpoint (or of
+    /// the cached mirror it started from).
+    saved: Option<(silo_proto::data::Resume, Option<silo_proto::model::TerminalConfig>)>,
     preparer: Arc<Mutex<FramePreparer>>,
     prepared: Option<Arc<PreparedFrame>>,
     prepared_key: Option<(u64, u32, u32, u32, u32)>,
@@ -103,7 +125,8 @@ impl ImeLayout {
 }
 
 impl Pane {
-    pub fn new(block_id: String, rt: tokio::runtime::Handle, control: Option<Control>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `restored`: a mirror from the cache, shown until the stream resumes.
+    pub fn new(block_id: String, rt: tokio::runtime::Handle, control: Option<Control>, restored: Option<Mirror>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         cx.on_focus(&focus, window, |this, _, cx| {
             this.blink.reset();
@@ -123,7 +146,9 @@ impl Pane {
             cx.notify();
         })
         .detach();
-        let mirror = Mirror::new();
+        let mut mirror = restored.unwrap_or_default();
+        let cell = CellMetrics::for_window(window).grid(1.0, 1.0);
+        mirror.set_cell_size(cell.cell_width, cell.cell_height);
         let mut pane = Self {
             block_id,
             rt,
@@ -133,6 +158,7 @@ impl Pane {
             status: Status::Connecting,
             info: None,
             generation: 0,
+            saved: None,
             preparer: Arc::new(Mutex::new(FramePreparer::new(cx.text_system().clone()))),
             prepared: None,
             prepared_key: None,
@@ -157,6 +183,7 @@ impl Pane {
             attempt: 0,
             stream_task: None,
         };
+        pane.saved = pane.dirty();
         pane.connect(cx);
         pane
     }
@@ -165,9 +192,7 @@ impl Pane {
     pub fn set_control(&mut self, control: Control, cx: &mut Context<Self>) {
         self.control = Some(control);
         self.own_requested = None;
-        if !matches!(self.status, Status::Exited(_)) {
-            self.connect(cx);
-        }
+        self.connect(cx);
     }
 
     pub fn set_info(&mut self, info: BlockInfo, cx: &mut Context<Self>) {
@@ -187,10 +212,35 @@ impl Pane {
         self.info.as_ref().is_some_and(|i| i.owner.is_some() && i.owner == me)
     }
 
+    fn running(&self) -> bool {
+        takes_input(self.info.as_ref())
+    }
+
+    /// The mirror's checkpointable state when it differs from the last
+    /// checkpoint (new output or configuration; not scrolling/selection).
+    fn dirty(&self) -> Option<(silo_proto::data::Resume, Option<silo_proto::model::TerminalConfig>)> {
+        let state = (self.mirror.checkpointable()?, self.mirror.config());
+        (self.saved != Some(state)).then_some(state)
+    }
+
+    /// Whether [`checkpoint`](Self::checkpoint) has anything to save.
+    pub fn needs_checkpoint(&self) -> bool {
+        self.dirty().is_some()
+    }
+
+    /// A checkpoint of the mirror if it changed since the last one. Encodes
+    /// the snapshot on the calling thread (~10 ms for 100k lines).
+    pub fn checkpoint(&mut self) -> Option<MirrorCheckpoint> {
+        let state = self.dirty()?;
+        let checkpoint = MirrorCheckpoint::capture(&mut self.mirror).ok().flatten()?;
+        self.saved = Some(state);
+        Some(checkpoint)
+    }
+
     /// Ask for size ownership: `Take` on focus and input, `Request` when
     /// merely visible.
     pub fn own(&mut self, mode: OwnMode) {
-        if mode == OwnMode::Take && self.is_owner() {
+        if !self.running() || (mode == OwnMode::Take && self.is_owner()) {
             return;
         }
         if self.own_requested.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
@@ -273,14 +323,13 @@ impl Pane {
     /// Apply server frames; returns false to stop the stream task.
     fn apply(&mut self, batch: Vec<ServerData>, cx: &mut Context<Self>) -> bool {
         let mut dirty = false;
+        // A short batch drained everything received so far.
+        let idle = batch.len() < 512;
         for data in batch {
             match self.mirror.apply(data) {
                 Ok(Applied::Redraw) => dirty = true,
                 Ok(Applied::None) => {}
-                Ok(Applied::Exited(code)) => {
-                    self.status = Status::Exited(code);
-                    dirty = true;
-                }
+                Ok(Applied::Exited(_)) => dirty = true,
                 Err(error) => {
                     tracing::warn!(block = %self.block_id, "re-sync after: {error:#}");
                     self.reset_mirror();
@@ -288,6 +337,9 @@ impl Pane {
                     return false;
                 }
             }
+        }
+        if let Some(sender) = &self.sender {
+            sender.ack(&mut self.mirror, idle);
         }
         if dirty {
             self.generation += 1;
@@ -297,7 +349,7 @@ impl Pane {
     }
 
     fn lost(&mut self, attempt: u64, cx: &mut Context<Self>) {
-        if attempt != self.attempt || matches!(self.status, Status::Exited(_)) {
+        if attempt != self.attempt {
             return;
         }
         self.status = Status::Lost;
@@ -319,7 +371,7 @@ impl Pane {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) {
-        if bytes.is_empty() || !matches!(self.status, Status::Live) {
+        if bytes.is_empty() || !matches!(self.status, Status::Live) || !self.running() {
             return;
         }
         if let Some(sender) = &self.sender {
@@ -344,6 +396,9 @@ impl Pane {
     }
 
     fn send_size(&self) {
+        if !self.running() {
+            return;
+        }
         if let (Some(sender), Some(g)) = (&self.sender, self.grid) {
             sender.send(&ClientData::Resize(TermSize { columns: g.columns, rows: g.rows, cell_width: g.cell_width, cell_height: g.cell_height }));
         }
@@ -365,7 +420,7 @@ impl Pane {
     }
 
     fn accepts_input(&self, window: &Window) -> bool {
-        self.status == Status::Live && self.focus.is_focused(window) && window.is_window_active()
+        self.status == Status::Live && self.running() && self.focus.is_focused(window) && window.is_window_active()
     }
 
     // ---- keyboard ----
@@ -507,6 +562,7 @@ impl Pane {
     fn pointer(&mut self, position: Point<Pixels>, action: MouseAction, button: MouseButton, modifiers: gpui::Modifiers, scale: f32, cx: &mut Context<Self>) {
         let Some(bounds) = self.content_bounds else { return };
         let scale = scale.max(0.5);
+        let exited = !self.running();
         let Some(vt) = self.mirror.terminal() else { return };
         let grid = vt.size();
         let max_x = (f32::from(grid.columns) * f32::from(grid.cell_width) - 1.0).max(0.0);
@@ -538,8 +594,7 @@ impl Pane {
             y: y as u16,
             modifiers: Modifiers { shift: modifiers.shift, control: modifiers.control, alt: modifiers.alt, super_key: modifiers.platform },
         };
-        let exited = matches!(self.status, Status::Exited(_));
-        // An exited block has no program to report to: always select.
+        // A block without a process has no program to report to: always select.
         if exited {
             event.modifiers.shift = true;
         }
@@ -618,7 +673,7 @@ impl Pane {
         }
         self.wheel -= lines as f32;
         let tracking = self.last_frame.as_ref().is_some_and(|f| f.mouse_tracking);
-        if tracking && self.status == Status::Live {
+        if tracking && self.status == Status::Live && self.running() {
             let button = if lines > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
             for _ in 0..lines.unsigned_abs().min(10) {
                 self.pointer(event.position, MouseAction::Press, button, event.modifiers, scale, cx);
@@ -683,7 +738,8 @@ impl Pane {
         };
         let c = frame.cursor;
         self.blink.track(c.column, c.row);
-        self.blink_wanted = crate::blink::active(focused && self.status == Status::Live, window_active, c.visible, c.blinking, frame.scroll.at_bottom());
+        let live = self.status == Status::Live && self.running();
+        self.blink_wanted = crate::blink::active(focused && live, window_active, c.visible, c.blinking, frame.scroll.at_bottom());
         if !self.blink_wanted {
             return true;
         }
@@ -724,18 +780,26 @@ impl Pane {
     }
 
     fn status_text(&self) -> Option<String> {
+        // Offline: the workspace shows one indicator for all panes.
+        if self.control.as_ref().is_none_or(Control::is_closed) {
+            return None;
+        }
         match &self.status {
             Status::Live => None,
             Status::Connecting => Some("attaching…".into()),
             Status::Lost => Some("reconnecting…".into()),
-            Status::Exited(code) => Some(format!("process exited ({code})")),
         }
+    }
+
+    fn lifecycle_text(&self) -> Option<String> {
+        self.info.as_ref().and_then(|i| lifecycle_label(i.lifecycle, i.exited))
     }
 
     /// The server applies another client's size to this block.
     fn sized_elsewhere(&self) -> bool {
         let applied = self.mirror.size();
         self.status == Status::Live
+            && self.running()
             && self.grid.is_some_and(|g| g.columns != applied.columns || g.rows != applied.rows)
             && self.info.as_ref().is_some_and(|i| i.owner.is_some()) && !self.is_owner()
     }
@@ -776,6 +840,7 @@ impl Render for Pane {
         let cursor = CursorPresentation { focused, phase_visible };
         let selection = rgb(theme::selection()).opacity(0.55);
         let status = self.status_text();
+        let lifecycle = self.lifecycle_text();
         let sized_elsewhere = self.sized_elsewhere();
         let entity = cx.entity();
         let mut element = div()
@@ -850,7 +915,7 @@ impl Render for Pane {
                     el.child(div().absolute().top_0().left_0().size_full().child(terminal_canvas(prepared, metrics, cursor, selection, Overlay::default())))
                 })
                 .child(input_canvas(entity, metrics))
-                .when_some(status, |el, text| {
+                .when_some(status.filter(|_| lifecycle.is_none()), |el, text| {
                     el.child(
                         div()
                             .absolute()
@@ -863,6 +928,35 @@ impl Render for Pane {
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
                             .child(text),
+                    )
+                })
+                .when_some(lifecycle, |el, text| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .bottom(px(4.0))
+                            .right(px(4.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .continuous(4.0)
+                            .bg(rgb(theme::tab_active()))
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::foreground()).opacity(0.75))
+                            .text_size(px(11.0))
+                            .child(text)
+                            .child(
+                                div()
+                                    .id("new-shell")
+                                    .text_color(rgb(theme::foreground()))
+                                    .cursor_pointer()
+                                    .child("New shell here")
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::NewShell))),
+                            ),
                     )
                 })
                 .when(sized_elsewhere, |el| {
@@ -1075,5 +1169,43 @@ impl EntityInputHandler for Pane {
         }
         let byte = layout.line.closest_index_for_x(point.x - layout.origin.x);
         Some(layout.text.get(..byte)?.encode_utf16().count())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use silo_proto::model::{BlockKind, Lifecycle, TermSize};
+
+    use super::*;
+
+    fn info(lifecycle: Lifecycle, exited: Option<i32>) -> BlockInfo {
+        BlockInfo {
+            id: "b".into(),
+            session_id: "s".into(),
+            kind: BlockKind::Terminal,
+            title: String::new(),
+            cwd: None,
+            exited,
+            lifecycle,
+            size: TermSize::new(80, 24),
+            owner: None,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn only_running_blocks_take_input() {
+        assert!(takes_input(None));
+        assert!(takes_input(Some(&info(Lifecycle::Running, None))));
+        assert!(!takes_input(Some(&info(Lifecycle::Exited, Some(0)))));
+        assert!(!takes_input(Some(&info(Lifecycle::Restored, None))));
+    }
+
+    #[test]
+    fn lifecycle_labels() {
+        assert_eq!(lifecycle_label(Lifecycle::Running, None), None);
+        assert_eq!(lifecycle_label(Lifecycle::Exited, Some(3)).as_deref(), Some("Process exited (code 3)"));
+        assert_eq!(lifecycle_label(Lifecycle::Exited, None).as_deref(), Some("Process exited"));
+        assert_eq!(lifecycle_label(Lifecycle::Restored, None).as_deref(), Some("Restored · process exited"));
     }
 }

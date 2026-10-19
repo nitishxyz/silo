@@ -6,6 +6,12 @@
 //! snapshot history may interleave with live frames; clients apply both in
 //! arrival order. Offsets count raw PTY output bytes since the block's epoch
 //! began, so a client can resume after a disconnect without a snapshot.
+//!
+//! On resume or replay, `Welcome.size` is the size in effect at
+//! `Welcome.offset`; later `RESIZED`/`CONFIGURED` transitions arrive at
+//! their original offsets. A server that ends the stream without `EXITED`
+//! cut the client off (too slow); reconnect, the resume offset is likely
+//! gone and a snapshot follows.
 
 use std::io;
 
@@ -18,10 +24,9 @@ use crate::{
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DataHello {
-    pub protocol: u32,
+    /// The client's [`crate::BUILD`]; must equal the server's.
+    pub build: String,
     pub ticket: String,
-    pub ghostty_rev: String,
-    pub snapshot_version: u16,
     #[serde(default)]
     pub resume: Option<Resume>,
 }
@@ -39,9 +44,6 @@ pub enum StartMode {
     Resume,
     /// A native snapshot follows; output continues from `offset`.
     Snapshot,
-    /// Snapshot formats differ: the raw output ring is replayed from
-    /// `offset` into a fresh terminal (lossy if the ring was trimmed).
-    Replay,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,7 +69,9 @@ pub enum ServerData {
     Output { offset: u64, bytes: Vec<u8> },
     /// The PTY was resized at this point of the output stream.
     Resized { offset: u64, size: TermSize },
-    Exited { code: i32 },
+    /// The program is gone; `code` is `None` when unknown (a block restored
+    /// from disk). The stream stays open: the block remains readable.
+    Exited { code: Option<i32> },
     /// The effective terminal configuration from this point of the output
     /// stream on (sent after `Welcome` and whenever it changes).
     Configured(TerminalConfig),
@@ -78,6 +82,11 @@ pub enum ClientData {
     Input(Vec<u8>),
     /// This client's desired size.
     Resize(TermSize),
+    /// Every output byte below this offset has been applied. Required: the
+    /// acked offset starts at `Welcome.offset`; the server ends the stream
+    /// (forcing a reconnect with a fresh snapshot) when it falls behind the
+    /// output ring or unacked output exceeds the server's budget. A
+    /// backwards or not-yet-sent offset also ends the stream.
     Ack(u64),
     /// This client's desired terminal configuration; applied while it owns
     /// the block (same ownership as size).
@@ -127,7 +136,7 @@ impl ServerData {
                 payload.extend_from_slice(&size_bytes(*size));
                 Frame::new(kind::RESIZED, payload)
             }
-            Self::Exited { code } => Frame::new(kind::EXITED, code.to_le_bytes().to_vec()),
+            Self::Exited { code } => Frame::new(kind::EXITED, code.map(|c| c.to_le_bytes().to_vec()).unwrap_or_default()),
             Self::Configured(config) => Frame::json(kind::CONFIGURED, config).expect("config serializes"),
         }
     }
@@ -142,10 +151,11 @@ impl ServerData {
             kind::SNAPSHOT_DONE => Self::SnapshotDone,
             kind::OUTPUT => Self::Output { offset: parse_u64(&p)?, bytes: p[8..].to_vec() },
             kind::RESIZED => Self::Resized { offset: parse_u64(&p)?, size: parse_size(&p[8..])? },
-            kind::EXITED => {
-                let code = p.get(..4).ok_or_else(|| invalid("short exit"))?;
-                Self::Exited { code: i32::from_le_bytes(code.try_into().unwrap()) }
-            }
+            kind::EXITED => match p.len() {
+                0 => Self::Exited { code: None },
+                4.. => Self::Exited { code: Some(i32::from_le_bytes(p[..4].try_into().unwrap())) },
+                _ => return Err(invalid("short exit")),
+            },
             kind::CONFIGURED => Self::Configured(parse_config(&p)?),
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
@@ -196,7 +206,8 @@ mod tests {
         for message in [
             ServerData::Output { offset: 42, bytes: b"hi".to_vec() },
             ServerData::Resized { offset: 7, size },
-            ServerData::Exited { code: -1 },
+            ServerData::Exited { code: Some(-1) },
+            ServerData::Exited { code: None },
             ServerData::SnapshotDone,
             ServerData::Configured(TerminalConfig::default()),
         ] {

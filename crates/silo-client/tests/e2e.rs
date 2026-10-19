@@ -7,7 +7,7 @@ use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
     control::{Capture, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
     data::{ClientData, StartMode},
-    model::{Axis, SessionView, TermSize, TerminalConfig},
+    model::{Axis, Lifecycle, SessionView, TermSize, TerminalConfig},
     paths,
 };
 
@@ -35,7 +35,7 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start_server(home: &Path) {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None };
+    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, ..Default::default() };
     tokio::spawn(async move {
         silo_server::run(config).await.unwrap();
     });
@@ -89,7 +89,7 @@ async fn attach_snapshot_resume_ownership_exit() {
 async fn attach_snapshot_resume_ownership_exit_body() {
     let home = temp_home("e2e");
     start_server(&home).await;
-    let (control, mut events) = connect(&home, "test-a").await;
+    let (control, events) = connect(&home, "test-a").await;
     control.subscribe().await.unwrap();
     let created: Created = control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell() }).await.unwrap();
     let block = created.block_id.clone();
@@ -161,7 +161,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(view.blocks.len(), 2);
     control.call_value(Method::BlockClose { block_id: split.block_id.clone() }).await.unwrap();
 
-    // Exit: stream reports it and the session disappears.
+    // Exit: stream reports it; the block stays readable in its layout.
     stream_a.send(&ClientData::Input(b"exit 7\n".to_vec()));
     let code = tokio::time::timeout(TIMEOUT, async {
         loop {
@@ -177,20 +177,104 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     })
     .await
     .unwrap();
-    assert_eq!(code, 7);
+    assert_eq!(code, Some(7));
+    let info = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+            let info = view.blocks.into_iter().find(|b| b.id == block).expect("exited block stays in the session");
+            if info.lifecycle == Lifecycle::Exited {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(info.exited, Some(7));
+    let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+    assert_eq!(view.session.windows[0].layout.blocks(), std::slice::from_ref(&block));
+    // Still attachable: snapshot, then the exit status.
+    let mut c = Mirror::new();
+    let mut stream_c = attach(&control, &block, &mut c).await;
+    assert_eq!(stream_c.welcome.mode, StartMode::Snapshot);
+    pump_until(&mut stream_c, &mut c, |m| m.exited().is_some() && m.screen_text().contains("exit 7")).await;
+    assert_eq!(c.exited(), Some(Some(7)));
+    drop(events);
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn block_swap_and_window_move() {
+    guarded("block_swap_and_window_move", block_swap_and_window_move_body()).await;
+}
+
+/// Next `session.changed` view for `session`.
+async fn next_view(events: &mut Events, session: &str) -> SessionView {
     tokio::time::timeout(TIMEOUT, async {
         while let Some((_, event)) = events.recv().await {
-            if let Event::SessionClosed { session_id } = event {
-                assert_eq!(session_id, created.session_id);
-                return;
+            if let Event::SessionChanged { view } = event
+                && view.session.id == session
+            {
+                return view;
             }
         }
         panic!("events closed");
     })
     .await
-    .unwrap();
-    let sessions: Vec<serde_json::Value> = control.call(Method::SessionList {}).await.unwrap();
-    assert!(sessions.is_empty());
+    .unwrap()
+}
+
+async fn block_swap_and_window_move_body() {
+    let home = temp_home("swap");
+    start_server(&home).await;
+    let (control, _) = connect(&home, "test-a").await;
+    let (observer, mut events) = connect(&home, "test-b").await;
+    observer.subscribe().await.unwrap();
+    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+    let sid = created.session_id.clone();
+    let a = created.block_id.clone();
+    let b: Created = control.call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell() }).await.unwrap();
+    let c: Created = control.call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell() }).await.unwrap();
+    let (b, c) = (b.block_id, c.block_id);
+    control.call_value(Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await.unwrap();
+    control.call_value(Method::BlockFocus { block_id: a.clone() }).await.unwrap();
+    let before: SessionView = control.call(Method::SessionView { session_id: sid.clone() }).await.unwrap();
+    while next_view(&mut events, &sid).await.session.revision < before.session.revision {}
+
+    // Swap: leaves exchange, ratios and focus stay, revision bumps, event.
+    control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: c.clone() }).await.unwrap();
+    let view = next_view(&mut events, &sid).await;
+    assert_eq!(view.session.revision, before.session.revision + 1);
+    let layout = &view.session.windows[0].layout;
+    assert_eq!(layout.blocks(), [c.clone(), b.clone(), a.clone()]);
+    assert!(matches!(layout, silo_proto::model::Layout::Split { ratio, .. } if (*ratio - 0.3).abs() < 1e-6));
+    assert_eq!(view.session.windows[0].focused, a);
+    // The shells keep running.
+    let capture: Capture = control.call(Method::TerminalCapture { block_id: a.clone(), history: false }).await.unwrap();
+    assert!(capture.size.columns > 0);
+    assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
+
+    // Cross-window swaps are rejected and change nothing.
+    let other: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell() }).await.unwrap();
+    let after_create = next_view(&mut events, &sid).await;
+    let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await.unwrap_err();
+    assert!(err.to_string().contains("different windows"), "{err}");
+    let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: "bmissing".into() }).await.unwrap_err();
+    assert!(err.to_string().contains("not_found"), "{err}");
+    let unchanged: SessionView = control.call(Method::SessionView { session_id: sid.clone() }).await.unwrap();
+    assert_eq!(unchanged.session.revision, after_create.session.revision);
+
+    // window.move: order changes for every client.
+    let third: Created = control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell() }).await.unwrap();
+    next_view(&mut events, &sid).await;
+    control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await.unwrap();
+    let view = next_view(&mut events, &sid).await;
+    let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
+    assert_eq!(order, [third.window_id.clone(), created.window_id.clone(), other.window_id.clone()]);
+    control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 99 }).await.unwrap();
+    let view = next_view(&mut events, &sid).await;
+    let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
+    assert_eq!(order, [created.window_id.clone(), other.window_id.clone(), third.window_id.clone()]);
     control.call_value(Method::ServerShutdown {}).await.unwrap();
 }
 

@@ -36,6 +36,10 @@ enum Command {
         /// (0 = never; `--daemon` defaults to 10).
         #[arg(long)]
         idle_exit: Option<u64>,
+        /// Take every session, live, from the running server (of another
+        /// build) instead of starting fresh; fails if that is not possible.
+        #[arg(long)]
+        takeover: bool,
     },
     /// List sessions.
     #[command(alias = "list")]
@@ -172,17 +176,22 @@ fn init_tracing() {
 
 async fn run(command: Command) -> anyhow::Result<i32> {
     match command {
-        Command::Server { daemon, idle_exit } => {
+        Command::Server { daemon, idle_exit, takeover } => {
             init_tracing();
             let idle_exit = match idle_exit {
                 Some(0) => None,
                 Some(secs) => Some(Duration::from_secs(secs)),
                 None => daemon.then(|| Duration::from_secs(10)),
             };
-            if daemon {
+            if daemon || takeover {
                 start_menubar();
             }
-            silo_server::run(silo_server::Config { home: paths::home(), idle_exit }).await?;
+            let config = silo_server::Config { home: paths::home(), idle_exit, ..Default::default() };
+            if takeover {
+                silo_server::takeover(config, false).await?;
+            } else {
+                silo_server::run(config).await?;
+            }
             Ok(0)
         }
         Command::Ls { json } => {
@@ -332,6 +341,9 @@ async fn connect() -> anyhow::Result<(Control, Events)> {
 async fn connect_existing() -> anyhow::Result<(Option<Control>, Option<Events>)> {
     match Control::connect(&paths::socket(&paths::home()), &client_name()).await {
         Ok((control, events)) => Ok((Some(control), Some(events))),
+        Err(error) if silo_client::mismatch::is_mismatch(&error) => {
+            Err(silo_client::mismatch::inspect(&paths::home()).await.into())
+        }
         Err(_) => Ok((None, None)),
     }
 }
@@ -349,7 +361,8 @@ async fn resolve_session(control: &Control, target: Option<&str>) -> anyhow::Res
             None => bail!("no sessions; create one with `silo new`"),
         }
     };
-    control.call(Method::SessionView { session_id: session.id.clone() }).await}
+    control.call(Method::SessionView { session_id: session.id.clone() }).await
+}
 
 /// A block id, or the focused block of a session's active window.
 async fn resolve_block(control: &Control, target: Option<&str>) -> anyhow::Result<String> {

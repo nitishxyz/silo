@@ -206,6 +206,27 @@ impl Layout {
         }
     }
 
+    /// Exchange the positions of leaves `a` and `b`; splits (axes, ratios)
+    /// are untouched. False unless both are distinct leaves of this tree.
+    pub fn swap(&mut self, a: &str, b: &str) -> bool {
+        if a == b || !self.contains(a) || !self.contains(b) {
+            return false;
+        }
+        fn walk(layout: &mut Layout, a: &str, b: &str) {
+            match layout {
+                Layout::Block { id } if id == a => b.clone_into(id),
+                Layout::Block { id } if id == b => a.clone_into(id),
+                Layout::Block { .. } => {}
+                Layout::Split { first, second, .. } => {
+                    walk(first, a, b);
+                    walk(second, a, b);
+                }
+            }
+        }
+        walk(self, a, b);
+        true
+    }
+
     /// Set the ratio of the split reached by `path` (0 = first child,
     /// 1 = second child at each level; empty = this node).
     pub fn set_ratio(&mut self, path: &[usize], ratio: f32) -> bool {
@@ -249,6 +270,27 @@ pub enum BlockKind {
     Terminal,
 }
 
+/// Whether a block still has a process behind it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    /// A live PTY and program; input is delivered.
+    #[default]
+    Running,
+    /// The program exited; contents stay readable, input is ignored.
+    Exited,
+    /// Rebuilt from a saved snapshot (crash, reboot); no process, input is
+    /// ignored, exit status unknown.
+    Restored,
+}
+
+impl Lifecycle {
+    #[must_use]
+    pub fn is_running(self) -> bool {
+        self == Self::Running
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockInfo {
     pub id: BlockId,
@@ -257,9 +299,13 @@ pub struct BlockInfo {
     pub title: String,
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Exit code once the process has exited (`-1` when killed by a signal).
+    /// Exit code once the process has exited; `None` while running, when
+    /// killed by a signal, or for restored blocks whose exit status is
+    /// unknown. Use `lifecycle` to tell whether a process is running.
     #[serde(default)]
     pub exited: Option<i32>,
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
     pub size: TermSize,
     #[serde(default)]
     pub owner: Option<ClientId>,
@@ -298,5 +344,24 @@ mod tests {
         let layout = layout.remove("a").unwrap();
         assert_eq!(layout, Layout::block("c"));
         assert!(layout.remove("c").is_none());
+    }
+
+    #[test]
+    fn swap_exchanges_leaves_and_keeps_splits() {
+        let mut layout = Layout::block("a");
+        layout.split("a", "b".into(), Axis::Horizontal);
+        layout.split("b", "c".into(), Axis::Vertical);
+        layout.set_ratio(&[], 0.3);
+        layout.set_ratio(&[1], 0.7);
+        let before = layout.clone();
+        assert!(layout.swap("a", "c"));
+        assert_eq!(layout.blocks(), ["c", "b", "a"]);
+        let Layout::Split { axis, ratio, second, .. } = &layout else { panic!() };
+        assert_eq!((*axis, *ratio), (Axis::Horizontal, 0.3));
+        assert!(matches!(**second, Layout::Split { axis: Axis::Vertical, ratio, .. } if ratio == 0.7));
+        assert!(!layout.swap("a", "a"));
+        assert!(!layout.swap("a", "x"));
+        assert!(layout.swap("c", "a"));
+        assert_eq!(layout, before);
     }
 }

@@ -1,22 +1,24 @@
 //! Session tree, clients, tickets and the sequenced event bus.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
     control::{Created, DataTicket, Event, RpcError, ServerMessage, SpawnSpec},
     data::ticket_hex,
     kind,
     model::{
-        Axis, BlockId, BlockInfo, BlockKind, ClientId, Layout, SessionId, SessionInfo, SessionSummary, SessionView,
+        Axis, BlockId, BlockInfo, BlockKind, ClientId, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary, SessionView,
         TermSize, WindowId, WindowInfo,
     },
 };
 use silo_pty::SpawnConfig;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use crate::block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms};
 
@@ -25,6 +27,7 @@ use crate::block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms};
 const EVENT_BACKLOG: usize = 8 * 1024 * 1024;
 const TICKET_TTL: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Window {
     pub id: WindowId,
     pub name: Option<String>,
@@ -33,6 +36,7 @@ pub struct Window {
     pub zoomed: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
     pub name: String,
@@ -64,7 +68,7 @@ impl Session {
         }
     }
 
-    fn blocks(&self) -> Vec<BlockId> {
+    pub fn blocks(&self) -> Vec<BlockId> {
         self.windows.iter().flat_map(|w| w.layout.blocks()).collect()
     }
 }
@@ -91,6 +95,16 @@ pub struct Registry {
     next_client: ClientId,
     seq: u64,
     notes: UnboundedSender<Note>,
+    /// Blocks whose checkpoint may be stale, and whether the tree changed,
+    /// since the last commit.
+    dirty: HashSet<BlockId>,
+    tree_dirty: bool,
+    /// Wakes the persistence worker after a mutation.
+    pub persist_kick: Arc<Notify>,
+    /// Open PTYs of blocks whose re-adoption after an aborted upgrade
+    /// failed: the block shows its restored screen, and the program lives
+    /// on (no hangup) until the next upgrade carries it or the block closes.
+    pub parked: HashMap<BlockId, silo_pty::Detached>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -107,6 +121,61 @@ impl Registry {
             next_client: 1,
             seq: 0,
             notes,
+            dirty: HashSet::new(),
+            tree_dirty: false,
+            persist_kick: Arc::new(Notify::new()),
+            parked: HashMap::new(),
+        }
+    }
+
+    /// A registry holding a restored tree; nothing is spawned.
+    pub fn restored(notes: UnboundedSender<Note>, sessions: Vec<Session>, blocks: HashMap<BlockId, BlockHandle>) -> Self {
+        Self { sessions, blocks, ..Self::new(notes) }
+    }
+
+    /// The channel block actors report to.
+    pub fn notes(&self) -> UnboundedSender<Note> {
+        self.notes.clone()
+    }
+
+    /// Take the tree flag and, when `blocks` is set or the tree changed, the
+    /// dirty blocks accumulated since they were last taken.
+    pub fn take_dirty(&mut self, blocks: bool) -> (HashSet<BlockId>, bool) {
+        let tree = std::mem::take(&mut self.tree_dirty);
+        let dirty = if blocks || tree { std::mem::take(&mut self.dirty) } else { HashSet::new() };
+        (dirty, tree)
+    }
+
+    /// Give back what [`Self::take_dirty`] took but could not be committed;
+    /// the next commit retries it.
+    pub fn restore_dirty(&mut self, blocks: impl IntoIterator<Item = BlockId>, tree: bool) {
+        self.dirty.extend(blocks);
+        self.tree_dirty |= tree;
+    }
+
+    /// A block's terminal changed; its checkpoint is stale but the tree is not.
+    fn mark_block_dirty(&mut self, block: &str) {
+        self.dirty.insert(block.to_owned());
+        self.persist_kick.notify_one();
+    }
+
+    fn mark_dirty(&mut self, block: Option<&str>) {
+        if let Some(block) = block {
+            self.dirty.insert(block.to_owned());
+        }
+        self.tree_dirty = true;
+        self.persist_kick.notify_one();
+    }
+
+    /// A random id not used by any session, window or block.
+    fn fresh_id(&self, prefix: char) -> String {
+        loop {
+            let id = new_id(prefix);
+            let taken = self.blocks.contains_key(&id)
+                || self.sessions.iter().any(|s| s.id == id || s.windows.iter().any(|w| w.id == id || w.layout.contains(&id)));
+            if !taken {
+                return id;
+            }
         }
     }
 
@@ -209,7 +278,7 @@ impl Registry {
     }
 
     fn spawn_block(&mut self, session_id: &str, spawn: &SpawnSpec, fallback: TermSize) -> Result<BlockId, RpcError> {
-        let id = new_id('b');
+        let id = self.fresh_id('b');
         let size = spawn.size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(fallback);
         let info = BlockInfo {
             id: id.clone(),
@@ -218,6 +287,7 @@ impl Registry {
             title: "shell".into(),
             cwd: spawn.cwd.clone(),
             exited: None,
+            lifecycle: Lifecycle::Running,
             size,
             owner: None,
             pid: None,
@@ -234,6 +304,7 @@ impl Registry {
 
     fn session_changed(&mut self, si: usize) {
         self.sessions[si].revision += 1;
+        self.mark_dirty(None);
         let id = self.sessions[si].id.clone();
         if let Ok(view) = self.view(&id) {
             self.emit(Event::SessionChanged { view });
@@ -241,14 +312,15 @@ impl Registry {
     }
 
     fn sessions_changed(&mut self) {
+        self.mark_dirty(None);
         let sessions = self.summaries();
         self.emit(Event::SessionsChanged { sessions });
     }
 
     pub fn create_session(&mut self, name: Option<String>, spawn: &SpawnSpec) -> Result<Created, RpcError> {
-        let session_id = new_id('s');
+        let session_id = self.fresh_id('s');
         let block_id = self.spawn_block(&session_id, spawn, TermSize::new(80, 24))?;
-        let window_id = new_id('w');
+        let window_id = self.fresh_id('w');
         let name = name
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
@@ -282,7 +354,7 @@ impl Registry {
             .map(|w| self.window_size(w))
             .unwrap_or(TermSize::new(80, 24));
         let block_id = self.spawn_block(&sid, spawn, fallback)?;
-        let window_id = new_id('w');
+        let window_id = self.fresh_id('w');
         let session = self.session_mut(&sid)?;
         session.windows.push(Window { id: window_id.clone(), name: None, layout: Layout::block(&block_id), focused: block_id.clone(), zoomed: false });
         session.active_window = window_id.clone();
@@ -348,6 +420,22 @@ impl Registry {
         let window = &mut self.sessions[si].windows[wi];
         window.focused = block_id.to_owned();
         window.zoomed = zoomed;
+        self.session_changed(si);
+        Ok(())
+    }
+
+    /// Exchange the positions of two blocks of one window. Ratios stay, so
+    /// each block's grid changes only if the two slots differ in size.
+    pub fn swap(&mut self, block_id: &str, other_block_id: &str) -> Result<(), RpcError> {
+        let (si, wi) = self.locate(block_id)?;
+        let other = self.locate(other_block_id)?;
+        if other != (si, wi) {
+            return Err(RpcError::bad_request(format!("blocks {block_id} and {other_block_id} are in different windows")));
+        }
+        if block_id == other_block_id {
+            return Err(RpcError::bad_request("cannot swap a block with itself"));
+        }
+        self.sessions[si].windows[wi].layout.swap(block_id, other_block_id);
         self.session_changed(si);
         Ok(())
     }
@@ -434,12 +522,14 @@ impl Registry {
     }
 
     fn kill_block(&mut self, block_id: &str) {
+        // Closing a block hangs up its program, parked or not.
+        self.parked.remove(block_id);
         if let Some(block) = self.blocks.remove(block_id) {
             block.send(BlockMsg::Shutdown);
         }
     }
 
-    /// Remove a block from the layout (after exit or close), collapsing
+    /// Remove a closed block from the layout, collapsing
     /// empty windows and sessions.
     pub fn remove_block(&mut self, block_id: &str) {
         self.blocks.remove(block_id);
@@ -494,16 +584,19 @@ impl Registry {
     pub fn handle_note(&mut self, note: Note) {
         match note {
             Note::Changed(id) => {
+                self.mark_dirty(Some(&id));
                 if let Some(block) = self.block_info(&id) {
                     self.emit(Event::BlockChanged { block });
                 }
             }
             Note::Bell(id) => self.emit(Event::BlockBell { block_id: id }),
+            Note::Dirty(id) => self.mark_block_dirty(&id),
+            // The block stays in its layout, read-only, until closed.
             Note::Exited(id) => {
+                self.mark_dirty(Some(&id));
                 if let Some(block) = self.block_info(&id) {
                     self.emit(Event::BlockChanged { block });
                 }
-                self.remove_block(&id);
             }
         }
     }
@@ -512,6 +605,7 @@ impl Registry {
         for (_, block) in self.blocks.drain() {
             block.send(BlockMsg::Shutdown);
         }
+        self.parked.clear();
         self.sessions.clear();
     }
 }
@@ -520,5 +614,75 @@ fn expand_home(path: &str) -> String {
     match path.strip_prefix('~') {
         Some(rest) => format!("{}{rest}", silo_pty::home_dir().display()),
         None => path.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A registry with session `s` holding window `w1` (`a | b / c`) and
+    /// window `w2` (`d`), without spawning processes.
+    fn registry() -> (Registry, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let mut layout = Layout::block("a");
+        layout.split("a", "b".into(), Axis::Horizontal);
+        layout.split("b", "c".into(), Axis::Vertical);
+        layout.set_ratio(&[], 0.3);
+        let window = |id: &str, layout: Layout, focused: &str| Window { id: id.into(), name: None, layout, focused: focused.into(), zoomed: false };
+        reg.sessions.push(Session {
+            id: "s".into(),
+            name: "s".into(),
+            windows: vec![window("w1", layout, "a"), window("w2", Layout::block("d"), "d"), window("w3", Layout::block("e"), "e")],
+            active_window: "w1".into(),
+            revision: 1,
+            created_at: 0,
+        });
+        let client = reg.add_client("test".into(), false);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        reg.subscribe(client, Sink::new(tx));
+        (reg, rx)
+    }
+
+    fn changed(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Frame>) -> SessionView {
+        let frame = rx.try_recv().expect("event");
+        match frame.parse::<ServerMessage>().unwrap() {
+            ServerMessage::Event { event: Event::SessionChanged { view }, .. } => view,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn swap_exchanges_leaves_bumps_revision_and_emits() {
+        let (mut reg, mut rx) = registry();
+        reg.swap("a", "c").unwrap();
+        let view = changed(&mut rx);
+        assert_eq!(view.session.revision, 2);
+        let window = &view.session.windows[0];
+        assert_eq!(window.layout.blocks(), ["c", "b", "a"]);
+        assert!(matches!(window.layout, Layout::Split { ratio, .. } if ratio == 0.3));
+        assert_eq!(window.focused, "a", "focus follows the block, not the slot");
+
+        let err = reg.swap("a", "d").unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert!(err.message.contains("different windows"), "{err}");
+        assert_eq!(reg.swap("a", "a").unwrap_err().code, "bad_request");
+        assert_eq!(reg.swap("a", "zz").unwrap_err().code, "not_found");
+        assert!(rx.try_recv().is_err(), "rejected swaps emit nothing");
+        assert_eq!(reg.sessions[0].revision, 2);
+    }
+
+    #[test]
+    fn move_window_reorders_and_emits() {
+        let (mut reg, mut rx) = registry();
+        reg.move_window("w1", 2).unwrap();
+        let view = changed(&mut rx);
+        let order: Vec<_> = view.session.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(order, ["w2", "w3", "w1"]);
+        reg.move_window("w1", 0).unwrap();
+        let order: Vec<_> = changed(&mut rx).session.windows.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(order, ["w1", "w2", "w3"]);
+        assert_eq!(reg.sessions[0].revision, 3);
     }
 }

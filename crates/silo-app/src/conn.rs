@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use silo_client::{Control, Incompatible};
+use silo_client::{Control, DifferentBuild};
 use silo_proto::control::Event;
 use tokio::sync::mpsc;
 
@@ -21,9 +21,9 @@ pub enum ConnEvent {
     Connected(Control),
     Event(Event),
     Disconnected(String),
-    /// A server of another version holds this host; nothing was spawned.
+    /// A server of a different build holds this host; nothing was spawned.
     /// Sent again only when its description changes.
-    Incompatible(Incompatible),
+    DifferentBuild(DifferentBuild),
     /// "Quit Silo" stopped the server on purpose: quit, don't reconnect.
     Quit,
 }
@@ -75,7 +75,7 @@ pub fn start(rt: &tokio::runtime::Handle, transport: Transport, paused: Arc<Atom
 async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused: Arc<AtomicBool>) {
     let name = format!("Silo {} (macOS, pid {})", env!("CARGO_PKG_VERSION"), std::process::id());
     let mut backoff = Duration::from_millis(100);
-    let mut incompatible: Option<Incompatible> = None;
+    let mut incompatible: Option<DifferentBuild> = None;
     loop {
         if paused.load(Ordering::Acquire) {
             if tx.is_closed() {
@@ -120,12 +120,12 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused:
                 }
             }
             Err(error) => {
-                if let Some(server) = error.downcast_ref::<Incompatible>() {
+                if let Some(server) = error.downcast_ref::<DifferentBuild>() {
                     // Slow, quiet polling: nothing is spawned meanwhile.
                     if incompatible.as_ref() != Some(server) {
                         tracing::info!(?server, "incompatible server");
                         incompatible = Some(server.clone());
-                        if tx.send(ConnEvent::Incompatible(server.clone())).is_err() {
+                        if tx.send(ConnEvent::DifferentBuild(server.clone())).is_err() {
                             return;
                         }
                     }
@@ -137,7 +137,8 @@ async fn run(transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused:
                 }
                 incompatible = None;
                 tracing::debug!("connect failed: {error:#}");
-                if tx.send(ConnEvent::Disconnected(format!("{error:#}"))).is_err() || !transport.retries() {
+                // The full error (paths and all) stays in the log.
+                if tx.send(ConnEvent::Disconnected("connection failed".into())).is_err() || !transport.retries() {
                     return;
                 }
                 tokio::time::sleep(backoff).await;

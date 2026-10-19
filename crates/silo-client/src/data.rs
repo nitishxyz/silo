@@ -1,13 +1,13 @@
 use anyhow::{Context, anyhow, bail};
 use silo_proto::{
-    Frame, PROTOCOL_VERSION,
+    BUILD, Frame,
     control::{DataTicket, Method},
     data::{ClientData, DataHello, Reject, Resume, ServerData, Welcome},
     kind, read_frame, spawn_reader, write_frame,
 };
 use tokio::{net::UnixStream, sync::mpsc};
 
-use crate::Control;
+use crate::{Control, Mirror};
 
 /// An attached block data stream.
 pub struct DataStream {
@@ -25,6 +25,11 @@ impl DataSender {
     pub fn send(&self, data: &ClientData) -> bool {
         self.0.send(data.to_frame()).is_ok()
     }
+
+    /// Send the mirror's pending acknowledgement, if one is due.
+    pub fn ack(&self, mirror: &mut Mirror, idle: bool) -> bool {
+        mirror.take_ack(idle).is_none_or(|offset| self.send(&ClientData::Ack(offset)))
+    }
 }
 
 impl DataStream {
@@ -37,10 +42,8 @@ impl DataStream {
         let stream = UnixStream::connect(control.socket()).await.context("connect data stream")?;
         let (mut reader, mut writer) = stream.into_split();
         let hello = DataHello {
-            protocol: PROTOCOL_VERSION,
+            build: BUILD.to_owned(),
             ticket: ticket.ticket,
-            ghostty_rev: silo_vt::GHOSTTY_REV.to_owned(),
-            snapshot_version: 1,
             resume,
         };
         write_frame(&mut writer, &Frame::json(kind::DATA_HELLO, &hello)?).await?;
@@ -83,6 +86,12 @@ impl DataStream {
 
     pub fn send(&self, data: &ClientData) -> bool {
         self.tx.send(data.to_frame()).is_ok()
+    }
+
+    /// Send the mirror's pending acknowledgement, if one is due; `idle`
+    /// when every received frame has been applied.
+    pub fn ack(&self, mirror: &mut Mirror, idle: bool) -> bool {
+        mirror.take_ack(idle).is_none_or(|offset| self.send(&ClientData::Ack(offset)))
     }
 
     #[must_use]

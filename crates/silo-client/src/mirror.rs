@@ -2,6 +2,8 @@
 //! the same raw output bytes, so rendering, scrolling, selection and input
 //! encoding are local.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, bail};
 use silo_proto::{
     data::{Resume, ServerData, StartMode, Welcome},
@@ -15,9 +17,15 @@ pub enum Applied {
     None,
     /// The terminal changed; redraw.
     Redraw,
-    /// The process exited with this code.
-    Exited(i32),
+    /// The process exited with this code; `None` when unknown (a block
+    /// restored from disk).
+    Exited(Option<i32>),
 }
+
+/// Acknowledge at least every this many applied output bytes...
+pub const ACK_BYTES: u64 = 64 * 1024;
+/// ...or after this long with unacknowledged output.
+pub const ACK_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct Mirror {
     vt: Option<TerminalCore>,
@@ -26,7 +34,18 @@ pub struct Mirror {
     size: TermSize,
     /// Local cell metrics in device pixels, used for mouse encoding.
     cell: (u16, u16),
-    exited: Option<i32>,
+    exited: Option<Option<i32>>,
+    /// A snapshot was announced and its head has not arrived yet.
+    awaiting_head: bool,
+    /// The local state fully reflects the stream up to `next_offset`
+    /// (snapshot head and all history applied, or a full replay/resume).
+    complete: bool,
+    /// An error (gap, malformed frame, failed resume) broke the mirror;
+    /// it must not be resumed or checkpointed.
+    invalid: bool,
+    /// Last acknowledged offset on the current stream and when.
+    acked: Option<u64>,
+    acked_at: Instant,
     /// The block's effective configuration as announced by the server,
     /// re-installed into every restored terminal. Never a local guess: the
     /// server terminal answers color queries with exactly these values.
@@ -42,7 +61,34 @@ impl Default for Mirror {
 impl Mirror {
     #[must_use]
     pub fn new() -> Self {
-        Self { vt: None, epoch: 0, next_offset: 0, size: TermSize::new(80, 24), cell: (8, 16), exited: None, config: None }
+        Self {
+            vt: None,
+            epoch: 0,
+            next_offset: 0,
+            size: TermSize::new(80, 24),
+            cell: (8, 16),
+            exited: None,
+            awaiting_head: false,
+            complete: false,
+            invalid: false,
+            acked: None,
+            acked_at: Instant::now(),
+            config: None,
+        }
+    }
+
+    /// The local state exactly mirrors the server stream up to the resume
+    /// offset: safe to resume from or to checkpoint.
+    #[must_use]
+    pub fn coherent(&self) -> bool {
+        self.vt.is_some() && self.complete && !self.invalid && !self.awaiting_head
+    }
+
+    /// The point a checkpoint of the current state corresponds to, when
+    /// the state is [`coherent`](Self::coherent).
+    #[must_use]
+    pub fn checkpointable(&self) -> Option<Resume> {
+        self.resume()
     }
 
     /// The effective configuration the server last announced.
@@ -69,23 +115,31 @@ impl Mirror {
 
     /// Begin applying a new data stream.
     ///
+    /// A `Resume` welcome is accepted only when the mirror is coherent and
+    /// both the epoch and the offset match it exactly.
+    ///
     /// # Errors
-    /// Terminal allocation failure.
+    /// Terminal allocation failure, or a resume that does not match the
+    /// local state (the mirror is invalidated; reconnect without resume).
     pub fn begin(&mut self, welcome: &Welcome) -> anyhow::Result<()> {
-        self.size = welcome.size;
+        self.acked = None;
+        self.acked_at = Instant::now();
         match welcome.mode {
             StartMode::Resume => {
-                if self.vt.is_none() || welcome.epoch != self.epoch {
-                    bail!("resume without matching local state");
+                if !self.coherent() || welcome.epoch != self.epoch || welcome.offset != self.next_offset {
+                    let local = self.resume();
+                    self.invalid = true;
+                    bail!("resume at {}:{} does not match local state {local:?}", welcome.epoch, welcome.offset);
                 }
             }
             // Keep showing the previous state until the snapshot head arrives.
-            StartMode::Snapshot => {}
-            StartMode::Replay => {
-                let vt = TerminalCore::new(self.grid(welcome.size)).map_err(|e| anyhow!("{e}"))?;
-                self.install(vt);
+            StartMode::Snapshot => {
+                self.awaiting_head = true;
+                self.complete = false;
             }
         }
+        self.invalid = false;
+        self.size = welcome.size;
         self.epoch = welcome.epoch;
         self.next_offset = welcome.offset;
         self.exited = None;
@@ -98,39 +152,66 @@ impl Mirror {
     /// Malformed snapshot data or an output gap; the caller should
     /// reconnect without resume.
     pub fn apply(&mut self, data: ServerData) -> anyhow::Result<Applied> {
+        if self.invalid {
+            bail!("mirror is out of sync");
+        }
+        let applied = self.apply_inner(data);
+        if applied.is_err() {
+            self.invalid = true;
+        }
+        applied
+    }
+
+    fn apply_inner(&mut self, data: ServerData) -> anyhow::Result<Applied> {
         match data {
             ServerData::SnapshotHead(bytes) => {
+                if !self.awaiting_head {
+                    bail!("unexpected snapshot head");
+                }
                 let options = RestoreOptions { retain_continuation: false, compress_history: true };
                 let (mut vt, _) = TerminalCore::restore(&bytes, options).map_err(|e| anyhow!("{e}"))?;
                 let size = vt.size();
                 self.size = TermSize { columns: size.columns, rows: size.rows, ..self.size };
                 vt.resize(self.grid(self.size)).map_err(|e| anyhow!("{e}"))?;
                 self.install(vt);
+                self.awaiting_head = false;
                 Ok(Applied::Redraw)
             }
             ServerData::SnapshotHistory(bytes) => {
+                if self.awaiting_head || self.complete {
+                    bail!("unexpected snapshot history");
+                }
                 let vt = self.vt.as_mut().ok_or_else(|| anyhow!("history before snapshot head"))?;
                 let progress = vt.restore_history(&bytes).map_err(|e| anyhow!("{e}"))?;
                 Ok(if progress.rows > 0 { Applied::Redraw } else { Applied::None })
             }
-            ServerData::SnapshotDone => Ok(Applied::None),
-            ServerData::Output { offset, bytes } => {
-                let end = offset + bytes.len() as u64;
-                if end <= self.next_offset {
-                    return Ok(Applied::None);
+            ServerData::SnapshotDone => {
+                if self.awaiting_head || self.vt.is_none() {
+                    bail!("snapshot done before head");
                 }
-                if offset > self.next_offset {
+                self.complete = true;
+                Ok(Applied::None)
+            }
+            ServerData::Output { offset, bytes } => {
+                if self.awaiting_head {
+                    bail!("output before snapshot head");
+                }
+                let len = u64::try_from(bytes.len())?;
+                let end = offset.checked_add(len).ok_or_else(|| anyhow!("output offset overflow"))?;
+                if offset != self.next_offset {
                     bail!("output gap: expected offset {}, got {offset}", self.next_offset);
                 }
-                let skip = (self.next_offset - offset) as usize;
                 let vt = self.vt.as_mut().ok_or_else(|| anyhow!("output before terminal state"))?;
                 // Replies (DA, DSR, ...) are answered by the server's
                 // authoritative terminal; the mirror's are discarded.
-                let _ = vt.write_output(&bytes[skip..]);
+                let _ = vt.write_output(&bytes);
                 self.next_offset = end;
-                Ok(Applied::Redraw)
+                Ok(if bytes.is_empty() { Applied::None } else { Applied::Redraw })
             }
-            ServerData::Resized { size, .. } => {
+            ServerData::Resized { offset, size } => {
+                if offset > self.next_offset {
+                    bail!("resize gap: expected offset {}, got {offset}", self.next_offset);
+                }
                 self.size = size;
                 let grid = self.grid(size);
                 if let Some(vt) = self.vt.as_mut() {
@@ -164,10 +245,30 @@ impl Mirror {
         }
     }
 
-    /// Resume point for reconnecting without a snapshot.
+    /// Resume point for reconnecting without a snapshot; `None` unless the
+    /// mirror is [`coherent`](Self::coherent).
     #[must_use]
     pub fn resume(&self) -> Option<Resume> {
-        self.vt.as_ref().map(|_| Resume { epoch: self.epoch, offset: self.next_offset })
+        self.coherent().then_some(Resume { epoch: self.epoch, offset: self.next_offset })
+    }
+
+    /// Offset to acknowledge now, if any (send it as `ClientData::Ack`).
+    ///
+    /// Throttled: due once [`ACK_BYTES`] were applied or [`ACK_INTERVAL`]
+    /// passed since the last ack, and always when `idle` (the caller has
+    /// drained every frame received so far), so the server sees the client
+    /// caught up.
+    pub fn take_ack(&mut self, idle: bool) -> Option<u64> {
+        if self.invalid || self.awaiting_head || self.vt.is_none() || self.acked == Some(self.next_offset) {
+            return None;
+        }
+        let pending = self.acked.map_or(u64::MAX, |acked| self.next_offset.saturating_sub(acked));
+        if idle || pending >= ACK_BYTES || self.acked_at.elapsed() >= ACK_INTERVAL {
+            self.acked = Some(self.next_offset);
+            self.acked_at = Instant::now();
+            return self.acked;
+        }
+        None
     }
 
     #[must_use]
@@ -181,8 +282,10 @@ impl Mirror {
         self.size
     }
 
+    /// `Some(code)` once the program exited; the code is `None` when
+    /// unknown (a block restored from disk).
     #[must_use]
-    pub fn exited(&self) -> Option<i32> {
+    pub fn exited(&self) -> Option<Option<i32>> {
         self.exited
     }
 

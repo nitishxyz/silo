@@ -81,6 +81,7 @@ pub struct Runtime {
     pub pid: u32,
     pub socket: PathBuf,
     pub version: String,
-    pub ghostty_rev: String,
+    /// The server's [`crate::BUILD`].
+    pub build: String,
     pub started_at: u64,
 }

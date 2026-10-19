@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, bail};
 use silo_proto::paths;
 
-use crate::{Control, Events, compat};
+use crate::{Control, Events, mismatch};
 
 /// True if a server accepts connections for `home`.
 pub async fn server_running(home: &Path) -> bool {
@@ -21,7 +21,7 @@ pub async fn server_running(home: &Path) -> bool {
 /// if none is running. Concurrent callers serialise on `start.lock`.
 ///
 /// Never starts a second server while one holds the server lock: an
-/// incompatible server fails with [`compat::Incompatible`] at once, one that
+/// server of another build fails with [`mismatch::DifferentBuild`] at once, one that
 /// does not answer fails after a short wait.
 ///
 /// # Errors
@@ -44,7 +44,7 @@ pub async fn connect_or_spawn(home: &Path, server_exe: &Path, client_name: &str)
         Ok(connected) => return Ok(connected),
         Err(e) => incompatible(home, &e).await?,
     }
-    if compat::server_lock_held(home) {
+    if mismatch::server_lock_held(home) {
         // Starting up, or alive without a socket: wait, don't spawn.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -58,18 +58,7 @@ pub async fn connect_or_spawn(home: &Path, server_exe: &Path, client_name: &str)
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log(home))?;
-    let status = Command::new(server_exe)
-        .args(["server", "--daemon"])
-        .env("SILO_HOME", home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .status()
-        .with_context(|| format!("start {}", server_exe.display()))?;
-    if !status.success() {
-        bail!("{} server --daemon failed ({status})", server_exe.display());
-    }
+    start_daemon(home, server_exe, &[])?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match Control::connect(&socket, client_name).await {
@@ -79,18 +68,64 @@ pub async fn connect_or_spawn(home: &Path, server_exe: &Path, client_name: &str)
             }
             Err(e) if Instant::now() >= deadline => {
                 incompatible(home, &e).await?;
-                return Err(e.context(format!("server did not start; see {}", paths::log(home).display())));
+                tracing::warn!("server did not start: {e:#}; see {}", paths::log(home).display());
+                return Err(e.context("the Silo server did not start"));
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
         }
     }
 }
 
-/// Turn a protocol rejection into [`compat::Incompatible`]; other errors
+/// Run `server_exe server --daemon <extra>` for `home`, logging to its log
+/// file; returns once the daemon detached.
+pub(crate) fn start_daemon(home: &Path, server_exe: &Path, extra: &[&str]) -> anyhow::Result<()> {
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log(home))?;
+    let status = Command::new(server_exe)
+        .args(["server", "--daemon"])
+        .args(extra)
+        .env("SILO_HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .status()
+        .map_err(|error| {
+            tracing::warn!("start {}: {error}", server_exe.display());
+            anyhow::anyhow!("could not start the Silo server")
+        })?;
+    if !status.success() {
+        tracing::warn!("{} server --daemon failed ({status})", server_exe.display());
+        bail!("could not start the Silo server");
+    }
+    Ok(())
+}
+
+/// Run `server_exe server <args>` for `home` as our child in its own
+/// process group (no double fork), logging to its log file, so the caller
+/// can see it exit.
+pub(crate) fn spawn_server(home: &Path, server_exe: &Path, args: &[&str]) -> anyhow::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log(home))?;
+    Command::new(server_exe)
+        .arg("server")
+        .args(args)
+        .env("SILO_HOME", home)
+        .current_dir("/")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .map_err(|error| {
+            tracing::warn!("start {}: {error}", server_exe.display());
+            anyhow::anyhow!("could not start the Silo server")
+        })
+}
+
+/// Turn a build rejection into [`mismatch::DifferentBuild`]; other errors
 /// pass.
 async fn incompatible(home: &Path, error: &anyhow::Error) -> anyhow::Result<()> {
-    match compat::mismatch(error) {
-        Some(mismatch) => Err(compat::inspect(home, mismatch).await.into()),
-        None => Ok(()),
+    if mismatch::is_mismatch(error) {
+        return Err(mismatch::inspect(home).await.into());
     }
+    Ok(())
 }

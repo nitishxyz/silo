@@ -89,7 +89,10 @@ pub async fn run(control: &Control, block_id: &str, watch: bool) -> anyhow::Resu
                         renderer.draw(&mut mirror);
                         break Outcome::Exited(code);
                     }
-                    Ok(Applied::Redraw) => dirty = true,
+                    Ok(Applied::Redraw) => {
+                        dirty = true;
+                        stream.ack(&mut mirror, stream.rx.is_empty());
+                    }
                     Ok(Applied::None) => {}
                     Err(e) => {
                         // Out of sync: re-attach from a fresh snapshot.
@@ -140,8 +143,12 @@ pub async fn run(control: &Control, block_id: &str, watch: bool) -> anyhow::Resu
             println!("[detached]");
             0
         }
-        Outcome::Exited(code) => {
+        Outcome::Exited(Some(code)) => {
             println!("[exited {code}]");
+            0
+        }
+        Outcome::Exited(None) => {
+            println!("[exited]");
             0
         }
         Outcome::Lost => {
@@ -153,7 +160,7 @@ pub async fn run(control: &Control, block_id: &str, watch: bool) -> anyhow::Resu
 
 enum Outcome {
     Detached,
-    Exited(i32),
+    Exited(Option<i32>),
     Lost,
 }
 

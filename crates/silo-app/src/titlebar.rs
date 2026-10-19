@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, Window, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 use silo_proto::control::Method;
 
 use crate::theme::Continuous as _;
@@ -84,6 +84,48 @@ pub fn ease_toward(from: f32, to: f32) -> f32 {
     if (to - from).abs() < 0.5 { to } else { from + (to - from) * REVEAL_EASE }
 }
 
+/// Keep a press on a titlebar control from moving the window.
+fn claim_press<E: InteractiveElement>(el: E) -> E {
+    el.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// Where a tab dragged from `from` lands when dropped before (or `after`)
+/// the tab at `target`: its index once removed and reinserted, or `None`
+/// when it would not move.
+#[must_use]
+pub fn drop_index(from: usize, target: usize, after: bool) -> Option<usize> {
+    let slot = target + usize::from(after);
+    let to = if slot > from { slot - 1 } else { slot };
+    (to != from).then_some(to)
+}
+
+/// A tab being dragged; also renders the pill that follows the pointer.
+#[derive(Clone)]
+struct TabDrag {
+    window_id: String,
+    title: String,
+}
+
+impl Render for TabDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(TAB_HEIGHT))
+            .max_w(px(TAB_MAX))
+            .px(px(TAB_PAD))
+            .capsule()
+            .bg(rgb(theme::tab_selected_on(theme::surface())))
+            .shadow_md()
+            .font_family(theme::ui_font())
+            .text_size(px(12.0))
+            .text_color(rgb(theme::foreground()))
+            .child(icon("terminal", 12.0, theme::accent()))
+            .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
+    }
+}
+
 impl Workspace {
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let several = self.view.as_ref().is_some_and(|v| v.session.windows.len() > 1);
@@ -103,6 +145,23 @@ impl Workspace {
             .h(px(TITLEBAR_HEIGHT))
             .pl(px(inset))
             .pr(px(10.0))
+            // The app owns titlebar dragging: a press on empty space moves
+            // the window once dragged, and a double click zooms it.
+            // Controls stop the press, so it never reaches here.
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.titlebar_move = true))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.titlebar_move = false))
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_move = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if std::mem::take(&mut this.titlebar_move) {
+                    window.start_window_move();
+                }
+            }))
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
             .bg(rgb(strip))
             .font_family(theme::ui_font())
             .child(self.render_pill(cx));
@@ -122,6 +181,8 @@ impl Workspace {
                 .items_center()
                 .gap(px(TAB_GAP))
                 .pl(px(PILL_GAP))
+                // Room for the insertion bar after the last tab.
+                .pr(px(TAB_GAP))
                 .h_full()
                 .min_w_0()
                 .flex_shrink(1.0)
@@ -180,7 +241,35 @@ impl Workspace {
                 .when(fade_right, |el| el.child(fade(false)));
             let comfortable = self.density() == crate::hosts::Density::Comfortable;
             let menu_open = self.appearance_menu.open;
-            bar = bar.child(strip_view).child(div().flex_1()).child(
+            // The strip and the empty space after it take tab drops. The
+            // space after the last tab means "move to the end".
+            let last = view.session.windows.len().saturating_sub(1);
+            let spacer = div().flex_1().h_full().on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let id = ev.drag(cx).window_id.clone();
+                    this.set_tab_drop(&id, Some((last, true)), cx);
+                }
+            }));
+            let drop_zone = div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(strip_view)
+                .child(spacer)
+                .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                    if !ev.bounds.contains(&ev.event.position) {
+                        this.set_tab_drop("", None, cx);
+                    }
+                }))
+                .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
+                    if let Some((target, after)) = this.tab_drop.take() {
+                        this.move_tab(&drag.window_id, target, after, cx);
+                    }
+                    cx.notify();
+                }));
+            bar = bar.child(drop_zone).child(
                 div()
                     .id("appearance")
                     .flex()
@@ -201,6 +290,7 @@ impl Workspace {
                         }))
                     })
                     .child(icon("eye", 15.0, theme::muted()))
+                    .map(claim_press)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance_menu(window, cx))),
             )
             .child(
@@ -217,6 +307,7 @@ impl Workspace {
                     .cursor_pointer()
                     .tooltip(crate::tooltip::Tooltip::text("New Tab  ⌘T"))
                     .child(icon("plus", 15.0, theme::muted()))
+                    .map(claim_press)
                     .on_click(cx.listener(|this, _, window, cx| this.new_window(window, cx))),
             );
         }
@@ -276,6 +367,11 @@ impl Workspace {
         let primary = selected || !several;
         let close = self.motion.close_button(&w.id, now);
         let title = self.window_title(w, cx);
+        let drag = TabDrag { window_id: w.id.clone(), title: title.clone() };
+        // Insertion bar on the side a dragged tab would drop, centred in
+        // the gap to the neighbour.
+        let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
+        let workspace = cx.entity().downgrade();
         let window_id = w.id.clone();
         let group = format!("tab-{}", w.id);
         let hover = theme::tab_hover_on(strip);
@@ -339,16 +435,91 @@ impl Workspace {
             // Content-sized: no minimum width, so nothing pads the end.
             .max_w(px(TAB_MAX * appear))
             .when(entering, |el| el.overflow_hidden().opacity(appear))
+            // The source stays in place, faded, under the drag preview.
+            .when(self.tab_dragging.as_ref() == Some(&w.id), |el| el.opacity(0.4))
             .text_size(px(12.0))
             .text_color(rgb(if primary { theme::foreground() } else { theme::muted() }))
             .cursor_pointer()
             .child(label)
+            .when_some(insert, |el, after| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(5.0))
+                        .bottom(px(5.0))
+                        .w(px(2.0))
+                        .map(|el| if after { el.right(px(-(TAB_GAP + 2.0) / 2.0)) } else { el.left(px(-(TAB_GAP + 2.0) / 2.0)) })
+                        .continuous(1.0)
+                        .bg(rgb(theme::accent())),
+                )
+            })
+            .map(claim_press)
+            // The preview lives exactly as long as the drag, so its release
+            // ends the drag state however the drag ended.
+            .on_drag(drag, move |drag, _, _, cx| {
+                let id = drag.window_id.clone();
+                _ = workspace.update(cx, |this, cx| {
+                    this.tab_dragging = Some(id);
+                    this.tab_drop = None;
+                    cx.notify();
+                });
+                let workspace = workspace.clone();
+                cx.new(|cx| {
+                    cx.on_release(move |_, cx| {
+                        _ = workspace.update(cx, |this, cx| {
+                            this.tab_dragging = None;
+                            this.tab_drop = None;
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                    drag.clone()
+                })
+            })
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let after = ev.event.position.x > ev.bounds.center().x;
+                    let id = ev.drag(cx).window_id.clone();
+                    this.set_tab_drop(&id, Some((index, after)), cx);
+                }
+            }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.motion.set_hover(&hover_id, *hovered, Instant::now(), !cx.reduce_motion());
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, _, _| this.select_window(index)))
             .into_any_element()
+    }
+
+    /// Record where a drag of `window_id` would drop; a no-op spot clears it.
+    fn set_tab_drop(&mut self, window_id: &str, drop: Option<(usize, bool)>, cx: &mut Context<Self>) {
+        let from = self.view.as_ref().and_then(|v| v.session.windows.iter().position(|w| w.id == window_id));
+        let drop = drop.filter(|&(target, after)| from.is_some_and(|from| drop_index(from, target, after).is_some()));
+        if self.tab_drop != drop {
+            self.tab_drop = drop;
+            cx.notify();
+        }
+    }
+
+    /// Move a tab locally for an instant drop, then on the server, whose
+    /// `session.changed` confirms it; a failed call puts it back.
+    fn move_tab(&mut self, window_id: &str, target: usize, after: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else { return };
+        let windows = &mut view.session.windows;
+        let Some(from) = windows.iter().position(|w| w.id == window_id) else { return };
+        let Some(to) = drop_index(from, target, after).filter(|&to| to < windows.len()) else { return };
+        let window = windows.remove(from);
+        windows.insert(to, window);
+        let id = window_id.to_owned();
+        let revert = move |this: &mut Self| {
+            let Some(windows) = this.view.as_mut().map(|v| &mut v.session.windows) else { return };
+            if let Some(at) = windows.iter().position(|w| w.id == id) {
+                let window = windows.remove(at);
+                windows.insert(from.min(windows.len()), window);
+            }
+        };
+        let method = Method::WindowMove { window_id: window_id.to_owned(), index: to };
+        self.call_optimistic(method, "Couldn't move tab", revert, cx);
     }
 
     fn render_pill(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -397,6 +568,7 @@ impl Workspace {
                     .child(host.info.name.clone()),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
+            .map(claim_press)
             // Right-click renames the current session.
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
@@ -482,5 +654,20 @@ mod tests {
             frames += 1;
             assert!(frames < 40, "settles quickly");
         }
+    }
+
+    #[test]
+    fn drop_index_accounts_for_the_removed_source() {
+        // Tabs 0..4, dragging tab 1.
+        assert_eq!(drop_index(1, 3, false), Some(2), "before 3");
+        assert_eq!(drop_index(1, 3, true), Some(3), "after 3, the end");
+        assert_eq!(drop_index(1, 0, false), Some(0));
+        assert_eq!(drop_index(1, 0, true), None, "after 0 is where it is");
+        assert_eq!(drop_index(1, 2, false), None, "before its neighbour");
+        assert_eq!(drop_index(1, 1, false), None, "onto itself");
+        assert_eq!(drop_index(1, 1, true), None);
+        // Dragging the last tab to the front, and the first to the end.
+        assert_eq!(drop_index(3, 0, false), Some(0));
+        assert_eq!(drop_index(0, 3, true), Some(3));
     }
 }
