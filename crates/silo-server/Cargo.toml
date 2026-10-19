@@ -19,6 +19,10 @@ rand.workspace = true
 libc.workspace = true
 rustix.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { workspace = true, features = ["NSData"] }
+objc2-app-kit = { workspace = true, features = ["NSPasteboard"] }
+
 [dev-dependencies]
 silo-client.workspace = true
 data-encoding.workspace = true

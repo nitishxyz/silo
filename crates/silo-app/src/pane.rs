@@ -5,8 +5,12 @@
 use std::{
     cell::RefCell,
     ops::Range,
+    path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -17,7 +21,7 @@ use gpui::{
 use silo_client::{Applied, Control, DataSender, DataStream, Mirror, Predictor, cache::MirrorCheckpoint, transport::Conn};
 use silo_proto::{
     control::{Method, OwnMode},
-    data::{ClientData, ServerData},
+    data::{ClientData, ClipKind, ClipboardLocation, ServerData},
     model::{BlockInfo, Lifecycle, TermSize},
 };
 use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, Predicted, PreparedFrame, terminal_canvas};
@@ -25,6 +29,7 @@ use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, Mo
 
 use crate::theme::Continuous as _;
 use crate::{
+    clipboard::{self, Contents, Paste, Source},
     composition::{Composition, InputGate, RawDisposition, byte_range},
     theme,
 };
@@ -43,6 +48,19 @@ pub enum PaneEvent {
     Activated,
     /// "New shell here" on an exited or restored block.
     NewShell,
+    /// A program in the block wrote this text to the clipboard.
+    ClipboardWrite(String),
+    /// A brief message for the status bar.
+    Notice(String),
+}
+
+/// Files on their way to the block's (remote) host.
+struct Uploading {
+    files: usize,
+    /// Bytes sent and total.
+    progress: Arc<(AtomicU64, AtomicU64)>,
+    abort: tokio::task::AbortHandle,
+    _task: Task<()>,
 }
 
 /// Whether a block takes input and size ownership: only while its process
@@ -68,6 +86,8 @@ const SIZE_SETTLE: Duration = Duration::from_millis(120);
 
 pub struct Pane {
     pub block_id: String,
+    /// The block's host by name; `None` for this Mac.
+    pub host: Option<String>,
     rt: tokio::runtime::Handle,
     control: Option<Control>,
     mirror: Mirror,
@@ -115,6 +135,11 @@ pub struct Pane {
     own_requested: Option<Instant>,
     /// A multi-line paste awaiting confirmation (no bracketed paste).
     pending_paste: Option<String>,
+    /// The last ⌘V, Ctrl+V or Ctrl+Shift+V: lets a program read the clipboard.
+    paste_gesture: Option<Instant>,
+    /// The Mac clipboard for a remote host, sent ahead of the paste gesture's input.
+    push: Option<silo_proto::data::Clip>,
+    upload: Option<Uploading>,
     /// Focused pane: takes ownership rather than requesting it.
     active: bool,
     attempt: u64,
@@ -143,6 +168,7 @@ impl Pane {
     /// `restored`: a mirror from the cache, shown until the stream resumes.
     pub fn new(
         block_id: String,
+        host: Option<String>,
         rt: tokio::runtime::Handle,
         control: Option<Control>,
         restored: Option<Mirror>,
@@ -173,6 +199,7 @@ impl Pane {
         mirror.set_cell_size(cell.cell_width, cell.cell_height);
         let mut pane = Self {
             block_id,
+            host,
             rt,
             predictor: predictor_for(control.as_ref()),
             trace: crate::latency::Trace::from_env().map(|t| Rc::new(RefCell::new(t))),
@@ -206,6 +233,9 @@ impl Pane {
             wheel: 0.0,
             own_requested: None,
             pending_paste: None,
+            paste_gesture: None,
+            push: None,
+            upload: None,
             active: false,
             attempt: 0,
             stream_task: None,
@@ -372,6 +402,11 @@ impl Pane {
         let idle = batch.len() < 512;
         for data in batch {
             self.predictor.server(&data);
+            match &data {
+                ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text } => cx.emit(PaneEvent::ClipboardWrite(text.clone())),
+                ServerData::ClipboardRead { request, kind } => self.clipboard_read(*request, *kind, cx),
+                _ => {}
+            }
             match self.mirror.apply(data) {
                 Ok(Applied::Redraw) => dirty = true,
                 Ok(Applied::None) => {}
@@ -436,7 +471,7 @@ impl Pane {
             return;
         }
         let Some(sender) = &self.sender else { return };
-        sender.send(&ClientData::Input(bytes.clone()));
+        send_frames(&self.block_id, sender, clipboard::frames(self.push.take(), Some(bytes.clone())));
         if !self.remote() && self.trace.is_none() {
             return;
         }
@@ -447,6 +482,22 @@ impl Pane {
         self.predictor.input(&bytes, &frame);
         if let Some(trace) = self.trace.as_ref().filter(|_| key) {
             trace.borrow_mut().key(&bytes, target);
+        }
+    }
+
+    /// The user asked to paste: programs may read the clipboard for a
+    /// moment, and a remote host gets it on its system clipboard before the
+    /// paste's input.
+    fn on_paste_gesture(&mut self, item: Option<&gpui::ClipboardItem>) {
+        self.paste_gesture = Some(Instant::now());
+        self.push = item.filter(|_| self.remote()).and_then(|item| clipboard::push(Contents::of(item)));
+    }
+
+    /// Send a gesture's push that no input carried.
+    fn flush_push(&mut self) {
+        let Some(push) = self.push.take() else { return };
+        if let Some(sender) = self.sender.as_ref().filter(|_| self.status == Status::Live && self.running()) {
+            send_frames(&self.block_id, sender, clipboard::frames(Some(push), None));
         }
     }
 
@@ -510,6 +561,10 @@ impl Pane {
         if !self.accepts_input(window) {
             return true;
         }
+        if !release && clipboard::is_paste_gesture(&key.key, &key.modifiers) {
+            let item = if self.remote() { cx.read_from_clipboard() } else { None };
+            self.on_paste_gesture(item.as_ref());
+        }
         // Return confirms a pending paste and Escape cancels it; any other key cancels it too.
         if self.pending_paste.is_some() && !release {
             self.confirm_paste(key.key == "enter", cx);
@@ -519,18 +574,23 @@ impl Pane {
         }
         let printable =
             key.key_char.as_ref().is_some_and(|t| !t.is_empty()) && !key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform;
-        match self.input_gate.route(&key.key, printable, release, self.composition.is_active()) {
-            RawDisposition::Encode => self.encode_key(key, release, cx),
-            RawDisposition::PlatformText => return false,
-            RawDisposition::Ignore => {}
+        let handled = match self.input_gate.route(&key.key, printable, release, self.composition.is_active()) {
+            RawDisposition::Encode => {
+                self.encode_key(key, release, cx);
+                true
+            }
+            RawDisposition::PlatformText => false,
+            RawDisposition::Ignore => true,
             RawDisposition::Cancel => {
                 self.composition.cancel();
                 self.ime = None;
                 window.invalidate_character_coordinates();
                 cx.notify();
+                true
             }
-        }
-        true
+        };
+        self.flush_push();
+        handled
     }
 
     fn encode_key(&mut self, key: &Keystroke, release: bool, cx: &mut Context<Self>) {
@@ -633,9 +693,38 @@ impl Pane {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
+        let item = cx.read_from_clipboard();
+        self.on_paste_gesture(item.as_ref());
+        let Some(item) = item else { return };
+        match clipboard::choose(Contents::of(&item), self.remote()) {
+            Some(Paste::Text(text)) => self.paste_text(text, cx),
+            Some(Paste::Paths(paths)) => self.paste_paths(&paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), cx),
+            Some(Paste::SaveImage(png)) => match clipboard::save_png(&silo_proto::paths::home(), &png) {
+                Ok(path) => self.paste_paths(&[path.to_string_lossy().into_owned()], cx),
+                Err(error) => cx.emit(PaneEvent::Notice(format!("Couldn't save the image: {error}"))),
+            },
+            Some(Paste::Upload(sources)) => self.upload(sources, cx),
+            None => {}
+        }
+        self.flush_push();
+    }
+
+    /// Files dropped from Finder: their paths, uploaded first on a remote host.
+    fn drop_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.remote() {
+            self.upload(paths.into_iter().map(Source::Path).collect(), cx);
+        } else {
+            self.paste_paths(&paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), cx);
+        }
+    }
+
+    fn paste_paths<S: AsRef<str>>(&mut self, paths: &[S], cx: &mut Context<Self>) {
+        if !paths.is_empty() {
+            self.paste_text(format!("{} ", clipboard::quoted(paths)), cx);
+        }
+    }
+
+    fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(vt) = self.mirror.terminal() else {
             return;
         };
@@ -650,6 +739,125 @@ impl Pane {
             }
             Err(error) => tracing::warn!(block = %self.block_id, "{error}"),
         }
+    }
+
+    fn upload(&mut self, sources: Vec<Source>, cx: &mut Context<Self>) {
+        if self.upload.is_some() {
+            cx.emit(PaneEvent::Notice("Upload in progress".into()));
+            return;
+        }
+        let Some(control) = self.control.clone().filter(|_| self.status == Status::Live && self.running()) else {
+            return;
+        };
+        let files: Vec<silo_client::Upload> = sources
+            .into_iter()
+            .map(|source| match source {
+                Source::Path(path) => silo_client::Upload {
+                    name: path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned()),
+                    source: silo_client::UploadSource::Path(path),
+                },
+                Source::Png(bytes) => silo_client::Upload { name: "clipboard.png".into(), source: silo_client::UploadSource::Bytes(bytes) },
+            })
+            .collect();
+        let count = files.len();
+        let progress = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+        let report = progress.clone();
+        let block = self.block_id.clone();
+        let handle = self.rt.spawn(async move {
+            silo_client::upload(&control, &block, files, move |sent, total| {
+                report.0.store(sent, Ordering::Relaxed);
+                report.1.store(total, Ordering::Relaxed);
+            })
+            .await
+        });
+        let abort = handle.abort_handle();
+        let task = cx.spawn(async move |this, cx| {
+            while !handle.is_finished() {
+                cx.background_executor().timer(Duration::from_millis(100)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+            let result = handle.await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.upload = None;
+                cx.notify();
+                match result {
+                    Ok(Ok(paths)) => pane.paste_paths(&paths, cx),
+                    Ok(Err(error)) => cx.emit(PaneEvent::Notice(format!("Upload failed: {error:#}"))),
+                    Err(_) => {}
+                }
+            });
+        });
+        self.upload = Some(Uploading { files: count, progress, abort, _task: task });
+        cx.notify();
+    }
+
+    fn cancel_upload(&mut self, cx: &mut Context<Self>) {
+        if let Some(upload) = self.upload.take() {
+            upload.abort.abort();
+            cx.notify();
+        }
+    }
+
+    /// A program in the block asks for the clipboard: answered only right
+    /// after the user pasted into this focused block, never prompting. One
+    /// paste answers one read.
+    fn clipboard_read(&mut self, request: u64, kind: ClipKind, cx: &mut Context<Self>) {
+        let Some(sender) = self.sender.clone() else { return };
+        let gesture = self.paste_gesture.take_if(|at| clipboard::read_allowed(self.active, Some(*at), Instant::now()));
+        let contents = gesture.and_then(|_| cx.read_from_clipboard()).map(|item| Contents::of(&item));
+        cx.spawn(async move |this, cx| {
+            let answered = cx
+                .background_spawn(async move {
+                    let content = contents.and_then(|contents| clipboard::answer(contents, kind));
+                    let answered = content.is_some();
+                    sender.send(&ClientData::ClipboardContent { request, content });
+                    answered
+                })
+                .await;
+            if !answered && gesture.is_some() {
+                let _ = this.update(cx, |pane, _| {
+                    pane.paste_gesture = pane.paste_gesture.or(gesture);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn upload_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let upload = self.upload.as_ref()?;
+        let label = clipboard::upload_label(upload.files, upload.progress.0.load(Ordering::Relaxed), upload.progress.1.load(Ordering::Relaxed));
+        Some(
+            div()
+                .id("upload-progress")
+                .occlude()
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .continuous(10.0)
+                .bg(rgb(theme::popover()))
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .shadow_xl()
+                .text_size(px(12.0))
+                .child(label)
+                .child(
+                    div()
+                        .id("upload-cancel")
+                        .text_color(rgb(theme::muted()))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(rgb(theme::foreground())))
+                        .child("Cancel")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_upload(cx))),
+                ),
+        )
     }
 
     fn confirm_paste(&mut self, paste: bool, cx: &mut Context<Self>) {
@@ -985,6 +1193,20 @@ impl Pane {
     }
 }
 
+fn send_frames(block: &str, sender: &DataSender, frames: Vec<ClientData>) {
+    for frame in frames {
+        if let ClientData::ClipboardPush { content } = &frame {
+            let (kind, bytes) = match content {
+                silo_proto::data::Clip::Text(text) => ("text", text.len()),
+                silo_proto::data::Clip::Image { data, .. } => ("image", data.len()),
+                silo_proto::data::Clip::Types(_) => ("types", 0),
+            };
+            tracing::debug!(block, kind, bytes, "clipboard push");
+        }
+        sender.send(&frame);
+    }
+}
+
 /// Remote (iroh) connections predict, seeded with the path RTT; local ones never do.
 fn predictor_for(control: Option<&Control>) -> Predictor {
     match control.map(Control::conn) {
@@ -1146,6 +1368,21 @@ impl Render for Pane {
                 .when_some(edge_x.zip(edge_y), |el, (x, y)| el.child(outside().left(x).top(y).right_0().bottom_0()))
                 .when_some(trace, |el, (trace, prepared, predicted)| el.child(crate::latency::paint_probe(trace, prepared, predicted)))
                 .child(input_canvas(entity, metrics))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .continuous(6.0)
+                        .drag_over::<gpui::ExternalPaths>(|s, _, _, _| {
+                            s.bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent()))
+                        })
+                        .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                            this.focus.focus(window, cx);
+                            this.drop_paths(paths.paths().to_vec(), cx);
+                        })),
+                )
                 .when_some(status.filter(|_| lifecycle.is_none()), |el, text| {
                     el.child(
                         div()
@@ -1221,7 +1458,8 @@ impl Render for Pane {
                             ),
                     )
                 })
-                .children(self.paste_card(cx)),
+                .children(self.paste_card(cx))
+                .children(self.upload_card(cx)),
         )
     }
 }

@@ -6589,6 +6589,7 @@ dependencies = [
  "data-encoding",
  "gpui",
  "gpui_platform",
+ "image",
  "objc2 0.6.5",
  "qrcode",
  "raw-window-handle",
@@ -6678,6 +6679,7 @@ dependencies = [
 name = "silo-proto"
 version = "0.1.0"
 dependencies = [
+ "data-encoding",
  "schemars",
  "serde",
  "serde_json",
@@ -6708,6 +6710,8 @@ dependencies = [
  "anyhow",
  "data-encoding",
  "libc",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "rand 0.9.5",
  "rustix 1.1.5",
  "serde",

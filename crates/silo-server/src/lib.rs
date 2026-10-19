@@ -7,12 +7,15 @@ pub mod block;
 pub mod browser;
 pub mod bundle;
 pub mod conn;
+pub mod drops;
 pub mod handoff;
 mod names;
 pub mod notify;
 pub mod persist;
 pub mod registry;
 pub mod remote;
+pub mod shell;
+pub mod sysclip;
 pub mod tunnel;
 
 use std::{
@@ -47,6 +50,9 @@ pub struct Config {
     pub pin_initial_path: bool,
     /// Fixed UDP port for the remote endpoint; `None` picks a random one.
     pub port: Option<u16>,
+    /// The host's system clipboard remote pastes are pushed into and, where
+    /// it can be watched, copied back from; `None` (the default) for none.
+    pub system_clipboard: Option<Arc<dyn sysclip::SystemClipboard>>,
 }
 
 impl Default for Config {
@@ -59,6 +65,7 @@ impl Default for Config {
             mdns: true,
             pin_initial_path: false,
             port: None,
+            system_clipboard: None,
         }
     }
 }
@@ -70,6 +77,8 @@ impl Config {
 }
 
 pub struct Server {
+    /// The server's state directory.
+    pub home: PathBuf,
     pub registry: Mutex<Registry>,
     pub info: ServerInfo,
     pub shutdown: Notify,
@@ -81,6 +90,68 @@ pub struct Server {
     /// Whether the endpoint uses relays (`Net::online` waits for one).
     pub relays: bool,
     last_activity: Mutex<Instant>,
+    pub clipboard: HostClipboard,
+}
+
+/// The host's system clipboard as remote clients see it.
+#[derive(Default)]
+pub struct HostClipboard {
+    pub system: Option<Arc<dyn sysclip::SystemClipboard>>,
+    /// The change count right after our last push, so it is not copied back.
+    pushed: Mutex<Option<i64>>,
+    /// Open remote data streams; changes are watched only while any is.
+    pub remote_streams: std::sync::atomic::AtomicUsize,
+    /// The block that last got input from a remote stream.
+    pub last_input: Mutex<Option<String>>,
+}
+
+/// How often [`watch_clipboard`] looks for host clipboard changes.
+pub const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
+
+impl HostClipboard {
+    /// Put `content` (text or image within [`silo_proto::data::MAX_CLIP_BYTES`])
+    /// on the system clipboard; done when it is there.
+    pub async fn push(&self, content: silo_proto::data::Clip) {
+        let Some(system) = self.system.clone() else { return };
+        if content.size() > silo_proto::data::MAX_CLIP_BYTES {
+            tracing::debug!(len = content.size(), "clipboard push too large; ignored");
+            return;
+        }
+        let written = tokio::task::spawn_blocking(move || system.write(&content).map(|()| system.change_count())).await;
+        match written {
+            Ok(Ok(count)) => *self.pushed.lock().unwrap() = count,
+            Ok(Err(error)) => tracing::debug!("clipboard push: {error}"),
+            Err(error) => tracing::warn!("clipboard push: {error}"),
+        }
+    }
+}
+
+/// While remote streams are open, send changes of the host's clipboard
+/// that were not our own pushes to the remote clients of the block that
+/// last got their input.
+pub async fn watch_clipboard(server: Arc<Server>) {
+    let Some(system) = server.clipboard.system.clone() else { return };
+    let mut seen: Option<i64> = None;
+    loop {
+        tokio::time::sleep(CLIPBOARD_POLL).await;
+        if server.clipboard.remote_streams.load(Ordering::Relaxed) == 0 {
+            seen = None;
+            continue;
+        }
+        let probe = system.clone();
+        let Ok(Some(count)) = tokio::task::spawn_blocking(move || probe.change_count()).await else { return };
+        let changed = seen.is_some_and(|seen| seen != count);
+        seen = Some(count);
+        if !changed || *server.clipboard.pushed.lock().unwrap() == Some(count) {
+            continue;
+        }
+        let read = system.clone();
+        let Ok(Some(text)) = tokio::task::spawn_blocking(move || read.read_text()).await else { continue };
+        let Some(block_id) = server.clipboard.last_input.lock().unwrap().clone() else { continue };
+        if let Ok(block) = server.registry.lock().unwrap().block(&block_id) {
+            block.send(block::BlockMsg::HostClipboard { text });
+        }
+    }
 }
 
 impl Server {
@@ -235,8 +306,17 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     if let Err(error) = written {
         tracing::error!("write runtime.json: {error}");
     }
+    if let Err(error) = bundle::install_shims(&home) {
+        tracing::error!("install clipboard shims: {error}");
+    }
+    let (canonical, lead) = bundle::path_lead();
+    if let Err(error) = shell::install(canonical, lead) {
+        tracing::error!("install shell integration: {error}");
+    }
+    let _drops_gc = AbortOnDrop(tokio::spawn(drops::gc_daily(home.clone())));
 
     let server = Arc::new(Server {
+        home: home.clone(),
         registry: Mutex::new(Registry::restored(notes_tx, sessions, blocks)),
         info,
         shutdown: Notify::new(),
@@ -245,7 +325,9 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         net: tokio::sync::Mutex::new(net),
         relays: config.relay != RelayConfig::Disabled,
         last_activity: Mutex::new(Instant::now()),
+        clipboard: HostClipboard { system: config.system_clipboard.clone(), ..HostClipboard::default() },
     });
+    let _clipboard_task = AbortOnDrop(tokio::spawn(watch_clipboard(server.clone())));
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
     let (incoming, tunnels) = incoming.unzip();
     let _remote_task = incoming.map(|incoming| AbortOnDrop(tokio::spawn(remote::accept_loop(server.clone(), incoming))));

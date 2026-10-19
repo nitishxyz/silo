@@ -74,10 +74,16 @@ pub(crate) struct Shared {
     pub(crate) focused: AtomicBool,
     /// Last mouse press or key press sent to the page.
     pub(crate) last_input: Mutex<Option<Instant>>,
+    /// Last external file drop on the page: the navigation Chromium starts
+    /// when the page ignores it is cancelled.
+    pub(crate) dropped: Mutex<Option<Instant>>,
 }
 
 /// How long a user input counts as a gesture (Chromium's user activation).
 const GESTURE: Duration = Duration::from_secs(5);
+
+/// How long after a file drop a `file:` navigation counts as caused by it.
+const DROP_NAVIGATION: Duration = Duration::from_secs(2);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -96,5 +102,10 @@ impl Shared {
     /// Whether the user interacted with the page just now; each input counts once.
     pub(crate) fn take_gesture(&self) -> bool {
         lock(&self.last_input).take().is_some_and(|at| at.elapsed() < GESTURE)
+    }
+
+    /// Whether a navigation to `url` is the fallback of a file drop just now.
+    pub(crate) fn drop_navigation(&self, url: &str) -> bool {
+        url.starts_with("file:") && lock(&self.dropped).is_some_and(|at| at.elapsed() < DROP_NAVIGATION)
     }
 }

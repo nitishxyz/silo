@@ -232,7 +232,9 @@ impl Mirror {
             }
             // Prediction metadata: the caller hands these to its
             // `Predictor::server`; they never move `next_offset` or acks.
-            ServerData::InputAck { .. } | ServerData::TtyMode { .. } => Ok(Applied::None),
+            ServerData::InputAck { .. } | ServerData::TtyMode { .. } | ServerData::ClipboardWrite { .. } | ServerData::ClipboardRead { .. } => {
+                Ok(Applied::None)
+            }
         }
     }
 

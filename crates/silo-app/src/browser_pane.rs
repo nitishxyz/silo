@@ -223,6 +223,8 @@ pub struct BrowserPane {
     bounds: Option<gpui::Bounds<gpui::Pixels>>,
     scale: f32,
     held: Vec<silo_web::MouseButton>,
+    /// An external file drag is over the page (CEF saw drag-enter).
+    file_drag: bool,
     composing: Option<String>,
     gate: crate::composition::InputGate,
     /// IME candidate anchor in page points.
@@ -285,6 +287,7 @@ impl BrowserPane {
             bounds: None,
             scale: 2.0,
             held: Vec::new(),
+            file_drag: false,
             composing: None,
             gate: Default::default(),
             ime_rect: None,
@@ -858,6 +861,18 @@ fn page_canvas(entity: gpui::Entity<BrowserPane>) -> impl gpui::IntoElement {
             }
             let focus = entity.read(cx).focus.clone();
             window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, entity.clone()), cx);
+            let entity = entity.downgrade();
+            window.on_mouse_event(move |e: &gpui::FileDropEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && matches!(e, gpui::FileDropEvent::Exited | gpui::FileDropEvent::Ended) {
+                    let _ = entity.update(cx, |pane, _| {
+                        if std::mem::take(&mut pane.file_drag)
+                            && let Some(page) = &pane.page
+                        {
+                            page.file_drag_leave();
+                        }
+                    });
+                }
+            });
         },
     )
     .size_full()
@@ -990,7 +1005,26 @@ impl gpui::Render for BrowserPane {
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, _| this.mouse_move(e.position, e.modifiers)))
-            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, _| this.wheel(e)));
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, _| this.wheel(e)))
+            .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                let inside = e.bounds.contains(&e.event.position);
+                let (Some(page), Some((x, y))) = (this.page.clone(), this.local(e.event.position)) else { return };
+                match (inside, this.file_drag) {
+                    (true, false) => page.file_drag_enter(x, y, e.drag(cx).paths()),
+                    (true, true) => page.file_drag_over(x, y),
+                    (false, true) => page.file_drag_leave(),
+                    (false, false) => {}
+                }
+                this.file_drag = inside;
+            }))
+            .on_drop(cx.listener(|this, _: &gpui::ExternalPaths, window, cx| {
+                this.focus.focus(window, cx);
+                if std::mem::take(&mut this.file_drag)
+                    && let (Some(page), Some((x, y))) = (this.page.as_ref(), this.local(window.mouse_position()))
+                {
+                    page.file_drop(x, y);
+                }
+            }));
         for b in [gpui::MouseButton::Left, gpui::MouseButton::Right, gpui::MouseButton::Middle] {
             page = page
                 .on_mouse_down(

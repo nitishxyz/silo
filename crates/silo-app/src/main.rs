@@ -7,6 +7,7 @@ mod blink;
 mod browser_pane;
 mod cache;
 mod cli_link;
+mod clipboard;
 mod commands;
 mod composition;
 mod conn;

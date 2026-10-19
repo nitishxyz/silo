@@ -4,8 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{
-    Axis, BlockId, BlockInfo, BlockKind, ClientId, FloatRect, HistoryEntry, SessionId, SessionSummary, SessionView, TermSize, WindowId,
+use crate::{
+    data::{Clip, ClipKind, ClipboardLocation},
+    model::{Axis, BlockId, BlockInfo, BlockKind, ClientId, FloatRect, HistoryEntry, SessionId, SessionSummary, SessionView, TermSize, WindowId},
 };
 
 /// First frame on a control stream.
@@ -191,6 +192,14 @@ pub enum Method {
     #[serde(rename = "terminal.reset")]
     TerminalReset { block_id: BlockId },
 
+    /// Read the clipboard of the block's attached clients: the first answer
+    /// wins; `content` is `None` when none answers within 3 s.
+    #[serde(rename = "clipboard.read")]
+    ClipboardRead { block_id: BlockId, kind: ClipKind },
+    /// Set the clipboard of the block's attached clients (as OSC 52).
+    #[serde(rename = "clipboard.write")]
+    ClipboardWrite { block_id: BlockId, location: ClipboardLocation, text: String },
+
     #[serde(rename = "session.own_block")]
     OwnBlock {
         block_ids: Vec<BlockId>,
@@ -284,6 +293,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("terminal.resize", "Report this client's desired size; applied if owner or unowned."),
     ("terminal.clear", "Clear screen and scrollback, spliced at a parser-ground boundary."),
     ("terminal.reset", "Reset the terminal (RIS), spliced at a parser-ground boundary."),
+    ("clipboard.read", "Read the clipboard of a block's attached clients (first answer wins)."),
+    ("clipboard.write", "Set the clipboard of a block's attached clients."),
     ("session.own_block", "Take or request size/theme ownership of blocks."),
     ("session.disown_block", "Release ownership or candidacy of blocks."),
     ("data.connect", "Single-use ticket for a block data stream."),
@@ -521,6 +532,12 @@ pub struct SizeInfo {
 pub struct Capture {
     pub text: String,
     pub size: TermSize,
+}
+
+/// Result of `clipboard.read`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Pasted {
+    pub content: Option<Clip>,
 }
 
 /// Result of `pair.create`.

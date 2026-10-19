@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 
 use crate::control::{
     ApiMethod, Capture, Created, DataTicket, Dock, Empty, InvitePurpose, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices,
-    ServerInfo, SizeInfo, SpawnSpec,
+    Pasted, ServerInfo, SizeInfo, SpawnSpec,
 };
+use crate::data::{ClipKind, ClipboardLocation};
 use crate::model::{Axis, BlockKind, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
 
 /// The description of method `name`; `None` for an unknown method.
@@ -71,6 +72,8 @@ fn result_schema(method: &Method) -> Schema {
         M::SessionView { .. } => schema_for!(SessionView),
         M::TerminalCapture { .. } => schema_for!(Capture),
         M::TerminalSize { .. } => schema_for!(SizeInfo),
+        M::ClipboardRead { .. } => schema_for!(Pasted),
+        M::ClipboardWrite { .. } => schema_for!(Empty),
         M::DataConnect { .. } => schema_for!(DataTicket),
         M::PairCreate { .. } => schema_for!(PairInvite),
         M::PairList {} => schema_for!(PairedDevices),
@@ -125,6 +128,8 @@ pub fn examples() -> Vec<Method> {
         M::TerminalResize { block_id: b(), size: TermSize { columns: 120, rows: 40, cell_width: 16, cell_height: 34 } },
         M::TerminalClear { block_id: b() },
         M::TerminalReset { block_id: b() },
+        M::ClipboardRead { block_id: b(), kind: ClipKind::Image },
+        M::ClipboardWrite { block_id: b(), location: ClipboardLocation::Standard, text: "hello".into() },
         M::OwnBlock { block_ids: vec![b()], mode: OwnMode::Take },
         M::DisownBlock { block_ids: vec![b()] },
         M::DataConnect { block_id: b() },

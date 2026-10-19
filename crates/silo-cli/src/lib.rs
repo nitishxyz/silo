@@ -1,5 +1,6 @@
 //! Command logic of the `silo` CLI, callable from tests.
 
+pub mod clipboard;
 pub mod hosts;
 pub mod link;
 

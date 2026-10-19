@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
     control::{Capture, DesiredSize, HostOffer, OfferSource, OwnMode, SizeInfo},
-    data::{Reject, Resume, ServerData, StartMode, Welcome},
+    data::{Clip, ClipKind, ClipboardLocation, MAX_CLIP_BYTES, MAX_CLIP_TEXT, Reject, Resume, ServerData, StartMode, Welcome},
     kind,
     model::{BlockId, BlockInfo, ClientId, CursorShape, Lifecycle, TermSize, TerminalConfig},
     offer::{Offer, OfferScanner},
@@ -59,6 +59,9 @@ const OFFER_LIMIT: usize = 3;
 const OFFER_WINDOW: Duration = Duration::from_secs(60);
 /// Distinct offered tickets remembered per block.
 const OFFERED_CAP: usize = 16;
+/// Least time between clipboard writes a block sends; writes in between
+/// coalesce, the last one wins.
+const CLIP_WRITE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Back-pressure from the actor to the PTY reader thread.
 #[derive(Default)]
@@ -211,6 +214,29 @@ pub enum BlockMsg {
     },
     SizeInfo {
         reply: tokio::sync::oneshot::Sender<SizeInfo>,
+    },
+    /// Set attached clients' clipboard; replies how many streams got it.
+    ClipboardWrite {
+        text: String,
+        reply: tokio::sync::oneshot::Sender<usize>,
+    },
+    /// The host's system clipboard changed to `text`: set remote clients'
+    /// clipboard (local ones share the host's).
+    HostClipboard {
+        text: String,
+    },
+    /// Ask attached clients for their clipboard: the reply is the first
+    /// answer with content, else `None` once every stream has answered
+    /// (or detached), or right away when none is attached.
+    ClipboardRead {
+        kind: ClipKind,
+        reply: tokio::sync::oneshot::Sender<Option<Clip>>,
+    },
+    /// Stream `sub_id`'s answer to a clipboard read.
+    ClipboardContent {
+        sub_id: u64,
+        request: u64,
+        content: Option<Clip>,
     },
     /// Splice `bytes` into the output stream (all clients and the server
     /// terminal see them in the same order) at the next parser-ground
@@ -549,6 +575,19 @@ struct Actor {
     /// Tickets already offered and when recent offers were raised.
     offered: VecDeque<String>,
     offer_times: VecDeque<Instant>,
+    /// Clipboard reads awaiting an answer with content, and the streams
+    /// that have not answered yet.
+    clip_reads: HashMap<u64, ClipRead>,
+    next_clip_read: u64,
+    /// When the last clipboard write went out, and a later one held back
+    /// (with whether it is only for remote streams).
+    clip_sent: Option<Instant>,
+    clip_held: Option<(String, bool)>,
+}
+
+struct ClipRead {
+    reply: tokio::sync::oneshot::Sender<Option<Clip>>,
+    waiting: std::collections::HashSet<u64>,
 }
 
 /// Configuration or size change at an output offset.
@@ -735,7 +774,7 @@ fn launch(
     actor.ring_start = offset;
     actor.log.floor = offset;
     actor.osc_title = osc_title;
-    actor.command = !config.command.is_empty();
+    actor.command = !config.command.is_empty() && !crate::shell::is_hooked_login(&config.command);
     actor.pty = Some(pty);
     actor.input = Some(input);
     actor.tx = Some(tx.clone());
@@ -936,6 +975,10 @@ impl Actor {
             scanner: OfferScanner::default(),
             offered: VecDeque::new(),
             offer_times: VecDeque::new(),
+            clip_reads: HashMap::new(),
+            next_clip_read: 1,
+            clip_sent: None,
+            clip_held: None,
         }
     }
 
@@ -951,6 +994,9 @@ impl Actor {
             }
             if self.pty.is_some() && self.remote_attached() {
                 timeout = timeout.min(MODE_INTERVAL.saturating_sub(self.last_mode_poll.elapsed()));
+            }
+            if let (Some(_), Some(sent)) = (&self.clip_held, self.clip_sent) {
+                timeout = timeout.min(CLIP_WRITE_INTERVAL.saturating_sub(sent.elapsed()));
             }
             match rx.recv_timeout(timeout) {
                 Ok(BlockMsg::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -979,6 +1025,8 @@ impl Actor {
             self.flush_config();
             self.flush_injects();
             self.flush_input_acks();
+            self.flush_clipboard();
+            self.clip_reads.retain(|_, read| !read.reply.is_closed());
             if self.remote_attached() && self.last_mode_poll.elapsed() >= MODE_INTERVAL {
                 self.poll_mode();
             }
@@ -1019,6 +1067,7 @@ impl Actor {
             BlockMsg::Attach(attach) => self.attach(*attach),
             BlockMsg::Detach(id) => {
                 self.subscribers.remove(&id);
+                self.clip_forget(id);
             }
             BlockMsg::Ack { sub_id, offset } => {
                 let ring_start = self.ring_start;
@@ -1064,6 +1113,32 @@ impl Actor {
                     .collect();
                 desired.sort_by_key(|d| d.client_id);
                 let _ = reply.send(SizeInfo { size: self.size, owner: self.owner, desired });
+            }
+            BlockMsg::ClipboardWrite { text, reply } => {
+                let _ = reply.send(self.clipboard_write(text));
+            }
+            BlockMsg::HostClipboard { text } => {
+                self.hold_clipboard(text, true);
+            }
+            BlockMsg::ClipboardRead { kind, reply } => {
+                let request = self.next_clip_read;
+                self.next_clip_read += 1;
+                self.broadcast(&ServerData::ClipboardRead { request, kind });
+                let waiting: std::collections::HashSet<u64> = self.subscribers.keys().copied().collect();
+                if waiting.is_empty() {
+                    let _ = reply.send(None);
+                } else {
+                    self.clip_reads.insert(request, ClipRead { reply, waiting });
+                }
+            }
+            BlockMsg::ClipboardContent { sub_id, request, content } => {
+                let content = content.filter(|c| c.size() <= MAX_CLIP_BYTES);
+                let Some(read) = self.clip_reads.get_mut(&request) else { return false };
+                if (content.is_some() || (read.waiting.remove(&sub_id) && read.waiting.is_empty()))
+                    && let Some(read) = self.clip_reads.remove(&request)
+                {
+                    let _ = read.reply.send(content);
+                }
             }
             BlockMsg::Inject { bytes, input } if self.lifecycle.is_running() => {
                 self.injects.push_back((bytes, input));
@@ -1239,6 +1314,9 @@ impl Actor {
             if events.bells > 0 {
                 let _ = self.notes.send(Note::Bell(self.id.clone()));
             }
+            for (_, text) in events.clipboard {
+                self.clipboard_write(text);
+            }
             let mut changed = false;
             if let Some(title) = events.title {
                 self.osc_title = title;
@@ -1318,16 +1396,55 @@ impl Actor {
         }
     }
 
+    /// Hand clipboard text to every attached client (dropped above
+    /// [`MAX_CLIP_TEXT`]; held back while [`CLIP_WRITE_INTERVAL`] has not
+    /// passed since the last write); returns how many streams it goes to.
+    /// Silo has a single clipboard: primary selection writes land there too.
+    fn clipboard_write(&mut self, text: String) -> usize {
+        self.hold_clipboard(text, false)
+    }
+
+    /// Hold `text` for the next clipboard write, to remote streams only if
+    /// `remote_only`; returns how many streams it goes to.
+    fn hold_clipboard(&mut self, text: String, remote_only: bool) -> usize {
+        if text.len() > MAX_CLIP_TEXT {
+            tracing::debug!(block = %self.id, len = text.len(), "clipboard write too large; dropped");
+            return 0;
+        }
+        let count = self.subscribers.values().filter(|sub| sub.remote || !remote_only).count();
+        if count == 0 {
+            return 0;
+        }
+        self.clip_held = Some((text, remote_only));
+        self.flush_clipboard();
+        count
+    }
+
+    fn flush_clipboard(&mut self) {
+        if self.clip_held.is_none() || self.clip_sent.is_some_and(|sent| sent.elapsed() < CLIP_WRITE_INTERVAL) {
+            return;
+        }
+        if let Some((text, remote_only)) = self.clip_held.take() {
+            self.clip_sent = Some(Instant::now());
+            self.broadcast_where(&ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text }, |sub| sub.remote || !remote_only);
+        }
+    }
+
     /// Send to every subscriber, cutting off those that fell too far behind.
     /// Never blocks: slow subscribers only grow their own queue until cut.
     fn broadcast(&mut self, data: &ServerData) {
+        self.broadcast_where(data, |_| true);
+    }
+
+    /// [`Self::broadcast`] to the subscribers `to` selects.
+    fn broadcast_where(&mut self, data: &ServerData, to: impl Fn(&Subscriber) -> bool) {
         if self.subscribers.is_empty() {
             return;
         }
         let frame = data.to_frame();
         let ring_start = self.ring_start;
         let mut cut = Vec::new();
-        for (id, sub) in &mut self.subscribers {
+        for (id, sub) in self.subscribers.iter_mut().filter(|(_, sub)| to(sub)) {
             if !sub.send(frame.clone()) || sub.lagging(ring_start) {
                 cut.push(*id);
             }
@@ -1387,6 +1504,21 @@ impl Actor {
         if let Some(sub) = self.subscribers.remove(&id) {
             tracing::debug!("block {}: cutting off slow subscriber {id}", self.id);
             sub.sink.cancel();
+        }
+        self.clip_forget(id);
+    }
+
+    /// Stream `sub_id` is gone: reads only it still owed answer `None`.
+    fn clip_forget(&mut self, sub_id: u64) {
+        let done: Vec<u64> = self
+            .clip_reads
+            .iter_mut()
+            .filter_map(|(request, read)| (read.waiting.remove(&sub_id) && read.waiting.is_empty()).then_some(*request))
+            .collect();
+        for request in done {
+            if let Some(read) = self.clip_reads.remove(&request) {
+                let _ = read.reply.send(None);
+            }
         }
     }
 

@@ -15,6 +15,7 @@
 
 use std::io;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -61,6 +62,67 @@ pub struct Reject {
     pub reason: String,
 }
 
+/// Largest clipboard text a program may set (OSC 52, `silo clipboard copy`).
+pub const MAX_CLIP_TEXT: usize = 1024 * 1024;
+/// Largest clipboard content a client may answer a read with.
+pub const MAX_CLIP_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardLocation {
+    Standard,
+    Primary,
+}
+
+/// What a clipboard read asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipKind {
+    Text,
+    /// An image, preferably PNG.
+    Image,
+    /// The MIME types on offer.
+    Types,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Clip {
+    Text(String),
+    Image {
+        mime: String,
+        /// Base64 in JSON.
+        #[serde(with = "base64")]
+        #[schemars(with = "String")]
+        data: Vec<u8>,
+    },
+    Types(Vec<String>),
+}
+
+impl Clip {
+    /// Bytes of content, as limited by [`MAX_CLIP_BYTES`].
+    #[must_use]
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Image { mime, data } => mime.len() + data.len(),
+            Self::Types(types) => types.iter().map(String::len).sum(),
+        }
+    }
+}
+
+mod base64 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&data_encoding::BASE64.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        data_encoding::BASE64.decode(String::deserialize(deserializer)?.as_bytes()).map_err(D::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerData {
     SnapshotHead(Vec<u8>),
@@ -97,6 +159,17 @@ pub enum ServerData {
         echo: bool,
         icanon: bool,
     },
+    /// A program set the clipboard (OSC 52 or `silo clipboard copy`).
+    ClipboardWrite {
+        location: ClipboardLocation,
+        text: String,
+    },
+    /// A program reads the clipboard; answer with
+    /// [`ClientData::ClipboardContent`] for `request`.
+    ClipboardRead {
+        request: u64,
+        kind: ClipKind,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +186,17 @@ pub enum ClientData {
     /// This client's desired terminal configuration; applied while it owns
     /// the block (same ownership as size).
     Config(TerminalConfig),
+    /// Answer to [`ServerData::ClipboardRead`]; `None` when unavailable.
+    ClipboardContent {
+        request: u64,
+        content: Option<Clip>,
+    },
+    /// Put `content` (text or image) on the host's system clipboard before
+    /// the input that follows on this stream (a paste) is processed. Above
+    /// [`MAX_CLIP_BYTES`], or on hosts without a system clipboard, ignored.
+    ClipboardPush {
+        content: Clip,
+    },
 }
 
 fn size_bytes(size: TermSize) -> [u8; 8] {
@@ -138,6 +222,59 @@ fn parse_u64(bytes: &[u8]) -> io::Result<u64> {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
+fn location_byte(location: ClipboardLocation) -> u8 {
+    match location {
+        ClipboardLocation::Standard => 0,
+        ClipboardLocation::Primary => 1,
+    }
+}
+
+fn clip_kind_byte(kind: ClipKind) -> u8 {
+    match kind {
+        ClipKind::Text => 0,
+        ClipKind::Image => 1,
+        ClipKind::Types => 2,
+    }
+}
+
+/// `tag: u8 | body`: 0 none, 1 text (UTF-8), 2 image (`mime_len: u16 LE |
+/// mime | data`), 3 types (newline-separated).
+fn clip_bytes(content: Option<&Clip>) -> Vec<u8> {
+    match content {
+        None => vec![0],
+        Some(Clip::Text(text)) => [&[1u8][..], text.as_bytes()].concat(),
+        Some(Clip::Image { mime, data }) => {
+            let mime = &mime.as_bytes()[..mime.len().min(usize::from(u16::MAX))];
+            let mut out = Vec::with_capacity(3 + mime.len() + data.len());
+            out.push(2);
+            out.extend_from_slice(&(mime.len() as u16).to_le_bytes());
+            out.extend_from_slice(mime);
+            out.extend_from_slice(data);
+            out
+        }
+        Some(Clip::Types(types)) => [&[3u8][..], types.join("\n").as_bytes()].concat(),
+    }
+}
+
+fn parse_clip(bytes: &[u8]) -> io::Result<Option<Clip>> {
+    let utf8 = |b: &[u8]| String::from_utf8(b.to_vec()).map_err(|_| invalid("clipboard text is not UTF-8"));
+    let Some((&tag, body)) = bytes.split_first() else { return Err(invalid("short clipboard content")) };
+    Ok(match tag {
+        0 => None,
+        1 => Some(Clip::Text(utf8(body)?)),
+        2 => {
+            let len = body.get(..2).map(|b| usize::from(u16::from_le_bytes([b[0], b[1]]))).ok_or_else(|| invalid("short image"))?;
+            let mime = body.get(2..2 + len).ok_or_else(|| invalid("short image mime"))?;
+            Some(Clip::Image { mime: utf8(mime)?, data: body[2 + len..].to_vec() })
+        }
+        3 => {
+            let text = utf8(body)?;
+            Some(Clip::Types(text.split('\n').filter(|t| !t.is_empty()).map(str::to_owned).collect()))
+        }
+        _ => return Err(invalid("unknown clipboard content")),
+    })
 }
 
 impl ServerData {
@@ -170,6 +307,12 @@ impl ServerData {
                 payload.push(u8::from(*echo) | (u8::from(*icanon) << 1));
                 Frame::new(kind::TTY_MODE, payload)
             }
+            Self::ClipboardWrite { location, text } => Frame::new(kind::CLIPBOARD_WRITE, [&[location_byte(*location)][..], text.as_bytes()].concat()),
+            Self::ClipboardRead { request, kind: clip } => {
+                let mut payload = request.to_le_bytes().to_vec();
+                payload.push(clip_kind_byte(*clip));
+                Frame::new(kind::CLIPBOARD_READ, payload)
+            }
         }
     }
 
@@ -194,6 +337,23 @@ impl ServerData {
                 Some(flags) => Self::TtyMode { offset: parse_u64(&p)?, echo: flags & 1 != 0, icanon: flags & 2 != 0 },
                 None => return Err(invalid("short tty mode")),
             },
+            kind::CLIPBOARD_WRITE => {
+                let location = match p.first() {
+                    Some(0) => ClipboardLocation::Standard,
+                    Some(1) => ClipboardLocation::Primary,
+                    _ => return Err(invalid("bad clipboard location")),
+                };
+                Self::ClipboardWrite { location, text: String::from_utf8(p[1..].to_vec()).map_err(|_| invalid("clipboard text is not UTF-8"))? }
+            }
+            kind::CLIPBOARD_READ => {
+                let clip = match p.get(8) {
+                    Some(0) => ClipKind::Text,
+                    Some(1) => ClipKind::Image,
+                    Some(2) => ClipKind::Types,
+                    _ => return Err(invalid("bad clipboard kind")),
+                };
+                Self::ClipboardRead { request: parse_u64(&p)?, kind: clip }
+            }
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
     }
@@ -207,6 +367,10 @@ impl ClientData {
             Self::Resize(size) => Frame::new(kind::RESIZE, size_bytes(*size).to_vec()),
             Self::Ack(offset) => Frame::new(kind::ACK, offset.to_le_bytes().to_vec()),
             Self::Config(config) => Frame::json(kind::CONFIG, config).expect("config serializes"),
+            Self::ClipboardContent { request, content } => {
+                Frame::new(kind::CLIPBOARD_CONTENT, [&request.to_le_bytes()[..], &clip_bytes(content.as_ref())].concat())
+            }
+            Self::ClipboardPush { content } => Frame::new(kind::CLIPBOARD_PUSH, clip_bytes(Some(content))),
         }
     }
 
@@ -218,6 +382,10 @@ impl ClientData {
             kind::RESIZE => Self::Resize(parse_size(&frame.payload)?),
             kind::ACK => Self::Ack(parse_u64(&frame.payload)?),
             kind::CONFIG => Self::Config(parse_config(&frame.payload)?),
+            kind::CLIPBOARD_CONTENT => {
+                Self::ClipboardContent { request: parse_u64(&frame.payload)?, content: parse_clip(frame.payload.get(8..).unwrap_or_default())? }
+            }
+            kind::CLIPBOARD_PUSH => Self::ClipboardPush { content: parse_clip(&frame.payload)?.ok_or_else(|| invalid("empty clipboard push"))? },
             other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
         })
     }
@@ -250,9 +418,30 @@ mod tests {
             ServerData::InputAck { count: 3, offset: u64::MAX - 1 },
             ServerData::TtyMode { offset: 5, echo: false, icanon: true },
             ServerData::TtyMode { offset: 6, echo: true, icanon: false },
+            ServerData::ClipboardWrite { location: ClipboardLocation::Primary, text: "héllo".into() },
+            ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text: String::new() },
+            ServerData::ClipboardRead { request: u64::MAX, kind: ClipKind::Image },
+            ServerData::ClipboardRead { request: 1, kind: ClipKind::Types },
         ] {
             assert_eq!(ServerData::from_frame(message.to_frame()).unwrap(), message);
         }
+        for content in [
+            None,
+            Some(Clip::Text("a\nb".into())),
+            Some(Clip::Image { mime: "image/png".into(), data: vec![0x89, b'P', 0, 255] }),
+            Some(Clip::Types(vec!["text/plain".into(), "image/png".into()])),
+        ] {
+            let message = ClientData::ClipboardContent { request: 7, content: content.clone() };
+            assert_eq!(ClientData::from_frame(message.to_frame()).unwrap(), message);
+            if let Some(content) = content.clone() {
+                let message = ClientData::ClipboardPush { content };
+                assert_eq!(ClientData::from_frame(message.to_frame()).unwrap(), message);
+            }
+            let json = serde_json::to_string(&content).unwrap();
+            assert_eq!(serde_json::from_str::<Option<Clip>>(&json).unwrap(), content, "{json}");
+        }
+        assert!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_CONTENT, vec![0; 8])).is_err());
+        assert!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_PUSH, vec![0])).is_err());
         let light = TerminalConfig { background: 0x00ff_ffff, foreground: 0, scrollback_lines: 500, ..TerminalConfig::default() };
         assert!(light.is_light() && !TerminalConfig::default().is_light());
         for message in [ClientData::Input(b"ls\r".to_vec()), ClientData::Resize(size), ClientData::Ack(99), ClientData::Config(light)] {

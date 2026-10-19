@@ -182,7 +182,11 @@ impl Predictor {
                 }
             }
             ServerData::SnapshotHead(_) | ServerData::Resized { .. } | ServerData::Configured(_) | ServerData::Exited { .. } => self.clear(),
-            ServerData::SnapshotHistory(_) | ServerData::SnapshotDone | ServerData::Output { .. } => {}
+            ServerData::SnapshotHistory(_)
+            | ServerData::SnapshotDone
+            | ServerData::Output { .. }
+            | ServerData::ClipboardWrite { .. }
+            | ServerData::ClipboardRead { .. } => {}
         }
     }
 }

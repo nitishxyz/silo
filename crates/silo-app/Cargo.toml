@@ -23,6 +23,7 @@ serde_json.workspace = true
 serde.workspace = true
 data-encoding.workspace = true
 qrcode = { version = "0.14", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

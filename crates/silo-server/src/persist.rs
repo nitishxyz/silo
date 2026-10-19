@@ -159,7 +159,7 @@ fn revive(info: BlockInfo, checkpoint: Checkpoint, notes: &UnboundedSender<Note>
     if checkpoint.lifecycle == Lifecycle::Exited {
         return block::spawn_restored(info, checkpoint, notes.clone());
     }
-    let config = registry::spawn_config(&[], info.cwd.as_deref());
+    let config = registry::spawn_config(&info.id, &[], info.cwd.as_deref());
     block::spawn_resumed(info.clone(), checkpoint.clone(), &config, notes.clone()).or_else(|error| {
         tracing::warn!(block = %info.id, "restoring block without a shell: {error:#}");
         block::spawn_restored(info, checkpoint, notes.clone())

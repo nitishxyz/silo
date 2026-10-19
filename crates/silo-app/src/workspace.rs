@@ -100,7 +100,8 @@ pub struct Workspace {
     /// When each block was last checkpointed.
     checkpointed: HashMap<String, Instant>,
     _quit: Subscription,
-    _bounds: Subscription,
+    /// Window bounds and activation.
+    _window: [Subscription; 2],
     /// `shared`'s changes, connection events and offer events.
     _hosts: [Subscription; 3],
 }
@@ -175,7 +176,18 @@ impl Workspace {
             checkpointed: HashMap::new(),
             _quit: quit,
             // Fullscreen changes the titlebar inset; re-render at once.
-            _bounds: cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
+            _window: [
+                cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
+                // A remote write held while the app was in the background
+                // lands once the user is back at its focused block.
+                cx.observe_window_activation(window, |this, window, cx| {
+                    let Some(pane) = this.focused_pane(window, cx).filter(|_| window.is_window_active()) else { return };
+                    let (block, host) = (pane.read(cx).block_id.clone(), pane.read(cx).host.clone());
+                    if let Some(text) = crate::clipboard::writes(|w| w.take(&block, Instant::now())) {
+                        this.copied(text, host, cx);
+                    }
+                }),
+            ],
             _hosts: [hosts_changed, host_events, offer_events],
         };
         this.sync_hosts(cx);
@@ -591,17 +603,39 @@ impl Workspace {
                     let rt = self.rt.clone();
                     let id = block.clone();
                     let host = self.active_host;
+                    let host_name = Some(&self.hosts[host].info).filter(|h| !h.local).map(|h| h.name.clone());
                     let restored = self.shared.update(cx, |shared, _| shared.take_restored(host, &block));
-                    let pane = cx.new(|cx| Pane::new(id, rt, control, restored, window, cx));
-                    let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, _, cx| match event {
+                    let pane = cx.new(|cx| Pane::new(id, host_name, rt, control, restored, window, cx));
+                    let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, window, cx| match event {
                         PaneEvent::Activated => {
                             let block = pane.read(cx).block_id.clone();
+                            if let Some(text) = crate::clipboard::writes(|w| w.take(&block, Instant::now())) {
+                                this.copied(text, pane.read(cx).host.clone(), cx);
+                            }
                             this.pane_activated(block);
                             cx.notify();
                         }
                         PaneEvent::NewShell => {
                             let block = pane.read(cx).block_id.clone();
                             this.new_shell(block, cx);
+                        }
+                        PaneEvent::ClipboardWrite(text) => {
+                            let (block, host) = (pane.read(cx).block_id.clone(), pane.read(cx).host.clone());
+                            // A remote host writes only while the user sees the block; else on its next focus.
+                            let shown =
+                                window.is_window_active() && this.active_window().is_some_and(|w| crate::floats::window_blocks(w).contains(&block));
+                            let now = Instant::now();
+                            if host.is_none() || shown {
+                                if crate::clipboard::writes(|w| w.apply(&block, text, now)) {
+                                    this.copied(text.clone(), host, cx);
+                                }
+                            } else {
+                                crate::clipboard::writes(|w| w.defer(&block, text.clone(), now));
+                            }
+                        }
+                        PaneEvent::Notice(message) => {
+                            this.flash(message.clone(), cx);
+                            cx.notify();
                         }
                     });
                     self.panes.insert(block, (pane, subscription));
@@ -739,6 +773,12 @@ impl Workspace {
             // working by focusing the workspace itself.
             None => self.focus.focus(window, cx),
         }
+    }
+
+    fn copied(&mut self, text: String, host: Option<String>, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.flash(crate::clipboard::copied_label(host.as_deref()), cx);
+        cx.notify();
     }
 
     pub(crate) fn pane_activated(&mut self, block: String) {

@@ -168,6 +168,11 @@ enum Command {
     KillServer,
     /// Print server events as JSON lines.
     Events,
+    /// The clipboard of the Silo client showing this block (`SILO_BLOCK`).
+    Clipboard {
+        #[command(subcommand)]
+        command: ClipboardCommand,
+    },
     /// Raw control API.
     Api {
         #[command(subcommand)]
@@ -179,6 +184,25 @@ enum Command {
 enum DevicesCommand {
     /// Revoke a device by id or id prefix.
     Revoke { id: String },
+}
+
+#[derive(Subcommand)]
+enum ClipboardCommand {
+    /// Print the clipboard; exits 1 when no client answers.
+    Paste {
+        /// `text`, `types` or an image MIME type such as `image/png`.
+        #[arg(long = "type", default_value = "text")]
+        kind: String,
+    },
+    /// Set the clipboard from stdin.
+    Copy,
+    /// Run as a clipboard tool shim (`pbpaste`, `xclip`, ...).
+    #[command(hide = true)]
+    Shim {
+        tool: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -352,6 +376,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Devices { .. }
                 | Command::Id
                 | Command::Hosts { .. }
+                | Command::Clipboard { .. }
         )
     {
         bail!("--host is not supported for this command");
@@ -371,7 +396,15 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             if daemon || takeover || adopt {
                 start_menubar();
             }
-            let config = silo_server::Config { home, idle_exit, relay, mdns: !no_mdns, port, ..Default::default() };
+            let config = silo_server::Config {
+                home,
+                idle_exit,
+                relay,
+                mdns: !no_mdns,
+                port,
+                system_clipboard: silo_server::sysclip::native(),
+                ..Default::default()
+            };
             if takeover {
                 if let Err(error) = takeover_reporting(config, status).await {
                     if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
@@ -500,6 +533,11 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             shutdown(control).await?;
             Ok(0)
         }
+        Command::Clipboard { command } => match command {
+            ClipboardCommand::Paste { kind } => silo_cli::clipboard::paste_command(&kind).await,
+            ClipboardCommand::Copy => silo_cli::clipboard::copy_command().await,
+            ClipboardCommand::Shim { tool, args } => Ok(silo_cli::clipboard::shim(&tool, &args).await),
+        },
         Command::Events => {
             let (control, mut events, _net) = connect(host).await?;
             control.subscribe().await?;

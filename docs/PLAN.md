@@ -135,6 +135,8 @@ Every stream (unix or iroh QUIC) carries length-prefixed frames: `u32 len | u8 k
 | `Ack {offset}` | `SizeChanged {cols, rows, owner}` |
 | | `Exited {code}` |
 
+Clipboard layers: remote clients send `ClipboardPush` before a paste so programs that read the host's clipboard directly see it (NSPasteboard on macOS, the real `wl-copy`/`xclip` with a display), and macOS hosts send their own clipboard changes back to remote clients. Headless hosts have no system clipboard: the `pbpaste`/`xclip`/... shims in `<SILO_HOME>/shims` ask clients through `clipboard.read`/`clipboard.write`. OSC 52 always reaches every client.
+
 ### 3.4 Attach algorithm (server side, inside the PTY actor so nothing races)
 
 1. **Resume** if `resume.epoch == epoch` and `resume.offset >= ring.start`: send `Output` from that offset. No

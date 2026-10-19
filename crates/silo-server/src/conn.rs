@@ -7,13 +7,15 @@ use serde_json::{Value, json};
 use silo_proto::{
     BUILD, Frame, api,
     control::{
-        ApiMethod, BrowserCommand, ClientHello, Empty, Event, METHODS, Method, OfferSource, PairInvite, PairedDevices, Request, RpcError,
+        ApiMethod, BrowserCommand, ClientHello, Empty, Event, METHODS, Method, OfferSource, PairInvite, PairedDevices, Pasted, Request, RpcError,
         ServerHello, ServerMessage,
     },
-    data::{ClientData, DataHello, Reject},
+    data::{ClientData, DataHello, MAX_CLIP_TEXT, Reject},
     kind,
     model::short_client_name,
-    read_frame, spawn_reader, write_frame,
+    read_frame, spawn_reader,
+    upload::UploadHello,
+    write_frame,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -37,6 +39,8 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(4);
 pub const REMOTE_HELLO_MAX: usize = 8 * 1024;
 /// A join-invite connection must offer its host within this time.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `clipboard.read` waits for an attached client to answer.
+pub const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// [`read_frame`] limited to `max` bytes.
 async fn read_frame_max<R: AsyncRead + Unpin>(reader: &mut R, max: usize) -> std::io::Result<Option<Frame>> {
@@ -81,6 +85,7 @@ where
     let result = match (first.kind, expect) {
         (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
         (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
+        (kind::UPLOAD_HELLO, Expect::Any | Expect::Data) => upload(server, first, reader, writer, peer).await,
         other => {
             tracing::debug!("unexpected first frame {:#x}", other.0);
             Ok(())
@@ -443,6 +448,24 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::SizeInfo { reply });
             to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
         }
+        Method::ClipboardRead { block_id, kind } => {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::ClipboardRead { kind, reply });
+            let content = tokio::time::timeout(CLIPBOARD_READ_TIMEOUT, rx).await.ok().and_then(Result::ok).flatten();
+            to_value(Pasted { content })
+        }
+        Method::ClipboardWrite { block_id, location: _, text } => {
+            if text.len() > MAX_CLIP_TEXT {
+                let (len, max) = (silo_proto::drops::human_size(text.len() as u64), silo_proto::drops::human_size(MAX_CLIP_TEXT as u64));
+                return Err(RpcError::bad_request(format!("Too large to copy ({len}, max {max})")));
+            }
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::ClipboardWrite { text, reply });
+            match rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))? {
+                0 => Err(RpcError::new("unavailable", "No Silo client is attached to this block")),
+                _ => to_value(Empty {}),
+            }
+        }
         Method::TerminalResize { block_id, size } => {
             if size.columns == 0 || size.rows == 0 {
                 return Err(RpcError::bad_request("size must be at least 1x1"));
@@ -536,6 +559,9 @@ where
             drop(tx);
             let mut frames = spawn_reader(reader, 256);
             tokio::pin!(cancelled);
+            if remote {
+                server.clipboard.remote_streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             loop {
                 // A cut-off subscriber's stream ends now: dropping both
                 // halves closes the connection so the client reconnects.
@@ -549,6 +575,9 @@ where
                         let _ = block.send(BlockMsg::Ack { sub_id, offset });
                     }
                     Ok(ClientData::Input(bytes)) => {
+                        if remote {
+                            *server.clipboard.last_input.lock().unwrap() = Some(block_id.clone());
+                        }
                         let _ = block.send(BlockMsg::StreamInput { sub_id, bytes });
                     }
                     Ok(ClientData::Resize(size)) if size.columns > 0 && size.rows > 0 => {
@@ -557,9 +586,18 @@ where
                     Ok(ClientData::Config(config)) => {
                         let _ = block.send(BlockMsg::Config { client_id, config });
                     }
+                    Ok(ClientData::ClipboardContent { request, content }) => {
+                        let _ = block.send(BlockMsg::ClipboardContent { sub_id, request, content });
+                    }
+                    // Local clients share the host's clipboard. Awaited so
+                    // the paste input that follows sees the new content.
+                    Ok(ClientData::ClipboardPush { content }) if remote => server.clipboard.push(content).await,
                     Ok(_) => {}
                     Err(_) => break,
                 }
+            }
+            if remote {
+                server.clipboard.remote_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = block.send(BlockMsg::Detach(sub_id));
             writer_task.abort();
@@ -568,6 +606,41 @@ where
         reject("not_found", "block no longer exists")?;
     } else {
         reject("ticket", "invalid or expired ticket")?;
+    }
+    drop(tx);
+    let _ = writer_task.await;
+    Ok(())
+}
+
+/// An upload stream: files for the host of the ticket's terminal block.
+async fn upload<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W, peer: Peer) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let hello: UploadHello = hello.parse()?;
+    let (tx, writer_task) = spawn_writer(writer);
+    let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
+    let result = if hello.build != BUILD {
+        Err((RpcError::DIFFERENT_BUILD, RpcError::different_build(BUILD, &hello.build).message))
+    } else if let Some((block_id, _)) = redeemed {
+        if server.registry.lock().unwrap().blocks.get(&block_id).and_then(Block::terminal).is_some() {
+            let mut frames = spawn_reader(reader, 16);
+            crate::drops::receive(&server.home, hello.total, &mut frames).await
+        } else {
+            Err(("not_found", "block no longer exists".to_owned()))
+        }
+    } else {
+        Err(("ticket", "invalid or expired ticket".to_owned()))
+    };
+    match result {
+        Ok(uploaded) => {
+            tx.send(Frame::json(kind::UPLOADED, &uploaded)?);
+        }
+        Err((code, reason)) => {
+            tracing::debug!(code, reason, "upload refused");
+            tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason })?);
+        }
     }
     drop(tx);
     let _ = writer_task.await;

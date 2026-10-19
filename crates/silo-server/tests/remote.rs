@@ -15,11 +15,12 @@ use silo_proto::{
         Capture, ClientHello, Created, DataTicket, Event, HostOffer, InvitePurpose, Method, OfferSource, PairInvite, PairedDevices, Request,
         RpcError, ServerHello, ServerMessage, SpawnSpec,
     },
-    data::DataHello,
+    data::{ClientData, Clip, DataHello, ServerData},
     kind,
     model::TermSize,
     paths, read_frame, write_frame,
 };
+use silo_server::sysclip::Fake;
 use silo_transport::{BiStream, EndpointAddr, Identity, Net, PairTicket, RelayConfig, RemoteConn};
 use tokio::{io::AsyncWriteExt, task::JoinHandle, time::timeout};
 
@@ -32,12 +33,17 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> JoinHandle<()> {
+    start_with(home, None).await
+}
+
+async fn start_with(home: &Path, system_clipboard: Option<std::sync::Arc<dyn silo_server::sysclip::SystemClipboard>>) -> JoinHandle<()> {
     let config = silo_server::Config {
         home: home.to_owned(),
         idle_exit: None,
         checkpoint_interval: Duration::from_millis(200),
         relay: RelayConfig::Disabled,
         mdns: false,
+        system_clipboard,
         ..Default::default()
     };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
@@ -594,5 +600,78 @@ async fn printed_offer_is_raised_once_and_stripped() {
     // The same ticket again is not raised twice.
     let again = timeout(Duration::from_millis(500), next_offer(&mut events)).await;
     assert!(again.is_err(), "{again:?}");
+    shutdown(control, task).await;
+}
+
+/// A remote data stream's next clipboard write, or `None` within `wait`.
+async fn remote_clip_write(stream: &mut BiStream, wait: Duration) -> Option<String> {
+    timeout(wait, async {
+        loop {
+            let frame = read_frame(&mut *stream).await.unwrap().expect("data stream open");
+            if let Ok(ServerData::ClipboardWrite { text, .. }) = ServerData::from_frame(frame) {
+                return text;
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_pastes_reach_the_host_clipboard_and_host_copies_come_back() {
+    let home = temp_home("sysclip");
+    let fake = std::sync::Arc::new(Fake::with_delay(Duration::from_millis(300)));
+    let task = start_with(&home, Some(fake.clone())).await;
+    let control = owner(&home).await;
+    let (invite, addr) = invite(&control, 60).await;
+    let net = device(&home, "a").await;
+    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let created = create(&mut ctl).await;
+    let block = created.block_id;
+
+    // A push lands before the input after it is processed.
+    let mut data = ctl.rc.open_stream().await.unwrap();
+    let hello = DataHello { build: BUILD.into(), ticket: ticket(&mut ctl, &block).await, resume: None };
+    send(&mut data, &Frame::json(kind::DATA_HELLO, &hello).unwrap()).await;
+    let pasted = Clip::Text("pasted".into());
+    send(&mut data, &ClientData::ClipboardPush { content: pasted.clone() }.to_frame()).await;
+    send(&mut data, &ClientData::Input(b"echo mark$((40+2))\n".to_vec()).to_frame()).await;
+    let mut seen = String::new();
+    timeout(T, async {
+        while !seen.contains("mark42") {
+            let frame = read_frame(&mut data).await.unwrap().expect("data stream open");
+            if let Ok(ServerData::Output { bytes, .. }) = ServerData::from_frame(frame) {
+                seen.push_str(&String::from_utf8_lossy(&bytes));
+                assert!(seen.contains("mark42") <= (fake.content() == Some(pasted.clone())), "input ran before the push landed");
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fake.content(), Some(pasted));
+    // Our own push is not copied back.
+    assert_eq!(remote_clip_write(&mut data, Duration::from_millis(1200)).await, None);
+
+    // Local clients share the host's clipboard: their pushes are ignored,
+    // and host changes go to remote streams only.
+    let mut local = silo_client::DataStream::open(&control, &block, None).await.unwrap();
+    local.send(&ClientData::ClipboardPush { content: Clip::Text("local".into()) });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(fake.content(), Some(Clip::Text("pasted".into())));
+    fake.set_by_host("copied on host");
+    assert_eq!(remote_clip_write(&mut data, T).await.as_deref(), Some("copied on host"));
+    let local_write = timeout(Duration::from_millis(800), async {
+        loop {
+            if let ServerData::ClipboardWrite { text, .. } = local.rx.recv().await.expect("stream open") {
+                return text;
+            }
+        }
+    })
+    .await;
+    assert!(local_write.is_err(), "{local_write:?}");
+    drop(local);
+    drop(data);
+    drop(ctl);
+    net.close().await.unwrap();
     shutdown(control, task).await;
 }

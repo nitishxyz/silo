@@ -279,10 +279,24 @@ wrap_life_span_handler! {
 
 wrap_request_handler! {
     pub(crate) struct PageRequestHandler {
+        shared: Arc<Shared>,
         tunnel: SharedTunnel,
     }
 
     impl RequestHandler {
+        // UI thread. A file drop the page didn't handle never navigates the block.
+        fn on_before_browse(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            _user_gesture: c_int,
+            _is_redirect: c_int,
+        ) -> c_int {
+            let url = request.map(|r| CefString::from(&r.url()).to_string()).unwrap_or_default();
+            c_int::from(self.shared.drop_navigation(&url))
+        }
+
         // IO thread. Answers only proxy challenges from this profile's own tunnel proxy; anything
         // else (origin 401s, other proxies) is cancelled, never prompted or auto-filled.
         fn auth_credentials(
@@ -402,7 +416,7 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         PageDisplayHandler::new(Arc::clone(shared)),
         PageLoadHandler::new(Arc::clone(shared)),
         PageLifeSpanHandler::new(Arc::clone(shared)),
-        PageRequestHandler::new(Arc::clone(tunnel)),
+        PageRequestHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PagePermissionHandler::new(Arc::clone(shared)),
     )
 }

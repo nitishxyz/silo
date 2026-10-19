@@ -50,6 +50,7 @@ impl Runtime {
             notify: options.notify,
             focused: AtomicBool::new(false),
             last_input: Mutex::new(None),
+            dropped: Mutex::new(None),
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
@@ -170,11 +171,44 @@ impl Browser {
     }
 }
 
+fn copy_operation() -> DragOperationsMask {
+    DragOperationsMask::from(sys::cef_drag_operations_mask_t::DRAG_OPERATION_COPY)
+}
+
 /// Input, in view points (DIP) relative to the browser's top-left.
 impl Browser {
     pub fn mouse_move(&self, x: f32, y: f32, mods: Modifiers, held: &[MouseButton]) {
         if let Some(host) = self.host() {
             host.send_mouse_move_event(Some(&mouse_event(x, y, mods, held)), 0);
+        }
+    }
+
+    /// Files from outside the app dragged onto the page at `(x, y)`.
+    pub fn file_drag_enter(&self, x: f32, y: f32, paths: &[std::path::PathBuf]) {
+        let (Some(host), Some(mut data)) = (self.host(), drag_data_create()) else { return };
+        for path in paths {
+            data.add_file(Some(&CefString::from(path.to_string_lossy().as_ref())), None);
+        }
+        host.drag_target_drag_enter(Some(&mut data), Some(&mouse_event(x, y, Modifiers::default(), &[])), copy_operation());
+    }
+
+    pub fn file_drag_over(&self, x: f32, y: f32) {
+        if let Some(host) = self.host() {
+            host.drag_target_drag_over(Some(&mouse_event(x, y, Modifiers::default(), &[])), copy_operation());
+        }
+    }
+
+    pub fn file_drag_leave(&self) {
+        if let Some(host) = self.host() {
+            host.drag_target_drag_leave();
+        }
+    }
+
+    /// Ends a file drag at `(x, y)`; unhandled by the page, it does nothing.
+    pub fn file_drop(&self, x: f32, y: f32) {
+        if let Some(host) = self.host() {
+            *lock(&self.shared.dropped) = Some(std::time::Instant::now());
+            host.drag_target_drop(Some(&mouse_event(x, y, Modifiers::default(), &[])));
         }
     }
 

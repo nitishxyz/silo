@@ -4,15 +4,18 @@
 //! `u32 len (LE, kind + payload) | u8 kind | payload`.
 //! The first frame of a stream decides its role: [`kind::CONTROL_HELLO`]
 //! opens a JSON control stream, [`kind::DATA_HELLO`] attaches a binary data
-//! stream to one block using a ticket obtained over control.
+//! stream to one block using a ticket obtained over control,
+//! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket.
 
 pub mod api;
 pub mod control;
 pub mod data;
+pub mod drops;
 pub mod frame;
 pub mod model;
 pub mod offer;
 pub mod paths;
+pub mod upload;
 
 #[cfg(test)]
 mod build_id;
@@ -48,6 +51,10 @@ pub mod kind {
     pub const ACK: u8 = 0x13;
     /// JSON [`crate::model::TerminalConfig`]: this client's desired config.
     pub const CONFIG: u8 = 0x14;
+    /// `request: u64 LE | content`, see [`crate::data::ClientData::ClipboardContent`].
+    pub const CLIPBOARD_CONTENT: u8 = 0x15;
+    /// `content`, see [`crate::data::ClientData::ClipboardPush`].
+    pub const CLIPBOARD_PUSH: u8 = 0x16;
 
     // Data stream, server -> client.
     pub const WELCOME: u8 = 0x81;
@@ -65,4 +72,21 @@ pub mod kind {
     pub const INPUT_ACK: u8 = 0x8a;
     /// `offset: u64 LE | flags: u8` (bit 0 echo, bit 1 icanon).
     pub const TTY_MODE: u8 = 0x8b;
+    /// `location: u8 | text`, see [`crate::data::ServerData::ClipboardWrite`].
+    pub const CLIPBOARD_WRITE: u8 = 0x8c;
+    /// `request: u64 LE | kind: u8`, see [`crate::data::ServerData::ClipboardRead`].
+    pub const CLIPBOARD_READ: u8 = 0x8d;
+
+    /// JSON [`crate::upload::UploadHello`].
+    pub const UPLOAD_HELLO: u8 = 0x20;
+    // Upload stream, client -> server.
+    /// JSON [`crate::upload::UploadEntry`].
+    pub const UPLOAD_ENTRY: u8 = 0x21;
+    /// Bytes of the current file.
+    pub const UPLOAD_CHUNK: u8 = 0x22;
+    /// Every entry was sent.
+    pub const UPLOAD_END: u8 = 0x23;
+    // Upload stream, server -> client (or `REJECT`).
+    /// JSON [`crate::upload::Uploaded`].
+    pub const UPLOADED: u8 = 0x8e;
 }

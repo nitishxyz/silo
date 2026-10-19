@@ -50,6 +50,19 @@ pub fn log(home: &std::path::Path) -> PathBuf {
     home.join("server.log")
 }
 
+/// Clipboard tool shims (`pbpaste`, `xclip`, ...) put first on spawned
+/// shells' `PATH`.
+#[must_use]
+pub fn shims(home: &std::path::Path) -> PathBuf {
+    home.join("shims")
+}
+
+/// Uploaded files, one `<yyyymmdd-hhmmss>-<id>` directory per upload.
+#[must_use]
+pub fn drops(home: &std::path::Path) -> PathBuf {
+    home.join("drops")
+}
+
 /// Written by "Quit Silo" with the pid of the server it stops, so clients
 /// can tell that shutdown from a crash or a restart.
 #[must_use]

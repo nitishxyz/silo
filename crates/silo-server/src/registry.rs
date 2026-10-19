@@ -447,7 +447,7 @@ impl Registry {
             self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
             return Ok(id);
         }
-        let config = spawn_config(&spawn.command, spawn.cwd.as_deref());
+        let config = spawn_config(&id, &spawn.command, spawn.cwd.as_deref());
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
         self.blocks.insert(id.clone(), Block::Terminal(handle));
         Ok(id)
@@ -874,13 +874,21 @@ impl Registry {
     }
 }
 
-/// How a terminal block runs `command` (the login shell if empty) in `cwd`.
-pub fn spawn_config(command: &[String], cwd: Option<&str>) -> SpawnConfig {
-    SpawnConfig {
-        command: command.iter().map(Into::into).collect(),
-        cwd: cwd.map(|c| std::path::PathBuf::from(expand_home(c))).filter(|p| p.is_dir()),
-        env: crate::bundle::shell_env().to_vec(),
+/// How terminal block `block_id` runs `command` (the login shell if empty) in `cwd`.
+pub fn spawn_config(block_id: &str, command: &[String], cwd: Option<&str>) -> SpawnConfig {
+    let mut env = crate::bundle::shell_env(block_id);
+    let mut command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
+    if command.is_empty() {
+        let program = silo_pty::user_shell();
+        if let Some(shell) = crate::shell::Shell::of(&program) {
+            let (args, hook_env) = crate::shell::hook(shell, &crate::bundle::path_lead().0);
+            env.extend(hook_env);
+            if !args.is_empty() {
+                command = std::iter::once(program.into_os_string()).chain(args).collect();
+            }
+        }
     }
+    SpawnConfig { command, cwd: cwd.map(|c| std::path::PathBuf::from(expand_home(c))).filter(|p| p.is_dir()), env }
 }
 
 fn expand_home(path: &str) -> String {
@@ -1101,7 +1109,7 @@ mod tests {
             pid: None,
             browser: None,
         };
-        let config = spawn_config(&["/bin/sh".into(), "-c".into(), script.into()], None);
+        let config = spawn_config("b", &["/bin/sh".into(), "-c".into(), script.into()], None);
         let mut handle = block::spawn(info, &config, notes.clone()).unwrap();
         assert!(handle.command);
         handle.command = !shell;
