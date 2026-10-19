@@ -718,10 +718,21 @@ int silo_vt_key(SiloVt *vt, const char *key, const char *text, size_t len,
     return result;
 }
 
-int silo_vt_paste(SiloVt *vt, char *data, size_t len, char *out, size_t cap, size_t *written) {
-    if (!ghostty_paste_is_safe(data, len)) return -2;
+static bool contains(const char *data, size_t len, const char *needle, size_t n) {
+    for (size_t i = 0; i + n <= len; i++)
+        if (memcmp(data + i, needle, n) == 0) return true;
+    return false;
+}
+
+int silo_vt_paste(SiloVt *vt, char *data, size_t len, bool line_breaks, char *out, size_t cap, size_t *written) {
     GhosttyTerminalModeConfig mode = { .mode = GHOSTTY_MODE_BRACKETED_PASTE };
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode));
+    /* Upstream's terminal-aware rule (ghostty_terminal_paste): line breaks
+     * run commands only outside a bracketed paste (-2 unless the user
+     * allowed them); inside one only its terminator can (-3). */
+    static const char end[] = "\x1b[201~";
+    if (mode.value && contains(data, len, end, sizeof end - 1)) return -3;
+    if (!mode.value && !line_breaks && (contains(data, len, "\n", 1) || contains(data, len, "\r", 1))) return -2;
     return ghostty_paste_encode(data, len, mode.value, out, cap, written);
 }
 

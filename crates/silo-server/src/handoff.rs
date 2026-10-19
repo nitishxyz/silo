@@ -13,10 +13,11 @@
 //!    - one [`crate::persist::encode`]d checkpoint per `Transfer::blocks`
 //!      entry, in order (browser blocks travel as `Transfer::browsers`
 //!      state only).
-//! 3. old -> successor: the PTY masters via `SCM_RIGHTS`, in messages of at
-//!    most [`FDS_PER_MESSAGE`] descriptors, each with a 4-byte `u32 LE`
-//!    payload holding its descriptor count (`PtyRecord::fd` indexes their
-//!    concatenation); then one message (payload `2`) with the server lock
+//! 3. old -> successor: the PTY masters and PTY host status pipes via
+//!    `SCM_RIGHTS`, in messages of at most [`FDS_PER_MESSAGE`] descriptors,
+//!    each with a 4-byte `u32 LE` payload holding its descriptor count
+//!    (`PtyRecord::fd` and `PtyRecord::status` index their concatenation);
+//!    then one message (payload `2`) with the server lock
 //!    and the listening socket. `flock` follows the open file description,
 //!    so the lock never lapses, and connections queue in the shared backlog.
 //! 4. successor -> old: [`READY`] once every block runs and its state store
@@ -91,6 +92,13 @@ pub struct Record {
 pub struct PtyRecord {
     /// Index into the transferred descriptors.
     pub fd: usize,
+    /// Index of the PTY host's status pipe; `None` for programs started
+    /// without one.
+    #[serde(default)]
+    pub status: Option<usize>,
+    /// Raw wait status the old server already read from that pipe.
+    #[serde(default)]
+    pub exit: Option<i32>,
     pub pid: i32,
     pub columns: u16,
     pub rows: u16,
@@ -156,7 +164,8 @@ pub type Received = (Transfer, Vec<Vec<u8>>, Vec<OwnedFd>, [OwnedFd; 2]);
 pub fn recv(sock: &mut UnixStream) -> io::Result<Received> {
     let transfer: Transfer = serde_json::from_slice(&read_frame(sock).map_err(refused)?)?;
     let checkpoints = (0..transfer.blocks.len()).map(|_| read_frame(sock)).collect::<io::Result<Vec<_>>>()?;
-    let want = transfer.blocks.iter().filter_map(|b| b.pty.as_ref()).count();
+    let ptys = || transfer.blocks.iter().filter_map(|b| b.pty.as_ref());
+    let want = ptys().map(|p| 1 + usize::from(p.status.is_some())).sum();
     let mut fds = Vec::with_capacity(want);
     while fds.len() < want {
         let (payload, got) = silo_pty::handoff::recv_fds(sock, FDS_PER_MESSAGE, 4)?;
@@ -166,7 +175,7 @@ pub fn recv(sock: &mut UnixStream) -> io::Result<Received> {
         }
         fds.extend(got);
     }
-    if fds.len() != want || transfer.blocks.iter().filter_map(|b| b.pty.as_ref()).any(|p| p.fd >= want) {
+    if fds.len() != want || ptys().any(|p| p.fd >= want || p.status.is_some_and(|s| s >= want)) {
         return Err(invalid("descriptor index out of range"));
     }
     let (payload, got) = silo_pty::handoff::recv_fds(sock, 2, 4)?;
@@ -205,7 +214,7 @@ fn invalid(message: &str) -> io::Error {
 /// A block during an upgrade on the old server: released for transfer, or
 /// still running because releasing it failed.
 enum Slot {
-    Released(Box<BlockInfo>, Handoff),
+    Released(Box<BlockInfo>, Box<Handoff>),
     Kept(BlockHandle),
 }
 
@@ -236,7 +245,7 @@ pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, o
                     if released.pty.is_none() {
                         released.pty = parked.remove(&id);
                     }
-                    slots.push((id, Slot::Released(info, released)));
+                    slots.push((id, Slot::Released(info, Box::new(released))));
                     continue;
                 }
                 Err(error) => failed = Some(error.context(format!("release block {id}"))),
@@ -265,9 +274,17 @@ async fn transfer(mut sock: UnixStream, mut transfer: Transfer, slots: &[(BlockI
         let pty = match &released.pty {
             Some(pty) => {
                 fds.push(pty.master.try_clone()?);
+                let fd = fds.len() - 1;
+                let status = match &pty.status {
+                    Some(status) => {
+                        fds.push(status.try_clone()?);
+                        Some(fds.len() - 1)
+                    }
+                    None => None,
+                };
                 let s = pty.size;
                 let (columns, rows, cell_width, cell_height) = (s.columns, s.rows, s.cell_width, s.cell_height);
-                Some(PtyRecord { fd: fds.len() - 1, pid: pty.pid, columns, rows, cell_width, cell_height })
+                Some(PtyRecord { fd, status, exit: pty.exit, pid: pty.pid, columns, rows, cell_width, cell_height })
             }
             None => None,
         };
@@ -300,8 +317,8 @@ fn readopt(registry: &std::sync::Mutex<crate::registry::Registry>, slots: Vec<(B
     for (id, slot) in slots {
         let handle = match slot {
             Slot::Kept(handle) => Ok(handle),
-            Slot::Released(info, Handoff { checkpoint, pty: Some(pty) }) => {
-                match block::spawn_adopted((*info).clone(), checkpoint.clone(), pty, notes.clone()) {
+            Slot::Released(info, released) => match *released {
+                Handoff { checkpoint, pty: Some(pty) } => match block::spawn_adopted((*info).clone(), checkpoint.clone(), pty, notes.clone()) {
                     Ok(handle) => Ok(handle),
                     Err(error) => match error.downcast::<block::AdoptFailed>() {
                         Ok(failed) => {
@@ -311,9 +328,9 @@ fn readopt(registry: &std::sync::Mutex<crate::registry::Registry>, slots: Vec<(B
                         }
                         Err(error) => Err(error),
                     },
-                }
-            }
-            Slot::Released(info, Handoff { checkpoint, pty: None }) => restore(*info, checkpoint, &notes),
+                },
+                Handoff { checkpoint, pty: None } => restore(*info, checkpoint, &notes),
+            },
         };
         match handle {
             Ok(handle) => drop(reg.blocks.insert(id, Block::Terminal(handle))),
@@ -427,8 +444,9 @@ async fn adopt(
         let spawned = persist::decode(&bytes).and_then(|checkpoint| match record.pty {
             Some(p) => {
                 let master = fds[p.fd].take().ok_or_else(|| anyhow::anyhow!("descriptor {} reused", p.fd))?;
+                let status = p.status.map(|i| fds[i].take().ok_or_else(|| anyhow::anyhow!("descriptor {i} reused"))).transpose()?;
                 let size = silo_pty::PtySize { columns: p.columns, rows: p.rows, cell_width: p.cell_width, cell_height: p.cell_height };
-                block::spawn_adopted(record.info, checkpoint, silo_pty::Detached { master, pid: p.pid, size }, notes.clone())
+                block::spawn_adopted(record.info, checkpoint, silo_pty::Detached { master, status, exit: p.exit, pid: p.pid, size }, notes.clone())
             }
             None => block::spawn_restored(record.info, checkpoint, notes.clone()),
         });
@@ -558,7 +576,7 @@ mod tests {
         let pid = released.pty.as_ref().unwrap().pid;
         released.checkpoint.snapshot = b"not a snapshot".to_vec();
         let registry = std::sync::Mutex::new(crate::registry::Registry::new(notes));
-        readopt(&registry, vec![("b1".into(), Slot::Released(Box::new(info), released))]);
+        readopt(&registry, vec![("b1".into(), Slot::Released(Box::new(info), Box::new(released)))]);
         tokio::time::sleep(Duration::from_millis(200)).await;
         {
             let reg = registry.lock().unwrap();

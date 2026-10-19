@@ -202,7 +202,16 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
     let released = block::spawn(info.clone(), &config, notes).unwrap().handoff().await.unwrap();
     let pty = released.pty.unwrap();
     let (pid, s) = (pty.pid, pty.size);
-    let record = handoff::PtyRecord { fd: 0, pid, columns: s.columns, rows: s.rows, cell_width: s.cell_width, cell_height: s.cell_height };
+    let record = handoff::PtyRecord {
+        fd: 0,
+        status: None,
+        exit: None,
+        pid,
+        columns: s.columns,
+        rows: s.rows,
+        cell_width: s.cell_width,
+        cell_height: s.cell_height,
+    };
     let window = Window::new("w1".into(), "b1");
     let session = Session { id: "s1".into(), name: "main".into(), windows: vec![window], active_window: "w1".into(), revision: 1, created_at: 0 };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
@@ -297,5 +306,46 @@ async fn aborted_takeover_keeps_old_server_serving() {
     control.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// After a takeover the successor still learns each program's exit status
+/// from its PTY host: `exit 0` closes the block, `exit 3` shows Exited(3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn takeover_keeps_exit_status() {
+    let home = temp_home("status");
+    let old = start(&home).await;
+    let control = connect(&home).await;
+    let login = SpawnSpec { command: Vec::new(), cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
+    let exiting = SpawnSpec { command: vec!["/bin/sh".into(), "-c".into(), "read code; exit $code".into()], ..login.clone() };
+    let created: Created =
+        control.call(Method::SessionCreate { name: Some("main".into()), spawn: login, kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split =
+        Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: exiting, kind: BlockKind::Terminal, url: None };
+    let failing: Created = control.call(split).await.unwrap();
+
+    let new = tokio::spawn(silo_server::takeover(config(&home), false));
+    tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().expect("old server commits and exits");
+    drop(control);
+    let control = reconnect(&home).await;
+
+    let failed = DataStream::open(&control, &failing.block_id, None).await.unwrap();
+    failed.send(&ClientData::Input(b"3\n".to_vec()));
+    let clean = DataStream::open(&control, &created.block_id, None).await.unwrap();
+    clean.send(&ClientData::Input(b"exit 0\n".to_vec()));
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let blocks = view(&control, &created.session_id).await.blocks;
+        let ids: Vec<_> = blocks.iter().map(|b| (b.id.as_str(), b.lifecycle, b.exited)).collect();
+        if ids == [(failing.block_id.as_str(), Lifecycle::Exited, Some(3))] {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "exit statuses not seen: {ids:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop((failed, clean, control));
+    tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }

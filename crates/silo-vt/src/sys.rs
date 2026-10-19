@@ -119,7 +119,7 @@ unsafe extern "C" {
         cap: usize,
         written: *mut usize,
     ) -> i32;
-    fn silo_vt_paste(vt: *mut c_void, text: *mut u8, len: usize, out: *mut u8, cap: usize, written: *mut usize) -> i32;
+    fn silo_vt_paste(vt: *mut c_void, text: *mut u8, len: usize, line_breaks: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_scroll(vt: *mut c_void, delta: i32);
     fn silo_vt_scroll_to_row(vt: *mut c_void, row: u64);
     fn silo_vt_scrollbar(vt: *mut c_void, out: *mut u64) -> i32;
@@ -703,11 +703,27 @@ impl TerminalCore {
         Ok(out)
     }
 
-    /// Conservatively rejects multiline and escape-terminator pastes; no implicit consent.
+    /// The bytes for a paste, or `None` when it has line breaks outside a
+    /// bracketed paste: those run as commands, so the user must confirm
+    /// ([`Self::paste_confirmed`]).
     ///
     /// # Errors
-    /// Rejects oversized or unsafe pastes and upstream encoder failures.
-    pub fn paste(&mut self, text: &str) -> Result<Vec<u8>, TerminalError> {
+    /// Rejects oversized pastes, the bracketed-paste terminator inside one
+    /// and upstream encoder failures.
+    pub fn paste(&mut self, text: &str) -> Result<Option<Vec<u8>>, TerminalError> {
+        self.encode_paste(text, false)
+    }
+
+    /// A paste whose line breaks the user allowed; sent as carriage returns
+    /// outside a bracketed paste.
+    ///
+    /// # Errors
+    /// As [`Self::paste`], minus the line-break refusal.
+    pub fn paste_confirmed(&mut self, text: &str) -> Result<Vec<u8>, TerminalError> {
+        self.encode_paste(text, true)?.ok_or_else(|| TerminalError("paste refused line breaks".into()))
+    }
+
+    fn encode_paste(&mut self, text: &str, line_breaks: bool) -> Result<Option<Vec<u8>>, TerminalError> {
         if text.len() > 32768 {
             return Err(TerminalError("paste exceeds 32 KiB".into()));
         }
@@ -715,13 +731,15 @@ impl TerminalCore {
         let mut out = vec![0; data.len() + 32];
         let mut written = 0;
         // SAFETY: separate mutable buffers, lengths match allocations, exclusive handle.
-        let result = unsafe { silo_vt_paste(self.handle.as_ptr(), data.as_mut_ptr(), data.len(), out.as_mut_ptr(), out.len(), &raw mut written) };
-        if result == -2 {
-            return Err(TerminalError("Paste refused: multiline/escape paste requires confirmation (not yet implemented)".into()));
+        let result =
+            unsafe { silo_vt_paste(self.handle.as_ptr(), data.as_mut_ptr(), data.len(), line_breaks, out.as_mut_ptr(), out.len(), &raw mut written) };
+        match result {
+            -2 => return Ok(None),
+            -3 => return Err(TerminalError("Paste refused: it could end the program's bracketed paste".into())),
+            _ => check(result)?,
         }
-        check(result)?;
         out.truncate(written);
-        Ok(out)
+        Ok(Some(out))
     }
 
     pub fn scroll(&mut self, lines: i32) {
@@ -910,8 +928,12 @@ mod tests {
         // Ctrl+U, readline's unix-line-discard, not written to the PTY raw.
         key.key = "u".into();
         assert_eq!(vt.encode_key(&key).unwrap(), b"\x15");
-        assert!(vt.paste("echo danger\n").is_err());
+        assert_eq!(vt.paste("echo danger\n").unwrap(), None, "line breaks need confirmation");
+        assert_eq!(vt.paste_confirmed("a\nb\n").unwrap(), b"a\rb\r");
         vt.write_output(b"\x1b[?2004h").unwrap();
-        assert_eq!(vt.paste("hello").unwrap(), b"\x1b[200~hello\x1b[201~");
+        assert_eq!(vt.paste("hello").unwrap().unwrap(), b"\x1b[200~hello\x1b[201~");
+        assert_eq!(vt.paste("a\nb").unwrap().unwrap(), b"\x1b[200~a\nb\x1b[201~", "line breaks are safe when bracketed");
+        assert!(vt.paste("x\x1b[201~rm -rf ~\n").is_err());
+        assert!(vt.paste_confirmed("x\x1b[201~rm -rf ~\n").is_err());
     }
 }

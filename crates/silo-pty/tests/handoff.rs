@@ -12,7 +12,7 @@ use silo_pty::{Pty, PtyEvent, PtySize, SpawnConfig, handoff};
 const SIZE: PtySize = PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 };
 const LOOP: &str = "stty -echo; echo ready; while read x; do echo got:$x; done";
 
-fn shell(script: &str, on_exit: impl FnOnce(std::process::ExitStatus) + Send + 'static) -> Pty {
+fn shell(script: &str, on_exit: impl FnOnce(Option<std::process::ExitStatus>) + Send + 'static) -> Pty {
     let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], ..Default::default() };
     Pty::spawn(&config, SIZE, on_exit).unwrap()
 }
@@ -50,12 +50,13 @@ fn detach_then_adopt_keeps_shell_running() {
 
     let detached = pty.detach();
     assert_eq!(detached.size, SIZE);
+    let pid = detached.pid;
     // Written while nobody owns the PTY; the output waits in the master.
     rustix::io::write(&detached.master, b"two\n").unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
     let (exit_tx, exit_rx) = mpsc::channel();
-    let mut adopted = Pty::adopt(detached.master, detached.pid, detached.size, move |code| {
+    let mut adopted = Pty::adopt(detached, move |code| {
         let _ = exit_tx.send(code);
     })
     .unwrap();
@@ -66,11 +67,12 @@ fn detach_then_adopt_keeps_shell_running() {
 
     drop(adopted);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while unsafe { libc::kill(detached.pid, 0) } == 0 {
+    while unsafe { libc::kill(pid, 0) } == 0 {
         assert!(Instant::now() < deadline, "shell survived drop of adopted pty");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(exit_rx.try_recv().is_err(), "drop must not report exit");
+    let status = exit_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGHUP), "{status:?}");
 }
 
 #[test]
@@ -90,23 +92,43 @@ fn master_sent_over_socket_still_drives_shell() {
         fds.pop().unwrap()
     });
     handoff::send_fds(&a, b"pty:1", &[detached.master.as_fd()]).unwrap();
-    drop(detached.master);
+    let silo_pty::Detached { master, status, exit, pid, size } = detached;
+    drop(master);
     let master = receiver.join().unwrap();
 
-    let mut adopted = Pty::adopt(master, detached.pid, detached.size, |_| {}).unwrap();
+    let mut adopted = Pty::adopt(silo_pty::Detached { master, status, exit, pid, size }, |_| {}).unwrap();
     let (input, rx) = io(&mut adopted);
     assert!(input.send(b"moved\n".to_vec()));
     wait_for(&rx, "got:moved");
 }
 
 #[test]
-fn adopted_pty_reports_unknown_exit() {
+fn adopted_pty_reports_exit_status() {
     let mut pty = shell("stty -echo; echo ready; read x; exit 7", |_| {});
     let (_input, rx) = io(&mut pty);
     wait_for(&rx, "ready");
     let detached = pty.detach();
+    assert!(detached.status.is_some());
     let (tx, exit_rx) = mpsc::channel();
-    let mut adopted = Pty::adopt(detached.master, detached.pid, detached.size, move |code| {
+    let mut adopted = Pty::adopt(detached, move |status| {
+        let _ = tx.send(status.and_then(|s| s.code()));
+    })
+    .unwrap();
+    let (input, _rx) = io(&mut adopted);
+    assert!(input.send(b"bye\n".to_vec()));
+    assert_eq!(exit_rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(7));
+    assert!(adopted.exited());
+    assert_eq!(adopted.exit_status().and_then(|s| s.code()), Some(7));
+}
+
+#[test]
+fn adopted_pty_without_status_reports_unknown_exit() {
+    let mut pty = shell("stty -echo; echo ready; read x; exit 7", |_| {});
+    let (_input, rx) = io(&mut pty);
+    wait_for(&rx, "ready");
+    let detached = silo_pty::Detached { status: None, ..pty.detach() };
+    let (tx, exit_rx) = mpsc::channel();
+    let mut adopted = Pty::adopt(detached, move |code| {
         let _ = tx.send(code);
     })
     .unwrap();
@@ -125,13 +147,13 @@ fn failed_adopt_hands_master_back() {
     let detached = pty.detach();
     let pid = detached.pid;
 
-    let err = Pty::adopt(detached.master, 0, detached.size, |_| {}).err().expect("pid 0 must fail");
+    let err = Pty::adopt(silo_pty::Detached { pid: 0, ..detached }, |_| {}).err().expect("pid 0 must fail");
     assert_eq!(err.error.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(err.detached.pid, 0);
 
     // A non-terminal descriptor fails too, and the pipe comes back open.
     let (r, w) = rustix::pipe::pipe().unwrap();
-    let back = Pty::adopt(r, pid, SIZE, |_| {}).err().expect("pipe is not a pty");
+    let back = Pty::adopt(silo_pty::Detached { master: r, status: None, exit: None, pid, size: SIZE }, |_| {}).err().expect("pipe is not a pty");
     rustix::io::write(&w, b"x").unwrap();
     let mut byte = [0u8; 1];
     assert_eq!(rustix::io::read(&back.detached.master, &mut byte).unwrap(), 1);
@@ -183,5 +205,23 @@ fn dropping_a_normal_pty_hangs_up() {
     wait_for(&events, "ready");
     drop(pty);
     let status = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(status.signal(), Some(libc::SIGHUP), "{status:?}");
+    assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGHUP), "{status:?}");
+}
+
+/// A status read by the old owner before it detached travels along.
+#[test]
+fn status_read_before_detach_reaches_the_adopter() {
+    let (tx, rx) = mpsc::channel();
+    let pty = shell("exit 4", move |status| {
+        let _ = tx.send(status);
+    });
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let detached = pty.detach();
+    assert_eq!(detached.exit.map(|raw| std::process::ExitStatus::from_raw(raw).code()), Some(Some(4)));
+    let (tx, rx) = mpsc::channel();
+    let _adopted = Pty::adopt(detached, move |status| {
+        let _ = tx.send(status.and_then(|s| s.code()));
+    })
+    .unwrap();
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(4));
 }

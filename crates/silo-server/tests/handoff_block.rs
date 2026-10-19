@@ -155,23 +155,39 @@ async fn exited_block_hands_off_checkpoint_only() {
     restored.send(BlockMsg::Shutdown);
 }
 
-#[tokio::test]
-async fn adopted_block_reports_unknown_exit() {
-    let (old, _notes) = spawn("b-kill", "printf ready; read l; exit 5");
+/// An adopted program's exit code comes from its PTY host; without the
+/// host's status pipe (an older build's program) it is unknown.
+async fn adopted_exit(id: &str, keep_status: bool) -> Option<i32> {
+    let (old, _notes) = spawn(id, "printf ready; read l; exit 5");
     wait_for(&old, "ready").await;
     let handoff = old.handoff().await.expect("handoff");
-    let pty = handoff.pty.expect("pty");
+    let mut pty = handoff.pty.expect("pty");
+    assert!(pty.status.is_some());
+    if !keep_status {
+        pty.status = None;
+    }
 
     let (notes, mut rx) = unbounded_channel();
-    let adopted = block::spawn_adopted(info("b-kill"), handoff.checkpoint, pty, notes).expect("adopt");
+    let adopted = block::spawn_adopted(info(id), handoff.checkpoint, pty, notes).expect("adopt");
     adopted.send(BlockMsg::Input(b"bye\n".to_vec()));
     let exited = async { while !matches!(rx.recv().await, Some(Note::Exited(_)) | None) {} };
     tokio::time::timeout(Duration::from_secs(10), exited).await.expect("exit note");
     let info = adopted.info.lock().unwrap().clone();
-    assert_eq!((info.lifecycle, info.exited), (Lifecycle::Exited, None));
+    assert_eq!(info.lifecycle, Lifecycle::Exited);
     let checkpoint = adopted.checkpoint().await.expect("checkpoint");
-    assert_eq!(checkpoint.exit_code, None);
+    assert_eq!(checkpoint.exit_code, info.exited);
     adopted.send(BlockMsg::Shutdown);
+    info.exited
+}
+
+#[tokio::test]
+async fn adopted_block_reports_exit_code() {
+    assert_eq!(adopted_exit("b-code", true).await, Some(5));
+}
+
+#[tokio::test]
+async fn adopted_block_without_status_reports_unknown_exit() {
+    assert_eq!(adopted_exit("b-kill", false).await, None);
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ mod profile;
 mod runtime;
 mod shared;
 
-pub use browser::{Browser, BrowserOptions};
+pub use browser::{Browser, BrowserOptions, Edit};
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;

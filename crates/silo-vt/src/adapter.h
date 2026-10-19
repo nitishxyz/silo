@@ -82,7 +82,7 @@ int silo_vt_search_state(SiloVt *vt, uint64_t *total, uint64_t *selected, uint32
 int silo_vt_search_viewport(SiloVt *vt, uint32_t *out, size_t cap, size_t *count);
 int silo_vt_key(SiloVt *vt, const char *key, const char *text, size_t len,
                     uint32_t mods, bool release, char *out, size_t cap, size_t *written);
-int silo_vt_paste(SiloVt *vt, char *data, size_t len, char *out, size_t cap, size_t *written);
+int silo_vt_paste(SiloVt *vt, char *data, size_t len, bool line_breaks, char *out, size_t cap, size_t *written);
 void silo_vt_scroll(SiloVt *vt, int32_t delta);
 void silo_vt_scroll_to_row(SiloVt *vt, uint64_t row);
 int silo_vt_scrollbar(SiloVt *vt, uint64_t *out);

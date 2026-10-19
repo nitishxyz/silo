@@ -6,9 +6,10 @@ use std::{
     time::Duration,
 };
 
-use silo_client::Control;
+use silo_client::{Control, DataStream};
 use silo_proto::{
     control::{Capture, Created, Method, SpawnSpec},
+    data::ServerData,
     model::{Axis, BlockInfo, BlockKind, Float, FloatRect, Lifecycle, SessionView, TermSize},
     paths,
 };
@@ -70,6 +71,11 @@ async fn crash(control: Control, task: JoinHandle<()>) {
 
 fn shell() -> SpawnSpec {
     SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) }
+}
+
+/// The user's login shell (an empty command).
+fn login() -> SpawnSpec {
+    SpawnSpec { command: Vec::new(), ..shell() }
 }
 
 async fn send(control: &Control, block: &str, text: &str) {
@@ -318,19 +324,46 @@ async fn closed_block_snapshots_are_collected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn closing_the_last_exited_block_deletes_the_session() {
+async fn a_clean_exit_closes_the_block_and_its_session() {
     let home = temp_home("last");
     let task = start(&home).await;
     let control = connect(&home).await;
-    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    send(&control, &main.block_id, "exit 0\n").await;
-    wait_for("exit", async || block(&view(&control, &main.session_id).await, &main.block_id).lifecycle == Lifecycle::Exited).await;
-    let dir = snapshot_dir(&home, &main.block_id);
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: login(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split: Created = control
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: login(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    let command: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    send(&control, &command.block_id, "exit 0\n").await;
+    let exited = async || block(&view(&control, &command.session_id).await, &command.block_id).exited == Some(0);
+    wait_for("explicit command exited", exited).await;
+    let dir = snapshot_dir(&home, &split.block_id);
     wait_for("checkpoint", async || dir.is_dir()).await;
+    let mut stream = DataStream::open(&control, &split.block_id, None).await.unwrap();
+    send(&control, &split.block_id, "exit 0\n").await;
+    let mut last = None;
+    while let Some(data) = tokio::time::timeout(TIMEOUT, stream.rx.recv()).await.expect("stream ends") {
+        last = Some(data);
+    }
+    assert!(matches!(last, Some(ServerData::Exited { code: Some(0) })), "the exit reaches the stream before it ends: {last:?}");
+    wait_for("split closed", async || view(&control, &main.session_id).await.blocks.len() == 1).await;
+    let after = view(&control, &main.session_id).await;
+    assert_eq!(
+        (after.session.windows[0].layout.blocks(), after.session.windows[0].focused.as_str()),
+        (vec![main.block_id.clone()], main.block_id.as_str())
+    );
+    shutdown(control, task).await;
 
-    control.call_value(Method::BlockClose { block_id: main.block_id.clone() }).await.unwrap();
-    let sessions: Vec<serde_json::Value> = control.call(Method::SessionList {}).await.unwrap();
-    assert!(sessions.is_empty(), "{sessions:?}");
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let after = view(&control, &main.session_id).await;
+    assert_eq!(after.session.windows[0].layout.blocks(), [main.block_id.as_str()], "the exited block came back");
+    let kept = view(&control, &command.session_id).await;
+    let kept = block(&kept, &command.block_id);
+    assert_eq!((kept.lifecycle, kept.exited), (Lifecycle::Exited, Some(0)), "an explicit command's output stays");
+    send(&control, &main.block_id, "exit 0\n").await;
+    wait_for("session closed", async || control.call::<Vec<serde_json::Value>>(Method::SessionList {}).await.unwrap().len() == 1).await;
+    control.call_value(Method::SessionClose { session_id: command.session_id.clone() }).await.unwrap();
     shutdown(control, task).await;
 
     let task = start(&home).await;

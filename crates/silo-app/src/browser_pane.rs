@@ -145,18 +145,25 @@ enum Chord {
     Forward,
     Reload,
     Stop,
+    Edit(silo_web::Edit),
 }
 
-/// ⌘L / ⌘R / ⌘. on the page, and ⌘← / ⌘→ unless a page text field has
-/// focus (there they move the caret). Nothing for the address bar.
+/// ⌘L / ⌘R / ⌘. and ⌘X / ⌘Z / ⇧⌘Z on the page, and ⌘← / ⌘→ unless a page
+/// text field has focus (there they move the caret). Nothing for the
+/// address bar. ⌘C / ⌘V / ⌘A are app commands that reach the page too.
 fn page_chord(key: &str, m: gpui::Modifiers, page_focused: bool, editable: bool) -> Option<Chord> {
-    if !page_focused || !(m.platform && !m.shift && !m.control && !m.alt) {
+    if !page_focused || !m.platform || m.control || m.alt {
         return None;
+    }
+    if m.shift {
+        return key.eq_ignore_ascii_case("z").then_some(Chord::Edit(silo_web::Edit::Redo));
     }
     match key {
         "l" => Some(Chord::Address),
         "r" => Some(Chord::Reload),
         "." => Some(Chord::Stop),
+        "x" => Some(Chord::Edit(silo_web::Edit::Cut)),
+        "z" => Some(Chord::Edit(silo_web::Edit::Undo)),
         "left" if !editable => Some(Chord::Back),
         "right" if !editable => Some(Chord::Forward),
         _ => None,
@@ -556,18 +563,11 @@ impl BrowserPane {
         }
     }
 
-    /// An app-bound ⌘ chord the page should also see (⌘C, ⌘A).
-    pub fn forward_chord(&self, key: &str) {
-        let Some(page) = &self.page else { return };
-        let modifiers = silo_web::Modifiers { command: true, ..Default::default() };
-        for down in [true, false] {
-            page.key(&silo_web::KeyInput { key, key_char: Some(key), modifiers, down, repeat: false });
-        }
-    }
-
-    pub fn paste(&self, text: Option<&str>) {
-        if let (Some(page), Some(text)) = (&self.page, text) {
-            page.insert_text(text);
+    /// Copy, Paste, Undo, …: the page's own edit commands (windowless
+    /// pages don't map ⌘ chords to them).
+    pub fn edit(&self, edit: silo_web::Edit) {
+        if let Some(page) = &self.page {
+            page.edit(edit);
         }
     }
 
@@ -1099,6 +1099,7 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
                 Chord::Forward => pane.forward(),
                 Chord::Reload => pane.reload(),
                 Chord::Stop => pane.stop(),
+                Chord::Edit(edit) => pane.edit(edit),
             }
             cx.stop_propagation();
         });
@@ -1280,5 +1281,9 @@ mod tests {
         assert_eq!(page_chord("]", cmd, true, false), None);
         let shift = gpui::Modifiers { shift: true, ..cmd };
         assert_eq!(page_chord("left", shift, true, false), None);
+        assert_eq!(page_chord("x", cmd, true, true), Some(Chord::Edit(silo_web::Edit::Cut)));
+        assert_eq!(page_chord("z", cmd, true, true), Some(Chord::Edit(silo_web::Edit::Undo)));
+        assert_eq!(page_chord("z", shift, true, true), Some(Chord::Edit(silo_web::Edit::Redo)));
+        assert_eq!(page_chord("x", cmd, false, false), None, "the address bar cuts its own text");
     }
 }

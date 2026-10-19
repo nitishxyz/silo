@@ -190,6 +190,13 @@ impl TextField {
                     }
                     return true;
                 }
+                if m.platform && k.key == "x" {
+                    if selected {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.text.clone()));
+                        self.edit(Edit::DeleteChar, cx);
+                    }
+                    return true;
+                }
                 return false;
             }
             _ => match k.key_char.as_deref() {

@@ -179,6 +179,7 @@ pub(crate) fn empty_checkpoint(size: TermSize) -> anyhow::Result<Checkpoint> {
         exit_code: None,
         osc_title: String::new(),
         osc_pwd: None,
+        command: false,
     })
 }
 
@@ -219,7 +220,7 @@ impl Persist {
                 };
                 let running = handle.info.lock().is_ok_and(|i| i.lifecycle.is_running());
                 if dirty.contains(id) || !self.generations.contains_key(id) || (full && running) {
-                    targets.push((id.clone(), BlockHandle { tx: handle.tx.clone(), info: handle.info.clone() }));
+                    targets.push((id.clone(), BlockHandle { tx: handle.tx.clone(), info: handle.info.clone(), command: handle.command }));
                 }
             }
             let infos: Vec<BlockInfo> = ids.iter().filter_map(|id| reg.block_info(id)).collect();

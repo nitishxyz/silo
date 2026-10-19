@@ -29,6 +29,17 @@ pub struct Browser {
     shared: Arc<Shared>,
 }
 
+/// An edit command run by the page's focused frame, as from Chrome's Edit menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
 impl Runtime {
     pub fn create_browser(&self, options: BrowserOptions) -> Result<Browser> {
         let shared = Arc::new(Shared {
@@ -38,6 +49,7 @@ impl Runtime {
             events: Mutex::new(Vec::new()),
             notify: options.notify,
             focused: AtomicBool::new(false),
+            last_input: Mutex::new(None),
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
@@ -103,6 +115,21 @@ impl Browser {
         }
     }
 
+    /// Runs `edit` in the focused frame, so the page sees its clipboard
+    /// events and the edit joins its undo history.
+    pub fn edit(&self, edit: Edit) {
+        let Some(frame) = self.page().and_then(|page| page.focused_frame().or_else(|| page.main_frame())) else { return };
+        self.shared.input();
+        match edit {
+            Edit::Undo => frame.undo(),
+            Edit::Redo => frame.redo(),
+            Edit::Cut => frame.cut(),
+            Edit::Copy => frame.copy(),
+            Edit::Paste => frame.paste(),
+            Edit::SelectAll => frame.select_all(),
+        }
+    }
+
     /// CEF zoom level (0.0 = 100%, each step ≈ ×1.2).
     pub fn set_zoom(&self, level: f64) {
         if let Some(host) = self.host() {
@@ -158,6 +185,9 @@ impl Browser {
     }
 
     pub fn mouse_button(&self, x: f32, y: f32, button: MouseButton, down: bool, clicks: u32, mods: Modifiers) {
+        if down {
+            self.shared.input();
+        }
         let held: &[MouseButton] = if down { &[button] } else { &[] };
         let event = mouse_event(x, y, mods, held);
         if let Some(host) = self.host() {
@@ -175,6 +205,9 @@ impl Browser {
     }
 
     pub fn key(&self, input: &KeyInput) {
+        if input.down {
+            self.shared.input();
+        }
         for event in key_events(input) {
             if let Some(host) = self.host() {
                 host.send_key_event(Some(&event));

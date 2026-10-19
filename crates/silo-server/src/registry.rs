@@ -81,6 +81,14 @@ impl Window {
     }
 }
 
+/// A login shell that exited with status 0: its block closes. A block
+/// running an explicit command keeps its output readable instead.
+fn exited_cleanly(block: &Block) -> bool {
+    let Block::Terminal(handle) = block else { return false };
+    let info = handle.info.lock().unwrap();
+    !handle.command && info.lifecycle == Lifecycle::Exited && info.exited == Some(0)
+}
+
 /// The leaf of `layout` nearest to `target` in the subtree that takes over
 /// its space when it is removed.
 fn sibling(layout: &Layout, target: &str) -> Option<BlockId> {
@@ -201,9 +209,16 @@ impl Registry {
         }
     }
 
-    /// A registry holding a restored tree; nothing is spawned.
+    /// A registry holding a restored tree, without the blocks whose login
+    /// shell had already exited cleanly; nothing is spawned.
     pub fn restored(notes: UnboundedSender<Note>, sessions: Vec<Session>, blocks: HashMap<BlockId, Block>) -> Self {
-        Self { sessions, blocks, ..Self::new(notes) }
+        let mut reg = Self { sessions, blocks, ..Self::new(notes) };
+        let done: Vec<BlockId> = reg.blocks.iter().filter(|(_, b)| exited_cleanly(b)).map(|(id, _)| id.clone()).collect();
+        for id in done {
+            reg.kill_block(&id);
+            reg.remove_block(&id);
+        }
+        reg
     }
 
     /// The channel block actors report to.
@@ -794,7 +809,10 @@ impl Registry {
             Note::Bell(id) => self.emit(Event::BlockBell { block_id: id }),
             Note::Offer(offer) => self.emit_owner(Event::HostOffered { offer }),
             Note::Dirty(id) => self.mark_block_dirty(&id),
-            // The block stays in its layout, read-only, until closed.
+            Note::Exited(id) if self.blocks.get(&id).is_some_and(exited_cleanly) => {
+                let _ = self.close_block(&id);
+            }
+            // A failed program stays in its layout, read-only, until closed.
             Note::Exited(id) => {
                 self.mark_dirty(Some(&id));
                 if let Some(block) = self.block_info(&id) {
@@ -1065,6 +1083,86 @@ mod tests {
         reg.sessions[0].windows[0].history.clear();
         reg.remove_block("a");
         assert_eq!(focused(&reg, 0), ("b", vec!["b"]), "the nearest leaf of the subtree taking a's space");
+    }
+
+    /// Run `script` in block `id`; `shell` makes it count as the login shell.
+    fn run(reg: &mut Registry, id: &str, script: &str, shell: bool, notes: &UnboundedSender<Note>) {
+        let info = BlockInfo {
+            id: id.into(),
+            session_id: "s".into(),
+            kind: BlockKind::Terminal,
+            title: "sh".into(),
+            cwd: None,
+            exited: None,
+            lifecycle: Lifecycle::Running,
+            size: TermSize::new(80, 24),
+            owner: None,
+            owner_name: None,
+            pid: None,
+            browser: None,
+        };
+        let config = spawn_config(&["/bin/sh".into(), "-c".into(), script.into()], None);
+        let mut handle = block::spawn(info, &config, notes.clone()).unwrap();
+        assert!(handle.command);
+        handle.command = !shell;
+        reg.blocks.insert(id.into(), Block::Terminal(handle));
+    }
+
+    async fn exited(reg: &mut Registry, notes: &mut tokio::sync::mpsc::UnboundedReceiver<Note>) {
+        let wait = async {
+            loop {
+                let note = notes.recv().await.expect("note");
+                let done = matches!(note, Note::Exited(_));
+                reg.handle_note(note);
+                if done {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait).await.expect("exit note");
+    }
+
+    fn events(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Frame>) -> Vec<Event> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|frame| match frame.parse::<ServerMessage>().unwrap() {
+                ServerMessage::Event { event, .. } => *event,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_clean_exit_closes_the_block_a_failed_one_stays() {
+        let (mut reg, mut rx) = registry();
+        let (notes, mut notes_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        run(&mut reg, "d", "exit 3", true, &notes);
+        exited(&mut reg, &mut notes_rx).await;
+        let info = reg.block_info("d").unwrap();
+        assert_eq!((info.lifecycle, info.exited), (Lifecycle::Exited, Some(3)));
+        assert!(reg.sessions[0].windows[1].contains("d"));
+
+        run(&mut reg, "d", "exit 0", false, &notes);
+        exited(&mut reg, &mut notes_rx).await;
+        let info = reg.block_info("d").unwrap();
+        assert_eq!((info.lifecycle, info.exited), (Lifecycle::Exited, Some(0)), "an explicit command stays readable");
+
+        reg.focus("b").unwrap();
+        reg.focus("c").unwrap();
+        run(&mut reg, "c", "exit 0", true, &notes);
+        exited(&mut reg, &mut notes_rx).await;
+        assert!(reg.block_info("c").is_none());
+        assert_eq!(focused(&reg, 0), ("b", vec!["b", "a"]), "focus returns to the previous block");
+        assert_eq!(reg.sessions[0].windows[0].layout.blocks(), ["a", "b"]);
+
+        reg.close_window("w1").unwrap();
+        reg.close_window("w2").unwrap();
+        events(&mut rx);
+        run(&mut reg, "e", "exit 0", true, &notes);
+        exited(&mut reg, &mut notes_rx).await;
+        assert!(reg.sessions.is_empty());
+        let events = events(&mut rx);
+        assert!(matches!(&events[..], [.., Event::SessionClosed { session_id }, Event::SessionsChanged { .. }] if session_id == "s"), "{events:?}");
     }
 
     #[test]

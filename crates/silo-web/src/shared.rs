@@ -2,6 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::frame::Frame;
 
@@ -71,7 +72,12 @@ pub(crate) struct Shared {
     pub(crate) notify: Notify,
     /// Last `Browser::set_focus`; re-applied to each new page's widget.
     pub(crate) focused: AtomicBool,
+    /// Last mouse press or key press sent to the page.
+    pub(crate) last_input: Mutex<Option<Instant>>,
 }
+
+/// How long a user input counts as a gesture (Chromium's user activation).
+const GESTURE: Duration = Duration::from_secs(5);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -81,5 +87,14 @@ impl Shared {
     pub(crate) fn push(&self, event: Event) {
         lock(&self.events).push(event);
         (self.notify)();
+    }
+
+    pub(crate) fn input(&self) {
+        *lock(&self.last_input) = Some(Instant::now());
+    }
+
+    /// Whether the user interacted with the page just now; each input counts once.
+    pub(crate) fn take_gesture(&self) -> bool {
+        lock(&self.last_input).take().is_some_and(|at| at.elapsed() < GESTURE)
     }
 }

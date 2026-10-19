@@ -255,6 +255,9 @@ pub struct Checkpoint {
     pub osc_title: String,
     /// Working directory reported by the program (OSC 7).
     pub osc_pwd: Option<String>,
+    /// Started with an explicit command rather than the login shell.
+    #[serde(default)]
+    pub command: bool,
 }
 
 /// Notifications from block actors to the registry.
@@ -273,6 +276,8 @@ pub enum Note {
 pub struct BlockHandle {
     pub tx: mpsc::Sender<BlockMsg>,
     pub info: Arc<Mutex<BlockInfo>>,
+    /// Runs an explicit command rather than the login shell.
+    pub command: bool,
 }
 
 impl BlockHandle {
@@ -520,6 +525,8 @@ struct Actor {
     child_exited: bool,
     /// Its exit code; `None` when killed by a signal (or unknown).
     exit_code: Option<i32>,
+    /// Runs an explicit command rather than the login shell.
+    command: bool,
     reader_closed: bool,
     /// Pending injections and when the first was queued.
     injects: VecDeque<(Vec<u8>, Vec<u8>)>,
@@ -717,7 +724,7 @@ fn launch(
     let (tx, rx) = mpsc::channel();
     let exit_tx = tx.clone();
     let mut pty = Pty::spawn(config, pty_size(info.size), move |status| {
-        let _ = exit_tx.send(BlockMsg::ChildExited(status.code()));
+        let _ = exit_tx.send(BlockMsg::ChildExited(status.and_then(|s| s.code())));
     })?;
     let gate = Arc::new(ReadGate::default());
     let input = start_io(&mut pty, &info.id, &tx, &gate)?;
@@ -728,6 +735,7 @@ fn launch(
     actor.ring_start = offset;
     actor.log.floor = offset;
     actor.osc_title = osc_title;
+    actor.command = !config.command.is_empty();
     actor.pty = Some(pty);
     actor.input = Some(input);
     actor.tx = Some(tx.clone());
@@ -758,6 +766,7 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
     let mut actor = Actor::new(&info, vt, config, notes);
     actor.lifecycle = lifecycle;
     actor.exit_code = exit_code;
+    actor.command = checkpoint.command;
     actor.ring_start = checkpoint.offset;
     actor.log.floor = checkpoint.offset;
     (actor.osc_title, actor.osc_pwd) = (checkpoint.osc_title, checkpoint.osc_pwd);
@@ -768,7 +777,8 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
 /// Run a block around a program's PTY released by [`BlockHandle::handoff`],
 /// continuing its stream: epoch and offsets carry on from `checkpoint`, so
 /// clients resume at the handoff offset without a gap. The exit code of an
-/// adopted program is unknown (`None`).
+/// adopted program comes from its PTY host; without one it is unknown
+/// (`None`).
 ///
 /// # Errors
 /// Fails if the snapshot cannot be restored or the PTY not adopted.
@@ -792,6 +802,7 @@ pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Det
     restore_osc(&mut info, &checkpoint);
     let mut actor = Actor::new(&info, vt, config, notes);
     actor.epoch = checkpoint.epoch;
+    actor.command = checkpoint.command;
     actor.gate = gate;
     actor.ring_start = checkpoint.offset;
     actor.log.floor = checkpoint.offset;
@@ -835,8 +846,8 @@ fn adopt_pty(id: &str, pty: silo_pty::Detached, tx: &mpsc::Sender<BlockMsg>, gat
     Pty::adopt_with_io(
         pty,
         &format!("silo-pty-{id}"),
-        move |code| {
-            let _ = exit_tx.send(BlockMsg::ChildExited(code));
+        move |status| {
+            let _ = exit_tx.send(BlockMsg::ChildExited(status.and_then(|s| s.code())));
         },
         move |event| feed(&io_tx, &gate, event),
     )
@@ -873,8 +884,9 @@ fn feed(tx: &mpsc::Sender<BlockMsg>, gate: &ReadGate, event: PtyEvent) {
 
 fn start(mut actor: Actor, id: &str, tx: mpsc::Sender<BlockMsg>, rx: mpsc::Receiver<BlockMsg>) -> anyhow::Result<BlockHandle> {
     let shared = actor.info.clone();
+    let command = actor.command;
     std::thread::Builder::new().name(format!("silo-block-{id}")).spawn(move || actor.run(&rx))?;
-    Ok(BlockHandle { tx, info: shared })
+    Ok(BlockHandle { tx, info: shared, command })
 }
 
 impl Drop for Actor {
@@ -910,6 +922,7 @@ impl Actor {
             last_probe: Instant::now() - PROBE_INTERVAL,
             child_exited: false,
             exit_code: None,
+            command: false,
             reader_closed: false,
             injects: VecDeque::new(),
             inject_since: None,
@@ -1166,6 +1179,7 @@ impl Actor {
             offset: self.ring_end(),
             lifecycle: self.lifecycle,
             exit_code: self.exit_code,
+            command: self.command,
             osc_title: self.osc_title.clone(),
             osc_pwd: self.osc_pwd.clone(),
         })

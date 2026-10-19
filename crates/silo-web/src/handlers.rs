@@ -305,6 +305,60 @@ wrap_request_handler! {
     }
 }
 
+wrap_permission_handler! {
+    pub(crate) struct PagePermissionHandler {
+        shared: Arc<Shared>,
+    }
+
+    impl PermissionHandler {
+        // A clipboard read (`navigator.clipboard.read*`) is allowed once per user input to
+        // the page and others are dismissed. Chromium persists the grant and counts
+        // dismissals toward an embargo, so both are cleared and every read asks again.
+        // Other prompts keep CEF's default.
+        fn on_show_permission_prompt(
+            &self,
+            browser: Option<&mut Browser>,
+            _prompt_id: u64,
+            requesting_origin: Option<&CefString>,
+            requested_permissions: u32,
+            callback: Option<&mut PermissionPromptCallback>,
+        ) -> c_int {
+            let clipboard = PermissionRequestTypes::CLIPBOARD.get_raw();
+            let Some(callback) = callback.filter(|_| requested_permissions == clipboard) else { return 0 };
+            let gesture = self.shared.take_gesture();
+            callback.cont(if gesture { PermissionRequestResult::ACCEPT } else { PermissionRequestResult::DISMISS });
+            let context = browser.as_ref().and_then(|b| b.host()).and_then(|h| h.request_context());
+            if let (Some(context), Some(origin)) = (context, requesting_origin) {
+                // Owned copies: the borrowed origin is only valid during this call.
+                let origin = CefString::from(origin.to_string().as_str());
+                let top = browser.and_then(|b| b.main_frame()).map_or_else(|| origin.to_string(), |f| CefString::from(&f.url()).to_string());
+                // Chromium checks the setting again when it reads, so keep the grant briefly.
+                let mut task = ForgetClipboard::new(context, origin, CefString::from(top.as_str()));
+                post_delayed_task(ThreadId::UI, Some(&mut task), FORGET_CLIPBOARD_MS);
+            }
+            1
+        }
+    }
+}
+
+const FORGET_CLIPBOARD_MS: i64 = 1000;
+
+wrap_task! {
+    struct ForgetClipboard {
+        context: RequestContext,
+        origin: CefString,
+        top: CefString,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            let (origin, top) = (Some(&self.origin), Some(&self.top));
+            self.context.set_content_setting(origin, top, ContentSettingTypes::CLIPBOARD_READ_WRITE, ContentSettingValues::DEFAULT);
+            self.context.set_website_setting(origin, top, ContentSettingTypes::PERMISSION_AUTOBLOCKER_DATA, None);
+        }
+    }
+}
+
 wrap_client! {
     pub(crate) struct PageClient {
         view: RenderHandler,
@@ -312,6 +366,7 @@ wrap_client! {
         load: LoadHandler,
         life_span: LifeSpanHandler,
         request: RequestHandler,
+        permission: PermissionHandler,
     }
 
     impl Client {
@@ -334,6 +389,10 @@ wrap_client! {
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.request.clone())
         }
+
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(self.permission.clone())
+        }
     }
 }
 
@@ -344,6 +403,7 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         PageLoadHandler::new(Arc::clone(shared)),
         PageLifeSpanHandler::new(Arc::clone(shared)),
         PageRequestHandler::new(Arc::clone(tunnel)),
+        PagePermissionHandler::new(Arc::clone(shared)),
     )
 }
 

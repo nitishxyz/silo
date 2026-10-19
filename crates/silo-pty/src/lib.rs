@@ -1,6 +1,7 @@
 //! PTY allocation and child supervision (macOS and Linux).
 
 pub mod handoff;
+mod host;
 mod threads;
 mod watch;
 
@@ -10,7 +11,10 @@ use std::{
     ffi::{OsStr, OsString},
     fs::File,
     io,
-    os::{fd::OwnedFd, unix::process::CommandExt},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::process::{CommandExt, ExitStatusExt},
+    },
     path::PathBuf,
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -21,6 +25,9 @@ use std::{
 };
 
 use threads::IoThreads;
+
+/// Longest wait for the PTY host to report that the program started.
+const HOST_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 use rustix::{
     fs::{Mode, OFlags, open},
@@ -92,12 +99,56 @@ impl ChildState {
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
+
+    fn finish(&self, status: Option<ExitStatus>, on_exit: impl FnOnce(Option<ExitStatus>)) {
+        if let Ok(mut slot) = self.status.lock() {
+            *slot = status;
+        }
+        self.exited.store(true, Ordering::Release);
+        if self.notify.swap(false, Ordering::AcqRel) {
+            on_exit(status);
+        }
+    }
+}
+
+/// Report the program's exit from its PTY host's status pipe.
+fn watch_status(
+    state: &Arc<ChildState>,
+    status: &Arc<OwnedFd>,
+    exit: Option<i32>,
+    on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static,
+) -> io::Result<JoinHandle<()>> {
+    let (worker, status) = (state.clone(), status.clone());
+    std::thread::Builder::new().name("silo-pty-status".into()).spawn(move || {
+        if let Some(raw) = exit.map(Some).or_else(|| host::wait(&status, &worker.stop)) {
+            worker.finish(raw.map(ExitStatus::from_raw), on_exit);
+        }
+    })
+}
+
+/// A close-on-exec pipe: `(read, write)`.
+fn status_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe fills two new descriptors that we then own.
+    let (read, write) = unsafe {
+        if libc::pipe(fds.as_mut_ptr()) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+    };
+    for fd in [&read, &write] {
+        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
+    }
+    Ok((read, write))
 }
 
 /// A PTY and its process. Dropping it hangs up the process group; use
 /// [`Pty::detach`] to hand the process to another owner instead.
 pub struct Pty {
     master: Arc<OwnedFd>,
+    /// Read end of the PTY host's status pipe; `None` for programs started
+    /// without a host, whose exit status is unknown.
+    status: Option<Arc<OwnedFd>>,
     child: Arc<ChildState>,
     size: Mutex<PtySize>,
     io: Option<IoThreads>,
@@ -109,6 +160,10 @@ pub struct Pty {
 #[derive(Debug)]
 pub struct Detached {
     pub master: OwnedFd,
+    /// The PTY host's status pipe (see [`Pty::spawn`]).
+    pub status: Option<OwnedFd>,
+    /// Raw wait status already read from `status` before the detach.
+    pub exit: Option<i32>,
     pub pid: i32,
     pub size: PtySize,
 }
@@ -134,12 +189,17 @@ impl std::error::Error for AdoptError {
 }
 
 impl Pty {
-    /// Spawn `config` on a new PTY. `on_exit` runs on a supervisor thread
-    /// once the child was reaped.
+    /// Spawn `config` on a new PTY under a PTY host (this executable run
+    /// as `pty-host`), which stays the program's parent and reports its
+    /// wait status through a pipe that travels with [`Pty::detach`].
+    /// `on_exit` runs on a supervisor thread once the program was reaped,
+    /// with `None` if the host died without reporting.
     ///
     /// # Errors
     /// PTY allocation or spawn failures.
-    pub fn spawn(config: &SpawnConfig, size: PtySize, on_exit: impl FnOnce(ExitStatus) + Send + 'static) -> io::Result<Self> {
+    pub fn spawn(config: &SpawnConfig, size: PtySize, on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static) -> io::Result<Self> {
+        // Keeps the host constructor linked into every binary that spawns.
+        std::hint::black_box(&host::INIT);
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
         // macOS posix_openpt has no O_CLOEXEC; set it before spawning anything.
         rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
@@ -148,22 +208,26 @@ impl Pty {
         let name = ptsname(&master, Vec::new())?;
         let slave = File::from(open(name.as_c_str(), OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())?);
         set_size(&master, size)?;
+        let (status, status_write) = status_pipe()?;
 
         let (program, args, login) = if config.command.is_empty() {
             (user_shell().into_os_string(), Vec::new(), true)
         } else {
             (config.command[0].clone(), config.command[1..].to_vec(), false)
         };
-        let mut command = Command::new(&program);
-        command.args(&args);
-        if login {
+        let arg0 = if login {
             // A leading dash makes the shell a login shell, so a daemon
             // started from a GUI app still gets the user's PATH.
             let base = std::path::Path::new(&program).file_name().unwrap_or(OsStr::new("sh"));
             let mut arg0 = OsString::from("-");
             arg0.push(base);
-            command.arg0(arg0);
-        }
+            arg0
+        } else {
+            program.clone()
+        };
+        let inherit = [status_write.as_raw_fd(), slave.as_raw_fd()];
+        let mut command = Command::new(host::exe()?);
+        command.arg(host::ARG).arg(inherit[0].to_string()).arg(inherit[1].to_string()).arg(&program).arg(arg0).args(&args);
         command
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
@@ -174,9 +238,9 @@ impl Pty {
             .env("LC_TERMINAL", "silo")
             .env_remove("COLUMNS")
             .env_remove("LINES")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if std::env::var_os("LANG").is_none() {
             command.env("LANG", "en_US.UTF-8");
         }
@@ -186,83 +250,95 @@ impl Pty {
         command.current_dir(config.cwd.clone().unwrap_or_else(home_dir));
         // SAFETY: only async-signal-safe syscalls run between fork and exec.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // Restore default signal dispositions the daemon may ignore.
-                for signal in [libc::SIGPIPE, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP, libc::SIGCHLD] {
-                    libc::signal(signal, libc::SIG_DFL);
+                for fd in inherit {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
                 Ok(())
             });
         }
-        let mut child = command.spawn()?;
-        let state = ChildState::new(i32::try_from(child.id()).map_err(io::Error::other)?);
-        let worker = state.clone();
-        // The child is reaped even after `detach` (to avoid zombies), but its
-        // exit is then no longer reported here.
-        std::thread::Builder::new().name("silo-pty-child".into()).spawn(move || {
-            let status = child.wait();
-            worker.exited.store(true, Ordering::Release);
-            if let Ok(status) = status {
-                if let Ok(mut slot) = worker.status.lock() {
-                    *slot = Some(status);
+        let mut host = command.spawn()?;
+        drop((slave, status_write));
+        let pid = match host::read_within(&status, HOST_START_TIMEOUT) {
+            Ok(Some(host::Record::Started(pid))) => pid,
+            other => {
+                if other.is_err() {
+                    let _ = host.kill();
                 }
-                if worker.notify.swap(false, Ordering::AcqRel) {
-                    on_exit(status);
-                }
+                let _ = host.wait();
+                return Err(match other {
+                    Ok(Some(host::Record::Failed(errno))) => io::Error::from_raw_os_error(errno),
+                    Err(error) => error,
+                    _ => io::Error::other("pty host failed to start the program"),
+                });
             }
+        };
+        // The host is reaped here even after `detach`; it exits right after
+        // reporting the program's status to whoever holds the pipe then.
+        std::thread::Builder::new().name("silo-pty-host".into()).spawn(move || {
+            let _ = host.wait();
         })?;
-        Ok(Self::new(master, state, size, None))
+        let state = ChildState::new(pid);
+        let status = Arc::new(status);
+        let watcher = watch_status(&state, &status, None, on_exit)?;
+        Ok(Self::new(master, Some(status), state, size, Some(watcher)))
     }
 
-    fn new(master: OwnedFd, child: Arc<ChildState>, size: PtySize, watcher: Option<JoinHandle<()>>) -> Self {
-        Self { master: Arc::new(master), child, size: Mutex::new(size), io: None, watcher, detached: false }
+    fn new(master: OwnedFd, status: Option<Arc<OwnedFd>>, child: Arc<ChildState>, size: PtySize, watcher: Option<JoinHandle<()>>) -> Self {
+        Self { master: Arc::new(master), status, child, size: Mutex::new(size), io: None, watcher, detached: false }
     }
 
     /// Wrap an inherited PTY master whose session leader `pid` is not our
-    /// child (e.g. received over [`handoff`]). Exit is observed through a
-    /// pidfd on Linux and kqueue `EVFILT_PROC` on macOS, so it is reported
-    /// even while the process is an unreaped zombie; the status is unknown,
-    /// so `on_exit` gets `None`. Master EOF/EIO is reported separately as
-    /// [`PtyEvent::Closed`].
+    /// child (e.g. received over [`handoff`]). With a status pipe the exit
+    /// status comes from its PTY host. Without one (a program started by
+    /// an older build) exit is observed through a pidfd on Linux and kqueue
+    /// `EVFILT_PROC` on macOS and the status is unknown, so `on_exit` gets
+    /// `None`. Master EOF/EIO is reported separately as [`PtyEvent::Closed`].
     ///
     /// # Errors
     /// Fails if `pid` is invalid, the descriptor is not a usable terminal or
     /// a thread cannot be spawned. On failure the master is handed back
     /// unharmed in [`AdoptError`], so the program is not hung up.
-    pub fn adopt(master: OwnedFd, pid: i32, size: PtySize, on_exit: impl FnOnce(Option<i32>) + Send + 'static) -> Result<Self, AdoptError> {
-        let fail = |error, master| Err(AdoptError { error, detached: Detached { master, pid, size } });
+    pub fn adopt(detached: Detached, on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static) -> Result<Self, AdoptError> {
+        let Detached { master, status, exit, pid, size } = detached;
+        let fail = |error, master, status| Err(AdoptError { error, detached: Detached { master, status, exit, pid, size } });
         if pid <= 0 {
-            return fail(io::Error::new(io::ErrorKind::InvalidInput, "invalid pid"), master);
+            return fail(io::Error::new(io::ErrorKind::InvalidInput, "invalid pid"), master, status);
         }
-        if let Err(e) = rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC) {
-            return fail(e.into(), master);
+        for fd in std::iter::once(&master).chain(&status) {
+            if let Err(e) = rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC) {
+                return fail(e.into(), master, status);
+            }
         }
         if let Err(e) = set_size(&master, size) {
-            return fail(e, master);
+            return fail(e, master, status);
+        }
+        let state = ChildState::new(pid);
+        if let Some(status) = status {
+            let status = Arc::new(status);
+            return match watch_status(&state, &status, exit, on_exit) {
+                Ok(watcher) => Ok(Self::new(master, Some(status), state, size, Some(watcher))),
+                Err(e) => fail(e, master, Arc::into_inner(status)),
+            };
         }
         let watch = match watch::Watch::new(pid) {
             Ok(watch) => watch,
-            Err(e) => return fail(e, master),
+            Err(e) => return fail(e, master, None),
         };
-        let state = ChildState::new(pid);
         let worker = state.clone();
         let watcher = std::thread::Builder::new().name("silo-pty-watch".into()).spawn(move || {
             if watch.wait(&worker.stop) {
-                worker.exited.store(true, Ordering::Release);
-                if worker.notify.swap(false, Ordering::AcqRel) {
-                    on_exit(None);
-                }
+                worker.finish(None, on_exit);
             }
         });
         match watcher {
-            Ok(watcher) => Ok(Self::new(master, state, size, Some(watcher))),
-            Err(e) => fail(e, master),
+            Ok(watcher) => Ok(Self::new(master, None, state, size, Some(watcher))),
+            Err(e) => fail(e, master, None),
         }
     }
 
@@ -274,10 +350,10 @@ impl Pty {
     pub fn adopt_with_io(
         detached: Detached,
         name: &str,
-        on_exit: impl FnOnce(Option<i32>) + Send + 'static,
+        on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static,
         on_event: impl FnMut(PtyEvent) + Send + 'static,
     ) -> Result<(Self, PtyInput), AdoptError> {
-        let mut pty = Self::adopt(detached.master, detached.pid, detached.size, on_exit)?;
+        let mut pty = Self::adopt(detached, on_exit)?;
         match pty.start_io(name, on_event) {
             Ok(input) => Ok((pty, input)),
             Err(error) => Err(AdoptError { error, detached: pty.detach() }),
@@ -306,17 +382,19 @@ impl Pty {
     /// by their owners.
     ///
     /// Once the threads are joined this Pty holds the only reference to the
-    /// master, so it is moved out, not duplicated.
+    /// master and status pipe, so they are moved out, not duplicated.
     #[must_use]
     pub fn detach(mut self) -> Detached {
         self.detached = true;
         self.child.notify.store(false, Ordering::Release);
         self.stop_threads();
-        let (master, pid, size) = (self.master.clone(), self.child.pid, self.size());
+        let (master, status, pid, size) = (self.master.clone(), self.status.take(), self.child.pid, self.size());
+        let exit = if self.child.exited.load(Ordering::Acquire) { self.exit_status().map(ExitStatusExt::into_raw) } else { None };
         drop(self);
         // Nothing else clones the Arc once the I/O threads are joined.
         let master = Arc::try_unwrap(master).expect("pty master still shared after detach");
-        Detached { master, pid, size }
+        let status = status.map(|s| Arc::try_unwrap(s).expect("pty status still shared after detach"));
+        Detached { master, status, exit, pid, size }
     }
 
     fn stop_threads(&mut self) {
@@ -399,9 +477,10 @@ impl Pty {
     /// Send `signal` to the child's process group unless it was reaped.
     pub fn signal(&self, signal: i32) {
         if !self.child.exited.load(Ordering::Acquire) {
-            // SAFETY: the child is unreaped (the supervisor only reaps after
-            // setting `exited`... races leave at worst a stale signal to a
-            // process group that no longer exists).
+            // SAFETY: kill takes no pointers. The PTY host reaps the program
+            // before its status reaches `exited`, so between that reap and
+            // the status being read the pid may already be reused and the
+            // signal hit an unrelated process group.
             unsafe {
                 libc::kill(-self.child.pid, signal);
             }
@@ -411,6 +490,14 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        if !self.detached && self.status.is_some() {
+            // The status watcher outlives us to report the hangup's exit.
+            if let Some(io) = self.io.take() {
+                io.stop();
+            }
+            self.signal(libc::SIGHUP);
+            return;
+        }
         self.stop_threads();
         if !self.detached {
             self.signal(libc::SIGHUP);
@@ -503,7 +590,27 @@ mod tests {
         assert!(text.contains("33 91"), "{text}");
         assert!(text.contains("got:hello"), "{text}");
         let status = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(status.code(), Some(3));
+        assert_eq!(status.and_then(|s| s.code()), Some(3));
+        assert!(pty.exited());
+    }
+
+    #[test]
+    fn program_inherits_only_stdio() {
+        // SAFETY: dup returns a new descriptor without CLOEXEC, owned here.
+        let leak = unsafe { OwnedFd::from_raw_fd(libc::dup(2)) };
+        let script = format!("[ -e /dev/fd/{} ] && echo fd:leaked || echo fd:clean", leak.as_raw_fd());
+        let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], ..Default::default() };
+        let pty = Pty::spawn(&config, PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 }, |_| {}).unwrap();
+        let mut reader = pty.reader().unwrap();
+        let mut output = Vec::new();
+        let mut buf = [0u8; 256];
+        while !String::from_utf8_lossy(&output).contains("fd:") || !output.ends_with(b"\n") {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("fd:clean"), "{}", String::from_utf8_lossy(&output));
     }
 
     #[test]

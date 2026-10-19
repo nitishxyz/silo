@@ -113,6 +113,8 @@ pub struct Pane {
     blink_task: Option<Task<()>>,
     wheel: f32,
     own_requested: Option<Instant>,
+    /// A multi-line paste awaiting confirmation (no bracketed paste).
+    pending_paste: Option<String>,
     /// Focused pane: takes ownership rather than requesting it.
     active: bool,
     attempt: u64,
@@ -203,6 +205,7 @@ impl Pane {
             blink_task: None,
             wheel: 0.0,
             own_requested: None,
+            pending_paste: None,
             active: false,
             attempt: 0,
             stream_task: None,
@@ -507,6 +510,13 @@ impl Pane {
         if !self.accepts_input(window) {
             return true;
         }
+        // Return confirms a pending paste and Escape cancels it; any other key cancels it too.
+        if self.pending_paste.is_some() && !release {
+            self.confirm_paste(key.key == "enter", cx);
+            if matches!(key.key.as_str(), "enter" | "escape") {
+                return true;
+            }
+        }
         let printable =
             key.key_char.as_ref().is_some_and(|t| !t.is_empty()) && !key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform;
         match self.input_gate.route(&key.key, printable, release, self.composition.is_active()) {
@@ -629,10 +639,76 @@ impl Pane {
         let Some(vt) = self.mirror.terminal() else {
             return;
         };
-        if let Ok(bytes) = vt.paste(&text) {
-            self.send_input(bytes, false);
-            self.typed(cx);
+        match vt.paste(&text) {
+            Ok(Some(bytes)) => {
+                self.send_input(bytes, false);
+                self.typed(cx);
+            }
+            Ok(None) => {
+                self.pending_paste = Some(text);
+                cx.notify();
+            }
+            Err(error) => tracing::warn!(block = %self.block_id, "{error}"),
         }
+    }
+
+    fn confirm_paste(&mut self, paste: bool, cx: &mut Context<Self>) {
+        let Some(text) = self.pending_paste.take() else { return };
+        cx.notify();
+        let Some(vt) = self.mirror.terminal().filter(|_| paste) else { return };
+        match vt.paste_confirmed(&text) {
+            Ok(bytes) => {
+                self.send_input(bytes, false);
+                self.typed(cx);
+            }
+            Err(error) => tracing::warn!(block = %self.block_id, "{error}"),
+        }
+    }
+
+    fn paste_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let lines = self.pending_paste.as_ref()?.lines().count();
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .h(px(24.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .continuous(12.0)
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
+                .when(!primary, |el| el.bg(rgb(theme::tab_active())).hover(|s| s.bg(rgb(theme::row_active()))))
+                .child(label)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| this.confirm_paste(primary, cx)))
+        };
+        Some(
+            div()
+                .id("paste-confirm")
+                .occlude()
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .p(px(12.0))
+                .continuous(10.0)
+                .bg(rgb(theme::popover()))
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .shadow_xl()
+                .text_size(px(13.0))
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Paste {lines} line{}?", if lines == 1 { "" } else { "s" })))
+                .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child("It may run as commands."))
+                .child(div().flex().justify_end().gap(px(8.0)).child(button("paste-cancel", "Cancel", false)).child(button(
+                    "paste-confirm-button",
+                    "Paste",
+                    true,
+                ))),
+        )
     }
 
     // ---- pointer ----
@@ -1144,7 +1220,8 @@ impl Render for Pane {
                                     })),
                             ),
                     )
-                }),
+                })
+                .children(self.paste_card(cx)),
         )
     }
 }
