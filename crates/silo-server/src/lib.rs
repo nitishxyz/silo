@@ -2,12 +2,15 @@
 //! authoritative terminal state, serving clients over a unix socket (and,
 //! later, iroh).
 
+pub mod auth;
 pub mod block;
 pub mod conn;
 pub mod handoff;
 mod names;
+pub mod notify;
 pub mod persist;
 pub mod registry;
+pub mod remote;
 
 use std::{
     os::fd::AsFd,
@@ -21,6 +24,8 @@ use std::{
 
 use anyhow::Context;
 use silo_proto::{control::ServerInfo, paths};
+pub use silo_transport::RelayConfig;
+use silo_transport::{Identity, Net, NetOptions};
 use tokio::{net::UnixListener, sync::Notify};
 
 use crate::registry::Registry;
@@ -31,11 +36,33 @@ pub struct Config {
     pub idle_exit: Option<Duration>,
     /// How often running blocks are checkpointed to `<home>/state`.
     pub checkpoint_interval: Duration,
+    /// Relays used by the remote (iroh) endpoint.
+    pub relay: RelayConfig,
+    /// Advertise and discover on the LAN via mDNS.
+    pub mdns: bool,
+    /// Keep each remote connection on the path it was established on.
+    pub pin_initial_path: bool,
+    /// Fixed UDP port for the remote endpoint; `None` picks a random one.
+    pub port: Option<u16>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { home: paths::home(), idle_exit: None, checkpoint_interval: Duration::from_secs(5) }
+        Self {
+            home: paths::home(),
+            idle_exit: None,
+            checkpoint_interval: Duration::from_secs(5),
+            relay: RelayConfig::Default,
+            mdns: true,
+            pin_initial_path: false,
+            port: None,
+        }
+    }
+}
+
+impl Config {
+    fn net_options(&self) -> NetOptions {
+        NetOptions { relay: self.relay.clone(), mdns: self.mdns, pin_initial_path: self.pin_initial_path, port: self.port }
     }
 }
 
@@ -45,10 +72,28 @@ pub struct Server {
     pub shutdown: Notify,
     /// Set while blocks are being handed to a successor; mutations fail.
     pub upgrading: AtomicBool,
+    pub auth: Mutex<auth::Auth>,
+    /// The remote endpoint; taken when the server stops or hands over.
+    pub net: tokio::sync::Mutex<Option<Net>>,
+    /// Whether the endpoint uses relays (`Net::online` waits for one).
+    pub relays: bool,
     last_activity: Mutex<Instant>,
 }
 
 impl Server {
+    /// [`Self::info`] with the endpoint's current address.
+    pub async fn info_now(&self) -> ServerInfo {
+        let addr = self.net.lock().await.as_ref().map(Net::addr);
+        let endpoint_addr = addr.and_then(|addr| serde_json::to_value(addr).inspect_err(|e| tracing::warn!("encode endpoint address: {e}")).ok());
+        ServerInfo { endpoint_addr, ..self.info.clone() }
+    }
+
+    /// The grants and invites. A panic while holding them must not take
+    /// remote access down with it, so poisoning is ignored.
+    pub fn auth(&self) -> std::sync::MutexGuard<'_, auth::Auth> {
+        self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn touch(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
@@ -105,7 +150,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let (notes_tx, notes_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persist, restored) = persist::open(&config.home, &notes_tx)?;
     tracing::info!(sessions = restored.sessions.len(), blocks = restored.blocks.len(), "state restored");
-    let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions: restored.sessions, blocks: restored.blocks };
+    let identity = Identity::load_or_create(paths::iroh_identity(&config.home)).context("load iroh identity")?;
+    let auth = auth::Auth::open(&config.home)?;
+    let net = Net::bind_with(&identity, config.net_options()).await?;
+    let remote = Remote { identity, auth, net: Ok(net) };
+    let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions: restored.sessions, blocks: restored.blocks, remote };
     serve(config, start).await
 }
 
@@ -118,12 +167,32 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 /// could not be served after it committed.
 pub async fn takeover(config: Config, fail_before_ready: bool) -> anyhow::Result<()> {
     prepare_home(&config.home)?;
+    // Everything fallible is loaded before taking any program.
+    let identity = Identity::load_or_create(paths::iroh_identity(&config.home)).context("load iroh identity")?;
+    let auth = auth::Auth::open(&config.home)?;
     let (notes_tx, notes_rx) = tokio::sync::mpsc::unbounded_channel();
     let taken = handoff::take(&config.home, &notes_tx, fail_before_ready).await?;
     tracing::info!(sessions = taken.sessions.len(), blocks = taken.blocks.len(), "took over");
     let handoff::Taken { lock, listener, persist, sessions, blocks, .. } = taken;
-    let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions, blocks };
+    // The old server froze pairing when the upgrade began: re-read the
+    // grants it may have recorded since they were first loaded.
+    let auth = auth::Auth::open(&config.home).unwrap_or_else(|error| {
+        tracing::error!("re-read paired devices: {error:#}");
+        auth
+    });
+    // The old server closed its endpoint before COMMIT. Not fatal: the
+    // programs we now hold must not end here.
+    let net = Net::bind_with(&identity, config.net_options()).await.map_err(|error| format!("{error:#}"));
+    let remote = Remote { identity, auth, net };
+    let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions, blocks, remote };
     serve(config, start).await
+}
+
+struct Remote {
+    identity: Identity,
+    auth: auth::Auth,
+    /// The endpoint, or why remote access is unavailable.
+    net: Result<Net, String>,
 }
 
 struct Start {
@@ -134,10 +203,19 @@ struct Start {
     persist: persist::Persist,
     sessions: Vec<registry::Session>,
     blocks: std::collections::HashMap<silo_proto::model::BlockId, block::BlockHandle>,
+    remote: Remote,
 }
 
 async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
-    let Start { lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks } = start;
+    let Start { lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks, remote } = start;
+    let Remote { identity, auth, net } = remote;
+    let (net, incoming, remote_error) = match net.and_then(|mut net| net.serve_ctl(16).map(|incoming| (net, incoming)).map_err(|e| format!("{e:#}"))) {
+        Ok((net, incoming)) => (Some(net), Some(incoming), None),
+        Err(error) => {
+            tracing::error!("remote access unavailable: {error}");
+            (None, None, Some(error))
+        }
+    };
     let home = config.home;
     let socket = paths::socket(&home);
     let started_at = block::now_ms();
@@ -146,6 +224,9 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         pid: std::process::id(),
         server_id: persist.server_id().to_owned(),
         started_at,
+        endpoint_id: identity.node_id(),
+        remote_error,
+        endpoint_addr: None,
     };
     let runtime = paths::Runtime {
         pid: info.pid,
@@ -165,9 +246,14 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         info,
         shutdown: Notify::new(),
         upgrading: AtomicBool::new(false),
+        auth: Mutex::new(auth),
+        net: tokio::sync::Mutex::new(net),
+        relays: config.relay != RelayConfig::Disabled,
         last_activity: Mutex::new(Instant::now()),
     });
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
+    let _remote_task = incoming.map(|incoming| AbortOnDrop(tokio::spawn(remote::accept_loop(server.clone(), incoming))));
+    notify::notify("READY=1");
 
     let notes_server = server.clone();
     let notes_task = AbortOnDrop(tokio::spawn(async move {
@@ -261,6 +347,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         worker.finish().await;
     }
     drop(notes_task);
+    close_net(&server).await;
+    server.auth().flush();
     server.registry.lock().unwrap().shutdown();
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(paths::runtime(&home));
@@ -275,6 +363,12 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
 /// (it is the same socket); the successor rewrites the runtime file.
 async fn commit(server: &Server, listener: UnixListener, lock: std::fs::File, mut sock: std::os::unix::net::UnixStream) -> anyhow::Result<()> {
     drop(listener);
+    // Remote clients reconnect to the successor, which binds the same
+    // identity once this endpoint is gone.
+    close_net(server).await;
+    // Wait out any hello that took the auth lock before `upgrading` was
+    // set, and leave the successor's re-read the latest `last_seen`.
+    server.auth().flush();
     {
         let mut reg = server.registry.lock().unwrap();
         for client in reg.clients.values_mut() {
@@ -289,6 +383,17 @@ async fn commit(server: &Server, listener: UnixListener, lock: std::fs::File, mu
     tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await??;
     tracing::info!("upgrade committed; exiting");
     Ok(())
+}
+
+/// Close the remote endpoint and every remote connection.
+async fn close_net(server: &Server) {
+    let net = server.net.lock().await.take();
+    let Some(net) = net else { return };
+    match tokio::time::timeout(Duration::from_secs(3), net.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!("close remote endpoint: {error:#}"),
+        Err(_) => tracing::warn!("closing the remote endpoint timed out"),
+    }
 }
 
 /// Aborts a background task when the server future is dropped (a crash in

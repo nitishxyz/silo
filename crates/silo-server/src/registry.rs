@@ -79,11 +79,15 @@ pub struct ClientEntry {
     pub events: Option<Sink>,
     pub close: Option<tokio::sync::oneshot::Sender<()>>,
     pub attached: usize,
+    /// The remote connection this client's control stream runs on; data
+    /// tickets it is issued are redeemable only there (`None`: unix).
+    pub origin: Option<u64>,
 }
 
 struct Ticket {
     block_id: BlockId,
     client_id: ClientId,
+    origin: Option<u64>,
     expires: Instant,
 }
 
@@ -182,7 +186,7 @@ impl Registry {
     pub fn add_client(&mut self, name: String, passive: bool) -> ClientId {
         let id = self.next_client;
         self.next_client += 1;
-        self.clients.insert(id, ClientEntry { name, passive, events: None, close: None, attached: 0 });
+        self.clients.insert(id, ClientEntry { name, passive, events: None, close: None, attached: 0, origin: None });
         id
     }
 
@@ -571,12 +575,17 @@ impl Registry {
         let now = Instant::now();
         self.tickets.retain(|_, t| t.expires > now);
         let ticket = ticket_hex(&rand::random::<[u8; 16]>());
-        self.tickets.insert(ticket.clone(), Ticket { block_id: block_id.to_owned(), client_id, expires: now + TICKET_TTL });
+        let origin = self.clients.get(&client_id).and_then(|c| c.origin);
+        self.tickets.insert(ticket.clone(), Ticket { block_id: block_id.to_owned(), client_id, origin, expires: now + TICKET_TTL });
         Ok(DataTicket { ticket, expires_in_ms: TICKET_TTL.as_millis() as u64 })
     }
 
-    /// Consume a ticket: `(block, client)`.
-    pub fn redeem(&mut self, ticket: &str) -> Option<(BlockId, ClientId)> {
+    /// Consume a ticket presented on `origin`: `(block, client)`. A ticket
+    /// issued to another connection is refused and left unconsumed.
+    pub fn redeem(&mut self, ticket: &str, origin: Option<u64>) -> Option<(BlockId, ClientId)> {
+        if self.tickets.get(ticket)?.origin != origin {
+            return None;
+        }
         let t = self.tickets.remove(ticket)?;
         (t.expires > Instant::now() && self.clients.contains_key(&t.client_id)).then_some((t.block_id, t.client_id))
     }

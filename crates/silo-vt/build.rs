@@ -11,14 +11,22 @@ fn main() {
     let revision = fs::read_to_string(&rev_file).expect("GHOSTTY_REV");
     let revision = revision.trim();
 
+    // Cross builds use a per-triple runtime that scripts/build-ghostty.sh
+    // cross-compiles with zig and tags with its triple.
+    let target = env::var("TARGET").expect("TARGET");
+    let cross = (target != env::var("HOST").expect("HOST")).then_some(target.as_str());
     let runtime = env::var_os("SILO_GHOSTTY_RUNTIME").map_or_else(
-        || root.join(format!("target/ghostty/{revision}/runtime")),
+        || {
+            let dir = cross.map_or_else(|| "runtime".to_owned(), |t| format!("runtime-{t}"));
+            root.join(format!("target/ghostty/{revision}/{dir}"))
+        },
         PathBuf::from,
     );
     let stamp = runtime.join("silo-revision");
     if fs::read_to_string(&stamp).unwrap_or_default().trim() != revision {
         let status = Command::new("bash")
             .arg(root.join("scripts/build-ghostty.sh"))
+            .args(cross)
             .status()
             .expect("run scripts/build-ghostty.sh");
         assert!(status.success(), "building libghostty-vt failed");
@@ -28,6 +36,15 @@ fn main() {
         revision,
         "libghostty-vt runtime missing; run scripts/build-ghostty.sh"
     );
+    if let Some(target) = cross {
+        let built_for = fs::read_to_string(runtime.join("silo-target")).unwrap_or_default();
+        assert_eq!(
+            built_for.trim(),
+            target,
+            "libghostty-vt runtime {} is not built for {target}; unset SILO_GHOSTTY_RUNTIME or run scripts/build-ghostty.sh {target}",
+            runtime.display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", stamp.display());
 
     cc::Build::new()

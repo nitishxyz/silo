@@ -103,7 +103,7 @@ async fn run(config: Config, shared: Arc<Shared>, mut cmds: mpsc::UnboundedRecei
     let socket = paths::socket(&config.home);
     loop {
         // Connected: mirror events, run commands until the connection drops.
-        match Control::connect_with(&socket, NAME, true).await {
+        match Control::connect_local(&socket, NAME, true).await {
             Ok((control, mut events)) => {
                 let _ = control.subscribe().await;
                 let sessions = list(&control).await.len();
@@ -216,6 +216,9 @@ mod tests {
             version: "x".into(),
             pid: 2,
             server_id: String::new(),
+            endpoint_id: String::new(),
+            remote_error: None,
+            endpoint_addr: None,
             started_at: 0,
         });
         state.sessions = 1;

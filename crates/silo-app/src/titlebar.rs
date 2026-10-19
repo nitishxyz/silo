@@ -104,11 +104,14 @@ pub fn drop_index(from: usize, target: usize, after: bool) -> Option<usize> {
 struct TabDrag {
     window_id: String,
     title: String,
+    /// Grab point within the tab; the preview pads it away so the pill
+    /// sits just below-right of the pointer.
+    offset: gpui::Point<gpui::Pixels>,
 }
 
 impl Render for TabDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let pill = div()
             .flex()
             .flex_row()
             .items_center()
@@ -122,7 +125,8 @@ impl Render for TabDrag {
             .text_size(px(12.0))
             .text_color(rgb(theme::foreground()))
             .child(icon("terminal", 12.0, theme::accent()))
-            .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
+            .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()));
+        div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
     }
 }
 
@@ -367,7 +371,7 @@ impl Workspace {
         let primary = selected || !several;
         let close = self.motion.close_button(&w.id, now);
         let title = self.window_title(w, cx);
-        let drag = TabDrag { window_id: w.id.clone(), title: title.clone() };
+        let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), offset: gpui::Point::default() };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
         let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
@@ -456,7 +460,7 @@ impl Workspace {
             .map(claim_press)
             // The preview lives exactly as long as the drag, so its release
             // ends the drag state however the drag ended.
-            .on_drag(drag, move |drag, _, _, cx| {
+            .on_drag(drag, move |drag, offset, _, cx| {
                 let id = drag.window_id.clone();
                 _ = workspace.update(cx, |this, cx| {
                     this.tab_dragging = Some(id);
@@ -473,7 +477,7 @@ impl Workspace {
                         });
                     })
                     .detach();
-                    drag.clone()
+                    TabDrag { offset, ..drag.clone() }
                 })
             })
             .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {

@@ -223,6 +223,12 @@ impl Pane {
         (self.saved != Some(state)).then_some(state)
     }
 
+    /// Hand over the mirror (leaving its host): shown again from memory on
+    /// return, and resumed from where it was.
+    pub fn take_mirror(&mut self) -> silo_client::Mirror {
+        std::mem::take(&mut self.mirror)
+    }
+
     /// Whether [`checkpoint`](Self::checkpoint) has anything to save.
     pub fn needs_checkpoint(&self) -> bool {
         self.dirty().is_some()

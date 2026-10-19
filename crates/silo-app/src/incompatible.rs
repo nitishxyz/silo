@@ -4,7 +4,7 @@
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
 
-use crate::{theme, theme::Continuous as _, workspace::Workspace};
+use crate::{hosts::HostState, theme, theme::Continuous as _, workspace::Workspace};
 
 impl Workspace {
     /// The active host's incompatible server, if one holds it.
@@ -34,6 +34,47 @@ impl Workspace {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Card for a remote host that can't be used as is: not paired (with
+    /// Pair again) or another build (nothing to do from here).
+    pub(crate) fn render_remote_problem(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let host = self.active_host;
+        let (title, detail, pair) = match self.hosts.get(host)?.state {
+            HostState::NotPaired => ("Not paired", "This Mac is no longer paired with that machine.", true),
+            HostState::DifferentBuild => ("Different server build", "Update Silo on that machine.", false),
+            _ => return None,
+        };
+        let card = div()
+            .max_w(px(460.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(12.0))
+            .text_center()
+            .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(detail))
+            .when(pair, |el| {
+                el.child(
+                    div()
+                        .id("remote-pair-again")
+                        .h(px(28.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .continuous(14.0)
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(rgb(theme::tab_active()))
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.88))
+                        .child("Pair Again…")
+                        .on_click(cx.listener(move |this, _, window, cx| this.pair_again(host, window, cx))),
+                )
+            });
+        Some(div().size_full().flex().items_center().justify_center().p(px(24.0)).child(card).into_any_element())
     }
 
     pub(crate) fn render_incompatible(&self, server: &silo_client::DifferentBuild, cx: &mut Context<Self>) -> AnyElement {

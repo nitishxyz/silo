@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
@@ -44,6 +44,53 @@ const INJECT_WAIT: Duration = Duration::from_millis(250);
 /// Configuration and size transitions remembered inside the ring; older
 /// resume points fall back to a snapshot.
 const TRANSITION_LOG_CAP: usize = 1024;
+/// PTY output read but not yet handled by the actor is capped at this: the
+/// reader thread (and so the program) waits for the actor. Without it a
+/// fast PTY (Linux) queues megabytes ahead of subscribers' ACKs in the
+/// mailbox, and subscribers that keep up are cut as lagging.
+const READ_AHEAD: usize = 256 * 1024;
+
+/// Back-pressure from the actor to the PTY reader thread.
+#[derive(Default)]
+struct ReadGate {
+    /// Bytes queued for the actor, and whether waiting is disabled.
+    state: Mutex<(usize, bool)>,
+    room: Condvar,
+}
+
+impl ReadGate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, bool)> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Reader side: queue `len` bytes via `send`, then wait for room.
+    fn read(&self, len: usize, send: impl FnOnce()) {
+        self.lock().0 += len;
+        send();
+        let state = self.lock();
+        drop(self.room.wait_while(state, |(queued, open)| *queued > READ_AHEAD && !*open));
+    }
+
+    /// Actor side: `len` queued bytes were taken.
+    fn done(&self, len: usize) {
+        let mut state = self.lock();
+        state.0 = state.0.saturating_sub(len);
+        if state.0 <= READ_AHEAD {
+            self.room.notify_all();
+        }
+    }
+
+    /// Stop throttling, so the reader thread can be stopped and joined.
+    fn open(&self) {
+        self.lock().1 = true;
+        self.room.notify_all();
+    }
+
+    /// Throttle again from empty (a re-adopted PTY).
+    fn reset(&self) {
+        *self.lock() = (0, false);
+    }
+}
 
 /// Outgoing frames for one data stream; `queued` counts unsent bytes.
 #[derive(Clone)]
@@ -373,6 +420,9 @@ struct Actor {
     /// A PTY released by a failed handoff that could not be re-adopted: the
     /// program keeps running (frozen, no I/O) and the next handoff returns it.
     parked: Option<silo_pty::Detached>,
+    /// Throttles the PTY reader thread; opened before the PTY is dropped
+    /// or detached, which joins that thread.
+    gate: Arc<ReadGate>,
     lifecycle: Lifecycle,
     vt: TerminalCore,
     epoch: u64,
@@ -532,7 +582,8 @@ pub fn spawn(
     let mut pty = Pty::spawn(config, pty_size(size), move |status| {
         let _ = exit_tx.send(BlockMsg::ChildExited(status.code()));
     })?;
-    let input = start_io(&mut pty, &info.id, &tx)?;
+    let gate = Arc::new(ReadGate::default());
+    let input = start_io(&mut pty, &info.id, &tx, &gate)?;
 
     let mut info = info;
     info.size = size;
@@ -542,6 +593,7 @@ pub fn spawn(
     let config = TerminalConfig::default();
     install_config(&mut vt, &config);
     let mut actor = Actor::new(&info, vt, config, notes);
+    actor.gate = gate;
     actor.pty = Some(pty);
     actor.input = Some(input);
     actor.tx = Some(tx.clone());
@@ -590,7 +642,8 @@ pub fn spawn_adopted(
         Err(error) => return Err(AdoptFailed { error, detached: pty }.into()),
     };
     let (tx, rx) = mpsc::channel();
-    let (pty, input) = adopt_pty(&info.id, pty, &tx)
+    let gate = Arc::new(ReadGate::default());
+    let (pty, input) = adopt_pty(&info.id, pty, &tx, &gate)
         .map_err(|e| AdoptFailed { error: e.error.into(), detached: e.detached })?;
     let mut info = info;
     info.size = checkpoint.size;
@@ -601,6 +654,7 @@ pub fn spawn_adopted(
     restore_osc(&mut info, &checkpoint);
     let mut actor = Actor::new(&info, vt, config, notes);
     actor.epoch = checkpoint.epoch;
+    actor.gate = gate;
     actor.ring_start = checkpoint.offset;
     actor.log.floor = checkpoint.offset;
     (actor.osc_title, actor.osc_pwd) = (checkpoint.osc_title, checkpoint.osc_pwd);
@@ -642,20 +696,16 @@ fn adopt_pty(
     id: &str,
     pty: silo_pty::Detached,
     tx: &mpsc::Sender<BlockMsg>,
+    gate: &Arc<ReadGate>,
 ) -> Result<(Pty, PtyInput), silo_pty::AdoptError> {
-    let (exit_tx, io_tx) = (tx.clone(), tx.clone());
+    let (exit_tx, io_tx, gate) = (tx.clone(), tx.clone(), gate.clone());
     Pty::adopt_with_io(
         pty,
         &format!("silo-pty-{id}"),
         move |code| {
             let _ = exit_tx.send(BlockMsg::ChildExited(code));
         },
-        move |event| {
-            let _ = io_tx.send(match event {
-                PtyEvent::Output(bytes) => BlockMsg::Output(bytes),
-                PtyEvent::Closed => BlockMsg::ReaderClosed,
-            });
-        },
+        move |event| feed(&io_tx, &gate, event),
     )
 }
 
@@ -675,20 +725,30 @@ fn restore_vt(checkpoint: &Checkpoint) -> anyhow::Result<(TerminalCore, Terminal
 }
 
 /// Run the PTY's owned reader/writer threads, feeding the actor's channel.
-fn start_io(pty: &mut Pty, id: &str, tx: &mpsc::Sender<BlockMsg>) -> std::io::Result<PtyInput> {
-    let tx = tx.clone();
-    pty.start_io(&format!("silo-pty-{id}"), move |event| {
-        let _ = tx.send(match event {
-            PtyEvent::Output(bytes) => BlockMsg::Output(bytes),
-            PtyEvent::Closed => BlockMsg::ReaderClosed,
-        });
-    })
+fn start_io(pty: &mut Pty, id: &str, tx: &mpsc::Sender<BlockMsg>, gate: &Arc<ReadGate>) -> std::io::Result<PtyInput> {
+    let (tx, gate) = (tx.clone(), gate.clone());
+    pty.start_io(&format!("silo-pty-{id}"), move |event| feed(&tx, &gate, event))
+}
+
+/// Reader thread: hand an event to the actor, waiting while it is behind.
+fn feed(tx: &mpsc::Sender<BlockMsg>, gate: &ReadGate, event: PtyEvent) {
+    match event {
+        PtyEvent::Output(bytes) => gate.read(bytes.len(), || drop(tx.send(BlockMsg::Output(bytes)))),
+        PtyEvent::Closed => drop(tx.send(BlockMsg::ReaderClosed)),
+    }
 }
 
 fn start(mut actor: Actor, id: &str, tx: mpsc::Sender<BlockMsg>, rx: mpsc::Receiver<BlockMsg>) -> anyhow::Result<BlockHandle> {
     let shared = actor.info.clone();
     std::thread::Builder::new().name(format!("silo-block-{id}")).spawn(move || actor.run(&rx))?;
     Ok(BlockHandle { tx, info: shared })
+}
+
+impl Drop for Actor {
+    /// Dropping the PTY joins its reader thread: let it finish first.
+    fn drop(&mut self) {
+        self.gate.open();
+    }
 }
 
 impl Actor {
@@ -699,6 +759,7 @@ impl Actor {
             input: None,
             tx: None,
             parked: None,
+            gate: Arc::default(),
             lifecycle: Lifecycle::Running,
             vt,
             epoch: rand::random(),
@@ -749,6 +810,9 @@ impl Actor {
                     }
                 },
                 Ok(msg) => {
+                    if let BlockMsg::Output(bytes) = &msg {
+                        self.gate.done(bytes.len());
+                    }
                     if self.handle(msg) && exit_deadline.is_none() {
                         // Drain output still buffered in the PTY before
                         // reporting the exit, but do not wait forever for
@@ -853,6 +917,7 @@ impl Actor {
     /// running, or, if that fails, parked open for the next handoff.
     fn handoff(&mut self, rx: &mpsc::Receiver<BlockMsg>) -> Result<Handoff, String> {
         self.input = None;
+        self.gate.open();
         let detached = self.pty.take().map(Pty::detach).or_else(|| self.parked.take());
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -884,7 +949,8 @@ impl Actor {
             self.parked = Some(detached);
             return;
         };
-        match adopt_pty(&self.id, detached, &tx) {
+        self.gate.reset();
+        match adopt_pty(&self.id, detached, &tx, &self.gate) {
             Ok((pty, input)) => {
                 self.pty = Some(pty);
                 self.input = Some(input);
@@ -1262,6 +1328,7 @@ impl Actor {
         // Stay alive as a read-only block: drop the PTY and the input path.
         self.lifecycle = Lifecycle::Exited;
         self.input = None;
+        self.gate.open();
         self.pty = None;
         self.tx = None;
         self.injects.clear();

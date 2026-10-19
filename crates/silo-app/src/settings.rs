@@ -12,7 +12,7 @@ use crate::{
     fonts,
     hosts::HostState,
     settings_panel::{
-        CARD_RADIUS, ServerAction, SettingsEvent, SettingsHost, SettingsPanel, SettingsServer, SettingsShortcut,
+        CARD_RADIUS, ServerAction, SettingsDevice, SettingsEvent, SettingsHost, SettingsPanel, SettingsServer, SettingsShortcut,
         SettingsSnapshot, TerminalSettings, UiFontSettings,
     },
     terminal_prefs::{self, TerminalPrefs},
@@ -20,10 +20,48 @@ use crate::{
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
 
+/// The local server's paired devices and a pending invite.
+#[derive(Default)]
+pub(crate) struct Pairing {
+    pub devices: Vec<silo_proto::control::PairedDevice>,
+    pub invite: Option<String>,
+}
+
+/// "Last seen …" for a device (`last_seen` 0 = never).
+fn seen(last_seen: u64, now: u64) -> String {
+    if last_seen == 0 {
+        return "Never connected".into();
+    }
+    match now.saturating_sub(last_seen) {
+        s if s < 60 => "Last seen just now".into(),
+        s if s < 3600 => format!("Last seen {} min ago", s / 60),
+        s if s < 86_400 => format!("Last seen {} h ago", s / 3600),
+        s => format!("Last seen {} d ago", s / 86_400),
+    }
+}
+
+/// A server message for display: words that look like paths are dropped.
+fn without_paths(reason: &str) -> String {
+    reason.split_whitespace().filter(|w| !w.contains('/')).collect::<Vec<_>>().join(" ")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 pub struct SettingsModal {
     pub panel: Entity<SettingsPanel>,
     _sub: Subscription,
+    /// Refreshes paired devices while the Server page is shown.
+    _devices: gpui::Task<()>,
 }
+
+/// After a pairing call: `None` leaves the panel as is, `Some(message)`
+/// refreshes it with an optional message.
+type Refresh = Option<Option<String>>;
+
+/// How often the paired devices list is re-read while visible.
+const DEVICES_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Workspace {
     pub(crate) fn settings_snapshot(&self, message: Option<String>, cx: &gpui::App) -> SettingsSnapshot {
@@ -35,11 +73,7 @@ impl Workspace {
             .map(|(index, h)| SettingsHost {
                 id: index.to_string(),
                 name: h.info.name.clone(),
-                address: match &h.info.transport {
-                    crate::hosts::Transport::Iroh { address } => address.clone(),
-                    // The local host needs no address in the UI.
-                    crate::hosts::Transport::Local { .. } => String::new(),
-                },
+                address: h.info.transport.remote_id().unwrap_or_default(),
                 status: host_status(&h.state, h.paused.load(std::sync::atomic::Ordering::Acquire)),
                 removable: !h.info.local,
             })
@@ -67,6 +101,15 @@ impl Workspace {
             can_start: paused,
             can_stop: connected.is_some(),
             can_restart: connected.is_some() || incompatible.is_some(),
+            endpoint_id: connected.map(|c| c.hello().server.endpoint_id.clone()).filter(|id| !id.is_empty()),
+            remote_error: connected.and_then(|c| c.hello().server.remote_error.as_deref()).map(without_paths),
+            devices: self
+                .pairing
+                .devices
+                .iter()
+                .map(|d| SettingsDevice { id: d.id.clone(), name: d.name.clone(), seen: seen(d.last_seen, unix_now()) })
+                .collect(),
+            invite: self.pairing.invite.clone(),
         };
         let (_, font_in_use, _) = theme::summary();
         let prefs = theme::prefs();
@@ -100,6 +143,69 @@ impl Workspace {
         }
     }
 
+    /// Run a pairing RPC on the local server, then apply its result.
+    fn pairing_call<T: serde::de::DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: silo_proto::control::Method,
+        apply: impl FnOnce(&mut Self, anyhow::Result<T>) -> Refresh + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(control) = self.hosts.first().and_then(|h| h.control.clone()) else { return };
+        let task = self.rt.spawn(async move { control.call::<T>(method).await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                // Unchanged: leave the panel (and any confirmation) alone.
+                if let Some(message) = apply(this, result) {
+                    this.refresh_settings(message, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        use silo_proto::control::{Method, PairedDevices};
+        self.pairing_call(Method::PairList {}, |this, result: anyhow::Result<PairedDevices>| {
+            let devices = result.inspect_err(|e| tracing::debug!("pair.list: {e:#}")).ok()?.devices;
+            if devices == this.pairing.devices {
+                return None;
+            }
+            this.pairing.devices = devices;
+            Some(None)
+        }, cx);
+    }
+
+    fn create_invite(&mut self, cx: &mut Context<Self>) {
+        use silo_proto::control::{Method, PairInvite};
+        self.pairing_call(Method::PairCreate { ttl_secs: 600 }, |this, result: anyhow::Result<PairInvite>| match result {
+            Ok(invite) => {
+                this.pairing.invite = Some(invite.ticket);
+                Some(None)
+            }
+            Err(error) if error.downcast_ref::<silo_client::Offline>().is_some() => Some(Some("Not online yet. Try again shortly.".into())),
+            Err(error) => {
+                tracing::warn!("pair.create: {error:#}");
+                Some(Some("Could not create a ticket.".into()))
+            }
+        }, cx);
+    }
+
+    fn revoke_device(&mut self, id: String, cx: &mut Context<Self>) {
+        let method = silo_proto::control::Method::PairRevoke { id: id.clone() };
+        self.pairing_call(method, move |this, result: anyhow::Result<serde_json::Value>| match result {
+            Ok(_) => {
+                this.pairing.devices.retain(|d| d.id != id);
+                Some(None)
+            }
+            Err(error) => {
+                tracing::warn!("pair.revoke: {error:#}");
+                Some(Some("Could not revoke the device.".into()))
+            }
+        }, cx);
+    }
+
     /// ⌘, / "Settings…": open the panel, or focus it if already open.
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_switcher(window, cx);
@@ -113,10 +219,25 @@ impl Workspace {
             theme::apply_font(cx);
             theme::apply_ui_font(self.ui_font_family(), cx);
             window.refresh();
+            self.pairing.invite = None;
+            self.refresh_devices(cx);
             let snapshot = self.settings_snapshot(None, cx);
             let panel = cx.new(|cx| SettingsPanel::new(snapshot, window, cx));
             let sub = cx.subscribe_in(&panel, window, |this, _, event: &SettingsEvent, window, cx| this.settings_event(event, window, cx));
-            self.settings = Some(SettingsModal { panel, _sub: sub });
+            let devices = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(DEVICES_REFRESH).await;
+                    let alive = this.update(cx, |this, cx| {
+                        if this.settings.as_ref().is_some_and(|m| m.panel.read(cx).showing_server()) {
+                            this.refresh_devices(cx);
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            });
+            self.settings = Some(SettingsModal { panel, _sub: sub, _devices: devices });
         }
         if let Some(modal) = &self.settings {
             modal.panel.update(cx, |panel, cx| panel.focus_search(window, cx));
@@ -269,6 +390,14 @@ impl Workspace {
                 self.execute(Command::OpenTerminalSettingsFile, window, cx);
                 None
             }
+            SettingsEvent::PairDevice => {
+                self.create_invite(cx);
+                None
+            }
+            SettingsEvent::RevokeDevice(id) => {
+                self.revoke_device(id.clone(), cx);
+                None
+            }
             SettingsEvent::OpenServerLog => {
                 self.execute(Command::ShowServerLog, window, cx);
                 None
@@ -276,8 +405,13 @@ impl Workspace {
             // The host sheet replaces the panel; it is a modal of its own.
             SettingsEvent::AddHost => {
                 self.close_settings(window, cx);
-                self.add_host = Some(crate::add_host::AddHostSheet::new(window, cx));
-                cx.notify();
+                self.open_add_host(None, None, window, cx);
+                return;
+            }
+            SettingsEvent::RenameHost(id) => {
+                let Ok(index) = id.parse::<usize>() else { return };
+                self.close_settings(window, cx);
+                self.open_rename_host(index, window, cx);
                 return;
             }
             SettingsEvent::RemoveHost(id) => match id.parse::<usize>().map_err(|e| e.to_string()).and_then(|i| self.remove_host(i)) {
@@ -353,6 +487,8 @@ fn host_status(state: &HostState, paused: bool) -> String {
         HostState::Connecting => "Connecting…".into(),
         HostState::Connected => "Connected".into(),
         HostState::Unreachable(reason) => format!("Unreachable: {reason}"),
+        HostState::NotPaired => "Not paired".into(),
+        HostState::DifferentBuild => "Different server build".into(),
     }
 }
 
@@ -378,6 +514,26 @@ mod tests {
         assert_eq!(host_status(&HostState::Unreachable("refused".into()), false), "Unreachable: refused");
         assert_eq!(short("d2865b8f578fa4e85e2f2b85ef97f5ef69de951f"), "d2865b8f");
         assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn remote_error_hides_paths() {
+        assert_eq!(without_paths("bind iroh endpoint: /Users/x/Library/key: denied"), "bind iroh endpoint: denied");
+        assert_eq!(without_paths("no network"), "no network");
+    }
+
+    #[test]
+    fn last_seen_is_short() {
+        assert_eq!(seen(0, 100), "Never connected");
+        assert_eq!(seen(100, 130), "Last seen just now");
+        assert_eq!(seen(100, 100 + 5 * 60), "Last seen 5 min ago");
+        assert_eq!(seen(100, 100 + 3 * 3600), "Last seen 3 h ago");
+        assert_eq!(seen(100, 100 + 2 * 86_400), "Last seen 2 d ago");
+        assert_eq!(host_status(&HostState::NotPaired, false), "Not paired");
+        assert_eq!(host_status(&HostState::DifferentBuild, false), "Different server build");
+        assert_eq!(crate::switcher::state_label(&HostState::Unreachable("x".into()), false), Some("offline"));
+        assert_eq!(crate::switcher::state_label(&HostState::NotPaired, false), Some("not paired"));
+        assert_eq!(crate::switcher::state_label(&HostState::Connected, false), None);
     }
 
     #[test]

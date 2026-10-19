@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::{Connection, ConnectionError, presets};
+use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
+use iroh::endpoint::{Connection, ConnectionError, PathList, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -15,9 +17,10 @@ pub const CTL_ALPN: &[u8] = b"silo/ctl/1";
 /// Reserved for browser-block tunnels (Phase 6). Not served yet.
 pub const TUNNEL_ALPN: &[u8] = b"silo/tunnel/1";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RelayConfig {
     /// n0 production relays plus n0 DNS/pkarr address lookup.
+    #[default]
     Default,
     /// A single self-hosted relay; no n0 services.
     Custom(RelayUrl),
@@ -32,8 +35,39 @@ pub struct Net {
     router: Option<Router>,
 }
 
+/// Endpoint options. `Default` = n0 relays, mDNS off, normal path selection.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetOptions {
+    pub relay: RelayConfig,
+    pub mdns: bool,
+    /// Keep every connection on the path it was established on (the dialed
+    /// address for clients, the peer's source address for servers). iroh
+    /// still learns holepunch candidates but closes those paths instead of
+    /// switching to them. For tests that route traffic through a proxy.
+    pub pin_initial_path: bool,
+    /// Fixed UDP port for the IPv4 and IPv6 sockets (unspecified address),
+    /// so direct addresses stay valid across restarts. `None`: random.
+    pub port: Option<u16>,
+}
+
 impl Net {
     pub async fn bind(identity: &Identity, relay: RelayConfig, mdns: bool) -> Result<Net> {
+        let opts = NetOptions {
+            relay,
+            mdns,
+            pin_initial_path: false,
+            port: None,
+        };
+        Net::bind_with(identity, opts).await
+    }
+
+    pub async fn bind_with(identity: &Identity, opts: NetOptions) -> Result<Net> {
+        let NetOptions {
+            relay,
+            mdns,
+            pin_initial_path,
+            port,
+        } = opts;
         let builder = match relay {
             RelayConfig::Default => Endpoint::builder(presets::N0),
             RelayConfig::Custom(url) => {
@@ -46,6 +80,16 @@ impl Net {
         let mut builder = builder.secret_key(identity.secret().clone());
         if mdns {
             builder = builder.address_lookup(MdnsAddressLookup::builder());
+        }
+        if pin_initial_path {
+            builder = builder.path_selector(Arc::new(PinInitialPath));
+        }
+        if let Some(port) = port {
+            builder = builder
+                .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
+                .context("bind address")?
+                .bind_addr((std::net::Ipv6Addr::UNSPECIFIED, port))
+                .context("bind address")?;
         }
         let endpoint = builder.bind().await.context("bind iroh endpoint")?;
         Ok(Net {
@@ -131,6 +175,11 @@ impl RemoteConn {
         self.conn.remote_id()
     }
 
+    /// Currently open network paths of this connection.
+    pub fn paths(&self) -> PathList<'_> {
+        self.conn.paths()
+    }
+
     /// Identifier unique among this process's live connections.
     pub fn id(&self) -> u64 {
         self.conn.stable_id() as u64
@@ -178,5 +227,21 @@ impl ProtocolHandler for CtlHandler {
             rc.close(b"server not accepting");
         }
         Ok(())
+    }
+}
+
+/// Never moves off the first selected path.
+#[derive(Debug)]
+struct PinInitialPath;
+
+impl PathSelector for PinInitialPath {
+    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
+        let mut sel = PathSelection::none();
+        if ctx.current().is_none()
+            && let Some(first) = ctx.paths().next()
+        {
+            sel.set(&first);
+        }
+        sel
     }
 }

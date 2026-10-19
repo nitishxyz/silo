@@ -1,0 +1,275 @@
+# Phase 6: browser blocks
+
+Goal: a block can be a browser.
+- **Server holds the state:** URL, history, title, favicon, zoom and profile.
+- **Client runs the engine:** CEF windowless, composited into GPUI.
+- **Localhost URLs** reach the server machine over `silo/tunnel/1`.
+
+Planning doc. It builds on PLAN.md §6/§7 and the code as of the Phase 5 plan.
+
+## 1. What exists (checked 2026-10-19)
+
+| Thing | Finding |
+|---|---|
+| crates.io `cef` | **154.5.0+154.0.34** (2026-10-07), repo `tauri-apps/cef-rs`. Supports macOS x86_64/arm64. Its `build.rs` (`cef-dll-sys`) downloads the CEF binary distribution into `OUT_DIR`, or uses `CEF_PATH`. It ships `bundle-cef-app` for macOS `.app` + helper layout. The `accelerated_osr` feature pulls in `objc2-io-surface`/`objc2-metal` (and wgpu); we don't need it, because we only read `AcceleratedPaintInfo.shared_texture_io_surface` |
+| `cef-rs` | Same project as the crate above; there is no separate binding to choose |
+| `chromiumoxide` 0.9.1 | CDP client for an external Chrome. It can't embed or composite in-process. Fit only for the later server-side headless/agent flavor |
+| gpui fork `b36b2e8` | macOS `Window::paint_surface(bounds, CVPixelBuffer)` (`gpui/src/window.rs:4856`), `gpui::surface()` element, `surface_bgra_fragment` in `gpui_macos/src/shaders.metal` via `CVMetalTextureCache`. **Limits:** BGRA is drawn opaque (alpha forced to 1), and the clip is a rectangular `content_mask` only, with **no corner radii** |
+| desktop-platform | Found at `~/dev/nitishxyz/desktop-platform` (not `~/dev/desktop-platform`). `crates/web-runtime` (~14k lines incl. examples) and `crates/webview` (~2.6k), pinned to `cef =151.8.0`. Linux-only design: `multi_threaded_message_loop: true` (**unsupported on macOS**), DMA-BUF `on_accelerated_paint`, and no IME bridge |
+
+**Portable from desktop-platform:**
+- `web-runtime/src/session/{handlers,types,shared,geometry,input,popup}.rs`: client handlers, frame queue, popup
+  handling, input translation.
+- `lifecycle.rs`, `dialog.rs`, `file_dialog.rs`, `context_menu.rs`.
+- `webview/src/{pump,keyboard,input,frame}.rs`.
+
+**Not ported:**
+- `semantic_document.rs`, `semantic_budget.rs` and the `platform-agentkit-*` dependencies (agent features, which
+  are Phase 7+).
+- `platform-native-*` UI.
+
+## 2. Engine path: decided
+
+**Windowless CEF + accelerated paint → IOSurface → CVPixelBuffer → `window.paint_surface`.** One engine, one
+compositing model, and the same input path as the terminal.
+
+| | Windowless CEF in GPUI | WKWebView child NSView |
+|---|---|---|
+| Compositing | Drawn in the GPUI scene, so z-order is correct by construction | A separate layer above the Metal view; anything GPUI draws over it (palette, switcher, tooltips, drag ghosts, menus) is hidden *under* it unless we hide/snapshot the view |
+| Rounded pane corners | Needs a fork change (below) | `layer.cornerRadius` + `masksToBounds`, so easy |
+| Motion (`motion.rs` ghosts, zoom animations) | Works: frames are just textures | Has to be moved/resized in sync each frame, and lags or tears |
+| Input | We translate GPUI events to CEF (port `input.rs`/`keyboard.rs`), with full control over our shortcuts | Native, but steals first responder; our keybindings need an `NSEvent` monitor |
+| IME | We bridge `EntityInputHandler` → `CefBrowserHost::ime_set_composition/commit_text` (new work) | Native, free |
+| Size/packaging | +~250–300 MB framework, 4 helper apps, signing work (§7) | 0 MB |
+| Profiles, devtools, CDP | Per-profile `RequestContext`, devtools, remote debugging port (agent path) | `WKWebsiteDataStore(forIdentifier:)` (macOS 14+), Safari Web Inspector, no CDP |
+| Engine parity with Linux client later | Same | Different engine |
+
+WKWebView would win on IME, size and corners. It loses on the thing Silo is built around: panes that animate,
+overlap overlays and stay in one scene. So **CEF**, with two pieces of fork work:
+
+1. **Rounded/alpha surfaces:** add `corner_radii` to `PaintSurface` and apply the existing quad SDF in
+   `surface_vertex`/`surface_bgra_fragment` (plus `paint_surface_rounded(bounds, radii, buf)`). It's a small
+   change to `nitishxyz/zed` (`torrz/glass`). Until it lands, the pane card paints its 1 px border and corner
+   "caps" over the surface corners, which looks acceptable at the current radii.
+2. **`CrAppControlProtocol` on NSApp:** CEF on macOS requires the `NSApplication` subclass to implement
+   `isHandlingSendEvent`/`setHandlingSendEvent:` and wrap `sendEvent:`.
+   - gpui's `GPUIApplication` (`gpui_macos/src/platform.rs:75`) doesn't.
+   - Fix: add the methods in the fork's `ClassDecl`. An objc runtime `class_addMethod` from our crate is possible,
+     but the fork is cleaner. **This blocks CEF init.**
+
+**Message loop:**
+- `multi_threaded_message_loop` is unsupported on macOS, so we use `external_message_pump: true`.
+- `CefApp::on_schedule_message_pump_work(delay)` posts a GPUI foreground task that calls
+  `cef::do_message_loop_work()` after `delay`, plus a 30 Hz safety tick while any browser exists. That is the
+  pattern of desktop-platform's old `pump.rs`.
+- Paint callbacks arrive on the UI thread, so there are no mutexes on the hot path.
+
+**Accelerated paint on macOS:**
+- `on_accelerated_paint(info)` hands over `info.shared_texture_io_surface`, which is valid only during the
+  callback.
+- We `CVPixelBufferCreateWithIOSurface` (retaining the IOSurface), store it as the pane's current frame and
+  `cx.notify()`. The surface element paints the latest buffer.
+- Software `on_paint` isn't implemented (no fallback). Init fails loudly if `shared_texture_enabled` isn't honoured.
+
+## 3. Server-held state (proto, registry, persistence)
+
+- `BlockKind` (already `Terminal`-only in `silo-proto/src/model.rs:269`) gains `Browser`.
+- `BlockInfo` gains `browser: Option<BrowserState>`, which is `Some` exactly when `kind == Browser`.
+- Terminal-only fields stay as they are; for browsers, `size`/`pid` are unused (zero/`None`).
+
+```rust
+pub struct BrowserState {
+    pub url: String,             // committed URL of the current entry
+    pub history: Vec<HistoryEntry>, pub index: usize,  // back/forward list, capped at 50
+    pub title: String,
+    pub favicon: Option<String>, // data: URL, ≤ 32 KiB, PNG 32x32
+    pub zoom: f32,               // CEF zoom level, 0.0 = 100%
+    pub profile: String,         // "default" | named; maps to a client-side RequestContext dir
+    pub loading: bool,
+}
+pub struct HistoryEntry { pub url: String, pub title: String }
+```
+
+**Who writes it:**
+- The **owning client** (same ownership as terminals, §3.6 of PLAN) reports engine state with
+  `browser.report {block_id, url, title, favicon?, loading, history, index}`. The server stores it, bumps the
+  revision and emits `block.changed`.
+- **Commands** (`browser.navigate/back/forward/reload/zoom`) go to the server. It updates the intended state and
+  emits `browser.command {block_id, command}` to the owner (and to every attached client, so passive viewers
+  follow).
+- **The server never runs an engine.**
+- With no client attached, the commands update the stored state directly (`navigate` pushes history), so the next
+  client opens there.
+
+**Methods** (`silo-proto/src/control.rs`):
+- `block.split {block_id, axis, spawn, kind?: BlockKind, url?: String}` and `window.create {.., kind?, url?}`.
+  `kind` defaults to terminal.
+- `browser.navigate {block_id, url}` (bare host → `https://`; `localhost`/private-IP → `http://`),
+  `browser.back`, `browser.forward`, `browser.reload {ignore_cache?}`, `browser.zoom {block_id, zoom}`,
+  `browser.report {…}`.
+- `data.connect` on a browser block is rejected with `bad_request`. Browser blocks have no data stream.
+
+**Registry/actor:**
+- A browser block has no PTY actor. `silo-server/src/browser.rs` (new) holds a `BrowserBlock { info }` behind
+  the same `BlockHandle`-shaped interface, as an enum: `BlockHandle::{Terminal, Browser}`.
+- Registry calls that are terminal-only (`terminal.*`, ownership size logic) return `bad_request` for browsers.
+
+**Persistence:** `persist.rs::BlockRecord` already stores `BlockInfo`, so `browser` round-trips with no
+checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs` unchanged.
+
+## 4. Client: `silo-web` crate + browser pane
+
+**`crates/silo-web` (new)** is the CEF boundary and the only crate with `unsafe` for CEF/CoreVideo:
+- `Runtime::init()`:
+  - CEF settings: `windowless_rendering_enabled`, `external_message_pump`, `root_cache_path =
+    ~/Library/Application Support/Silo/web`, one `RequestContext` per profile under `web/profiles/<name>`.
+  - Must run before gpui's `Application::run` returns control, and after `CrAppControlProtocol` is in place.
+  - The helper subprocess entry is `silo-app --type=…`, handled by `cef::execute_process` at the very top of
+    `main.rs`.
+- `Browser` handle: `navigate/back/forward/reload/zoom/resize(scale,size)/focus`, mouse/key/wheel/IME events,
+  and `frame() -> Option<CVPixelBuffer>`.
+- Events: `UrlChanged`, `TitleChanged`, `FaviconChanged`, `Loading`, `HistoryChanged`, `Popup(url)` (opened as a
+  new browser block via `block.split`), `CursorChanged`.
+- Ported from desktop-platform `web-runtime/session/*` and `webview/{pump,keyboard,input,frame}.rs`.
+  DMA-BUF is replaced by IOSurface, and agentkit is dropped.
+
+**`silo-app/src/browser_pane.rs` (new):**
+- `BrowserPane` sits next to `Pane`.
+- `workspace.rs` keeps `panes: HashMap<String, (PaneKind, Subscription)>`, with
+  `enum PaneKind { Terminal(Entity<Pane>), Browser(Entity<BrowserPane>) }`, chosen by `BlockInfo.kind`.
+- Chrome is concise: a single 28 px row in the pane with back/forward/reload, URL field (`text_field.rs`), and a
+  favicon and title shown only when unfocused.
+  - Cmd-L focuses the URL field; Cmd-[ / Cmd-] go back/forward; Cmd-R reloads; Cmd-+/- zoom.
+- **IME:** `BrowserPane` implements `EntityInputHandler` and forwards to `ime_set_composition` /
+  `ime_commit_text` / `ime_finish_composing_text`. Candidate-window bounds come from
+  `RenderHandler::on_ime_composition_range_changed`. This is new work; desktop-platform had none.
+- Commands from the palette/CLI: "New Browser Split" → `block.split{kind:browser,url}`.
+
+**Ghost/motion:** `ghost()` for browser panes returns the last `CVPixelBuffer`, so animations reuse the texture.
+
+## 5. Tunnels (`silo/tunnel/1`)
+
+These only apply to browser blocks on **remote** servers. Local servers load `localhost` directly.
+
+**Which requests are tunneled:**
+- Hosts `localhost`, `*.localhost`, `127.0.0.0/8` and `::1`, and RFC 1918 / link-local / ULA literals. These are
+  "server-private".
+- Public hosts go directly from the client, which is better for latency and for the user's own cookies/VPN.
+
+**Client: a local proxy port, with no URL rewriting:**
+- `silo-client/src/tunnel.rs` (new) runs one loopback HTTP proxy per remote server on `127.0.0.1:0`.
+- CEF's profile `RequestContext` for that server's blocks gets a `proxy` preference with a PAC script. The PAC
+  sends exactly the server-private hosts to `PROXY 127.0.0.1:<port>` and everything else `DIRECT`.
+  - Pages keep their real origin (`http://localhost:3000`), so cookies, CORS and HMR websockets behave as they
+    would on the server.
+  - Profiles are per server (`profile = "<server>/<name>"`), so localhost cookies of two servers never mix.
+- The proxy accepts `CONNECT host:port` (https/wss) and absolute-form `GET http://host:port/…` (plain http and
+  ws upgrade).
+- For each client connection it opens an iroh connection with `TUNNEL_ALPN` to the server (cached, one per server)
+  and a new bi stream, writing `TunnelOpen {host, port}` (a JSON frame, the same `u32 len | u8 kind` framing).
+  It waits for `TunnelOk` / `TunnelErr {code}`, then splices bytes both ways.
+  - For absolute-form http it rewrites only the request line to origin-form before splicing.
+
+**Server:**
+- `silo-transport/src/net.rs`: `serve_ctl` becomes `serve(backlog) -> (CtlIncoming, TunnelIncoming)`, which
+  builds the one `Router` with both `.accept(CTL_ALPN, …)` and `.accept(TUNNEL_ALPN, …)`. The router is spawned
+  once, so a second ALPN can't be added later. `TunnelIncoming` yields `(RemoteConn, BiStream)` per stream.
+- `silo-server/src/tunnel.rs` (new):
+  - Authorizes `conn.remote_id()` against the **same paired-device grants** (`auth.rs`, owner or paired device).
+    An unknown peer gets the connection closed immediately with `unauthorized`.
+  - Allows only server-private destinations (the same list as the client; checked server-side after DNS
+    resolution, so `localhost` can't be pointed elsewhere).
+  - `TcpStream::connect` with a 5 s timeout, then `copy_bidirectional`.
+- No per-port grants: a paired device can already run shell commands, so it can already reach any local port.
+- Limits: 256 concurrent streams per peer, idle streams closed after 10 min.
+- Local unix clients never use tunnels.
+
+## 6. Packaging (macOS)
+
+- **Getting CEF:**
+  - `cef-dll-sys`'s `build.rs` downloads the CEF minimal distribution for the pinned version (~120 MB archive from
+    the Spotify CDN) on first build, or uses `CEF_PATH`.
+  - We set `CEF_PATH=$HOME/.local/share/cef/<version>`, filled once by cef-rs's `export-cef-dir`. That keeps
+    clean builds and CI offline after the first fetch.
+  - Pin `cef = "=154.5.0"` exactly (build-ID rule: the version is part of `BUILD` through `Cargo.lock`).
+- **Bundle layout** (extend `scripts/bundle-macos.sh`; don't adopt `bundle-cef-app`, because the bundle already
+  has the server binary and the menubar):
+  - `Silo.app/Contents/Frameworks/Chromium Embedded Framework.framework` (~250–300 MB unpacked, arm64);
+  - helpers `Silo Helper.app`, `Silo Helper (GPU).app`, `Silo Helper (Renderer).app`,
+    `Silo Helper (Plugin).app`;
+  - each helper is the same small `silo-web-helper` binary (a new bin in `silo-web` that calls
+    `cef::execute_process`) with its own Info.plist.
+  - The main binary loads the framework through `cef::library_loader` at startup, and helpers at
+    `../../../..`-relative paths.
+- **Signing:**
+  - Sign inside-out: framework libraries, then the framework, then each helper (with its own entitlements:
+    Renderer/GPU need `com.apple.security.cs.allow-jit` and `allow-unsigned-executable-memory`; GPU also needs
+    `disable-library-validation` only if we load unsigned plugins, which we don't), then the app.
+  - Hardened runtime everywhere. Notarization is unchanged, just bigger and slower (~5 min more).
+- **Size:** the app grows from ~40 MB to ~330 MB unpacked, and the dmg by ~110 MB. Accepted: there is no
+  "download on first browser" path (one clean path).
+- **Server:** unchanged. The `silo` server binary never links CEF, and the Linux server packages are unaffected.
+
+## 7. Tasks (file ownership doesn't overlap)
+
+**P6-1: browser block state + control API.** Headless; depends on nothing.
+- **Files:** `silo-proto/src/{model.rs,control.rs}`, `silo-server/src/{browser.rs (new),registry.rs,conn.rs
+  (dispatch),block.rs (`BlockHandle` enum),persist.rs,handoff.rs}`, `silo-cli` (`silo new --browser URL`,
+  `silo browser navigate|back|…`).
+- **Tests:**
+  - split with `kind:browser` creates a block with `BrowserState{url}`;
+  - navigate/back/forward edit history with no client attached;
+  - `browser.report` from a non-owner gets `unauthorized`;
+  - `data.connect` on a browser gets `bad_request`;
+  - persist round trip + hot-upgrade handoff keep `BrowserState`;
+  - `browser.command` is emitted to subscribers.
+
+**P6-2: tunnels.** Headless; depends on nothing, so it runs in parallel with P6-1.
+- **Files:** `silo-transport/src/{net.rs,tunnel.rs (new)}`, `silo-server/src/tunnel.rs (new)` + the
+  `serve_ctl` → `serve` call site in `silo-server/src/lib.rs:181`, `silo-client/src/tunnel.rs (new)`.
+- **Tests (two in-process iroh endpoints, relay disabled):**
+  - paired peer → `TunnelOpen{localhost, P}` reaches a test HTTP server; an unpaired peer is closed;
+  - a public destination gets `TunnelErr{forbidden}`;
+  - the client proxy handles `CONNECT` and absolute-form GET and a websocket upgrade end to end (with `curl -x`);
+  - the PAC script routes `localhost:3000` → proxy and `example.com` → DIRECT (pure function test).
+
+**P6-3: fork + `silo-web` runtime.** Depends on nothing. Needs a GUI session to fully verify.
+- **Files:** `nitishxyz/zed` fork (`CrAppControlProtocol` on `GPUIApplication`, rounded surfaces), workspace
+  `Cargo.toml` rev bump, `crates/silo-web/**` (new), `scripts/bundle-macos.sh`.
+- **Tests:**
+  - headless: `cargo test -p silo-web` covers the input/key translation tables and the PAC builder;
+  - `silo-web` example `offscreen_smoke` inits CEF, loads a `data:` page that paints a known color, and gets at
+    least one `on_accelerated_paint` with a 32BGRA IOSurface whose centre pixel matches. It needs a logged-in
+    macOS session (WindowServer), not a visible window, so it runs on a self-hosted macOS runner;
+  - the bundle passes `codesign --verify --deep --strict` and `spctl -a`.
+
+**P6-4: browser pane in the app.** Depends on P6-1 and P6-3, plus P6-2 for remote.
+- **Files:** `silo-app/src/{browser_pane.rs (new),workspace.rs,layout.rs,motion.rs,palette.rs,commands.rs,
+  main.rs}`.
+- **Tests:**
+  - unit: `PaneKind` selection from `BlockInfo.kind`; ghost for browser panes;
+  - UI (`scripts/ui-driver.swift`): split browser → type URL → title appears in the tab; Cmd-[ goes back;
+    palette/switcher overlays draw over the page; Japanese IME composes in a `<input>`;
+  - remote: a dev server on the remote host loads at `http://localhost:5173` with HMR working.
+
+Order: P6-1 ∥ P6-2 ∥ P6-3, then P6-4.
+
+**Verifiable headless:** P6-1 and P6-2 fully, and P6-3's translation and PAC units. CEF paint needs a WindowServer
+session, and P6-4 needs the GUI.
+
+## 8. Blockers and risks
+
+- **CEF init on macOS:** needs `CrAppControlProtocol` on NSApp. That's a fork change to `GPUIApplication`
+  (P6-3, first step).
+- **CEF binaries:** need a ~120 MB download (Spotify CDN, via `cef-dll-sys` or `export-cef-dir`) per version, and
+  ~300 MB of disk per checkout. CI caches `CEF_PATH`.
+- **Rounded corners:** the fork's surface shader has no corner radii and forces alpha to 1. A shader change in
+  `gpui_macos/src/shaders.metal` + `scene.rs`; until it lands, caps are painted over the corners.
+- **desktop-platform code:** pinned to `cef 151.8`. API drift to 154 (handler trait signatures) is expected in
+  the port; budget it in P6-3.
+- **IME:** brand-new code (`ime_set_composition` mapping). Main risk is candidate-window placement; tested with
+  Japanese/Pinyin in P6-4.
+- **Proxy via PAC:** CEF applies proxy prefs per `RequestContext` at runtime (`set_preference("proxy", …)`).
+  Verify in P6-3 that changing it doesn't need a restart. If it does, create the context with the PAC at profile
+  creation (the port is known before any browser opens).
+- **Helper count and signing:** four helper apps, each signed with entitlements. Notarization time grows.

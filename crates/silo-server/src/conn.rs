@@ -1,40 +1,79 @@
 //! Control and data stream handling, transport-independent.
 
 use std::sync::{Arc, atomic::Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use silo_proto::{
     BUILD, Frame,
-    control::{ClientHello, METHODS, Method, Request, RpcError, ServerHello, ServerMessage},
+    control::{ClientHello, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage},
     data::{ClientData, DataHello, Reject},
     kind, read_frame, spawn_reader, write_frame,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::mpsc,
 };
 
 use crate::{
     Server,
+    auth::Peer,
     block::{Attach, BlockMsg, Sink},
     handoff,
 };
 
+/// A remote peer must send its first frame within this time.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `pair.create` waits for the endpoint to learn an address.
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(4);
+/// Largest first frame (a hello) accepted from a remote peer.
+pub const REMOTE_HELLO_MAX: usize = 8 * 1024;
+
+/// [`read_frame`] limited to `max` bytes.
+async fn read_frame_max<R: AsyncRead + Unpin>(reader: &mut R, max: usize) -> std::io::Result<Option<Frame>> {
+    let mut len = [0u8; 4];
+    match reader.read_exact(&mut len).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_le_bytes(len) as usize;
+    if len == 0 || len > max {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad hello length {len}")));
+    }
+    let mut rest = vec![0; len];
+    reader.read_exact(&mut rest).await?;
+    Ok(Some(Frame { kind: rest[0], payload: rest.split_off(1) }))
+}
+
+/// Which first frames a stream may start with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    Any,
+    Control,
+    Data,
+}
+
 /// Serve one accepted stream; its first frame selects control or data.
-pub async fn serve<S>(server: Arc<Server>, stream: S)
+/// `admitted` fires once a control hello is accepted.
+pub async fn serve<S>(server: Arc<Server>, stream: S, peer: Peer, expect: Expect, admitted: Option<tokio::sync::oneshot::Sender<()>>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, writer) = tokio::io::split(stream);
-    let first = match read_frame(&mut reader).await {
+    let first = match &peer {
+        Peer::Local => read_frame(&mut reader).await,
+        Peer::Remote { .. } => tokio::time::timeout(HELLO_TIMEOUT, read_frame_max(&mut reader, REMOTE_HELLO_MAX)).await.unwrap_or(Ok(None)),
+    };
+    let first = match first {
         Ok(Some(frame)) => frame,
         _ => return,
     };
-    let result = match first.kind {
-        kind::CONTROL_HELLO => control(server, first, reader, writer).await,
-        kind::DATA_HELLO => data(server, first, reader, writer).await,
+    let result = match (first.kind, expect) {
+        (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
+        (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
         other => {
-            tracing::debug!("unexpected first frame {other:#x}");
+            tracing::debug!("unexpected first frame {:#x}", other.0);
             Ok(())
         }
     };
@@ -48,7 +87,7 @@ where
 pub async fn accept(server: Arc<Server>, stream: tokio::net::UnixStream, upgrades: mpsc::UnboundedSender<std::os::unix::net::UnixStream>) {
     match handoff::peek_magic(&stream).await {
         Ok(true) => {}
-        Ok(false) => return serve(server, stream).await,
+        Ok(false) => return serve(server, stream, Peer::Local, Expect::Any, None).await,
         Err(error) => return tracing::debug!("peek: {error}"),
     }
     let stream = match stream.into_std() {
@@ -98,18 +137,33 @@ where
     (sink, task)
 }
 
-async fn control<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W) -> std::io::Result<()>
+async fn control<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W, peer: Peer, on_admit: Option<tokio::sync::oneshot::Sender<()>>) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let hello: ClientHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
-    if hello.build != BUILD {
+    // Builds are compared first: a mismatched build never enrolls.
+    let admitted = if hello.build != BUILD {
+        Err(RpcError::different_build(BUILD, &hello.build))
+    } else if let Peer::Remote { endpoint_id, .. } = &peer {
+        let mut auth = server.auth();
+        // Checked under the lock: once the upgrade commits, pairing is
+        // frozen and the successor's re-read sees every grant.
+        if server.upgrading.load(Ordering::SeqCst) {
+            Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
+        } else {
+            auth.authorize(endpoint_id, &hello.client_name, hello.invite.as_deref())
+        }
+    } else {
+        Ok(())
+    };
+    if let Err(error) = admitted {
         tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response {
             id: 0,
             result: None,
-            error: Some(RpcError::different_build(BUILD, &hello.build)),
+            error: Some(error),
         })?);
         drop(tx);
         let _ = writer_task.await;
@@ -121,12 +175,16 @@ where
         let id = reg.add_client(hello.client_name.clone(), hello.passive);
         if let Some(entry) = reg.clients.get_mut(&id) {
             entry.close = Some(close_tx);
+            entry.origin = peer.conn_id();
         }
         id
     };
-    let reply = ServerHello { build: BUILD.to_owned(), client_id, server: server.info.clone() };
+    let reply = ServerHello { build: BUILD.to_owned(), client_id, server: server.info_now().await };
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
+    if let Some(on_admit) = on_admit {
+        let _ = on_admit.send(());
+    }
 
     let mut frames = spawn_reader(reader, 64);
     let result = loop {
@@ -149,6 +207,10 @@ where
                     }
                 };
                 let id = request.id;
+                if let Err(error) = permitted(&peer, &request.method) {
+                    respond(&tx, id, Err(error));
+                    continue;
+                }
                 let subscribe = matches!(request.method, Method::EventsSubscribe {});
                 if subscribe {
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
@@ -189,9 +251,25 @@ fn to_value(value: impl serde::Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(RpcError::internal)
 }
 
+/// Owner-only methods: pairing and stopping the server. (Upgrades arrive
+/// only over the unix socket.) Everything else is open to paired devices.
+fn permitted(peer: &Peer, method: &Method) -> Result<(), RpcError> {
+    let name = match method {
+        Method::ServerShutdown {} => "server.shutdown",
+        Method::PairCreate { .. } => "pair.create",
+        Method::PairList {} => "pair.list",
+        Method::PairRevoke { .. } => "pair.revoke",
+        _ => return Ok(()),
+    };
+    match peer {
+        Peer::Local => Ok(()),
+        Peer::Remote { .. } => Err(RpcError::forbidden(name)),
+    }
+}
+
 async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value, RpcError> {
     match method {
-        Method::ServerInfo {} => to_value(&server.info),
+        Method::ServerInfo {} => to_value(server.info_now().await),
         Method::ServerShutdown {} => Ok(json!({})),
         Method::ApiList {} => Ok(json!(METHODS.iter().map(|(name, description)| json!({"name": name, "description": description})).collect::<Vec<_>>())),
         Method::EventsSubscribe {} => Ok(json!({})),
@@ -300,17 +378,43 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             reg.emit(silo_proto::control::Event::OpenSession { session_id: id });
             Ok(json!({}))
         }
+        Method::PairCreate { ttl_secs } => {
+            let ttl = Duration::from_secs(ttl_secs);
+            if ttl.is_zero() || ttl > crate::auth::MAX_INVITE_TTL {
+                return Err(RpcError::bad_request(format!("ttl_secs must be between 1 and {}", crate::auth::MAX_INVITE_TTL.as_secs())));
+            }
+            let addr = {
+                let net = server.net.lock().await;
+                let net = net.as_ref().ok_or_else(|| RpcError::internal("remote access is not running"))?;
+                // Wait for the home relay, or for any address without relays.
+                if server.relays || net.addr().is_empty() {
+                    let _ = tokio::time::timeout(ONLINE_TIMEOUT, net.online()).await;
+                }
+                net.addr()
+            };
+            if addr.is_empty() {
+                return Err(RpcError::new("offline", "the server has no relay or direct address yet; retry"));
+            }
+            let secret = server.auth().create_invite(ttl)?;
+            let ticket = silo_transport::PairTicket { addr, secret }.encode();
+            to_value(PairInvite { ticket, expires_in_secs: ttl_secs })
+        }
+        Method::PairList {} => to_value(PairedDevices { devices: server.auth().devices() }),
+        Method::PairRevoke { id } => {
+            server.auth().revoke(&id)?;
+            Ok(json!({}))
+        }
     }
 }
 
-async fn data<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W) -> std::io::Result<()>
+async fn data<R, W>(server: Arc<Server>, hello: Frame, reader: R, writer: W, peer: Peer) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let hello: DataHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
-    let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket);
+    let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
     let reject = |code: &str, reason: &str| -> std::io::Result<()> {
         tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason: reason.into() })?);
         Ok(())

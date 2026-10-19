@@ -1,0 +1,177 @@
+//! Remote control and data over iroh: pairing, reconnect, data streams,
+//! build mismatch, unauthorized devices and disconnect. Relays and mDNS
+//! are disabled; the client dials the server's loopback address.
+
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use silo_client::{
+    BuildMismatch, Control, DataStream, Mirror, Unauthorized,
+    transport::{Conn, EndpointAddr, Net, PairTicket, RelayConfig},
+};
+use silo_proto::{
+    control::{Created, Method, PairInvite, PairedDevices, SpawnSpec},
+    data::ClientData,
+    model::TermSize,
+    paths,
+};
+use tokio::{task::JoinHandle, time::timeout};
+
+const T: Duration = Duration::from_secs(10);
+
+fn temp_home(name: &str) -> PathBuf {
+    let dir = PathBuf::from(format!("/tmp/silo-client-remote-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+async fn start(home: &Path) -> JoinHandle<()> {
+    let config = silo_server::Config {
+        home: home.to_owned(),
+        idle_exit: None,
+        relay: RelayConfig::Disabled,
+        mdns: false,
+        ..Default::default()
+    };
+    let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
+    for _ in 0..500 {
+        if silo_client::server_running(home).await {
+            return task;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("server did not start");
+}
+
+async fn owner(home: &Path) -> Control {
+    Control::connect(&paths::socket(home), "owner").await.unwrap().0
+}
+
+async fn shutdown(control: Control, task: JoinHandle<()>) {
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(control);
+    timeout(T, task).await.unwrap().unwrap();
+}
+
+/// A fresh invite, rewritten to the server's loopback address.
+async fn invite(control: &Control) -> PairTicket {
+    for _ in 0..200 {
+        let invite: PairInvite = control.call(Method::PairCreate { ttl_secs: 60 }).await.unwrap();
+        let ticket = PairTicket::decode(&invite.ticket).unwrap();
+        if let Some(port) = ticket.addr.ip_addrs().find(|a| a.is_ipv4()).map(SocketAddr::port) {
+            let addr = EndpointAddr::new(ticket.addr.id).with_ip_addr((Ipv4Addr::LOCALHOST, port).into());
+            return PairTicket { addr, secret: ticket.secret };
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("server endpoint has no direct address");
+}
+
+async fn device(home: &Path, name: &str) -> Net {
+    let id = silo_client::client_identity(&home.join(format!("client-{name}"))).unwrap();
+    Net::bind(&id, RelayConfig::Disabled, false).await.unwrap()
+}
+
+fn shell() -> SpawnSpec {
+    SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) }
+}
+
+async fn attach(control: &Control, block: &str, mirror: &mut Mirror) -> DataStream {
+    let stream = DataStream::open(control, block, mirror.resume()).await.unwrap();
+    mirror.begin(&stream.welcome).unwrap();
+    stream
+}
+
+async fn pump_until(stream: &mut DataStream, mirror: &mut Mirror, text: &str) {
+    timeout(T, async {
+        while !mirror.screen_text().contains(text) {
+            let data = stream.rx.recv().await.expect("stream closed");
+            mirror.apply(data).unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out; screen:\n{}", mirror.screen_text()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_reconnect_and_attach() {
+    let home = temp_home("pair");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let ticket = invite(&control).await;
+    let net = device(&home, "a").await;
+
+    let (first, _) = timeout(T, silo_client::pair(&net, &ticket, "laptop")).await.unwrap().unwrap();
+    let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(devices.devices[0].name, "laptop");
+    drop(first);
+
+    let (remote, _) = Control::connect_remote(&net, ticket.addr.clone(), "laptop", false, None).await.unwrap();
+    assert!(matches!(remote.conn(), Conn::Iroh(_)));
+    let created: Created = remote.call(Method::SessionCreate { name: None, spawn: shell() }).await.unwrap();
+
+    // Two data streams on the one connection.
+    let (mut a, mut b) = (Mirror::new(), Mirror::new());
+    let mut stream_a = attach(&remote, &created.block_id, &mut a).await;
+    let mut stream_b = attach(&remote, &created.block_id, &mut b).await;
+    stream_a.send(&ClientData::Input(b"echo remote-$((40+2))\n".to_vec()));
+    pump_until(&mut stream_a, &mut a, "remote-42").await;
+    pump_until(&mut stream_b, &mut b, "remote-42").await;
+
+    drop((stream_a, stream_b, remote));
+    net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_build_is_build_mismatch() {
+    let home = temp_home("build");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let ticket = invite(&control).await;
+    let net = device(&home, "a").await;
+    let rc = net.dial(ticket.addr.clone()).await.unwrap();
+    let error = Control::connect_build(Conn::Iroh(rc), "laptop", false, "other-build").await.err().unwrap();
+    assert!(error.downcast_ref::<BuildMismatch>().is_some(), "{error:#}");
+    // Nothing spawned for the client: its directory holds only the identity.
+    assert!(!paths::socket(&home.join("client-a")).exists());
+    net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unpaired_device_is_unauthorized() {
+    let home = temp_home("unauth");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let ticket = invite(&control).await;
+    let net = device(&home, "x").await;
+    let error = Control::connect_remote(&net, ticket.addr.clone(), "x", false, None).await.err().unwrap();
+    assert!(error.downcast_ref::<Unauthorized>().is_some(), "{error:#}");
+    let forged = PairTicket { addr: ticket.addr.clone(), secret: [7; 32] };
+    let error = silo_client::pair(&net, &forged, "x").await.err().unwrap();
+    assert!(error.downcast_ref::<Unauthorized>().is_some(), "{error:#}");
+    net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_exit_resolves_closed() {
+    let home = temp_home("closed");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let ticket = invite(&control).await;
+    let net = device(&home, "a").await;
+    let (remote, _) = silo_client::pair(&net, &ticket, "laptop").await.unwrap();
+    assert!(!remote.is_closed());
+    shutdown(control, task).await;
+    timeout(T, remote.closed()).await.unwrap();
+    assert!(remote.is_closed());
+    assert!(remote.call_value(Method::SessionList {}).await.is_err());
+    drop(remote);
+    net.close().await.unwrap();
+}

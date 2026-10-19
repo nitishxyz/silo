@@ -233,11 +233,11 @@ impl Pty {
     }
 
     /// Wrap an inherited PTY master whose session leader `pid` is not our
-    /// child (e.g. received over [`handoff`]). Exit is detected by polling
-    /// the process (kqueue `EVFILT_PROC` on macOS, `kill(pid, 0)` elsewhere);
-    /// the status is unknown, so `on_exit` gets `None`. On Linux a zombie
-    /// still counts as alive, so exit is reported once its parent reaps it.
-    /// Master EOF/EIO is reported separately as [`PtyEvent::Closed`].
+    /// child (e.g. received over [`handoff`]). Exit is observed through a
+    /// pidfd on Linux and kqueue `EVFILT_PROC` on macOS, so it is reported
+    /// even while the process is an unreaped zombie; the status is unknown,
+    /// so `on_exit` gets `None`. Master EOF/EIO is reported separately as
+    /// [`PtyEvent::Closed`].
     ///
     /// # Errors
     /// Fails if `pid` is invalid, the descriptor is not a usable terminal or
@@ -259,10 +259,14 @@ impl Pty {
         if let Err(e) = set_size(&master, size) {
             return fail(e, master);
         }
+        let watch = match watch::Watch::new(pid) {
+            Ok(watch) => watch,
+            Err(e) => return fail(e, master),
+        };
         let state = ChildState::new(pid);
         let worker = state.clone();
         let watcher = std::thread::Builder::new().name("silo-pty-watch".into()).spawn(move || {
-            if watch::wait_exit(worker.pid, &worker.stop) {
+            if watch.wait(&worker.stop) {
                 worker.exited.store(true, Ordering::Release);
                 if worker.notify.swap(false, Ordering::AcqRel) {
                     on_exit(None);

@@ -35,7 +35,7 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start_server(home: &Path) {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, ..Default::default() };
+    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
     tokio::spawn(async move {
         silo_server::run(config).await.unwrap();
     });
@@ -73,9 +73,12 @@ async fn attach(control: &Control, block: &str, mirror: &mut Mirror) -> DataStre
     stream
 }
 
+/// An interactive bash without user rc files. Not `/bin/sh`: dash (Debian)
+/// has no line editor, so the tty echoes injected control input (the `^L`
+/// sent by clear/reset) into the screen and the shell's next line.
 fn shell() -> SpawnSpec {
     SpawnSpec {
-        command: vec!["/bin/sh".into()],
+        command: vec!["/bin/bash".into(), "--norc".into(), "--noprofile".into()],
         cwd: Some("/tmp".into()),
         size: Some(TermSize::new(80, 24)),
     }
@@ -359,12 +362,19 @@ fn background(m: &mut Mirror) -> u32 {
 }
 
 /// Ask the server terminal for its background (OSC 11) and wait for the
-/// reply, echoed by `cat -v`, to show `rgb`.
+/// reply, echoed by `cat -v`, to show `rgb`. `cat` ends on a read timeout
+/// rather than `^C`, whose input flush (Linux) would drop the next command.
 async fn query_background(stream: &mut DataStream, m: &mut Mirror, rgb: &str) {
-    stream.send(&ClientData::Input(b"clear; stty -echo -icanon; printf '\\033]11;?\\007'; cat -v\n".to_vec()));
+    stream.send(&ClientData::Input(
+        b"clear; stty -echo -icanon min 0 time 5; printf '\\033]11;?\\007'; cat -v; stty sane; echo; echo query-done\n".to_vec(),
+    ));
     let want = format!("11;rgb:{rgb}");
-    pump_until(stream, m, |m| m.screen_text().contains(&want)).await;
-    stream.send(&ClientData::Input(b"\x03stty sane; clear\n".to_vec()));
+    pump_until(stream, m, |m| {
+        let text = m.screen_text();
+        text.contains(&want) && text.contains("\nquery-done\n$")
+    })
+    .await;
+    stream.send(&ClientData::Input(b"clear\n".to_vec()));
 }
 
 async fn owner_terminal_config_body() {

@@ -12,6 +12,9 @@ pub mod frame;
 pub mod model;
 pub mod paths;
 
+#[cfg(test)]
+mod build_id;
+
 pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 
 /// Build id: a hash of every workspace source (see `build.rs`). Server and

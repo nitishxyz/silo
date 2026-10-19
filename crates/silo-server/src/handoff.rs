@@ -31,6 +31,12 @@
 //! successor's steps are bounded), so both never run the same programs.
 //! After writing `READY` the successor keeps everything, even without a
 //! `COMMIT`.
+//!
+//! Remote access is not transferred: the old server closes its iroh
+//! endpoint (and every remote connection) before `COMMIT`, and the
+//! successor binds its own with the same identity from `<home>/state/iroh`.
+//! Paired devices persist in `<home>/state`, re-read after the takeover;
+//! pairing invites live only in memory and are lost: create new ones.
 
 use std::{
     collections::HashMap,
@@ -323,6 +329,10 @@ pub struct Taken {
 /// No server is running, it refuses, or the transfer fails.
 pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready: bool) -> anyhow::Result<Taken> {
     let socket = silo_proto::paths::socket(home);
+    let old_pid = std::fs::read(silo_proto::paths::runtime(home))
+        .ok()
+        .and_then(|j| serde_json::from_slice::<silo_proto::paths::Runtime>(&j).ok())
+        .map(|r| r.pid);
     let (sock, transfer, checkpoints, fds, [lock, listener]) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let mut sock = UnixStream::connect(&socket).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => io::Error::new(e.kind(), "no running server to take over"),
@@ -344,7 +354,7 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
     listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(listener)?;
     let blocks = adopt(transfer.blocks, checkpoints, fds, notes).await?;
-    let blocks = commit(sock, blocks).await?;
+    let blocks = commit(sock, blocks, old_pid).await?;
     Ok(Taken { server_id: transfer.server_id, sessions: transfer.sessions, blocks, lock, listener, persist })
 }
 
@@ -352,13 +362,21 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
 /// never reached the old server, which keeps its blocks: ours are released.
 /// Once written, the blocks are ours whatever follows; a missing COMMIT
 /// (the old server died committing) is only logged, never a hangup.
-async fn commit(mut sock: UnixStream, blocks: HashMap<BlockId, BlockHandle>) -> anyhow::Result<HashMap<BlockId, BlockHandle>> {
+///
+/// Under systemd this process becomes the unit's main PID before READY:
+/// the old server cannot exit before reading READY, so systemd never sees
+/// the unit lose its main process. A failed READY hands it back.
+async fn commit(mut sock: UnixStream, blocks: HashMap<BlockId, BlockHandle>, old_pid: Option<u32>) -> anyhow::Result<HashMap<BlockId, BlockHandle>> {
+    crate::notify::notify(&format!("MAINPID={}", std::process::id()));
     let (sock, ready) = tokio::task::spawn_blocking(move || {
         let ready = sock.write_all(READY);
         (sock, ready)
     })
     .await?;
     if let Err(error) = ready {
+        if let Some(pid) = old_pid {
+            crate::notify::notify(&format!("MAINPID={pid}"));
+        }
         release(blocks.into_values()).await;
         return Err(anyhow::Error::from(error).context("send READY"));
     }

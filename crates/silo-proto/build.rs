@@ -1,52 +1,20 @@
-//! `BUILD`: a hash of every workspace source, so binaries built from the
-//! same tree (app, CLI, server, menu bar) agree and any other build differs.
+//! `BUILD`: a hash of the workspace sources that shape the protocol and
+//! server (rule in `src/build_id.rs`), so binaries built from one tree
+//! agree and any other build differs.
 
-use std::path::{Path, PathBuf};
+#[path = "src/build_id.rs"]
+mod build_id;
 
-use sha2::{Digest, Sha256};
+use std::path::Path;
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let root = root.canonicalize().expect("workspace root");
-    let mut files = vec![root.join("Cargo.toml"), root.join("Cargo.lock"), root.join("GHOSTTY_REV")];
-    let mut crates: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
-        .expect("read crates")
-        .map(|e| e.expect("crate entry").path())
-        .filter(|p| p.join("Cargo.toml").is_file())
-        .collect();
-    crates.sort();
-    println!("cargo:rerun-if-changed={}", root.join("crates").display());
-    for krate in &crates {
-        files.push(krate.join("Cargo.toml"));
-        let src = krate.join("src");
-        println!("cargo:rerun-if-changed={}", src.display());
-        walk(&src, &mut files);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("workspace root");
+    let sources = build_id::sources(&root).expect("list workspace sources");
+    // Directories catch added and removed files; a stray file there reruns
+    // this script but leaves the id unchanged.
+    for path in sources.dirs.iter().chain(&sources.files) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
-    let mut hash = Sha256::new();
-    for file in &files {
-        println!("cargo:rerun-if-changed={}", file.display());
-        let rel = file.strip_prefix(&root).expect("inside workspace");
-        let bytes = std::fs::read(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
-        hash.update(rel.to_string_lossy().as_bytes());
-        hash.update([0]);
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(&bytes);
-    }
-    let digest = hash.finalize();
-    let id: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let id = build_id::hash(&root, &sources.files).expect("hash workspace sources");
     println!("cargo:rustc-env=SILO_BUILD_ID={id}");
-}
-
-/// Every file under `dir`, sorted, so the hash does not depend on readdir order.
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut paths: Vec<PathBuf> = entries.map(|e| e.expect("dir entry").path()).collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            walk(&path, out);
-        } else {
-            out.push(path);
-        }
-    }
 }

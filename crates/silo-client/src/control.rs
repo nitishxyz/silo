@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, atomic::AtomicU64},
 };
 
@@ -11,8 +11,9 @@ use silo_proto::{
     control::{ClientHello, Event, Method, Request, RpcError, ServerHello, ServerMessage},
     kind, read_frame, spawn_reader, write_frame,
 };
+use silo_transport::Conn;
 use tokio::{
-    net::UnixStream,
+    io::AsyncWriteExt,
     sync::{mpsc, oneshot},
 };
 
@@ -23,20 +24,50 @@ type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<serde_json::
 /// Sequenced server events; `None` once the connection closed.
 pub type Events = mpsc::UnboundedReceiver<(u64, Event)>;
 
-/// The server rejected our hello because it is a different build.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BuildMismatch {
-    /// The server's rejection, naming both builds.
-    pub message: String,
+macro_rules! server_error {
+    ($(#[$doc:meta] $name:ident;)*) => {$(
+        #[$doc]
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub struct $name {
+            /// The server's message.
+            pub message: String,
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.message)
+            }
+        }
+
+        impl std::error::Error for $name {}
+    )*};
 }
 
-impl std::fmt::Display for BuildMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+server_error! {
+    /// The server rejected our hello because it is a different build.
+    BuildMismatch;
+    /// The server refused our device: not paired, revoked or a bad invite.
+    Unauthorized;
+    /// The server is handing over to a new build; retry shortly.
+    Upgrading;
+    /// The server has no reachable address yet (`pair.create`); retry.
+    Offline;
+}
+
+const UPGRADING: &str = "upgrading";
+const OFFLINE: &str = "offline";
+
+/// A server error as its typed client error where one exists.
+fn typed(error: RpcError) -> anyhow::Error {
+    let message = error.message.clone();
+    match error.code.as_str() {
+        RpcError::DIFFERENT_BUILD => BuildMismatch { message }.into(),
+        RpcError::UNAUTHORIZED => Unauthorized { message }.into(),
+        UPGRADING => Upgrading { message }.into(),
+        OFFLINE => Offline { message }.into(),
+        _ => error.into(),
     }
 }
-
-impl std::error::Error for BuildMismatch {}
 
 /// A control connection. Cheap to clone; all clones share one stream.
 #[derive(Clone)]
@@ -49,9 +80,18 @@ struct Inner {
     pending: Pending,
     next_id: AtomicU64,
     hello: ServerHello,
-    socket: PathBuf,
+    conn: Conn,
     client_name: String,
     closed: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Drop for Inner {
+    /// The connection belongs to this control: its data streams end with it.
+    fn drop(&mut self) {
+        if let Conn::Iroh(rc) = &self.conn {
+            rc.close(b"client closed");
+        }
+    }
 }
 
 impl Control {
@@ -62,57 +102,77 @@ impl Control {
     /// # Errors
     /// Connection or handshake failure.
     pub async fn connect(socket: &Path, client_name: &str) -> anyhow::Result<(Self, Events)> {
-        Self::connect_with(socket, client_name, false).await
+        Self::connect_local(socket, client_name, false).await
     }
 
-    /// Like [`Control::connect`]; a `passive` client does not keep an idle
-    /// auto-started server alive.
+    /// Connect to the local server socket; a `passive` client does not keep
+    /// an idle auto-started server alive.
     ///
     /// # Errors
     /// Connection or handshake failure.
-    pub async fn connect_with(socket: &Path, client_name: &str, passive: bool) -> anyhow::Result<(Self, Events)> {
-        Self::connect_build(socket, client_name, passive, BUILD).await
+    pub async fn connect_local(socket: &Path, client_name: &str, passive: bool) -> anyhow::Result<(Self, Events)> {
+        Self::connect_build(Conn::Unix(socket.to_owned()), client_name, passive, BUILD).await
     }
 
-    /// Like [`Control::connect_with`], announcing `build` in the hello.
-    /// Only for best-effort `session.list` / `server.shutdown` on a server
-    /// of another build, whose shapes may differ.
+    /// Hello over `conn` announcing `build`. Only for best-effort
+    /// `session.list` / `server.shutdown` on a server of another build,
+    /// whose shapes may differ.
     ///
     /// # Errors
     /// Connection or handshake failure; a build rejection is a
-    /// [`BuildMismatch`].
-    pub async fn connect_build(socket: &Path, client_name: &str, passive: bool, build: &str) -> anyhow::Result<(Self, Events)> {
-        let stream = UnixStream::connect(socket).await.with_context(|| format!("connect {}", socket.display()))?;
-        let (mut reader, mut writer) = stream.into_split();
-        let hello = ClientHello { build: build.to_owned(), client_name: client_name.to_owned(), token: None, passive };
-        write_frame(&mut writer, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
-        let reply = read_frame(&mut reader).await?.ok_or_else(|| anyhow!("server closed during hello"))?;
+    /// [`BuildMismatch`], a refused device [`Unauthorized`].
+    pub async fn connect_build(conn: Conn, client_name: &str, passive: bool, build: &str) -> anyhow::Result<(Self, Events)> {
+        Self::handshake(conn, client_name, passive, build, None).await
+    }
+
+    /// Hello over a fresh stream on `conn`, then start the reader/writer.
+    pub(crate) async fn handshake(conn: Conn, client_name: &str, passive: bool, build: &str, invite: Option<String>) -> anyhow::Result<(Self, Events)> {
+        let mut stream = conn.open_stream().await?;
+        let hello = ClientHello { build: build.to_owned(), client_name: client_name.to_owned(), token: None, passive, invite };
+        write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
+        stream.flush().await?;
+        let reply = read_frame(&mut stream).await?.ok_or_else(|| anyhow!("server closed during hello"))?;
         if reply.kind != kind::CONTROL_HELLO {
             if let Ok(ServerMessage::Response { error: Some(error), .. }) = reply.parse::<ServerMessage>() {
-                if error.code == RpcError::DIFFERENT_BUILD {
-                    return Err(BuildMismatch { message: error.message }.into());
-                }
-                bail!("server rejected client: {error}");
+                return Err(typed(error));
             }
             bail!("unexpected hello reply");
         }
         let hello: ServerHello = reply.parse()?;
+        let (reader, mut writer) = tokio::io::split(stream);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
-                if write_frame(&mut writer, &frame).await.is_err() {
+                if write_frame(&mut writer, &frame).await.is_err() || writer.flush().await.is_err() {
                     break;
                 }
             }
+            let _ = writer.shutdown().await;
         });
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
         let reader_pending = pending.clone();
         let mut frames = spawn_reader(reader, 256);
+        let remote = match &conn {
+            Conn::Iroh(rc) => Some(rc.clone()),
+            Conn::Unix(_) => None,
+        };
         tokio::spawn(async move {
-            while let Some(Ok(frame)) = frames.recv().await {
+            let conn_closed = async {
+                match remote {
+                    Some(rc) => drop(rc.closed().await),
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::pin!(conn_closed);
+            loop {
+                let frame = tokio::select! {
+                    frame = frames.recv() => frame,
+                    () = &mut conn_closed => break,
+                };
+                let Some(Ok(frame)) = frame else { break };
                 match frame.parse::<ServerMessage>() {
                     Ok(ServerMessage::Response { id, result, error }) => {
                         let waiter = reader_pending.lock().unwrap().as_mut().and_then(|p| p.remove(&id));
@@ -137,7 +197,7 @@ impl Control {
             pending,
             next_id: AtomicU64::new(1),
             hello,
-            socket: socket.to_owned(),
+            conn,
             client_name: client_name.to_owned(),
             closed: closed_rx,
         };
@@ -154,9 +214,10 @@ impl Control {
         self.inner.hello.client_id
     }
 
+    /// The route to the server; data streams open through it.
     #[must_use]
-    pub fn socket(&self) -> &Path {
-        &self.inner.socket
+    pub fn conn(&self) -> &Conn {
+        &self.inner.conn
     }
 
     #[must_use]
@@ -199,7 +260,7 @@ impl Control {
         }
         match rx.await {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(error.into()),
+            Ok(Err(error)) => Err(typed(error)),
             Err(_) => bail!("connection closed"),
         }
     }
@@ -219,5 +280,23 @@ impl Control {
     /// See [`Control::call`].
     pub async fn subscribe(&self) -> anyhow::Result<()> {
         self.call_value(Method::EventsSubscribe {}).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(code: &str) -> anyhow::Error {
+        typed(RpcError::new(code, "why"))
+    }
+
+    #[test]
+    fn server_errors_are_typed() {
+        assert_eq!(code(RpcError::DIFFERENT_BUILD).downcast_ref::<BuildMismatch>().unwrap().message, "why");
+        assert!(code(RpcError::UNAUTHORIZED).downcast_ref::<Unauthorized>().is_some());
+        assert!(code("upgrading").downcast_ref::<Upgrading>().is_some());
+        assert!(code("offline").downcast_ref::<Offline>().is_some());
+        assert_eq!(code(RpcError::FORBIDDEN).downcast_ref::<RpcError>().unwrap().code, RpcError::FORBIDDEN);
     }
 }

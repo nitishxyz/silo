@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# Builds the pinned libghostty-vt static library into target/ghostty/<rev>/runtime.
+# Builds the pinned libghostty-vt static library into target/ghostty/<rev>/runtime,
+# or, given a Rust target triple, cross-compiles it into runtime-<triple>.
 set -euo pipefail
+target=${1:-}
+cross=()
+case "$target" in
+    "") ;;
+    x86_64-unknown-linux-gnu) cross=(-Dtarget=x86_64-linux-gnu) ;;
+    aarch64-unknown-linux-gnu) cross=(-Dtarget=aarch64-linux-gnu) ;;
+    x86_64-apple-darwin) cross=(-Dtarget=x86_64-macos) ;;
+    aarch64-apple-darwin) cross=(-Dtarget=aarch64-macos) ;;
+    *) echo "unsupported target $target" >&2; exit 1 ;;
+esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 revision=$(tr -d '[:space:]' < "$root/GHOSTTY_REV")
 zig_version=0.16.0
@@ -20,7 +31,7 @@ fi
 [[ $("$zig" version) == "$zig_version" ]] || { echo "need zig $zig_version" >&2; exit 1; }
 
 cache="$root/target/ghostty/$revision"
-runtime="$cache/runtime"
+runtime="$cache/runtime${target:+-$target}"
 if [[ -f $runtime/silo-revision && $(cat "$runtime/silo-revision") == "$revision" ]]; then
     echo "$runtime"
     exit 0
@@ -33,8 +44,9 @@ if [[ ! -d $cache/source/.git ]]; then
 fi
 (
     cd "$cache/source"
-    "$zig" build -Demit-lib-vt=true -Doptimize=ReleaseFast -Dsimd=false \
+    "$zig" build ${cross[@]+"${cross[@]}"} -Demit-lib-vt=true -Doptimize=ReleaseFast -Dsimd=false \
         -Dvt-features=-kitty-graphics --prefix "$runtime" >&2
 )
+printf '%s\n' "${target:-host}" > "$runtime/silo-target"
 printf '%s\n' "$revision" > "$runtime/silo-revision"
 echo "$runtime"

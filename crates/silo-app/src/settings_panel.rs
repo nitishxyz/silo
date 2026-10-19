@@ -46,6 +46,22 @@ pub struct SettingsServer {
     pub can_start: bool,
     pub can_stop: bool,
     pub can_restart: bool,
+    /// The server's iroh EndpointId, once connected.
+    pub endpoint_id: Option<String>,
+    /// Why remote access is unavailable (no paths), if it is.
+    pub remote_error: Option<String>,
+    pub devices: Vec<SettingsDevice>,
+    /// A fresh pairing ticket to show (and copy, or scan).
+    pub invite: Option<String>,
+}
+
+/// A device paired with the local server.
+#[derive(Clone, Debug)]
+pub struct SettingsDevice {
+    pub id: String,
+    pub name: String,
+    /// e.g. "Last seen 5 min ago".
+    pub seen: String,
 }
 
 /// A bundled theme, for the picker and its preview tiles.
@@ -290,9 +306,13 @@ pub enum SettingsEvent {
     /// Show the settings file in Finder.
     RevealConfig,
     AddHost,
+    RenameHost(String),
     RemoveHost(String),
     OpenServerLog,
     Server(ServerAction),
+    /// `pair.create`: show a new pairing ticket.
+    PairDevice,
+    RevokeDevice(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -505,6 +525,12 @@ impl SettingsPanel {
         let lines = t.scrollback_lines.to_string();
         self.scrollback_field.update(cx, |f, cx| f.replace_text(lines, cx));
         cx.notify();
+    }
+
+    /// Whether the Server page (with paired devices) is on screen.
+    #[must_use]
+    pub fn showing_server(&self) -> bool {
+        self.selected == Section::Server || (!self.query.is_empty() && self.matches(Section::Server))
     }
 
     pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1447,16 +1473,23 @@ impl SettingsPanel {
                         )
                     } else if host.removable {
                         let id = host.id.clone();
-                        Some(Self::button(
-                            ("settings-remove-host", index),
-                            "Remove…",
-                            ButtonKind::Secondary,
-                            move |this, cx| {
-                                this.pending_remove = Some(id.clone());
-                                cx.notify();
-                            },
-                            cx,
-                        ))
+                        Some(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .child(Self::emit_button(("settings-rename-host", index), "Rename…", SettingsEvent::RenameHost(id.clone()), cx))
+                                .child(Self::button(
+                                    ("settings-remove-host", index),
+                                    "Remove…",
+                                    ButtonKind::Secondary,
+                                    move |this, cx| {
+                                        this.pending_remove = Some(id.clone());
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ))
+                                .into_any_element(),
+                        )
                     } else {
                         None
                     };
@@ -1492,7 +1525,7 @@ impl SettingsPanel {
                     None,
                     vec![Self::row(
                         "Remote host",
-                        Some("Coming soon".into()),
+                        Some("Pair with a ticket from another Mac".into()),
                         Some(Self::emit_button("settings-add-host", "Add…", SettingsEvent::AddHost, cx)),
                         false,
                     )],
@@ -1576,6 +1609,9 @@ impl SettingsPanel {
                     "Restart and Stop end all sessions".into()
                 };
                 out.push(Self::group(None, vec![Self::row("Server", Some(description), Some(control), narrow)]));
+                if s.server.endpoint_id.is_some() || s.server.remote_error.is_some() {
+                    out.push(self.devices_group(narrow, cx));
+                }
             }
             Section::About => {
                 out.push(Self::group(
@@ -1608,6 +1644,45 @@ impl SettingsPanel {
             }
         }
         out
+    }
+
+    /// Settings › Server › Paired devices: the server id, devices with
+    /// Revoke, and Pair a device… with its ticket.
+    fn devices_group(&self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+        let s = &self.snapshot.server;
+        let copy = |id: &'static str, text: String, cx: &mut Context<Self>| {
+            Self::button(id, "Copy", ButtonKind::Secondary, move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())), cx)
+        };
+        let mut rows = Vec::new();
+        if let Some(id) = s.endpoint_id.clone() {
+            let short = format!("{}…", id.get(..12).unwrap_or(&id));
+            let control = div().flex().items_center().gap(px(6.0)).child(Self::value(short)).child(copy("settings-copy-endpoint", id, cx));
+            rows.push(Self::row("Server ID", None, Some(control.into_any_element()), false));
+        }
+        for (index, device) in s.devices.iter().enumerate() {
+            let id = device.id.clone();
+            let revoke = Self::emit_button(("settings-revoke", index), "Revoke", SettingsEvent::RevokeDevice(id), cx);
+            rows.push(Self::row(device.name.clone(), Some(device.seen.clone().into()), Some(revoke), false));
+        }
+        if let Some(reason) = s.remote_error.clone() {
+            let line = div()
+                .id("settings-remote-error")
+                .text_size(px(12.5))
+                .text_color(rgb(theme::muted()))
+                .child("Remote access unavailable")
+                .tooltip(crate::tooltip::Tooltip::text(reason));
+            rows.push(div().px(px(14.0)).py(px(10.0)).child(line).into_any_element());
+        } else {
+            let pair = Self::emit_button("settings-pair-device", "Pair a device…", SettingsEvent::PairDevice, cx);
+            rows.push(Self::row("New device", Some("Single use, valid 10 minutes".into()), Some(pair), narrow));
+        }
+        if let Some(ticket) = s.invite.clone() {
+            let code = crate::qr::render(&ticket);
+            let control = div().flex().items_center().gap(px(6.0)).child(div().max_w(px(180.0)).child(Self::value(ticket.clone()))).child(copy("settings-copy-ticket", ticket, cx));
+            rows.push(Self::row("Ticket", None, Some(control.into_any_element()), narrow));
+            rows.extend(code.map(|qr| div().w_full().flex().justify_center().py(px(12.0)).child(qr).into_any_element()));
+        }
+        Self::group(Some("Paired devices"), rows)
     }
 
     fn sidebar(&self, width: f32, searching: bool, cx: &mut Context<Self>) -> AnyElement {

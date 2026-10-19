@@ -1,0 +1,22 @@
+[package]
+name = "silo-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+data-encoding.workspace = true
+cef.workspace = true
+core-foundation.workspace = true
+core-video.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "silo-web-helper"
+path = "src/bin/helper.rs"

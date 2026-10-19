@@ -13,4 +13,5 @@ tokio = { workspace = true, features = ["io-util"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+sha2 = "0.10"
 tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

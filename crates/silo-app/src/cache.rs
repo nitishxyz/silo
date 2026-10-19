@@ -115,6 +115,26 @@ pub fn start(root: &Path, identity: &str) -> anyhow::Result<(CacheWriter, Option
     Ok((CacheWriter { jobs }, tree, blocks))
 }
 
+/// One host's cache: its writer, the cached tree and restored mirrors
+/// (waiting for their panes).
+pub struct HostCache {
+    pub writer: CacheWriter,
+    pub tree: Option<CachedTree>,
+    pub restored: std::collections::HashMap<String, silo_client::Mirror>,
+}
+
+/// Open the cache of the host keyed `identity`; `None` (logged) if it
+/// can't be opened.
+#[must_use]
+pub fn open_host(root: &Path, identity: &str) -> Option<HostCache> {
+    let (writer, tree, blocks) = start(root, identity).inspect_err(|e| tracing::warn!("client cache: {e:#}")).ok()?;
+    let restored = blocks
+        .into_iter()
+        .filter_map(|b| b.checkpoint.restore().inspect_err(|e| tracing::warn!(block = %b.id, "cached block: {e:#}")).ok().map(|m| (b.id, m)))
+        .collect();
+    Some(HostCache { writer, tree, restored })
+}
+
 impl CacheWriter {
     pub fn save_tree(&self, tree: CachedTree) {
         let _ = self.jobs.send(Job::Tree(Box::new(tree)));
@@ -265,6 +285,33 @@ mod tests {
         drop(writer);
         let (_, cached, _) = start(&root, "/tmp/sock").unwrap();
         assert_eq!(cached, Some(tree));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hosts_are_isolated_with_equal_block_ids() {
+        let root = temp("isolated");
+        let (local, remote) = ("/tmp/silo/server.sock", "iroh:abc");
+        let a = open_host(&root, local).unwrap();
+        let b = open_host(&root, remote).unwrap();
+        a.writer.save_tree(CachedTree { sessions: Vec::new(), view: view_of("s-local", &["b1", "b2"]) });
+        a.writer.save_block("b1".into(), checkpoint());
+        a.writer.save_block("b2".into(), checkpoint());
+        b.writer.save_tree(CachedTree { sessions: Vec::new(), view: view_of("s-remote", &["b1"]) });
+        b.writer.save_block("b1".into(), checkpoint());
+        // Closing b1 remotely leaves the local b1 alone.
+        b.writer.gc(Vec::new());
+        a.writer.flush(Duration::from_secs(5));
+        b.writer.flush(Duration::from_secs(5));
+        drop((a, b));
+        let a = open_host(&root, local).unwrap();
+        let b = open_host(&root, remote).unwrap();
+        assert_eq!(a.tree.unwrap().view.session.id, "s-local");
+        assert_eq!(b.tree.unwrap().view.session.id, "s-remote");
+        let mut ids: Vec<_> = a.restored.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, ["b1", "b2"]);
+        assert!(b.restored.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

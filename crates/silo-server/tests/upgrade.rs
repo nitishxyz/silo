@@ -24,7 +24,7 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 fn config(home: &Path) -> silo_server::Config {
-    silo_server::Config { home: home.to_owned(), idle_exit: None, checkpoint_interval: Duration::from_millis(200) }
+    silo_server::Config { home: home.to_owned(), idle_exit: None, checkpoint_interval: Duration::from_millis(200), relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() }
 }
 
 async fn start(home: &Path) -> JoinHandle<anyhow::Result<()>> {

@@ -1,0 +1,42 @@
+name: linux
+
+on:
+  push:
+  pull_request:
+
+env:
+  # rustc peaks at several GB per job on the larger crates (iroh, ghostty
+  # bindings); two jobs stay well inside the 16 GB runner.
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # ~/.cargo registry/git and target/ dependency artifacts (debug and
+      # release), keyed on the toolchain and Cargo.lock.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      # libghostty-vt depends only on GHOSTTY_REV and the build script.
+      - uses: actions/cache@v4
+        with:
+          path: target/ghostty/*/runtime
+          key: ghostty-${{ runner.os }}-${{ hashFiles('GHOSTTY_REV', 'scripts/build-ghostty.sh') }}
+      - name: Build libghostty-vt
+        run: ZIG="$(command -v zig)" bash scripts/build-ghostty.sh
+      - name: Test
+        run: cargo test -p silo-pty -p silo-store -p silo-proto -p silo-server -p silo-client -p silo-transport -p silo-cli
+      - name: Build silo
+        run: cargo build -p silo-cli --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: silo-linux-x86_64
+          path: target/release/silo

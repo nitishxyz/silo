@@ -9,6 +9,7 @@ silo-vt.workspace = true
 silo-pty.workspace = true
 silo-proto.workspace = true
 silo-store.workspace = true
+silo-transport.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

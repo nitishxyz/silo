@@ -41,6 +41,12 @@ pub fn server_lock(home: &std::path::Path) -> PathBuf {
     home.join("server.lock")
 }
 
+/// The server's persistent iroh identity directory.
+#[must_use]
+pub fn iroh_identity(home: &std::path::Path) -> PathBuf {
+    home.join("state").join("iroh")
+}
+
 #[must_use]
 pub fn log(home: &std::path::Path) -> PathBuf {
     home.join("server.log")

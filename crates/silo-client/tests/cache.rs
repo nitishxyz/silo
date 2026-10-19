@@ -37,7 +37,7 @@ fn tree() -> Tree {
 }
 
 async fn start_server(home: &Path) {
-    let config = silo_server::Config { home: home.to_owned(), ..Default::default() };
+    let config = silo_server::Config { home: home.to_owned(), relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
     tokio::spawn(async move {
         silo_server::run(config).await.unwrap();
     });

@@ -41,8 +41,7 @@ enum Step {
 enum Input {
     RenameSession(String),
     RenameTab(String),
-    HostName,
-    HostAddress(String),
+    HostName(usize),
 }
 
 impl Input {
@@ -50,16 +49,14 @@ impl Input {
         match self {
             Self::RenameSession(_) => "Rename session".into(),
             Self::RenameTab(_) => "Rename tab (empty to reset)".into(),
-            Self::HostName => "Add remote host — name".into(),
-            Self::HostAddress(name) => format!("Add remote host “{name}”"),
+            Self::HostName(_) => "Rename host".into(),
         }
     }
 
     fn placeholder(&self) -> &'static str {
         match self {
             Self::RenameSession(_) | Self::RenameTab(_) => "New name",
-            Self::HostName => "Host name, e.g. studio-mini",
-            Self::HostAddress(_) => "Address or iroh ticket",
+            Self::HostName(_) => "Host name",
         }
     }
 }
@@ -107,6 +104,11 @@ impl Workspace {
             self.close_palette(window, cx);
         }
         let block = self.focused_block(window, cx);
+        let server_command = matches!(command, Command::StartServer | Command::StopServer | Command::RestartServer);
+        if server_command && !self.hosts.get(self.active_host).is_some_and(|h| h.info.local) {
+            self.flash("Switch to This Mac to manage its server.".into(), cx);
+            return;
+        }
         match command {
             Command::NewSession => {
                 self.close_switcher(window, cx);
@@ -150,7 +152,10 @@ impl Workspace {
             Command::FocusPaneUp => self.focus_direction(crate::focus::Direction::Up, window, cx),
             Command::FocusPaneDown => self.focus_direction(crate::focus::Direction::Down, window, cx),
             Command::ZoomPane => self.toggle_zoom(window, cx),
-            Command::AddHost => self.open_palette_step(Step::Input(Input::HostName), String::new(), window, cx),
+            Command::AddHost => {
+                self.close_palette(window, cx);
+                self.open_add_host(None, None, window, cx);
+            }
             Command::RemoveHost => {
                 if self.hosts.iter().any(|h| !h.info.local && !h.removed) {
                     self.open_palette_step(Step::RemoveHost, String::new(), window, cx);
@@ -230,12 +235,14 @@ impl Workspace {
         let host = self.hosts.get(self.active_host);
         let connected = host.is_some_and(|h| h.control.is_some());
         let paused = host.is_some_and(|h| h.paused.load(Ordering::Acquire));
+        // Remote servers are never started, stopped or upgraded from here.
+        let local = host.is_some_and(|h| h.info.local);
         let tabs = self.view.as_ref().map_or(0, |v| v.session.windows.len());
         let panes = self.active_window().map_or(0, |w| w.layout.blocks().len());
         match command {
-            Command::StartServer => paused,
-            Command::StopServer => connected,
-            Command::RestartServer => connected || self.incompatible().is_some(),
+            Command::StartServer => local && paused,
+            Command::StopServer => local && connected,
+            Command::RestartServer => local && (connected || self.incompatible().is_some()),
             Command::NextTab | Command::PreviousTab => tabs > 1,
             Command::NextSession | Command::PreviousSession => host.is_some_and(|h| h.sessions.len() > 1),
             Command::FocusNextPane
@@ -337,6 +344,12 @@ impl Workspace {
         } else {
             self.open_palette_step(Step::Search, String::new(), window, cx);
         }
+    }
+
+    /// Ask for a new name of remote host `index`.
+    pub(crate) fn open_rename_host(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.hosts.get(index).map(|h| h.info.name.clone()).unwrap_or_default();
+        self.open_palette_step(Step::Input(Input::HostName(index)), name, window, cx);
     }
 
     fn open_palette_step(&mut self, step: Step, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -496,16 +509,10 @@ impl Workspace {
                 self.call(Method::WindowRename { window_id, name: (!text.is_empty()).then_some(text) });
                 self.close_palette(window, cx);
             }
-            Input::HostName => {
-                if text.is_empty() {
-                    return fail(self, "Enter a name.".into(), cx);
-                }
-                self.open_palette_step(Step::Input(Input::HostAddress(text)), String::new(), window, cx);
-            }
-            Input::HostAddress(name) => match self.save_host(name, text, window, cx) {
+            Input::HostName(index) => match self.rename_host(index, text) {
                 Ok(()) => {
-                    self.status = None;
                     self.close_palette(window, cx);
+                    self.refresh_settings(None, cx);
                 }
                 Err(error) => fail(self, error, cx),
             },
@@ -572,11 +579,7 @@ impl Workspace {
             Entry::Back => (div().child("Cancel").into_any_element(), None, Some("esc".into()), false),
             Entry::RemoveHost(i) => {
                 let h = &self.hosts[*i];
-                let address = match &h.info.transport {
-                    crate::hosts::Transport::Iroh { address } => address.clone(),
-                    crate::hosts::Transport::Local { .. } => String::new(),
-                };
-                (div().child(format!("Remove “{}”", h.info.name)).into_any_element(), Some(address), None, true)
+                (div().child(format!("Remove “{}”", h.info.name)).into_any_element(), None, None, true)
             }
         };
         let entry = entry.clone();

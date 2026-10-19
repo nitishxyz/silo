@@ -5,7 +5,7 @@ use silo_proto::{
     data::{ClientData, DataHello, Reject, Resume, ServerData, Welcome},
     kind, read_frame, spawn_reader, write_frame,
 };
-use tokio::{net::UnixStream, sync::mpsc};
+use tokio::{io::AsyncWriteExt, sync::mpsc};
 
 use crate::{Control, Mirror};
 
@@ -39,15 +39,15 @@ impl DataStream {
     /// Ticket, connection or handshake failure (including `Reject`).
     pub async fn open(control: &Control, block_id: &str, resume: Option<Resume>) -> anyhow::Result<Self> {
         let ticket: DataTicket = control.call(Method::DataConnect { block_id: block_id.to_owned() }).await?;
-        let stream = UnixStream::connect(control.socket()).await.context("connect data stream")?;
-        let (mut reader, mut writer) = stream.into_split();
+        let mut stream = control.conn().open_stream().await.context("open data stream")?;
         let hello = DataHello {
             build: BUILD.to_owned(),
             ticket: ticket.ticket,
             resume,
         };
-        write_frame(&mut writer, &Frame::json(kind::DATA_HELLO, &hello)?).await?;
-        let first = read_frame(&mut reader).await?.ok_or_else(|| anyhow!("data stream closed during hello"))?;
+        write_frame(&mut stream, &Frame::json(kind::DATA_HELLO, &hello)?).await?;
+        stream.flush().await?;
+        let first = read_frame(&mut stream).await?.ok_or_else(|| anyhow!("data stream closed during hello"))?;
         let welcome: Welcome = match first.kind {
             kind::WELCOME => first.parse()?,
             kind::REJECT => {
@@ -56,13 +56,15 @@ impl DataStream {
             }
             other => bail!("unexpected data frame {other:#x}"),
         };
+        let (reader, mut writer) = tokio::io::split(stream);
         let (tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
-                if write_frame(&mut writer, &frame).await.is_err() {
+                if write_frame(&mut writer, &frame).await.is_err() || writer.flush().await.is_err() {
                     break;
                 }
             }
+            let _ = writer.shutdown().await;
         });
         let (in_tx, rx) = mpsc::unbounded_channel();
         let mut frames = spawn_reader(reader, 256);

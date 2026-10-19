@@ -408,7 +408,8 @@ pub(crate) struct DraggedPane {
 }
 
 /// The pill following the pointer while a pane is dragged. GPUI places
-/// it at the grab point's offset; `offset` shifts it back under the pointer.
+/// its root at the pointer minus the grab offset; padding by `offset` puts
+/// the pill just below-right of the pointer.
 struct PanePill {
     label: gpui::SharedString,
     offset: gpui::Point<gpui::Pixels>,
@@ -416,9 +417,7 @@ struct PanePill {
 
 impl Render for PanePill {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .ml(self.offset.x + px(10.0))
-            .mt(self.offset.y + px(10.0))
+        let pill = div()
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -432,7 +431,9 @@ impl Render for PanePill {
             .text_size(px(11.5))
             .text_color(rgb(theme::foreground()))
             .child(icon("terminal", 12.0, theme::accent()))
-            .child(self.label.clone())
+            .child(self.label.clone());
+        // Padding, not margin: the root's margins are ignored by layout.
+        div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
     }
 }
 

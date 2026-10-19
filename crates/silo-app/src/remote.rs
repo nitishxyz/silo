@@ -1,0 +1,38 @@
+//! The process-wide iroh endpoint for remote hosts, bound on first use
+//! with this app's device identity (`<state>/client`).
+
+use std::path::{Path, PathBuf};
+
+use silo_client::transport::{Net, RelayConfig};
+use tokio::sync::OnceCell;
+
+static NET: OnceCell<Net> = OnceCell::const_new();
+
+/// Where this app's device key lives.
+#[must_use]
+pub fn identity_dir(home: &Path) -> PathBuf {
+    home.join("client")
+}
+
+/// The shared endpoint, bound the first time it is needed. A failed bind
+/// is retried on the next call.
+///
+/// # Errors
+/// Unreadable identity or bind failure.
+pub async fn net(home: &Path) -> anyhow::Result<&'static Net> {
+    NET.get_or_try_init(|| async {
+        let identity = silo_client::client_identity(&identity_dir(home))?;
+        Net::bind(&identity, RelayConfig::Default, true).await
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_lives_in_state_dir() {
+        assert_eq!(identity_dir(Path::new("/tmp/silo")), PathBuf::from("/tmp/silo/client"));
+    }
+}

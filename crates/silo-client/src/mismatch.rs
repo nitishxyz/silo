@@ -80,7 +80,7 @@ pub async fn inspect(home: &Path) -> DifferentBuild {
 
 async fn connect(home: &Path, build: &str) -> Option<Control> {
     let socket = paths::socket(home);
-    let connected = Control::connect_build(&socket, NAME, true, build);
+    let connected = Control::connect_build(silo_transport::Conn::Unix(socket.clone()), NAME, true, build);
     Some(tokio::time::timeout(Duration::from_secs(2), connected).await.ok()?.ok()?.0)
 }
 
@@ -144,7 +144,7 @@ pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) ->
     };
     loop {
         // Connections wait in the shared backlog during the handoff.
-        let connected = tokio::time::timeout(Duration::from_secs(1), Control::connect_with(&socket, NAME, true)).await;
+        let connected = tokio::time::timeout(Duration::from_secs(1), Control::connect_local(&socket, NAME, true)).await;
         if let Ok(Ok(_)) = connected {
             // The successor outlives us; reap it whenever it exits.
             std::thread::spawn(move || child.wait());
@@ -274,6 +274,9 @@ mod tests {
                     pid: 4242,
                     server_id: "other".into(),
                     started_at: 0,
+                    endpoint_id: String::new(),
+                    remote_error: None,
+                    endpoint_addr: None,
                 };
                 let hello = ServerHello { build: OTHER.into(), client_id: 1, server: info };
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
@@ -351,7 +354,7 @@ mod tests {
     async fn handshake_requires_same_build() {
         let home = std::env::temp_dir().join(format!("silo-mismatch-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let config = silo_server::Config { home: home.clone(), idle_exit: None, ..Default::default() };
+        let config = silo_server::Config { home: home.clone(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
         let server = tokio::spawn(silo_server::run(config));
         let socket = paths::socket(&home);
         let mut connected = None;
@@ -366,7 +369,7 @@ mod tests {
         assert_eq!(control.hello().build, silo_proto::BUILD);
         assert_eq!(read_runtime(&home).unwrap().build, silo_proto::BUILD);
 
-        let error = Control::connect_build(&socket, "forged", false, OTHER).await.err().expect("forged build rejected");
+        let error = Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "forged", false, OTHER).await.err().expect("forged build rejected");
         let rejected = error.downcast_ref::<BuildMismatch>().expect("a build mismatch");
         assert!(rejected.message.contains(silo_proto::BUILD) && rejected.message.contains(OTHER), "{rejected}");
 

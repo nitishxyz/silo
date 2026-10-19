@@ -7,7 +7,6 @@ use gpui::{
 
 use crate::theme::Continuous as _;
 use crate::{
-    add_host::AddHostSheet,
     assets::icon,
     hosts::HostState,
     text_field::{FieldEvent, TextField},
@@ -106,17 +105,16 @@ impl Workspace {
                 continue;
             }
             rows.push(Row::Header { host: index });
-            if host.state == HostState::Connected {
-                for s in &host.sessions {
-                    if s.name.to_lowercase() == filter {
-                        exact = true;
-                    }
-                    if filter.is_empty() || s.name.to_lowercase().contains(&filter) {
-                        rows.push(Row::Item(Item::Session { host: index, id: s.id.clone() }));
-                    }
-                }
-            } else if !host.info.local {
+            if host.state == HostState::NotPaired {
                 rows.push(Row::Item(Item::Connect(index)));
+            }
+            for s in &host.sessions {
+                if s.name.to_lowercase() == filter {
+                    exact = true;
+                }
+                if filter.is_empty() || s.name.to_lowercase().contains(&filter) {
+                    rows.push(Row::Item(Item::Session { host: index, id: s.id.clone() }));
+                }
             }
         }
         let text = self.switcher.as_ref().map(|s| s.filter.trim().to_owned()).unwrap_or_default();
@@ -209,16 +207,8 @@ impl Workspace {
             Item::Session { host, id } => self.open_session(host, id, window, cx),
             Item::Create(name) => self.create_session(Some(name), window, cx),
             Item::NewSession => self.create_session(None, window, cx),
-            Item::AddHost => {
-                self.add_host = Some(AddHostSheet::new(window, cx));
-            }
-            Item::Connect(host) => {
-                let reason = match &self.hosts[host].state {
-                    HostState::Unreachable(reason) => reason.clone(),
-                    _ => "connecting…".into(),
-                };
-                self.status = Some(format!("{}: {reason}", self.hosts[host].info.name));
-            }
+            Item::AddHost => self.open_add_host(None, None, window, cx),
+            Item::Connect(host) => self.pair_again(host, window, cx),
         }
         cx.notify();
     }
@@ -239,12 +229,8 @@ impl Workspace {
             match row {
                 Row::Header { host } => {
                     let entry = &self.hosts[host];
-                    let state = match &entry.state {
-                        HostState::Connected => None,
-                        HostState::Connecting => Some("connecting…".to_owned()),
-                        HostState::Unreachable(_) if !entry.info.local => Some("not connected".to_owned()),
-                        HostState::Unreachable(_) => Some("unavailable".to_owned()),
-                    };
+                    let state = state_label(&entry.state, entry.info.local);
+                    let dot = state_color(&entry.state);
                     list = list.child(
                         div()
                             .flex()
@@ -259,7 +245,8 @@ impl Workspace {
                             .text_color(rgb(theme::muted()))
                             .child(icon(if entry.info.local { "laptop" } else { "globe" }, 12.0, theme::muted()))
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.info.name.clone()))
-                            .children(state.map(|s| div().flex_none().text_size(px(10.5)).font_weight(FontWeight::NORMAL).child(s))),
+                            .children(state.map(|s| div().flex_none().text_size(px(10.5)).font_weight(FontWeight::NORMAL).child(s)))
+                            .child(div().flex_none().size(px(6.0)).rounded_full().bg(rgb(dot))),
                     );
                 }
                 Row::Divider => {
@@ -333,7 +320,7 @@ impl Workspace {
                 (None, name, hint, checked)
             }
             Item::Create(name) => (Some("plus"), format!("Create “{name}”"), Some("↩".into()), false),
-            Item::Connect(_) => (Some("globe"), "Connect (remote hosts coming soon)".into(), None, false),
+            Item::Connect(_) => (Some("globe"), "Pair again…".into(), None, false),
             Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
             Item::AddHost => (Some("add-host"), "Add Remote Host…".into(), None, false),
         };
@@ -394,6 +381,27 @@ impl Workspace {
             )
             .on_click(cx.listener(move |this, _, window, cx| this.activate(item.clone(), window, cx)))
             .into_any_element()
+    }
+}
+
+/// Quiet label after a host's name; none while connected.
+pub(crate) fn state_label(state: &HostState, local: bool) -> Option<&'static str> {
+    match state {
+        HostState::Connected => None,
+        HostState::Connecting => Some("connecting…"),
+        HostState::Unreachable(_) if local => Some("unavailable"),
+        HostState::Unreachable(_) => Some("offline"),
+        HostState::NotPaired => Some("not paired"),
+        HostState::DifferentBuild => Some("different build"),
+    }
+}
+
+fn state_color(state: &HostState) -> u32 {
+    match state {
+        HostState::Connected => theme::accent(),
+        HostState::Connecting => theme::muted(),
+        HostState::Unreachable(_) => theme::border(),
+        HostState::NotPaired | HostState::DifferentBuild => theme::danger(),
     }
 }
 

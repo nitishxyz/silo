@@ -1,0 +1,28 @@
+# systemd user unit for the silo server. See packaging/linux/README.md.
+[Unit]
+Description=silo terminal server
+Documentation=file://%h/.local/share/doc/silo/README.md
+
+[Service]
+# The server sends READY=1 once serving; a takeover successor sends
+# MAINPID=<its pid> before committing, so systemd follows it.
+Type=notify
+NotifyAccess=all
+# Foreground, no idle exit: the server lives until stopped.
+ExecStart=%h/.local/bin/silo server
+# Hot upgrade: the successor runs inside this unit (its cgroup and
+# NOTIFY_SOCKET), takes every session live and becomes the main process.
+ExecReload=%h/.local/bin/silo server --takeover --daemon --idle-exit 0
+Restart=on-failure
+UMask=0077
+# The Linux default (crates/silo-proto/src/paths.rs), pinned so the unit and
+# CLI clients agree even if the service manager's XDG_STATE_HOME differs.
+Environment=SILO_HOME=%h/.local/state/silo
+# Stop signals only the server: its own shutdown hangs up every shell. After
+# a takeover the old server exits by itself and the shells it handed over
+# must survive it, so the cgroup is not swept.
+KillMode=process
+# No PrivateTmp/ProtectHome: shells need the user's real home and /tmp.
+
+[Install]
+WantedBy=default.target

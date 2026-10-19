@@ -8,7 +8,13 @@ rust-version.workspace = true
 name = "silo"
 path = "src/main.rs"
 
+[lib]
+name = "silo_cli"
+path = "src/lib.rs"
+
 [dependencies]
+serde.workspace = true
+qrcode = { version = "0.14", default-features = false }
 silo-proto.workspace = true
 silo-server.workspace = true
 silo-client.workspace = true

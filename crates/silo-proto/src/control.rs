@@ -19,6 +19,11 @@ pub struct ClientHello {
     /// server from exiting when idle.
     #[serde(default)]
     pub passive: bool,
+    /// Remote only: a pairing invite (`silo1…` PairTicket string from
+    /// `pair.create`) redeemed on first contact. Paired devices omit it; they
+    /// are authenticated by their endpoint id.
+    #[serde(default)]
+    pub invite: Option<String>,
 }
 
 /// Reply to [`ClientHello`].
@@ -36,6 +41,17 @@ pub struct ServerInfo {
     pub pid: u32,
     pub server_id: String,
     pub started_at: u64,
+    /// The server's iroh EndpointId.
+    pub endpoint_id: String,
+    /// Why remote (iroh) access is unavailable; `None` while it serves.
+    #[serde(default)]
+    pub remote_error: Option<String>,
+    /// The server's current reachable address: iroh `EndpointAddr` (id,
+    /// home relay URL, direct addresses) in its serde JSON form, as of this
+    /// reply. Clients refresh stored host addresses from it. `None` without
+    /// remote access.
+    #[serde(default)]
+    pub endpoint_addr: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +172,16 @@ pub enum Method {
     /// Ask attached UI clients (the app) to show a session.
     #[serde(rename = "ui.open_session")]
     UiOpenSession { session_id: SessionId },
+
+    /// Owner only: a single-use pairing invite valid for `ttl_secs`.
+    #[serde(rename = "pair.create")]
+    PairCreate { ttl_secs: u64 },
+    /// Owner only: paired devices.
+    #[serde(rename = "pair.list")]
+    PairList {},
+    /// Owner only: forget a device and close its connections.
+    #[serde(rename = "pair.revoke")]
+    PairRevoke { id: String },
 }
 
 /// Method names and one-line descriptions, for `api.list`.
@@ -190,6 +216,9 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.disown_block", "Release ownership or candidacy of blocks."),
     ("data.connect", "Single-use ticket for a block data stream."),
     ("ui.open_session", "Ask subscribed UI clients to show a session."),
+    ("pair.create", "Create a single-use pairing invite (owner only)."),
+    ("pair.list", "List paired devices (owner only)."),
+    ("pair.revoke", "Forget a paired device and close its connections (owner only)."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,6 +274,18 @@ impl RpcError {
     }
     /// Code of [`RpcError::different_build`].
     pub const DIFFERENT_BUILD: &str = "different_build";
+    /// Code of [`RpcError::unauthorized`].
+    pub const UNAUTHORIZED: &str = "unauthorized";
+    /// Code of [`RpcError::forbidden`].
+    pub const FORBIDDEN: &str = "forbidden";
+    /// Hello rejection: an unknown device without a valid invite.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(Self::UNAUTHORIZED, message)
+    }
+    /// The authenticated peer may not call this method.
+    pub fn forbidden(method: &str) -> Self {
+        Self::new(Self::FORBIDDEN, format!("{method} is not permitted for this client"))
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -324,6 +365,32 @@ pub struct SizeInfo {
 pub struct Capture {
     pub text: String,
     pub size: TermSize,
+}
+
+/// Result of `pair.create`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairInvite {
+    /// Encoded `PairTicket` (`silo1…`).
+    pub ticket: String,
+    pub expires_in_secs: u64,
+}
+
+/// Element of `pair.list`'s `devices`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairedDevice {
+    /// The device's iroh EndpointId.
+    pub id: String,
+    pub name: String,
+    /// Unix seconds.
+    pub paired_at: u64,
+    /// Unix seconds of the last authenticated control hello.
+    pub last_seen: u64,
+}
+
+/// Result of `pair.list`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairedDevices {
+    pub devices: Vec<PairedDevice>,
 }
 
 #[cfg(test)]
