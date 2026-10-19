@@ -233,7 +233,7 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
     build is a hot upgrade.
   - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications with the default state dir installs or
     refreshes the launchd agent for its bundled CLI (shared `silo_client::service`), taking over or adopting a running
-    server live, and links `~/.local/bin/silo` when that dir is on the login `PATH`. Anything else (`SILO_HOME`, dev
+    server live, and links `~/.local/bin/silo` when that dir exists. Anything else (`SILO_HOME`, dev
     and debug builds, a disk image) starts a plain server; Stop disables the agent until the next launch.
 - **Server modes:**
   - Personal: auto-exits about 10 s after the last session and client, unless started explicitly.
