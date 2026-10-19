@@ -8,6 +8,7 @@ mod mirror;
 pub mod mismatch;
 mod predict;
 mod remote;
+pub mod service;
 mod spawn;
 pub mod tunnel;
 

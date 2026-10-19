@@ -10,7 +10,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use silo_cli::{NetOptions, hosts::Hosts, link, parse_duration, parse_relay, service};
+use silo_cli::{NetOptions, hosts::Hosts, link, parse_duration, parse_relay};
+use silo_client::service;
 use silo_client::{
     Control, Events,
     transport::{Net, RelayConfig},
@@ -360,6 +361,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             init_tracing();
             let home = paths::home();
             let takeover = takeover || (adopt && silo_client::mismatch::server_lock_held(&home));
+            tracing::info!(daemon, takeover, adopt, ?idle_exit, pid = std::process::id(), "silo server starting");
             let idle_exit = match idle_exit {
                 Some(0) => None,
                 Some(secs) => Some(Duration::from_secs(secs)),
@@ -656,22 +658,12 @@ async fn shutdown(control: Control) -> anyhow::Result<()> {
 
 fn local_service(runner: &dyn service::Runner) -> anyhow::Result<service::Service> {
     let exe = std::env::current_exe().and_then(|e| e.canonicalize()).context("locate silo executable")?;
-    let user_home = std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME is not set")?.into();
-    let user = std::env::var("USER").context("USER is not set")?;
-    let uid = rustix::process::getuid().as_raw();
-    service::Service::new(service::detect(runner), exe, paths::home(), user_home, uid, user)
+    service::Service::local(service::detect(runner), exe, paths::home())
 }
 
 /// The local server, if one of this build answers, and how it runs.
-async fn probe_server() -> anyhow::Result<(service::Server, Option<Control>)> {
-    match connect_existing().await {
-        Ok((Some(control), _)) if control.hello().server.idle_exit_secs == 0 => Ok((service::Server::Current, Some(control))),
-        Ok((Some(control), _)) => Ok((service::Server::Idle, Some(control))),
-        Ok(_) if silo_client::mismatch::server_lock_held(&paths::home()) => Ok((service::Server::Other, None)),
-        Ok(_) => Ok((service::Server::Absent, None)),
-        Err(error) if error.is::<silo_client::DifferentBuild>() => Ok((service::Server::Other, None)),
-        Err(error) => Err(error),
-    }
+async fn probe_server() -> (service::Server, Option<Control>) {
+    service::probe_server(&paths::home(), &client_name()).await
 }
 
 fn manager_name(manager: service::Manager) -> &'static str {
@@ -687,32 +679,16 @@ fn manager_name(manager: service::Manager) -> &'static str {
 async fn up() -> anyhow::Result<Control> {
     let runner = service::System;
     let svc = local_service(&runner)?;
-    let (server, control) = probe_server().await?;
-    drop(control);
-    let state = svc.probe(&runner, server)?;
-    let actions = service::plan_up(&state);
-    for note in svc.apply(&runner, &actions)? {
+    let service::Up { control, actions, notes } = service::up(&svc, &runner, &client_name()).await.map_err(|error| {
+        if error.is::<service::NotUpgraded>() {
+            anyhow::anyhow!("{error}; stop it with `silo down` (ends its sessions), then run `silo up`")
+        } else {
+            error
+        }
+    })?;
+    for note in notes {
         eprintln!("silo: {note}");
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    // Under launchd a takeover outside the job serves briefly before the
-    // job adopts it: wait for the job's own process.
-    let control = loop {
-        if let (service::Server::Current, Some(control)) = probe_server().await?
-            && (svc.manager != service::Manager::Launchd || svc.job_pid(&runner)? == Some(control.hello().server.pid))
-        {
-            break control;
-        }
-        if std::time::Instant::now() >= deadline {
-            if probe_server().await?.0 == service::Server::Other {
-                bail!(
-                    "the running server of another build cannot be upgraded live; stop it with `silo down` (ends its sessions), then run `silo up`"
-                );
-            }
-            bail!("the server did not come up; see the server log");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
     let pid = control.hello().server.pid;
     match svc.manager {
         service::Manager::None => {
@@ -800,10 +776,11 @@ async fn remote_install(target: &str, binary: Option<&std::path::Path>) -> anyho
 async fn down(yes: bool) -> anyhow::Result<i32> {
     let runner = service::System;
     let svc = local_service(&runner)?;
-    let (server, control) = probe_server().await?;
+    let (server, control) = probe_server().await;
     let sessions = match (&control, server) {
         (Some(control), _) => Some(silo_cli::sessions(control).await?.len()),
         (None, service::Server::Other) => silo_client::mismatch::inspect(&paths::home()).await.sessions,
+        (None, service::Server::Unresponsive) => None,
         (None, _) => Some(0),
     };
     if sessions != Some(0) && !yes {
@@ -825,9 +802,9 @@ async fn down(yes: bool) -> anyhow::Result<i32> {
     drop(control);
     let state = svc.probe(&runner, server)?;
     svc.apply(&runner, &service::plan_down(&state))?;
-    match probe_server().await? {
+    match probe_server().await {
         (_, Some(control)) => shutdown(control).await?,
-        (service::Server::Other, None) => {
+        (service::Server::Other | service::Server::Unresponsive, None) => {
             let home = paths::home();
             silo_client::mismatch::stop(&home, &silo_client::mismatch::inspect(&home).await).await?;
         }
@@ -840,7 +817,7 @@ async fn down(yes: bool) -> anyhow::Result<i32> {
 async fn show_status() -> anyhow::Result<i32> {
     let runner = service::System;
     let svc = local_service(&runner)?;
-    let (server, control) = probe_server().await?;
+    let (server, control) = probe_server().await;
     let state = svc.probe(&runner, server)?;
     let managed = if state.running { manager_name(svc.manager) } else { "not managed" };
     let autostart = if state.loaded { "yes" } else { "no" };
@@ -859,6 +836,10 @@ async fn show_status() -> anyhow::Result<i32> {
         }
         (service::Server::Other, None) => {
             println!("running:        yes (a different build; `silo up` upgrades it)");
+            println!("managed by:     {managed}");
+        }
+        (service::Server::Unresponsive, None) => {
+            println!("running:        yes (not responding)");
             println!("managed by:     {managed}");
         }
         _ => println!("running:        no"),

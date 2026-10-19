@@ -29,6 +29,10 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$out/silo-app" "$app/Contents/MacOS/Silo"
 cp "$out/silo" "$app/Contents/MacOS/silo-server"
+# Lowercase `silo` for PATH: the server puts Resources/bin on the PATH of
+# every shell it spawns (shell startup files may reorder it).
+mkdir -p "$app/Contents/Resources/bin"
+ln -s ../../MacOS/silo-server "$app/Contents/Resources/bin/silo"
 # Menu-bar agent (accessory app, no Dock icon), started by the app and by
 # `silo-server server --daemon`.
 cp "$out/silo-menubar" "$app/Contents/MacOS/silo-menubar"

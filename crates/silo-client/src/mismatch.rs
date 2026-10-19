@@ -151,21 +151,19 @@ pub async fn stop(home: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
 /// Replace the different-build server with this build's `server_exe`:
 /// live where it can (`server --takeover` takes every session, programs
 /// included), else, for a server from before live upgrade, [`stop`] it
-/// (its sessions end) and start this build's. Returns once this build
-/// answers on the socket; clients then reconnect. On failure the old
-/// server keeps serving.
+/// (its sessions end); the caller then starts this build's. On failure
+/// the old server keeps serving.
 ///
 /// # Errors
 /// The successor could not take over, or the old server could not be
-/// stopped or this build's started.
+/// stopped.
 pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<Upgraded> {
     match take_over(home, server_exe, server).await {
         Ok(()) => Ok(Upgraded::Live),
         Err(error) if error.is::<NotUpgradable>() => {
-            tracing::info!(pid = ?server.pid, "the server predates live upgrade; restarting it");
+            tracing::info!(pid = ?server.pid, "the server predates live upgrade; stopping it");
             stop(home, server).await?;
-            drop(crate::connect_or_spawn(home, server_exe, NAME).await?);
-            Ok(Upgraded::Restarted)
+            Ok(Upgraded::Stopped)
         }
         Err(error) => Err(error),
     }
@@ -176,14 +174,13 @@ pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) ->
 pub enum Upgraded {
     /// Taken over live; every session kept running.
     Live,
-    /// It predated live upgrade: stopped (its sessions ended) and this
-    /// build's server started.
-    Restarted,
+    /// It predated live upgrade: stopped (its sessions ended).
+    Stopped,
 }
 
 /// The live takeover; [`NotUpgradable`] if the server predates it.
 async fn take_over(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
-    let mut child = crate::spawn::spawn_server(home, server_exe, &["--takeover", "--idle-exit", "10"])?;
+    let mut child = crate::spawn::spawn_server(home, server_exe, &["--takeover", "--idle-exit", "0"])?;
     let socket = paths::socket(home);
     let deadline = Instant::now() + UPGRADE_TIMEOUT;
     let failed = |why: String| {
@@ -421,42 +418,15 @@ mod tests {
             assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), n, "one hello each, no session lookup");
         }
         // It closes on the upgrade request, so the takeover exits 3: one
-        // upgrade stops it and starts this build (`server --daemon`).
+        // upgrade stops it.
         let successor = home.join("bin/successor");
-        let started = home.join("started");
-        let script = format!("#!/bin/sh\n[ \"$2\" = --takeover ] && exit {}\ntouch '{}'\n", silo_proto::EXIT_NOT_UPGRADABLE, started.display());
+        let script = format!("#!/bin/sh\n[ \"$2\" = --takeover ] && exit {}\n", silo_proto::EXIT_NOT_UPGRADABLE);
         std::fs::write(&successor, script).unwrap();
         std::fs::set_permissions(&successor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let new_server = tokio::spawn(this_build_when(started, paths::socket(&home)));
-        assert_eq!(upgrade(&home, &successor, &expected).await.unwrap(), Upgraded::Restarted);
+        assert_eq!(upgrade(&home, &successor, &expected).await.unwrap(), Upgraded::Stopped);
         assert!(!server_lock_held(&home), "the old server was stopped");
         task.abort();
-        new_server.abort();
         let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// Once `marker` exists, serve this build's hello on `socket` (a fresh
-    /// bind, as a newly started server does).
-    async fn this_build_when(marker: std::path::PathBuf, socket: std::path::PathBuf) {
-        use silo_proto::{Frame, control::ServerHello, kind, read_frame, write_frame};
-        while !marker.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let _ = std::fs::remove_file(&socket);
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        loop {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            tokio::spawn(async move {
-                read_frame(&mut stream).await.unwrap();
-                let server = serde_json::from_value(
-                    serde_json::json!({"version": "", "pid": 0, "server_id": "", "started_at": 0, "endpoint_id": "", "idle_exit_secs": 0}),
-                )
-                .unwrap();
-                let hello = ServerHello { build: silo_proto::BUILD.to_owned(), client_id: 1, server };
-                write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
-                std::future::pending::<()>().await;
-            });
-        }
     }
 
     /// The live path needs a real successor binary (see `silo-server`'s

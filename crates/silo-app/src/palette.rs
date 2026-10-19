@@ -230,6 +230,16 @@ impl Workspace {
                     host.paused.store(true, Ordering::Release);
                 }
                 self.call(Method::ServerShutdown {});
+                // Stays off, at login too, until Start Server or the next app launch.
+                if let Some(service) = self.local_service().filter(|s| s.manager == silo_client::service::Manager::Launchd) {
+                    self.rt.spawn_blocking(move || {
+                        use silo_client::service::Action;
+                        let stopped = service.apply(&silo_client::service::System, &[Action::Disable, Action::Bootout]);
+                        if let Err(error) = stopped {
+                            tracing::warn!("stop service: {error:#}");
+                        }
+                    });
+                }
                 self.detach_view();
                 self.focus.focus(window, cx);
                 self.status = Some("Server stopped. Run “Start Server” from the command palette (⌘P).".into());

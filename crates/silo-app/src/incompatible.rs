@@ -17,23 +17,30 @@ impl Workspace {
         self.hosts.get(self.active_host)?.incompatible.as_ref()
     }
 
+    /// The service running the active host's server, if it is this Mac.
+    pub(crate) fn local_service(&self) -> Option<silo_client::service::Service> {
+        match &self.hosts.get(self.active_host)?.info.transport {
+            crate::hosts::Transport::Local { service: Ok(service), .. } => Some(service.clone()),
+            _ => None,
+        }
+    }
+
     /// Upgrade the incompatible server on the active (local) host; does
     /// nothing while an upgrade runs. Until this build connects the card
     /// shows "Upgrading…"; then a short note says how it went.
     pub(crate) fn upgrade_server(&mut self, cx: &mut Context<Self>) {
-        let Some(server) = self.incompatible().cloned() else { return };
+        let (Some(server), Some(service)) = (self.incompatible().cloned(), self.local_service()) else { return };
         if std::mem::replace(&mut self.upgrading, true) {
             return;
         }
         self.status = None;
-        let (home, exe) = (self.home.clone(), crate::conn::server_exe());
-        let task = self.rt.spawn(async move { silo_client::mismatch::upgrade(&home, &exe, &server).await });
+        let task = self.rt.spawn(async move { crate::conn::upgrade(&service, &server).await });
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |this, cx| {
                 let notice = match result {
                     Ok(Upgraded::Live) => "Upgraded.",
-                    Ok(Upgraded::Restarted) => "Upgraded. Old sessions ended.",
+                    Ok(Upgraded::Stopped) => "Upgraded. Old sessions ended.",
                     Err(error) => {
                         tracing::warn!("upgrade server: {error:#}");
                         this.upgrading = false;

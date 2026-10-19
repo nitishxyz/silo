@@ -6,6 +6,7 @@ mod assets;
 mod blink;
 mod browser_pane;
 mod cache;
+mod cli_link;
 mod commands;
 mod composition;
 mod conn;
@@ -58,6 +59,10 @@ fn main() {
     let home = silo_proto::paths::home();
     let exe = conn::server_exe();
     tracing::info!(home = %home.display(), server = %exe.display(), "starting Silo");
+    let (service, move_hint) = conn::local_service(&home, exe);
+    if service.as_ref().is_ok_and(|s| s.manager == silo_client::service::Manager::Launchd) {
+        rt.spawn_blocking(cli_link::refresh);
+    }
     let loaded = terminal_prefs::load(&home);
     if let Some(problem) = &loaded.problem {
         tracing::warn!("{problem}");
@@ -120,7 +125,7 @@ fn main() {
             }
         })
         .detach();
-        hosts_state::HostsState::install(rt.clone(), home.clone(), exe.clone(), cx);
+        hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), move_hint, cx);
         if let Err(error) = open_window(None, cx) {
             eprintln!("silo: cannot open window: {error:#}");
             cx.quit();

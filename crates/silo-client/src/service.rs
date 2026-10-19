@@ -1,9 +1,15 @@
 //! `silo up`/`down`: the server as a user service of the platform's service
 //! manager (systemd user unit on Linux, launchd agent on macOS).
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, bail};
+use silo_proto::paths;
+
+use crate::Control;
 
 pub const UNIT: &str = "silo.service";
 pub const LABEL: &str = "dev.silo.server";
@@ -73,6 +79,8 @@ pub enum Server {
     Idle,
     /// Of another build.
     Other,
+    /// Holds the state directory but does not answer (starting, hung).
+    Unresponsive,
 }
 
 /// What the service manager and the socket report.
@@ -97,11 +105,14 @@ pub enum Action {
     WriteUnit,
     RemoveUnit,
     DaemonReload,
+    /// systemd: enable the unit; launchd: clear a `Disable`.
     Enable,
+    /// systemd: start the unit; launchd: start the loaded job if it is not running (`kickstart`, no `-k`).
     Start,
     /// systemd `ExecReload`: a takeover inside the unit.
     Reload,
     Stop,
+    /// systemd: disable the unit; launchd: keep it from loading at login.
     Disable,
     Bootstrap,
     Bootout,
@@ -138,10 +149,10 @@ pub fn plan_up(state: &State) -> Vec<Action> {
         Manager::Launchd => {
             // launchd runs one process per label and bootout/kickstart -k SIGTERM it, which ends
             // every session: upgrade by a takeover outside launchd, then the job adopts it (two handoffs).
-            if state.loaded && state.running {
-                if !stale && state.server != Server::Other {
-                    return actions;
-                }
+            if state.loaded && state.running && !stale && state.server != Server::Other {
+                return actions;
+            }
+            if state.server == Server::Other || (state.loaded && state.running) {
                 actions.push(Action::Takeover);
             }
             if stale {
@@ -149,16 +160,16 @@ pub fn plan_up(state: &State) -> Vec<Action> {
                 if state.loaded {
                     actions.push(Action::Bootout);
                 }
-                actions.push(Action::Bootstrap);
+                actions.extend([Action::Enable, Action::Bootstrap]);
             } else if state.loaded {
                 actions.push(Action::Kickstart);
             } else {
-                actions.push(Action::Bootstrap);
+                actions.extend([Action::Enable, Action::Bootstrap]);
             }
         }
         Manager::None => match state.server {
             Server::Absent => actions.push(Action::Spawn),
-            Server::Current => {}
+            Server::Current | Server::Unresponsive => {}
             Server::Idle | Server::Other => actions.push(Action::Takeover),
         },
     }
@@ -214,6 +225,16 @@ impl Service {
             bail!("service binary path is not absolute: {}", exe.display());
         }
         Ok(Self { manager, exe, silo_home, user_home, uid, user })
+    }
+
+    /// The service of this user running `exe` for `silo_home`.
+    ///
+    /// # Errors
+    /// `exe` is relative or `HOME` is not set.
+    pub fn local(manager: Manager, exe: PathBuf, silo_home: PathBuf) -> anyhow::Result<Self> {
+        let user_home = std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME is not set")?.into();
+        let user = std::env::var("USER").unwrap_or_default();
+        Self::new(manager, exe, silo_home, user_home, rustix::process::getuid().as_raw(), user)
     }
 
     #[must_use]
@@ -291,9 +312,16 @@ impl Service {
                     let dir = unit.parent().context("unit path has no parent")?;
                     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
                     std::fs::write(&unit, text).with_context(|| format!("write {}", unit.display()))?;
+                    tracing::info!("service: wrote {}", unit.display());
                 }
-                Action::RemoveUnit => std::fs::remove_file(&unit).with_context(|| format!("remove {}", unit.display()))?,
+                Action::RemoveUnit => {
+                    std::fs::remove_file(&unit).with_context(|| format!("remove {}", unit.display()))?;
+                    tracing::info!("service: removed {}", unit.display());
+                }
                 Action::DaemonReload => check(runner, "systemctl", &["--user", "daemon-reload"])?,
+                Action::Enable if self.manager == Manager::Launchd => check(runner, "launchctl", &["enable", &self.target()])?,
+                Action::Disable if self.manager == Manager::Launchd => check(runner, "launchctl", &["disable", &self.target()])?,
+                Action::Start if self.manager == Manager::Launchd => check(runner, "launchctl", &["kickstart", &self.target()])?,
                 Action::Enable => check(runner, "systemctl", &["--user", "enable", UNIT])?,
                 Action::Start => check(runner, "systemctl", &["--user", "start", UNIT])?,
                 Action::Reload => check(runner, "systemctl", &["--user", "reload", UNIT])?,
@@ -320,8 +348,86 @@ fn launchd_pid(print: &str) -> Option<u32> {
     print.lines().find_map(|line| line.trim().strip_prefix("pid = ")?.trim().parse().ok())
 }
 
+/// The server for `home`, if one of this build answers, and how it runs.
+pub async fn probe_server(home: &Path, client_name: &str) -> (Server, Option<Control>) {
+    match Control::connect(&paths::socket(home), client_name).await {
+        Ok((control, _)) if control.hello().server.idle_exit_secs == 0 => (Server::Current, Some(control)),
+        Ok((control, _)) => (Server::Idle, Some(control)),
+        Err(error) if crate::mismatch::different_build(home, &error).await.is_some() => (Server::Other, None),
+        Err(_) if crate::mismatch::server_lock_held(home) => (Server::Unresponsive, None),
+        Err(_) => (Server::Absent, None),
+    }
+}
+
+/// A server of another build still holds the state directory after `up`:
+/// it predates live upgrade and keeps its sessions until stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotUpgraded;
+
+impl std::fmt::Display for NotUpgraded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the running server of another build cannot be upgraded live")
+    }
+}
+
+impl std::error::Error for NotUpgraded {}
+
+/// What [`up`] did.
+pub struct Up {
+    pub control: Control,
+    pub actions: Vec<Action>,
+    pub notes: Vec<String>,
+}
+
+/// Install or update the service and start it; returns once this build's
+/// server answers (under launchd: the job's own process, not a takeover
+/// successor serving before the job adopts it).
+///
+/// # Errors
+/// An action fails, the server does not come up, or [`NotUpgraded`].
+pub async fn up(svc: &Service, runner: &dyn Runner, client_name: &str) -> anyhow::Result<Up> {
+    let home = &svc.silo_home;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (server, control) = loop {
+        match probe_server(home, client_name).await {
+            (Server::Unresponsive, _) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(100)).await,
+            (Server::Unresponsive, _) => bail!("the server is running but not responding"),
+            probed => break probed,
+        }
+    };
+    drop(control);
+    let state = svc.probe(runner, server)?;
+    let actions = plan_up(&state);
+    tracing::info!(manager = ?svc.manager, ?server, loaded = state.loaded, running = state.running, stale = state.installed != state.desired, ?actions, "service up");
+    let notes = match svc.apply(runner, &actions) {
+        Ok(notes) => notes,
+        Err(error) if probe_server(home, client_name).await.0 == Server::Other => {
+            tracing::warn!("service up: {error:#}");
+            return Err(NotUpgraded.into());
+        }
+        Err(error) => return Err(error),
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let (Server::Current, Some(control)) = probe_server(home, client_name).await
+            && (svc.manager != Manager::Launchd || svc.job_pid(runner)? == Some(control.hello().server.pid))
+        {
+            tracing::info!(pid = control.hello().server.pid, manager = ?svc.manager, "service server up");
+            return Ok(Up { control, actions, notes });
+        }
+        if Instant::now() >= deadline {
+            if probe_server(home, client_name).await.0 == Server::Other {
+                return Err(NotUpgraded.into());
+            }
+            bail!("the server did not come up; see the server log");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn check(runner: &dyn Runner, program: &str, args: &[&str]) -> anyhow::Result<()> {
     let out = runner.run(program, args)?;
+    tracing::info!(success = out.success, "service: {program} {}", args.join(" "));
     if !out.success {
         bail!("{program} {} failed: {}", args.join(" "), out.stderr.trim());
     }
@@ -465,12 +571,17 @@ mod tests {
         use Action::*;
         let s = State { linger: None, ..state(Manager::Launchd) };
         assert_eq!(plan_up(&s), []);
-        assert_eq!(plan_up(&State { installed: None, loaded: false, running: false, server: Server::Absent, ..s.clone() }), [WriteUnit, Bootstrap]);
-        assert_eq!(plan_up(&State { loaded: false, running: false, server: Server::Other, ..s.clone() }), [Bootstrap]);
+        assert_eq!(
+            plan_up(&State { installed: None, loaded: false, running: false, server: Server::Absent, ..s.clone() }),
+            [WriteUnit, Enable, Bootstrap]
+        );
+        assert_eq!(plan_up(&State { loaded: false, running: false, server: Server::Other, ..s.clone() }), [Takeover, Enable, Bootstrap]);
+        assert_eq!(plan_up(&State { loaded: false, running: false, server: Server::Idle, ..s.clone() }), [Enable, Bootstrap]);
         assert_eq!(plan_up(&State { server: Server::Other, ..s.clone() }), [Takeover, Kickstart]);
-        assert_eq!(plan_up(&State { installed: Some("old".into()), ..s.clone() }), [Takeover, WriteUnit, Bootout, Bootstrap]);
+        assert_eq!(plan_up(&State { server: Server::Unresponsive, ..s.clone() }), []);
+        assert_eq!(plan_up(&State { installed: Some("old".into()), ..s.clone() }), [Takeover, WriteUnit, Bootout, Enable, Bootstrap]);
         assert_eq!(plan_up(&State { running: false, ..s.clone() }), [Kickstart]);
-        assert_eq!(plan_up(&State { installed: Some("old".into()), running: false, ..s }), [WriteUnit, Bootout, Bootstrap]);
+        assert_eq!(plan_up(&State { installed: Some("old".into()), running: false, ..s }), [WriteUnit, Bootout, Enable, Bootstrap]);
     }
 
     #[test]
@@ -479,6 +590,7 @@ mod tests {
         assert_eq!(plan_up(&State { server: Server::Absent, ..s.clone() }), [Action::Spawn]);
         assert_eq!(plan_up(&State { server: Server::Other, ..s.clone() }), [Action::Takeover]);
         assert_eq!(plan_up(&State { server: Server::Idle, ..s.clone() }), [Action::Takeover]);
+        assert_eq!(plan_up(&State { server: Server::Unresponsive, ..s.clone() }), []);
         assert_eq!(plan_up(&s), []);
     }
 
@@ -579,7 +691,7 @@ mod tests {
         let home = temp_home("apply-launchd");
         let svc = service(Manager::Launchd, &home);
         let fake = Fake::default();
-        svc.apply(&fake, &[Takeover, WriteUnit, Bootout, Bootstrap, Kickstart]).unwrap();
+        svc.apply(&fake, &[Takeover, WriteUnit, Bootout, Enable, Bootstrap, Kickstart, Disable]).unwrap();
         let plist = svc.unit_path().unwrap();
         assert_eq!(std::fs::read_to_string(&plist).unwrap(), svc.unit_text().unwrap());
         assert_eq!(
@@ -587,8 +699,10 @@ mod tests {
             [
                 "/opt/silo/bin/silo server --takeover --daemon --idle-exit 0".to_owned(),
                 "launchctl bootout gui/501/dev.silo.server".to_owned(),
+                "launchctl enable gui/501/dev.silo.server".to_owned(),
                 format!("launchctl bootstrap gui/501 {}", plist.display()),
                 "launchctl kickstart -k gui/501/dev.silo.server".to_owned(),
+                "launchctl disable gui/501/dev.silo.server".to_owned(),
             ]
         );
         svc.apply(&fake, &[RemoveUnit]).unwrap();

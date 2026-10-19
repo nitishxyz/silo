@@ -231,7 +231,10 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
 - **macOS app:**
   - Bundles it and runs it from the bundle. A running server is unaffected by an app update; moving to the new
     build is a hot upgrade.
-  - **Always** adopts or spawns the detached daemon.
+  - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications with the default state dir installs or
+    refreshes the launchd agent for its bundled CLI (shared `silo_client::service`), taking over or adopting a running
+    server live, and links `~/.local/bin/silo` when that dir is on the login `PATH`. Anything else (`SILO_HOME`, dev
+    and debug builds, a disk image) starts a plain server; Stop disables the agent until the next launch.
 - **Server modes:**
   - Personal: auto-exits about 10 s after the last session and client, unless started explicitly.
   - Shared and login modes come later.

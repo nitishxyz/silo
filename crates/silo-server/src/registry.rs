@@ -405,7 +405,7 @@ impl Registry {
         let config = SpawnConfig {
             command: spawn.command.iter().map(Into::into).collect(),
             cwd: spawn.cwd.as_ref().map(|c| expand_home(c).into()).filter(|p: &std::path::PathBuf| p.is_dir()),
-            env: Vec::new(),
+            env: crate::bundle::shell_env().to_vec(),
         };
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
         self.blocks.insert(id.clone(), Block::Terminal(handle));

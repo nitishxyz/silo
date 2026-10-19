@@ -67,6 +67,8 @@ pub struct SettingsServer {
     pub can_start: bool,
     pub can_stop: bool,
     pub can_restart: bool,
+    /// launchd runs the server (in the background, at login).
+    pub managed: bool,
     /// The server's iroh EndpointId, once connected.
     pub endpoint_id: Option<String>,
     /// Why remote access is unavailable (no paths), if it is.
@@ -1522,7 +1524,12 @@ impl SettingsPanel {
             Section::Server => {
                 let status = if s.server.status.is_empty() { "Unknown".to_owned() } else { s.server.status.clone() };
                 let mut rows = vec![
-                    Self::row("Status", None, Some(Self::value(status)), false),
+                    Self::row(
+                        "Status",
+                        s.server.managed.then(|| "Runs in the background · starts at login".into()),
+                        Some(Self::value(status)),
+                        false,
+                    ),
                     Self::row("Version", None, Some(Self::value(s.server.version.clone().unwrap_or_else(|| "Unknown".into()))), false),
                 ];
                 if s.server.has_log {

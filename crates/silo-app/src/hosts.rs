@@ -100,8 +100,9 @@ pub fn update<R>(home: &Path, change: impl FnOnce(&mut Vec<RemoteHost>) -> R) ->
 /// How a host's control connection is made.
 #[derive(Clone, Debug)]
 pub enum Transport {
-    /// This Mac: adopt or spawn the daemon on the unix socket.
-    Local { home: PathBuf, server_exe: PathBuf },
+    /// This Mac on the unix socket; `service` starts its server (see
+    /// `conn::ensure`), or says why it can't.
+    Local { home: PathBuf, service: Result<silo_client::service::Service, String> },
     /// A paired remote server over iroh; never spawned or upgraded.
     Iroh { home: PathBuf, addr: EndpointAddr },
 }
@@ -113,8 +114,14 @@ impl Transport {
     /// Connection failures; remote transports are not available yet.
     pub async fn connect(&self, client_name: &str) -> anyhow::Result<(Control, Events)> {
         match self {
-            Self::Local { home, server_exe } => {
-                let (control, events) = silo_client::connect_or_spawn(home, server_exe, client_name).await?;
+            Self::Local { home, .. } => {
+                let (control, events) = match Control::connect(&silo_proto::paths::socket(home), client_name).await {
+                    Ok(connected) => connected,
+                    Err(error) => match silo_client::mismatch::different_build(home, &error).await {
+                        Some(server) => return Err(server.into()),
+                        None => return Err(error),
+                    },
+                };
                 control.subscribe().await?;
                 Ok((control, events))
             }
@@ -173,8 +180,8 @@ pub struct HostInfo {
 
 impl HostInfo {
     #[must_use]
-    pub fn local(home: PathBuf, server_exe: PathBuf) -> Self {
-        Self { name: "This Mac".into(), local: true, transport: Transport::Local { home, server_exe } }
+    pub fn local(home: PathBuf, service: Result<silo_client::service::Service, String>) -> Self {
+        Self { name: "This Mac".into(), local: true, transport: Transport::Local { home, service } }
     }
 
     #[must_use]
@@ -236,6 +243,20 @@ pub fn save_state(home: &Path, state: &AppState) {
 pub(crate) mod tests {
     use super::*;
 
+    /// This Mac's transport for `home`, never managed by launchd.
+    pub(crate) fn local_transport(home: &std::path::Path) -> Transport {
+        let service = silo_client::service::Service::new(
+            silo_client::service::Manager::None,
+            "/nonexistent/silo".into(),
+            home.to_owned(),
+            home.to_owned(),
+            501,
+            "test".into(),
+        )
+        .map_err(|e| e.to_string());
+        Transport::Local { home: home.to_owned(), service }
+    }
+
     pub(crate) fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("silo-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -290,7 +311,7 @@ pub(crate) mod tests {
     #[test]
     fn cache_identity_per_transport() {
         let dir = temp("identity");
-        let local = Transport::Local { home: dir.clone(), server_exe: "silo".into() };
+        let local = local_transport(&dir);
         assert_eq!(local.cache_identity(), dir.join("server.sock").to_string_lossy());
         let a = addr(&dir.join("key"));
         let remote = Transport::Iroh { home: dir.clone(), addr: a.clone() };

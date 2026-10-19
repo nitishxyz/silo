@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod block;
 pub mod browser;
+pub mod bundle;
 pub mod conn;
 pub mod handoff;
 mod names;

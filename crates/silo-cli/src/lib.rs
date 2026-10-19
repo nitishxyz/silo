@@ -2,7 +2,6 @@
 
 pub mod hosts;
 pub mod link;
-pub mod service;
 
 use std::{path::Path, time::Duration};
 

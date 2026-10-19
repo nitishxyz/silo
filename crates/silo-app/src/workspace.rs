@@ -107,6 +107,7 @@ impl Workspace {
     pub fn new(shared: Entity<HostsState>, session: Option<(usize, String)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (rt, home) = (shared.read(cx).rt.clone(), shared.read(cx).home.clone());
         let state = shared.read(cx).app_state().clone();
+        let move_hint = shared.update(cx, |hosts, _| std::mem::take(&mut hosts.move_hint));
         let last = || std::env::var("SILO_SESSION").ok().filter(|s| !s.is_empty()).or_else(|| state.last_session.clone());
         let requested = session.as_ref().map(|(_, id)| id.clone());
         let (active_host, wanted_session) = session.map_or_else(|| (0, last()), |(host, id)| (host, Some(id)));
@@ -138,7 +139,7 @@ impl Workspace {
             active_host,
             status: Some("connecting to server…".into()),
             upgrading: false,
-            notice: None,
+            notice: move_hint.then(|| "Move Silo to Applications to keep it running in the background.".into()),
             view: None,
             ahead_of: None,
             wanted_session,

@@ -10,7 +10,7 @@ use crate::theme::Continuous as _;
 use crate::{
     commands::Command,
     fonts,
-    hosts::HostState,
+    hosts::{HostState, Transport as HostTransport},
     settings_panel::{
         CARD_RADIUS, ServerAction, SettingsDevice, SettingsEvent, SettingsHost, SettingsPanel, SettingsServer, SettingsShortcut, SettingsSnapshot,
         TerminalSettings, UiFontSettings,
@@ -98,6 +98,9 @@ impl Workspace {
             can_start: paused,
             can_stop: connected.is_some(),
             can_restart: connected.is_some(),
+            managed: local.is_some_and(
+                |h| matches!(&h.info.transport, HostTransport::Local { service: Ok(s), .. } if s.manager == silo_client::service::Manager::Launchd),
+            ),
             endpoint_id: connected.map(|c| c.hello().server.endpoint_id.clone()).filter(|id| !id.is_empty()),
             remote_error: connected.and_then(|c| c.hello().server.remote_error.as_deref()).map(without_paths),
             devices: self
