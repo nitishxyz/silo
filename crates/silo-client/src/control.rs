@@ -430,6 +430,7 @@ mod tests {
                 endpoint_id: String::new(),
                 remote_error: None,
                 endpoint_addr: None,
+                idle_exit_secs: 0,
             };
             let hello = ServerHello { build: BUILD.to_owned(), client_id: 1, server: info };
             write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();

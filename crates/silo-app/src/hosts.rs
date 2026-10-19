@@ -55,18 +55,46 @@ fn hosts_path(home: &Path) -> PathBuf {
 
 #[must_use]
 pub fn load(home: &Path) -> Vec<RemoteHost> {
-    std::fs::read(hosts_path(home)).ok().and_then(|b| serde_json::from_slice::<HostsFile>(&b).ok()).map(|f| f.hosts).unwrap_or_default()
+    try_load(home).unwrap_or_default()
 }
 
+/// The saved hosts; `None` if the file is unreadable or invalid (a missing
+/// file is no hosts).
+#[must_use]
+pub fn try_load(home: &Path) -> Option<Vec<RemoteHost>> {
+    match std::fs::read(hosts_path(home)) {
+        Ok(bytes) => serde_json::from_slice::<HostsFile>(&bytes).ok().map(|f| f.hosts),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+/// hosts.json's (mtime, length), to notice changes; `None` if missing.
+#[must_use]
+pub fn stamp(home: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(hosts_path(home)).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Change the saved hosts under an exclusive `flock` of `hosts.json.lock`
+/// (shared with the CLI); written (temp file + rename) only if changed.
+///
 /// # Errors
-/// Write failure.
-pub fn save(home: &Path, hosts: &[RemoteHost]) -> anyhow::Result<()> {
+/// An unreadable or invalid hosts.json (never overwritten), lock or write
+/// failure.
+pub fn update<R>(home: &Path, change: impl FnOnce(&mut Vec<RemoteHost>) -> R) -> anyhow::Result<R> {
     std::fs::create_dir_all(home)?;
-    let file = HostsFile { hosts: hosts.to_vec() };
-    let tmp = hosts_path(home).with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&file)?)?;
-    std::fs::rename(tmp, hosts_path(home))?;
-    Ok(())
+    let lock = std::fs::File::options().create(true).truncate(false).write(true).open(home.join("hosts.json.lock"))?;
+    lock.lock()?;
+    let mut hosts = try_load(home).ok_or_else(|| anyhow::anyhow!("hosts.json is unreadable"))?;
+    let before = hosts.clone();
+    let out = change(&mut hosts);
+    if hosts != before {
+        let tmp = home.join(format!("hosts.json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&HostsFile { hosts })?)?;
+        std::fs::rename(tmp, hosts_path(home))?;
+    }
+    Ok(out)
 }
 
 /// How a host's control connection is made.
@@ -225,7 +253,16 @@ pub(crate) mod tests {
         let dir = temp("hosts");
         let host = RemoteHost::new(addr(&dir.join("key")), "mini".into());
         assert_eq!(host.id, host.addr.id.to_string());
-        save(&dir, std::slice::from_ref(&host)).unwrap();
+        update(&dir, |hosts| hosts.push(host.clone())).unwrap();
+        assert!(dir.join("hosts.json.lock").exists());
+        assert!(!dir.join(format!("hosts.json.{}.tmp", std::process::id())).exists());
+        // An unreadable file is never overwritten.
+        let bad = temp("hosts-bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("hosts.json"), b"{").unwrap();
+        assert!(update(&bad, |hosts| hosts.push(host.clone())).is_err());
+        assert_eq!(std::fs::read(bad.join("hosts.json")).unwrap(), b"{");
+        let _ = std::fs::remove_dir_all(bad);
         let loaded = load(&dir);
         assert_eq!(loaded, vec![host.clone()]);
         assert!(find(&loaded, &host.id).is_some(), "same EndpointId is a duplicate");

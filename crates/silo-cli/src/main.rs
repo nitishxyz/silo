@@ -10,13 +10,13 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use silo_cli::{NetOptions, hosts::Hosts, parse_duration, parse_relay};
+use silo_cli::{NetOptions, hosts::Hosts, link, parse_duration, parse_relay, service};
 use silo_client::{
     Control, Events,
     transport::{Net, RelayConfig},
 };
 use silo_proto::{
-    control::{Capture, Created, Method, SpawnSpec},
+    control::{Capture, Created, InvitePurpose, Method, SpawnSpec},
     model::{BlockKind, SessionSummary, SessionView, TermSize},
     paths,
 };
@@ -48,6 +48,10 @@ enum Command {
         /// build) instead of starting fresh; fails if that is not possible.
         #[arg(long)]
         takeover: bool,
+        /// Take over the running server (of any build) if there is one,
+        /// else start fresh; how the service manager runs the server.
+        #[arg(long, conflicts_with = "takeover")]
+        adopt: bool,
         /// Relays for remote access: `default`, `disabled` or a relay URL.
         #[arg(long, value_parser = parse_relay, default_value = "default")]
         relay: RelayConfig,
@@ -59,6 +63,29 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Run the server as a user service that starts at login (systemd or
+    /// launchd), upgrading a running server live.
+    Up {
+        /// Do not offer this machine to the Silo terminal running over SSH.
+        #[arg(long)]
+        no_offer: bool,
+    },
+    /// Start the server (as `up`) and offer it to the machine whose join
+    /// ticket this is; it is added there.
+    Join { ticket: String },
+    /// Set up other machines over SSH.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+    /// Stop the server service and remove it; ends every session.
+    Down {
+        /// Do not ask before ending sessions.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the server and its service.
+    Status,
     /// Create a pairing ticket for a new device.
     Pair {
         /// How long the ticket stays valid (`90s`, `10m`, `1h`).
@@ -154,6 +181,18 @@ enum DevicesCommand {
 }
 
 #[derive(Subcommand)]
+enum RemoteCommand {
+    /// Install silo on `target` (an ssh destination), start it and add it
+    /// as a host here.
+    Install {
+        target: String,
+        /// Upload this silo binary instead of downloading the release.
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum HostsCommand {
     /// Pair with a host using its ticket and remember it.
     Add {
@@ -235,10 +274,8 @@ fn daemonize(report: bool) -> Option<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let home = paths::home();
     let _ = std::fs::create_dir_all(&home);
-    // Clients redirect output to the log; do it ourselves when run by hand.
-    let log = (std::io::stdout().is_terminal() || std::io::stderr().is_terminal())
-        .then(|| std::fs::OpenOptions::new().create(true).append(true).open(paths::log(&home)).ok())
-        .flatten();
+    // Never hold the caller's terminal or pipes open.
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log(&home)).ok();
     let mut pipe = [-1; 2];
     #[allow(unsafe_code)]
     // SAFETY: single-threaded at this point (before the tokio runtime);
@@ -303,27 +340,45 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
     if host.is_some()
         && matches!(
             command,
-            Command::Server { .. } | Command::KillServer | Command::Pair { .. } | Command::Devices { .. } | Command::Id | Command::Hosts { .. }
+            Command::Server { .. }
+                | Command::Up { .. }
+                | Command::Join { .. }
+                | Command::Remote { .. }
+                | Command::Down { .. }
+                | Command::Status
+                | Command::KillServer
+                | Command::Pair { .. }
+                | Command::Devices { .. }
+                | Command::Id
+                | Command::Hosts { .. }
         )
     {
         bail!("--host is not supported for this command");
     }
     match command {
-        Command::Server { daemon, idle_exit, takeover, relay, no_mdns, port } => {
+        Command::Server { daemon, idle_exit, takeover, adopt, relay, no_mdns, port } => {
             init_tracing();
+            let home = paths::home();
+            let takeover = takeover || (adopt && silo_client::mismatch::server_lock_held(&home));
             let idle_exit = match idle_exit {
                 Some(0) => None,
                 Some(secs) => Some(Duration::from_secs(secs)),
                 None => daemon.then(|| Duration::from_secs(10)),
             };
             #[cfg(target_os = "macos")]
-            if daemon || takeover {
+            if daemon || takeover || adopt {
                 start_menubar();
             }
-            let config = silo_server::Config { home: paths::home(), idle_exit, relay, mdns: !no_mdns, port, ..Default::default() };
+            let config = silo_server::Config { home, idle_exit, relay, mdns: !no_mdns, port, ..Default::default() };
             if takeover {
                 if let Err(error) = takeover_reporting(config, status).await {
                     if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
+                        // A clean exit so the service manager does not retry
+                        // (the unit and plist do not restart exit 0).
+                        if adopt {
+                            tracing::error!("adopt: {error:#}; stop it with `silo down`, then run `silo up`");
+                            return Ok(0);
+                        }
                         tracing::warn!("takeover: {error:#}");
                         return Ok(silo_proto::EXIT_NOT_UPGRADABLE);
                     }
@@ -420,24 +475,27 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             control.call_value(Method::SessionClose { session_id: session.session.id }).await?;
             Ok(0)
         }
+        Command::Up { no_offer } => {
+            let control = up().await?;
+            let tty = std::io::stdout().is_terminal();
+            let lc_terminal = std::env::var("LC_TERMINAL").ok();
+            let ssh = std::env::var("SSH_CONNECTION").ok();
+            if link::ssh_offer_wanted(lc_terminal.as_deref(), ssh.as_deref(), tty, no_offer) {
+                offer_over_ssh(&control).await?;
+            }
+            Ok(0)
+        }
+        Command::Join { ticket } => join(&ticket).await,
+        Command::Remote { command: RemoteCommand::Install { target, binary } } => remote_install(&target, binary.as_deref()).await,
+        Command::Down { yes } => down(yes).await,
+        Command::Status => show_status().await,
         Command::KillServer => {
             let (control, _) = connect_existing().await?;
             let Some(control) = control else {
                 eprintln!("no server running");
                 return Ok(0);
             };
-            let pid = control.hello().server.pid;
-            control.call_value(Method::ServerShutdown {}).await?;
-            control.closed().await;
-            // Wait for the process to release its lock.
-            for _ in 0..100 {
-                #[allow(unsafe_code)]
-                // SAFETY: signal 0 only checks for existence.
-                if unsafe { libc::kill(pid as i32, 0) } != 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            shutdown(control).await?;
             Ok(0)
         }
         Command::Events => {
@@ -520,9 +578,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                     }
                 }
                 HostsCommand::Rm { host } => {
-                    let mut hosts = Hosts::load(&home)?;
-                    let removed = hosts.remove(&host)?;
-                    hosts.save(&home)?;
+                    let removed = Hosts::update(&home, |hosts| hosts.remove(&host))?;
                     println!("removed {} ({})", removed.name, removed.id);
                 }
             }
@@ -535,14 +591,25 @@ fn client_name() -> String {
     format!("silo cli {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id())
 }
 
-/// How this device is named on hosts it pairs with.
-fn device_name() -> String {
+/// This machine's hostname; empty if it has none.
+fn raw_hostname() -> String {
     let mut buf = [0u8; 256];
     #[allow(unsafe_code)]
     // SAFETY: the buffer is valid for its length.
     let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let host = if ok { String::from_utf8_lossy(&buf[..len]).into_owned() } else { String::new() };
+    if ok { String::from_utf8_lossy(&buf[..len]).into_owned() } else { String::new() }
+}
+
+/// How this machine's server is named when offered to another.
+fn hostname() -> String {
+    let host = raw_hostname();
+    if host.is_empty() { "silo host".to_owned() } else { host }
+}
+
+/// How this device is named on hosts it pairs with.
+fn device_name() -> String {
+    let host = raw_hostname();
     if host.is_empty() { "silo cli".to_owned() } else { format!("silo cli on {host}") }
 }
 
@@ -568,6 +635,239 @@ async fn local_server() -> anyhow::Result<Control> {
         (Some(control), _) => Ok(control),
         _ => bail!("no server running; start one with `silo server`"),
     }
+}
+
+/// Stop the server behind `control` and wait for it to exit.
+async fn shutdown(control: Control) -> anyhow::Result<()> {
+    let pid = control.hello().server.pid;
+    control.call_value(Method::ServerShutdown {}).await?;
+    control.closed().await;
+    // Wait for the process to release its lock.
+    for _ in 0..100 {
+        #[allow(unsafe_code)]
+        // SAFETY: signal 0 only checks for existence.
+        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+fn local_service(runner: &dyn service::Runner) -> anyhow::Result<service::Service> {
+    let exe = std::env::current_exe().and_then(|e| e.canonicalize()).context("locate silo executable")?;
+    let user_home = std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME is not set")?.into();
+    let user = std::env::var("USER").context("USER is not set")?;
+    let uid = rustix::process::getuid().as_raw();
+    service::Service::new(service::detect(runner), exe, paths::home(), user_home, uid, user)
+}
+
+/// The local server, if one of this build answers, and how it runs.
+async fn probe_server() -> anyhow::Result<(service::Server, Option<Control>)> {
+    match connect_existing().await {
+        Ok((Some(control), _)) if control.hello().server.idle_exit_secs == 0 => Ok((service::Server::Current, Some(control))),
+        Ok((Some(control), _)) => Ok((service::Server::Idle, Some(control))),
+        Ok(_) if silo_client::mismatch::server_lock_held(&paths::home()) => Ok((service::Server::Other, None)),
+        Ok(_) => Ok((service::Server::Absent, None)),
+        Err(error) if error.is::<silo_client::DifferentBuild>() => Ok((service::Server::Other, None)),
+        Err(error) => Err(error),
+    }
+}
+
+fn manager_name(manager: service::Manager) -> &'static str {
+    match manager {
+        service::Manager::Systemd => "systemd",
+        service::Manager::Launchd => "launchd",
+        service::Manager::None => "none",
+    }
+}
+
+/// Install or update the server service and start it; returns once this
+/// build's server answers.
+async fn up() -> anyhow::Result<Control> {
+    let runner = service::System;
+    let svc = local_service(&runner)?;
+    let (server, control) = probe_server().await?;
+    drop(control);
+    let state = svc.probe(&runner, server)?;
+    let actions = service::plan_up(&state);
+    for note in svc.apply(&runner, &actions)? {
+        eprintln!("silo: {note}");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // Under launchd a takeover outside the job serves briefly before the
+    // job adopts it: wait for the job's own process.
+    let control = loop {
+        if let (service::Server::Current, Some(control)) = probe_server().await?
+            && (svc.manager != service::Manager::Launchd || svc.job_pid(&runner)? == Some(control.hello().server.pid))
+        {
+            break control;
+        }
+        if std::time::Instant::now() >= deadline {
+            if probe_server().await?.0 == service::Server::Other {
+                bail!(
+                    "the running server of another build cannot be upgraded live; stop it with `silo down` (ends its sessions), then run `silo up`"
+                );
+            }
+            bail!("the server did not come up; see the server log");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let pid = control.hello().server.pid;
+    match svc.manager {
+        service::Manager::None => {
+            println!("silo server running (pid {pid})");
+            eprintln!("silo: no service manager; the server will not survive a reboot");
+        }
+        manager if actions.is_empty() => println!("silo server already up (pid {pid}, {})", manager_name(manager)),
+        manager => println!("silo server up (pid {pid}, {})", manager_name(manager)),
+    }
+    Ok(control)
+}
+
+/// Offer this machine to the Silo app whose terminal we run in over SSH.
+async fn offer_over_ssh(control: &Control) -> anyhow::Result<()> {
+    if silo_cli::server_info(control).await?.remote_error.is_some() {
+        return Ok(());
+    }
+    if std::env::var_os("TMUX").is_some() {
+        eprintln!("silo: inside tmux; run `silo up` outside it to offer this machine to your Silo");
+        return Ok(());
+    }
+    let invite = link::invite(control, link::SSH_OFFER_TTL, InvitePurpose::Device).await?;
+    let mut out = std::io::stdout().lock();
+    out.write_all(silo_proto::offer::osc(&invite.ticket, &hostname()).as_bytes())?;
+    out.flush()?;
+    println!("Offered this machine to your Silo.");
+    Ok(())
+}
+
+async fn join(ticket: &str) -> anyhow::Result<i32> {
+    silo_client::transport::PairTicket::decode(ticket.trim()).context("invalid join ticket")?;
+    let control = up().await?;
+    let name = hostname();
+    link::join(&paths::home(), &control, ticket, &name, &NetOptions::default()).await?;
+    println!("Offered {name} to the other machine.");
+    Ok(0)
+}
+
+/// Run `argv`, sharing our terminal.
+fn run_interactive(argv: &[String]) -> anyhow::Result<()> {
+    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).status().with_context(|| format!("run {}", argv[0]))?;
+    if !status.success() {
+        bail!("{} failed ({status})", argv[0]);
+    }
+    Ok(())
+}
+
+async fn remote_install(target: &str, binary: Option<&std::path::Path>) -> anyhow::Result<i32> {
+    let install = link::Install::new(target)?;
+    let (control, mut events, _net) = connect(None).await?;
+    link::require_remote(&control).await?;
+    let detect = install.detect();
+    let output = std::process::Command::new(&detect[0]).args(&detect[1..]).stderr(std::process::Stdio::inherit()).output().context("run ssh")?;
+    if !output.status.success() {
+        bail!("could not reach {target} over ssh ({})", output.status);
+    }
+    let platform = link::Platform::from_uname(&String::from_utf8_lossy(&output.stdout))?;
+    if let Some(binary) = binary {
+        let mut header = [0u8; 64];
+        let mut file = std::fs::File::open(binary).with_context(|| format!("open {}", binary.display()))?;
+        let n = std::io::Read::read(&mut file, &mut header)?;
+        if link::Platform::of_binary(&header[..n]) != Some(platform) {
+            bail!("{} is not a binary for {target} (needs {})", binary.display(), platform.asset());
+        }
+    }
+    control.subscribe().await?;
+    let invite = link::invite(&control, link::INSTALL_JOIN_TTL, InvitePurpose::Join).await?;
+    match binary {
+        Some(binary) => {
+            eprintln!("silo: uploading {} to {target}", binary.display());
+            run_interactive(&install.upload(binary))?;
+            run_interactive(&install.join_uploaded(&invite.ticket))?;
+        }
+        None => {
+            eprintln!("silo: installing {} on {target}", platform.asset());
+            run_interactive(&install.join_download(&invite.ticket))?;
+        }
+    }
+    let offer = link::wait_offer(&mut events, &invite.invite_id, Duration::from_secs(30)).await?;
+    let host = silo_cli::add_host(&paths::home(), &offer.ticket, Some(offer.name), &NetOptions::default(), &device_name()).await?;
+    println!("Added {}.", host.name);
+    Ok(0)
+}
+
+async fn down(yes: bool) -> anyhow::Result<i32> {
+    let runner = service::System;
+    let svc = local_service(&runner)?;
+    let (server, control) = probe_server().await?;
+    let sessions = match (&control, server) {
+        (Some(control), _) => Some(silo_cli::sessions(control).await?.len()),
+        (None, service::Server::Other) => silo_client::mismatch::inspect(&paths::home()).await.sessions,
+        (None, _) => Some(0),
+    };
+    if sessions != Some(0) && !yes {
+        let prompt = match sessions {
+            Some(1) => "Stopping the server ends 1 session.".to_owned(),
+            Some(n) => format!("Stopping the server ends {n} sessions."),
+            None => "Stopping the server ends every session it runs.".to_owned(),
+        };
+        if !std::io::stdin().is_terminal() {
+            bail!("{prompt} Pass --yes to confirm.");
+        }
+        eprint!("{prompt} Continue? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            return Ok(1);
+        }
+    }
+    drop(control);
+    let state = svc.probe(&runner, server)?;
+    svc.apply(&runner, &service::plan_down(&state))?;
+    match probe_server().await? {
+        (_, Some(control)) => shutdown(control).await?,
+        (service::Server::Other, None) => {
+            let home = paths::home();
+            silo_client::mismatch::stop(&home, &silo_client::mismatch::inspect(&home).await).await?;
+        }
+        _ => {}
+    }
+    println!("silo server down");
+    Ok(0)
+}
+
+async fn show_status() -> anyhow::Result<i32> {
+    let runner = service::System;
+    let svc = local_service(&runner)?;
+    let (server, control) = probe_server().await?;
+    let state = svc.probe(&runner, server)?;
+    let managed = if state.running { manager_name(svc.manager) } else { "not managed" };
+    let autostart = if state.loaded { "yes" } else { "no" };
+    match (server, control) {
+        (_, Some(control)) => {
+            let hello = control.hello();
+            let sessions = silo_cli::sessions(&control).await?.len();
+            let devices = silo_cli::devices(&control).await?.len();
+            println!("running:        yes");
+            println!("pid:            {}", hello.server.pid);
+            println!("build:          {}", hello.build);
+            println!("endpoint id:    {}", hello.server.endpoint_id);
+            println!("managed by:     {managed}");
+            println!("sessions:       {sessions}");
+            println!("paired devices: {devices}");
+        }
+        (service::Server::Other, None) => {
+            println!("running:        yes (a different build; `silo up` upgrades it)");
+            println!("managed by:     {managed}");
+        }
+        _ => println!("running:        no"),
+    }
+    println!("autostart:      {autostart}");
+    if state.loaded && state.installed != state.desired {
+        println!("note:           the service is out of date; `silo up` updates it");
+    }
+    Ok(0)
 }
 
 /// Run a takeover, reporting its outcome on `status` (see [`daemonize`]):
@@ -747,5 +1047,29 @@ mod tests {
         assert!(matches!(command.method("b".into()), Method::BrowserReload { ignore_cache: true, .. }));
         let Some(Command::Browser { command, .. }) = Cli::parse_from(["silo", "browser", "navigate", "example.com"]).command else { panic!() };
         assert!(matches!(command.method("b".into()), Method::BrowserNavigate { url, .. } if url == "example.com"));
+    }
+
+    #[test]
+    fn service_and_link_commands() {
+        assert!(matches!(Cli::parse_from(["silo", "up"]).command, Some(Command::Up { no_offer: false })));
+        assert!(matches!(Cli::parse_from(["silo", "up", "--no-offer"]).command, Some(Command::Up { no_offer: true })));
+        assert!(matches!(Cli::parse_from(["silo", "down"]).command, Some(Command::Down { yes: false })));
+        assert!(matches!(Cli::parse_from(["silo", "down", "--yes"]).command, Some(Command::Down { yes: true })));
+        assert!(matches!(Cli::parse_from(["silo", "status"]).command, Some(Command::Status)));
+        assert!(matches!(Cli::parse_from(["silo", "join", "silo1abc"]).command, Some(Command::Join { ticket }) if ticket == "silo1abc"));
+        assert!(Cli::try_parse_from(["silo", "join"]).is_err());
+        let Some(Command::Remote { command: RemoteCommand::Install { target, binary } }) =
+            Cli::parse_from(["silo", "remote", "install", "me@box", "--binary", "/tmp/silo"]).command
+        else {
+            panic!()
+        };
+        assert_eq!((target.as_str(), binary), ("me@box", Some(PathBuf::from("/tmp/silo"))));
+        let Some(Command::Remote { command: RemoteCommand::Install { binary: None, .. } }) =
+            Cli::parse_from(["silo", "remote", "install", "box"]).command
+        else {
+            panic!()
+        };
+        let Some(Command::Server { adopt: true, takeover: false, .. }) = Cli::parse_from(["silo", "server", "--adopt"]).command else { panic!() };
+        assert!(Cli::try_parse_from(["silo", "server", "--adopt", "--takeover"]).is_err());
     }
 }

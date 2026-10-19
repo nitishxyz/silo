@@ -258,6 +258,7 @@ mod tests {
             endpoint_id: String::new(),
             remote_error: None,
             endpoint_addr: None,
+            idle_exit_secs: 0,
             started_at: 0,
         });
         state.sessions = 1;

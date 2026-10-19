@@ -258,12 +258,21 @@ impl Registry {
     }
 
     pub fn emit(&mut self, event: Event) {
+        self.emit_to(event, false);
+    }
+
+    /// Emit to local (owner) clients only: the event carries secrets.
+    pub fn emit_owner(&mut self, event: Event) {
+        self.emit_to(event, true);
+    }
+
+    fn emit_to(&mut self, event: Event, owner_only: bool) {
         self.seq += 1;
         let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
         let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
             return;
         };
-        for client in self.clients.values_mut() {
+        for client in self.clients.values_mut().filter(|c| !owner_only || c.origin.is_none()) {
             let Some(sink) = &client.events else { continue };
             let overflow = sink.queued.load(std::sync::atomic::Ordering::Acquire) > EVENT_BACKLOG;
             if overflow || !sink.send(frame.clone()) {
@@ -746,6 +755,7 @@ impl Registry {
                 }
             }
             Note::Bell(id) => self.emit(Event::BlockBell { block_id: id }),
+            Note::Offer(offer) => self.emit_owner(Event::HostOffered { offer }),
             Note::Dirty(id) => self.mark_block_dirty(&id),
             // The block stays in its layout, read-only, until closed.
             Note::Exited(id) => {

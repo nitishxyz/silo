@@ -256,7 +256,7 @@ async fn measure(control: &Control, link: &str, rtt: Option<u64>, keys: usize) -
 /// A fresh invite and the server's IPv4 loopback endpoint address.
 async fn server_addr(owner: &Control) -> anyhow::Result<(PairTicket, SocketAddr)> {
     for _ in 0..200 {
-        let invite: PairInvite = owner.call(Method::PairCreate { ttl_secs: 60 }).await?;
+        let invite: PairInvite = owner.call(Method::PairCreate { ttl_secs: 60, purpose: silo_client::proto::control::InvitePurpose::Device }).await?;
         let ticket = PairTicket::decode(&invite.ticket)?;
         let port = ticket.addr.ip_addrs().find(|a| a.is_ipv4()).map(SocketAddr::port);
         if let Some(port) = port {

@@ -334,6 +334,7 @@ mod tests {
                     endpoint_id: String::new(),
                     remote_error: None,
                     endpoint_addr: None,
+                    idle_exit_secs: 0,
                 };
                 let hello = ServerHello { build: OTHER.into(), client_id: 1, server: info };
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
@@ -447,9 +448,10 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
                 read_frame(&mut stream).await.unwrap();
-                let server =
-                    serde_json::from_value(serde_json::json!({"version": "", "pid": 0, "server_id": "", "started_at": 0, "endpoint_id": ""}))
-                        .unwrap();
+                let server = serde_json::from_value(
+                    serde_json::json!({"version": "", "pid": 0, "server_id": "", "started_at": 0, "endpoint_id": "", "idle_exit_secs": 0}),
+                )
+                .unwrap();
                 let hello = ServerHello { build: silo_proto::BUILD.to_owned(), client_id: 1, server };
                 write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
                 std::future::pending::<()>().await;
@@ -521,15 +523,24 @@ mod tests {
 
     #[test]
     fn lock_probe() {
+        // A flock follows its open file into children forked (by parallel
+        // tests) until they exec, so a lock may stay held a moment longer.
+        let eventually = |what: &str, check: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !check() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
         let home = std::env::temp_dir().join(format!("silo-mismatch-lock-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         assert!(!server_lock_held(&home), "no lock file");
         let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(&home)).unwrap();
-        assert!(!server_lock_held(&home), "unlocked");
-        rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        eventually("unlocked", &|| !server_lock_held(&home));
+        eventually("lock", &|| rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok());
         assert!(server_lock_held(&home), "locked");
         drop(file);
-        assert!(!server_lock_held(&home), "released");
+        eventually("released", &|| !server_lock_held(&home));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -24,6 +24,14 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> JoinHandle<()> {
+    // The previous server's lock can outlive it briefly in a child forked
+    // (by a parallel test) before exec.
+    for _ in 0..500 {
+        if !silo_client::mismatch::server_lock_held(home) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let config = silo_server::Config {
         home: home.to_owned(),
         idle_exit: None,

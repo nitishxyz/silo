@@ -273,7 +273,7 @@ These were confirmed by grepping the code; Phase 7 and iOS are excluded.
 | §3.6 badge names the owner | See gap 3 | Task 3 |
 | §4 Ohara HMAC adoption challenge | Covered differently: `ClientHello.token`, a shared secret (`control.rs:17`), plus a peer-uid check (`silo-server/src/conn.rs`) | None. One mechanism is enough; don't add HMAC. |
 | Phase 4 "relay config" in the multi-server UI | Server side done: `silo server --relay/--no-mdns` (`silo-cli/src/main.rs:48-56`). The app hardcodes `RelayConfig::Default, mdns: true` (`silo-app/src/remote.rs:27`) | **Drop.** The defaults are right for a client, and the server is configured where it runs. |
-| §5 deb/rpm/tarball, the xtask sign/notarize | Linux has only `packaging/linux/silo.service` and a CI tarball artifact; macOS uses `scripts/bundle-macos.sh`; there is no `xtask` | **Defer**, not a gap for a dev project with no users. Release work. |
+| §5 deb/rpm/tarball, the xtask sign/notarize | Linux and macOS have tarballs from the release workflow (`.github/workflows/release.yml`), installed by `install.sh` and run as a user service by `silo up`; macOS uses `scripts/bundle-macos.sh`; there is no `xtask` | **Defer**, not a gap for a dev project with no users. Release work. |
 | Phase 0 fuzz in CI | `silo-vt` isn't in `linux.yml` | Task 1 |
 | Phases 3, 5, 6 (resume, skip-ahead, cache, persistence, hot upgrade, prediction, latency bench, browser, tunnels) | Present: `block.rs` skip-ahead, `silo-client/tests/resume.rs`, `persist.rs`, `handoff.rs`, `predict.rs`, `silo-latency`, `browser*.rs`, `tunnel.rs` | None |
 

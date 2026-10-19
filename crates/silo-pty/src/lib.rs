@@ -169,6 +169,9 @@ impl Pty {
             .env("COLORTERM", "truecolor")
             .env("TERM_PROGRAM", "silo")
             .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+            // ssh forwards LC_* (TERM_PROGRAM is not): lets `silo` on the far
+            // side know it runs inside Silo and offer its host.
+            .env("LC_TERMINAL", "silo")
             .env_remove("COLUMNS")
             .env_remove("LINES")
             .stdin(Stdio::from(slave.try_clone()?))

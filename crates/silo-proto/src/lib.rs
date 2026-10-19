@@ -11,6 +11,7 @@ pub mod control;
 pub mod data;
 pub mod frame;
 pub mod model;
+pub mod offer;
 pub mod paths;
 
 #[cfg(test)]
@@ -22,6 +23,9 @@ pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 /// client hellos carry it and must match exactly; there is no other
 /// protocol versioning.
 pub const BUILD: &str = env!("SILO_BUILD_ID");
+
+/// The install script (`curl -fsSL … | sh`) for the CLI and server.
+pub const INSTALL_URL: &str = "https://nitishxyz.github.io/silo/install.sh";
 
 /// Exit status of `silo server --takeover` when the running server closed
 /// on the upgrade request: it predates live upgrade and keeps serving.

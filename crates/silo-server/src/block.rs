@@ -15,10 +15,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{Capture, DesiredSize, OwnMode, SizeInfo},
+    control::{Capture, DesiredSize, HostOffer, OfferSource, OwnMode, SizeInfo},
     data::{Reject, Resume, ServerData, StartMode, Welcome},
     kind,
     model::{BlockId, BlockInfo, ClientId, CursorShape, Lifecycle, TermSize, TerminalConfig},
+    offer::{Offer, OfferScanner},
 };
 use silo_pty::{Pty, PtyEvent, PtyInput, PtySize, SpawnConfig};
 use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
@@ -52,6 +53,12 @@ const TRANSITION_LOG_CAP: usize = 1024;
 /// fast PTY (Linux) queues megabytes ahead of subscribers' ACKs in the
 /// mailbox, and subscribers that keep up are cut as lagging.
 const READ_AHEAD: usize = 256 * 1024;
+/// Host offers (OSC 7717) a block may raise per [`OFFER_WINDOW`]; a ticket
+/// is offered once per block.
+const OFFER_LIMIT: usize = 3;
+const OFFER_WINDOW: Duration = Duration::from_secs(60);
+/// Distinct offered tickets remembered per block.
+const OFFERED_CAP: usize = 16;
 
 /// Back-pressure from the actor to the PTY reader thread.
 #[derive(Default)]
@@ -256,6 +263,8 @@ pub enum Note {
     Changed(BlockId),
     Exited(BlockId),
     Bell(BlockId),
+    /// A program printed a valid host offer.
+    Offer(HostOffer),
     /// Terminal content or configuration changed for the first time since
     /// the last [`Checkpoint`]; sent once per checkpoint.
     Dirty(BlockId),
@@ -528,6 +537,11 @@ struct Actor {
     /// Last `(echo, icanon)` read from the PTY and when it was polled.
     tty_mode: Option<(bool, bool)>,
     last_mode_poll: Instant,
+    /// Strips host offers from the output.
+    scanner: OfferScanner,
+    /// Tickets already offered and when recent offers were raised.
+    offered: VecDeque<String>,
+    offer_times: VecDeque<Instant>,
 }
 
 /// Configuration or size change at an output offset.
@@ -844,6 +858,9 @@ impl Actor {
             dirty_armed: true,
             tty_mode: None,
             last_mode_poll: Instant::now(),
+            scanner: OfferScanner::default(),
+            offered: VecDeque::new(),
+            offer_times: VecDeque::new(),
         }
     }
 
@@ -1001,6 +1018,9 @@ impl Actor {
                 _ => {}
             }
         }
+        if self.lifecycle.is_running() {
+            self.release_held();
+        }
         match self.checkpoint() {
             Ok(checkpoint) => {
                 for (_, sub) in self.subscribers.drain() {
@@ -1051,6 +1071,28 @@ impl Actor {
         }
     }
 
+    /// Raise a printed host offer: valid tickets only, each once, at most
+    /// [`OFFER_LIMIT`] per [`OFFER_WINDOW`].
+    fn offer(&mut self, offer: Offer) {
+        let now = Instant::now();
+        while self.offer_times.front().is_some_and(|t| now.duration_since(*t) >= OFFER_WINDOW) {
+            self.offer_times.pop_front();
+        }
+        if self.offer_times.len() >= OFFER_LIMIT || self.offered.contains(&offer.ticket) {
+            return;
+        }
+        let source = OfferSource::Terminal { block_id: self.id.clone() };
+        let Some(host) = crate::auth::host_offer(&offer.ticket, &offer.name, source) else {
+            return;
+        };
+        self.offer_times.push_back(now);
+        self.offered.push_back(offer.ticket);
+        if self.offered.len() > OFFERED_CAP {
+            self.offered.pop_front();
+        }
+        let _ = self.notes.send(Note::Offer(host));
+    }
+
     fn checkpoint(&mut self) -> Result<Checkpoint, String> {
         let snapshot = self.vt.snapshot().map_err(|e| e.to_string())?;
         self.dirty_armed = true;
@@ -1067,7 +1109,37 @@ impl Actor {
         })
     }
 
-    fn output(&mut self, bytes: &[u8]) {
+    /// Program output: host offers are taken out before it is applied.
+    fn output(&mut self, raw: &[u8]) {
+        if self.scanner.is_idle() && !raw.contains(&0x1b) {
+            return self.apply(raw);
+        }
+        let mut bytes = Vec::with_capacity(raw.len());
+        for offer in self.scanner.feed(raw, &mut bytes) {
+            self.offer(offer);
+        }
+        if !bytes.is_empty() {
+            self.apply(&bytes);
+        }
+    }
+
+    /// Both the terminal parser and the offer scanner are between sequences.
+    fn at_ground(&mut self) -> bool {
+        self.scanner.is_idle() && self.vt.at_ground().unwrap_or(true)
+    }
+
+    /// Pass on output the offer scanner holds, unparsed (before an
+    /// out-of-band write that cannot wait longer, or a handoff).
+    fn release_held(&mut self) {
+        if !self.scanner.is_idle() {
+            let mut held = Vec::new();
+            self.scanner.release(&mut held);
+            self.apply(&held);
+        }
+    }
+
+    /// Feed output to the terminal, the ring and subscribers.
+    fn apply(&mut self, bytes: &[u8]) {
         let offset = self.ring_end();
         self.mark_dirty();
         match self.vt.write_output(bytes) {
@@ -1112,12 +1184,13 @@ impl Actor {
         let Some(since) = self.inject_since else {
             return;
         };
-        if !self.vt.at_ground().unwrap_or(true) && since.elapsed() < INJECT_WAIT {
+        if !self.at_ground() && since.elapsed() < INJECT_WAIT {
             return;
         }
         self.inject_since = None;
+        self.release_held();
         while let Some((bytes, input)) = self.injects.pop_front() {
-            self.output(&bytes);
+            self.apply(&bytes);
             if !input.is_empty() {
                 self.send_input(input);
             }
@@ -1141,13 +1214,14 @@ impl Actor {
         let Some((config, since)) = self.pending_config else {
             return;
         };
-        if !self.vt.at_ground().unwrap_or(true) && since.elapsed() < INJECT_WAIT {
+        if !self.at_ground() && since.elapsed() < INJECT_WAIT {
             return;
         }
         self.pending_config = None;
         if config == self.config {
             return;
         }
+        self.release_held();
         let report = install_config(&mut self.vt, &config);
         if !report.is_empty() {
             // Mode 2031: the program asked to hear about scheme changes.

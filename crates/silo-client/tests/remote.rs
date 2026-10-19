@@ -53,7 +53,8 @@ async fn shutdown(control: Control, task: JoinHandle<()>) {
 /// A fresh invite, rewritten to the server's loopback address.
 async fn invite(control: &Control) -> PairTicket {
     for _ in 0..200 {
-        let invite: PairInvite = control.call(Method::PairCreate { ttl_secs: 60 }).await.unwrap();
+        let invite: PairInvite =
+            control.call(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await.unwrap();
         let ticket = PairTicket::decode(&invite.ticket).unwrap();
         if let Some(port) = ticket.addr.ip_addrs().find(|a| a.is_ipv4()).map(SocketAddr::port) {
             let addr = EndpointAddr::new(ticket.addr.id).with_ip_addr((Ipv4Addr::LOCALHOST, port).into());

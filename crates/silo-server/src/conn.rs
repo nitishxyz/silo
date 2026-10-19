@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use silo_proto::{
     BUILD, Frame, api,
     control::{
-        ApiMethod, BrowserCommand, ClientHello, Empty, METHODS, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage,
+        ApiMethod, BrowserCommand, ClientHello, Empty, Event, METHODS, Method, OfferSource, PairInvite, PairedDevices, Request, RpcError,
+        ServerHello, ServerMessage,
     },
     data::{ClientData, DataHello, Reject},
     kind,
@@ -21,7 +22,7 @@ use tokio::{
 
 use crate::{
     Server,
-    auth::Peer,
+    auth::{Admission, Peer},
     block::{Attach, BlockMsg, Sink},
     browser::{Block, Report},
     handoff,
@@ -34,6 +35,8 @@ pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Largest first frame (a hello) accepted from a remote peer.
 pub const REMOTE_HELLO_MAX: usize = 8 * 1024;
+/// A join-invite connection must offer its host within this time.
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// [`read_frame`] limited to `max` bytes.
 async fn read_frame_max<R: AsyncRead + Unpin>(reader: &mut R, max: usize) -> std::io::Result<Option<Frame>> {
@@ -167,17 +170,22 @@ where
         if server.upgrading.load(Ordering::SeqCst) {
             Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
         } else {
-            auth.authorize(endpoint_id, &hello.client_name, hello.invite.as_deref())
+            auth.authorize(endpoint_id, &hello.client_name, hello.invite.as_deref()).map(Some)
         }
     } else {
-        Ok(())
+        Ok(None)
     };
-    if let Err(error) = admitted {
-        tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) })?);
-        drop(tx);
-        let _ = writer_task.await;
-        return Ok(());
-    }
+    // A join-invite connection's invite id; it ends once it has offered.
+    let join = match admitted {
+        Ok(Some(Admission::Join { invite_id })) => Some(invite_id),
+        Ok(_) => None,
+        Err(error) => {
+            tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) })?);
+            drop(tx);
+            let _ = writer_task.await;
+            return Ok(());
+        }
+    };
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
     let device = match &peer {
         Peer::Remote { endpoint_id, .. } => server.auth().devices().into_iter().find(|d| d.id == *endpoint_id).map(|d| d.name),
@@ -196,11 +204,21 @@ where
     let reply = ServerHello { build: BUILD.to_owned(), client_id, server: server.info_now().await };
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
-    if let Some(on_admit) = on_admit {
+    // Join connections get no data streams.
+    if let Some(on_admit) = on_admit.filter(|_| join.is_none()) {
         let _ = on_admit.send(());
     }
 
     let mut frames = spawn_reader(reader, 64);
+    let joining = join.is_some();
+    let join_deadline = async move {
+        if joining {
+            tokio::time::sleep(JOIN_TIMEOUT).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::pin!(join_deadline);
     let result = loop {
         tokio::select! {
             frame = frames.recv() => {
@@ -221,9 +239,20 @@ where
                     }
                 };
                 let id = request.id;
-                if let Err(error) = permitted(&peer, &request.method) {
+                if let Err(error) = permitted(&peer, join.is_some(), &request.method) {
                     respond(&tx, id, Err(error));
                     continue;
+                }
+                if let (Some(invite_id), Method::HostOffer { ticket, name }) = (&join, &request.method) {
+                    let source = OfferSource::Join { invite_id: invite_id.clone() };
+                    let Some(offer) = crate::auth::host_offer(ticket, name, source) else {
+                        respond(&tx, id, Err(RpcError::bad_request("ticket is not a valid pairing ticket")));
+                        continue;
+                    };
+                    tracing::info!(host = offer.name, "a host offered itself over a join invite");
+                    server.registry.lock().unwrap().emit_owner(Event::HostOffered { offer });
+                    respond(&tx, id, to_value(Empty {}));
+                    break Ok(());
                 }
                 let subscribe = matches!(request.method, Method::EventsSubscribe {});
                 if subscribe {
@@ -245,6 +274,7 @@ where
                 }
             }
             _ = &mut close_rx => break Ok(()),
+            () = &mut join_deadline => break Ok(()),
         }
     };
     server.registry.lock().unwrap().remove_client(client_id);
@@ -283,9 +313,17 @@ fn browser(server: &Server, block_id: &str, command: BrowserCommand) -> Result<V
     Ok(json!({}))
 }
 
-/// Owner-only methods: pairing and stopping the server. (Upgrades arrive
-/// only over the unix socket.) Everything else is open to paired devices.
-fn permitted(peer: &Peer, method: &Method) -> Result<(), RpcError> {
+/// A join-invite connection (`joining`) may only call `host.offer`, which
+/// nobody else may. Owner-only methods: pairing and stopping the server.
+/// (Upgrades arrive only over the unix socket.) Everything else is open to
+/// paired devices.
+fn permitted(peer: &Peer, joining: bool, method: &Method) -> Result<(), RpcError> {
+    match (joining, method) {
+        (true, Method::HostOffer { .. }) => return Ok(()),
+        (true, _) => return Err(RpcError::unauthorized("a join invite only permits host.offer")),
+        (false, Method::HostOffer { .. }) => return Err(RpcError::forbidden("host.offer")),
+        (false, _) => {}
+    }
     let name = match method {
         Method::ServerShutdown {} => "server.shutdown",
         Method::PairCreate { .. } => "pair.create",
@@ -440,7 +478,7 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             reg.emit(silo_proto::control::Event::OpenSession { session_id: id });
             Ok(json!({}))
         }
-        Method::PairCreate { ttl_secs } => {
+        Method::PairCreate { ttl_secs, purpose } => {
             let ttl = Duration::from_secs(ttl_secs);
             if ttl.is_zero() || ttl > crate::auth::MAX_INVITE_TTL {
                 return Err(RpcError::bad_request(format!("ttl_secs must be between 1 and {}", crate::auth::MAX_INVITE_TTL.as_secs())));
@@ -457,15 +495,17 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             if addr.is_empty() {
                 return Err(RpcError::new("offline", "the server has no relay or direct address yet; retry"));
             }
-            let secret = server.auth().create_invite(ttl)?;
+            let (secret, invite_id) = server.auth().create_invite(ttl, purpose)?;
             let ticket = silo_transport::PairTicket { addr, secret }.encode();
-            to_value(PairInvite { ticket, expires_in_secs: ttl_secs })
+            to_value(PairInvite { invite_id, ticket, expires_in_secs: ttl_secs })
         }
         Method::PairList {} => to_value(PairedDevices { devices: server.auth().devices() }),
         Method::PairRevoke { id } => {
             server.auth().revoke(&id)?;
             Ok(json!({}))
         }
+        // Only join connections, answered in the control loop.
+        Method::HostOffer { .. } => Err(RpcError::forbidden("host.offer")),
     }
 }
 
@@ -551,9 +591,14 @@ mod tests {
             index: 0,
         };
         for method in [Method::BrowserNavigate { block_id: "b".into(), url: "u".into() }, Method::BrowserBack { block_id: "b".into() }, report] {
-            assert!(permitted(&remote, &method).is_ok());
+            assert!(permitted(&remote, false, &method).is_ok());
         }
-        assert_eq!(permitted(&remote, &Method::ServerShutdown {}).unwrap_err().code, RpcError::FORBIDDEN);
+        assert_eq!(permitted(&remote, false, &Method::ServerShutdown {}).unwrap_err().code, RpcError::FORBIDDEN);
+        let offer = Method::HostOffer { ticket: "t".into(), name: "n".into() };
+        assert_eq!(permitted(&remote, false, &offer).unwrap_err().code, RpcError::FORBIDDEN);
+        assert_eq!(permitted(&Peer::Local, false, &offer).unwrap_err().code, RpcError::FORBIDDEN);
+        assert!(permitted(&remote, true, &offer).is_ok());
+        assert_eq!(permitted(&remote, true, &Method::SessionList {}).unwrap_err().code, RpcError::UNAUTHORIZED);
     }
 
     #[test]

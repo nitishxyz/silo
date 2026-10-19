@@ -94,7 +94,7 @@ commands! {
     NewBrowser => "New Browser", "Browser", [];
     OpenUrl => "Open URL…", "Browser", [];
     // Hosts
-    AddHost => "Add Remote Host…", "Hosts", [];
+    AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RemoveHost => "Remove Host…", "Hosts", [];
     // Edit & terminal
     Copy => "Copy", "Edit", ["cmd-c"];

@@ -225,6 +225,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         endpoint_id: identity.node_id(),
         remote_error,
         endpoint_addr: None,
+        idle_exit_secs: config.idle_exit.map_or(0, |d| d.as_secs().max(1)),
     };
     let runtime =
         paths::Runtime { pid: info.pid, socket: socket.clone(), version: info.version.clone(), build: silo_proto::BUILD.to_owned(), started_at };
@@ -316,13 +317,32 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                     continue;
                 };
                 let server_id = persist.server_id().to_owned();
-                match handoff::give(&server, sock, server_id, own).await {
+                // SIGTERM during a handoff comes from a service manager
+                // restarting the job after a takeover: honour it only if the
+                // handoff commits (we exit then anyway).
+                let give = handoff::give(&server, sock, server_id, own);
+                tokio::pin!(give);
+                let mut deferred = false;
+                let given = loop {
+                    tokio::select! {
+                        given = &mut give => break given,
+                        Some(()) = terminate.recv() => {
+                            if !std::mem::replace(&mut deferred, true) {
+                                tracing::info!("SIGTERM during an upgrade; deferred until it commits");
+                            }
+                        }
+                    }
+                };
+                match given {
                     Ok(sock) => {
                         committed = Some(sock);
                         break;
                     }
                     Err(error) => {
                         tracing::warn!("upgrade aborted: {error:#}");
+                        if deferred {
+                            tracing::warn!("ignoring the SIGTERM received during the aborted upgrade; still serving");
+                        }
                         worker = Some(persist::Worker::spawn(persist, server.clone(), kick.clone(), interval));
                         server.upgrading.store(false, Ordering::SeqCst);
                     }

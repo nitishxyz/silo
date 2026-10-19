@@ -179,7 +179,7 @@ impl Workspace {
     fn create_invite(&mut self, cx: &mut Context<Self>) {
         use silo_proto::control::{Method, PairInvite};
         self.pairing_call(
-            Method::PairCreate { ttl_secs: 600 },
+            Method::PairCreate { ttl_secs: 600, purpose: silo_proto::control::InvitePurpose::Device },
             |this, result: anyhow::Result<PairInvite>| match result {
                 Ok(invite) => {
                     this.pairing.invite = Some(invite.ticket);

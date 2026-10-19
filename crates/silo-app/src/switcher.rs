@@ -323,7 +323,7 @@ impl Workspace {
             Item::Create(name) => (Some("plus"), format!("Create “{name}”"), Some("↩".into()), false),
             Item::Connect(_) => (Some("globe"), "Pair again…".into(), None, false),
             Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
-            Item::AddHost => (Some("add-host"), "Add Remote Host…".into(), None, false),
+            Item::AddHost => (Some("add-host"), "Add Machine…".into(), None, false),
         };
         let is_session = matches!(item, Item::Session { .. });
         let rename_id = if let Item::Session { id, .. } = &item { Some(id.clone()) } else { None };

@@ -1,4 +1,5 @@
-//! Paired remote hosts, stored in `<home>/client/hosts.json`, keyed by the
+//! Paired remote hosts, stored in `<home>/hosts.json` (shared with the
+//! app, as is the client identity in `<home>/client`), keyed by the
 //! host's canonical EndpointId.
 
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ pub fn client_dir(home: &Path) -> PathBuf {
 }
 
 fn file(home: &Path) -> PathBuf {
-    client_dir(home).join("hosts.json")
+    home.join("hosts.json")
 }
 
 impl Hosts {
@@ -42,17 +43,35 @@ impl Hosts {
         }
     }
 
+    /// Read-modify-write `hosts.json` under an exclusive lock on
+    /// `hosts.json.lock` (shared with the app); written only when `change`
+    /// succeeds, never over an unreadable file.
+    ///
     /// # Errors
-    /// The file cannot be written.
-    pub fn save(&self, home: &Path) -> anyhow::Result<()> {
+    /// Unreadable or invalid `hosts.json`, `change` failed, or the file
+    /// cannot be written.
+    pub fn update<T>(home: &Path, change: impl FnOnce(&mut Self) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        use std::os::{fd::AsFd, unix::fs::OpenOptionsExt};
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(home)?;
+        let lock_path = home.join("hosts.json.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .with_context(|| format!("open {}", lock_path.display()))?;
+        rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::LockExclusive).with_context(|| format!("lock {}", lock_path.display()))?;
+        let mut hosts = Self::load(home)?;
+        let value = change(&mut hosts)?;
         let path = file(home);
-        // Shared with the client identity, which requires a private dir.
-        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(client_dir(home))?;
-        let tmp = path.with_extension("json.tmp");
+        let tmp = home.join(format!("hosts.json.{}.tmp", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = std::os::unix::fs::OpenOptionsExt::mode(std::fs::OpenOptions::new().write(true).create_new(true), 0o600).open(&tmp)?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        std::io::Write::write_all(&mut out, &serde_json::to_vec_pretty(&hosts)?)?;
+        out.sync_all()?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))?;
+        Ok(value)
     }
 
     /// Add or update the host with `addr`'s id; `name` defaults to the

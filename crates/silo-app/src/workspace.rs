@@ -18,7 +18,7 @@ use crate::{
     add_host::AddHostSheet,
     cache::{self, CacheWriter, CachedTree},
     conn::ConnEvent,
-    hosts::{self, AppState, HostInfo, HostState},
+    hosts::{self, AppState, HostState},
     hosts_state::{HostEntry, HostEvent, HostsState},
     motion::{self, Edge, Motion, PaneGhost, TabGhost},
     pane::{Pane, PaneEvent},
@@ -97,8 +97,8 @@ pub struct Workspace {
     checkpointed: HashMap<String, Instant>,
     _quit: Subscription,
     _bounds: Subscription,
-    /// `shared`'s changes and connection events.
-    _hosts: [Subscription; 2],
+    /// `shared`'s changes, connection events and offer events.
+    _hosts: [Subscription; 3],
 }
 
 impl Workspace {
@@ -128,6 +128,8 @@ impl Workspace {
             cx.notify();
         });
         let host_events = cx.subscribe_in(&shared, window, |this, _, event: &HostEvent, window, cx| this.host_event(event, window, cx));
+        let offer_events =
+            cx.subscribe_in(&shared, window, |this, _, event: &crate::offers::OfferEvent, window, cx| this.offer_event(event, window, cx));
         let mut this = Self {
             rt,
             home: home.clone(),
@@ -168,7 +170,7 @@ impl Workspace {
             _quit: quit,
             // Fullscreen changes the titlebar inset; re-render at once.
             _bounds: cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
-            _hosts: [hosts_changed, host_events],
+            _hosts: [hosts_changed, host_events, offer_events],
         };
         this.sync_hosts(cx);
         // Paint the cached tree until the server answers (unless another
@@ -248,12 +250,6 @@ impl Workspace {
         let tree = CachedTree { sessions: entry.sessions.clone(), view: view.clone() };
         let host = self.active_host;
         self.shared.update(cx, |shared, _| shared.save_tree(host, tree));
-    }
-
-    /// Add a host for every window and connect to it.
-    pub(crate) fn add_host_entry(&mut self, info: HostInfo, cx: &mut Context<Self>) {
-        self.shared.update(cx, |shared, cx| shared.add(info, cx));
-        self.sync_hosts(cx);
     }
 
     /// Paint the active host's last known tree until its server answers.
@@ -349,7 +345,7 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
                 }
             }
-            ConnEvent::Event(Event::BlockBell { .. }) => {}
+            ConnEvent::Event(Event::BlockBell { .. } | Event::HostOffered { .. }) => {}
         }
         cx.notify();
     }
@@ -1069,6 +1065,7 @@ impl Render for Workspace {
         let titlebar = self.render_titlebar(window, cx);
         let switcher = self.render_switcher(window, cx);
         let sheet = self.render_add_host(cx);
+        let offers = self.render_offers(window, cx);
         let palette = self.render_palette(window, cx);
         let picker = self.render_picker(window, cx);
         div()
@@ -1114,6 +1111,7 @@ impl Render for Workspace {
             .children(appearance)
             .children(settings)
             .children(switcher)
+            .children(offers)
             .children(sheet)
             .children(palette)
             .children(picker)

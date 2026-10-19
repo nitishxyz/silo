@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Context;
-use silo_proto::control::{PairedDevice, RpcError};
+use silo_proto::control::{HostOffer, InvitePurpose, OfferSource, PairedDevice, RpcError};
 use silo_store::HostKey;
 use silo_transport::{INVITE_SECRET_LEN, PairTicket, RemoteConn};
 
@@ -39,11 +39,28 @@ impl Peer {
     }
 }
 
+/// An outstanding invite.
+#[derive(Clone)]
+struct Invite {
+    id: String,
+    purpose: InvitePurpose,
+    expires: Instant,
+}
+
+/// What an authorized remote control hello may do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// A paired device.
+    Device,
+    /// A redeemed join invite: may only call `host.offer`, once.
+    Join { invite_id: String },
+}
+
 pub struct Auth {
     key: HostKey,
     path: PathBuf,
     devices: Vec<PairedDevice>,
-    invites: HashMap<[u8; INVITE_SECRET_LEN], Instant>,
+    invites: HashMap<[u8; INVITE_SECRET_LEN], Invite>,
     /// Live remote connections by `RemoteConn::id`, with their endpoint id.
     live: HashMap<u64, (String, RemoteConn)>,
     /// `last_seen` changed in memory since the grants file was written.
@@ -52,6 +69,16 @@ pub struct Auth {
 
 fn unix_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Longest offered host name kept, in chars.
+const MAX_OFFER_NAME: usize = 128;
+
+/// A [`HostOffer`] for `ticket` if it is a valid pairing ticket.
+pub fn host_offer(ticket: &str, name: &str, source: OfferSource) -> Option<HostOffer> {
+    let endpoint_id = PairTicket::decode(ticket).ok()?.addr.id.to_string();
+    let name = name.trim().chars().filter(|c| !c.is_control()).take(MAX_OFFER_NAME).collect();
+    Some(HostOffer { ticket: ticket.trim().to_owned(), name, endpoint_id, source })
 }
 
 impl Auth {
@@ -84,22 +111,24 @@ impl Auth {
         }
     }
 
-    /// A single-use invite valid for `ttl` (1 s ..= [`MAX_INVITE_TTL`]).
-    pub fn create_invite(&mut self, ttl: Duration) -> Result<[u8; INVITE_SECRET_LEN], RpcError> {
+    /// A single-use invite valid for `ttl` (1 s ..= [`MAX_INVITE_TTL`]):
+    /// its secret and id.
+    pub fn create_invite(&mut self, ttl: Duration, purpose: InvitePurpose) -> Result<([u8; INVITE_SECRET_LEN], String), RpcError> {
         if ttl.is_zero() || ttl > MAX_INVITE_TTL {
             return Err(RpcError::bad_request(format!("ttl_secs must be between 1 and {}", MAX_INVITE_TTL.as_secs())));
         }
         let now = Instant::now();
         let expires = now.checked_add(ttl).ok_or_else(|| RpcError::bad_request("ttl_secs is too large"))?;
-        self.invites.retain(|_, expires| *expires > now);
+        self.invites.retain(|_, invite| invite.expires > now);
         let secret = rand::random::<[u8; INVITE_SECRET_LEN]>();
-        self.invites.insert(secret, expires);
-        Ok(secret)
+        let id = format!("{:016x}", rand::random::<u64>());
+        self.invites.insert(secret, Invite { id: id.clone(), purpose, expires });
+        Ok((secret, id))
     }
 
-    /// Admit `endpoint_id` if paired, else redeem `invite` (consuming it and
-    /// recording the grant).
-    pub fn authorize(&mut self, endpoint_id: &str, name: &str, invite: Option<&str>) -> Result<(), RpcError> {
+    /// Admit `endpoint_id` if paired, else redeem `invite`, consuming it: a
+    /// device invite records the grant, a join invite records nothing.
+    pub fn authorize(&mut self, endpoint_id: &str, name: &str, invite: Option<&str>) -> Result<Admission, RpcError> {
         let now = unix_secs();
         if let Some(device) = self.devices.iter_mut().find(|d| d.id == endpoint_id) {
             let stale = now.saturating_sub(device.last_seen) >= LAST_SEEN_INTERVAL;
@@ -108,20 +137,24 @@ impl Auth {
             if stale {
                 self.flush();
             }
-            return Ok(());
+            return Ok(Admission::Device);
         }
         let invite = invite.ok_or_else(|| RpcError::unauthorized("unknown device; pair it with an invite"))?;
         let ticket = PairTicket::decode(invite).map_err(|e| RpcError::unauthorized(format!("{e:#}")))?;
-        let expires = self.invites.remove(&ticket.secret).filter(|e| *e > Instant::now());
-        let expires = expires.ok_or_else(|| RpcError::unauthorized("invalid, expired or already used invite"))?;
+        let invite = self.invites.remove(&ticket.secret).filter(|i| i.expires > Instant::now());
+        let invite = invite.ok_or_else(|| RpcError::unauthorized("invalid, expired or already used invite"))?;
+        if invite.purpose == InvitePurpose::Join {
+            tracing::info!(peer = endpoint_id, name, "redeemed a join invite");
+            return Ok(Admission::Join { invite_id: invite.id });
+        }
         self.devices.push(PairedDevice { id: endpoint_id.to_owned(), name: name.to_owned(), paired_at: now, last_seen: now });
         if let Err(error) = self.save() {
             self.devices.pop();
-            self.invites.insert(ticket.secret, expires);
+            self.invites.insert(ticket.secret, invite);
             return Err(error);
         }
         tracing::info!(device = endpoint_id, name, "paired a device");
-        Ok(())
+        Ok(Admission::Device)
     }
 
     /// Whether `endpoint_id` holds a grant (read-only; no `last_seen`).
@@ -167,9 +200,9 @@ mod tests {
         let home = PathBuf::from(format!("/tmp/silo-auth-debounce-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut auth = Auth::open(&home).unwrap();
-        assert!(auth.create_invite(Duration::ZERO).is_err());
-        assert!(auth.create_invite(MAX_INVITE_TTL + Duration::from_secs(1)).is_err());
-        let secret = auth.create_invite(Duration::from_secs(60)).unwrap();
+        assert!(auth.create_invite(Duration::ZERO, InvitePurpose::Device).is_err());
+        assert!(auth.create_invite(MAX_INVITE_TTL + Duration::from_secs(1), InvitePurpose::Device).is_err());
+        let (secret, _) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Device).unwrap();
         let id = silo_transport::Identity::load_or_create(home.join("peer")).unwrap().id();
         let invite = PairTicket { addr: silo_transport::EndpointAddr::new(id), secret }.encode();
         auth.authorize("dev", "Dev", Some(&invite)).unwrap();
@@ -183,6 +216,21 @@ mod tests {
         auth.flush();
         assert_eq!(std::fs::read(&auth.path).unwrap(), flushed, "nothing left to flush");
         assert_eq!(Auth::open(&home).unwrap().devices().len(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn join_invites_pair_nothing_and_are_single_use() {
+        let home = PathBuf::from(format!("/tmp/silo-auth-join-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut auth = Auth::open(&home).unwrap();
+        let (secret, id) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Join).unwrap();
+        let peer = silo_transport::Identity::load_or_create(home.join("peer")).unwrap().id();
+        let invite = PairTicket { addr: silo_transport::EndpointAddr::new(peer), secret }.encode();
+        assert_eq!(auth.authorize("dev", "Dev", Some(&invite)).unwrap(), Admission::Join { invite_id: id });
+        assert!(auth.devices().is_empty() && !auth.is_paired("dev"));
+        assert_eq!(auth.authorize("dev", "Dev", Some(&invite)).unwrap_err().code, RpcError::UNAUTHORIZED);
+        assert_eq!(auth.authorize("dev", "Dev", None).unwrap_err().code, RpcError::UNAUTHORIZED);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

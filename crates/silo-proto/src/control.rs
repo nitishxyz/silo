@@ -55,6 +55,8 @@ pub struct ServerInfo {
     /// remote access.
     #[serde(default)]
     pub endpoint_addr: Option<Value>,
+    /// Seconds without clients after which the server exits; 0 = never.
+    pub idle_exit_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -232,15 +234,22 @@ pub enum Method {
     #[serde(rename = "ui.open_session")]
     UiOpenSession { session_id: SessionId },
 
-    /// Owner only: a single-use pairing invite valid for `ttl_secs`.
+    /// Owner only: a single-use invite valid for `ttl_secs`. A `device`
+    /// invite pairs the redeeming device; a `join` invite only lets it call
+    /// `host.offer` once.
     #[serde(rename = "pair.create")]
-    PairCreate { ttl_secs: u64 },
+    PairCreate { ttl_secs: u64, purpose: InvitePurpose },
     /// Owner only: paired devices.
     #[serde(rename = "pair.list")]
     PairList {},
     /// Owner only: forget a device and close its connections.
     #[serde(rename = "pair.revoke")]
     PairRevoke { id: String },
+    /// Join-invite connections only (and only this): offer the caller's
+    /// server, `ticket` being its `silo1…` pairing ticket. Emits
+    /// `host.offered`.
+    #[serde(rename = "host.offer")]
+    HostOffer { ticket: String, name: String },
 }
 
 /// Method names and one-line descriptions, for `api.list`.
@@ -285,9 +294,10 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.zoom", "Set a browser block's zoom level (0 = 100%)."),
     ("browser.report", "Report a browser block's engine state (owner only)."),
     ("ui.open_session", "Ask subscribed UI clients to show a session."),
-    ("pair.create", "Create a single-use pairing invite (owner only)."),
+    ("pair.create", "Create a single-use device-pairing or join invite (owner only)."),
     ("pair.list", "List paired devices (owner only)."),
     ("pair.revoke", "Forget a paired device and close its connections (owner only)."),
+    ("host.offer", "Offer the caller's server to this one (join-invite connections only)."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,6 +409,41 @@ pub enum Event {
     /// A browser command for the owner's engine; viewers follow it too.
     #[serde(rename = "browser.command")]
     BrowserCommand { block_id: BlockId, command: BrowserCommand },
+    /// Another machine's server offered to link: seen in a terminal's
+    /// output (SSH) or sent over a join invite.
+    #[serde(rename = "host.offered")]
+    HostOffered { offer: HostOffer },
+}
+
+/// What a `pair.create` invite grants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum InvitePurpose {
+    /// Pair the redeeming device.
+    Device,
+    /// Let the redeeming peer offer its own server (`host.offer`) once.
+    Join,
+}
+
+/// A server offered for linking.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostOffer {
+    /// The offering server's `silo1…` pairing ticket.
+    pub ticket: String,
+    /// Its hostname.
+    pub name: String,
+    /// Its iroh EndpointId (from the ticket).
+    pub endpoint_id: String,
+    pub source: OfferSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum OfferSource {
+    /// Printed (OSC 7717) in this terminal block, e.g. over SSH.
+    Terminal { block_id: BlockId },
+    /// Sent over the join invite `invite_id`.
+    Join { invite_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -481,6 +526,8 @@ pub struct Capture {
 /// Result of `pair.create`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PairInvite {
+    /// Identifies the invite in a later [`OfferSource::Join`].
+    pub invite_id: String,
     /// Encoded `PairTicket` (`silo1…`).
     pub ticket: String,
     pub expires_in_secs: u64,

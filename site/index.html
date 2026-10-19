@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>silo</title>
+<meta name="description" content="Your workspace, always running, anywhere.">
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #6b6b6b; --bg: #fafaf8; --code: #efefeb; --accent: #2f6f4f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e4; --muted: #8d8d88; --bg: #111110; --code: #1c1c1a; --accent: #7fc4a0; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { width: min(36rem, 100% - 3rem); }
+  h1 { margin: 0; font: 600 1.1rem ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; }
+  h1::before { content: "\25AE"; color: var(--accent); margin-right: .5em; }
+  p { margin: .75rem 0 2.25rem; font-size: 1.6rem; line-height: 1.25; letter-spacing: -.01em; }
+  .cmd { display: flex; align-items: center; gap: .75rem; background: var(--code); border-radius: 8px; padding: .8rem 1rem; }
+  code { flex: 1; overflow-x: auto; white-space: nowrap; font: .9rem ui-monospace, "SF Mono", Menlo, monospace; }
+  code::before { content: "$ "; color: var(--muted); }
+  button { border: 0; background: none; color: var(--muted); font: inherit; font-size: .85rem; cursor: pointer; padding: 0; }
+  button:hover { color: var(--fg); }
+  footer { margin-top: 1.5rem; font-size: .85rem; color: var(--muted); }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>silo</h1>
+  <p>Your workspace, always running, anywhere.</p>
+  <div class="cmd">
+    <code id="cmd">curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh</code>
+    <button type="button" id="copy">copy</button>
+  </div>
+  <footer>Linux (x86_64, arm64) and macOS (Apple silicon). <a href="https://github.com/nitishxyz/silo">GitHub</a></footer>
+</main>
+<script>
+  document.getElementById("copy").addEventListener("click", async (e) => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById("cmd").textContent);
+      e.target.textContent = "copied";
+      setTimeout(() => (e.target.textContent = "copy"), 1500);
+    } catch {}
+  });
+</script>
+</body>
+</html>

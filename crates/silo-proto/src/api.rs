@@ -5,8 +5,8 @@ use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
 use crate::control::{
-    ApiMethod, Capture, Created, DataTicket, Dock, Empty, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, ServerInfo,
-    SizeInfo, SpawnSpec,
+    ApiMethod, Capture, Created, DataTicket, Dock, Empty, InvitePurpose, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices,
+    ServerInfo, SizeInfo, SpawnSpec,
 };
 use crate::model::{Axis, BlockKind, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
 
@@ -84,6 +84,7 @@ fn result_schema(method: &Method) -> Schema {
         M::OwnBlock { .. } | M::DisownBlock { .. } | M::UiOpenSession { .. } | M::PairRevoke { .. } => schema_for!(Empty),
         M::BrowserNavigate { .. } | M::BrowserBack { .. } | M::BrowserForward { .. } | M::BrowserReload { .. } => schema_for!(Empty),
         M::BrowserZoom { .. } | M::BrowserReport { .. } => schema_for!(Empty),
+        M::HostOffer { .. } => schema_for!(Empty),
     }
 }
 
@@ -142,9 +143,10 @@ pub fn examples() -> Vec<Method> {
             index: 0,
         },
         M::UiOpenSession { session_id: s() },
-        M::PairCreate { ttl_secs: 600 },
+        M::PairCreate { ttl_secs: 600, purpose: InvitePurpose::Device },
         M::PairList {},
         M::PairRevoke { id: "7c3e5f0d9a1b4c6e8f2a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e".into() },
+        M::HostOffer { ticket: "silo1aeaqcaibaeaq".into(), name: "mini".into() },
     ]
 }
 

@@ -18,7 +18,7 @@ pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};
 pub use mismatch::DifferentBuild;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
-pub use remote::{client_identity, pair};
+pub use remote::{client_identity, offer_host, pair};
 pub use spawn::{connect_or_spawn, server_running};
 
 pub use silo_proto as proto;

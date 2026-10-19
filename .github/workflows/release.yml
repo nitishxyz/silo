@@ -1,0 +1,147 @@
+name: release
+
+# Builds the `silo` CLI/server for Linux (x86_64, aarch64) and macOS (arm64)
+# and publishes them on the GitHub Release for the tag:
+#   silo-<os>-<arch>.tar.gz          (contains the `silo` binary)
+#   silo-<os>-<arch>.tar.gz.sha256
+#   build-id                         (silo_proto::BUILD; identical on every
+#                                     platform for one commit)
+#
+# Linux builds run on ubuntu-22.04 runners, so the binaries need glibc 2.35
+# or newer (Debian 12, Ubuntu 22.04, RHEL/Rocky 10, Fedora 36+). The
+# required version is printed in the job summary.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (empty = build the selected ref, no release)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # rustc peaks at several GB per job on the larger crates (iroh, ghostty
+  # bindings); two jobs stay well inside the runner's memory.
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: linux, arch: x86_64, runner: ubuntu-22.04 }
+          - { os: linux, arch: aarch64, runner: ubuntu-22.04-arm }
+          - { os: macos, arch: aarch64, runner: macos-14 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      ASSET: silo-${{ matrix.os }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.arch }}
+          cache-on-failure: true
+      # libghostty-vt depends only on GHOSTTY_REV and the build script.
+      - uses: actions/cache@v4
+        with:
+          path: target/ghostty/*/runtime
+          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('GHOSTTY_REV', 'scripts/build-ghostty.sh') }}
+      - name: Build libghostty-vt
+        run: ZIG="$(command -v zig)" bash scripts/build-ghostty.sh
+      - name: Build silo
+        run: cargo build -p silo-cli --release --locked
+      - name: Package
+        run: |
+          set -eu
+          bin=target/release/silo
+          "$bin" --version
+          # silo-proto's build script output holds SILO_BUILD_ID. The cache
+          # can keep stale silo-proto build dirs with other ids, so keep the
+          # one id this binary embeds.
+          id=$(
+            for out in target/release/build/silo-proto-*/output; do
+              candidate=$(sed -n 's/^cargo:rustc-env=SILO_BUILD_ID=//p' "$out")
+              if [ -n "$candidate" ] && grep -aq "$candidate" "$bin"; then echo "$candidate"; fi
+            done | sort -u
+          )
+          case $id in
+            *[!0-9a-f]* | "") echo "cannot determine the build id of $bin: '$id'" >&2; exit 1 ;;
+          esac
+          [ "${#id}" -eq 16 ] || { echo "bad build id '$id'" >&2; exit 1; }
+          mkdir -p stage dist
+          cp "$bin" stage/silo
+          COPYFILE_DISABLE=1 tar -C stage -czf "dist/$ASSET.tar.gz" silo
+          (cd dist && shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256")
+          printf '%s\n' "$id" > "dist/build-id-$ASSET"
+          {
+            echo "### $ASSET"
+            echo "- build id: \`$id\`"
+            echo "- sha256: \`$(cut -d' ' -f1 "dist/$ASSET.tar.gz.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report glibc requirement
+        if: matrix.os == 'linux'
+        run: |
+          set -eu
+          glibc=$(objdump -T target/release/silo | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
+          echo "requires $glibc"
+          echo "- requires \`$glibc\`" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check build ids agree
+        run: |
+          set -eu
+          cd dist
+          ids=$(cat build-id-* | sort -u)
+          if [ "$(printf '%s\n' "$ids" | wc -l)" -ne 1 ]; then
+            echo "platforms disagree on the build id:" >&2
+            grep . build-id-* >&2
+            exit 1
+          fi
+          printf '%s\n' "$ids" > build-id
+          rm build-id-*
+          ls -l
+      - name: Publish
+        run: |
+          set -eu
+          cd dist
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" ./* --clobber
+          else
+            prerelease=
+            case "$TAG" in *-*) prerelease=--prerelease ;; esac
+            gh release create "$TAG" ./* --verify-tag --title "$TAG" --generate-notes $prerelease
+          fi

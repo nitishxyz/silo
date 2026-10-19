@@ -8,10 +8,13 @@ use std::{
 };
 
 use serde_json::Value;
-use silo_client::Control;
+use silo_client::{Control, Events};
 use silo_proto::{
     BUILD, Frame,
-    control::{ClientHello, Created, DataTicket, Method, PairInvite, PairedDevices, Request, RpcError, ServerHello, ServerMessage, SpawnSpec},
+    control::{
+        Capture, ClientHello, Created, DataTicket, Event, HostOffer, InvitePurpose, Method, OfferSource, PairInvite, PairedDevices, Request,
+        RpcError, ServerHello, ServerMessage, SpawnSpec,
+    },
     data::DataHello,
     kind,
     model::TermSize,
@@ -59,12 +62,17 @@ async fn shutdown(control: Control, task: JoinHandle<()>) {
 
 /// A fresh invite and the server's loopback address.
 async fn invite(control: &Control, ttl_secs: u64) -> (String, EndpointAddr) {
+    let (invite, addr) = invite_for(control, ttl_secs, InvitePurpose::Device).await;
+    (invite.ticket, addr)
+}
+
+async fn invite_for(control: &Control, ttl_secs: u64, purpose: InvitePurpose) -> (PairInvite, EndpointAddr) {
     for _ in 0..200 {
-        let invite: PairInvite = control.call(Method::PairCreate { ttl_secs }).await.unwrap();
+        let invite: PairInvite = control.call(Method::PairCreate { ttl_secs, purpose }).await.unwrap();
         let ticket = PairTicket::decode(&invite.ticket).unwrap();
         if let Some(port) = ticket.addr.ip_addrs().find(|a| a.is_ipv4()).map(SocketAddr::port) {
             let addr = EndpointAddr::new(ticket.addr.id).with_ip_addr((Ipv4Addr::LOCALHOST, port).into());
-            return (invite.ticket, addr);
+            return (invite, addr);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -229,7 +237,7 @@ async fn paired_device_is_not_owner() {
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
     let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
-    assert_eq!(code(ctl.call(Method::PairCreate { ttl_secs: 60 }).await), RpcError::FORBIDDEN);
+    assert_eq!(code(ctl.call(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairList {}).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairRevoke { id: net.id().to_string() }).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::ServerShutdown {}).await), RpcError::FORBIDDEN);
@@ -368,7 +376,7 @@ async fn invite_ttl_is_bounded_and_overflow_is_harmless() {
     let task = start(&home).await;
     let control = owner(&home).await;
     for ttl_secs in [0, 7 * 24 * 3600 + 1, u64::MAX] {
-        let error = control.call_value(Method::PairCreate { ttl_secs }).await.unwrap_err();
+        let error = control.call_value(Method::PairCreate { ttl_secs, purpose: silo_proto::control::InvitePurpose::Device }).await.unwrap_err();
         assert!(error.to_string().contains("bad_request"), "{ttl_secs}: {error}");
     }
     // Remote access still works afterwards.
@@ -485,9 +493,106 @@ async fn fixed_port_survives_takeover_and_bind_failure_is_reported() {
     let info: silo_proto::control::ServerInfo = control.call(Method::ServerInfo {}).await.unwrap();
     assert!(info.remote_error.is_some(), "{info:?}");
     assert!(info.endpoint_addr.is_none(), "{info:?}");
-    let error = control.call_value(Method::PairCreate { ttl_secs: 60 }).await.unwrap_err();
+    let error = control.call_value(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await.unwrap_err();
     assert!(error.to_string().contains("remote access is not running"), "{error}");
     net.close().await.unwrap();
     control.call_value(Method::ServerShutdown {}).await.unwrap();
     timeout(T, third).await.unwrap().unwrap().unwrap();
+}
+
+/// A valid pairing ticket of some other machine.
+fn other_host(home: &Path) -> String {
+    let id = Identity::load_or_create(home.join("other-host")).unwrap().id();
+    PairTicket { addr: EndpointAddr::new(id), secret: [1; 32] }.encode()
+}
+
+async fn next_offer(events: &mut Events) -> HostOffer {
+    loop {
+        let (_, event) = timeout(T, events.recv()).await.unwrap().expect("events");
+        if let Event::HostOffered { offer } = event {
+            return offer;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn join_invite_only_offers_a_host_once() {
+    let home = temp_home("join");
+    let task = start(&home).await;
+    let (control, mut events) = Control::connect(&paths::socket(&home), "owner").await.unwrap();
+    control.subscribe().await.unwrap();
+    // A paired device subscribed to events must not see offers (they
+    // carry pairing tickets).
+    let (paired_invite, addr) = invite(&control, 60).await;
+    let paired_net = device(&home, "paired").await;
+    let paired_ticket = PairTicket { addr, secret: PairTicket::decode(&paired_invite).unwrap().secret };
+    let (paired, mut paired_events) =
+        Control::connect_remote(&paired_net, paired_ticket.addr.clone(), "paired", false, Some(&paired_ticket)).await.unwrap();
+    paired.subscribe().await.unwrap();
+    let (join, addr) = invite_for(&control, 60, InvitePurpose::Join).await;
+    let offered = other_host(&home);
+    let net = device(&home, "a").await;
+    let mut ctl = connect(&net, &addr, BUILD, Some(&join.ticket)).await.unwrap();
+    assert_eq!(code(ctl.call(Method::SessionList {}).await), RpcError::UNAUTHORIZED);
+    assert_eq!(code(ctl.call(Method::PairList {}).await), RpcError::UNAUTHORIZED);
+    assert_eq!(code(ctl.call(Method::HostOffer { ticket: "silo1garbage".into(), name: "far".into() }).await), "bad_request");
+    ctl.call(Method::HostOffer { ticket: offered.clone(), name: " far\n".into() }).await.unwrap();
+    let offer = next_offer(&mut events).await;
+    let endpoint_id = PairTicket::decode(&offered).unwrap().addr.id.to_string();
+    assert_eq!(
+        offer,
+        HostOffer { ticket: offered.clone(), name: "far".into(), endpoint_id, source: OfferSource::Join { invite_id: join.invite_id } }
+    );
+    // The connection ends, the invite is spent and nothing was paired.
+    assert!(timeout(T, read_frame(&mut ctl.stream)).await.unwrap().map_or(true, |f| f.is_none()));
+    assert_eq!(code(connect(&net, &addr, BUILD, Some(&join.ticket)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
+    assert_eq!(devices.devices.len(), 1, "only the paired device");
+    let leaked = timeout(Duration::from_millis(300), next_offer(&mut paired_events)).await;
+    assert!(leaked.is_err(), "{leaked:?}");
+    drop(paired);
+    paired_net.close().await.unwrap();
+
+    // The client helper, on a fresh join invite.
+    let (join, addr) = invite_for(&control, 60, InvitePurpose::Join).await;
+    let ticket = PairTicket { addr, secret: PairTicket::decode(&join.ticket).unwrap().secret };
+    silo_client::offer_host(&net, &ticket, &offered, "far").await.unwrap();
+    assert_eq!(next_offer(&mut events).await.source, OfferSource::Join { invite_id: join.invite_id });
+    // A device invite does not admit host.offer.
+    let (device_invite, addr) = invite(&control, 60).await;
+    let ticket = PairTicket { addr, secret: PairTicket::decode(&device_invite).unwrap().secret };
+    assert!(silo_client::offer_host(&net, &ticket, &offered, "far").await.is_err());
+    net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn printed_offer_is_raised_once_and_stripped() {
+    let home = temp_home("osc");
+    let task = start(&home).await;
+    let (control, mut events) = Control::connect(&paths::socket(&home), "owner").await.unwrap();
+    control.subscribe().await.unwrap();
+    let offered = other_host(&home);
+    let osc = silo_proto::offer::osc(&offered, "far").replace('\x1b', "\\033").replace('\x07', "\\007");
+    let script = format!("printf 'before{osc}'; printf '{osc}after\\n'; exec sleep 30");
+    let spawn = SpawnSpec { command: vec!["/bin/sh".into(), "-c".into(), script], cwd: Some("/tmp".into()), size: Some(TermSize::new(200, 24)) };
+    let created: Created =
+        control.call(Method::SessionCreate { name: None, spawn, kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
+    let offer = next_offer(&mut events).await;
+    assert_eq!(offer.source, OfferSource::Terminal { block_id: created.block_id.clone() });
+    assert_eq!((offer.ticket.as_str(), offer.name.as_str()), (offered.as_str(), "far"));
+    let mut text = String::new();
+    for _ in 0..200 {
+        let capture: Capture = control.call(Method::TerminalCapture { block_id: created.block_id.clone(), history: true }).await.unwrap();
+        text = capture.text;
+        if text.contains("after") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(text.contains("beforeafter") && !text.contains("7717") && !text.contains("silo1"), "{text:?}");
+    // The same ticket again is not raised twice.
+    let again = timeout(Duration::from_millis(500), next_offer(&mut events)).await;
+    assert!(again.is_err(), "{again:?}");
+    shutdown(control, task).await;
 }

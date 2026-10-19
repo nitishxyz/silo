@@ -20,6 +20,7 @@ mod keys;
 mod latency;
 mod layout;
 mod motion;
+mod offers;
 mod palette;
 mod pane;
 mod qr;

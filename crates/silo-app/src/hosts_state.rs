@@ -19,7 +19,7 @@ use silo_proto::{
 use crate::{
     cache::{self, CacheWriter, CachedTree},
     conn::ConnEvent,
-    hosts::{self, AppState, HostInfo, HostState},
+    hosts::{self, AppState, HostInfo, HostState, RemoteHost},
 };
 
 /// What a window sees of a host.
@@ -57,6 +57,31 @@ pub struct HostEvent {
     pub event: ConnEvent,
 }
 
+/// How often hosts.json is checked for outside changes.
+const HOSTS_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Changes that bring the remote hosts in line with hosts.json.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HostsPlan {
+    add: Vec<RemoteHost>,
+    forget: Vec<usize>,
+    rename: Vec<(usize, String)>,
+}
+
+/// `current`: (index, EndpointId, name) of every live remote host.
+fn reconcile(current: &[(usize, String, &str)], saved: Vec<RemoteHost>) -> HostsPlan {
+    let mut plan = HostsPlan::default();
+    for (index, id, name) in current {
+        match saved.iter().find(|h| h.id == *id) {
+            None => plan.forget.push(*index),
+            Some(host) if host.name != *name => plan.rename.push((*index, host.name.clone())),
+            Some(_) => {}
+        }
+    }
+    plan.add = saved.into_iter().filter(|h| !current.iter().any(|(_, id, _)| *id == h.id)).collect();
+    plan
+}
+
 pub struct HostsState {
     pub rt: tokio::runtime::Handle,
     pub home: PathBuf,
@@ -64,10 +89,16 @@ pub struct HostsState {
     owned: Vec<Owned>,
     /// App preferences (state.json); written only here.
     state: AppState,
+    /// Machines offering to link (see `offers.rs`).
+    pub(crate) offers: crate::offers::Offers,
+    /// hosts.json's last seen (mtime, length); see `watch_hosts`.
+    hosts_stamp: Option<(std::time::SystemTime, u64)>,
+    _watch: Option<Task<()>>,
     _quit: Subscription,
 }
 
 impl EventEmitter<HostEvent> for HostsState {}
+impl EventEmitter<crate::offers::OfferEvent> for HostsState {}
 
 struct GlobalHosts(Entity<HostsState>);
 
@@ -88,15 +119,64 @@ impl HostsState {
             });
             let state = hosts::load_state(&home);
             crate::theme::apply_ui_font(&state.ui_font_family, cx);
-            let mut this = Self { rt, home: home.clone(), entries: Vec::new(), owned: Vec::new(), state, _quit: quit };
+            let offers = crate::offers::Offers::default();
+            let mut this = Self {
+                rt,
+                home: home.clone(),
+                entries: Vec::new(),
+                owned: Vec::new(),
+                state,
+                offers,
+                hosts_stamp: hosts::stamp(&home),
+                _watch: None,
+                _quit: quit,
+            };
             this.add(HostInfo::local(home.clone(), exe), cx);
             for remote in hosts::load(&home) {
                 this.add(HostInfo::remote(home.clone(), &remote), cx);
             }
+            this._watch = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(HOSTS_POLL).await;
+                    if this.update(cx, |this, cx| this.watch_hosts(cx)).is_err() {
+                        return;
+                    }
+                }
+            }));
             this
         });
         cx.set_global(GlobalHosts(hosts.clone()));
         hosts
+    }
+
+    /// hosts.json changed (e.g. `silo hosts add`): connect new hosts,
+    /// drop removed ones, take new names. The app's own writes already
+    /// match `entries`, so they change nothing.
+    fn watch_hosts(&mut self, cx: &mut Context<Self>) {
+        let stamp = hosts::stamp(&self.home);
+        if stamp == self.hosts_stamp {
+            return;
+        }
+        // Mid-write or invalid: keep the hosts, look again next time.
+        let Some(saved) = hosts::try_load(&self.home) else { return };
+        self.hosts_stamp = stamp;
+        let current: Vec<(usize, String, &str)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| !h.removed)
+            .filter_map(|(i, h)| Some((i, h.info.transport.remote_id()?, h.info.name.as_str())))
+            .collect();
+        let plan = reconcile(&current, saved);
+        for index in plan.forget {
+            self.forget(index, cx);
+        }
+        for (index, name) in plan.rename {
+            self.rename(index, name, cx);
+        }
+        for host in plan.add {
+            self.add(HostInfo::remote(self.home.clone(), &host), cx);
+        }
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -209,6 +289,20 @@ impl HostsState {
         cx.notify();
     }
 
+    /// Persist a paired host (replacing its old entry and, with `replace`,
+    /// its old connection) and connect to it; its index.
+    pub fn save_remote(&mut self, host: RemoteHost, replace: Option<usize>, cx: &mut Context<Self>) -> Result<usize, String> {
+        hosts::update(&self.home, |saved| {
+            saved.retain(|h| h.id != host.id);
+            saved.push(host.clone());
+        })
+        .map_err(|e| format!("Could not save: {e:#}"))?;
+        if let Some(index) = replace.filter(|i| *i < self.entries.len()) {
+            self.forget(index, cx);
+        }
+        Ok(self.add(HostInfo::remote(self.home.clone(), &host), cx))
+    }
+
     pub fn rename(&mut self, host: usize, name: String, cx: &mut Context<Self>) {
         self.entries[host].info.name = name;
         cx.notify();
@@ -247,6 +341,7 @@ impl HostsState {
                 self.forget_session(host, session_id);
                 self.gc_cache(host);
             }
+            ConnEvent::Event(Event::HostOffered { offer }) => self.host_offered(host, offer, cx),
             ConnEvent::Event(_) => {}
         }
         cx.emit(HostEvent { host, event });
@@ -257,10 +352,7 @@ impl HostsState {
         if let hosts::Transport::Iroh { addr: current, .. } = &mut self.entries[host].info.transport {
             current.clone_from(addr);
         }
-        let mut saved = hosts::load(&self.home);
-        if hosts::merge_addr(&mut saved, addr)
-            && let Err(error) = hosts::save(&self.home, &saved)
-        {
+        if let Err(error) = hosts::update(&self.home, |saved| hosts::merge_addr(saved, addr)) {
             tracing::warn!("save host address: {error:#}");
         }
     }
@@ -303,5 +395,41 @@ impl HostsState {
                 Err(error) => tracing::debug!("cache gc skipped: {error:#}"),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hosts::tests::{addr, temp};
+
+    #[test]
+    fn hosts_file_changes_become_a_plan() {
+        let dir = temp("reconcile");
+        let (a, b, c) = (
+            RemoteHost::new(addr(&dir.join("a")), "a".into()),
+            RemoteHost::new(addr(&dir.join("b")), "b".into()),
+            RemoteHost::new(addr(&dir.join("c")), "c".into()),
+        );
+        let current = vec![(1, a.id.clone(), "a"), (2, b.id.clone(), "b")];
+        // The app's own writes match what it has: nothing to do.
+        assert_eq!(reconcile(&current, vec![a.clone(), b.clone()]), HostsPlan::default());
+        // The CLI added c, removed b and renamed a.
+        let renamed = RemoteHost { name: "mini".into(), ..a.clone() };
+        let plan = reconcile(&current, vec![renamed, c.clone()]);
+        assert_eq!(plan, HostsPlan { add: vec![c], forget: vec![2], rename: vec![(1, "mini".into())] });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_hosts_file_is_not_an_empty_one() {
+        let dir = temp("try-load");
+        assert_eq!(hosts::try_load(&dir), Some(Vec::new()), "missing: no hosts");
+        assert_eq!(hosts::stamp(&dir), None);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hosts.json"), b"{\"hosts\": [").unwrap();
+        assert_eq!(hosts::try_load(&dir), None, "half written");
+        assert!(hosts::stamp(&dir).is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
