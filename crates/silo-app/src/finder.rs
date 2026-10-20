@@ -338,7 +338,7 @@ impl Workspace {
     fn finder_sources(&self, scope: Scope, snapshot: &SettingsSnapshot, cx: &gpui::App) -> Vec<Item> {
         let mut out = Vec::new();
         if scope.includes(Group::Commands) {
-            for &command in Command::ALL.iter().filter(|c| !matches!(c, Command::AddHost | Command::RenameHost) && self.available(**c)) {
+            for &command in Command::ALL.iter().filter(|c| !matches!(c, Command::AddHost | Command::RenameHost) && self.available(**c, cx)) {
                 let mut item = Item::new(Target::Command(command), Group::Commands, command.title(), command_key(command));
                 item.detail = Some(self.subtitle(command).map_or_else(|| command.group().to_owned(), |s| format!("{} · {s}", command.group())));
                 item.right = command.hint().map(Right::Shortcut);

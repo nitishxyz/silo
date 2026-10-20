@@ -51,6 +51,8 @@ const MAX_LATEST: u64 = 1024 * 1024;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Staging directories next to the app: `.silo-update.<pid>`.
 const STAGE_PREFIX: &str = ".silo-update.";
+/// [`PrivateDir`]s: `$TMPDIR/silo-update.<pid>.<random>`.
+const TEMP_PREFIX: &str = "silo-update.";
 
 /// The `<string>` after `<key>key</key>` in an XML plist.
 #[must_use]
@@ -88,8 +90,7 @@ impl Feed {
     #[must_use]
     pub fn local(base: &str) -> Option<Self> {
         let base = base.trim_end_matches('/');
-        let local = ["http://127.0.0.1:", "http://localhost:", "file:///"].iter().any(|p| base.starts_with(p));
-        local.then(|| Self { latest: format!("{base}/latest.json"), assets: Some(base.to_owned()), https: false })
+        loopback(base).then(|| Self { latest: format!("{base}/latest.json"), assets: Some(base.to_owned()), https: false })
     }
 
     /// GitHub, or the test feed `SILO_UPDATE_FEED` and `true`: tests only,
@@ -115,6 +116,22 @@ impl Feed {
     }
 }
 
+/// `file:///…`, or `http://` to exactly `127.0.0.1` or `localhost` (an
+/// optional `:port`) followed by a path: nothing curl could take for
+/// another host (no userinfo, no other characters in the authority).
+fn loopback(url: &str) -> bool {
+    if url.starts_with("file:///") {
+        return !url.contains('@');
+    }
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let Some((authority, _)) = rest.split_once('/') else { return false };
+    let (host, port_ok) = match authority.split_once(':') {
+        Some((host, port)) => (host, !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())),
+        None => (authority, true),
+    };
+    matches!(host, "127.0.0.1" | "localhost") && port_ok && !url.contains('@')
+}
+
 /// The version of a latest-release description, if it is a published
 /// release (`v<major.minor.patch>`).
 #[must_use]
@@ -133,31 +150,71 @@ pub fn latest_version(json: &[u8]) -> Option<String> {
     (plain && !latest.draft && !latest.prerelease).then(|| version.to_owned())
 }
 
-/// Whether `candidate` is a higher version than `running`.
+/// Whether `candidate` is a higher version than `running`: a higher
+/// `major.minor.patch`, or the same one when `running` is its pre-release
+/// (`0.2.0-rc.1` < `0.2.0`). The feed never offers pre-releases.
 #[must_use]
 pub fn is_newer(running: &str, candidate: &str) -> bool {
-    upgrade::compare_versions(running, candidate) == Some(std::cmp::Ordering::Less)
+    use std::cmp::Ordering;
+    match upgrade::compare_versions(running, candidate) {
+        Some(Ordering::Less) => true,
+        Some(Ordering::Equal) => running.contains('-') && !candidate.contains(['-', '+']),
+        _ => false,
+    }
 }
 
-/// The latest release's version on `feed` (`dir` holds the download).
+/// A fresh directory only this user can read (`$TMPDIR/silo-update.<pid>.<random>`,
+/// mode 0700), removed on drop; downloads and mounts go there.
+pub struct PrivateDir(PathBuf);
+
+impl PrivateDir {
+    /// # Errors
+    /// No directory can be created.
+    pub fn new() -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        for _ in 0..8 {
+            let path = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}.{:016x}", std::process::id(), rand::random::<u64>()));
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other("no fresh temporary directory"))
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The latest release's version on `feed`.
 ///
 /// # Errors
 /// The feed cannot be read or names no release.
-pub async fn latest(feed: &Feed, dir: &Path) -> Result<String, String> {
-    let file = dir.join(format!("silo-latest.{}.json", std::process::id()));
-    let fetched = release::fetch(&feed.latest, &file, feed.https, MAX_LATEST).await;
-    let body = std::fs::read(&file);
-    let _ = std::fs::remove_file(&file);
-    fetched.map_err(|(_, e)| e)?.ok_or("no published release")?;
-    latest_version(&body.map_err(|e| e.to_string())?).ok_or_else(|| "the latest release has no version".into())
+pub async fn latest(feed: &Feed) -> Result<String, String> {
+    let dir = PrivateDir::new().map_err(|e| format!("create a temporary folder: {e}"))?;
+    let file = dir.path().join("latest.json");
+    release::fetch(&feed.latest, &file, feed.https, MAX_LATEST).await.map_err(|(_, e)| e)?.ok_or("no published release")?;
+    let body = std::fs::read(&file).map_err(|e| e.to_string())?;
+    latest_version(&body).ok_or_else(|| "the latest release has no version".into())
 }
 
 /// The release newer than `running` published on `feed`, if any.
 ///
 /// # Errors
 /// The feed cannot be read.
-pub async fn check_latest(feed: &Feed, running: &str, dir: &Path) -> Result<Option<String>, String> {
-    let version = latest(feed, dir).await?;
+pub async fn check_latest(feed: &Feed, running: &str) -> Result<Option<String>, String> {
+    let version = latest(feed).await?;
     Ok(is_newer(running, &version).then_some(version))
 }
 
@@ -268,7 +325,10 @@ async fn verify_code(path: &Path, identity: &Identity, app: bool) -> Result<(), 
 }
 
 /// `app` is intact, signed like `running` and Silo `version`.
-async fn verify_app(app: &Path, version: &str, running: &Signature) -> Result<(), String> {
+///
+/// # Errors
+/// Why not.
+pub async fn verify_app(app: &Path, version: &str, running: &Signature) -> Result<(), String> {
     let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).map_err(|e| format!("read Info.plist: {e}"))?;
     let found = plist_string(&plist, "CFBundleShortVersionString");
     if found != Some(version) {
@@ -336,23 +396,43 @@ pub async fn download_image(feed: &Feed, version: &str, dir: &Path) -> Result<Pa
     Ok(path)
 }
 
-/// Mount `image`, check its Silo.app and copy it to `dest`.
-async fn unpack(image: &Path, version: &str, running: &Signature, dest: &Path) -> Result<(), String> {
-    let mount = std::env::temp_dir().join(format!("silo-update.{}.mnt", std::process::id()));
-    let _ = std::fs::create_dir_all(&mount);
+/// A mounted disk image, detached on drop (also when the update is
+/// cancelled midway).
+struct Mounted(PathBuf);
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        detach(&self.0);
+    }
+}
+
+/// Force-detach the image mounted at `mount`.
+fn detach(mount: &Path) {
+    let out = std::process::Command::new("hdiutil").arg("detach").arg(mount).arg("-force").stdin(std::process::Stdio::null()).output();
+    match out {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!("update: hdiutil detach: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        Err(error) => tracing::warn!("update: hdiutil detach: {error}"),
+    }
+}
+
+/// Whether something is mounted at `path` (another device than its parent).
+fn mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let dev = |p: &Path| std::fs::metadata(p).map(|m| m.dev());
+    path.parent().is_some_and(|parent| matches!((dev(path), dev(parent)), (Ok(a), Ok(b)) if a != b))
+}
+
+/// Mount `image` in `dir`, check its Silo.app and copy it to `dest`.
+async fn unpack(image: &Path, dir: &Path, version: &str, running: &Signature, dest: &Path) -> Result<(), String> {
+    let mount = dir.join("mnt");
+    std::fs::create_dir(&mount).map_err(|e| format!("create the mount point: {e}"))?;
     let attach = ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"].map(OsStr::new);
     check("hdiutil", &[&attach[..], &[mount.as_os_str(), image.as_os_str()]].concat()).await?;
+    let _mounted = Mounted(mount.clone());
     let app = mount.join("Silo.app");
-    let copied = async {
-        verify_app(&app, version, running).await?;
-        check("ditto", &[app.as_os_str(), dest.as_os_str()]).await.map(drop)
-    }
-    .await;
-    if let Err(error) = check("hdiutil", &["detach".as_ref(), mount.as_os_str(), "-force".as_ref()]).await {
-        tracing::warn!("update: {error}");
-    }
-    let _ = std::fs::remove_dir(&mount);
-    copied
+    verify_app(&app, version, running).await?;
+    check("ditto", &[app.as_os_str(), dest.as_os_str()]).await.map(drop)
 }
 
 /// Download, check and stage release `version` of the Silo.app at `app`
@@ -365,7 +445,8 @@ pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature
     let staged = stage.join("Silo.app");
     let result = async {
         let image = download_image(feed, version, &stage).await?;
-        let unpacked = unpack(&image, version, running, &staged).await;
+        let mounts = PrivateDir::new().map_err(|e| format!("create a temporary folder: {e}"))?;
+        let unpacked = unpack(&image, mounts.path(), version, running, &staged).await;
         let _ = std::fs::remove_file(&image);
         let _ = std::fs::remove_file(stage.join(upgrade::CHECKSUMS));
         unpacked?;
@@ -422,13 +503,35 @@ pub fn relaunch(app: &Path) -> std::io::Result<()> {
 }
 
 /// Remove staging directories (and the apps they replaced) next to `app`
-/// left by processes that are gone.
+/// left by processes that are gone, and their [`PrivateDir`]s, detaching
+/// an image still mounted there.
 pub fn clean_stale(app: &Path) {
+    clean_stale_temp(&std::env::temp_dir());
     let Some(dir) = app.parent() else { return };
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for path in entries.filter_map(Result::ok).map(|e| e.path()) {
         let pid = path.file_name().and_then(|n| n.to_str()?.strip_prefix(STAGE_PREFIX)?.parse::<i32>().ok());
         if pid.is_some_and(|pid| !alive(pid)) && std::fs::remove_dir_all(&path).is_ok() {
+            tracing::info!("update: removed {}", path.display());
+        }
+    }
+}
+
+/// [`PrivateDir`]s in `tmp` of processes that are gone.
+fn clean_stale_temp(tmp: &Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else { return };
+    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+        let pid = path.file_name().and_then(|n| n.to_str()?.strip_prefix(TEMP_PREFIX)?.split('.').next()?.parse::<i32>().ok());
+        let ours = std::fs::symlink_metadata(&path)
+            .is_ok_and(|m| m.is_dir() && std::os::unix::fs::MetadataExt::uid(&m) == rustix::process::getuid().as_raw());
+        if !ours || pid.is_none_or(alive) {
+            continue;
+        }
+        let mount = path.join("mnt");
+        if mount_point(&mount) {
+            detach(&mount);
+        }
+        if !mount_point(&mount) && std::fs::remove_dir_all(&path).is_ok() {
             tracing::info!("update: removed {}", path.display());
         }
     }
@@ -594,11 +697,53 @@ pub async fn prepare_binary(feed: &Feed, version: &str, exe: &Path) -> Result<Pa
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
+    /// A test's directory, removed when the test ends, failed or not.
+    struct Temp(PathBuf);
+
+    impl std::ops::Deref for Temp {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp(name: &str) -> Temp {
         let dir = std::env::temp_dir().join(format!("silo-update-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        Temp(dir.canonicalize().unwrap())
+    }
+
+    #[test]
+    fn private_dirs() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (a, b) = (PrivateDir::new().unwrap(), PrivateDir::new().unwrap());
+        assert_ne!(a.path(), b.path(), "unpredictable names");
+        let name = a.path().file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(name.starts_with(&format!("silo-update.{}.", std::process::id())), "{name}");
+        assert_eq!(std::fs::metadata(a.path()).unwrap().permissions().mode() & 0o777, 0o700);
+        let path = a.path().to_owned();
+        drop(a);
+        assert!(!path.exists(), "removed on drop");
+        // A gone process's directory is cleaned, a live one's kept.
+        let tmp = temp("stale-temp");
+        let gone = tmp.join(format!("silo-update.{}.0123", i32::MAX));
+        let live = tmp.join(format!("silo-update.{}.0123", std::process::id()));
+        for dir in [&gone, &live] {
+            std::fs::create_dir_all(dir.join("mnt")).unwrap();
+        }
+        clean_stale_temp(&tmp);
+        assert!(!gone.exists() && live.exists());
+        assert_eq!(std::fs::metadata(&live).unwrap().uid(), rustix::process::getuid().as_raw());
+        assert!(!mount_point(&live.join("mnt")));
     }
 
     #[test]
@@ -622,6 +767,12 @@ mod tests {
         assert!(!is_newer("0.1.1", "0.1.1"));
         assert!(!is_newer("0.2.0", "0.1.9"));
         assert!(!is_newer("0.1.1", "garbage"));
+        // A pre-release is older than its release, never newer.
+        assert!(is_newer("0.2.0-rc.1", "0.2.0"));
+        assert!(is_newer("0.2.0-rc.1", "0.2.1"));
+        assert!(!is_newer("0.2.0", "0.2.0-rc.1"));
+        assert!(!is_newer("0.2.0-rc.1", "0.2.0-rc.2"), "the feed never offers pre-releases");
+        assert!(!is_newer("0.2.0-rc.1", "0.1.9"));
     }
 
     #[test]
@@ -634,7 +785,25 @@ mod tests {
         assert_eq!(local.latest, "http://127.0.0.1:8000/r/latest.json");
         assert_eq!(local.asset("0.1.2", upgrade::CHECKSUMS).unwrap(), "http://127.0.0.1:8000/r/SHA256SUMS");
         assert!(Feed::local("file:///tmp/feed").is_some());
-        for remote in ["https://example.com/feed", "http://10.0.0.1:80/x", "http://127.0.0.1.evil.com/x", "file://host/x"] {
+        assert!(Feed::local("http://localhost:8000/feed").is_some());
+        assert!(Feed::local("http://127.0.0.1/feed").is_some(), "no port");
+        for remote in [
+            "https://example.com/feed",
+            "http://10.0.0.1:80/x",
+            "http://127.0.0.1.evil.com/x",
+            "http://127.0.0.1:80@evil.com/x",
+            "http://localhost:1@x/",
+            "http://127.0.0.1@evil.com/x",
+            "http://evil.com/@127.0.0.1:80/x",
+            "http://127.0.0.1:80/@evil.com",
+            "http://127.0.0.1:/x",
+            "http://127.0.0.1:8a/x",
+            "http://127.0.0.1:80",
+            "http://localhost.:1/x",
+            "http://[::1]:80/x",
+            "file://host/x",
+            "file:///x@y",
+        ] {
             assert_eq!(Feed::local(remote), None, "{remote}");
         }
         assert!(local.asset("../0.1.2", upgrade::CHECKSUMS).is_err());
@@ -737,7 +906,6 @@ mod tests {
         assert_eq!(find_app(&roots), None, "not an app without its Info.plist");
         bundle(&dir.join("Applications/Silo.app"), "0.1.1");
         assert_eq!(find_app(&roots), Some(dir.join("Applications/Silo.app")));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -766,7 +934,6 @@ mod tests {
         std::fs::remove_dir_all(&stage).unwrap();
         assert!(install(&staged, &app).is_err());
         assert_eq!(version_of(&app), "0.1.2");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -775,11 +942,10 @@ mod tests {
         let dir = temp("unwritable");
         let app = dir.join("Silo.app");
         bundle(&app, "0.1.1");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&*dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         let staged = fresh_stage(&app);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&*dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(staged, Err(Failure::Unwritable));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// `files` as a file:// feed.
@@ -811,12 +977,11 @@ mod tests {
         assert!(!out.join("Silo-0.1.3.dmg").exists(), "a mismatch is not kept");
         assert!(download_image(&feed, "0.1.4", &out).await.unwrap_err().contains("not in the checksums"));
         std::fs::write(dir.join("feed/latest.json"), br#"{"tag_name":"v0.1.2"}"#).unwrap();
-        assert_eq!(check_latest(&feed, "0.1.1", &out).await.unwrap().as_deref(), Some("0.1.2"));
-        assert_eq!(check_latest(&feed, "0.1.2", &out).await.unwrap(), None);
-        assert_eq!(latest(&feed, &out).await.unwrap(), "0.1.2");
+        assert_eq!(check_latest(&feed, "0.1.1").await.unwrap().as_deref(), Some("0.1.2"));
+        assert_eq!(check_latest(&feed, "0.1.2").await.unwrap(), None);
+        assert_eq!(latest(&feed).await.unwrap(), "0.1.2");
         std::fs::remove_file(dir.join("feed/latest.json")).unwrap();
-        assert!(check_latest(&feed, "0.1.1", &out).await.is_err());
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(check_latest(&feed, "0.1.1").await.is_err());
     }
 
     /// A `silo` script reporting `version`, packed as this platform's
@@ -864,7 +1029,6 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(&bin).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left, ["silo"], "nothing staged is left behind");
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "installed");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The whole app path on a real disk image of ad-hoc signed bundles.
@@ -912,6 +1076,5 @@ mod tests {
         let team = (APP_ID.to_owned(), Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() });
         let error = prepare(&feed, "0.1.2", &app, &team).await.unwrap_err();
         assert!(matches!(&error, Failure::Retry(e) if e.contains("not as the installed copy")), "{error:?}");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

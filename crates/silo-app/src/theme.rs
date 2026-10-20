@@ -582,6 +582,18 @@ pub fn on_accent() -> u32 {
     if luminance(accent()) > 0.6 { 0x0000_0000 } else { 0x00ff_ffff }
 }
 
+/// The Update pill's fill: a saturated blue close to macOS systemBlue in
+/// every theme (the accent may be pastel), deep enough for white text
+/// ([`TEXT_CONTRAST`]); a touch brighter on dark themes.
+#[must_use]
+pub fn update_blue() -> u32 {
+    update_blue_for(is_light())
+}
+
+fn update_blue_for(light: bool) -> u32 {
+    if light { 0x0000_64d2 } else { 0x000a_6ce8 }
+}
+
 /// This app's desired terminal configuration, reported to the server for
 /// every attached block.
 #[must_use]
@@ -604,6 +616,16 @@ mod tests {
 
     fn style(mut element: gpui::Div) -> gpui::StyleRefinement {
         element.style().clone()
+    }
+
+    #[test]
+    fn update_blue_is_saturated_and_reads_white() {
+        for light in [true, false] {
+            let blue = super::update_blue_for(light);
+            let [r, g, b] = super::channels(blue);
+            assert!(b > 200.0 && r < 20.0 && g < 120.0, "{blue:06x} is a saturated blue");
+            assert!(super::contrast(0x00ff_ffff, blue) >= super::TEXT_CONTRAST, "{blue:06x}");
+        }
     }
 
     #[test]

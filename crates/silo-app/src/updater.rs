@@ -54,6 +54,8 @@ pub struct Updater {
     rt: tokio::runtime::Handle,
     /// The bundle to replace; `None`: this build does not update.
     app: Option<PathBuf>,
+    /// How `app` is signed (known whenever `app` is).
+    running: Option<update::Signature>,
     feed: Feed,
     state: State,
     last_check: Option<SystemTime>,
@@ -83,11 +85,15 @@ fn due(last: Option<SystemTime>, now: SystemTime) -> bool {
 
 impl Updater {
     pub fn install(rt: tokio::runtime::Handle, hosts: Entity<HostsState>, server_exe: &Path, cx: &mut App) {
-        let (app, feed) = match Feed::from_env() {
-            Some((feed, test)) => (crate::conn::updatable_app(server_exe, test), feed),
-            None => (None, Feed::github()),
+        let (app, feed, test) = match Feed::from_env() {
+            Some((feed, test)) => (crate::conn::updatable_app(server_exe, test), feed, test),
+            None => (None, Feed::github(), false),
         };
-        tracing::info!(app = ?app, "updates");
+        // How this app is signed, once: what every update must match.
+        let running =
+            app.as_ref().and_then(|app| rt.block_on(update::signature(app)).inspect_err(|error| tracing::warn!("update: this app: {error}")).ok());
+        let app = app.filter(|_| running.as_ref().is_some_and(|running| updates_allowed(&running.1, test)));
+        tracing::info!(app = ?app, signed = ?running.as_ref().map(|r| &r.1), "updates");
         if let Some(app) = app.clone() {
             rt.spawn_blocking(move || update::clean_stale(&app));
         }
@@ -123,7 +129,7 @@ impl Updater {
             } else {
                 Task::ready(())
             };
-            Self { rt, app, feed, state: State::Idle, last_check: None, requester: None, hosts, check: None, _tick: tick }
+            Self { rt, app, running, feed, state: State::Idle, last_check: None, requester: None, hosts, check: None, _tick: tick }
         });
         cx.set_global(GlobalUpdater(updater));
     }
@@ -156,7 +162,7 @@ impl Updater {
     /// Look for a newer release now; `requester` (a window) is told how it
     /// went.
     pub fn check(&mut self, requester: Option<EntityId>, cx: &mut Context<Self>) {
-        let Some(app) = self.app.clone() else { return };
+        let (Some(app), Some(running)) = (self.app.clone(), self.running.clone()) else { return };
         if requester.is_some() {
             self.requester = requester;
         }
@@ -184,7 +190,7 @@ impl Updater {
         self.check = Some(cx.spawn(async move |this, cx| {
             let latest = {
                 let feed = feed.clone();
-                rt.spawn(async move { update::check_latest(&feed, VERSION, &std::env::temp_dir()).await }).await
+                rt.spawn(async move { update::check_latest(&feed, VERSION).await }).await
             };
             let version = match latest.map_err(|e| e.to_string()).and_then(|r| r) {
                 Ok(Some(version)) => version,
@@ -201,11 +207,7 @@ impl Updater {
             });
             let prepared = {
                 let version = version.clone();
-                rt.spawn(async move {
-                    let running = update::signature(&app).await.map_err(|e| Failure::Retry(format!("this app: {e}")))?;
-                    update::prepare(&feed, &version, &app, &running).await
-                })
-                .await
+                rt.spawn(async move { update::prepare(&feed, &version, &app, &running).await }).await
             };
             let _ = this.update(cx, |this, cx| match prepared.map_err(|e| Failure::Retry(e.to_string())).and_then(|r| r) {
                 Ok(staged) => {
@@ -235,22 +237,42 @@ impl Updater {
         cx.notify();
     }
 
-    /// Put the staged app in place, open it and quit.
+    /// Put the staged app in place, open it and quit. Only over this very
+    /// version (else something else updated the app meanwhile; the stage is
+    /// dropped), and only if the staged app still checks out.
     pub fn restart(&mut self, cx: &mut Context<Self>) {
-        let (State::Ready { version, staged }, Some(app)) = (self.state.clone(), self.app.clone()) else { return };
+        let (State::Ready { version, staged }, Some(app), Some(running)) = (self.state.clone(), self.app.clone(), self.running.clone()) else {
+            return;
+        };
+        if !may_install(update::app_version(&app).as_deref()) {
+            tracing::info!(on_disk = ?update::app_version(&app), "update: the app changed on disk; dropping the staged update");
+            drop_stage(&staged);
+            self.state = State::Idle;
+            cx.notify();
+            return;
+        }
         self.state = State::Installing;
         cx.notify();
         let installing = version.clone();
-        let task = self.rt.spawn_blocking(move || {
-            update::install(&staged, &app)?;
+        let task = self.rt.spawn(async move {
+            if let Err(error) = update::verify_app(&staged, &installing, &running).await {
+                drop_stage(&staged);
+                return Err(Installing::Invalid(error));
+            }
+            update::install(&staged, &app).map_err(Installing::Io)?;
             tracing::info!(version = installing, "update: installed; relaunching");
-            update::relaunch(&app)
+            update::relaunch(&app).map_err(Installing::Io)
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await.map_err(std::io::Error::other).and_then(|r| r);
+            let result = task.await.map_err(|e| Installing::Io(std::io::Error::other(e))).and_then(|r| r);
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => cx.quit(),
-                Err(error) => {
+                Err(Installing::Invalid(error)) => {
+                    tracing::warn!("update: the staged app no longer checks out (retrying at the next check): {error}");
+                    this.state = State::Idle;
+                    cx.notify();
+                }
+                Err(Installing::Io(error)) => {
                     tracing::warn!("update install: {error}");
                     let reason = if error.kind() == std::io::ErrorKind::PermissionDenied { UNWRITABLE } else { "The update couldn't be installed" };
                     this.state = State::Blocked { version, reason };
@@ -281,9 +303,65 @@ impl Updater {
     }
 }
 
+/// Why [`Updater::restart`] did not install.
+enum Installing {
+    Invalid(String),
+    Io(std::io::Error),
+}
+
+/// Remove a staged update (its staging directory).
+fn drop_stage(staged: &Path) {
+    if let Some(stage) = update::replaced(staged) {
+        let _ = std::fs::remove_dir_all(stage);
+    }
+}
+
+/// Whether an app signed as `running` updates: never an ad-hoc signed one
+/// from GitHub (a local build: releases are Developer ID signed, so it
+/// would download every one and refuse it); with the test feed, ad hoc
+/// updates to ad hoc.
+fn updates_allowed(running: &update::Identity, test_feed: bool) -> bool {
+    test_feed || *running != update::Identity::AdHoc
+}
+
+/// Whether the staged update may go in over the app now on disk
+/// (`on_disk`'s version): only over this running version, so a newer app
+/// installed meanwhile is never downgraded.
+fn may_install(on_disk: Option<&str>) -> bool {
+    on_disk == Some(VERSION)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_builds_never_update_from_github() {
+        let team = update::Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() };
+        assert!(updates_allowed(&team, false));
+        assert!(!updates_allowed(&update::Identity::AdHoc, false), "ad hoc from GitHub: no checks, no pill");
+        assert!(updates_allowed(&update::Identity::AdHoc, true), "the test feed");
+    }
+
+    #[test]
+    fn installs_only_over_the_running_version() {
+        assert!(may_install(Some(VERSION)));
+        assert!(!may_install(Some("999.0.0")), "a newer app went in meanwhile: no downgrade");
+        assert!(!may_install(Some("0.0.1")));
+        assert!(!may_install(None), "the app is gone");
+    }
+
+    #[test]
+    fn a_dropped_stage_goes_with_its_folder() {
+        let dir = std::env::temp_dir().join(format!("silo-updater-stage-{}", std::process::id()));
+        let staged = dir.join(format!(".silo-update.{}", std::process::id())).join("Silo.app");
+        std::fs::create_dir_all(&staged).unwrap();
+        drop_stage(&staged);
+        assert!(!staged.parent().unwrap().exists() && dir.exists());
+        drop_stage(&dir.join("Silo.app"));
+        assert!(dir.exists(), "never anything but a staging folder");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn automatic_checks_are_spaced() {

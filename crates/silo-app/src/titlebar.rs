@@ -649,13 +649,13 @@ impl Workspace {
             .font_weight(FontWeight::MEDIUM)
             .map(|el| {
                 if ready {
-                    el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).cursor_pointer().hover(|s| s.opacity(0.88))
+                    el.bg(rgb(theme::update_blue())).text_color(rgb(0x00ff_ffff)).cursor_pointer().hover(|s| s.opacity(0.88))
                 } else {
                     el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
                 }
             })
             .child(label)
-            .when_some(tooltip, |el, text| el.tooltip(crate::tooltip::Tooltip::text(text)))
+            .when_some(tooltip, |el, text| el.tooltip(crate::tooltip::Tooltip::below(text, TITLEBAR_HEIGHT)))
             .map(claim_press);
         Some(if ready {
             pill.on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |updater, cx| updater.restart(cx)))).into_any_element()

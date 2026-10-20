@@ -119,10 +119,8 @@ pub struct Workspace {
     _window: [Subscription; 2],
     /// `shared`'s changes, connection events and offer events.
     _hosts: [Subscription; 3],
-    /// The process's updater, whether this build updates at all, and its
-    /// changes and check outcomes.
+    /// The process's updater, and its changes and check outcomes.
     pub(crate) updater: Entity<crate::updater::Updater>,
-    pub(crate) updates: bool,
     _updater: [Subscription; 2],
 }
 
@@ -158,7 +156,6 @@ impl Workspace {
         let offer_events =
             cx.subscribe_in(&shared, window, |this, _, event: &crate::offers::OfferEvent, window, cx| this.offer_event(event, window, cx));
         let updater = crate::updater::Updater::global(cx);
-        let updates = updater.read(cx).enabled();
         let updater_subscriptions = [
             cx.observe(&updater, |_, _, cx| cx.notify()),
             cx.subscribe(&updater, |this, _, status: &crate::updater::UpdateStatus, cx| {
@@ -248,7 +245,6 @@ impl Workspace {
             ],
             _hosts: [hosts_changed, host_events, offer_events],
             updater,
-            updates,
             _updater: updater_subscriptions,
         };
         this.sync_hosts(cx);

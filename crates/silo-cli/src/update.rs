@@ -95,22 +95,52 @@ pub async fn run(check: bool) -> anyhow::Result<i32> {
             anyhow::Ok((target, version))
         })
         .collect::<Result<_, _>>()?;
-    let latest = update::latest(&feed, &std::env::temp_dir()).await.map_err(|e| anyhow!("can't check for updates: {e}"))?;
+    if let Some(app) = installed.iter().find_map(|(t, _)| if let Target::App(app) = t { Some(app) } else { None }) {
+        update::clean_stale(app);
+    }
+    let latest = update::latest(&feed).await.map_err(|e| anyhow!("can't check for updates: {e}"))?;
     let pending: Vec<&Target> = installed.iter().filter(|(_, v)| update::is_newer(v, &latest)).map(|(t, _)| t).collect();
     if check || pending.is_empty() {
         report(&installed, &latest, check).iter().for_each(|line| println!("{line}"));
         return Ok(0);
     }
-    for target in pending {
-        match target {
-            Target::App(app) => update_app(&feed, &latest, app).await?,
-            Target::Binary(exe) => update_binary(&feed, &latest, exe).await?,
-        }
+    // With Silo.app here the app runs the server (from a runtime copy); a
+    // standalone `silo up` would point the service away from it and race
+    // the app's own takeover.
+    let plist = std::fs::read_to_string(user_home.join("Library/LaunchAgents").join(format!("{}.plist", silo_client::service::LABEL))).ok();
+    let app_server = app_runs_server(installed.iter().any(|(t, _)| matches!(t, Target::App(_))), plist.as_deref(), &state);
+    let failed = for_each_target(&pending, async |target| match target {
+        Target::App(app) => update_app(&feed, &latest, app).await,
+        Target::Binary(exe) => update_binary(&feed, &latest, exe, !app_server).await,
+    })
+    .await;
+    if failed > 0 {
+        return Ok(1);
     }
     if crate::hosts::Hosts::load(&home).is_ok_and(|h| !h.hosts.is_empty()) {
         println!("run `silo remote upgrade --all` to update remote hosts");
     }
     Ok(0)
+}
+
+/// Whether Silo.app runs this machine's server: it is installed, or the
+/// launchd job (its `plist`) runs a copy from `home`'s runtime directory.
+#[must_use]
+pub fn app_runs_server(app_installed: bool, plist: Option<&str>, home: &Path) -> bool {
+    let runtime = silo_client::runtime::root(home);
+    app_installed || plist.is_some_and(|p| p.contains(&format!("<string>{}/", runtime.display())))
+}
+
+/// Run `update` for every target, reporting each failure; how many failed.
+async fn for_each_target<'a>(targets: &[&'a Target], update: impl AsyncFn(&'a Target) -> anyhow::Result<()>) -> usize {
+    let mut failed = 0;
+    for target in targets {
+        if let Err(error) = update(target).await {
+            eprintln!("silo: {error:#}");
+            failed += 1;
+        }
+    }
+    failed
 }
 
 #[cfg(target_os = "macos")]
@@ -147,7 +177,7 @@ async fn update_app(_: &Feed, _: &str, _: &Path) -> anyhow::Result<()> {
     bail!("Silo.app updates only on macOS")
 }
 
-async fn update_binary(feed: &Feed, version: &str, exe: &Path) -> anyhow::Result<()> {
+async fn update_binary(feed: &Feed, version: &str, exe: &Path, up: bool) -> anyhow::Result<()> {
     println!("downloading silo {version} for {}…", silo_proto::upgrade::platform());
     let staged = update::prepare_binary(feed, version, exe).await.map_err(|e| anyhow!("can't update silo: {e}"))?;
     // Renamed into place, so a running silo keeps its old binary.
@@ -156,6 +186,10 @@ async fn update_binary(feed: &Feed, version: &str, exe: &Path) -> anyhow::Result
         bail!("can't replace {}: {error}", exe.display());
     }
     println!("updated silo to {version}");
+    if !up {
+        println!("Silo.app runs the server; it takes over when Silo starts");
+        return Ok(());
+    }
     let status = std::process::Command::new(exe).arg("up").status().context("run `silo up`")?;
     if !status.success() {
         bail!("`silo up` failed ({status}); run it again to upgrade the server");
@@ -182,6 +216,34 @@ mod tests {
         // Standalone: the binary, and the app too when there is one.
         assert_eq!(targets(Origin::Standalone(exe.clone()), None, &roots).unwrap(), [Target::Binary(exe.clone())]);
         assert_eq!(targets(Origin::Standalone(exe.clone()), Some(app.clone()), &roots).unwrap(), [Target::App(app), Target::Binary(exe)]);
+    }
+
+    #[test]
+    fn the_app_keeps_its_server() {
+        let home = Path::new("/Users/bat/Library/Application Support/silo");
+        let job = |exe: &str| silo_client::service::launchd_plist(Path::new(exe), home);
+        let runtime = job("/Users/bat/Library/Application Support/silo/runtime/0123456789abcdef/silo");
+        let standalone = job("/Users/bat/.local/bin/silo");
+        assert!(app_runs_server(true, None, home), "Silo.app is installed");
+        assert!(app_runs_server(false, Some(&runtime), home), "the job runs the app's runtime copy");
+        assert!(!app_runs_server(false, Some(&standalone), home));
+        assert!(!app_runs_server(false, None, home));
+    }
+
+    #[tokio::test]
+    async fn every_target_is_tried() {
+        let app = Target::App("/Applications/Silo.app".into());
+        let binary = Target::Binary("/b/silo".into());
+        let tried = std::sync::Mutex::new(Vec::new());
+        let failed = for_each_target(&[&app, &binary], async |target| {
+            tried.lock().unwrap().push(target.clone());
+            if matches!(target, Target::App(_)) { bail!("can't update Silo.app") } else { Ok(()) }
+        })
+        .await;
+        assert_eq!(failed, 1);
+        assert_eq!(*tried.lock().unwrap(), [app.clone(), binary.clone()], "the binary is updated after the app failed");
+        assert_eq!(for_each_target(&[&app, &binary], async |_| bail!("no")).await, 2);
+        assert_eq!(for_each_target(&[&binary], async |_| Ok(())).await, 0);
     }
 
     #[test]

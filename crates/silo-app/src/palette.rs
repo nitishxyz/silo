@@ -261,7 +261,7 @@ impl Workspace {
                 }
             }
             Command::RenameHost => {
-                if self.available(Command::RenameHost) {
+                if self.available(Command::RenameHost, cx) {
                     self.open_rename_host(self.active_host, window, cx);
                 } else {
                     self.flash(Status::info("This Mac can't be renamed"), cx);
@@ -358,7 +358,7 @@ impl Workspace {
     }
 
     /// Whether a command applies right now (hidden from the palette if not).
-    pub(crate) fn available(&self, command: Command) -> bool {
+    pub(crate) fn available(&self, command: Command, cx: &gpui::App) -> bool {
         let host = self.hosts.get(self.active_host);
         let connected = host.is_some_and(|h| h.control.is_some());
         let paused = host.is_some_and(|h| h.paused.load(Ordering::Acquire));
@@ -395,7 +395,7 @@ impl Workspace {
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
-            Command::CheckForUpdates => self.updates,
+            Command::CheckForUpdates => self.updater.read(cx).enabled(),
             Command::NewSession => connected,
             Command::RenameSession
             | Command::CloseSession
