@@ -309,10 +309,15 @@ jobs:
         run: |
           set -eu
           cd dist
+          # Created as a draft and published once every asset is up, so
+          # `releases/latest` (the app's and `silo update`'s check) never
+          # names a release missing some.
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" ./* --clobber
           else
             prerelease=
             case "$TAG" in *-*) prerelease=--prerelease ;; esac
-            gh release create "$TAG" ./* --verify-tag --title "Silo ${TAG#v}" --generate-notes $prerelease
+            gh release create "$TAG" --draft --verify-tag --title "Silo ${TAG#v}" --generate-notes $prerelease
+            gh release upload "$TAG" ./*
+            gh release edit "$TAG" --draft=false
           fi
