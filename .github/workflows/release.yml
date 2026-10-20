@@ -14,12 +14,25 @@ name: release
 # The macOS `silo` binary is Developer ID signed and notarized too (a bare
 # binary cannot be stapled; Gatekeeper looks its ticket up online). Signing
 # is mandatory: the macOS build fails without the APPLE_* secrets.
+# Notarization takes two submissions: one zip holding `silo` and Silo.app
+# (the notary service tickets every signed item in it, so both are covered),
+# then the DMG built around the stapled app.
+#
+# A tag push builds right away, while the `ci` workflow is still testing the
+# same commit (pushed to a branch; ci does not run on tags). The release job
+# publishes only once a `ci` push run for that commit has succeeded
+# (.github/scripts/wait-for-ci.sh, up to 45 minutes): if ci fails, is
+# cancelled (a later push to the branch cancels it), never ran or does not
+# finish in time, no release is created. Re-run ci, then re-run this
+# workflow's failed jobs; the builds are kept. So push the commit, then the
+# tag (or both at once), without waiting for ci.
 #
 # workflow_dispatch builds the selected ref (or an existing tag) and uploads
 # the assets as the `release` artifact; with dry_run unchecked and a tag
-# given it publishes that tag's release, replacing existing assets. A tag
-# build takes its sources from the tag but the signing tooling
-# (scripts/bundle-macos.sh, .github/scripts/notarize.sh) from this
+# given it publishes that tag's release (behind the same ci gate), replacing
+# existing assets. A dry run skips the gate. A tag build takes its sources
+# from the tag but the release tooling (scripts/bundle-macos.sh,
+# .github/scripts/notarize.sh, .github/scripts/wait-for-ci.sh) from this
 # workflow's commit.
 #
 # Linux builds run on ubuntu-22.04 runners, so the binaries need glibc 2.35
@@ -126,20 +139,16 @@ jobs:
         env:
           SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/bundle-macos.sh
-      - name: Sign and notarize silo
+      # Notarized together with the app below.
+      - name: Sign silo
         if: matrix.os == 'macos'
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -eu
           bin=target/release/silo
           codesign --force --sign "$SILO_SIGN_IDENTITY" --options runtime --timestamp "$bin"
           codesign --verify --strict "$bin"
-          ditto -c -k "$bin" "$RUNNER_TEMP/silo.zip"
-          .github/scripts/notarize.sh "$RUNNER_TEMP/silo.zip"
       - name: Package silo
         run: |
           set -eu
@@ -178,21 +187,29 @@ jobs:
           set -eu
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           dmg="dist/Silo-$version.dmg"
-          # Stapling and validating look the ticket up online; right after
+          # Stapling and assessing look the ticket up online; right after
           # notarization the connection can drop or the ticket not be found yet.
-          stapler() {
+          retry() {
             for attempt in 1 2 3 4 5 6; do
-              if xcrun stapler "$@"; then return; fi
+              if "$@"; then return; fi
               [ "$attempt" -lt 6 ] || return 1
               sleep $((attempt * 15))
             done
           }
+          stapler() { retry xcrun stapler "$@"; }
           staple() { stapler staple "$1"; }
-          # Staple the app itself so it passes Gatekeeper offline once
-          # copied out of the DMG.
-          ditto -c -k --keepParent target/Silo.app "$RUNNER_TEMP/Silo.zip"
-          .github/scripts/notarize.sh "$RUNNER_TEMP/Silo.zip"
+          # One submission tickets the bare `silo` (signed above, already in
+          # the tarball) and the app. Staple the app itself so it passes
+          # Gatekeeper offline once copied out of the DMG.
+          notary=$(mktemp -d)/silo-notary
+          mkdir "$notary"
+          ditto target/Silo.app "$notary/Silo.app"
+          cp target/release/silo "$notary/silo"
+          ditto -c -k --keepParent "$notary" "$RUNNER_TEMP/silo-notary.zip"
+          .github/scripts/notarize.sh "$RUNNER_TEMP/silo-notary.zip"
           staple target/Silo.app
+          notarized() { spctl -a -vv -t install "$1" 2>&1 | tee /dev/stderr | grep '^source=Notarized Developer ID$' > /dev/null; }
+          retry notarized target/release/silo
           stage=$(mktemp -d)
           ditto target/Silo.app "$stage/Silo.app"
           ln -s /Applications "$stage/Applications"
@@ -242,9 +259,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: write
+      actions: read
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -305,6 +323,20 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+      # Publish only what ci passed (see the header). The gate script comes
+      # from this workflow's commit, like the signing tooling.
+      - name: Wait for ci
+        if: env.PUBLISH == 'true'
+        run: |
+          set -eu
+          sha=$(git rev-parse HEAD)
+          script=.github/scripts/wait-for-ci.sh
+          if [ "$GITHUB_SHA" != "$sha" ]; then
+            git fetch --no-tags --depth 1 origin "$GITHUB_SHA"
+            git show "FETCH_HEAD:$script" > "$RUNNER_TEMP/wait-for-ci.sh"
+            script=$RUNNER_TEMP/wait-for-ci.sh
+          fi
+          sh "$script" "$sha" 2700
       - name: Publish
         if: env.PUBLISH == 'true'
         run: |

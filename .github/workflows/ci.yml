@@ -3,7 +3,12 @@ name: ci
 on:
   push:
     branches: ["**"]
+    # Docs and the site (pages.yml checks it) cannot break the build. A
+    # release tag needs a ci run on its commit (release.yml), so tag code
+    # commits.
+    paths-ignore: ["docs/**", "site/**", "**/*.md"]
   pull_request:
+    paths-ignore: ["docs/**", "site/**", "**/*.md"]
 
 permissions:
   contents: read
