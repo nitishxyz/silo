@@ -29,21 +29,33 @@ impl PendingRatio {
 }
 use crate::{
     commands::{Command, fuzzy},
+    finder::{self, Preview, Right, Target},
     focus::Direction,
-    hosts::HostState,
+    settings_panel::{SettingsEvent, SettingsSnapshot},
+    settings_table::{Choice, Kind, SettingId},
+    terminal_prefs::TerminalPrefs,
     text_field::{FieldEvent, TextField},
     theme,
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
 
+/// The ⌘P finder (see `finder.rs`) and its sub-steps.
 pub struct Palette {
     field: Entity<TextField>,
     /// The search query, restored when an input step goes back.
     query: String,
+    /// A choice list's filter.
+    filter: String,
     selected: usize,
     step: Step,
     scroll: ScrollHandle,
     error: Option<String>,
+    /// Something worth knowing about the last change; not an error.
+    note: Option<String>,
+    /// Settings as they were when the step opened (or last changed).
+    snapshot: SettingsSnapshot,
+    /// Recent picks, newest first.
+    recent: Vec<String>,
     _sub: Subscription,
 }
 
@@ -53,6 +65,10 @@ enum Step {
     Input(Input),
     Confirm(Command),
     RemoveHost,
+    /// A choice setting's values; the theme is previewed live.
+    Choice(SettingId, Option<Box<Preview<TerminalPrefs>>>),
+    /// A number setting, typed.
+    Number(SettingId),
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +80,16 @@ enum Input {
     /// (host index, current name)
     HostName(usize, String),
     OpenUrl(String),
+}
+
+impl Step {
+    /// End a theme preview this step runs: the original theme to put back
+    /// when another was shown. Any other step, or a step whose preview was
+    /// ended, gives `None`.
+    fn end_preview(&mut self) -> Option<TerminalPrefs> {
+        let Self::Choice(_, preview) = self else { return None };
+        preview.take()?.cancel()
+    }
 }
 
 impl Input {
@@ -87,8 +113,8 @@ impl Input {
 
 #[derive(Clone, Debug)]
 enum Entry {
-    Command { command: Command, ranges: Vec<std::ops::Range<usize>> },
-    Switch { host: usize, id: String, name: String, ranges: Vec<std::ops::Range<usize>> },
+    Item(finder::Item),
+    Choice { choice: Choice, ranges: Vec<std::ops::Range<usize>> },
     Confirm(Command),
     Back,
     RemoveHost(usize),
@@ -126,7 +152,7 @@ impl Workspace {
     }
 
     /// A command's palette subtitle in the current state.
-    fn subtitle(&self, command: Command) -> Option<&'static str> {
+    pub(crate) fn subtitle(&self, command: Command) -> Option<&'static str> {
         match command {
             Command::RestartServer if self.incompatible().is_some() => Some("Upgrades it to this build"),
             other => other.subtitle(),
@@ -321,7 +347,7 @@ impl Workspace {
     }
 
     /// Whether a command applies right now (hidden from the palette if not).
-    fn available(&self, command: Command) -> bool {
+    pub(crate) fn available(&self, command: Command) -> bool {
         let host = self.hosts.get(self.active_host);
         let connected = host.is_some_and(|h| h.control.is_some());
         let paused = host.is_some_and(|h| h.paused.load(Ordering::Acquire));
@@ -525,27 +551,57 @@ impl Workspace {
     }
 
     fn open_palette_step(&mut self, step: Step, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving a theme list (for any other step) puts the theme back.
+        self.cancel_preview(window, cx);
         self.close_switcher(window, cx);
         // One modal at a time; the palette replaces the settings panel.
         self.settings = None;
+        let snapshot = matches!(step, Step::Search | Step::Choice(..) | Step::Number(_)).then(|| self.settings_snapshot(None, cx));
         if self.palette.is_none() {
-            let field = cx.new(|cx| TextField::new("Type a command…", cx));
+            let field = cx.new(|cx| TextField::new(finder::PLACEHOLDER, cx));
             let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.palette_event(event, window, cx));
-            self.palette =
-                Some(Palette { field, query: String::new(), selected: 0, step: Step::Search, scroll: ScrollHandle::new(), error: None, _sub: sub });
+            self.palette = Some(Palette {
+                field,
+                query: String::new(),
+                filter: String::new(),
+                selected: 0,
+                step: Step::Search,
+                scroll: ScrollHandle::new(),
+                error: None,
+                note: None,
+                snapshot: SettingsSnapshot::default(),
+                recent: finder::load_recent(&self.home),
+                _sub: sub,
+            });
         }
         let Some(palette) = self.palette.as_mut() else { return };
+        if let Some(snapshot) = snapshot {
+            palette.snapshot = snapshot;
+        }
+        palette.selected = match &step {
+            // Start on the current value.
+            Step::Choice(id, _) => id.choices(&palette.snapshot).iter().position(|c| c.selected).unwrap_or(0),
+            _ => 0,
+        };
         palette.step = step.clone();
-        palette.selected = 0;
         palette.error = None;
+        palette.note = None;
+        palette.filter.clear();
         let placeholder = match &step {
-            Step::Search => "Type a command or session…".to_owned(),
+            Step::Search => finder::PLACEHOLDER.to_owned(),
             Step::Input(input) => input.placeholder(),
             Step::Confirm(_) => "↩ confirm · esc back".into(),
             Step::RemoveHost => "Choose a host to remove".into(),
+            Step::Choice(..) => "Filter".into(),
+            Step::Number(id) => id.number(&palette.snapshot).unwrap_or_default(),
         };
         let restore = if matches!(step, Step::Search) { palette.query.clone() } else { text };
         let field = palette.field.clone();
+        let selected = palette.selected;
+        let row = self.palette_row(selected, cx);
+        if let Some(palette) = self.palette.as_ref() {
+            palette.scroll.scroll_to_item(row);
+        }
         field.update(cx, |f, cx| {
             f.set_placeholder(placeholder, cx);
             f.replace_text(restore, cx);
@@ -557,49 +613,45 @@ impl Workspace {
     }
 
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
+        self.cancel_preview(window, cx);
+        if let Some(palette) = self.palette.take() {
+            drop(palette);
             self.refocus_terminal(window, cx);
             cx.notify();
         }
     }
 
-    fn entries(&self) -> Vec<Entry> {
+    /// Put back the theme a choice list is previewing, if any, and end
+    /// the preview. Re-reported to the servers: a pane that attached
+    /// meanwhile reported the previewed one (the servers ignore a config
+    /// they already have).
+    fn cancel_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(original) = self.palette.as_mut().and_then(|p| p.step.end_preview()) {
+            theme::install(original, theme::load_problem());
+            self.apply_terminal_theme(crate::settings::Reach::Servers, window, cx);
+        }
+    }
+
+    /// The window is gone: put back a theme it was previewing.
+    pub(crate) fn release_preview(&mut self, cx: &mut gpui::App) {
+        if let Some(original) = self.palette.as_mut().and_then(|p| p.step.end_preview()) {
+            crate::settings::restore_terminal_theme(original, cx);
+        }
+    }
+
+    fn entries(&self, cx: &gpui::App) -> Vec<Entry> {
         let Some(palette) = &self.palette else { return Vec::new() };
         match &palette.step {
-            Step::Search => {
-                let query = palette.query.trim();
-                let mut scored: Vec<(i32, usize, Entry)> = Command::ALL
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| self.available(**c))
-                    .filter_map(|(i, c)| fuzzy(query, c.title()).map(|(score, ranges)| (score, i, Entry::Command { command: *c, ranges })))
-                    .collect();
-                if !query.is_empty() {
-                    scored.sort_by_key(|(score, i, _)| (-score, *i));
-                }
-                let mut entries: Vec<Entry> = scored.into_iter().map(|(_, _, e)| e).collect();
-                if !query.is_empty() {
-                    let current = self.view.as_ref().map(|v| v.session.id.as_str());
-                    let mut sessions: Vec<(i32, Entry)> = Vec::new();
-                    for (host, entry) in self.hosts.iter().enumerate() {
-                        if entry.removed || entry.state != HostState::Connected {
-                            continue;
-                        }
-                        for s in &entry.sessions {
-                            if host == self.active_host && Some(s.id.as_str()) == current {
-                                continue;
-                            }
-                            if let Some((score, ranges)) = fuzzy(query, &s.name) {
-                                sessions.push((score, Entry::Switch { host, id: s.id.clone(), name: s.name.clone(), ranges }));
-                            }
-                        }
-                    }
-                    sessions.sort_by_key(|(score, _)| -score);
-                    entries.extend(sessions.into_iter().map(|(_, e)| e));
-                }
-                entries
-            }
-            Step::Input(_) => Vec::new(),
+            Step::Search => self.finder_items(&palette.query, &palette.snapshot, &palette.recent, cx).into_iter().map(Entry::Item).collect(),
+            Step::Choice(id, _) => id
+                .choices(&palette.snapshot)
+                .into_iter()
+                .filter_map(|choice| {
+                    let (_, ranges) = fuzzy(&palette.filter, &choice.label)?;
+                    Some(Entry::Choice { choice, ranges })
+                })
+                .collect(),
+            Step::Input(_) | Step::Number(_) => Vec::new(),
             Step::Confirm(command) => vec![Entry::Confirm(*command), Entry::Back],
             Step::RemoveHost => {
                 self.hosts.iter().enumerate().filter(|(_, h)| !h.info.local && !h.removed).map(|(i, _)| Entry::RemoveHost(i)).collect()
@@ -607,29 +659,66 @@ impl Workspace {
         }
     }
 
+    /// The list row of entry `selected` (search results have group labels).
+    fn palette_row(&self, selected: usize, cx: &gpui::App) -> usize {
+        if !self.palette.as_ref().is_some_and(|p| matches!(p.step, Step::Search)) {
+            return selected;
+        }
+        let groups: Vec<finder::Group> = self.entries(cx).iter().filter_map(|e| if let Entry::Item(i) = e { Some(i.group) } else { None }).collect();
+        finder::row_index(&groups, selected)
+    }
+
+    fn select_entry(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let row = self.palette_row(index, cx);
+        let Some(palette) = self.palette.as_mut() else { return };
+        palette.selected = index;
+        palette.scroll.scroll_to_item(row);
+        self.preview_selected(window, cx);
+        cx.notify();
+    }
+
+    /// While choosing a theme, show the selected one everywhere.
+    fn preview_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.entries(cx);
+        let Some(palette) = self.palette.as_mut() else { return };
+        let Step::Choice(_, Some(preview)) = &mut palette.step else { return };
+        let Some(Entry::Choice { choice: Choice { event: SettingsEvent::SetTheme(id), .. }, .. }) = entries.get(palette.selected) else { return };
+        let mut prefs = theme::prefs();
+        prefs.theme.clone_from(id);
+        if preview.show(prefs.clone()) {
+            self.preview_terminal_prefs(prefs, window, cx);
+        }
+    }
+
     fn palette_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.entries().len();
+        let count = self.entries(cx).len();
         let Some(palette) = self.palette.as_mut() else { return };
         match event {
             FieldEvent::Changed(text) => {
-                if matches!(palette.step, Step::Search) {
-                    palette.query = text.clone();
-                    palette.selected = 0;
-                    palette.scroll.scroll_to_item(0);
-                }
                 palette.error = None;
+                palette.note = None;
+                match palette.step {
+                    Step::Search if palette.query != *text => {
+                        palette.query = text.clone();
+                        self.select_entry(0, window, cx);
+                    }
+                    Step::Choice(..) if palette.filter != *text => {
+                        palette.filter = text.clone();
+                        self.select_entry(0, window, cx);
+                    }
+                    _ => {}
+                }
             }
             FieldEvent::Up | FieldEvent::Down if count > 0 => {
                 let delta = if matches!(event, FieldEvent::Up) { count - 1 } else { 1 };
-                palette.selected = (palette.selected + delta) % count;
-                palette.scroll.scroll_to_item(palette.selected);
+                let next = (palette.selected + delta) % count;
+                self.select_entry(next, window, cx);
             }
             FieldEvent::Up | FieldEvent::Down => {}
             FieldEvent::Cancel => {
-                if matches!(palette.step, Step::Search) {
-                    self.close_palette(window, cx);
-                } else {
-                    self.open_palette_step(Step::Search, String::new(), window, cx);
+                match &palette.step {
+                    Step::Search => self.close_palette(window, cx),
+                    _ => self.open_palette_step(Step::Search, String::new(), window, cx),
                 }
                 return;
             }
@@ -638,9 +727,16 @@ impl Workspace {
                 let text = palette.field.read(cx).text.trim().to_owned();
                 match step {
                     Step::Input(input) => self.submit_input(input, text, window, cx),
+                    Step::Number(id) => match id.parse(&text) {
+                        Ok(event) => self.apply_setting(id, &event, window, cx),
+                        Err(error) => {
+                            palette.error = Some(error);
+                            cx.notify();
+                        }
+                    },
                     _ => {
                         let selected = palette.selected;
-                        if let Some(entry) = self.entries().get(selected).cloned() {
+                        if let Some(entry) = self.entries(cx).get(selected).cloned() {
                             self.activate_entry(entry, window, cx);
                         }
                     }
@@ -649,6 +745,22 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Tab on a choice setting opens its values.
+    fn palette_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(palette) = &self.palette else { return false };
+        if !matches!(palette.step, Step::Search) {
+            return false;
+        }
+        match self.entries(cx).get(palette.selected) {
+            Some(Entry::Item(item)) if matches!(item.target, Target::Setting(id) if id.setting().kind == Kind::Choice) => {
+                let item = item.clone();
+                self.pick(item, window, cx);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn submit_input(&mut self, input: Input, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -688,12 +800,113 @@ impl Workspace {
         }
     }
 
-    fn activate_entry(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
-        match entry {
-            Entry::Command { command, .. } => self.run(command, window, cx),
-            Entry::Switch { host, id, .. } => {
+    /// Remember a finder pick for the empty query and the recency boost.
+    fn remember_pick(&mut self, key: &str) {
+        if key.is_empty() {
+            return;
+        }
+        let Some(palette) = self.palette.as_mut() else { return };
+        finder::remember(&mut palette.recent, key);
+        finder::save_recent(&self.home, &palette.recent);
+    }
+
+    /// Apply a setting's change from a sub-step, then close.
+    fn apply_setting(&mut self, id: SettingId, event: &SettingsEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_pick(&finder::setting_key(id));
+        // Kept: closing must not put a previewed theme back (the change
+        // below reports the kept one to the servers).
+        if let Some(palette) = self.palette.as_mut() {
+            drop(palette.step.end_preview());
+        }
+        let message = self.apply_settings_event(event, window, cx).and_then(crate::settings::Outcome::message);
+        self.close_palette(window, cx);
+        if let Some(message) = message {
+            self.flash(message, cx);
+        }
+    }
+
+    fn pick(&mut self, item: finder::Item, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(item.target, Target::OpenUrl(_)) {
+            self.remember_pick(&item.key);
+        }
+        match item.target {
+            Target::Command(command) => self.run(command, window, cx),
+            Target::Setting(id) => match id.setting().kind {
+                Kind::Toggle => {
+                    let on = self.palette.as_ref().and_then(|p| id.on(&p.snapshot));
+                    if let Some((on, event)) = on.and_then(|on| Some((!on, id.toggled(!on)?))) {
+                        let outcome = self.apply_settings_event(&event, window, cx).unwrap_or_default();
+                        if let Some(palette) = self.palette.as_mut() {
+                            // The row's value shows the flip.
+                            id.set_on(&mut palette.snapshot, on);
+                            palette.note = outcome.note();
+                            palette.error = outcome.error;
+                        }
+                    }
+                }
+                Kind::Choice => {
+                    let preview = (id == SettingId::Theme).then(|| Box::new(Preview::new(theme::prefs())));
+                    self.open_palette_step(Step::Choice(id, preview), String::new(), window, cx);
+                }
+                Kind::Number => self.open_palette_step(Step::Number(id), String::new(), window, cx),
+                Kind::Open => {
+                    self.close_palette(window, cx);
+                    self.open_settings_at(id, window, cx);
+                }
+            },
+            Target::Session { host, id } => {
                 self.close_palette(window, cx);
                 self.open_session(host, id, window, cx);
+            }
+            Target::Host(index) => {
+                self.close_palette(window, cx);
+                self.switch_host(index, window, cx);
+            }
+            Target::Upgrade(index) => {
+                self.close_palette(window, cx);
+                self.switch_host(index, window, cx);
+                if self.hosts.get(index).is_some_and(|h| h.incompatible.is_some()) {
+                    self.upgrade_server(cx);
+                }
+            }
+            Target::Tab { index } => {
+                self.close_palette(window, cx);
+                self.select_window(index);
+            }
+            Target::Pane { index, block } => {
+                self.close_palette(window, cx);
+                let active = self.active_window().map(|w| w.id.clone());
+                let target = self.view.as_ref().and_then(|v| v.session.windows.get(index)).map(|w| w.id.clone());
+                if target.is_some() && target == active {
+                    self.focus_block(&block, window, cx);
+                } else {
+                    // The server's focus is followed once the tab shows.
+                    self.call(Method::BlockFocus { block_id: block });
+                    self.select_window(index);
+                }
+            }
+            Target::Page(url) | Target::OpenUrl(url) => {
+                self.close_palette(window, cx);
+                self.open_page_tab(url);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A new tab holding a browser on `url`.
+    fn open_page_tab(&mut self, url: String) {
+        let Some(view) = &self.view else { return };
+        let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
+        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url) });
+    }
+
+    fn activate_entry(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        match entry {
+            Entry::Item(item) => self.pick(item, window, cx),
+            Entry::Choice { choice, .. } => {
+                if let Some(Step::Choice(id, _)) = self.palette.as_ref().map(|p| p.step.clone()) {
+                    self.apply_setting(id, &choice.event, window, cx);
+                }
             }
             Entry::Confirm(command) => self.execute(command, window, cx),
             Entry::Back => self.open_palette_step(Step::Search, String::new(), window, cx),
@@ -717,22 +930,47 @@ impl Workspace {
         let styled = |text: String, ranges: &[std::ops::Range<usize>]| {
             StyledText::new(text).with_highlights(ranges.iter().map(|r| (r.clone(), highlight)).collect::<Vec<_>>())
         };
-        let (title, subtitle, hint, danger): (AnyElement, Option<String>, Option<String>, bool) = match entry {
-            Entry::Command { command, ranges } => (
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(styled(command.title().into(), ranges))
-                    .when(self.checked(*command), |el| el.child(crate::assets::icon("check", 12.0, theme::accent())))
-                    .into_any_element(),
-                Some(self.subtitle(*command).map_or_else(|| command.group().to_owned(), |s| format!("{} · {s}", command.group()))),
-                command.hint(),
+        let check = |el: gpui::Div, on: bool| el.when(on, |el| el.child(crate::assets::icon("check", 12.0, theme::accent())));
+        let (title, subtitle, right, danger): (AnyElement, Option<String>, Option<Right>, bool) = match entry {
+            Entry::Item(item) => (
+                check(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(div().flex().child(item.lead).child(styled(item.text.clone(), &item.found.ranges))),
+                    item.check,
+                )
+                .into_any_element(),
+                item.detail.clone(),
+                item.right.clone(),
                 false,
             ),
-            Entry::Switch { host, name, ranges, .. } => (
-                div().flex().child("Switch to ").child(styled(name.clone(), ranges)).into_any_element(),
-                Some(self.hosts[*host].info.name.clone()),
+            Entry::Choice { choice, ranges, .. } => (
+                check(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .children(choice.swatch.map(|(bg, fg)| {
+                            div()
+                                .size(px(16.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .continuous(4.0)
+                                .bg(rgb(bg))
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .text_size(px(9.0))
+                                .text_color(rgb(fg))
+                                .child("A")
+                        }))
+                        .child(styled(choice.label.clone(), ranges)),
+                    choice.selected,
+                )
+                .into_any_element(),
+                None,
                 None,
                 false,
             ),
@@ -743,9 +981,9 @@ impl Workspace {
                     }
                     other => other.title().to_owned(),
                 };
-                (div().child(label).into_any_element(), self.subtitle(*command).map(str::to_owned), Some("↩".into()), true)
+                (div().child(label).into_any_element(), self.subtitle(*command).map(str::to_owned), Some(Right::Shortcut("↩".into())), true)
             }
-            Entry::Back => (div().child("Cancel").into_any_element(), None, Some("esc".into()), false),
+            Entry::Back => (div().child("Cancel").into_any_element(), None, Some(Right::Shortcut("esc".into())), false),
             Entry::RemoveHost(i) => {
                 let h = &self.hosts[*i];
                 (div().child(format!("Remove “{}”", h.info.name)).into_any_element(), None, None, true)
@@ -779,22 +1017,28 @@ impl Workspace {
                     .child(div().flex_none().text_color(rgb(if danger { theme::danger() } else { theme::foreground() })).child(title))
                     .children(subtitle.map(|s| div().min_w_0().text_ellipsis().text_size(px(11.5)).text_color(rgb(theme::muted())).child(s))),
             )
-            .children(hint.map(|h| {
-                div()
-                    .flex_none()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .continuous(5.0)
-                    .bg(theme::hover_fill())
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme::muted()))
-                    .child(h)
+            .children(right.map(|right| {
+                match right {
+                    Right::Shortcut(keys) => div()
+                        .flex_none()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .continuous(5.0)
+                        .bg(theme::hover_fill())
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::muted()))
+                        .child(keys),
+                    Right::Value(value) => {
+                        div().flex_none().max_w(px(200.0)).text_ellipsis().text_size(px(12.0)).text_color(rgb(theme::muted())).child(value)
+                    }
+                }
             }))
-            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                if let Some(p) = this.palette.as_mut()
-                    && p.selected != index
-                {
-                    p.selected = index;
+            .on_mouse_move(cx.listener(move |this, _, window, cx| {
+                if this.palette.as_ref().is_some_and(|p| p.selected != index) {
+                    if let Some(p) = this.palette.as_mut() {
+                        p.selected = index;
+                    }
+                    this.preview_selected(window, cx);
                     cx.notify();
                 }
             }))
@@ -802,16 +1046,36 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn group_label(label: &'static str, first: bool) -> AnyElement {
+        div()
+            .flex_none()
+            .px(px(16.0))
+            .when(!first, |el| el.pt(px(8.0)))
+            .pb(px(2.0))
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(theme::muted()))
+            .child(label)
+            .into_any_element()
+    }
+
     pub(crate) fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = self.palette.as_ref()?;
-        let entries = self.entries();
+        let entries = self.entries(cx);
         let header = match &palette.step {
             Step::Search => None,
             Step::Input(input) => Some(input.prompt()),
             Step::Confirm(command) => Some(format!("{}?", command.title())),
             Step::RemoveHost => Some("Remove which host?".into()),
+            Step::Choice(id, _) | Step::Number(id) => Some(id.setting().title.to_owned()),
         };
-        let input_step = matches!(palette.step, Step::Input(_));
+        let footer = match &palette.step {
+            Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back"),
+            Step::Choice(_, Some(_)) => Some("↩ keep · esc restore"),
+            Step::Choice(_, None) => Some("↩ apply · esc back"),
+            _ => None,
+        };
+        let input_step = matches!(palette.step, Step::Input(_) | Step::Number(_));
         let viewport = f32::from(window.viewport_size().height);
         let mut list = div()
             .id("palette-list")
@@ -821,7 +1085,14 @@ impl Workspace {
             .max_h(px((viewport - 200.0).clamp(120.0, 420.0)))
             .overflow_y_scroll()
             .track_scroll(&palette.scroll);
+        let mut previous = None;
         for (index, entry) in entries.iter().enumerate() {
+            if let Entry::Item(item) = entry
+                && previous != Some(item.group)
+            {
+                list = list.child(Self::group_label(item.group.label(), previous.is_none()));
+                previous = Some(item.group);
+            }
             list = list.child(self.entry_row(entry, index, index == palette.selected, cx));
         }
         let empty = entries.is_empty() && !input_step;
@@ -839,6 +1110,12 @@ impl Workspace {
             .overflow_hidden()
             .font_family(theme::ui_font())
             .text_size(px(13.5))
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let k = &event.keystroke;
+                if k.key == "tab" && !k.modifiers.shift && this.palette_tab(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .children(header.map(|h| div().px(px(16.0)).pt(px(10.0)).text_size(px(11.5)).text_color(rgb(theme::muted())).child(h)))
             .child(
                 div()
@@ -850,15 +1127,27 @@ impl Workspace {
                     .px(px(16.0))
                     .text_size(px(15.0))
                     .when(!input_step || !entries.is_empty(), |el| el.border_b_1().border_color(rgb(theme::border())))
-                    .child(crate::assets::icon("terminal", 16.0, theme::muted()))
+                    .child(crate::assets::icon(
+                        if matches!(palette.step, Step::Search) { "settings-search" } else { "terminal" },
+                        16.0,
+                        theme::muted(),
+                    ))
                     .child(palette.field.clone()),
             )
             .children(palette.error.clone().map(|e| div().px(px(16.0)).py(px(6.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)))
-            .when(input_step, |el| {
-                el.child(div().px(px(16.0)).py(px(8.0)).text_size(px(11.5)).text_color(rgb(theme::muted())).child("↩ apply · esc back"))
-            })
-            .when(empty, |el| el.child(div().px(px(16.0)).py(px(12.0)).text_color(rgb(theme::muted())).child("No matching commands")))
-            .when(!entries.is_empty(), |el| el.child(list));
+            .children(palette.note.clone().map(|n| div().px(px(16.0)).py(px(6.0)).text_size(px(11.5)).text_color(rgb(theme::muted())).child(n)))
+            .when(empty, |el| el.child(div().px(px(16.0)).py(px(12.0)).text_color(rgb(theme::muted())).child("No matches")))
+            .when(!entries.is_empty(), |el| el.child(list))
+            .children(footer.map(|f| {
+                div()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme::muted()))
+                    .child(f)
+            }));
         Some(
             div()
                 .id("palette-backdrop")
@@ -888,5 +1177,27 @@ mod tests {
         assert_eq!(Input::RenameTab("w1".into(), "zsh".into()).placeholder(), "zsh");
         assert_eq!(Input::HostName(1, "mini".into()).placeholder(), "mini");
         assert_eq!(Input::OpenUrl("b1".into()).placeholder(), "Address");
+    }
+
+    #[test]
+    fn leaving_a_theme_preview_puts_the_original_back_once() {
+        let original = TerminalPrefs::default();
+        let previewing = |shown: &str| {
+            let mut preview = Preview::new(original.clone());
+            preview.show(TerminalPrefs { theme: shown.into(), ..original.clone() });
+            Step::Choice(SettingId::Theme, Some(Box::new(preview)))
+        };
+        // Escape, closing, another step (Confirm, Rename…) or the window
+        // going all end the preview the same way.
+        let mut step = previewing("silo-light");
+        assert_eq!(step.end_preview(), Some(original.clone()));
+        assert!(matches!(step, Step::Choice(SettingId::Theme, None)), "the preview is gone");
+        assert_eq!(step.end_preview(), None, "put back once");
+        // Back on the original: nothing to put back.
+        assert_eq!(previewing(&original.theme).end_preview(), None);
+        for mut other in [Step::Search, Step::Confirm(Command::CloseSession), Step::RemoveHost, Step::Number(SettingId::FontSize)] {
+            assert_eq!(other.end_preview(), None);
+        }
+        assert_eq!(Step::Choice(SettingId::CursorShape, None).end_preview(), None);
     }
 }

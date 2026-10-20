@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod keys;
 pub mod proxy;
+pub mod stages;
 
-pub use bench::{Password, Report, Row, Stats, bench};
+pub use bench::{Link, Password, Report, Row, Stats, bench, bench_with};
 pub use proxy::{Proxy, ProxyConfig};

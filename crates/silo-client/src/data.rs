@@ -59,6 +59,7 @@ impl DataStream {
                 if write_frame(&mut writer, &frame).await.is_err() || writer.flush().await.is_err() {
                     break;
                 }
+                tracing::trace!(target: "silo::latency", stage = "client_sent", kind = frame.kind, len = frame.payload.len());
             }
             let _ = writer.shutdown().await;
         });
@@ -66,6 +67,7 @@ impl DataStream {
         let mut frames = spawn_reader(reader, 256);
         tokio::spawn(async move {
             while let Some(Ok(frame)) = frames.recv().await {
+                tracing::trace!(target: "silo::latency", stage = "client_received", kind = frame.kind, len = frame.payload.len());
                 match ServerData::from_frame(frame) {
                     Ok(data) => {
                         if in_tx.send(data).is_err() {

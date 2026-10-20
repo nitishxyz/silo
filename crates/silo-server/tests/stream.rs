@@ -504,3 +504,110 @@ mod control {
         control.call_value(Method::ServerShutdown {}).await.unwrap();
     }
 }
+
+/// The driving client's stream paces the program: while it applies
+/// nothing the PTY is held about a megabyte ahead of it, and acknowledging
+/// lets the whole output through without the stream being cut. Held past
+/// the hold limit, the program runs on and the stalled stream is cut.
+#[tokio::test]
+async fn driver_paces_output_until_it_stalls() {
+    const TOTAL: u64 = 20_000_000;
+    let script = format!("sleep 0.3; head -c {TOTAL} /dev/zero | tr '\\0' a; sleep 30");
+    let (block, _notes) = spawn("b-paced", TermSize::new(40, 10), &script);
+    let mut client = Client::attach(&block, 1, None);
+    block.send(BlockMsg::Own { client_id: 7, mode: silo_proto::control::OwnMode::Take });
+    let start = client.welcome().await.offset;
+    // Unacknowledged: held near the driver window (plus the reader's read-ahead).
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let held = block.checkpoint().await.unwrap().offset;
+    assert!(held > start && held < start + 2_000_000, "held at {held}");
+    let mut next = start;
+    while next < TOTAL {
+        let Some(frame) = client.recv(Duration::from_secs(20)).await else {
+            panic!("driver starved at {next} (cut: {})", client.sink.is_cancelled());
+        };
+        if let ServerData::Output { offset, bytes } = ServerData::from_frame(frame).unwrap() {
+            assert_eq!(offset, next, "gap in driver output");
+            next += bytes.len() as u64;
+            block.send(BlockMsg::Ack { sub_id: 1, offset: next });
+        }
+    }
+    assert!(!client.sink.is_cancelled(), "a driver that keeps up is never cut");
+    block.send(BlockMsg::Shutdown);
+
+    let (block, _notes) = spawn("b-stalled", TermSize::new(40, 10), &script);
+    let stalled = Client::attach(&block, 1, None);
+    block.send(BlockMsg::Own { client_id: 7, mode: silo_proto::control::OwnMode::Take });
+    wait_cancelled(&stalled.sink).await;
+    wait_offset(&block, TOTAL).await;
+    block.send(BlockMsg::Shutdown);
+}
+
+/// After the child exits the actor waits only briefly for output still in
+/// the PTY, so it must stop holding the reader for a stalled driver then,
+/// or that output is lost. (On macOS a child's exit waits for its output to
+/// drain; on Linux it does not, so the exit is reported here as the exit
+/// watcher reports it, while output is still on its way.) The flood lands
+/// before the client takes the block; taking it puts the driver past its
+/// window, and the reader parks after handing over `X`.
+#[tokio::test]
+async fn output_held_for_a_stalled_driver_survives_the_exit() {
+    const FLOOD: u64 = 1_200_000;
+    let script = format!("sleep 0.3; head -c {FLOOD} /dev/zero | tr '\\0' a; sleep 1; printf X; sleep 0.4; printf END-MARKER; sleep 30");
+    let (block, _notes) = spawn("b-held-exit", TermSize::new(40, 10), &script);
+    // Never acknowledges.
+    let _driver = Client::attach(&block, 1, None);
+    wait_offset(&block, FLOOD).await;
+    block.send(BlockMsg::Own { client_id: 7, mode: silo_proto::control::OwnMode::Take });
+    wait_offset(&block, FLOOD + 1).await;
+    // The marker follows within the actor's wait after this exit.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    block.send(BlockMsg::ChildExited(Some(0)));
+    wait_offset(&block, FLOOD + b"XEND-MARKER".len() as u64).await;
+    block.send(BlockMsg::Shutdown);
+}
+
+/// A focus report (mode 1004) does not make its client the driver whose
+/// configuration the server terminal answers with; typing does.
+#[tokio::test]
+async fn focus_reports_do_not_take_the_terminal() {
+    let (block, _notes) = spawn("b-focus", TermSize::new(40, 10), "cat");
+    let attach = |sub_id, client_id| {
+        let (tx, rx) = unbounded_channel();
+        let sink = Sink::new(tx);
+        block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: None, sink: sink.clone(), remote: false })));
+        Client { sink, rx }
+    };
+    let mut a = attach(1, 3);
+    let _b = attach(2, 4);
+    a.welcome().await;
+    let config = |background| TerminalConfig { background, ..TerminalConfig::default() };
+    block.send(BlockMsg::Config { client_id: 3, config: config(0x0011_1111) });
+    block.send(BlockMsg::Config { client_id: 4, config: config(0x0022_2222) });
+    block.send(BlockMsg::StreamInput { sub_id: 2, bytes: b"x".to_vec() });
+    block.send(BlockMsg::StreamInput { sub_id: 1, bytes: b"\x1b[O".to_vec() });
+    let configured: Vec<u32> = a
+        .drain(Duration::from_millis(600))
+        .await
+        .into_iter()
+        .filter_map(|data| match data {
+            ServerData::Configured(config) => Some(config.background),
+            _ => None,
+        })
+        .collect();
+    // The first client's before anyone typed, then client 4's once it typed;
+    // client 3 losing focus afterwards does not take it back.
+    assert_eq!(configured.last(), Some(&0x0022_2222), "{configured:x?}");
+    block.send(BlockMsg::StreamInput { sub_id: 1, bytes: b"y".to_vec() });
+    let typed: Vec<u32> = a
+        .drain(Duration::from_millis(600))
+        .await
+        .into_iter()
+        .filter_map(|data| match data {
+            ServerData::Configured(config) => Some(config.background),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed, [0x0011_1111], "typing does take it");
+    block.send(BlockMsg::Shutdown);
+}

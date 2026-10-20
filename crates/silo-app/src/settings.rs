@@ -280,36 +280,43 @@ impl Workspace {
     }
 
     /// Change the terminal preferences: validate, apply live (theme, font,
-    /// every attached terminal), then save atomically. Returns a problem to
-    /// show, if any; a failed save keeps the change for this run and says so.
-    pub(crate) fn update_terminal_prefs(
-        &mut self,
-        change: impl FnOnce(&mut TerminalPrefs),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
+    /// every attached terminal, reported to the servers), then save
+    /// atomically. A failed save keeps the change for this run and is the
+    /// error; adjusted values are notes.
+    fn change_terminal_prefs(&mut self, change: impl FnOnce(&mut TerminalPrefs), window: &mut Window, cx: &mut Context<Self>) -> Outcome {
         let mut prefs = theme::prefs();
         change(&mut prefs);
         let (prefs, problems) = prefs.validated();
         let saved = terminal_prefs::save(&self.home, &prefs);
         let save_problem = saved.err().map(|e| format!("Applied, but could not save terminal settings: {e}"));
         theme::install(prefs, save_problem.clone());
-        self.apply_terminal_theme(window, cx);
-        let mut messages: Vec<String> = save_problem.into_iter().chain(problems).collect();
-        if messages.is_empty() {
-            return None;
-        }
-        messages.dedup();
-        Some(messages.join(" "))
+        self.apply_terminal_theme(Reach::Servers, window, cx);
+        Outcome { error: save_problem, notes: problems }
     }
 
-    /// Install the current theme's font and colors everywhere.
-    fn apply_terminal_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Install the current theme's font and colors everywhere: this
+    /// window's panes and every other window's; reported to the servers
+    /// unless `reach` is [`Reach::Local`].
+    pub(crate) fn apply_terminal_theme(&mut self, reach: Reach, window: &mut Window, cx: &mut Context<Self>) {
         theme::apply_font(cx);
-        for (pane, _) in self.panes.values() {
-            pane.update(cx, |pane, cx| pane.apply_theme(cx));
-        }
+        self.apply_theme_to_panes(reach, cx);
         window.refresh();
+        let this = window.window_handle();
+        for other in cx.windows().into_iter().filter(|w| *w != this).filter_map(|w| w.downcast::<Workspace>()) {
+            let _ = other.update(cx, |workspace, window, cx| {
+                workspace.apply_theme_to_panes(reach, cx);
+                window.refresh();
+            });
+        }
+    }
+
+    fn apply_theme_to_panes(&self, reach: Reach, cx: &mut Context<Self>) {
+        for (pane, _) in self.panes.values() {
+            pane.update(cx, |pane, cx| match reach {
+                Reach::Servers => pane.apply_theme(cx),
+                Reach::Local => pane.preview_theme(cx),
+            });
+        }
     }
 
     /// Re-read terminal.json (after editing it by hand).
@@ -319,7 +326,7 @@ impl Workspace {
         theme::refresh_fonts(cx);
         theme::install(loaded.prefs, loaded.problem);
         theme::apply_ui_font(self.ui_font_family(), cx);
-        self.apply_terminal_theme(window, cx);
+        self.apply_terminal_theme(Reach::Servers, window, cx);
         self.flash(problem.unwrap_or_else(|| "Terminal settings reloaded".into()), cx);
         self.refresh_settings(None, cx);
     }
@@ -340,116 +347,133 @@ impl Workspace {
     }
 
     fn settings_event(&mut self, event: &SettingsEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let message = match event {
+        if let Some(outcome) = self.apply_settings_event(event, window, cx) {
+            self.refresh_settings(outcome.message(), cx);
+            cx.notify();
+        }
+    }
+
+    /// Show the panel scrolled to `setting` (the finder's "Open in
+    /// Settings").
+    pub(crate) fn open_settings_at(&mut self, setting: crate::settings_table::SettingId, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
+        if let Some(modal) = &self.settings {
+            modal.panel.update(cx, |panel, cx| panel.reveal(setting, cx));
+        }
+    }
+
+    /// Install terminal preferences for a preview: shown in every window,
+    /// neither saved nor reported to the servers (a theme is reported once
+    /// kept, through [`Workspace::apply_settings_event`]).
+    pub(crate) fn preview_terminal_prefs(&mut self, prefs: TerminalPrefs, window: &mut Window, cx: &mut Context<Self>) {
+        theme::install(prefs, theme::load_problem());
+        self.apply_terminal_theme(Reach::Local, window, cx);
+    }
+
+    /// Apply a settings change (from the panel or the finder). `None` when
+    /// the event replaced the panel (closed it, opened another modal);
+    /// else what failed and what is worth knowing.
+    pub(crate) fn apply_settings_event(&mut self, event: &SettingsEvent, window: &mut Window, cx: &mut Context<Self>) -> Option<Outcome> {
+        if let Some(change) = terminal_change(event) {
+            return Some(self.change_terminal_prefs(change, window, cx));
+        }
+        Some(match event {
             SettingsEvent::Close => {
                 self.close_settings(window, cx);
-                return;
+                return None;
             }
             SettingsEvent::SetDensity(density) => {
                 self.set_density(*density, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetPaneHeaders(show) => {
                 self.set_pane_headers(*show, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetMatchRunningApp(on) => {
                 self.set_match_running_app(*on, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetMaterial(material) => {
                 self.set_material(*material, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetTintWithApp(on) => {
                 self.set_tint_with_app(*on, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetTranslucentApps(on) => {
                 self.set_translucent_apps(*on, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::SetUiFontFamily(family) => {
                 self.set_ui_font_family(family.clone(), window, cx);
-                None
+                Outcome::default()
             }
-            SettingsEvent::SetTheme(id) => {
-                let id = id.clone();
-                self.update_terminal_prefs(|p| p.theme = id, window, cx)
+            // Handled above.
+            SettingsEvent::SetTheme(_)
+            | SettingsEvent::SetFontFamily(_)
+            | SettingsEvent::SetFontSize(_)
+            | SettingsEvent::SetColor(..)
+            | SettingsEvent::SetCursorShape(_)
+            | SettingsEvent::SetCursorBlink(_)
+            | SettingsEvent::SetScrollback(_) => Outcome::default(),
+            SettingsEvent::ResetTerminal => {
+                let mut outcome = self.change_terminal_prefs(|p| *p = TerminalPrefs::default(), window, cx);
+                if outcome.error.is_none() && outcome.notes.is_empty() {
+                    outcome.notes.push("Terminal settings restored to defaults.".into());
+                }
+                outcome
             }
-            SettingsEvent::SetFontFamily(family) => {
-                let family = family.clone();
-                self.update_terminal_prefs(|p| p.font_family = family, window, cx)
-            }
-            SettingsEvent::SetFontSize(size) => {
-                let size = *size;
-                self.update_terminal_prefs(|p| p.font_size = size, window, cx)
-            }
-            SettingsEvent::SetColor(slot, color) => {
-                let (slot, color) = (*slot, *color);
-                self.update_terminal_prefs(|p| p.colors.set(slot, color), window, cx)
-            }
-            SettingsEvent::SetCursorShape(shape) => {
-                let shape = *shape;
-                self.update_terminal_prefs(|p| p.cursor_shape = shape, window, cx)
-            }
-            SettingsEvent::SetCursorBlink(blink) => {
-                let blink = *blink;
-                self.update_terminal_prefs(|p| p.cursor_blink = blink, window, cx)
-            }
-            SettingsEvent::SetScrollback(lines) => {
-                let lines = *lines;
-                self.update_terminal_prefs(|p| p.scrollback_lines = lines, window, cx)
-            }
-            SettingsEvent::ResetTerminal => self
-                .update_terminal_prefs(|p| *p = TerminalPrefs::default(), window, cx)
-                .or_else(|| Some("Terminal settings restored to defaults.".into())),
             SettingsEvent::ReloadTerminal => {
                 self.execute(Command::ReloadTerminalSettings, window, cx);
-                theme::problems().first().cloned().or_else(|| Some("Terminal settings reloaded.".into()))
+                match theme::problems().first() {
+                    Some(problem) => Outcome::failed(problem.clone()),
+                    None => Outcome::noted("Terminal settings reloaded."),
+                }
             }
             SettingsEvent::RevealConfig => {
                 let path = terminal_prefs::path(&self.home);
                 if path.exists() || terminal_prefs::save(&self.home, &theme::prefs()).is_ok() {
                     cx.reveal_path(&path);
-                    None
+                    Outcome::default()
                 } else {
-                    Some("Could not create the terminal settings file.".into())
+                    Outcome::failed("Could not create the terminal settings file.")
                 }
             }
             SettingsEvent::OpenConfig => {
                 self.execute(Command::OpenTerminalSettingsFile, window, cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::PairDevice => {
                 self.create_invite(cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::RevokeDevice(id) => {
                 self.revoke_device(id.clone(), cx);
-                None
+                Outcome::default()
             }
             SettingsEvent::OpenServerLog => {
                 self.execute(Command::ShowServerLog, window, cx);
-                None
+                Outcome::default()
             }
             // The host sheet replaces the panel; it is a modal of its own.
             SettingsEvent::AddHost => {
                 self.close_settings(window, cx);
                 self.open_add_host(None, None, window, cx);
-                return;
+                return None;
             }
             SettingsEvent::RenameHost(id) => {
                 let Ok(index) = id.parse::<usize>() else {
-                    return;
+                    return None;
                 };
                 self.close_settings(window, cx);
                 self.open_rename_host(index, window, cx);
-                return;
+                return None;
             }
             SettingsEvent::RemoveHost(id) => match id.parse::<usize>().map_err(|e| e.to_string()).and_then(|i| self.remove_host(i, cx)) {
-                Ok(name) => Some(format!("Removed host “{name}”.")),
-                Err(error) => Some(error),
+                Ok(name) => Outcome::noted(format!("Removed host “{name}”.")),
+                Err(error) => Outcome::failed(error),
             },
             // The panel asked for confirmation already; run the commands
             // directly instead of through the palette's confirm step.
@@ -464,11 +488,9 @@ impl Workspace {
                 if let Some(modal) = &self.settings {
                     modal.panel.update(cx, |panel, cx| panel.focus_search(window, cx));
                 }
-                self.status.clone()
+                Outcome { error: None, notes: self.status.clone().into_iter().collect() }
             }
-        };
-        self.refresh_settings(message, cx);
-        cx.notify();
+        })
     }
 
     pub(crate) fn render_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -523,6 +545,75 @@ fn host_status(state: &HostState, paused: bool) -> String {
     }
 }
 
+/// The result of a setting change: an `error` (it failed, or did not
+/// stick) and `notes` worth knowing (e.g. a value adjusted to its range).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Outcome {
+    pub error: Option<String>,
+    pub notes: Vec<String>,
+}
+
+impl Outcome {
+    fn failed(error: impl Into<String>) -> Self {
+        Self { error: Some(error.into()), notes: Vec::new() }
+    }
+
+    fn noted(note: impl Into<String>) -> Self {
+        Self { error: None, notes: vec![note.into()] }
+    }
+
+    /// Everything, as one message (the settings panel's banner).
+    pub(crate) fn message(self) -> Option<String> {
+        let mut messages: Vec<String> = self.error.into_iter().chain(self.notes).collect();
+        messages.dedup();
+        (!messages.is_empty()).then(|| messages.join(" "))
+    }
+
+    /// The notes, as one hint.
+    pub(crate) fn note(&self) -> Option<String> {
+        (!self.notes.is_empty()).then(|| self.notes.join(" "))
+    }
+}
+
+/// Who sees a terminal theme change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// This app's panes only (a preview).
+    Local,
+    /// Reported to the servers too.
+    Servers,
+}
+
+/// Install `prefs` in every window and report them to the servers, from
+/// outside any window (one is closing).
+pub(crate) fn restore_terminal_theme(prefs: TerminalPrefs, cx: &mut gpui::App) {
+    theme::install(prefs, theme::load_problem());
+    theme::apply_font(cx);
+    for workspace in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
+        let _ = workspace.update(cx, |workspace, window, cx| {
+            workspace.apply_theme_to_panes(Reach::Servers, cx);
+            window.refresh();
+        });
+    }
+}
+
+/// A change to the terminal preferences.
+type PrefsChange = Box<dyn FnOnce(&mut TerminalPrefs)>;
+
+/// The terminal preference an event changes, if it changes one.
+fn terminal_change(event: &SettingsEvent) -> Option<PrefsChange> {
+    Some(match event.clone() {
+        SettingsEvent::SetTheme(id) => Box::new(move |p| p.theme = id),
+        SettingsEvent::SetFontFamily(family) => Box::new(move |p| p.font_family = family),
+        SettingsEvent::SetFontSize(size) => Box::new(move |p| p.font_size = size),
+        SettingsEvent::SetColor(slot, color) => Box::new(move |p| p.colors.set(slot, color)),
+        SettingsEvent::SetCursorShape(shape) => Box::new(move |p| p.cursor_shape = shape),
+        SettingsEvent::SetCursorBlink(blink) => Box::new(move |p| p.cursor_blink = blink),
+        SettingsEvent::SetScrollback(lines) => Box::new(move |p| p.scrollback_lines = lines),
+        _ => return None,
+    })
+}
+
 /// Commands that still run while the settings panel is open; everything
 /// else would act on the hidden terminal and is swallowed (⌘W closes the
 /// panel instead).
@@ -554,6 +645,21 @@ mod tests {
         assert_eq!(host_status(&HostState::Unreachable("refused".into()), false), "Unreachable: refused");
         assert_eq!(short("d2865b8f578fa4e85e2f2b85ef97f5ef69de951f"), "d2865b8f");
         assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn outcomes_keep_errors_apart_from_notes() {
+        let ok = Outcome::default();
+        assert_eq!((ok.note(), ok.message()), (None, None));
+        let noted = Outcome { error: None, notes: vec!["font size 40 out of range; using 32".into()] };
+        assert_eq!(noted.note().as_deref(), Some("font size 40 out of range; using 32"));
+        let failed = Outcome { error: Some("could not save".into()), notes: vec!["adjusted".into()] };
+        assert_eq!(failed.note().as_deref(), Some("adjusted"));
+        assert_eq!(failed.message().as_deref(), Some("could not save adjusted"));
+        let mut prefs = TerminalPrefs::default();
+        terminal_change(&SettingsEvent::SetCursorBlink(false)).unwrap()(&mut prefs);
+        assert!(!prefs.cursor_blink);
+        assert!(terminal_change(&SettingsEvent::SetPaneHeaders(true)).is_none());
     }
 
     #[test]

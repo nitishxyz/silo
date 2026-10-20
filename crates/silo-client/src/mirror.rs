@@ -46,10 +46,12 @@ pub struct Mirror {
     /// Last acknowledged offset on the current stream and when.
     acked: Option<u64>,
     acked_at: Instant,
-    /// The block's effective configuration as announced by the server,
-    /// re-installed into every restored terminal. Never a local guess: the
-    /// server terminal answers color queries with exactly these values.
+    /// The block's effective configuration as announced by the server: the
+    /// values its terminal answers color queries with.
     config: Option<TerminalConfig>,
+    /// This client's own configuration: when set, the mirror renders with
+    /// it (re-installed into every restored terminal) instead of `config`.
+    local: Option<TerminalConfig>,
 }
 
 impl Default for Mirror {
@@ -74,6 +76,7 @@ impl Mirror {
             acked: None,
             acked_at: Instant::now(),
             config: None,
+            local: None,
         }
     }
 
@@ -97,9 +100,24 @@ impl Mirror {
         self.config
     }
 
+    /// Render with this client's `config` (colours are client-local; the
+    /// server's stay what programs are told). Program overrides survive.
+    pub fn set_local_config(&mut self, config: TerminalConfig) {
+        self.local = Some(config);
+        if let Some(vt) = self.vt.as_mut() {
+            install_config(vt, &config);
+        }
+    }
+
+    /// The configuration the mirror renders with.
+    #[must_use]
+    pub fn render_config(&self) -> Option<TerminalConfig> {
+        self.local.or(self.config)
+    }
+
     fn install(&mut self, mut vt: TerminalCore) {
-        if let Some(config) = &self.config {
-            install_config(&mut vt, config);
+        if let Some(config) = self.render_config() {
+            install_config(&mut vt, &config);
         }
         self.vt = Some(vt);
     }
@@ -229,7 +247,7 @@ impl Mirror {
             }
             ServerData::Configured(config) => {
                 self.config = Some(config);
-                if let Some(vt) = self.vt.as_mut() {
+                if let Some(vt) = self.vt.as_mut().filter(|_| self.local.is_none()) {
                     install_config(vt, &config);
                 }
                 Ok(Applied::Redraw)

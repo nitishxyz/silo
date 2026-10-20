@@ -8,6 +8,15 @@
 #   typ TEXT       type text ("\n" = Return), one driver call
 #   chord MODS K   e.g. chord cmd t; chord cmd,shift d; keycode 36 [mods]
 #   shot FILE      capture the window only (-l WID);  ui_cleanup: stop app, server, menubar
+#   menubar_stop   stop this SILO_HOME's menu-bar agent (app_restart does too: the
+#                  agent outlives the app, and a wiped SILO_HOME loses its lock)
+# Every helper acts only on what this SILO_HOME launched: app_restart records
+# the app's pid in $SILO_HOME/.ui-env-app.pid, and a process counts only while
+# it runs APP_BIN with exactly this SILO_HOME in its environment (read entry by
+# entry with `ui-driver env`, not from `ps eww` text); if the home was wiped,
+# that is how the app is found. The menu-bar agent and server are matched the
+# same way. Agents using other homes, even with the same bundle, are never
+# found, focused or stopped.
 # SILO_MOTION_SLOWDOWN=12 app_restart stretches animations for frame shots.
 # The first click after `front` may only activate the window.
 DRIVER="${DRIVER:-target/ui-driver}"
@@ -21,16 +30,27 @@ case "$SILO_HOME" in /tmp/* | /private/tmp/*) ;; *) echo "ui-env: SILO_HOME must
 APP_BIN="${APP_BIN:-$(scripts/dev-bundle.sh)}" || return 1
 APP_LOG="${APP_LOG:-/tmp/silo-ui.log}"
 APP_PID="${APP_PID:-}"
+APP_PIDFILE="$SILO_HOME/.ui-env-app.pid"
 
 _now_ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
 ui_perms() { "$DRIVER" perms; }
 
-# Cached pid, revalidated; falls back to a lookup by binary path. Exported
-# as UI_PID so the driver posts keys straight to the app (the session-wide
-# HID tap can be filtered for some parent terminals).
+# Whether PID runs with exactly this SILO_HOME.
+_in_home() { [[ "$("$DRIVER" env "$1" SILO_HOME 2>/dev/null)" == "$SILO_HOME" ]]; }
+# Whether PID is this home's app: alive, running APP_BIN, with this SILO_HOME.
+_ours() {
+    [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null || return 1
+    [[ "$(ps -o command= -p "$1")" == "$APP_BIN"* ]] || return 1
+    _in_home "$1"
+}
+# This home's app: the cached pid, else the recorded one, else (home wiped)
+# the APP_BIN process with this SILO_HOME. Exported as UI_PID so the driver
+# posts keys straight to the app (the session-wide HID tap can be filtered
+# for some parent terminals).
 app_pid() {
-    if [[ -z "$APP_PID" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
-        APP_PID=$(pgrep -f "$APP_BIN" | head -1)
+    if ! _ours "$APP_PID"; then
+        APP_PID=$(cat "$APP_PIDFILE" 2>/dev/null)
+        _ours "$APP_PID" || APP_PID=$(for p in $(pgrep -f "$APP_BIN"); do _ours "$p" && echo "$p"; done | head -1)
     fi
     export UI_PID="$APP_PID"
     echo "$APP_PID"
@@ -50,29 +70,51 @@ app_start() {
 }
 app_restart() {
     app_stop
+    menubar_stop
     : > "$APP_LOG"
     SILO_LOG="${SILO_LOG:-silo_app=debug,info}" nohup python3 -c "import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])" "$APP_BIN" >>"$APP_LOG" 2>&1 < /dev/null &
     APP_PID=$!
     disown
+    mkdir -p "$SILO_HOME" && echo "$APP_PID" > "$APP_PIDFILE"
     # Window first, then a connected server with a terminal attached.
     read -r WX WY WW WH WID < <("$DRIVER" wait-window "$APP_PID" 10000) || { echo "ui-env: no window" >&2; return 1; }
     wait_log "connected to silo server" 10000 && wait_log "pane attached" 5000
 }
 app_stop() {
     local p; p=$(app_pid)
+    rm -f "$APP_PIDFILE"
+    APP_PID=""
     [[ -z "$p" ]] && return 0
     kill "$p" 2>/dev/null
     for _ in $(seq 100); do kill -0 "$p" 2>/dev/null || break; sleep 0.02; done
-    APP_PID=""
 }
-# Stop everything this SILO_HOME started (never the real ~/Library one).
+# Processes matching PATTERN whose environment has exactly this SILO_HOME
+# (never another home's, never the real one).
+home_pids() {
+    local p
+    for p in $(pgrep -f "$1"); do
+        _in_home "$p" && echo "$p"
+    done
+}
+# SIGTERM this home's processes matching PATTERN and wait for them.
+_home_stop() {
+    local p pids
+    pids=$(home_pids "$1")
+    [[ -z "$pids" ]] && return 0
+    for p in $pids; do kill "$p" 2>/dev/null; done
+    for _ in $(seq 150); do [[ -z "$(home_pids "$1")" ]] && return 0; sleep 0.02; done
+    echo "ui-env: still running for $SILO_HOME: $(home_pids "$1" | tr '\n' ' ')" >&2
+}
+menubar_pids() { home_pids 'silo-menubar'; }
+menubar_stop() { _home_stop 'silo-menubar'; }
+# Stop everything this SILO_HOME started (never the real ~/Library one): the
+# app, its server (by socket, else by signal if the home was wiped under it)
+# and the menu-bar agent.
 ui_cleanup() {
     app_stop
     target/debug/silo kill-server >/dev/null 2>&1
-    local p
-    for p in $(pgrep -f 'silo-menubar'); do
-        ps eww -p "$p" | grep -q "SILO_HOME=$SILO_HOME" && kill "$p"
-    done
+    _home_stop 'silo server'
+    menubar_stop
     return 0
 }
 front() {

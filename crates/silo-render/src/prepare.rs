@@ -35,6 +35,7 @@ use crate::{
 /// cluster is placed at its own cell origin, exactly as per-cell shaping
 /// placed it, so batching changes the amount of shaping work, never glyph
 /// positions.
+#[derive(Clone)]
 pub(crate) struct PreparedText {
     pub layout: Arc<LineLayout>,
     /// Top-left of the first cell, relative to the pane's content origin.
@@ -63,6 +64,27 @@ pub struct PreparedFrame {
     pub(crate) sprite_polygons: Vec<(Vec<Point<Pixels>>, Hsla)>,
     pub(crate) lines: Vec<(Bounds<Pixels>, Hsla)>,
     pub(crate) text: Vec<PreparedText>,
+    /// The content of the cell under a block cursor, repainted in the
+    /// cursor-text color over the opaque cursor.
+    pub(crate) cursor_cell: Option<CursorCell>,
+}
+
+/// The cell a block cursor sits on: where it is, how many columns it covers
+/// (2 for a wide character) and its glyph or sprite geometry, colorless so
+/// paint can choose the cursor-text color.
+pub(crate) struct CursorCell {
+    pub row: u16,
+    /// First column of the cell (the wide character, not its spacer).
+    pub column: u16,
+    pub cells: u16,
+    pub content: CursorContent,
+}
+
+pub(crate) enum CursorContent {
+    Empty,
+    Glyph(PreparedText),
+    /// Sprite quads and polygons with their coverage, relative to the cell.
+    Sprite(Vec<(Bounds<Pixels>, f32)>, Vec<Vec<Point<Pixels>>>),
 }
 
 impl PreparedFrame {
@@ -150,6 +172,7 @@ impl FramePreparer {
             sprite_polygons: Vec::new(),
             lines: Vec::new(),
             text: Vec::new(),
+            cursor_cell: None,
         };
         let mut views: Vec<CellView<'_>> = Vec::with_capacity(columns);
         for (row, cells) in frame.cells.chunks(columns).enumerate() {
@@ -197,6 +220,7 @@ impl FramePreparer {
                 out.text.push(text);
             }
         }
+        out.cursor_cell = cursor_cell(frame, metrics, &mut self.layouts, &mut self.sprites, &mut cost);
         self.layouts.end_frame();
         profile::add(&mut cost.total, started);
         profile::record_prepared(&cost);
@@ -314,7 +338,7 @@ pub(crate) fn grid_offset(index: usize) -> f32 {
     f32::from(u16::try_from(index).unwrap_or(u16::MAX))
 }
 
-fn face(bold: bool, italic: bool) -> Font {
+pub(crate) fn face(bold: bool, italic: bool) -> Font {
     let mut font = crate::terminal_font();
     if bold {
         font.weight = FontWeight::BOLD;
@@ -464,6 +488,67 @@ fn push_sprite_cell(out: &mut PreparedFrame, cache: &mut sprite::SpriteCache, ce
     for polygon in &shape.polygons {
         out.sprite_polygons.push((polygon.0.iter().map(|(x, y)| point(clip.left() + px(*x), clip.top() + px(*y))).collect(), color));
     }
+}
+
+/// What the frame's block cursor covers, shaped with the preparer's caches.
+fn cursor_cell(
+    frame: &Frame,
+    metrics: CellMetrics,
+    layouts: &mut LayoutCache,
+    sprites: &mut sprite::SpriteCache,
+    cost: &mut profile::Prepared,
+) -> Option<CursorCell> {
+    let cursor = frame.cursor;
+    if !cursor.visible || cursor.shape != silo_vt::CursorShape::Block {
+        return None;
+    }
+    cursor_cell_at(
+        frame,
+        (cursor.row, cursor.column),
+        metrics,
+        &mut |text, bold, italic| layouts.layout(text, bold, italic, metrics.font_size, cost),
+        &mut |code, width| sprites.geometry(code, width, metrics.height, metrics.scale).map(sprite_content),
+    )
+}
+
+/// The cell of `frame` at `(row, column)` (its wide character when that is
+/// the spacer) as a block cursor covers it: laid out with `layout`
+/// (text, bold, italic) or drawn with `sprite` (code point, width), without
+/// color. The prepared frame's cursor uses the preparer's caches; a
+/// predicted cursor is looked up while painting.
+pub(crate) fn cursor_cell_at(
+    frame: &Frame,
+    (row, column): (u16, u16),
+    metrics: CellMetrics,
+    layout: &mut dyn FnMut(&str, bool, bool) -> Arc<LineLayout>,
+    sprite: &mut dyn FnMut(char, f32) -> Option<CursorContent>,
+) -> Option<CursorCell> {
+    let columns = usize::from(frame.size.columns);
+    let at = |column: u16| (column < frame.size.columns).then(|| frame.cells.get(usize::from(row) * columns + usize::from(column))).flatten();
+    let mut column = column;
+    if at(column)?.width == 0 && column > 0 && at(column - 1).is_some_and(|c| c.width == 2) {
+        column -= 1;
+    }
+    let cell = at(column)?;
+    let cells = u16::from(cell.width.max(1));
+    let clip = cell_bounds(px(0.0), 0, usize::from(cells), metrics);
+    let content = if cell.text.is_empty() || cell.width == 0 {
+        CursorContent::Empty
+    } else if let Some(code) = sprite::code_point(&cell.text) {
+        sprite(code, f32::from(clip.size.width))?
+    } else {
+        let layout = layout(&cell.text, cell.bold, cell.italic);
+        let inset = px(((f32::from(clip.size.width) - f32::from(layout.width)) / 2.0).max(0.0));
+        CursorContent::Glyph(PreparedText { layout, origin: clip.origin, inset, starts: Vec::new(), colors: Vec::new() })
+    };
+    Some(CursorCell { row, column, cells, content })
+}
+
+/// A sprite's geometry for the cursor cell, relative to the cell.
+pub(crate) fn sprite_content(shape: &sprite::Sprite) -> CursorContent {
+    let quads = shape.quads.iter().map(|q| (Bounds::new(point(px(q.x), px(q.y)), size(px(q.width), px(q.height))), q.alpha)).collect();
+    let polygons = shape.polygons.iter().map(|p| p.0.iter().map(|(x, y)| point(px(*x), px(*y))).collect()).collect();
+    CursorContent::Sprite(quads, polygons)
 }
 
 /// A wide cell is shaped alone and centred in its two-cell box.

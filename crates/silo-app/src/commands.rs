@@ -226,6 +226,18 @@ pub fn fuzzy(query: &str, text: &str) -> Option<(i32, Vec<std::ops::Range<usize>
     if query.is_empty() {
         return Some((0, Vec::new()));
     }
+    // A contiguous match (ASCII, so byte offsets agree) is highlighted as
+    // one run and scores as consecutive matches would.
+    let needle: String = query.iter().collect();
+    if text.is_ascii()
+        && let Some(start) = text.to_ascii_lowercase().find(&needle)
+    {
+        let word_start = text[..start].chars().next_back().is_none_or(|p| !p.is_alphanumeric());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let score = (needle.len() as i32) * 6 - 5 + if word_start { 8 } else { 0 } - text.len() as i32 / 8;
+        #[allow(clippy::single_range_in_vec_init, reason = "one highlighted run")]
+        return Some((score, vec![start..start + needle.len()]));
+    }
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
     let mut score = 0;
     let mut qi = 0;
@@ -292,6 +304,8 @@ mod tests {
         let (b, _) = fuzzy("spr", "Show Server Log... previous").unwrap_or((i32::MIN, vec![]));
         assert!(a > b);
         assert!(fuzzy("xyz", "Split Right").is_none());
+        assert_eq!(fuzzy("light", "Silo Light").unwrap().1, vec![5..10], "a contiguous match is one run");
+        assert_eq!(fuzzy("ght", "Silo Light").unwrap().1, vec![7..10]);
         assert!(fuzzy("", "anything").is_some());
     }
 }

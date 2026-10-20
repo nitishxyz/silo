@@ -2,10 +2,7 @@
 //! and a cursor on top of the mirror, confirmed or rolled back against the
 //! mirror after every applied batch. Never touches the mirror itself.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use silo_proto::data::{ServerData, Welcome};
 use silo_vt::Frame;
@@ -15,27 +12,21 @@ pub const RTT_ON: Duration = Duration::from_millis(30);
 /// ...and off below this one.
 pub const RTT_OFF: Duration = Duration::from_millis(20);
 
-/// RFC 6298 RTT estimator with the on/off hysteresis of §4.1.
+/// The connection's round-trip time with the on/off hysteresis of §4.1.
+///
+/// It is the transport's own smoothed estimate of the path in use (QUIC's,
+/// RFC 9002), not a measurement of input acknowledgements: those include
+/// the time a busy UI thread takes to read them, and a connection that
+/// switches paths (relay to direct) is followed at once.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rtt {
     srtt: Option<Duration>,
-    rttvar: Duration,
     on: bool,
 }
 
 impl Rtt {
-    /// Add one sample (the first one seeds the estimate).
-    pub fn sample(&mut self, rtt: Duration) {
-        let srtt = match self.srtt {
-            None => {
-                self.rttvar = rtt / 2;
-                rtt
-            }
-            Some(srtt) => {
-                self.rttvar = (self.rttvar * 3 + srtt.abs_diff(rtt)) / 4;
-                (srtt * 7 + rtt) / 8
-            }
-        };
+    /// The path's current smoothed RTT.
+    pub fn update(&mut self, srtt: Duration) {
         self.srtt = Some(srtt);
         if srtt >= RTT_ON {
             self.on = true;
@@ -47,11 +38,6 @@ impl Rtt {
     #[must_use]
     pub fn srtt(&self) -> Option<Duration> {
         self.srtt
-    }
-
-    #[must_use]
-    pub fn rttvar(&self) -> Duration {
-        self.rttvar
     }
 
     /// The RTT is high enough to predict.
@@ -96,7 +82,6 @@ pub struct Predictor {
     /// Where this epoch's typing started; backspace stops there.
     start: Option<(u16, u16)>,
     sent: u64,
-    pending: VecDeque<(u64, Instant)>,
     acked: (u64, u64),
     acked_at: Instant,
 }
@@ -115,20 +100,32 @@ impl Predictor {
             cursor: None,
             start: None,
             sent: 0,
-            pending: VecDeque::new(),
             acked: (0, 0),
             acked_at: Instant::now(),
         }
     }
 
-    /// A remote connection, seeded with the path RTT (`RemoteConn::rtt`).
+    /// A remote connection with its path RTT (`RemoteConn::rtt`).
     #[must_use]
-    pub fn remote(seed: Option<Duration>) -> Self {
+    pub fn remote(rtt: Option<Duration>) -> Self {
         let mut predictor = Self { remote: true, ..Self::local() };
-        if let Some(rtt) = seed {
-            predictor.rtt.sample(rtt);
+        if let Some(rtt) = rtt {
+            predictor.path_rtt(rtt);
         }
         predictor
+    }
+
+    /// The connection's current path RTT (`RemoteConn::rtt`); feed it with
+    /// every input. Turning prediction off drops what is shown.
+    pub fn path_rtt(&mut self, rtt: Duration) {
+        let was = self.rtt.on();
+        self.rtt.update(rtt);
+        if was != self.rtt.on() {
+            tracing::debug!(rtt_ms = rtt.as_secs_f64() * 1e3, on = self.rtt.on(), "prediction");
+            if !self.rtt.on() {
+                self.clear();
+            }
+        }
     }
 
     #[must_use]
@@ -154,7 +151,6 @@ impl Predictor {
     pub fn begin(&mut self, welcome: &Welcome) {
         self.clear();
         self.sent = 0;
-        self.pending.clear();
         self.acked = (0, welcome.offset);
     }
 }
@@ -164,16 +160,8 @@ impl Predictor {
     pub fn server(&mut self, data: &ServerData) {
         match *data {
             ServerData::InputAck { count, offset } => {
-                let now = Instant::now();
-                let mut sample = None;
-                while self.pending.front().is_some_and(|&(n, _)| n <= count) {
-                    sample = self.pending.pop_front().map(|(_, at)| now - at);
-                }
-                if let Some(rtt) = sample {
-                    self.rtt.sample(rtt);
-                }
                 self.acked = (count, offset);
-                self.acked_at = now;
+                self.acked_at = Instant::now();
             }
             ServerData::TtyMode { echo, icanon, .. } => {
                 self.tty = Some((echo, icanon));
@@ -199,7 +187,6 @@ impl Predictor {
     pub fn input(&mut self, bytes: &[u8], frame: &Frame) {
         let now = Instant::now();
         self.sent += 1;
-        self.pending.push_back((self.sent, now));
         if !self.enabled(frame) || !frame.scroll.at_bottom() {
             self.clear();
             return;
@@ -420,24 +407,34 @@ mod tests {
     }
 
     #[test]
-    fn rtt_smoothing_with_hysteresis() {
+    fn rtt_hysteresis() {
         let ms = Duration::from_millis;
         let mut rtt = Rtt::default();
-        rtt.sample(ms(40));
+        rtt.update(ms(40));
         assert!(rtt.on());
-        assert_eq!(rtt.rttvar(), ms(20));
-        rtt.sample(ms(80));
-        assert_eq!(rtt.srtt(), Some(ms(45)));
-        let settle = |rtt: &mut Rtt, v| (0..60).for_each(|_| rtt.sample(ms(v)));
-        settle(&mut rtt, 25);
+        rtt.update(ms(25));
         assert!(rtt.on(), "25 ms stays on");
-        settle(&mut rtt, 10);
+        rtt.update(ms(10));
         assert!(!rtt.on());
-        settle(&mut rtt, 25);
+        rtt.update(ms(25));
         assert!(!rtt.on(), "25 ms stays off");
-        settle(&mut rtt, 40);
+        rtt.update(ms(40));
         assert!(rtt.on());
         assert!(!Predictor::local().enabled(&H::new(true, true).frame()));
+    }
+
+    /// A connection that came up over a relay and moved to the LAN stops
+    /// predicting with the next key, dropping what it showed.
+    #[test]
+    fn path_switch_to_a_fast_link_stops_at_once() {
+        let mut h = H::new(false, false);
+        h.confirm(b'a');
+        h.key(b"b");
+        assert_eq!(h.shown(), "b");
+        h.p.path_rtt(Duration::from_millis(2));
+        assert_eq!(h.p.overlay(), (vec![], None));
+        h.key(b"c");
+        assert_eq!(h.shown(), "");
     }
 
     #[test]

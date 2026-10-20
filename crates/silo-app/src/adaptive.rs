@@ -461,6 +461,45 @@ mod tests {
         assert!(c.shows(0x00f4_ecd8));
     }
 
+    /// A mirror of a block whose server terminal runs another theme than
+    /// this app's: it renders with this app's theme, and the backdrop is
+    /// judged against that, for a shell, a full-screen app on the default
+    /// background and one painting its own.
+    #[test]
+    fn backdrops_follow_the_local_theme_whatever_the_server_runs() {
+        use silo_proto::{
+            data::{ServerData, StartMode, Welcome},
+            model::{TermSize, TerminalConfig},
+        };
+        let (dark, light) =
+            (TerminalConfig::default(), TerminalConfig { background: 0x00fa_fafa, foreground: 0x0038_3a42, ..TerminalConfig::default() });
+        for (server, local) in [(dark, light), (light, dark)] {
+            let mut mirror = silo_client::Mirror::new();
+            mirror.begin(&Welcome { epoch: 1, mode: StartMode::Snapshot, offset: 0, size: TermSize::new(40, 12) }).unwrap();
+            mirror.apply(ServerData::Configured(server)).unwrap();
+            let grid = silo_vt::GridSize { columns: 40, rows: 12, cell_width: 8, cell_height: 16 };
+            mirror.apply(ServerData::SnapshotHead(silo_vt::TerminalCore::new(grid).unwrap().snapshot().unwrap())).unwrap();
+            mirror.apply(ServerData::SnapshotDone).unwrap();
+            mirror.set_local_config(local);
+            assert_eq!((mirror.config(), mirror.render_config()), (Some(server), Some(local)));
+            let mut offset = 0;
+            let mut sample = |mirror: &mut silo_client::Mirror, bytes: &[u8]| {
+                mirror.apply(ServerData::Output { offset, bytes: bytes.to_vec() }).unwrap();
+                offset += bytes.len() as u64;
+                let frame = mirror.terminal().unwrap().frame().unwrap();
+                let default = mirror.render_config().unwrap().background;
+                assert_eq!(frame.background, default, "renders with the local theme");
+                terminal_backdrop(&frame, default, None, &mut Vec::new())
+            };
+            assert_eq!(sample(&mut mirror, b"$ ls\r\nfile\r\n"), None, "a shell has no backdrop");
+            assert_eq!(sample(&mut mirror, b"\x1b[?1049h\x1b[2J\x1b[Htop-like"), None, "default cells match the card");
+            assert_eq!(sample(&mut mirror, b"\x1b[48;2;110;110;120m\x1b[2J\x1b[Hbtop-like"), Some(0x006e_6e78), "a painted backdrop");
+            // A theme switch keeps the program's colours.
+            mirror.set_local_config(server);
+            assert_eq!(sample(&mut mirror, b""), Some(0x006e_6e78));
+        }
+    }
+
     #[test]
     fn blend_eases_and_settles() {
         let t0 = Instant::now();

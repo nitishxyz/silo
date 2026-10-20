@@ -37,6 +37,7 @@ fn font_menu_place(
 use crate::{
     assets::icon,
     controls::{Segmented, Toggle},
+    settings_table::SettingId,
     terminal_prefs::{self, TerminalPrefs},
     text_field::{FieldEvent, TextField},
     theme,
@@ -354,8 +355,8 @@ pub enum SettingsEvent {
     RevokeDevice(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Section {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Section {
     Appearance,
     Terminal,
     Keyboard,
@@ -367,7 +368,7 @@ enum Section {
 impl Section {
     const ALL: [Self; 6] = [Self::Appearance, Self::Terminal, Self::Keyboard, Self::Hosts, Self::Server, Self::About];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
@@ -401,25 +402,86 @@ impl Section {
         }
     }
 
-    fn keywords(self) -> &'static str {
-        match self {
-            Self::Appearance => {
-                "general preferences density compact comfortable pane headers layout theme ui interface font family typeface system automatic"
-            }
-            Self::Terminal => {
-                "theme colors palette preview font family nerd automatic size foreground background cursor selection shape block bar underline blink blinking scrollback history lines reset defaults settings file json configuration config edit open reload finder"
-            }
+    /// Search words: the page's own and its settings' (`settings_table`).
+    fn keywords(self) -> String {
+        let own = match self {
+            Self::Appearance => "general preferences layout theme colors",
+            Self::Terminal => "preview settings file json configuration config edit open reload finder",
             Self::Keyboard => "shortcuts keys commands bindings",
             Self::Hosts => "remote local address add remove iroh",
             Self::Server => "daemon status version log start stop restart sessions",
             Self::About => "silo version revision build libghostty",
+        };
+        format!("{own} {}", crate::settings_table::section_keywords(self))
+    }
+}
+
+/// Whether a search for `words` (lowercase) shows `section`.
+fn section_matches(section: Section, snapshot: &SettingsSnapshot, words: &[&str]) -> bool {
+    let mut text = format!("{} {}", section.label(), section.keywords());
+    if matches!(section, Section::Terminal | Section::Appearance) {
+        for choice in &snapshot.terminal.themes {
+            text.push_str(&format!(" {}", choice.name));
         }
+    }
+    if section == Section::Keyboard {
+        for shortcut in &snapshot.shortcuts {
+            text.push_str(&format!(" {} {}", shortcut.label, shortcut.shortcut));
+        }
+    }
+    if section == Section::Hosts {
+        for host in &snapshot.hosts {
+            text.push_str(&format!(" {} {}", host.name, host.address));
+        }
+    }
+    let text = text.to_lowercase();
+    words.iter().all(|word| text.contains(word))
+}
+
+/// Where a panel laid out its titled groups, by page and title (`None`,
+/// "" for the page content), as window y from the last prepaint: where
+/// [`SettingsPanel::reveal`] scrolls to. One per panel.
+#[derive(Clone, Default)]
+struct Places(std::rc::Rc<std::cell::RefCell<std::collections::HashMap<PlaceKey, f32>>>);
+
+/// A page (`None`: the page content) and a group title.
+type PlaceKey = (Option<Section>, &'static str);
+
+impl Places {
+    fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+
+    /// Where group `title` of page `section` sits below the content top.
+    fn offset(&self, section: Section, title: &'static str) -> Option<f32> {
+        let places = self.0.borrow();
+        Some(places.get(&(Some(section), title))? - places.get(&(None, ""))?)
+    }
+
+    /// Records where `key` is laid out.
+    fn probe(&self, key: PlaceKey) -> impl IntoElement + use<> {
+        let places = self.0.clone();
+        gpui::canvas(
+            move |bounds, _, _| {
+                places.borrow_mut().insert(key, f32::from(bounds.top()));
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 }
 
 pub struct SettingsPanel {
     snapshot: SettingsSnapshot,
     selected: Section,
+    /// A setting to scroll to once its page is laid out, and frames waited.
+    reveal: Option<(SettingId, u8)>,
+    /// Where groups were laid out, and the page being built.
+    places: Places,
+    building: std::cell::Cell<Section>,
     search: Entity<TextField>,
     query: String,
     pending_server: Option<ServerAction>,
@@ -501,26 +563,25 @@ impl SettingsPanel {
             .collect();
         let scrollback_field = cx.new(|cx| TextField::new("10000", cx));
         subscriptions.push(cx.subscribe(&scrollback_field, |this, field, event, cx| match event {
-            FieldEvent::Submit => {
-                let text: String = field.read(cx).text.chars().filter(|c| !matches!(c, ',' | '_' | ' ')).collect();
-                let range = silo_proto::model::TerminalConfig::MIN_SCROLLBACK..=silo_proto::model::TerminalConfig::MAX_SCROLLBACK;
-                match text.parse::<u64>() {
-                    Ok(lines) if range.contains(&lines) => {
-                        this.field_error = None;
-                        cx.emit(SettingsEvent::SetScrollback(lines));
-                    }
-                    _ => {
-                        this.field_error = Some(format!("Scrollback must be a number of lines from {} to {}.", range.start(), range.end()));
-                        cx.notify();
-                    }
+            FieldEvent::Submit => match SettingId::Scrollback.parse(&field.read(cx).text) {
+                Ok(event) => {
+                    this.field_error = None;
+                    cx.emit(event);
                 }
-            }
+                Err(error) => {
+                    this.field_error = Some(error);
+                    cx.notify();
+                }
+            },
             FieldEvent::Cancel => this.sync_fields(cx),
             _ => {}
         }));
         let mut this = Self {
             snapshot,
             selected: Section::Appearance,
+            reveal: None,
+            places: Places::default(),
+            building: std::cell::Cell::new(Section::Appearance),
             search,
             query: String::new(),
             pending_server: None,
@@ -581,6 +642,33 @@ impl SettingsPanel {
         focus.focus(window, cx);
     }
 
+    /// Show `setting`'s page scrolled to it.
+    pub fn reveal(&mut self, setting: SettingId, cx: &mut Context<Self>) {
+        self.select(setting.setting().section, cx);
+        self.places.clear();
+        self.reveal = Some((setting, 0));
+    }
+
+    /// Scroll to the setting being revealed once its page was laid out.
+    fn scroll_to_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((setting, frames)) = self.reveal else { return };
+        let Some(group) = setting.setting().group else {
+            self.reveal = None;
+            return;
+        };
+        match self.places.offset(setting.setting().section, group) {
+            Some(y) => {
+                self.scroll.set_offset(gpui::point(px(0.0), px(-(y - 6.0).max(0.0))));
+                self.reveal = None;
+            }
+            None if frames < 10 => {
+                self.reveal = Some((setting, frames + 1));
+                cx.on_next_frame(window, |_, _, cx| cx.notify());
+            }
+            None => self.reveal = None,
+        }
+    }
+
     fn select(&mut self, section: Section, cx: &mut Context<Self>) {
         self.selected = section;
         self.theme_menu = None;
@@ -603,23 +691,7 @@ impl SettingsPanel {
     }
 
     fn matches(&self, section: Section) -> bool {
-        let mut text = format!("{} {}", section.label(), section.keywords());
-        if matches!(section, Section::Terminal | Section::Appearance) {
-            for choice in &self.snapshot.terminal.themes {
-                text.push_str(&format!(" {}", choice.name));
-            }
-        }
-        if section == Section::Keyboard {
-            for shortcut in &self.snapshot.shortcuts {
-                text.push_str(&format!(" {} {}", shortcut.label, shortcut.shortcut));
-            }
-        }
-        if section == Section::Hosts {
-            for host in &self.snapshot.hosts {
-                text.push_str(&format!(" {} {}", host.name, host.address));
-            }
-        }
-        self.text_matches(&text)
+        section_matches(section, &self.snapshot, &self.words().collect::<Vec<_>>())
     }
 
     // ---- building blocks ----
@@ -735,7 +807,9 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn group(title: Option<&'static str>, rows: Vec<AnyElement>) -> AnyElement {
+    /// A titled group records where it is laid out ([`Places`]) under the
+    /// page being built ([`Self::page`]).
+    fn group(&self, title: Option<&'static str>, rows: Vec<AnyElement>) -> AnyElement {
         let count = rows.len();
         let mut card =
             div().w_full().flex().flex_col().overflow_hidden().continuous(10.0).border_1().border_color(rgb(theme::border())).bg(theme::group_fill());
@@ -747,11 +821,13 @@ impl SettingsPanel {
         }
         div()
             .w_full()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(6.0))
             .children(title.map(|t| div().px(px(4.0)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::muted())).child(t)))
             .child(card)
+            .children(title.map(|t| self.places.probe((Some(self.building.get()), t))))
             .into_any_element()
     }
 
@@ -1312,7 +1388,7 @@ impl SettingsPanel {
         out.push(self.terminal_preview());
         out.push(self.config_line(cx));
 
-        out.push(Self::group(None, vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-terminal-theme", cx)), false)]));
+        out.push(self.group(None, vec![Self::row(SettingId::Theme.label(), None, Some(self.theme_dropdown("settings-terminal-theme", cx)), false)]));
 
         let size = t.font_size;
         let step = |id: &'static str, label: &'static str, delta: f32, cx: &mut Context<Self>| {
@@ -1328,10 +1404,10 @@ impl SettingsPanel {
             .child(step("settings-font-larger", "+", 1.0, cx))
             .into_any_element();
         let font_rows = vec![
-            Self::row("Family", t.font_status().map(Into::into), Some(self.font_dropdown(FontTarget::Terminal, cx)), narrow),
-            Self::row("Size", Some("This Mac only".into()), Some(size_control), narrow),
+            Self::row(SettingId::FontFamily.label(), t.font_status().map(Into::into), Some(self.font_dropdown(FontTarget::Terminal, cx)), narrow),
+            Self::row(SettingId::FontSize.label(), Some("This Mac only".into()), Some(size_control), narrow),
         ];
-        out.push(Self::group(Some("Font"), font_rows));
+        out.push(self.group(Some("Font"), font_rows));
 
         let mut color_rows = Vec::new();
         for (slot, field) in &self.color_fields {
@@ -1348,20 +1424,20 @@ impl SettingsPanel {
                 ));
             }
             let description: Option<gpui::SharedString> = overridden.then(|| "Custom".into());
-            color_rows.push(Self::row(slot.label(), description, Some(control.into_any_element()), narrow));
+            color_rows.push(Self::row(SettingId::Color(slot).label(), description, Some(control.into_any_element()), narrow));
         }
-        out.push(Self::group(Some("Colors"), color_rows));
+        out.push(self.group(Some("Colors"), color_rows));
 
         let blink = t.cursor_blink;
-        out.push(Self::group(
+        out.push(self.group(
             Some("Cursor"),
             vec![
                 Self::row(
-                    "Shape",
+                    SettingId::CursorShape.label(),
                     None,
                     Some(Self::segmented(
                         "settings-cursor-shape",
-                        &[(CursorShape::Block, "Block"), (CursorShape::Bar, "Bar"), (CursorShape::Underline, "Underline")],
+                        &crate::settings_table::CURSOR_SHAPES,
                         t.cursor_shape,
                         76.0,
                         SettingsEvent::SetCursorShape,
@@ -1370,7 +1446,7 @@ impl SettingsPanel {
                     narrow,
                 ),
                 Self::row(
-                    "Blinking",
+                    SettingId::CursorBlink.label(),
                     None,
                     Some(Self::switch("settings-cursor-blink", "Cursor blinking", blink, SettingsEvent::SetCursorBlink, cx)),
                     false,
@@ -1378,10 +1454,10 @@ impl SettingsPanel {
             ],
         ));
 
-        out.push(Self::group(
+        out.push(self.group(
             Some("Scrollback"),
             vec![Self::row(
-                "History",
+                SettingId::Scrollback.label(),
                 None,
                 Some(
                     div()
@@ -1396,10 +1472,10 @@ impl SettingsPanel {
             )],
         ));
 
-        out.push(Self::group(
+        out.push(self.group(
             None,
             vec![Self::row(
-                "Restore defaults",
+                SettingId::RestoreDefaults.label(),
                 None,
                 Some(Self::emit_button("settings-terminal-reset", "Restore", SettingsEvent::ResetTerminal, cx)),
                 false,
@@ -1412,56 +1488,47 @@ impl SettingsPanel {
 
     #[allow(clippy::too_many_lines)]
     fn page(&self, section: Section, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.building.set(section);
         let s = &self.snapshot;
         let mut out = Vec::new();
         match section {
             Section::Appearance => {
-                let frosted = s.material == crate::material::Material::Frosted && s.material_unavailable.is_none();
-                out.push(Self::group(
+                out.push(self.group(
                     Some("Layout"),
                     vec![
-                        Self::row("Pane density", None, Some(self.density_control(cx)), narrow),
+                        Self::row(SettingId::PaneDensity.label(), None, Some(self.density_control(cx)), narrow),
                         Self::row(
-                            "Pane headers",
+                            SettingId::PaneHeaders.label(),
                             None,
                             Some(Self::switch("settings-headers", "Pane headers", s.show_pane_headers, SettingsEvent::SetPaneHeaders, cx)),
                             false,
                         ),
                     ],
                 ));
-                out.push(Self::group(
-                    Some("Colors"),
-                    if frosted {
-                        vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)]
-                    } else {
-                        vec![
-                            Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false),
-                            Self::row(
-                                "Match running app",
-                                Some("Window and padding take on the background of the focused app or page".into()),
-                                Some(Self::switch(
-                                    "settings-match-app",
-                                    "Match running app",
-                                    s.match_running_app,
-                                    SettingsEvent::SetMatchRunningApp,
-                                    cx,
-                                )),
-                                false,
-                            ),
-                        ]
-                    },
-                ));
+                let mut colors = vec![Self::row(SettingId::Theme.label(), None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)];
+                if SettingId::MatchRunningApp.visible(s) {
+                    colors.push(Self::row(
+                        SettingId::MatchRunningApp.label(),
+                        Some("Window and padding take on the background of the focused app or page".into()),
+                        Some(Self::switch("settings-match-app", "Match running app", s.match_running_app, SettingsEvent::SetMatchRunningApp, cx)),
+                        false,
+                    ));
+                }
+                out.push(self.group(Some("Colors"), colors));
                 let unavailable = s.material_unavailable.filter(|_| s.material == crate::material::Material::Frosted);
-                let mut material = vec![Self::row("Window", unavailable.map(Into::into), Some(self.material_control(cx)), narrow)];
-                if frosted {
+                let mut material =
+                    vec![Self::row(SettingId::WindowMaterial.label(), unavailable.map(Into::into), Some(self.material_control(cx)), narrow)];
+                if SettingId::TintWithApp.visible(s) {
                     material.push(Self::row(
-                        "Tint with running app",
+                        SettingId::TintWithApp.label(),
                         Some("The blur takes on the background of the focused app or page".into()),
                         Some(Self::switch("settings-tint-app", "Tint with running app", s.tint_with_app, SettingsEvent::SetTintWithApp, cx)),
                         false,
                     ));
+                }
+                if SettingId::TranslucentApps.visible(s) {
                     material.push(Self::row(
-                        "Translucent app backgrounds",
+                        SettingId::TranslucentApps.label(),
                         Some("Full-screen apps show the blur through their own background".into()),
                         Some(Self::switch(
                             "settings-translucent-apps",
@@ -1473,10 +1540,15 @@ impl SettingsPanel {
                         false,
                     ));
                 }
-                out.push(Self::group(Some("Material"), material));
-                out.push(Self::group(
+                out.push(self.group(Some("Material"), material));
+                out.push(self.group(
                     Some("Font"),
-                    vec![Self::row("Interface font", s.ui_font.font_status().map(Into::into), Some(self.font_dropdown(FontTarget::Ui, cx)), narrow)],
+                    vec![Self::row(
+                        SettingId::InterfaceFont.label(),
+                        s.ui_font.font_status().map(Into::into),
+                        Some(self.font_dropdown(FontTarget::Ui, cx)),
+                        narrow,
+                    )],
                 ));
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
@@ -1491,7 +1563,7 @@ impl SettingsPanel {
                 if rows.is_empty() {
                     out.push(Self::note("No shortcuts."));
                 } else {
-                    out.push(Self::group(None, rows));
+                    out.push(self.group(None, rows));
                 }
             }
             Section::Hosts => {
@@ -1574,9 +1646,9 @@ impl SettingsPanel {
                     rows.push(Self::row(host.name.clone(), Some(host.status.clone().into()), control, narrow));
                 }
                 if !rows.is_empty() {
-                    out.push(Self::group(None, rows));
+                    out.push(self.group(None, rows));
                 }
-                out.push(Self::group(
+                out.push(self.group(
                     None,
                     vec![Self::row(
                         "Remote host",
@@ -1605,7 +1677,7 @@ impl SettingsPanel {
                         false,
                     ));
                 }
-                out.push(Self::group(None, rows));
+                out.push(self.group(None, rows));
 
                 let mut actions = div().flex().flex_wrap().gap(px(8.0));
                 for (action, label, enabled) in [
@@ -1663,13 +1735,13 @@ impl SettingsPanel {
                 } else {
                     "Restart and Stop end all sessions".into()
                 };
-                out.push(Self::group(None, vec![Self::row("Server", Some(description), Some(control), narrow)]));
+                out.push(self.group(None, vec![Self::row("Server", Some(description), Some(control), narrow)]));
                 if s.server.endpoint_id.is_some() || s.server.remote_error.is_some() {
                     out.push(self.devices_group(narrow, cx));
                 }
             }
             Section::About => {
-                out.push(Self::group(
+                out.push(self.group(
                     None,
                     vec![
                         Self::row("Version", None, Some(Self::value(s.version.clone())), false),
@@ -1729,7 +1801,7 @@ impl SettingsPanel {
             rows.push(div().px(px(14.0)).py(px(10.0)).child(line).into_any_element());
         } else {
             let pair = Self::emit_button("settings-pair-device", "Pair a device…", SettingsEvent::PairDevice, cx);
-            rows.push(Self::row("New device", Some("Single use, valid 10 minutes".into()), Some(pair), narrow));
+            rows.push(Self::row(SettingId::PairDevice.label(), Some("Single use, valid 10 minutes".into()), Some(pair), narrow));
         }
         if let Some(ticket) = s.invite.clone() {
             let code = crate::qr::render(&ticket);
@@ -1741,7 +1813,7 @@ impl SettingsPanel {
             rows.push(Self::row("Ticket", None, Some(control.into_any_element()), narrow));
             rows.extend(code.map(|qr| div().w_full().flex().justify_center().py(px(12.0)).child(qr).into_any_element()));
         }
-        Self::group(Some("Paired devices"), rows)
+        self.group(Some("Paired devices"), rows)
     }
 
     fn sidebar(&self, width: f32, searching: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1857,6 +1929,7 @@ fn keycap(shortcut: &str) -> AnyElement {
 
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.scroll_to_reveal(window, cx);
         // The host clamps the card to the viewport; mirror that here.
         let panel_width = (f32::from(window.viewport_size().width) - 64.0).clamp(420.0, 880.0);
         let compact = panel_width < NARROW;
@@ -1866,7 +1939,8 @@ impl Render for SettingsPanel {
 
         let sections: Vec<_> =
             Section::ALL.into_iter().filter(|section| if searching { self.matches(*section) } else { *section == self.selected }).collect();
-        let mut content = div().w_full().max_w(px(620.0)).flex().flex_col().gap(px(14.0)).pb(px(28.0));
+        let mut content =
+            div().w_full().max_w(px(620.0)).relative().flex().flex_col().gap(px(14.0)).pb(px(28.0)).child(self.places.probe((None, "")));
         if let Some(message) = self.snapshot.message.clone() {
             content = content.child(
                 div()
@@ -2089,5 +2163,38 @@ mod tests {
             assert!(query.split_whitespace().all(|w| text.to_lowercase().contains(w)), "{query} misses Appearance");
         }
         assert!(Section::Terminal.keywords().contains("font"));
+    }
+
+    #[test]
+    fn places_tell_same_titled_groups_of_different_pages_apart() {
+        let places = Places::default();
+        {
+            let mut p = places.0.borrow_mut();
+            p.insert((None, ""), 100.0);
+            p.insert((Some(Section::Appearance), "Colors"), 220.0);
+            p.insert((Some(Section::Terminal), "Colors"), 480.0);
+        }
+        assert_eq!(places.offset(Section::Terminal, "Colors"), Some(380.0));
+        assert_eq!(places.offset(Section::Appearance, "Colors"), Some(120.0));
+        assert_eq!(places.offset(Section::Terminal, "Font"), None);
+        // Each panel has its own.
+        assert_eq!(Places::default().offset(Section::Terminal, "Colors"), None);
+        places.clear();
+        assert_eq!(places.offset(Section::Appearance, "Colors"), None);
+    }
+
+    /// The finder's settings are the panel's: searching the panel for a
+    /// declared setting's title, label or a keyword shows its page.
+    #[test]
+    fn the_panel_search_finds_every_declared_setting() {
+        let snapshot = SettingsSnapshot::default();
+        for setting in crate::settings_table::SETTINGS {
+            let keyword = setting.keywords.split_whitespace().next().unwrap_or_default();
+            for text in [setting.title, setting.label, keyword] {
+                let query = text.to_lowercase();
+                let words: Vec<&str> = query.split_whitespace().collect();
+                assert!(section_matches(setting.section, &snapshot, &words), "{text:?} misses {:?}", setting.section);
+            }
+        }
     }
 }

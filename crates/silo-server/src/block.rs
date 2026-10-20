@@ -59,6 +59,16 @@ const OFFER_LIMIT: usize = 3;
 const OFFER_WINDOW: Duration = Duration::from_secs(60);
 /// Distinct offered tickets remembered per block.
 const OFFERED_CAP: usize = 16;
+/// The driving client's stream (see `Actor::driver`) may be this many
+/// output bytes behind (sent, not yet applied by it); beyond that the PTY is
+/// not read, so a program printing faster than the driver's link or
+/// renderer slows to its pace, as on a local terminal or over SSH, instead
+/// of the stream falling behind until it is cut and re-synchronised.
+const DRIVER_WINDOW: u64 = 1024 * 1024;
+/// A driver that stays more than `DRIVER_WINDOW` behind for this long stops
+/// holding the PTY (until it catches up): a stalled client never stalls the
+/// program for long.
+const HOLD_LIMIT: Duration = Duration::from_secs(2);
 /// Least time between clipboard writes a block sends; writes in between
 /// coalesce, the last one wins.
 const CLIP_WRITE_INTERVAL: Duration = Duration::from_millis(250);
@@ -66,42 +76,59 @@ const CLIP_WRITE_INTERVAL: Duration = Duration::from_millis(250);
 /// Back-pressure from the actor to the PTY reader thread.
 #[derive(Default)]
 struct ReadGate {
-    /// Bytes queued for the actor, and whether waiting is disabled.
-    state: Mutex<(usize, bool)>,
+    state: Mutex<GateState>,
     room: Condvar,
 }
 
+#[derive(Default)]
+struct GateState {
+    /// Bytes queued for the actor.
+    queued: usize,
+    /// The driving client is too far behind: read nothing more.
+    held: bool,
+    /// Waiting is disabled.
+    open: bool,
+}
+
 impl ReadGate {
-    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, bool)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Reader side: queue `len` bytes via `send`, then wait for room.
     fn read(&self, len: usize, send: impl FnOnce()) {
-        self.lock().0 += len;
+        self.lock().queued += len;
         send();
         let state = self.lock();
-        drop(self.room.wait_while(state, |(queued, open)| *queued > READ_AHEAD && !*open));
+        drop(self.room.wait_while(state, |s| (s.queued > READ_AHEAD || s.held) && !s.open));
     }
 
     /// Actor side: `len` queued bytes were taken.
     fn done(&self, len: usize) {
         let mut state = self.lock();
-        state.0 = state.0.saturating_sub(len);
-        if state.0 <= READ_AHEAD {
+        state.queued = state.queued.saturating_sub(len);
+        if state.queued <= READ_AHEAD {
+            self.room.notify_all();
+        }
+    }
+
+    /// Actor side: hold or release reading for the driving client.
+    fn hold(&self, held: bool) {
+        self.lock().held = held;
+        if !held {
             self.room.notify_all();
         }
     }
 
     /// Stop throttling, so the reader thread can be stopped and joined.
     fn open(&self) {
-        self.lock().1 = true;
+        self.lock().open = true;
         self.room.notify_all();
     }
 
     /// Throttle again from empty (a re-adopted PTY).
     fn reset(&self) {
-        *self.lock() = (0, false);
+        *self.lock() = GateState::default();
     }
 }
 
@@ -385,12 +412,15 @@ struct Subscriber {
     inputs_acked: u64,
     /// Remote streams get `TTY_MODE` and `INPUT_ACK`.
     remote: bool,
+    /// The client the stream belongs to.
+    client: ClientId,
 }
 
 impl Subscriber {
-    fn new(sink: Sink, start: u64, remote: bool) -> Self {
+    fn new(sink: Sink, start: u64, remote: bool, client: ClientId) -> Self {
         Self {
             remote,
+            client,
             sink,
             pending: VecDeque::new(),
             pending_live: 0,
@@ -540,6 +570,14 @@ struct Actor {
     size: TermSize,
     desired: HashMap<ClientId, Desired>,
     owner: Option<ClientId>,
+    /// The client that last typed into the block or took it (focus): its
+    /// configuration drives the server terminal (see `wanted_config`).
+    driver: Option<ClientId>,
+    /// Since when the PTY is held for the driver's stream (`DRIVER_WINDOW`).
+    held_since: Option<Instant>,
+    /// A driver stream that held past `HOLD_LIMIT`: not waited for again
+    /// until it catches up.
+    unheld: Option<u64>,
     /// Ownership candidates, least recently active first.
     candidates: Vec<ClientId>,
     info: Arc<Mutex<BlockInfo>>,
@@ -557,8 +595,8 @@ struct Actor {
     /// Pending injections and when the first was queued.
     injects: VecDeque<(Vec<u8>, Vec<u8>)>,
     inject_since: Option<Instant>,
-    /// Every client's desired configuration and when it was reported.
-    configs: HashMap<ClientId, (TerminalConfig, u64)>,
+    /// Every client's desired configuration.
+    configs: HashMap<ClientId, TerminalConfig>,
     /// Configuration installed in `vt` and announced to subscribers.
     config: TerminalConfig,
     /// A configuration waiting for a parser-ground boundary, and since when.
@@ -916,7 +954,10 @@ fn start_io(pty: &mut Pty, id: &str, tx: &mpsc::Sender<BlockMsg>, gate: &Arc<Rea
 /// Reader thread: hand an event to the actor, waiting while it is behind.
 fn feed(tx: &mpsc::Sender<BlockMsg>, gate: &ReadGate, event: PtyEvent) {
     match event {
-        PtyEvent::Output(bytes) => gate.read(bytes.len(), || drop(tx.send(BlockMsg::Output(bytes)))),
+        PtyEvent::Output(bytes) => {
+            tracing::trace!(target: "silo::latency", stage = "pty_output");
+            gate.read(bytes.len(), || drop(tx.send(BlockMsg::Output(bytes))));
+        }
         PtyEvent::Closed => drop(tx.send(BlockMsg::ReaderClosed)),
     }
 }
@@ -953,6 +994,9 @@ impl Actor {
             size: info.size,
             desired: HashMap::new(),
             owner: None,
+            driver: None,
+            held_since: None,
+            unheld: None,
             candidates: Vec::new(),
             info: Arc::new(Mutex::new(info.clone())),
             notes,
@@ -984,21 +1028,14 @@ impl Actor {
 
     fn run(&mut self, rx: &mpsc::Receiver<BlockMsg>) {
         let mut exit_deadline: Option<Instant> = None;
+        // A message taken while coalescing output, handled next.
+        let mut next: Option<BlockMsg> = None;
         loop {
-            let mut timeout = exit_deadline.map_or(PROBE_INTERVAL, |d| d.saturating_duration_since(Instant::now()));
-            if let Some(since) = self.inject_since.or(self.pending_config.map(|(_, since)| since)) {
-                timeout = timeout.min((since + INJECT_WAIT).saturating_duration_since(Instant::now()));
-            }
-            if self.subscribers.values().any(|sub| !sub.pending.is_empty()) {
-                timeout = timeout.min(PUMP_INTERVAL);
-            }
-            if self.pty.is_some() && self.remote_attached() {
-                timeout = timeout.min(MODE_INTERVAL.saturating_sub(self.last_mode_poll.elapsed()));
-            }
-            if let (Some(_), Some(sent)) = (&self.clip_held, self.clip_sent) {
-                timeout = timeout.min(CLIP_WRITE_INTERVAL.saturating_sub(sent.elapsed()));
-            }
-            match rx.recv_timeout(timeout) {
+            let received = match next.take() {
+                Some(msg) => Ok(msg),
+                None => rx.recv_timeout(self.wait_timeout(exit_deadline)),
+            };
+            match received {
                 Ok(BlockMsg::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(BlockMsg::Handoff { reply }) => match self.handoff(rx) {
                     Ok(handoff) => {
@@ -1009,10 +1046,27 @@ impl Actor {
                         let _ = reply.send(Err(e));
                     }
                 },
-                Ok(msg) => {
-                    if let BlockMsg::Output(bytes) = &msg {
-                        self.gate.done(bytes.len());
+                Ok(BlockMsg::Output(mut bytes)) => {
+                    self.gate.done(bytes.len());
+                    // PTY reads already queued (at most 1 KiB each on
+                    // macOS) become one chunk: one parse and one frame per
+                    // subscriber instead of hundreds. Nothing waits for more.
+                    while bytes.len() < OUTPUT_CHUNK {
+                        match rx.try_recv() {
+                            Ok(BlockMsg::Output(more)) => {
+                                self.gate.done(more.len());
+                                bytes.extend_from_slice(&more);
+                            }
+                            Ok(other) => {
+                                next = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
                     }
+                    self.handle(BlockMsg::Output(bytes));
+                }
+                Ok(msg) => {
                     if self.handle(msg) && exit_deadline.is_none() {
                         // Drain output still buffered in the PTY before
                         // reporting the exit, but do not wait forever for
@@ -1031,6 +1085,7 @@ impl Actor {
                 self.poll_mode();
             }
             self.pump();
+            self.update_hold();
             if self.child_exited && self.lifecycle.is_running() && (self.reader_closed || exit_deadline.is_some_and(|d| Instant::now() >= d)) {
                 self.finish();
                 exit_deadline = None;
@@ -1038,6 +1093,64 @@ impl Actor {
             if self.lifecycle.is_running() && self.last_probe.elapsed() >= PROBE_INTERVAL {
                 self.probe();
             }
+        }
+    }
+
+    /// How long the actor may wait for its next message.
+    fn wait_timeout(&self, exit_deadline: Option<Instant>) -> Duration {
+        let mut timeout = exit_deadline.map_or(PROBE_INTERVAL, |d| d.saturating_duration_since(Instant::now()));
+        if let Some(since) = self.inject_since.or(self.pending_config.map(|(_, since)| since)) {
+            timeout = timeout.min((since + INJECT_WAIT).saturating_duration_since(Instant::now()));
+        }
+        if self.subscribers.values().any(|sub| !sub.pending.is_empty()) {
+            timeout = timeout.min(PUMP_INTERVAL);
+        }
+        if self.pty.is_some() && self.remote_attached() {
+            timeout = timeout.min(MODE_INTERVAL.saturating_sub(self.last_mode_poll.elapsed()));
+        }
+        if let (Some(_), Some(sent)) = (&self.clip_held, self.clip_sent) {
+            timeout = timeout.min(CLIP_WRITE_INTERVAL.saturating_sub(sent.elapsed()));
+        }
+        if let Some(since) = self.held_since {
+            timeout = timeout.min(HOLD_LIMIT.saturating_sub(since.elapsed()));
+        }
+        timeout
+    }
+
+    /// Hold the PTY while the driver's stream is more than `DRIVER_WINDOW`
+    /// behind, for at most `HOLD_LIMIT` without it catching up.
+    fn update_hold(&mut self) {
+        let driver = self.driver;
+        let behind = self
+            .subscribers
+            .iter()
+            .filter(|(_, sub)| Some(sub.client) == driver)
+            .map(|(id, sub)| (*id, sub.sent.saturating_sub(sub.acked)))
+            .max_by_key(|(_, behind)| *behind);
+        if let Some(id) = self.unheld
+            && behind.is_none_or(|(driving, behind)| driving != id || behind <= DRIVER_WINDOW)
+        {
+            self.unheld = None;
+        }
+        // After the child exited the actor waits only briefly for the
+        // output still in the PTY: never park the reader then.
+        let hold = !self.child_exited && behind.is_some_and(|(id, behind)| behind > DRIVER_WINDOW && self.unheld != Some(id));
+        match (hold, self.held_since) {
+            (true, Some(since)) if since.elapsed() >= HOLD_LIMIT => {
+                tracing::debug!(block = %self.id, "driver stalled; not holding output for it");
+                self.unheld = behind.map(|(id, _)| id);
+                self.held_since = None;
+                self.gate.hold(false);
+            }
+            (true, None) => {
+                self.held_since = Some(Instant::now());
+                self.gate.hold(true);
+            }
+            (false, Some(_)) => {
+                self.held_since = None;
+                self.gate.hold(false);
+            }
+            _ => {}
         }
     }
 
@@ -1058,11 +1171,19 @@ impl Actor {
             }
             BlockMsg::StreamInput { sub_id, bytes } => {
                 let end = self.ring_end();
+                let client = self.subscribers.get(&sub_id).map(|sub| sub.client);
                 if let Some(sub) = self.subscribers.get_mut(&sub_id).filter(|sub| sub.remote) {
                     sub.inputs += 1;
                     sub.input_offset = end;
                 }
+                tracing::trace!(target: "silo::latency", stage = "actor_input");
+                // A focus report (mode 1004) is sent on focus changes, not
+                // typed: losing focus must not make that client the driver.
+                let typed = !is_focus_report(&bytes);
                 self.send_input(bytes);
+                if let Some(client) = client.filter(|_| typed) {
+                    self.drive(client);
+                }
             }
             BlockMsg::Attach(attach) => self.attach(*attach),
             BlockMsg::Detach(id) => {
@@ -1090,17 +1211,19 @@ impl Actor {
                 }
             }
             BlockMsg::Config { client_id, config } => {
-                self.configs.insert(client_id, (config.sanitized(), now_ms()));
-                if self.owner.is_none() || self.owner == Some(client_id) {
-                    self.request_config(config.sanitized());
-                }
+                self.configs.insert(client_id, config.sanitized());
+                self.reconfigure();
             }
             BlockMsg::Own { client_id, mode } => self.own(client_id, mode),
             BlockMsg::Disown { client_id } => self.disown(client_id),
             BlockMsg::ClientGone { client_id } => {
                 self.desired.remove(&client_id);
                 self.configs.remove(&client_id);
+                if self.driver == Some(client_id) {
+                    self.driver = None;
+                }
                 self.disown(client_id);
+                self.reconfigure();
             }
             BlockMsg::Capture { history, reply } => {
                 let _ = reply.send(self.capture(history));
@@ -1195,6 +1318,8 @@ impl Actor {
             return;
         };
         self.gate.reset();
+        self.held_since = None;
+        self.unheld = None;
         match adopt_pty(&self.id, detached, &tx, &self.gate) {
             Ok((pty, input)) => {
                 self.pty = Some(pty);
@@ -1289,16 +1414,12 @@ impl Actor {
         }
     }
 
-    /// Feed output to the terminal, the ring and subscribers.
+    /// Feed output to the ring and subscribers, then the terminal: clients
+    /// parse for themselves, so they never wait for the server's parse (the
+    /// actor's single thread keeps snapshots and offsets consistent).
     fn apply(&mut self, bytes: &[u8]) {
         let offset = self.ring_end();
         self.mark_dirty();
-        match self.vt.write_output(bytes) {
-            Ok(replies) if !replies.is_empty() => {
-                self.send_input(replies);
-            }
-            _ => {}
-        }
         self.ring.extend(bytes);
         if self.ring.len() > RING_CAP {
             let excess = self.ring.len() - RING_CAP;
@@ -1307,6 +1428,13 @@ impl Actor {
             self.log.trim(self.ring_start);
         }
         self.broadcast(&ServerData::Output { offset, bytes: bytes.to_vec() });
+        tracing::trace!(target: "silo::latency", stage = "server_output");
+        match self.vt.write_output(bytes) {
+            Ok(replies) if !replies.is_empty() => {
+                self.send_input(replies);
+            }
+            _ => {}
+        }
         if self.remote_attached() {
             self.poll_mode();
         }
@@ -1387,13 +1515,30 @@ impl Actor {
         self.broadcast(&ServerData::Configured(config));
     }
 
-    /// The configuration that should be effective: the owner's, else the
-    /// most recently reported one, else the current one.
-    fn wanted_config(&self) -> Option<TerminalConfig> {
-        match self.owner.and_then(|o| self.configs.get(&o)) {
-            Some((config, _)) => Some(*config),
-            None => self.configs.values().max_by_key(|(_, at)| *at).map(|(config, _)| *config),
+    /// `client` typed into the block or took it: its configuration now
+    /// drives the server terminal.
+    fn drive(&mut self, client: ClientId) {
+        if self.driver != Some(client) {
+            self.driver = Some(client);
+            self.reconfigure();
         }
+    }
+
+    /// Make the wanted configuration effective (at the next ground).
+    fn reconfigure(&mut self) {
+        if let Some(config) = self.wanted_config() {
+            self.request_config(config);
+        }
+    }
+
+    /// The configuration the server terminal answers colour queries,
+    /// `CSI ? 996 n` and snapshots with (clients render with their own):
+    /// the driver's, else the owner's (a client may hold either without
+    /// reporting one, e.g. `silo attach`), else that of the client that
+    /// connected first, so an unowned block (a server-created session)
+    /// does not flip with every client that reports one.
+    fn wanted_config(&self) -> Option<TerminalConfig> {
+        wanted_config(&self.configs, self.driver, self.owner)
     }
 
     /// Hand clipboard text to every attached client (dropped above
@@ -1563,7 +1708,7 @@ impl Actor {
         let resumable = attach.resume.filter(|r| r.epoch == self.epoch && (start..=end).contains(&r.offset));
         let mut sub;
         if let Some(Resume { offset: from, .. }) = resumable {
-            sub = Subscriber::new(attach.sink, from, attach.remote);
+            sub = Subscriber::new(attach.sink, from, attach.remote, attach.client_id);
             let (state, changes) = self.log.from(from);
             sub.send(welcome(StartMode::Resume, from, state.size));
             sub.send(ServerData::Configured(state.config).to_frame());
@@ -1581,7 +1726,7 @@ impl Actor {
                     return;
                 }
             };
-            sub = Subscriber::new(attach.sink, end, attach.remote);
+            sub = Subscriber::new(attach.sink, end, attach.remote, attach.client_id);
             let history = head.split_off(head_len.min(head.len()));
             sub.send(welcome(StartMode::Snapshot, end, self.size));
             // The snapshot already reflects the current configuration.
@@ -1606,6 +1751,9 @@ impl Actor {
     fn own(&mut self, client: ClientId, mode: OwnMode) {
         self.candidates.retain(|c| *c != client);
         self.candidates.push(client);
+        if mode == OwnMode::Take {
+            self.driver = Some(client);
+        }
         if mode == OwnMode::Take || self.owner.is_none() {
             if self.owner != Some(client) {
                 self.owner = Some(client);
@@ -1614,10 +1762,8 @@ impl Actor {
             if let Some(size) = self.desired.get(&client).map(|d| d.size) {
                 self.apply_size(size);
             }
-            if let Some(config) = self.wanted_config() {
-                self.request_config(config);
-            }
         }
+        self.reconfigure();
     }
 
     fn disown(&mut self, client: ClientId) {
@@ -1631,9 +1777,7 @@ impl Actor {
             if let Some(size) = size {
                 self.apply_size(size);
             }
-            if let Some(config) = self.wanted_config() {
-                self.request_config(config);
-            }
+            self.reconfigure();
             self.publish();
         }
     }
@@ -1760,6 +1904,21 @@ fn install_config(vt: &mut TerminalCore, config: &TerminalConfig) -> Vec<u8> {
     report
 }
 
+/// `ESC [ I` / `ESC [ O`: a focus report (mode 1004), not typing.
+fn is_focus_report(bytes: &[u8]) -> bool {
+    matches!(bytes, b"\x1b[I" | b"\x1b[O")
+}
+
+/// See `Actor::wanted_config`.
+fn wanted_config(configs: &HashMap<ClientId, TerminalConfig>, driver: Option<ClientId>, owner: Option<ClientId>) -> Option<TerminalConfig> {
+    [driver, owner]
+        .into_iter()
+        .flatten()
+        .find_map(|c| configs.get(&c))
+        .or_else(|| configs.iter().min_by_key(|(id, _)| **id).map(|(_, config)| config))
+        .copied()
+}
+
 pub fn engine_config(config: &TerminalConfig) -> (TerminalColors, TerminalDefaults) {
     let colors = TerminalColors {
         scheme: if config.is_light() { ColorScheme::Light } else { ColorScheme::Dark },
@@ -1806,6 +1965,27 @@ fn pwd_path(pwd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_driver_s_then_the_owner_s_then_the_first_client_s_config_wins() {
+        use std::collections::HashMap;
+
+        use silo_proto::model::TerminalConfig;
+        let c = |background| TerminalConfig { background, ..TerminalConfig::default() };
+        let configs = HashMap::from([(3, c(3)), (5, c(5)), (8, c(8))]);
+        assert_eq!(super::wanted_config(&configs, Some(8), Some(5)), Some(c(8)));
+        // A driver or owner without a config (`silo attach`) is skipped.
+        assert_eq!(super::wanted_config(&configs, Some(9), Some(5)), Some(c(5)));
+        assert_eq!(super::wanted_config(&configs, Some(9), Some(10)), Some(c(3)));
+        assert_eq!(super::wanted_config(&configs, None, None), Some(c(3)));
+        assert_eq!(super::wanted_config(&HashMap::new(), Some(1), Some(1)), None);
+    }
+
+    #[test]
+    fn only_exact_focus_reports_are_focus_reports() {
+        assert!(super::is_focus_report(b"\x1b[I") && super::is_focus_report(b"\x1b[O"));
+        assert!(!super::is_focus_report(b"\x1b[A") && !super::is_focus_report(b"x\x1b[O") && !super::is_focus_report(b"O"));
+    }
+
     #[test]
     fn osc7_paths() {
         assert_eq!(super::pwd_path("file://host/Users/me/a%20b").as_deref(), Some("/Users/me/a b"));

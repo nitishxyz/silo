@@ -25,6 +25,9 @@ pub struct ProxyConfig {
     pub jitter: Duration,
     /// Drop probability in `[0, 1]`.
     pub loss: f64,
+    /// Link rate in bytes per second (`0`: unlimited); datagrams queue
+    /// behind each other like on a real link. Applies without jitter.
+    pub rate: u64,
 }
 
 impl ProxyConfig {
@@ -123,9 +126,16 @@ fn line(tasks: &mut JoinSet<()>, config: ProxyConfig, target: Target) -> mpsc::U
             deliver(at, &fifo_target, &packet).await;
         }
     });
+    // When the link is next free to start sending (rate-limited links).
+    let mut free = Instant::now();
     tasks.spawn(async move {
         while let Some(packet) = rx.recv().await {
-            let Some(at) = config.deadline() else { continue };
+            let Some(mut at) = config.deadline() else { continue };
+            if config.rate > 0 {
+                let start = free.max(Instant::now());
+                free = start + Duration::from_secs_f64(packet.len() as f64 / config.rate as f64);
+                at = at.max(free + config.delay);
+            }
             if config.jitter.is_zero() {
                 let _ = fifo_tx.send((at, packet));
             } else {

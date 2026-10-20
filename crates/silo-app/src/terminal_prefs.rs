@@ -3,9 +3,9 @@
 //! terminal's configuration; everything here has a built-in default, so the
 //! app is complete without any file at all.
 //!
-//! Colors, cursor and scrollback travel to the server as a
-//! [`TerminalConfig`] (the owner's applies to the authoritative terminal);
-//! the font is local to this app.
+//! Every client renders terminals with its own colors. They also travel to
+//! the server as a [`TerminalConfig`], where the driving client's config
+//! answers programs' color queries; the font is local to this app.
 
 use std::{
     io::Write as _,

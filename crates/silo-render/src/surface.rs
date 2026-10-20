@@ -80,7 +80,7 @@ fn polygon_path(points: &[Point<Pixels>]) -> Option<Path<Pixels>> {
 
 /// Mirrors GPUI's own line painting (baseline from the line height and the
 /// layout's ascent/descent), but positions each cluster at its cell.
-fn paint_text(text: &PreparedText, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window) {
+pub(crate) fn paint_text(text: &PreparedText, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window) {
     let layout = &text.layout;
     let padding_top = (px(metrics.height) - layout.ascent - layout.descent) / 2.0;
     let baseline = origin.y + text.origin.y + padding_top + layout.ascent;
@@ -204,6 +204,29 @@ fn paint_predicted(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<P
     });
 }
 
+/// The cell under a predicted cursor, laid out on the UI thread.
+fn predicted_cursor_cell(prepared: &PreparedFrame, position: (u16, u16), window: &mut Window) -> Option<crate::prepare::CursorCell> {
+    let metrics = prepared.metrics;
+    let text = window.text_system().clone();
+    crate::prepare::cursor_cell_at(
+        &prepared.frame,
+        position,
+        metrics,
+        &mut |cell_text, bold, italic| {
+            let run = TextRun {
+                len: cell_text.len(),
+                font: crate::prepare::face(bold, italic),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            text.layout_line(cell_text, px(metrics.font_size), &[run], None)
+        },
+        &mut |code, width| crate::sprite::sprite(code, 0.0, 0.0, width, metrics.height, metrics.scale).map(|s| crate::prepare::sprite_content(&s)),
+    )
+}
+
 /// One canvas for the complete grid; no GPUI element or event handler per
 /// cell, and no layout work in the prepaint phase: `prepared` already holds
 /// every span, sprite and shaped run, built off the UI thread.
@@ -232,7 +255,14 @@ pub fn terminal_canvas(
                 (caret.row, caret.column) = (row, column);
             }
             window.with_content_mask(Some(gpui::ContentMask::new(bounds)), |window| {
-                crate::cursor::paint(caret, cursor, bounds, metrics, window);
+                // A predicted cursor covers another cell than the prepared one:
+                // look that one up (only while predicting, one cell).
+                let predicted = overlay
+                    .predicted_cursor
+                    .filter(|_| cursor.focused && caret.visible && caret.shape == silo_vt::CursorShape::Block)
+                    .and_then(|position| predicted_cursor_cell(&prepared, position, window));
+                let cell = if overlay.predicted_cursor.is_some() { predicted.as_ref() } else { prepared.cursor_cell.as_ref() };
+                crate::cursor::paint(caret, cursor, cell, prepared.frame.background, bounds, prepared.metrics, window);
             });
         },
     )

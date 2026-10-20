@@ -11,12 +11,13 @@ use silo_client::{
         data::{ClientData, ServerData},
         model::{BlockKind, TermSize},
     },
+    transport::{Conn, RemoteConn},
     vt::Frame,
 };
 use tokio::time::timeout;
 
 /// One measured keystroke, as offsets from sending it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Key {
     /// The mirror first held the expected cell.
     pub echo: Duration,
@@ -26,10 +27,14 @@ pub struct Key {
     pub predicted: bool,
     /// It was shown and the mirror disagreed.
     pub wrong: bool,
+    /// When each of [`crate::stages::STAGES`] was first reached.
+    pub stages: Vec<Option<Duration>>,
 }
 
 pub struct Session {
     stream: DataStream,
+    /// The connection whose path RTT the predictor follows (remote only).
+    path: Option<RemoteConn>,
     mirror: Mirror,
     pub predictor: Predictor,
     /// Most cells the overlay ever showed at once.
@@ -44,7 +49,11 @@ impl Session {
         let method = Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None };
         let created: Created = control.call(method).await?;
         let stream = DataStream::open(control, &created.block_id, None).await?;
-        let mut session = Self { stream, mirror: Mirror::new(), predictor, max_shown: 0 };
+        let path = match control.conn() {
+            Conn::Iroh(conn) => Some(conn.clone()),
+            Conn::Unix(_) => None,
+        };
+        let mut session = Self { stream, path, mirror: Mirror::new(), predictor, max_shown: 0 };
         session.mirror.begin(&session.stream.welcome)?;
         session.predictor.begin(&session.stream.welcome);
         session.recv(crate::bench::T).await?;
@@ -89,8 +98,10 @@ impl Session {
             _ => (column, char::from(byte).to_string()),
         };
         let index = usize::from(row) * usize::from(frame.size.columns) + usize::from(column);
+        let mark = crate::stages::mark();
         let sent = Instant::now();
         self.stream.send(&ClientData::Input(vec![byte]));
+        self.follow_path();
         self.predictor.input(&[byte], &frame);
         let (mut shown, mut wrong) = (None, false);
         loop {
@@ -105,8 +116,9 @@ impl Session {
             }
             wrong |= shown.is_some() && !in_overlay && !echoed;
             if echoed {
-                let echo = sent.elapsed();
-                return Ok(Key { echo, visible: shown.unwrap_or(echo), predicted: shown.is_some(), wrong });
+                let (echo, now) = (sent.elapsed(), Instant::now());
+                let stages = crate::stages::since(mark, sent, now, crate::stages::STAGES);
+                return Ok(Key { echo, visible: shown.unwrap_or(echo), predicted: shown.is_some(), wrong, stages });
             }
             let left = (sent + crate::bench::T).saturating_duration_since(Instant::now());
             self.recv(left).await?;
@@ -122,6 +134,7 @@ impl Session {
         for &byte in bytes {
             let frame = self.frame()?;
             self.stream.send(&ClientData::Input(vec![byte]));
+            self.follow_path();
             self.predictor.input(&[byte], &frame);
             let until = Instant::now() + wait;
             loop {
@@ -145,8 +158,16 @@ impl Session {
     pub async fn enter(&mut self) -> anyhow::Result<()> {
         let frame = self.frame()?;
         self.stream.send(&ClientData::Input(b"\r".to_vec()));
+        self.follow_path();
         self.predictor.input(b"\r", &frame);
         self.settle(Duration::from_millis(300)).await
+    }
+
+    /// Hand the predictor the path RTT, as the app does with every input.
+    fn follow_path(&mut self) {
+        if let Some(rtt) = self.path.as_ref().and_then(RemoteConn::rtt) {
+            self.predictor.path_rtt(rtt);
+        }
     }
 
     /// Kill the line and send EOF (ends `cat`, `zsh -f` and `read`).

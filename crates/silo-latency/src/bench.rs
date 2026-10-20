@@ -11,9 +11,11 @@ use std::{
 use anyhow::{Context, bail};
 use serde::Serialize;
 use silo_client::{
-    Control, Predictor,
+    Control, DataStream, Mirror, Predictor,
     proto::{
-        control::{Method, PairInvite},
+        control::{Created, Method, OwnMode, PairInvite, SpawnSpec},
+        data::ServerData,
+        model::{BlockKind, TermSize},
         paths,
     },
     transport::{EndpointAddr, Net, NetOptions, PairTicket, RelayConfig},
@@ -55,7 +57,7 @@ pub struct Row {
     pub link: String,
     /// Injected RTT; `None` for the unix baseline.
     pub rtt_ms: Option<u64>,
-    /// `"cat"` or `"zsh"`.
+    /// `"cat"` or `"zsh"`; `"cat+load"` while another session streams.
     pub program: String,
     pub echo: Stats,
     /// `key→pred`: the key's cell first visible (overlay, else echo);
@@ -63,13 +65,24 @@ pub struct Row {
     pub pred: Option<Stats>,
     /// Keys the overlay showed before their echo.
     pub predicted: usize,
+    /// How long those keys showed as (underlined) predictions.
+    pub overlay: Option<Stats>,
     /// Shown predictions the mirror disagreed with.
     pub mispredicted: usize,
     /// Echo p50 came in under the injected RTT: iroh found a path around the proxy.
     pub bypassed: bool,
+    /// `key→stage` per reached stage of [`crate::stages::STAGES`] (input
+    /// stages only under load, where output is not attributable).
+    pub stages: Vec<(String, Stats)>,
 }
 
 impl Row {
+    /// Measured while another session streamed: diagnostics, no targets.
+    #[must_use]
+    pub fn loaded(&self) -> bool {
+        self.program.contains("+load")
+    }
+
     #[must_use]
     pub fn misprediction_rate(&self) -> f64 {
         self.mispredicted as f64 / self.echo.n.max(1) as f64
@@ -103,7 +116,7 @@ impl Report {
     #[must_use]
     pub fn misses(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for r in &self.rows {
+        for r in self.rows.iter().filter(|r| !r.loaded()) {
             let (name, rtt) = (format!("{} {}", r.link, r.program), r.rtt_ms.unwrap_or(0) as f64);
             match r.pred {
                 _ if rtt < 50.0 => {}
@@ -127,6 +140,8 @@ impl Report {
     pub fn markdown(&self) -> String {
         let mut out = format!("# Keystroke latency (headless)\n\n{} keys per program plus a backspace burst; times in ms.\n\n", self.keys);
         out.push_str(&self.table());
+        out.push_str("\n## Stages (key→stage p50 / p95 / p99, ms)\n\n");
+        out.push_str(&self.stage_table());
         out.push_str("\n## Password prompt (`read -s`)\n\n| link | cells shown | prediction enabled |\n|---|---:|---|\n");
         for p in &self.passwords {
             let _ = writeln!(out, "| {} | {} | {} |", p.link, p.shown, p.enabled);
@@ -140,16 +155,28 @@ impl Report {
         out
     }
 
+    /// One line per row: every reached stage, then the echo.
+    pub fn stage_table(&self) -> String {
+        let mut out = String::from("| link | program | stages |\n|---|---|---|\n");
+        for row in &self.rows {
+            let f = |s: &Stats| format!("{:.2}/{:.2}/{:.2}", s.p50, s.p95, s.p99);
+            let stages: Vec<String> =
+                row.stages.iter().map(|(name, s)| format!("{name} {}", f(s))).chain([format!("echo {}", f(&row.echo))]).collect();
+            let _ = writeln!(out, "| {} | {} | {} |", row.link, row.program, stages.join(" → "));
+        }
+        out
+    }
+
     pub fn table(&self) -> String {
         let mut out = String::from(
-            "| link | program | echo p50 | echo p95 | echo p99 | pred p50 | pred p95 | pred p99 | predicted | mispredicted |\n\
-             |---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+            "| link | program | echo p50 | echo p95 | echo p99 | pred p50 | pred p95 | pred p99 | predicted | shown p50/p95 | mispredicted |\n\
+             |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         );
         for row in &self.rows {
             let pred = |f: fn(&Stats) -> f64| row.pred.as_ref().map_or("-".to_owned(), |s| format!("{:.1}", f(s)));
             let _ = writeln!(
                 out,
-                "| {} | {} | {:.1} | {:.1} | {:.1} | {} | {} | {} | {}/{} | {} ({:.1} %) |{}",
+                "| {} | {} | {:.1} | {:.1} | {:.1} | {} | {} | {} | {}/{} | {} | {} ({:.1} %) |{}",
                 row.link,
                 row.program,
                 row.echo.p50,
@@ -160,6 +187,7 @@ impl Report {
                 pred(|s| s.p99),
                 row.predicted,
                 row.echo.n,
+                row.overlay.map_or("-".to_owned(), |s| format!("{:.1}/{:.1}", s.p50, s.p95)),
                 row.mispredicted,
                 row.misprediction_rate() * 100.0,
                 if row.bypassed { " BYPASSED PROXY" } else { "" }
@@ -169,14 +197,59 @@ impl Report {
     }
 }
 
+/// One proxied iroh link.
+#[derive(Clone, Copy, Debug)]
+pub struct Link {
+    pub rtt_ms: u64,
+    /// Extra uniform one-way delay in `[0, jitter)` per datagram.
+    pub jitter_ms: u64,
+    /// Link rate in MB/s each way (`0`: unlimited).
+    pub mb_per_s: u64,
+    /// The RTT the predictor starts from; `None` takes the connection's
+    /// path RTT, as the app does. A larger one stands for a connection that
+    /// came up over a relay before switching to the direct path.
+    pub seed_ms: Option<u64>,
+}
+
+impl Link {
+    #[must_use]
+    pub fn rtt(rtt_ms: u64) -> Self {
+        Self { rtt_ms, jitter_ms: 0, mb_per_s: 0, seed_ms: None }
+    }
+
+    fn name(&self) -> String {
+        let mut name = format!("{}ms", self.rtt_ms);
+        if self.jitter_ms > 0 {
+            name += &format!(" +{}ms jitter", self.jitter_ms);
+        }
+        if self.mb_per_s > 0 {
+            name += &format!(" {}MB/s", self.mb_per_s);
+        }
+        if let Some(seed) = self.seed_ms {
+            name += &format!(" (seed {seed}ms)");
+        }
+        name
+    }
+}
+
 /// Run the bench: a unix baseline row, then one row per RTT (in ms).
 ///
 /// # Errors
 /// Server start, pairing, attach or a keystroke that never echoes.
 pub async fn bench(rtts: &[u64], keys: usize) -> anyhow::Result<Report> {
+    bench_with(&rtts.iter().copied().map(Link::rtt).collect::<Vec<_>>(), keys, false).await
+}
+
+/// [`bench`] over `links`, with `load`: each link also types into `cat`
+/// while another session on it streams output as fast as it can.
+///
+/// # Errors
+/// As [`bench`].
+pub async fn bench_with(links: &[Link], keys: usize, load: bool) -> anyhow::Result<Report> {
+    crate::stages::install();
     let home = temp_home();
     let task = start(&home).await?;
-    let result = run(&home, rtts, keys).await;
+    let result = run(&home, links, keys, load).await;
     let stopped = stop(&home, task).await;
     let _ = std::fs::remove_dir_all(&home);
     let report = result?;
@@ -184,19 +257,31 @@ pub async fn bench(rtts: &[u64], keys: usize) -> anyhow::Result<Report> {
     Ok(report)
 }
 
-async fn run(home: &Path, rtts: &[u64], keys: usize) -> anyhow::Result<Report> {
+async fn run(home: &Path, links: &[Link], keys: usize, load: bool) -> anyhow::Result<Report> {
     let owner = Control::connect(&paths::socket(home), "bench").await?.0;
-    let (mut rows, password) = measure(&owner, "unix", None, keys).await?;
+    let (mut rows, password) = measure(&owner, "unix", None, None, keys, load).await?;
     let mut passwords = vec![password];
-    for (i, &rtt) in rtts.iter().enumerate() {
+    for (i, link) in links.iter().enumerate() {
         let upstream = server_addr(&owner).await?;
-        let proxy = Proxy::spawn((Ipv4Addr::LOCALHOST, 0).into(), upstream.1, ProxyConfig::rtt(Duration::from_millis(rtt))).await?;
+        let config = ProxyConfig {
+            jitter: Duration::from_millis(link.jitter_ms),
+            rate: link.mb_per_s * 1_000_000,
+            ..ProxyConfig::rtt(Duration::from_millis(link.rtt_ms))
+        };
+        let proxy = Proxy::spawn((Ipv4Addr::LOCALHOST, 0).into(), upstream.1, config).await?;
         let ticket = PairTicket { addr: EndpointAddr::new(upstream.0.addr.id).with_ip_addr(proxy.addr()), secret: upstream.0.secret };
         let identity = silo_client::client_identity(&home.join(format!("client-{i}")))?;
         let options = NetOptions { relay: RelayConfig::Disabled, mdns: false, port: None, pin_initial_path: true };
         let net = Net::bind_with(&identity, options).await?;
         let (remote, _events) = timeout(T, silo_client::pair(&net, &ticket, "bench")).await.context("pair timed out")??;
-        let measured = measure(&remote, &format!("{rtt}ms"), Some(rtt), keys).await;
+        let seed = match link.seed_ms {
+            Some(seed) => Some(Duration::from_millis(seed)),
+            None => match remote.conn() {
+                silo_client::transport::Conn::Iroh(conn) => conn.rtt(),
+                silo_client::transport::Conn::Unix(_) => None,
+            },
+        };
+        let measured = measure(&remote, &link.name(), Some(link.rtt_ms), Some(seed), keys, load).await;
         drop(remote);
         net.close().await?;
         let (measured, password) = measured?;
@@ -217,40 +302,155 @@ fn programs() -> Vec<(&'static str, &'static [&'static str])> {
 
 /// A row from measured keys; `rtt` is `None` for the unix baseline.
 fn row(link: &str, rtt: Option<u64>, program: &str, keys: &[Key]) -> Row {
+    let reached = if program.ends_with("+load") { crate::stages::INPUT_STAGES } else { crate::stages::STAGES.len() };
+    let stages = crate::stages::STAGES[..reached]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (name, _))| {
+            let samples: Vec<Duration> = keys.iter().filter_map(|k| k.stages.get(i).copied().flatten()).collect();
+            (!samples.is_empty()).then(|| ((*name).to_owned(), Stats::from_samples(&samples)))
+        })
+        .collect();
     let echo = Stats::from_samples(&keys.iter().map(|k| k.echo).collect::<Vec<_>>());
     let predicted = keys.iter().filter(|k| k.predicted).count();
     let pred = (predicted > 0).then(|| Stats::from_samples(&keys.iter().map(|k| k.visible).collect::<Vec<_>>()));
+    let shown: Vec<Duration> = keys.iter().filter(|k| k.predicted).map(|k| k.echo.saturating_sub(k.visible)).collect();
+    let overlay = (!shown.is_empty()).then(|| Stats::from_samples(&shown));
     let mispredicted = keys.iter().filter(|k| k.wrong).count();
     let bypassed = rtt.is_some_and(|rtt| echo.p50 < rtt as f64);
-    Row { link: link.into(), rtt_ms: rtt, program: program.into(), echo, pred, predicted, mispredicted, bypassed }
+    Row { link: link.into(), rtt_ms: rtt, program: program.into(), echo, pred, predicted, overlay, mispredicted, bypassed, stages }
 }
 
 /// Every program over `control` (`keys` letters, Enter every `LINE` keys,
 /// then a backspace burst), and the `read -s` check.
-async fn measure(control: &Control, link: &str, rtt: Option<u64>, keys: usize) -> anyhow::Result<(Vec<Row>, Password)> {
-    let predictor = || if rtt.is_some() { Predictor::remote(None) } else { Predictor::local() };
+/// `seed`: `Some` for a remote link, with the RTT its predictor starts from.
+async fn measure(
+    control: &Control,
+    link: &str,
+    rtt: Option<u64>,
+    seed: Option<Option<Duration>>,
+    keys: usize,
+    load: bool,
+) -> anyhow::Result<(Vec<Row>, Password)> {
+    let predictor = || seed.map_or_else(Predictor::local, Predictor::remote);
     let mut rows = Vec::new();
     for (program, command) in programs() {
-        let mut session = Session::open(control, command, predictor()).await?;
-        let mut typed = Vec::with_capacity(keys + BURST.len());
-        for i in 0..keys {
-            if i > 0 && i % LINE == 0 {
-                session.enter().await?;
-            }
-            typed.push(session.key(b'a' + (i % 26) as u8).await?);
-            tokio::time::sleep(KEY_GAP).await;
-        }
-        for &byte in BURST {
-            typed.push(session.key(byte).await?);
-        }
-        session.close();
-        rows.push(row(link, rtt, program, &typed));
+        let session = Session::open(control, command, predictor()).await?;
+        rows.push(row(link, rtt, program, &type_keys(session, keys).await?));
+    }
+    if load {
+        let flood = Flood::start(control).await?;
+        let session = Session::open(control, &["/bin/cat"], predictor()).await;
+        let typed = match session {
+            Ok(session) => type_keys(session, keys).await,
+            Err(error) => Err(error),
+        };
+        let flooded = flood.stop(control).await;
+        rows.push(row(link, rtt, "cat+load", &typed?));
+        let flooded = flooded?;
+        let cut = if flooded.cut { ", stream cut as lagging" } else { "" };
+        let delay = Stats::from_samples(&flooded.delays);
+        rows.last_mut().expect("row").program =
+            format!("cat+load ({:.0} MB/s, output delay {:.0}/{:.0}/{:.0} ms{cut})", flooded.rate / 1e6, delay.p50, delay.p95, delay.p99);
     }
     let mut session = Session::open(control, &["/bin/sh", "-c", "read -s x"], predictor()).await?;
     let wait = Duration::from_millis(rtt.unwrap_or(0) + 50);
     let enabled = session.blind(b"secret", wait).await?;
     session.close();
     Ok((rows, Password { link: link.into(), shown: session.max_shown, enabled }))
+}
+
+/// `keys` letters (Enter every `LINE` keys), then the backspace burst.
+async fn type_keys(mut session: Session, keys: usize) -> anyhow::Result<Vec<Key>> {
+    crate::stages::clear();
+    let mut typed = Vec::with_capacity(keys + BURST.len());
+    for i in 0..keys {
+        if i > 0 && i % LINE == 0 {
+            session.enter().await?;
+        }
+        typed.push(session.key(b'a' + (i % 26) as u8).await?);
+        tokio::time::sleep(KEY_GAP).await;
+    }
+    for &byte in BURST {
+        typed.push(session.key(byte).await?);
+    }
+    session.close();
+    Ok(typed)
+}
+
+/// A session printing timestamped lines as fast as it can, its output
+/// applied to a mirror (and acknowledged) on its own thread, as a client
+/// would; each line's age on arrival is its output delay.
+struct Flood {
+    session_id: String,
+    started: std::time::Instant,
+    thread: std::thread::JoinHandle<(u64, Vec<Duration>)>,
+}
+
+struct Flooded {
+    /// Bytes per second received.
+    rate: f64,
+    /// Output delays, sampled about every millisecond.
+    delays: Vec<Duration>,
+    /// The server cut the stream (a subscriber that fell too far behind).
+    cut: bool,
+}
+
+/// Age of the first complete timestamped line in `bytes`.
+fn line_age(bytes: &[u8]) -> Option<Duration> {
+    let start = bytes.iter().position(|&b| b == b'\n')? + 1;
+    let line = bytes.get(start..)?;
+    let end = line.iter().position(|&b| b == b' ')?;
+    let stamp: f64 = std::str::from_utf8(&line[..end]).ok()?.parse().ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    Some(Duration::from_secs_f64((now - stamp).max(0.0)))
+}
+
+impl Flood {
+    async fn start(control: &Control) -> anyhow::Result<Self> {
+        let script = r#"use Time::HiRes "time"; $| = 0; my $pad = "x" x 150; printf "%.6f %s\n", time, $pad while 1"#;
+        let command = ["/usr/bin/perl", "-e", script].map(str::to_owned).to_vec();
+        let spawn = SpawnSpec { command, cwd: Some("/tmp".into()), size: Some(TermSize::new(200, 50)) };
+        let method = Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None };
+        let created: Created = control.call(method).await?;
+        let mut stream = DataStream::open(control, &created.block_id, None).await?;
+        // Taken, as the app takes the focused pane: this client drives it.
+        control.call_value(Method::OwnBlock { block_ids: vec![created.block_id.clone()], mode: OwnMode::Take }).await?;
+        let thread = std::thread::spawn(move || {
+            let mut mirror = Mirror::new();
+            let (mut bytes, mut delays) = (0, Vec::new());
+            if mirror.begin(&stream.welcome).is_err() {
+                return (bytes, delays);
+            }
+            let mut sampled = std::time::Instant::now();
+            while let Some(data) = stream.rx.blocking_recv() {
+                if let ServerData::Output { bytes: out, .. } = &data {
+                    bytes += out.len() as u64;
+                    if sampled.elapsed() >= Duration::from_millis(1)
+                        && let Some(age) = line_age(out)
+                    {
+                        delays.push(age);
+                        sampled = std::time::Instant::now();
+                    }
+                }
+                if mirror.apply(data).is_err() {
+                    break;
+                }
+                stream.ack(&mut mirror, stream.rx.is_empty());
+            }
+            (bytes, delays)
+        });
+        Ok(Self { session_id: created.session_id, started: std::time::Instant::now(), thread })
+    }
+
+    /// End the session.
+    async fn stop(self, control: &Control) -> anyhow::Result<Flooded> {
+        let cut = self.thread.is_finished();
+        control.call_value(Method::SessionClose { session_id: self.session_id }).await?;
+        let secs = self.started.elapsed().as_secs_f64();
+        let (bytes, delays) = tokio::task::spawn_blocking(move || self.thread.join()).await?.map_err(|_| anyhow::anyhow!("flood thread panicked"))?;
+        Ok(Flooded { rate: bytes as f64 / secs, delays, cut })
+    }
 }
 
 /// A fresh invite and the server's IPv4 loopback endpoint address.

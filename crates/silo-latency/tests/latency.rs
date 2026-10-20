@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use silo_latency::{Proxy, ProxyConfig, Stats};
+use silo_latency::{Link, Proxy, ProxyConfig, Stats};
 use tokio::net::UdpSocket;
 
 /// Raw UDP echo through the proxy: each round trip is `rtt` within ±2 ms (median).
@@ -64,4 +64,26 @@ async fn bench_echo_at_50ms() {
     assert!(unix.echo.p50 < 15.0 && unix.pred.is_none(), "{table}");
     assert!(report.passwords.iter().all(|p| p.shown == 0 && !p.enabled), "{table}");
     assert!(report.misses().is_empty(), "{table}");
+}
+
+/// The full report with per-stage times and the load rows:
+/// `cargo test -p silo-latency --release -- --ignored --nocapture report`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a benchmark, not a check"]
+async fn report() {
+    let report = silo_latency::bench_with(&[Link::rtt(0), Link::rtt(50)], 100, true).await.unwrap();
+    let markdown = report.markdown();
+    std::fs::create_dir_all("../../target/latency").unwrap();
+    std::fs::write("../../target/latency/report.md", &markdown).unwrap();
+    println!("{markdown}");
+}
+
+/// Fast links (a LAN): `cargo test -p silo-latency --release -- --ignored --nocapture lan`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a benchmark, not a check"]
+async fn lan() {
+    let links =
+        [Link::rtt(2), Link { seed_ms: Some(120), ..Link::rtt(2) }, Link { mb_per_s: 25, ..Link::rtt(2) }, Link { jitter_ms: 8, ..Link::rtt(2) }];
+    let report = silo_latency::bench_with(&links, 100, true).await.unwrap();
+    println!("{}", report.table());
 }

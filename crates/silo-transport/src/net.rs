@@ -174,6 +174,16 @@ impl RemoteConn {
         self.conn.paths().iter().find(|p| p.is_selected()).map(|p| p.rtt())
     }
 
+    /// The selected path for logs: `direct <addr>` or `relay <url>`, and its
+    /// RTT. A LAN host should be direct; a relay adds its round trip to
+    /// every keystroke.
+    pub fn path_summary(&self) -> Option<String> {
+        let paths = self.conn.paths();
+        let path = paths.iter().find(|p| p.is_selected())?;
+        let kind = if path.is_relay() { "relay" } else { "direct" };
+        Some(format!("{kind} {:?}, rtt {:.1} ms", path.remote_addr(), path.rtt().as_secs_f64() * 1e3))
+    }
+
     /// Identifier unique among this process's live connections.
     pub fn id(&self) -> u64 {
         self.conn.stable_id() as u64

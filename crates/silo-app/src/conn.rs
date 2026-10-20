@@ -396,6 +396,9 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                 incompatible = None;
                 let pid = control.hello().server.pid;
                 tracing::info!(pid, "connected to silo server");
+                if let silo_client::transport::Conn::Iroh(conn) = control.conn() {
+                    tracing::info!(path = conn.path_summary().as_deref().unwrap_or("none"), "remote path");
+                }
                 let local = match &transport {
                     Transport::Local { service: Ok(service), .. } => Some(service.clone()),
                     _ => None,

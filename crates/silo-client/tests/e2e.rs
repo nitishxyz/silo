@@ -449,7 +449,8 @@ async fn owner_terminal_config_body() {
     stream_a.send(&ClientData::Input(b"PS1='$ '\n".to_vec()));
     query_background(&mut stream_a, &mut a, "1010/2020/3030").await;
 
-    // B attaches with its own config but does not own: it renders A's.
+    // B attaches with its own config but does not own: the server keeps
+    // A's, yet B renders with its own colours once it sets them locally.
     let (control_b, _events_b) = connect(&home, "test-b").await;
     let mut b = Mirror::new();
     let mut stream_b = attach(&control_b, &block, &mut b).await;
@@ -457,15 +458,25 @@ async fn owner_terminal_config_body() {
     control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await.unwrap();
     pump_until(&mut stream_b, &mut b, |m| m.config() == Some(red) && m.terminal().is_some()).await;
     assert_eq!(background(&mut b), red.background);
+    b.set_local_config(blue);
+    assert_eq!(background(&mut b), blue.background);
+    assert_eq!((b.config(), b.render_config()), (Some(red), Some(blue)));
 
-    // B takes over: everyone (and the server) switches to B's config.
+    // B takes over: the server (and A, rendering the server's) switches to
+    // B's config.
     control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(blue)).await;
     pump_until(&mut stream_b, &mut b, |m| m.config() == Some(blue)).await;
     assert_eq!(background(&mut a), blue.background);
-    query_background(&mut stream_a, &mut a, "0000/0000/4040").await;
+    query_background(&mut stream_b, &mut b, "0000/0000/4040").await;
 
-    // The owner leaves: A's config is effective again.
+    // Typing makes A the driver again while B keeps the size.
+    stream_a.send(&ClientData::Input(b"true\n".to_vec()));
+    pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
+    pump_until(&mut stream_b, &mut b, |m| m.config() == Some(red)).await;
+    assert_eq!(background(&mut b), blue.background, "B keeps rendering its own");
+
+    // B leaves: A's config stays effective.
     drop(stream_b);
     drop(control_b);
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;

@@ -15,6 +15,8 @@
 //   ui-driver mean file.png                     -> mean brightness (0-255)
 //   ui-driver down x y | dragto x y | up x y    split drag (hold the button between calls)
 //   ui-driver crop in.png x y w h out.png       crop (image pixels); out.raw -> raw RGB bytes
+//   ui-driver env <pid> NAME                    -> the value of NAME in the pid's environment
+//                                                  (exit 1 if unset or unreadable)
 import AppKit
 import ApplicationServices
 import CoreGraphics
@@ -85,6 +87,36 @@ let usKeys: [Character: (CGKeyCode, Bool)] = {
 }()
 
 switch args[1] {
+case "env":
+    // KERN_PROCARGS2: `int32 argc | exec path NUL | NUL padding | argc
+    // NUL-terminated arguments (any may be empty) | NUL-terminated
+    // environment entries`, ended by an empty string or the buffer:
+    // exact entries, unlike `ps eww`'s space-joined text.
+    guard args.count > 3, let pid = Int32(args[2]) else { exit(1) }
+    var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { exit(1) }
+    var buffer = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { exit(1) }
+    let argc = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
+    var at = 4
+    /// The NUL-terminated string at `at`, moving past it.
+    func next() -> String? {
+        guard at < size, let end = buffer[at..<size].firstIndex(of: 0) else { return nil }
+        defer { at = end + 1 }
+        return String(decoding: buffer[at..<end], as: UTF8.self)
+    }
+    guard next() != nil else { exit(1) }  // exec path
+    while at < size && buffer[at] == 0 { at += 1 }  // padding
+    for _ in 0..<argc { guard next() != nil else { exit(1) } }
+    let prefix = args[3] + "="
+    while let entry = next(), !entry.isEmpty {
+        if entry.hasPrefix(prefix) {
+            print(entry.dropFirst(prefix.count))
+            exit(0)
+        }
+    }
+    exit(1)
 case "window", "wait-window":
     guard args.count > 2, let pid = Int32(args[2]) else { exit(1) }
     let deadline = Date().addingTimeInterval((args.count > 3 ? num(3) : 0) / 1000)

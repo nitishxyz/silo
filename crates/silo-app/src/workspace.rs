@@ -140,6 +140,8 @@ impl Workspace {
             this.checkpoint_all(cx);
             async {}
         });
+        // A window closed mid theme preview must not leave it installed.
+        cx.on_release(|this, cx| this.release_preview(cx)).detach();
         let hosts_changed = cx.observe(&shared, |this, _, cx| {
             this.sync_hosts(cx);
             cx.notify();

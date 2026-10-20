@@ -12,7 +12,7 @@ Planning doc. It builds on PLAN.md §3.3 (data plane) and the code as of the Pha
 |---|---|---|
 | Prediction engine (pure logic) | `silo-client/src/predict.rs` (new) | Sits next to `Mirror`, needs no GPUI, unit-testable headless |
 | Hooking it to the stream | `silo-client/src/mirror.rs` | `Mirror::apply` is the one place output lands, so predictions are judged right after each frame |
-| RTT estimator | `silo-client/src/predict.rs` (`Rtt`) | Fed by input-ack timing (§4) |
+| RTT estimator | `silo-client/src/predict.rs` (`Rtt`) | The transport's path RTT, read with every input (§4) |
 | Overlay paint | `silo-render/src/surface.rs` (`Overlay.predicted`) | Same place as search matches and links; painted on top of the prepared frame |
 | Key → prediction | `silo-app/src/pane.rs` (`encode_key`, `commit_text`, `send_input`) | That's where the keystroke and its encoded bytes are both known |
 | TTY mode + input acks | `silo-server/src/block.rs`, `silo-pty`, `silo-proto/src/data.rs` | Only the server can read termios and order it against output |
@@ -97,11 +97,14 @@ Prediction is on only when **all** of these hold. There is no user setting; this
 Turning off drops every prediction at once.
 
 **RTT:**
-- **Seed:** `RemoteConn::rtt()` (new in `silo-transport`) returns the selected path's RTT from iroh 1.3
-  `Connection::paths()` / `rtt(path_id)`. Read once at attach.
-- **Ongoing:** each `Input` send records `Instant`; the `INPUT_ACK` that covers it gives one sample (data path +
-  actor queue, which is what matters). RFC 6298 smoothing gives `srtt` and `rttvar`.
-- **No extra ping RPC:** an idle session doesn't need predictions, and the next keystroke gives a fresh sample.
+- **Source:** `RemoteConn::rtt()` (new in `silo-transport`) returns the selected path's smoothed RTT from iroh 1.3
+  `Connection::paths()` (QUIC's estimator, RFC 9002). Read at attach and again with every `Input` sent, so a
+  connection that comes up over a relay and moves to the LAN stops predicting with the next key.
+- **Not input-ack timing:** an earlier version sampled `Input` → `INPUT_ACK` with RFC 6298 smoothing, seeded once
+  at attach. On a LAN that kept predicting (underline flicker, an occasional rollback) for the dozen-odd keys the
+  smoothing took to forget a relay-time seed, and the samples included the time a busy UI thread took to read the
+  ack.
+- **No extra ping RPC:** an idle session doesn't need predictions, and QUIC keeps its estimate current.
 
 ## 5. Look
 
@@ -114,8 +117,9 @@ Turning off drops every prediction at once.
 - Rollback just stops painting the overlay. No flash or animation.
 - Nothing in the titlebar or status. Concise UI: the user should only notice that typing is fast.
 - **Dev/test knob, no UI:** `SILO_PIN_PATH=1` in the app's environment sets `NetOptions.pin_initial_path` on its
-  iroh endpoint, so a remote host dialed through the `silo-latency` delay proxy stays on that path instead of
-  holepunching around it. That is how to see predictions in the GUI at a known RTT.
+  iroh endpoint (and turns off its relay and mDNS), so a remote host dialed through the `silo-latency` delay
+  proxy, or on loopback, stays on that path instead of holepunching around it. That is how to see predictions
+  in the GUI at a known RTT.
 
 ## 6. Keystroke-to-photon harness
 

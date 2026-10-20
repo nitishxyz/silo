@@ -2,7 +2,9 @@
 //! in send order. `paint_pred_ms` is the time to the end of the first paint
 //! that showed it as a prediction, and `paint_echo_ms` the time to the first
 //! paint whose grid held the echo. A null time comes with its reason in
-//! `no_pred` / `no_echo`.
+//! `no_pred` / `no_echo`. The echo's stages on the way there:
+//! `mirror_echo_ms` (applied to the mirror) and `prepared_echo_ms` (its
+//! frame prepared for paint).
 
 use std::{
     cell::RefCell,
@@ -32,10 +34,33 @@ struct Key {
     cell: Option<(u16, u16)>,
     at: Instant,
     pred: Option<Instant>,
+    mirror: Option<Instant>,
+    prepared: Option<Instant>,
     echo: Option<Instant>,
 }
 
+/// Where an echo was seen on its way to the screen.
+#[derive(Clone, Copy)]
+pub enum Stage {
+    Mirror,
+    Prepared,
+}
+
 impl Key {
+    fn stage(&self, stage: Stage) -> Option<Instant> {
+        match stage {
+            Stage::Mirror => self.mirror,
+            Stage::Prepared => self.prepared,
+        }
+    }
+
+    fn stage_mut(&mut self, stage: Stage) -> &mut Option<Instant> {
+        match stage {
+            Stage::Mirror => &mut self.mirror,
+            Stage::Prepared => &mut self.prepared,
+        }
+    }
+
     fn done(&self, now: Instant) -> bool {
         self.cell.is_none() || self.echo.is_some() || now - self.at >= GIVE_UP
     }
@@ -52,6 +77,8 @@ impl Key {
             "key": self.text,
             "paint_pred_ms": ms(self.pred),
             "no_pred": reason(self.pred, NOT_PREDICTED),
+            "mirror_echo_ms": ms(self.mirror),
+            "prepared_echo_ms": ms(self.prepared),
             "paint_echo_ms": ms(self.echo),
             "no_echo": reason(self.echo, NEVER_ECHOED),
         })
@@ -83,8 +110,26 @@ impl Trace {
         let printable = matches!(bytes, [0x20..=0x7e]);
         self.seq += 1;
         let text = String::from_utf8_lossy(bytes).into_owned();
-        self.keys.push_back(Key { seq: self.seq, text, cell: printable.then_some(cell), at: Instant::now(), pred: None, echo: None });
-        self.flush(Instant::now());
+        let at = Instant::now();
+        self.keys.push_back(Key { seq: self.seq, text, cell: printable.then_some(cell), at, pred: None, mirror: None, prepared: None, echo: None });
+        self.flush(at);
+    }
+
+    /// Whether any key still waits for its echo to reach `stage`.
+    pub fn waiting(&self, stage: Stage) -> bool {
+        self.keys.iter().any(|k| k.cell.is_some() && k.echo.is_none() && k.stage(stage).is_none())
+    }
+
+    /// `frame` reached `stage` now: stamp the keys whose echo it holds.
+    pub fn seen(&mut self, stage: Stage, frame: &Frame) {
+        let (now, columns) = (Instant::now(), usize::from(frame.size.columns));
+        for key in &mut self.keys {
+            let Some(cell) = key.cell.filter(|_| key.echo.is_none() && key.stage(stage).is_none()) else { continue };
+            let index = usize::from(cell.0) * columns + usize::from(cell.1);
+            if frame.cells.get(index).is_some_and(|c| c.text == key.text) {
+                *key.stage_mut(stage) = Some(now);
+            }
+        }
     }
 
     /// A paint finished at `now` with these predicted cells over `frame`.

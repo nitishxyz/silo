@@ -118,6 +118,11 @@ pub struct Pane {
     prepared_offset: u64,
     prepared_key: Option<(u64, u32, u32, u32, u32)>,
     preparing: bool,
+    /// Cell metrics of the last render, and whether a render followed the
+    /// last finished preparation: then new output is prepared as soon as it
+    /// is applied (a pane that is not rendered prepares nothing more).
+    metrics: Option<CellMetrics>,
+    rendered: bool,
     last_frame: Option<Arc<Frame>>,
     /// Background the program paints, when it is not the configured one.
     backdrop: crate::adaptive::Stable,
@@ -214,6 +219,7 @@ impl Pane {
         })
         .detach();
         let mut mirror = restored.unwrap_or_default();
+        mirror.set_local_config(theme::terminal_config());
         let cell = CellMetrics::for_window(window).grid(1.0, 1.0);
         mirror.set_cell_size(cell.cell_width, cell.cell_height);
         let mut pane = Self {
@@ -234,6 +240,8 @@ impl Pane {
             prepared_offset: 0,
             prepared_key: None,
             preparing: false,
+            metrics: None,
+            rendered: false,
             last_frame: None,
             backdrop: crate::adaptive::Stable::default(),
             backdrop_at: None,
@@ -336,7 +344,8 @@ impl Pane {
     /// is scheduled even when no new frame arrives.
     fn update_backdrop(&mut self, cx: &mut Context<Self>) {
         self.backdrop_at = Some(Instant::now());
-        let default = self.mirror.config().map_or_else(theme::background, |c| c.background);
+        // What the mirror renders unset cells with: this app's theme.
+        let default = self.mirror.render_config().map_or_else(theme::background, |c| c.background);
         let keep = self.backdrop.value();
         let counts = &mut self.backdrop_counts;
         let sample = self.last_frame.as_deref().and_then(|frame| crate::adaptive::terminal_backdrop(frame, default, keep, counts));
@@ -472,6 +481,7 @@ impl Pane {
 
     fn reset_mirror(&mut self) {
         self.mirror = Mirror::new();
+        self.mirror.set_local_config(theme::terminal_config());
         if let Some(grid) = self.grid {
             self.mirror.set_cell_size(grid.cell_width, grid.cell_height);
         }
@@ -515,12 +525,33 @@ impl Pane {
             self.judge_painted();
         }
         if dirty {
+            self.trace_stage(crate::latency::Stage::Mirror);
             self.generation += 1;
-            cx.notify();
+            // Prepared right away, the output is painted by the very next
+            // frame; the finished preparation notifies.
+            let started = match self.metrics.filter(|_| self.rendered) {
+                Some(metrics) => self.request_prepare(metrics, cx),
+                None => false,
+            };
+            if !started {
+                cx.notify();
+            }
         } else if self.predictor.overlay() != shown {
             cx.notify();
         }
         true
+    }
+
+    /// Stamp traced keys whose echo the mirror now holds.
+    fn trace_stage(&mut self, stage: crate::latency::Stage) {
+        let Some(trace) = self.trace.clone().filter(|t| t.borrow().waiting(stage)) else { return };
+        let frame = match stage {
+            crate::latency::Stage::Mirror => self.mirror.terminal().and_then(|vt| vt.frame().ok()).map(Arc::new),
+            crate::latency::Stage::Prepared => self.prepared.as_ref().map(|p| p.frame().clone()),
+        };
+        if let Some(frame) = frame {
+            trace.borrow_mut().seen(stage, &frame);
+        }
     }
 
     /// Judge predictions against the frame actually painted, so a confirmed
@@ -566,6 +597,9 @@ impl Pane {
         let Some(frame) = self.mirror.terminal().and_then(|vt| vt.frame().ok()) else {
             return;
         };
+        if let Some(rtt) = self.control.as_ref().and_then(path_rtt) {
+            self.predictor.path_rtt(rtt);
+        }
         let target = self.predictor.overlay().1.unwrap_or((frame.cursor.row, frame.cursor.column));
         self.predictor.input(&bytes, &frame);
         if let Some(trace) = self.trace.as_ref().filter(|_| key) {
@@ -770,11 +804,18 @@ impl Pane {
         Some((self.prepared.clone()?, bounds.dilate(px(PADDING))))
     }
 
-    /// Report the (changed) terminal preferences to the server. They become
-    /// effective for every client while this app owns the block; the
-    /// server announces the result, which the mirror then renders.
+    /// Render with the (changed) terminal preferences at once, and report
+    /// them to the server, whose terminal answers programs' colour queries
+    /// with them while this app drives the block.
     pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
         self.send_config();
+        self.preview_theme(cx);
+    }
+
+    /// Render with the current terminal preferences, telling no one (a
+    /// theme preview).
+    pub fn preview_theme(&mut self, cx: &mut Context<Self>) {
+        self.mirror.set_local_config(theme::terminal_config());
         self.generation += 1;
         self.prepared_key = None;
         cx.notify();
@@ -1168,39 +1209,45 @@ impl Pane {
         }
     }
 
-    fn request_prepare(&mut self, metrics: CellMetrics, cx: &mut Context<Self>) {
+    /// Prepare the mirror's current frame off the UI thread unless it is
+    /// prepared already, one preparation at a time; whether one started.
+    fn request_prepare(&mut self, metrics: CellMetrics, cx: &mut Context<Self>) -> bool {
         let key = (self.generation, metrics.width.to_bits(), metrics.height.to_bits(), metrics.scale.to_bits(), metrics.font);
         if self.preparing || self.prepared_key == Some(key) {
-            return;
+            return false;
         }
         let offset = self.mirror.next_offset();
         let Some(vt) = self.mirror.terminal() else {
-            return;
+            return false;
         };
-        let Ok(frame) = vt.frame() else { return };
+        let Ok(frame) = vt.frame() else { return false };
         let frame = Arc::new(frame);
         self.last_frame = Some(frame.clone());
         self.sample_backdrop(cx);
         self.preparing = true;
         let preparer = self.preparer.clone();
         let options = FrameOptions { translucency: self.translucency, ..FrameOptions::default() };
+        // Started here rather than from the task below: under load the
+        // task's first poll can wait a while for the UI thread.
+        let prepared = cx.background_spawn(async move {
+            let mut preparer = preparer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            preparer.prepare(&frame, metrics, options)
+        });
         cx.spawn(async move |this, cx| {
-            let prepared = cx
-                .background_spawn(async move {
-                    let mut preparer = preparer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    preparer.prepare(&frame, metrics, options)
-                })
-                .await;
+            let prepared = prepared.await;
             let _ = this.update(cx, |pane, cx| {
                 pane.preparing = false;
                 pane.prepared = Some(Arc::new(prepared));
                 pane.prepared_offset = offset;
                 pane.prepared_key = Some(key);
+                pane.rendered = false;
+                pane.trace_stage(crate::latency::Stage::Prepared);
                 pane.judge_painted();
                 cx.notify();
             });
         })
         .detach();
+        true
     }
 
     /// Cursor phase for this render, starting or stopping the blink timer
@@ -1297,11 +1344,19 @@ fn send_frames(block: &str, sender: &DataSender, frames: Vec<ClientData>) {
     }
 }
 
-/// Remote (iroh) connections predict, seeded with the path RTT; local ones never do.
+/// Remote (iroh) connections predict, following the path RTT; local ones never do.
 fn predictor_for(control: Option<&Control>) -> Predictor {
     match control.map(Control::conn) {
         Some(Conn::Iroh(conn)) => Predictor::remote(conn.rtt()),
         _ => Predictor::local(),
+    }
+}
+
+/// The current path RTT of a remote connection.
+fn path_rtt(control: &Control) -> Option<Duration> {
+    match control.conn() {
+        Conn::Iroh(conn) => conn.rtt(),
+        Conn::Unix(_) => None,
     }
 }
 
@@ -1336,6 +1391,8 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = CellMetrics::for_window(window);
         let card_corner = self.card_corner;
+        self.metrics = Some(metrics);
+        self.rendered = true;
         self.request_prepare(metrics, cx);
         let focused = self.focus.is_focused(window) && window.is_window_active();
         let phase_visible = self.blink_phase(focused, window.is_window_active(), cx);
@@ -1356,7 +1413,7 @@ impl Render for Pane {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
             predicted_cursor,
             predicted_underline: rgb(theme::muted()),
-            predicted_foreground: rgb(self.mirror.config().map_or_else(theme::foreground, |c| c.foreground)),
+            predicted_foreground: rgb(self.mirror.render_config().map_or_else(theme::foreground, |c| c.foreground)),
             ..Overlay::default()
         };
         let trace = self.trace.clone().zip(self.prepared.clone()).map(|(t, p)| (t, p, overlay.predicted.clone()));

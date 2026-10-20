@@ -136,8 +136,11 @@ where
                     return;
                 }
                 // Coalesce small frames before flushing.
-                if rx.is_empty() && writer.flush().await.is_err() {
-                    return;
+                if rx.is_empty() {
+                    if writer.flush().await.is_err() {
+                        return;
+                    }
+                    tracing::trace!(target: "silo::latency", stage = "server_flushed", kind = frame.kind);
                 }
             }
             let _ = writer.shutdown().await;
@@ -584,6 +587,7 @@ where
                         let _ = block.send(BlockMsg::Ack { sub_id, offset });
                     }
                     Ok(ClientData::Input(bytes)) => {
+                        tracing::trace!(target: "silo::latency", stage = "server_input");
                         if remote {
                             *server.clipboard.last_input.lock().unwrap() = Some(block_id.clone());
                         }
