@@ -84,10 +84,10 @@ commands! {
     ClosePane => "Close Pane", "Panes", ["cmd-w"];
     FocusNextPane => "Focus Next Pane", "Panes", ["cmd-]"];
     FocusPreviousPane => "Focus Previous Pane", "Panes", ["cmd-["];
-    FocusPaneLeft => "Focus Pane Left", "Panes", ["cmd-h", "cmd-alt-left"];
-    FocusPaneRight => "Focus Pane Right", "Panes", ["cmd-l", "cmd-alt-right"];
-    FocusPaneUp => "Focus Pane Up", "Panes", ["cmd-alt-up"];
-    FocusPaneDown => "Focus Pane Down", "Panes", ["cmd-j", "cmd-alt-down"];
+    FocusPaneLeft => "Focus Pane Left", "Panes", ["ctrl-cmd-h", "cmd-alt-left"];
+    FocusPaneRight => "Focus Pane Right", "Panes", ["ctrl-cmd-l", "cmd-alt-right"];
+    FocusPaneUp => "Focus Pane Up", "Panes", ["ctrl-cmd-k", "cmd-alt-up"];
+    FocusPaneDown => "Focus Pane Down", "Panes", ["ctrl-cmd-j", "cmd-alt-down"];
     GrowPane => "Grow Pane", "Panes", ["ctrl-cmd-]"];
     ShrinkPane => "Shrink Pane", "Panes", ["ctrl-cmd-["];
     MovePaneEdgeLeft => "Move Pane Edge Left", "Panes", ["ctrl-cmd-left"];
@@ -126,6 +126,9 @@ commands! {
     ReloadTerminalSettings => "Reload Terminal Settings", "App", [], "Apply changes made by hand";
     OpenTerminalSettingsFile => "Open Terminal Settings File", "App", [];
     CommandPalette => "Command Palette", "App", ["cmd-p"];
+    HideSilo => "Hide Silo", "App", ["cmd-h"];
+    HideOthers => "Hide Others", "App", ["cmd-alt-h"];
+    ShowAll => "Show All", "App", [];
     Quit => "Quit Silo", "App", ["cmd-q"];
 }
 
@@ -252,8 +255,10 @@ mod tests {
         assert_eq!(Command::NewSession.hint().as_deref(), Some("⇧⌘N"));
         assert_eq!(Command::RenameSession.hint(), None);
         assert_eq!(Command::SwitchSession.hint().as_deref(), Some("⌘K"));
-        assert_eq!(Command::FocusPaneLeft.hint().as_deref(), Some("⌘H"));
-        assert_eq!(Command::FocusPaneUp.hint().as_deref(), Some("⌥⌘↑"));
+        assert_eq!(Command::FocusPaneLeft.hint().as_deref(), Some("⌃⌘H"));
+        assert_eq!(Command::FocusPaneUp.hint().as_deref(), Some("⌃⌘K"));
+        assert_eq!(Command::FocusPaneDown.hint().as_deref(), Some("⌃⌘J"));
+        assert_eq!(Command::FocusPaneRight.hint().as_deref(), Some("⌃⌘L"));
         assert_eq!(Command::GrowPane.hint().as_deref(), Some("⌃⌘]"));
         assert_eq!(Command::MovePaneEdgeLeft.hint().as_deref(), Some("⌃⌘←"));
         assert_eq!(Command::EqualizePanes.hint().as_deref(), Some("⌃⌘="));

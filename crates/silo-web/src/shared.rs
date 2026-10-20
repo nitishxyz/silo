@@ -1,6 +1,6 @@
 //! State shared between a `Browser` handle and its CEF handlers.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,8 @@ pub enum Event {
     ThemeColor(Option<u32>),
     /// The page asked for a new window; open it as a new browser block.
     Popup(String),
+    /// The connection of the main frame's current entry.
+    Security(Security),
     CursorChanged(Cursor),
     /// IME candidate anchor in view points: `(x, y, w, h)` of the selection's first character.
     ImeBounds {
@@ -54,6 +56,23 @@ pub enum Cursor {
     Grabbing,
     Move,
     None,
+}
+
+/// TLS facts of a page, as Chromium judged its connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Security {
+    /// The URL these facts are for.
+    pub url: String,
+    /// Loaded over a TLS connection.
+    pub secure: bool,
+    /// The certificate failed validation.
+    pub cert_error: bool,
+    /// The page displayed or ran insecure (http) content.
+    pub mixed: bool,
+    /// The certificate issuer's display name.
+    pub issuer: Option<String>,
+    /// The certificate's expiry, in Unix seconds.
+    pub valid_until: Option<i64>,
 }
 
 /// View size in points (DIP) and the backing scale factor.
@@ -83,6 +102,23 @@ pub(crate) struct Shared {
     /// Console prefix of the main frame's theme reports: random, so no
     /// other frame or page script can forge one.
     pub(crate) theme_tag: String,
+    /// The main frame's committed document is blank ([`is_blank`]); true
+    /// until the first commit.
+    pub(crate) blank: AtomicBool,
+    /// The committed document is a real page and has painted.
+    pub(crate) shown: AtomicBool,
+    /// A navigation asked for before the page existed, run once it does.
+    pub(crate) queued: Mutex<Option<String>>,
+    /// The last main-frame URL refused for its certificate.
+    pub(crate) cert_failed: Mutex<Option<String>>,
+}
+
+/// Whether `url` is no page: empty or `about:blank`.
+#[must_use]
+pub fn is_blank(url: &str) -> bool {
+    let url = url.trim();
+    let page = url.split(['#', '?']).next().unwrap_or_default();
+    page.is_empty() || page.eq_ignore_ascii_case("about:blank")
 }
 
 /// A fresh random theme tag.
@@ -107,6 +143,22 @@ impl Shared {
         (self.notify)();
     }
 
+    /// The main frame committed `url`: a blank document hides the page
+    /// until a real one paints.
+    pub(crate) fn committed(&self, url: &str) {
+        let blank = is_blank(url);
+        self.blank.store(blank, Ordering::Release);
+        if blank {
+            self.shown.store(false, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn painted(&self) {
+        if !self.blank.load(Ordering::Acquire) {
+            self.shown.store(true, Ordering::Release);
+        }
+    }
+
     pub(crate) fn input(&self) {
         *lock(&self.last_input) = Some(Instant::now());
     }
@@ -119,5 +171,20 @@ impl Shared {
     /// Whether a navigation to `url` is the fallback of a file drop just now.
     pub(crate) fn drop_navigation(&self, url: &str) -> bool {
         url.starts_with("file:") && lock(&self.dropped).is_some_and(|at| at.elapsed() < DROP_NAVIGATION)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_blank;
+
+    #[test]
+    fn blank_urls() {
+        for url in ["", "  ", "about:blank", "ABOUT:BLANK", "about:blank#top", "about:blank?x"] {
+            assert!(is_blank(url), "{url:?}");
+        }
+        for url in ["https://example.com", "about:blankx", "data:text/html,", "http://localhost:3000/about:blank"] {
+            assert!(!is_blank(url), "{url:?}");
+        }
     }
 }

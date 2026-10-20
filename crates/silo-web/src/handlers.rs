@@ -12,7 +12,7 @@ use cef::*;
 
 use crate::frame::Frame as SurfaceFrame;
 use crate::profile::{SharedTunnel, proxy_credentials};
-use crate::shared::{Cursor, Event, Shared, lock};
+use crate::shared::{Cursor, Event, Security, Shared, lock};
 
 /// Console messages from `FOCUS_SCRIPT`, swallowed by the display handler.
 const FOCUS_TAG: &str = "\u{1}silo-editable:";
@@ -137,6 +137,7 @@ wrap_render_handler! {
             match SurfaceFrame::from_io_surface(info.shared_texture_io_surface) {
                 Ok(frame) => {
                     *lock(&self.shared.frame) = Some(frame);
+                    self.shared.painted();
                     (self.shared.notify)();
                 }
                 Err(err) => tracing::error!("silo-web: accelerated paint dropped: {err:#}"),
@@ -191,7 +192,13 @@ wrap_display_handler! {
                 return;
             }
             if let Some(url) = url {
-                self.shared.push(Event::UrlChanged { url: url.to_string(), back_forward: back_forward(browser) });
+                self.shared.committed(&url.to_string());
+                let mut browser = browser;
+                let back_forward = back_forward(browser.as_deref_mut());
+                self.shared.push(Event::UrlChanged { url: url.to_string(), back_forward });
+                if let Some(security) = security(&self.shared, browser) {
+                    self.shared.push(Event::Security(security));
+                }
             }
         }
 
@@ -248,6 +255,30 @@ wrap_display_handler! {
 /// Favicons larger than this are dropped (server stores them in `BrowserState`).
 const FAVICON_LIMIT: usize = 32 * 1024;
 
+/// Chromium's certificate errors (`CERT_STATUS_ALL_ERRORS` without the
+/// minor revocation-check ones).
+const CERT_ERRORS: u32 = 0xFF00_FFFF & !(16 | 32);
+/// Seconds from 1601-01-01 (`base::Time`) to the Unix epoch.
+const WINDOWS_EPOCH: i64 = 11_644_473_600;
+
+/// The connection facts of `browser`'s visible entry.
+fn security(shared: &Shared, browser: Option<&mut Browser>) -> Option<Security> {
+    let entry = browser?.host()?.visible_navigation_entry()?;
+    let url = CefString::from(&entry.url()).to_string();
+    let refused = lock(&shared.cert_failed).as_deref() == Some(url.as_str());
+    let ssl = entry.sslstatus();
+    let cert = ssl.as_ref().and_then(|s| s.x509_certificate());
+    let content = ssl.as_ref().map_or(0, |s| s.content_status().get_raw());
+    Some(Security {
+        secure: ssl.as_ref().is_some_and(|s| s.is_secure_connection() != 0),
+        cert_error: refused || ssl.as_ref().is_some_and(|s| s.cert_status().get_raw() & CERT_ERRORS != 0),
+        mixed: content != 0,
+        issuer: cert.as_ref().and_then(|c| c.issuer()).map(|p| CefString::from(&p.display_name()).to_string()).filter(|name| !name.is_empty()),
+        valid_until: cert.map(|c| c.valid_expiry().val).filter(|&t| t > 0).map(|t| t / 1_000_000 - WINDOWS_EPOCH),
+        url,
+    })
+}
+
 wrap_download_image_callback! {
     pub(crate) struct FaviconCallback {
         shared: Arc<Shared>,
@@ -280,8 +311,28 @@ wrap_load_handler! {
     }
 
     impl LoadHandler {
-        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: c_int, _back: c_int, _forward: c_int) {
+        fn on_loading_state_change(&self, browser: Option<&mut Browser>, loading: c_int, _back: c_int, _forward: c_int) {
             self.shared.push(Event::Loading(loading != 0));
+            if loading == 0
+                && let Some(security) = security(&self.shared, browser)
+            {
+                self.shared.push(Event::Security(security));
+            }
+        }
+
+        fn on_load_error(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            error_code: Errorcode,
+            _error_text: Option<&CefString>,
+            failed_url: Option<&CefString>,
+        ) {
+            // net::IsCertificateError: -200..=-299.
+            let cert = (-299..=-200).contains(&error_code.get_raw());
+            if cert && frame.is_some_and(|frame| frame.is_main() != 0) {
+                *lock(&self.shared.cert_failed) = failed_url.map(ToString::to_string);
+            }
         }
 
         // A cross-document navigation gets a new render widget that starts unfocused, and Blink
@@ -335,6 +386,10 @@ wrap_life_span_handler! {
         }
 
         fn on_after_created(&self, browser: Option<&mut Browser>) {
+            let queued = lock(&self.shared.queued).take();
+            if let (Some(url), Some(frame)) = (queued, browser.as_ref().and_then(|browser| browser.main_frame())) {
+                frame.load_url(Some(&CefString::from(url.as_str())));
+            }
             *lock(&self.shared.browser) = browser.map(|browser| browser.clone());
             (self.shared.notify)();
         }

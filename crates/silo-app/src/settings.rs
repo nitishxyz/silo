@@ -524,7 +524,16 @@ fn host_status(state: &HostState, paused: bool) -> String {
 /// else would act on the hidden terminal and is swallowed (⌘W closes the
 /// panel instead).
 pub(crate) fn allowed_while_open(command: Command) -> bool {
-    matches!(command, Command::OpenSettings | Command::Quit | Command::ToggleFullScreen | Command::CycleWindows)
+    matches!(
+        command,
+        Command::OpenSettings
+            | Command::Quit
+            | Command::HideSilo
+            | Command::HideOthers
+            | Command::ShowAll
+            | Command::ToggleFullScreen
+            | Command::CycleWindows
+    )
 }
 
 fn short(rev: &str) -> &str {

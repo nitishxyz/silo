@@ -24,7 +24,7 @@ pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;
 pub use profile::{Profile, Tunnel};
 pub use runtime::{Config, Runtime, Schedule};
-pub use shared::{Cursor, Event, ViewSize};
+pub use shared::{Cursor, Event, Security, ViewSize, is_blank};
 
 /// Entry point of the `<App> Helper*.app` subprocesses; returns the process exit code.
 pub fn run_helper() -> i32 {

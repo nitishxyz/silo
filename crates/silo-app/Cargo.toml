@@ -22,6 +22,7 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 data-encoding.workspace = true
+idna = "1"
 qrcode = { version = "0.14", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
 

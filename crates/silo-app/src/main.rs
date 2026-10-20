@@ -2,9 +2,11 @@
 
 mod adaptive;
 mod add_host;
+mod address;
 mod appearance;
 mod assets;
 mod blink;
+mod browser_home;
 mod browser_pane;
 mod cache;
 mod cli_link;
@@ -45,7 +47,7 @@ mod workspace;
 use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, point, prelude::*, px, size};
 
 use crate::{
-    commands::act::{CommandPalette, CycleWindows, NewSession, NewWindow, OpenSettings, Quit},
+    commands::act::{CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll},
     workspace::Workspace,
 };
 
@@ -108,6 +110,9 @@ fn main() {
         cx.set_reduce_motion(reduce_motion());
         commands::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &HideSilo, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         cx.on_app_quit(|_| {
             web::shutdown();
             async {}
@@ -116,7 +121,15 @@ fn main() {
         cx.set_menus(vec![
             Menu {
                 name: "Silo".into(),
-                items: vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit Silo", Quit)],
+                items: vec![
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Hide Silo", HideSilo),
+                    MenuItem::action("Hide Others", HideOthers),
+                    MenuItem::action("Show All", ShowAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Silo", Quit),
+                ],
                 disabled: false,
             },
             Menu {

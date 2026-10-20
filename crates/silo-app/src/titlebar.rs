@@ -149,6 +149,21 @@ impl Workspace {
         }
     }
 
+    /// Block `id`'s icon slot at `size`: the spinner while its page loads,
+    /// its favicon, else its glyph. `slot` keeps spinners apart.
+    pub(crate) fn block_icon_view(&self, id: &str, slot: &str, size: f32, color: u32, cx: &gpui::App) -> AnyElement {
+        use crate::browser_pane::Icon;
+        let pane = self.browsers.get(id).map(|(p, _)| p.read(cx));
+        match pane.map_or(Icon::Glyph(self.block_icon(id)), crate::browser_pane::BrowserPane::icon) {
+            Icon::Spinner => crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx),
+            Icon::Favicon => match pane.and_then(crate::browser_pane::BrowserPane::favicon_image) {
+                Some(image) => gpui::img(image).flex_none().size(px(size)).into_any_element(),
+                None => icon("globe", size, color).into_any_element(),
+            },
+            Icon::Glyph(glyph) => icon(glyph, size, color).into_any_element(),
+        }
+    }
+
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let several = self.view.as_ref().is_some_and(|v| v.session.windows.len() > 1);
         let hover = self.chrome.hover();
@@ -158,6 +173,7 @@ impl Workspace {
             tracing::debug!(fullscreen, inset, "titlebar inset");
         }
         let now = Instant::now();
+        let compact = self.density() == crate::hosts::Density::Compact;
         let mut bar = div()
             .id("titlebar")
             .flex()
@@ -167,6 +183,8 @@ impl Workspace {
             .h(px(TITLEBAR_HEIGHT))
             .pl(px(inset))
             .pr(px(10.0))
+            // Compact: the same hairline as the pane dividers, closing the grid.
+            .when(compact, |el| el.border_b_1().border_color(rgb(theme::border())))
             // The app owns titlebar dragging: a press on empty space moves
             // the window once dragged, and a double click zooms it.
             // Controls stop the press, so it never reaches here.
@@ -249,7 +267,7 @@ impl Workspace {
             }
             self.step_tab_reveal(&active_id, active_child, active_entering, !cx.reduce_motion(), window);
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
-            let comfortable = self.density() == crate::hosts::Density::Comfortable;
+            let comfortable = !compact;
             let menu_open = self.appearance_menu.open;
             // The strip and the empty space after it take tab drops. The
             // space after the last tab means "move to the end".
@@ -410,7 +428,7 @@ impl Workspace {
             .capsule()
             .when(several && selected, |el| el.bg(fill))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
-            .child(icon(glyph, 12.0, if primary { chrome.accent } else { chrome.icon }))
+            .child(self.block_icon_view(&w.focused, "tab", 12.0, if primary { chrome.accent } else { chrome.icon }, cx))
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
             .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))))
             // Zero width unless this tab is hovered; grows and fades in.

@@ -248,7 +248,12 @@ async fn prepare(control: &Control) -> (Created, BrowserState) {
     control.call_value(Method::BrowserNavigate { block_id: created.block_id.clone(), url: "example.org".into() }).await.unwrap();
     control.call_value(Method::BrowserZoom { block_id: created.block_id.clone(), zoom: -1.0 }).await.unwrap();
     control.call_value(Method::OwnBlock { block_ids: vec![created.block_id.clone()], mode: OwnMode::Take }).await.unwrap();
-    (created.clone(), state(control, &created).await)
+    // A link followed in the page: only the owner's report knows it.
+    let urls = ["https://example.com/", "https://example.org/", "https://example.org/linked"];
+    control.call_value(report(&created, &urls, 2)).await.unwrap();
+    let state = state(control, &created).await;
+    assert_eq!(state.url, "https://example.org/linked");
+    (created, state)
 }
 
 #[tokio::test]
@@ -283,7 +288,7 @@ async fn state_survives_takeover() {
     assert_eq!((block.kind, block.owner), (BlockKind::Browser, None));
     assert_eq!(block.browser.unwrap(), before);
     control.call_value(Method::BrowserBack { block_id: created.block_id.clone() }).await.unwrap();
-    assert_eq!(state(&control, &created).await.url, "https://example.com");
+    assert_eq!(state(&control, &created).await.url, "https://example.org/");
     stop(control, new).await;
     let _ = std::fs::remove_dir_all(&home);
 }

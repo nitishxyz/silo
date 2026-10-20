@@ -232,6 +232,9 @@ pub struct AppState {
     /// Frosted: an app's own backdrop is veiled too, not just the default.
     #[serde(default)]
     pub translucent_apps: bool,
+    /// Pages visited in browser blocks, newest first, per host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_pages: Vec<crate::browser_home::RecentPage>,
 }
 
 impl Default for AppState {
@@ -245,6 +248,7 @@ impl Default for AppState {
             material: crate::material::Material::Solid,
             tint_with_app: true,
             translucent_apps: false,
+            recent_pages: Vec::new(),
         }
     }
 }
@@ -363,6 +367,7 @@ pub(crate) mod tests {
             material: crate::material::Material::Frosted,
             tint_with_app: false,
             translucent_apps: true,
+            recent_pages: Vec::new(),
         };
         save_state(&dir, &state);
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();

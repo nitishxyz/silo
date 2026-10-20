@@ -37,9 +37,9 @@ use crate::{
 pub const PADDING: f32 = 6.0;
 
 /// Radius of a surface `inset` points inside the terminal's padded area,
-/// concentric with the card's corner (1pt border + [`PADDING`] out).
-fn nested(inset: f32) -> f32 {
-    crate::radius::concentric(crate::radius::CARD, 1.0 + PADDING + inset)
+/// concentric with the card's `corner` (1pt border + [`PADDING`] out).
+fn nested(corner: f32, inset: f32) -> f32 {
+    crate::radius::concentric(corner, 1.0 + PADDING + inset)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +125,9 @@ pub struct Pane {
     backdrop_task: Option<Task<()>>,
     /// Cell background translucency over a frosted card.
     translucency: Option<silo_render::Translucency>,
+    /// The card's bottom-right corner radius, which the pane's overlays
+    /// (anchored there) nest inside.
+    card_corner: f32,
     content_bounds: Option<Bounds<Pixels>>,
     /// Grid this client wants for the block (from its pixel layout).
     grid: Option<GridSize>,
@@ -236,6 +239,7 @@ impl Pane {
             backdrop_counts: Vec::new(),
             backdrop_task: None,
             translucency: None,
+            card_corner: crate::radius::CARD,
             content_bounds: None,
             grid: None,
             size_task: None,
@@ -295,6 +299,14 @@ impl Pane {
         if self.translucency != translucency {
             self.translucency = translucency;
             self.generation += 1;
+            cx.notify();
+        }
+    }
+
+    /// Set by the workspace from the card's corners.
+    pub fn set_card_corner(&mut self, corner: f32, cx: &mut Context<Self>) {
+        if self.card_corner != corner {
+            self.card_corner = corner;
             cx.notify();
         }
     }
@@ -910,7 +922,7 @@ impl Pane {
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .continuous(nested(8.0))
+                .continuous(nested(self.card_corner, 8.0))
                 .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
@@ -973,7 +985,7 @@ impl Pane {
                 .flex_col()
                 .gap(px(8.0))
                 .p(px(12.0))
-                .continuous(nested(8.0))
+                .continuous(nested(self.card_corner, 8.0))
                 .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
@@ -1317,6 +1329,7 @@ fn mouse_button(button: Option<gpui::MouseButton>) -> MouseButton {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = CellMetrics::for_window(window);
+        let card_corner = self.card_corner;
         self.request_prepare(metrics, cx);
         let focused = self.focus.is_focused(window) && window.is_window_active();
         let phase_visible = self.blink_phase(focused, window.is_window_active(), cx);
@@ -1448,7 +1461,7 @@ impl Render for Pane {
                         .top_0()
                         .left_0()
                         .size_full()
-                        .continuous(nested(0.0))
+                        .continuous(nested(card_corner, 0.0))
                         .drag_over::<gpui::ExternalPaths>(|s, _, _, _| {
                             s.bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent()))
                         })
@@ -1465,7 +1478,7 @@ impl Render for Pane {
                             .right(px(4.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(nested(4.0))
+                            .continuous(nested(card_corner, 4.0))
                             .bg(theme::overlay_fill())
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
@@ -1483,7 +1496,7 @@ impl Render for Pane {
                             .gap(px(8.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(nested(4.0))
+                            .continuous(nested(card_corner, 4.0))
                             .bg(theme::overlay_fill())
                             .border_1()
                             .border_color(rgb(theme::border()))

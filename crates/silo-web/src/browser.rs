@@ -52,6 +52,10 @@ impl Runtime {
             last_input: Mutex::new(None),
             dropped: Mutex::new(None),
             theme_tag: crate::shared::theme_tag(),
+            blank: AtomicBool::new(true),
+            shown: AtomicBool::new(false),
+            queued: Mutex::new(None),
+            cert_failed: Mutex::new(None),
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
@@ -83,13 +87,24 @@ impl Browser {
         lock(&self.shared.frame).clone()
     }
 
+    /// Whether a real page committed and painted: until then the frame is
+    /// a blank document's (or a previous page's).
+    pub fn shown(&self) -> bool {
+        self.shared.shown.load(Ordering::Acquire)
+    }
+
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut *lock(&self.shared.events))
     }
 
     pub fn navigate(&self, url: &str) {
-        if let Some(frame) = self.page().and_then(|page| page.main_frame()) {
-            frame.load_url(Some(&CefString::from(url)));
+        match self.page() {
+            Some(page) => {
+                if let Some(frame) = page.main_frame() {
+                    frame.load_url(Some(&CefString::from(url)));
+                }
+            }
+            None => *lock(&self.shared.queued) = Some(url.to_owned()),
         }
     }
 

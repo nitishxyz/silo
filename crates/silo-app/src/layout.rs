@@ -110,7 +110,18 @@ impl Workspace {
             )
             .children(floats)
             .on_drag_move(cx.listener(Self::float_drag_move))
+            // A divider drag ends wherever the button is released; its
+            // ratio goes to the server then rather than after the debounce.
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.end_divider_drag(cx)))
+            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.end_divider_drag(cx)))
             .into_any_element()
+    }
+
+    fn end_divider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.divider_drag.take().is_some() {
+            self.flush_ratios(cx);
+            cx.notify();
+        }
     }
 
     /// The pane being zoomed or unzoomed, clipped to `rect`, between its
@@ -199,21 +210,57 @@ impl Workspace {
                     Density::Compact => (1.0, Some(theme::border())),
                     Density::Comfortable => (GAP, None),
                 };
-                // Double-click a divider to even out its split. Its hit area
-                // is wider than a Compact hairline and overlays both panes.
+                // Drag a divider to resize its split; double-click it to even
+                // the split out. Its hit area is wider than a Compact hairline
+                // and overlays both panes.
                 let split = path.to_vec();
-                let divider =
-                    div().flex_none().when_some(fill, |el, c| el.bg(rgb(c))).when(fill.is_none() && self.frosted(), |el| el.bg(self.chrome.fill()));
-                let hit = div().id(gpui::ElementId::Name(format!("divider-{split:?}").into())).absolute().occlude().on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
-                        let Some(w) = this.active_window().filter(|_| e.click_count == 2) else { return };
-                        let (window_id, change) = (w.id.clone(), even_split(&w.layout, &split));
-                        this.set_ratios(&window_id, change.into_iter().collect(), cx);
-                    }),
-                );
+                let dragging = self.divider_drag.as_ref().is_some_and(|d| d.path == path);
+                let divider = div()
+                    .flex_none()
+                    .when_some(fill, |el, c| el.bg(rgb(c)))
+                    .when(fill.is_none() && self.frosted(), |el| el.bg(self.chrome.fill()))
+                    .when(dragging, |el| el.child(div().size_full().bg(rgb(theme::accent()).opacity(0.35))));
+                let horizontal = *axis == Axis::Horizontal;
+                let along = move |p: gpui::Point<gpui::Pixels>| f32::from(if horizontal { p.x } else { p.y });
+                let hit = div()
+                    .id(gpui::ElementId::Name(format!("divider-{split:?}").into()))
+                    .absolute()
+                    .occlude()
+                    .cursor(if horizontal { gpui::CursorStyle::ResizeLeftRight } else { gpui::CursorStyle::ResizeUpDown })
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener({
+                            let split = split.clone();
+                            move |this, e: &gpui::MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                let Some(w) = this.active_window() else { return };
+                                let window_id = w.id.clone();
+                                if e.click_count == 2 {
+                                    let change = even_split(&w.layout, &split);
+                                    this.divider_drag = None;
+                                    this.set_ratios(&window_id, change.into_iter().collect(), cx);
+                                } else {
+                                    this.divider_drag =
+                                        Some(DividerDrag { window_id, path: split.clone(), start_ratio: ratio, start: along(e.position) });
+                                }
+                            }
+                        }),
+                    )
+                    .on_drag(DividerGrab, |_, _, _, cx| cx.new(|_| DividerGrab));
                 let inset = px((size - DIVIDER_HIT) / 2.0);
-                let container = div().relative().size_full().min_w_0().min_h_0().flex();
+                // The split's own container maps the drag to its ratio.
+                let container = div().relative().size_full().min_w_0().min_h_0().flex().on_drag_move(cx.listener(
+                    move |this, e: &gpui::DragMoveEvent<DividerGrab>, _, cx| {
+                        let Some(d) = this.divider_drag.as_ref().filter(|d| d.path == split) else { return };
+                        let extent = f32::from(if horizontal { e.bounds.size.width } else { e.bounds.size.height });
+                        let new = dragged_ratio(d.start_ratio, along(e.event.position) - d.start, extent, size);
+                        let window_id = d.window_id.clone();
+                        let old = this.active_window().filter(|w| w.id == window_id).and_then(|w| split_ratio(&w.layout, &split));
+                        if let Some(c) = old.and_then(|(_, old)| change(&split, old, new)) {
+                            this.set_ratios(&window_id, vec![c], cx);
+                        }
+                    },
+                ));
                 match axis {
                     Axis::Horizontal => container
                         .flex_row()
@@ -288,7 +335,10 @@ impl Workspace {
         }
         if let Some((pane, _)) = self.panes.get(id) {
             let translucency = self.translucency(id, fill_color, palette, cx);
-            pane.update(cx, |pane, cx| pane.set_translucency(translucency, cx));
+            pane.update(cx, |pane, cx| {
+                pane.set_translucency(translucency, cx);
+                pane.set_card_corner(corners.bottom_right, cx);
+            });
         }
         // Header and terminal are one surface; an inactive pane is dimmed
         // as a whole so no band appears between them. Solid: a wash of the
@@ -374,7 +424,6 @@ impl Workspace {
             .and_then(|(p, _)| p.read(cx).info.clone())
             .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
         let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
-        let loading = self.browsers.get(id).is_some_and(|(p, _)| p.read(cx).loading());
         let glyph = self.block_icon(id);
         let (name, cwd) = match browser {
             Some(title) => (title, None),
@@ -429,7 +478,7 @@ impl Workspace {
             .text_size(px(11.5))
             .child({
                 let color = if active { accent } else { icon_color };
-                if loading { crate::browser_pane::spinner(id, 12.0, color, cx) } else { icon(glyph, 12.0, color).into_any_element() }
+                self.block_icon_view(id, "header", 12.0, color, cx)
             })
             .child(
                 div()
@@ -720,6 +769,43 @@ impl Workspace {
 const MIN_RATIO: f32 = 0.05;
 /// How far one resize step moves a divider.
 pub(crate) const RESIZE_STEP: f32 = 0.05;
+/// Smallest size (pt) either side of a split keeps while its divider is dragged.
+const MIN_PANE: f32 = 60.0;
+
+/// A divider being dragged: its split, and the ratio and pointer
+/// position along the split's axis when it was pressed.
+#[derive(Clone)]
+pub(crate) struct DividerDrag {
+    window_id: String,
+    path: Vec<usize>,
+    start_ratio: f32,
+    start: f32,
+}
+
+/// The (invisible) view a divider drag carries; the cursor shows the drag.
+struct DividerGrab;
+
+impl gpui::Render for DividerGrab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The ratio of a split `extent` long, `divider` of it the divider, after
+/// its divider is dragged `delta` from where it was at ratio `start`.
+/// Either side keeps [`MIN_PANE`] and [`MIN_RATIO`]; a split too small for
+/// both keeps `start`.
+pub(crate) fn dragged_ratio(start: f32, delta: f32, extent: f32, divider: f32) -> f32 {
+    if extent <= 0.0 {
+        return start;
+    }
+    let lo = MIN_RATIO.max(MIN_PANE / extent);
+    let hi = (1.0 - MIN_RATIO).min((extent - divider - MIN_PANE) / extent);
+    if lo > hi {
+        return start;
+    }
+    (start + delta / extent).clamp(lo, hi)
+}
 
 /// A split's new ratio, by its path from the root (0 = first child).
 pub(crate) type RatioChange = (Vec<usize>, f32);
@@ -874,6 +960,23 @@ mod tests {
         assert_eq!(auto_axis(rect(400.0, 600.0)), Axis::Vertical);
         assert_eq!(auto_axis(rect(500.0, 500.0)), Axis::Vertical);
         assert_eq!(auto_axis(None), Axis::Horizontal);
+    }
+
+    #[test]
+    fn dragging_a_divider_moves_its_ratio_within_the_minimum_sizes() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // 1000pt split, 6pt divider: 100pt is a tenth.
+        assert!(near(dragged_ratio(0.5, 100.0, 1000.0, 6.0), 0.6));
+        assert!(near(dragged_ratio(0.5, -250.0, 1000.0, 6.0), 0.25));
+        // Either side keeps MIN_PANE (60pt), the divider included on the far side.
+        assert!(near(dragged_ratio(0.5, -900.0, 1000.0, 6.0), 0.06));
+        assert!(near(dragged_ratio(0.5, 900.0, 1000.0, 6.0), (1000.0 - 6.0 - 60.0) / 1000.0));
+        // Large splits still keep MIN_RATIO.
+        assert!(near(dragged_ratio(0.5, -5000.0, 4000.0, 1.0), MIN_RATIO));
+        assert!(near(dragged_ratio(0.5, 5000.0, 4000.0, 1.0), 1.0 - MIN_RATIO));
+        // Too small for both minimums, or unmeasured: unchanged.
+        assert!(near(dragged_ratio(0.4, 30.0, 100.0, 6.0), 0.4));
+        assert!(near(dragged_ratio(0.4, 30.0, 0.0, 6.0), 0.4));
     }
 
     #[test]

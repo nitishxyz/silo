@@ -6590,6 +6590,7 @@ dependencies = [
  "data-encoding",
  "gpui",
  "gpui_platform",
+ "idna",
  "image",
  "objc2 0.6.5",
  "qrcode",

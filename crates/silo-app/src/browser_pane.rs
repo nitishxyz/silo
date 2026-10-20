@@ -29,6 +29,25 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     }
 }
 
+/// What fills a block's icon slot (pane header, tab).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    Spinner,
+    Favicon,
+    Glyph(&'static str),
+}
+
+/// Loading beats the page's favicon, which beats the kind's glyph.
+#[must_use]
+pub fn icon_for(kind: Kind, loading: bool, favicon: bool) -> Icon {
+    match kind {
+        Kind::Terminal => Icon::Glyph("terminal"),
+        Kind::Browser if loading => Icon::Spinner,
+        Kind::Browser if favicon => Icon::Favicon,
+        Kind::Browser => Icon::Glyph("globe"),
+    }
+}
+
 /// The address strip's text for `url`: no scheme for http(s), nothing for
 /// `about:blank`.
 #[must_use]
@@ -105,8 +124,13 @@ pub fn step(state: &BrowserState, span: Span, delta: isize) -> Option<Step> {
 /// Follow the engine's committed URL in `state`'s history: the loaded
 /// entry of a jump (a redirect replaces it), a neighbour entry for the
 /// engine's back/forward, the current one a reload or same-page change,
-/// anything else a new navigation.
-pub fn follow_url(state: &mut BrowserState, span: &mut Span, url: &str, back_forward: bool) {
+/// anything else a new navigation. A blank commit while a page entry is
+/// loading is the engine's initial document: ignored (false).
+pub fn follow_url(state: &mut BrowserState, span: &mut Span, url: &str, back_forward: bool) -> bool {
+    let loading_page = span.jump.and_then(|t| state.history.get(t)).is_some_and(|e| !silo_web::is_blank(&e.url));
+    if loading_page && silo_web::is_blank(url) {
+        return false;
+    }
     if let Some(target) = span.jump.take().filter(|&t| t < state.history.len()) {
         #[allow(clippy::cast_possible_wrap)]
         state.go(target as isize - state.index as isize);
@@ -115,10 +139,10 @@ pub fn follow_url(state: &mut BrowserState, span: &mut Span, url: &str, back_for
             url.clone_into(&mut state.url);
         }
         *span = Span::at(target);
-        return;
+        return true;
     }
     if state.url == url {
-        return;
+        return true;
     }
     let engine = span.lo..=span.hi;
     let at = |i: Option<usize>| {
@@ -135,6 +159,7 @@ pub fn follow_url(state: &mut BrowserState, span: &mut Span, url: &str, back_for
         state.push(url.to_owned());
         *span = Span { lo: span.lo.saturating_sub(removed), hi: state.index, jump: None };
     }
+    true
 }
 
 /// An app chord on a focused page.
@@ -248,6 +273,22 @@ pub struct BrowserPane {
     debounce: Debounce,
     report_task: Option<gpui::Task<()>>,
     error: Option<String>,
+    /// No page to show: Silo's empty state instead of the engine's surface,
+    /// kept until a real page has painted.
+    empty: bool,
+    /// The recent page ↓/↑ picked from the address bar.
+    selected: Option<usize>,
+    /// What the engine shows or is loading.
+    engine_url: String,
+    /// The decoded favicon of `state.favicon`.
+    favicon_image: Option<(String, std::sync::Arc<gpui::Image>)>,
+    /// The engine's facts about its page's connection.
+    security: Option<silo_web::Security>,
+    /// The security popover is open.
+    security_open: bool,
+    /// A URL the engine refused for its certificate (its interstitial
+    /// shows, nothing commits): the bar shows it instead.
+    blocked: Option<String>,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -277,8 +318,15 @@ impl BrowserPane {
         }));
         subs.push(cx.on_focus(&address_focus, window, |this, _, cx| {
             this.editing = true;
+            this.security_open = false;
+            this.address.update(cx, |field, cx| field.select_all(cx));
             this.own();
             cx.emit(BrowserPaneEvent::Activated);
+        }));
+        subs.push(cx.observe(&crate::hosts_state::HostsState::global(cx), |this, _, cx| {
+            if this.empty {
+                cx.notify();
+            }
         }));
         Self {
             block_id,
@@ -310,6 +358,13 @@ impl BrowserPane {
             debounce: Debounce::default(),
             report_task: None,
             error: None,
+            empty: false,
+            selected: None,
+            engine_url: String::new(),
+            favicon_image: None,
+            security: None,
+            security_open: false,
+            blocked: None,
             _subs: subs,
         }
     }
@@ -344,8 +399,16 @@ impl BrowserPane {
             self.span = Span::at(server.index);
             self.state = Some(server);
             self.sync_address(cx);
+            self.refresh_empty(cx);
+            self.decode_favicon();
             if fresh {
                 self.ensure_page(cx);
+            } else if let Some(page) = self.page.clone()
+                && self.state.as_ref().is_some_and(|s| s.url != self.engine_url)
+            {
+                // The engine shows other state (it opened from the cached
+                // tree, or the owner followed a link): load the server's.
+                self.load_entry(self.span.lo, &page);
             }
         }
         cx.notify();
@@ -380,20 +443,34 @@ impl BrowserPane {
     }
 
     pub fn title(&self) -> String {
-        let state = self.state.as_ref();
+        let state = self.state.as_ref().filter(|s| !silo_web::is_blank(&s.url));
         match state.map(|s| s.title.trim()).filter(|t| !t.is_empty()) {
             Some(title) => title.to_owned(),
             None => state.map(|s| display_url(&s.url)).filter(|u| !u.is_empty()).unwrap_or_else(|| "New Tab".into()),
         }
     }
 
-    pub fn favicon(&self) -> Option<String> {
-        self.state.as_ref()?.favicon.clone()
+    /// The page's favicon as an image, decoded once per favicon.
+    pub fn favicon_image(&self) -> Option<std::sync::Arc<gpui::Image>> {
+        let current = self.state.as_ref()?.favicon.as_deref()?;
+        self.favicon_image.as_ref().filter(|(url, _)| url == current).map(|(_, image)| image.clone())
+    }
+
+    fn decode_favicon(&mut self) {
+        let current = self.state.as_ref().and_then(|s| s.favicon.clone());
+        if self.favicon_image.as_ref().map(|(url, _)| url) != current.as_ref() {
+            self.favicon_image = current.and_then(|url| favicon_image(&url).map(|image| (url, image)));
+        }
+    }
+
+    /// The icon slot's content for this block.
+    pub fn icon(&self) -> Icon {
+        icon_for(Kind::Browser, self.loading(), self.favicon_image().is_some())
     }
 
     /// The page's colour, while it has one.
     pub fn backdrop(&self) -> Option<u32> {
-        self.theme_color
+        self.theme_color.filter(|_| !self.empty)
     }
 
     /// The card's colours behind the toolbar, set by the workspace.
@@ -415,6 +492,51 @@ impl BrowserPane {
 
     pub fn bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
         self.bounds
+    }
+}
+
+impl BrowserPane {
+    /// The host the recent pages are remembered under.
+    fn host_key(&self) -> &str {
+        match &self.route {
+            Route::Local => "local",
+            Route::Remote { host_id, .. } => host_id,
+        }
+    }
+
+    /// Blank: the empty state; a real page replaces it once painted.
+    fn refresh_empty(&mut self, cx: &mut gpui::Context<Self>) {
+        let blank = self.state.as_ref().is_none_or(|s| silo_web::is_blank(&s.url));
+        let empty = blank || (self.empty && !self.page.as_ref().is_some_and(|p| p.shown()));
+        if self.empty != empty {
+            self.empty = empty;
+            self.selected = None;
+            cx.emit(BrowserPaneEvent::Backdrop);
+        }
+    }
+
+    fn recents(&self, cx: &gpui::App) -> Vec<crate::browser_home::RecentPage> {
+        crate::browser_home::listed(&crate::hosts_state::HostsState::global(cx).read(cx).app_state().recent_pages, self.host_key())
+    }
+
+    fn remember(&self, url: &str, title: Option<&str>, cx: &mut gpui::Context<Self>) {
+        let host = self.host_key().to_owned();
+        crate::hosts_state::HostsState::global(cx).update(cx, |hosts, cx| {
+            hosts.update_state(
+                |s| match title {
+                    Some(title) => crate::browser_home::retitle(&mut s.recent_pages, &host, url, title),
+                    None => crate::browser_home::visit(&mut s.recent_pages, &host, url, ""),
+                },
+                cx,
+            );
+        });
+    }
+
+    fn open_recent(&mut self, index: usize, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(page) = self.recents(cx).into_iter().nth(index) else { return };
+        self.selected = None;
+        self.navigate(&page.url);
+        self.focus.focus(window, cx);
     }
 }
 
@@ -483,6 +605,7 @@ impl BrowserPane {
                 crate::web::register(page.clone(), dirty, cx.weak_entity());
                 self.page = Some(page);
                 self.span = Span::at(state.index);
+                self.engine_url = state.url.clone();
                 self.error = None;
                 tracing::info!(block = %self.block_id, url = %state.url, "browser opened");
             }
@@ -497,15 +620,30 @@ impl BrowserPane {
     pub fn engine_changed(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(page) = self.page.clone() else { return };
         let mut changed = false;
+        let mut visits = Vec::new();
         for event in page.take_events() {
             let Some(state) = self.state.as_mut() else { break };
             match event {
                 silo_web::Event::UrlChanged { url, back_forward } => {
-                    follow_url(state, &mut self.span, &url, back_forward);
+                    if follow_url(state, &mut self.span, &url, back_forward) {
+                        self.engine_url.clone_from(&url);
+                    }
+                    self.security_open = false;
+                    self.blocked = None;
+                    visits.push((url, None));
                     changed = true;
+                }
+                silo_web::Event::Security(security) => {
+                    if security.cert_error && security.url != state.url {
+                        self.blocked = Some(security.url.clone());
+                        changed = true;
+                    }
+                    self.security = Some(security);
+                    cx.notify();
                 }
                 silo_web::Event::TitleChanged(title) => {
                     follow_title(state, &title);
+                    visits.push((state.url.clone(), Some(title)));
                     changed = true;
                 }
                 silo_web::Event::FaviconChanged(icon) => {
@@ -518,6 +656,7 @@ impl BrowserPane {
                     state.loading = loading;
                     if loading {
                         self.progress = 0.0;
+                        self.blocked = None;
                     } else {
                         self.span.jump = None;
                     }
@@ -548,6 +687,11 @@ impl BrowserPane {
             self.debounce.changed(Instant::now());
             self.schedule_report(cx);
         }
+        for (url, title) in visits {
+            self.remember(&url, title.as_deref(), cx);
+        }
+        self.decode_favicon();
+        self.refresh_empty(cx);
         cx.notify();
     }
 }
@@ -637,6 +781,7 @@ impl BrowserPane {
         if let Some(url) = entry.and_then(|e| silo_proto::model::browser_url(&e.url)) {
             self.span.jump = Some(target);
             page.navigate(&url);
+            self.engine_url = url;
         }
     }
 
@@ -673,7 +818,11 @@ impl BrowserPane {
         }
         let Some(page) = self.page.clone() else { return };
         match command {
-            BrowserCommand::Navigate { .. } => page.navigate(url.as_deref().unwrap_or_default()),
+            BrowserCommand::Navigate { .. } => {
+                let url = url.unwrap_or_default();
+                page.navigate(&url);
+                self.engine_url = url;
+            }
             BrowserCommand::Back | BrowserCommand::Forward => {
                 let delta = if matches!(command, BrowserCommand::Back) { -1 } else { 1 };
                 match self.state.as_ref().and_then(|s| step(s, self.span, delta)) {
@@ -696,9 +845,9 @@ impl BrowserPane {
 }
 
 impl BrowserPane {
-    /// Show the current URL unless the user is editing the address.
+    /// Put the full current URL in the field unless the user is editing it.
     fn sync_address(&mut self, cx: &mut gpui::Context<Self>) {
-        let url = self.state.as_ref().map(|s| display_url(&s.url)).unwrap_or_default();
+        let url = Some(self.url().to_owned()).filter(|u| !silo_web::is_blank(u)).unwrap_or_default();
         let editing = self.editing;
         self.address.update(cx, |field, cx| {
             if field.text != url && !editing {
@@ -718,15 +867,35 @@ impl BrowserPane {
         use crate::text_field::FieldEvent;
         match event {
             FieldEvent::Submit => {
+                if let Some(index) = self.selected.filter(|_| self.empty) {
+                    return self.open_recent(index, window, cx);
+                }
                 let text = self.address.read(cx).text.clone();
+                if text.trim().is_empty() {
+                    if !self.empty {
+                        self.navigate("about:blank");
+                    }
+                    return;
+                }
                 self.navigate(&text);
                 self.focus.focus(window, cx);
             }
             FieldEvent::Cancel => {
+                self.selected = None;
                 self.focus.focus(window, cx);
                 self.sync_address(cx);
             }
-            FieldEvent::Changed(_) | FieldEvent::Up | FieldEvent::Down => {}
+            FieldEvent::Up | FieldEvent::Down if self.empty => {
+                let delta = if matches!(event, FieldEvent::Up) { -1 } else { 1 };
+                self.selected = crate::browser_home::select(self.selected, self.recents(cx).len(), delta);
+                cx.notify();
+            }
+            FieldEvent::Changed(_) => {
+                if self.selected.take().is_some() {
+                    cx.notify();
+                }
+            }
+            FieldEvent::Up | FieldEvent::Down => {}
         }
     }
 }
@@ -898,7 +1067,7 @@ fn page_canvas(entity: gpui::Entity<BrowserPane>) -> impl gpui::IntoElement {
         move |bounds, (), window, cx| {
             let scale = window.scale_factor();
             entity.update(cx, |pane, cx| pane.layout(bounds, scale, cx));
-            if let Some(frame) = entity.read(cx).page.as_ref().and_then(|p| p.frame()) {
+            if let Some(frame) = entity.read(cx).page.as_ref().filter(|_| !entity.read(cx).empty).and_then(|p| p.frame()) {
                 let (left, right) = entity.read(cx).corners;
                 let corners = gpui::Corners { bottom_left: gpui::px(left), bottom_right: gpui::px(right), ..Default::default() };
                 window.paint_rounded_surface(bounds, frame.buffer, corners, crate::theme::CORNER_SMOOTHING);
@@ -973,7 +1142,6 @@ impl BrowserPane {
                 .child(crate::assets::icon(glyph, 13.0, if enabled { palette.ink } else { palette.icon }))
         };
         let loading = self.loading();
-        let favicon = self.favicon().and_then(|f| favicon_image(&f));
         let reload = if loading {
             button("browser-reload", "close", "Stop  ⌘.", true).on_click(cx.listener(|this, _, _, _| this.stop()))
         } else {
@@ -1005,11 +1173,209 @@ impl BrowserPane {
                     .min_w_0()
                     .px(px(6.0))
                     .when(palette.alpha < 1.0, |el| el.h(px(22.0)).continuous(crate::radius::CONTROL).bg(palette.tint(0.07)))
-                    .children(favicon.map(|f| gpui::img(f).size(px(14.0)).flex_none()))
-                    .child(self.address.clone()),
+                    .child(self.security_indicator(cx))
+                    .child(self.address_text(cx))
+                    .children(self.zoom_pill(cx)),
             )
             .children(progress)
+            .children(self.security_open.then(|| self.security_popover(cx)))
     }
+
+    fn url(&self) -> &str {
+        self.blocked.as_deref().or_else(|| self.state.as_ref().map(|s| s.url.as_str())).unwrap_or_default()
+    }
+
+    /// Lock, open lock + "Not secure", or info; opens the popover.
+    fn security_indicator(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use crate::address::Security;
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px, rgb};
+        let palette = self.palette;
+        let security = crate::address::security(self.url(), self.security.as_ref());
+        let glyph = match security {
+            Security::Secure => "lock",
+            Security::NotSecure => "lock-off",
+            Security::Neutral => "info",
+        };
+        let label = (security == Security::NotSecure && !self.editing).then_some("Not secure");
+        div()
+            .id("browser-security")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(4.0))
+            .h(px(18.0))
+            .min_w(px(18.0))
+            .justify_center()
+            .px(px(2.0))
+            .continuous(crate::radius::CONTROL)
+            .cursor_pointer()
+            .hover(|s| s.bg(palette.hover()))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.security_open = !this.security_open;
+                cx.notify();
+            }))
+            .child(crate::assets::icon(glyph, 12.0, palette.icon))
+            .children(label.map(|l| div().pr(px(2.0)).text_size(px(11.0)).text_color(rgb(palette.muted)).child(l)))
+            .into_any_element()
+    }
+
+    /// The field while editing; at rest the host, with scheme and path muted.
+    fn address_text(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use gpui::{div, prelude::*, rgb};
+        let palette = self.palette;
+        let shown = crate::address::shown(self.url());
+        let at_rest = !self.editing && !shown.host.is_empty();
+        let part = |text: String, color: u32| div().flex_none().text_color(rgb(color)).child(text);
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w_0()
+            .child(div().w_full().when(at_rest, |el| el.opacity(0.0)).child(self.address.clone()))
+            .when(at_rest, |el| {
+                el.child(
+                    div()
+                        .id("browser-address-shown")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .cursor(gpui::CursorStyle::IBeam)
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
+                        .when(!shown.scheme.is_empty(), |el| el.child(part(shown.scheme, palette.muted)))
+                        .child(part(shown.host, palette.ink))
+                        .child(div().min_w_0().truncate().text_color(rgb(palette.muted)).child(shown.path)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The page zoom when not 100%; a click resets it.
+    fn zoom_pill(&self, cx: &mut gpui::Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px, rgb};
+        let label = crate::address::zoom_label(self.state.as_ref()?.zoom)?;
+        let palette = self.palette;
+        Some(
+            div()
+                .id("browser-zoom")
+                .flex_none()
+                .px(px(5.0))
+                .h(px(16.0))
+                .flex()
+                .items_center()
+                .capsule()
+                .bg(palette.tint(0.08))
+                .hover(|s| s.bg(palette.tint(0.14)))
+                .cursor_pointer()
+                .text_size(px(10.5))
+                .text_color(rgb(palette.muted))
+                .tooltip(crate::tooltip::Tooltip::text("Reset zoom"))
+                .on_click(cx.listener(|this, _, _, _| this.send(Method::BrowserZoom { block_id: this.block_id.clone(), zoom: 0.0 })))
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    /// Over the page (painted after it), so opaque.
+    fn security_popover(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use crate::theme;
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px, rgb};
+        let url = self.url();
+        let info = self.security.as_ref().filter(|i| i.url == url);
+        let host = crate::address::shown(url).host;
+        let detail = |text: String| div().text_size(px(11.0)).text_color(rgb(theme::muted())).child(text);
+        let cert = info.filter(|i| i.secure && !i.cert_error);
+        let card = div()
+            .id("browser-security-popover")
+            .absolute()
+            .top(px(STRIP - 2.0))
+            .left(px(84.0))
+            .w(px(260.0))
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .continuous(10.0)
+            .bg(theme::overlay_fill())
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .shadow_lg()
+            .occlude()
+            .font_family(theme::ui_font())
+            .text_size(px(12.5))
+            .text_color(rgb(theme::foreground()))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.security_open = false;
+                cx.notify();
+            }))
+            .child(div().child(crate::address::headline(url, info)))
+            .when(!host.is_empty(), |el| el.child(detail(host)))
+            .children(cert.and_then(|i| i.issuer.clone()).map(|issuer| detail(format!("Issued by {issuer}"))))
+            .children(cert.and_then(|i| i.valid_until).map(|t| detail(format!("Valid until {}", crate::address::date(t)))));
+        gpui::deferred(card).with_priority(1).into_any_element()
+    }
+
+    /// No page: a hint and this host's recent pages, on the card itself.
+    fn empty_state(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px, rgb};
+        let palette = self.palette;
+        let rows: Vec<_> = self
+            .recents(cx)
+            .into_iter()
+            .enumerate()
+            .map(|(i, page)| {
+                let title = if page.title.trim().is_empty() { display_url(&page.url) } else { page.title.clone() };
+                div()
+                    .id(("browser-recent", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .continuous(crate::radius::CONTROL)
+                    .cursor_pointer()
+                    .when(self.selected == Some(i), |el| el.bg(palette.selected()))
+                    .hover(|s| s.bg(palette.hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_recent(i, window, cx)))
+                    .child(crate::assets::icon("globe", 12.0, palette.icon))
+                    .child(div().flex_1().min_w_0().truncate().text_color(rgb(palette.ink)).child(title))
+                    .child(
+                        div().flex_none().max_w(gpui::relative(0.5)).truncate().text_color(rgb(palette.muted)).child(page_host(&page.url).to_owned()),
+                    )
+            })
+            .collect();
+        div()
+            .id("browser-empty")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.0))
+            .p(px(24.0))
+            .text_size(px(12.0))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
+            .child(crate::assets::icon("globe", 24.0, palette.icon))
+            .child(div().text_size(px(13.0)).text_color(rgb(palette.muted)).child("Search or enter an address"))
+            .when(!rows.is_empty(), |el| el.child(div().flex().flex_col().gap(px(1.0)).w_full().max_w(px(380.0)).mt(px(6.0)).children(rows)))
+            .into_any_element()
+    }
+}
+
+/// `url`'s host (and port).
+fn page_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
 /// The loading spinner, in an icon's bounds: one turn a second, still
@@ -1049,7 +1415,13 @@ impl gpui::Render for BrowserPane {
                     cx.stop_propagation()
                 }
             }))
-            .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, _| this.mouse_move(e.position, e.modifiers)))
+            // Not during an app drag (a divider resize, a pane): the page
+            // never saw its press, so it gets neither the moves nor the release.
+            .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, cx| {
+                if !cx.has_active_drag() {
+                    this.mouse_move(e.position, e.modifiers);
+                }
+            }))
             .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, _| this.wheel(e)))
             .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
                 let inside = e.bounds.contains(&e.event.position);
@@ -1081,15 +1453,18 @@ impl gpui::Render for BrowserPane {
                 )
                 .on_mouse_up(
                     b,
-                    cx.listener(|this, e: &gpui::MouseUpEvent, _, _| {
-                        this.mouse_button(e.position, e.button, false, e.click_count, e.modifiers);
+                    cx.listener(|this, e: &gpui::MouseUpEvent, _, cx| {
+                        if !cx.has_active_drag() {
+                            this.mouse_button(e.position, e.button, false, e.click_count, e.modifiers);
+                        }
                     }),
                 );
         }
         let page = page
             .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Back), cx.listener(|this, _, _, _| this.back()))
             .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward), cx.listener(|this, _, _, _| this.forward()));
-        let page = page.child(page_canvas(cx.entity())).when_some(self.error.clone(), |el, _| {
+        let empty = (self.empty && self.error.is_none()).then(|| self.empty_state(cx));
+        let page = page.child(page_canvas(cx.entity())).children(empty).when_some(self.error.clone(), |el, _| {
             el.child(
                 div().absolute().inset_0().flex().items_center().justify_center().text_color(rgb(crate::theme::muted())).child("Can't open the page"),
             )
@@ -1278,6 +1653,31 @@ mod tests {
         follow_url(&mut s, &mut span, "b", false);
         follow_url(&mut s, &mut span, "a", false);
         assert_eq!((s.index, s.history.len()), (2, 3));
+    }
+
+    #[test]
+    fn icon_prefers_spinner_then_favicon_then_glyph() {
+        assert_eq!(icon_for(Kind::Browser, true, true), Icon::Spinner);
+        assert_eq!(icon_for(Kind::Browser, false, true), Icon::Favicon);
+        assert_eq!(icon_for(Kind::Browser, false, false), Icon::Glyph("globe"));
+        assert_eq!(icon_for(Kind::Terminal, true, true), Icon::Glyph("terminal"));
+    }
+
+    /// Reopened from a stale cached `about:blank`, then given the server's
+    /// page: the engine's initial blank commit must not become history.
+    #[test]
+    fn restored_page_ignores_the_initial_blank_commit() {
+        let mut s = BrowserState::new("about:blank".into());
+        s.push("http://a/".into());
+        let mut span = Span::at(s.index);
+        span.jump = Some(s.index);
+        assert!(!follow_url(&mut s, &mut span, "about:blank", false));
+        assert_eq!((s.index, s.url.as_str(), s.history.len()), (1, "http://a/", 2));
+        assert!(follow_url(&mut s, &mut span, "http://a/", false));
+        assert_eq!((s.index, s.history.len(), span), (1, 2, Span::at(1)));
+        // Without a pending load, about:blank is a navigation like any other.
+        assert!(follow_url(&mut s, &mut span, "about:blank", false));
+        assert_eq!((s.index, s.url.as_str()), (2, "about:blank"));
     }
 
     impl Span {

@@ -44,7 +44,16 @@ enum Shown {
 
 /// Commands that still work while the picker is open.
 pub(crate) fn allowed_while_open(command: Command) -> bool {
-    matches!(command, Command::NewWindow | Command::Quit | Command::ToggleFullScreen | Command::CycleWindows)
+    matches!(
+        command,
+        Command::NewWindow
+            | Command::Quit
+            | Command::HideSilo
+            | Command::HideOthers
+            | Command::ShowAll
+            | Command::ToggleFullScreen
+            | Command::CycleWindows
+    )
 }
 
 /// ⌘`: bring the next Silo window forward.

@@ -57,6 +57,8 @@ pub struct Workspace {
     /// `ratio_flush` sends them once resizing pauses.
     pub(crate) pending_ratios: Vec<crate::palette::PendingRatio>,
     pub(crate) ratio_flush: Option<Task<()>>,
+    /// The divider being dragged, from mouse-down to mouse-up.
+    pub(crate) divider_drag: Option<crate::layout::DividerDrag>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
     /// The shown session was closed and none replaced it: (re)connecting
@@ -176,6 +178,7 @@ impl Workspace {
             ahead_of: None,
             pending_ratios: Vec::new(),
             ratio_flush: None,
+            divider_drag: None,
             wanted_session,
             emptied: false,
             panes: HashMap::new(),

@@ -305,6 +305,9 @@ impl Workspace {
             Command::HidePaneHeaders => self.set_pane_headers(false, cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),
             Command::CommandPalette => self.toggle_palette(window, cx),
+            Command::HideSilo => cx.hide(),
+            Command::HideOthers => cx.hide_other_apps(),
+            Command::ShowAll => cx.unhide_other_apps(),
             Command::Quit => cx.quit(),
         }
         cx.notify();
@@ -402,7 +405,7 @@ impl Workspace {
         self.open_session(host, id, window, cx);
     }
 
-    /// Focus the geometric neighbour of the focused pane (⌘H/J/L, ⌥⌘arrows).
+    /// Focus the geometric neighbour of the focused pane (⌃⌘H/J/K/L, ⌥⌘arrows).
     /// No neighbour, or an open overlay, is a no-op.
     fn focus_direction(&mut self, direction: crate::focus::Direction, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() || self.palette.is_some() || self.add_host.is_some() || self.picker.is_some() {
@@ -461,7 +464,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn flush_ratios(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn flush_ratios(&mut self, cx: &mut Context<Self>) {
         self.ratio_flush = None;
         let windows = self.view.as_ref().map(|v| v.session.windows.as_slice()).unwrap_or_default();
         let pending: Vec<_> = std::mem::take(&mut self.pending_ratios).into_iter().filter(|p| p.fits(windows)).collect();
