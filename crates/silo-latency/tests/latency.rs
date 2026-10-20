@@ -66,16 +66,23 @@ async fn bench_echo_at_50ms() {
     assert!(report.misses().is_empty(), "{table}");
 }
 
-/// Typing ahead of the echo: `cargo test -p silo-latency -- --ignored --nocapture type_ahead_probe`.
+/// Typing ahead of the echo with every painted state checked (docs/PHASE5.md
+/// §3.1): `cargo test -p silo-latency -- --ignored --nocapture type_ahead_probe`.
+/// `PROBE_RTT` and `PROBE_JITTER` shape the link, `PROBE_GAP`..`PROBE_GAP_MAX`
+/// the time between keys (ms); `PROBE_SHELL` is `/bin/bash`, `/bin/zsh` or
+/// `zsh-hl` (a `ZDOTDIR=/tmp/zdot` sourcing zsh-syntax-highlighting and
+/// zsh-autosuggestions). `PROBE_TICKET` and `PROBE_HOME` pair with a real
+/// host instead and type into bash there.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a diagnostic"]
 async fn type_ahead_probe() {
-    let rtt: u64 = std::env::var("PROBE_RTT").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
     let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-    let (gap, gap_max, jitter) = (env("PROBE_GAP", 60), env("PROBE_GAP_MAX", 60), env("PROBE_JITTER", 0));
+    let (rtt, gap, gap_max, jitter) = (env("PROBE_RTT", 150), env("PROBE_GAP", 60), env("PROBE_GAP_MAX", 60), env("PROBE_JITTER", 0));
     let shell = std::env::var("PROBE_SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let args: Vec<&str> = match shell.as_str() {
         "/bin/zsh" => vec!["/bin/zsh", "-f"],
+        // ZDOTDIR with zsh-syntax-highlighting and zsh-autosuggestions sourced.
+        "zsh-hl" => vec!["/usr/bin/env", "ZDOTDIR=/tmp/zdot", "HOME=/tmp/zdot", "/bin/zsh", "-i"],
         s => vec![s, "--norc", "--noprofile"],
     };
     let link = ProxyConfig { jitter: Duration::from_millis(jitter), ..ProxyConfig::rtt(Duration::from_millis(rtt)) };

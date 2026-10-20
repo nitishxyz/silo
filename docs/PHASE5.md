@@ -65,19 +65,43 @@ frame count that carried it).
 - **Epochs (Mosh's "tentative" rule):** after an epoch boundary, predictions are kept but *not shown* until one of
   them is confirmed. Then the whole epoch shows immediately. That stops a burst of wrong guesses after Enter
   (for example the first keys of a password, or a TUI starting).
-- **Judging** runs after every `Mirror::apply` batch. A prediction for input `n` becomes judgeable once
-  `acked.count >= n` and `mirror.next_offset > acked.offset`, meaning the echo window has started. Then:
-  - **Confirmed:** the mirror cell at `(row,col)` holds `text`. It's removed from the overlay (the real cell now
-    shows it) and `confirmed_epoch = epoch`.
-  - **Wrong:** the cell differs and either `next_offset` has moved past the echo window (more output arrived after
-    a quiet period of one frame) or `max(2*srtt, 50 ms)` passed since the `INPUT_ACK`. In that case the **whole
-    epoch rolls back** (every pending `Pred` dropped, cursor prediction cleared) and a new epoch starts.
-  - **Expired:** if nothing judges a prediction within `max(4*srtt, 250 ms)` of sending, it's dropped quietly (for
-    example a program that buffers its echo).
+- **Judging** runs against the frame actually painted, whenever it changes and at `Predictor::deadline` (a timer,
+  so nothing waits for the next frame). A prediction for input `n` becomes judgeable once `acked.count >= n` and
+  the painted offset is past `acked.offset`, meaning the echo window has started. Then:
+  - **Confirmed:** the painted cell at `(row,col)` holds `text`. It's removed from the overlay (the real cell now
+    shows it), `confirmed_epoch = epoch`, and the cell joins the epoch's *echoed* typing (§3.1).
+  - **Suspect:** the cell differs. Nothing happens yet: the echo of earlier keys may still be arriving in pieces
+    (zsh-syntax-highlighting redraws the line two or three times per key, and keys that reach the PTY together are
+    acknowledged before those redraws are read).
+  - **Wrong:** a suspect cell still differs once the burst has **settled**, i.e. no output arrived for `SETTLE`
+    (50 ms, Mosh's echo timeout) and no newer frame is held back, or `max(4*srtt, 250 ms)` passed since sending.
+    Then the **whole epoch rolls back** (every pending `Pred` dropped, cursor prediction cleared) and a new epoch
+    starts.
+  - **Expired:** a prediction never judgeable within `max(4*srtt, 250 ms)` is dropped quietly (for example a
+    program that buffers its echo).
+  - An earlier version called a cell wrong as soon as *any* further output arrived after its echo window opened.
+    With highlighting shells and keys arriving bunched, the second redraw of key `n-1` rolled back everything typed
+    ahead: the letters vanished, the cursor jumped back, then both came back with the echo.
 - **Rollback is free:** the overlay only paints *over* the mirror's cells. Dropping a `Pred` brings back the real
   cell at the next paint, with nothing to undo.
 - **Cursor:** while any shown prediction exists, the painted cursor is the predicted one. Otherwise it's the
-  mirror's.
+  mirror's. The next prediction starts there too, or after the echoed typing while a mid-burst frame is in the
+  mirror.
+
+### 3.1 Which frame is painted
+
+The mirror applies every byte at once, but a frame from the middle of a burst is not always shown. Before a newly
+prepared frame replaces the painted one, `Predictor::present` holds it back when:
+
+- **it takes typing back:** an echoed cell of the live epoch no longer shows, or (with no prediction shown) the
+  cursor is not where the echoed typing left it, as when a line editor clears or redraws the line across two reads.
+  It waits until a later frame no longer does that, the stream settles (`SETTLE`), or 150 ms pass. If it settles
+  like that, the program rewrote the line itself: it is painted and the echoed record dropped;
+- **synchronized output (mode 2026) is set** when the batch ends: the program is mid-update. It waits for the reset,
+  at most 1 s (Ghostty's limit). This applies to local panes too; nothing else does.
+
+A held frame is never judged against, and only frames that would take something back wait, so the first echo of a
+key is never delayed. The headless `silo-latency` session paints through the same gate.
 
 ## 4. When prediction is on
 

@@ -519,6 +519,9 @@ int silo_vt_frame(SiloVt *vt, SiloFrame *out, SiloCell *cells, size_t capacity,
     GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
     out->alt_screen = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
+    GhosttyTerminalModeConfig sync = { .mode = GHOSTTY_MODE_SYNC_OUTPUT };
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &sync));
+    out->synchronized = sync.value;
     GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
     GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
     CHECK(ghostty_render_state_get(vt->render, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors));

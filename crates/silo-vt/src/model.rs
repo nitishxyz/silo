@@ -212,6 +212,9 @@ pub struct Frame {
     pub at_prompt: bool,
     /// The alternate screen is active.
     pub alt_screen: bool,
+    /// Synchronized output (mode 2026) is set: the program is in the
+    /// middle of an update and this frame may be half drawn.
+    pub synchronized: bool,
     /// OSC 8 hyperlink spans on viewport rows, shared like `cells`.
     pub links: std::sync::Arc<[Link]>,
     /// Present while a search needle is set.

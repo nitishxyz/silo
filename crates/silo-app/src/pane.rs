@@ -118,6 +118,11 @@ pub struct Pane {
     prepared_offset: u64,
     prepared_key: Option<(u64, u32, u32, u32, u32)>,
     preparing: bool,
+    /// A newer prepared frame (and its offset) not painted yet: the
+    /// predictor holds it back until its output burst settles.
+    held: Option<(Arc<PreparedFrame>, u64)>,
+    /// When `judge_painted` comes back without a new frame.
+    deadline: Option<Instant>,
     /// Cell metrics of the last render, and whether a render followed the
     /// last finished preparation: then new output is prepared as soon as it
     /// is applied (a pane that is not rendered prepares nothing more).
@@ -240,6 +245,8 @@ impl Pane {
             prepared_offset: 0,
             prepared_key: None,
             preparing: false,
+            held: None,
+            deadline: None,
             metrics: None,
             rendered: false,
             last_frame: None,
@@ -494,14 +501,6 @@ impl Pane {
         // A short batch drained everything received so far.
         let idle = batch.len() < 512;
         for data in batch {
-            if self.remote() {
-                match &data {
-                    ServerData::Output { offset, bytes } => {
-                        tracing::debug!(target: "silo::predict", "DBG out @{offset} {:?}", String::from_utf8_lossy(bytes))
-                    }
-                    other => tracing::debug!(target: "silo::predict", "DBG frame {other:?}"),
-                }
-            }
             self.predictor.server(&data);
             match &data {
                 ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text } => cx.emit(PaneEvent::ClipboardWrite(text.clone())),
@@ -528,9 +527,9 @@ impl Pane {
         if let Some(sender) = &self.sender {
             sender.ack(&mut self.mirror, idle);
         }
-        // A changed mirror is judged once its prepared frame lands.
+        // A changed mirror is judged once its prepared frame is painted.
         if !dirty {
-            self.judge_painted();
+            self.judge_painted(cx);
         }
         if dirty {
             self.trace_stage(crate::latency::Stage::Mirror);
@@ -562,12 +561,48 @@ impl Pane {
         }
     }
 
+    /// Paint the newest prepared frame unless the predictor holds it back
+    /// (mid-burst or mid-update, docs/PHASE5.md §3.1), then judge.
+    fn present(&mut self, cx: &mut Context<Self>) {
+        let shown = self.predictor.overlay();
+        if let Some((prepared, offset)) = self.held.take() {
+            if self.predictor.present(prepared.frame()) {
+                self.prepared = Some(prepared);
+                self.prepared_offset = offset;
+                self.trace_stage(crate::latency::Stage::Prepared);
+                cx.notify();
+            } else {
+                self.held = Some((prepared, offset));
+            }
+        }
+        self.judge_painted(cx);
+        if self.predictor.overlay() != shown {
+            cx.notify();
+        }
+    }
+
     /// Judge predictions against the frame actually painted, so a confirmed
-    /// cell leaves the overlay only once the grid shows its glyph.
-    fn judge_painted(&mut self) {
+    /// cell leaves the overlay only once the grid shows its glyph, and come
+    /// back at the predictor's deadline should no frame arrive first.
+    fn judge_painted(&mut self, cx: &mut Context<Self>) {
         if let (true, Some(prepared)) = (self.remote(), &self.prepared) {
             self.predictor.judge(prepared.frame(), self.prepared_offset);
         }
+        let Some(at) = self.predictor.deadline() else { return };
+        if self.deadline.is_some_and(|scheduled| scheduled <= at) {
+            return;
+        }
+        self.deadline = Some(at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(at.saturating_duration_since(Instant::now())).await;
+            let _ = this.update(cx, |pane, cx| {
+                if pane.deadline == Some(at) {
+                    pane.deadline = None;
+                }
+                pane.present(cx);
+            });
+        })
+        .detach();
     }
 
     fn lost(&mut self, attempt: u64, cx: &mut Context<Self>) {
@@ -609,7 +644,6 @@ impl Pane {
             self.predictor.path_rtt(rtt);
         }
         let target = self.predictor.overlay().1.unwrap_or((frame.cursor.row, frame.cursor.column));
-        tracing::debug!(target: "silo::predict", "DBG input {:?}", String::from_utf8_lossy(&bytes));
         self.predictor.input(&bytes, &frame);
         if let Some(trace) = self.trace.as_ref().filter(|_| key) {
             trace.borrow_mut().key(&bytes, target);
@@ -1246,13 +1280,10 @@ impl Pane {
             let prepared = prepared.await;
             let _ = this.update(cx, |pane, cx| {
                 pane.preparing = false;
-                pane.prepared = Some(Arc::new(prepared));
-                pane.prepared_offset = offset;
                 pane.prepared_key = Some(key);
                 pane.rendered = false;
-                pane.trace_stage(crate::latency::Stage::Prepared);
-                pane.judge_painted();
-                cx.notify();
+                pane.held = Some((Arc::new(prepared), offset));
+                pane.present(cx);
             });
         })
         .detach();
@@ -1418,18 +1449,6 @@ impl Render for Pane {
         let solid = self.translucency.is_none();
         let outside = || div().absolute().when(solid, |el| el.bg(rgb(theme::surface()))).border_color(rgb(theme::border()));
         let (cells, predicted_cursor) = self.predictor.overlay();
-        if self.remote()
-            && let Some(prepared) = &self.prepared
-        {
-            let f = prepared.frame();
-            let row = predicted_cursor.map_or(f.cursor.row, |c| c.0);
-            let cols = usize::from(f.size.columns);
-            let line: String = f.cells[usize::from(row) * cols..usize::from(row) * cols + cols.min(60)]
-                .iter()
-                .map(|c| if c.text.is_empty() { " " } else { c.text.as_str() })
-                .collect();
-            tracing::debug!(target: "silo::predict", "DBG render prepared@{} mirror@{} cursor {:?} pred {:?} cells {:?} |{}|", self.prepared_offset, self.mirror.next_offset(), (f.cursor.row, f.cursor.column), predicted_cursor, cells.iter().map(|c| (c.column, c.text.as_str())).collect::<Vec<_>>(), line.trim_end());
-        }
         let overlay = Overlay {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
             predicted_cursor,

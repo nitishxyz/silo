@@ -344,7 +344,8 @@ pub async fn type_ahead_remote(
     let ticket = PairTicket::decode(ticket)?;
     let identity = silo_client::client_identity(&home.join("client"))?;
     let net = Net::bind_with(&identity, NetOptions::default()).await?;
-    let (remote, _events) = timeout(Duration::from_secs(30), silo_client::pair(&net, &ticket, "type-ahead probe")).await.context("pair timed out")??;
+    let (remote, _events) =
+        timeout(Duration::from_secs(30), silo_client::pair(&net, &ticket, "type-ahead probe")).await.context("pair timed out")??;
     let rtt = match remote.conn() {
         silo_client::transport::Conn::Iroh(conn) => conn.rtt(),
         silo_client::transport::Conn::Unix(_) => None,

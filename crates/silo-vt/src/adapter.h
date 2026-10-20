@@ -19,6 +19,8 @@ typedef struct {
     uint32_t at_prompt;
     /* The alternate screen is active. */
     uint32_t alt_screen;
+    /* Synchronized output (mode 2026) is set: the program is mid-update. */
+    uint32_t synchronized;
 } SiloFrame;
 /* One OSC 8 hyperlink span on an extracted viewport row; `end` is exclusive. */
 typedef struct {

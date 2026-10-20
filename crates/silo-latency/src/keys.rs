@@ -39,6 +39,10 @@ pub struct Session {
     pub predictor: Predictor,
     /// Most cells the overlay ever showed at once.
     pub max_shown: usize,
+    /// Server frames received, for [`TypedAhead::log`].
+    frames: Vec<String>,
+    /// The frame painted and the mirror offset it shows.
+    painted: Option<(Frame, u64)>,
 }
 
 impl Session {
@@ -53,7 +57,7 @@ impl Session {
             Conn::Iroh(conn) => Some(conn.clone()),
             Conn::Unix(_) => None,
         };
-        let mut session = Self { stream, path, mirror: Mirror::new(), predictor, max_shown: 0 };
+        let mut session = Self { stream, path, mirror: Mirror::new(), predictor, max_shown: 0, frames: Vec::new(), painted: None };
         session.mirror.begin(&session.stream.welcome)?;
         session.predictor.begin(&session.stream.welcome);
         session.recv(crate::bench::T).await?;
@@ -73,17 +77,33 @@ impl Session {
         Ok(self.mirror.terminal().context("no terminal")?.frame()?)
     }
 
-    /// Apply the next server frame and judge predictions against it.
+    /// Apply the next server frame, then paint and judge as the app does.
     async fn recv(&mut self, wait: Duration) -> anyhow::Result<()> {
         let data: ServerData =
             timeout(wait, self.stream.rx.recv()).await.context("timed out waiting for output")?.ok_or_else(|| anyhow!("data stream closed"))?;
+        match &data {
+            ServerData::Output { bytes, .. } => self.frames.push(format!("out {:?}", String::from_utf8_lossy(bytes))),
+            ServerData::InputAck { .. } => self.frames.push(format!("{data:?}")),
+            _ => {}
+        }
         self.predictor.server(&data);
         self.mirror.apply(data)?;
-        let next_offset = self.mirror.next_offset();
-        if let Some(vt) = self.mirror.terminal() {
-            self.predictor.judge(&vt.frame()?, next_offset);
-        }
+        self.paint()?;
         self.stream.ack(&mut self.mirror, true);
+        Ok(())
+    }
+
+    /// Paint the mirror's frame unless the predictor holds it back, and
+    /// judge against what is painted (`Pane::present`).
+    fn paint(&mut self) -> anyhow::Result<()> {
+        let Some(vt) = self.mirror.terminal() else { return Ok(()) };
+        let frame = vt.frame()?;
+        if self.predictor.present(&frame) {
+            self.painted = Some((frame, self.mirror.next_offset()));
+        }
+        if let Some((frame, offset)) = &self.painted {
+            self.predictor.judge(frame, *offset);
+        }
         Ok(())
     }
 }
@@ -163,17 +183,28 @@ impl Session {
             } else {
                 let wait = if settle_until(typed) { Duration::from_millis(400) } else { next_key.saturating_duration_since(Instant::now()) };
                 match timeout(wait, self.recv(crate::bench::T)).await {
-                    Ok(applied) => applied?,
-                    Err(_) if settle_until(typed) => break,
-                    Err(_) => continue,
+                    Ok(applied) => {
+                        applied?;
+                        out.log.extend(self.frames.drain(..).map(|f| format!("        {f}")));
+                    }
+                    // The app's deadline timer.
+                    Err(_) if settle_until(typed) => {
+                        self.paint()?;
+                        break;
+                    }
+                    Err(_) => self.paint()?,
                 }
             }
-            let frame = self.frame()?;
+            let mirror = self.frame()?.cursor.column;
+            let frame = self.painted.as_ref().map(|(frame, _)| frame.clone()).context("nothing painted")?;
             let (cells, cursor) = self.predictor.overlay();
             let painted_cursor = cursor.unwrap_or((frame.cursor.row, frame.cursor.column)).1;
             let cell = |column: u16| {
                 cells.iter().find(|c| (c.row, c.column) == (row, column)).map(|c| c.text.clone()).unwrap_or_else(|| {
-                    frame.cells.get(usize::from(row) * usize::from(frame.size.columns) + usize::from(column)).map_or_else(String::new, |c| c.text.clone())
+                    frame
+                        .cells
+                        .get(usize::from(row) * usize::from(frame.size.columns) + usize::from(column))
+                        .map_or_else(String::new, |c| c.text.clone())
                 })
             };
             let shown = (0..typed).take_while(|&i| cell(start + i as u16) == char::from(text[i]).to_string()).count();
@@ -183,7 +214,7 @@ impl Session {
                 "{:7.1} shown {shown}/{typed} cursor {} (mirror {}) overlay {} |{line}|",
                 started.elapsed().as_secs_f64() * 1e3,
                 painted_cursor.saturating_sub(start),
-                frame.cursor.column.saturating_sub(start),
+                mirror.saturating_sub(start),
                 cells.len()
             );
             if let Some((was_shown, was_cursor)) = last
@@ -194,8 +225,10 @@ impl Session {
             out.log.push(state);
             last = Some((shown, painted_cursor));
         }
-        let frame = self.frame()?;
-        let line: String = (0..text.len() as u16).map(|i| frame.cells[usize::from(row) * usize::from(frame.size.columns) + usize::from(start + i)].text.clone()).collect();
+        let frame = self.painted.as_ref().map(|(frame, _)| frame.clone()).context("nothing painted")?;
+        let line: String = (0..text.len() as u16)
+            .map(|i| frame.cells[usize::from(row) * usize::from(frame.size.columns) + usize::from(start + i)].text.clone())
+            .collect();
         out.exact = line.as_bytes() == text && frame.cursor.column == start + text.len() as u16;
         Ok(out)
     }

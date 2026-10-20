@@ -36,6 +36,7 @@ struct RawFrame {
     dirty: u32,
     at_prompt: u32,
     alt_screen: u32,
+    synchronized: u32,
 }
 
 #[repr(C)]
@@ -530,6 +531,7 @@ impl TerminalCore {
             mouse_tracking: frame.mouse_tracking != 0,
             at_prompt: frame.at_prompt != 0,
             alt_screen: frame.alt_screen != 0,
+            synchronized: frame.synchronized != 0,
             links: Arc::from(self.links.clone()),
             search,
             cursor: Cursor {
@@ -906,6 +908,11 @@ mod tests {
         assert_eq!(frame.cells[2].text, "e\u{301}");
         vt.write_output(b"\x1b[?1049l").unwrap();
         assert_eq!(vt.frame().unwrap().cells[0].text, "r");
+        assert!(!vt.frame().unwrap().synchronized);
+        vt.write_output(b"\x1b[?2026h").unwrap();
+        assert!(vt.frame().unwrap().synchronized, "mode 2026 reported");
+        vt.write_output(b"\x1b[?2026l").unwrap();
+        assert!(!vt.frame().unwrap().synchronized);
         vt.resize(GridSize::new(40, 8).unwrap()).unwrap();
         assert_eq!(vt.frame().unwrap().cells.len(), 320);
     }
