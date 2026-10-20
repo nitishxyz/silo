@@ -277,7 +277,7 @@ user-facing feature, throwaway branches.
 **A1. Baseline.** Measure the current in-app engine and a P-style stream (worker OSR frames encoded and sent to
 the client) on the same pages and conditions. Every later number is compared to these.
 
-**A2. Capture (Mac mini).** Patched worker loads one simple page (a static docs page, then a GitHub repository
+**A2. Capture (build machine).** Patched worker loads one simple page (a static docs page, then a GitHub repository
 page), records commits/frames and all referenced resources to a file.
 
 **A3. Replay (current Mac).** A standalone replay harness, in a sandboxed process, renders the capture. Check:
@@ -344,16 +344,14 @@ local workspaces to option P for page survival (§2).
 - Whether accessibility can reuse Chromium's AX tree serialization across the cut.
 - Profile model once cookies live on servers: one profile per host, or named profiles per host.
 
-## 15. Mac mini capacity (read-only check, 2026-10-21)
+## 15. Machines for Spike A
 
-- `batmini.local` resolves over mDNS to `192.168.1.4` and answers ping (one sample, ~38 ms, high for a LAN;
-  re-measure, it may be on Wi-Fi).
-- `ssh -o BatchMode=yes -o ConnectTimeout=10 batmini.local …` fails with `Permission denied
-  (publickey,password,keyboard-interactive)`: no key in `~/.ssh/config` is authorized for `bat@batmini.local`,
-  and there is no `batmini` host alias. **Chip, RAM, free disk and macOS version are unknown.**
-- To complete the check, authorize this Mac's key on the mini (or add a `Host batmini` entry with the right
-  key), then run the same read-only command:
-  `sysctl -n hw.model hw.memsize; sysctl -n machdep.cpu.brand_string; df -h /; sw_vers`.
-- Capacity matters for two different things: running the worker (modest) and building the Chromium fork
-  (approximate planning budget of 110–250 GB total, recommend 250–300 GB free, plus lots of RAM; may be better
-  done on the faster machine or CI).
+Decided 2026-10-21:
+- **Build machine: AWS EC2 `mac-m4pro.metal` (`silo-build`).** Apple M4 Pro, 14 cores, 48 GB RAM, 1 TB
+  encrypted gp3 volume, macOS 26 Tahoe, us-east-2. Holds the Chromium/CEF checkout and builds, and runs the
+  patched worker for A2. Billed per hour while the dedicated host is allocated (24 h minimum).
+- **Live server: the user's Mac mini (`batmini.local`).** Used from A4 on with the built worker package copied
+  over; it never holds the Chromium checkout. Its specs are not yet checked (SSH auth was not set up).
+- **Client: the user's MacBook.** Replay harness and compositor.
+
+Agent rules for this branch are in `AGENTS.md`.
