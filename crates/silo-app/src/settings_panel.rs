@@ -268,6 +268,12 @@ enum FontTarget {
 pub struct SettingsSnapshot {
     pub density: Density,
     pub show_pane_headers: bool,
+    pub match_running_app: bool,
+    pub material: crate::material::Material,
+    /// Why Frosted cannot render now (the choice is kept).
+    pub material_unavailable: Option<&'static str>,
+    pub tint_with_app: bool,
+    pub translucent_apps: bool,
     pub ui_font: UiFontSettings,
     pub terminal: TerminalSettings,
     pub hosts: Vec<SettingsHost>,
@@ -286,6 +292,11 @@ impl Default for SettingsSnapshot {
         Self {
             density: Density::Comfortable,
             show_pane_headers: true,
+            match_running_app: true,
+            material: crate::material::Material::Solid,
+            material_unavailable: None,
+            tint_with_app: true,
+            translucent_apps: false,
             ui_font: UiFontSettings::default(),
             terminal: TerminalSettings::from_prefs(&TerminalPrefs::default(), terminal_prefs::DEFAULT_FONT.into()),
             hosts: Vec::new(),
@@ -311,6 +322,11 @@ pub enum SettingsEvent {
     Close,
     SetDensity(Density),
     SetPaneHeaders(bool),
+    /// Card padding and chrome take on the running app's background.
+    SetMatchRunningApp(bool),
+    SetMaterial(crate::material::Material),
+    SetTintWithApp(bool),
+    SetTranslucentApps(bool),
     /// The UI font family; empty = Automatic (the system font).
     SetUiFontFamily(String),
     SetTheme(String),
@@ -616,8 +632,8 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (bg, fg, hover) = match kind {
-            ButtonKind::Secondary => (theme::tab_active(), theme::foreground(), theme::row_active()),
-            ButtonKind::Danger => (theme::danger(), 0x00ff_ffff, theme::danger()),
+            ButtonKind::Secondary => (theme::control_fill(), theme::foreground(), theme::row_fill()),
+            ButtonKind::Danger => (rgb(theme::danger()), 0x00ff_ffff, rgb(theme::danger())),
         };
         div()
             .id(id)
@@ -631,11 +647,11 @@ impl SettingsPanel {
             .whitespace_nowrap()
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
-            .bg(rgb(bg))
+            .bg(bg)
             .text_color(rgb(fg))
             .when(kind == ButtonKind::Secondary, |b| b.border_1().border_color(rgb(theme::border())))
             .cursor_pointer()
-            .hover(move |s| if kind == ButtonKind::Secondary { s.bg(rgb(hover)) } else { s.opacity(0.88) })
+            .hover(move |s| if kind == ButtonKind::Secondary { s.bg(hover) } else { s.opacity(0.88) })
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
             .into_any_element()
@@ -656,7 +672,7 @@ impl SettingsPanel {
                 .justify_center()
                 .continuous(6.0)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::tab_hover())))
+                .hover(|s| s.bg(theme::hover_fill()))
                 .tooltip(crate::tooltip::Tooltip::text(tip))
                 .child(icon(glyph, 13.0, theme::muted()))
                 .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
@@ -721,15 +737,8 @@ impl SettingsPanel {
 
     fn group(title: Option<&'static str>, rows: Vec<AnyElement>) -> AnyElement {
         let count = rows.len();
-        let mut card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .continuous(10.0)
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .bg(rgb(theme::popover()));
+        let mut card =
+            div().w_full().flex().flex_col().overflow_hidden().continuous(10.0).border_1().border_color(rgb(theme::border())).bg(theme::group_fill());
         for (index, row) in rows.into_iter().enumerate() {
             card = card.child(row);
             if index + 1 < count {
@@ -782,6 +791,20 @@ impl SettingsPanel {
             .into_any_element()
     }
 
+    fn material_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::material::Material;
+        let panel = cx.entity().downgrade();
+        let selected = usize::from(self.snapshot.material == Material::Frosted);
+        Segmented::new("settings-material", ["Solid", "Frosted"], selected)
+            .segment_width(80.0)
+            .when_some(self.snapshot.material_unavailable, |s, why| s.unavailable(1, why))
+            .on_select(move |index, _, cx| {
+                let material = if index == 1 { Material::Frosted } else { Material::Solid };
+                let _ = panel.update(cx, |_, cx| cx.emit(SettingsEvent::SetMaterial(material)));
+            })
+            .into_any_element()
+    }
+
     fn density_control(&self, cx: &mut Context<Self>) -> AnyElement {
         Self::segmented(
             "settings-density",
@@ -803,7 +826,7 @@ impl SettingsPanel {
             .items_center()
             .overflow_hidden()
             .continuous(6.0)
-            .bg(rgb(theme::background()))
+            .bg(theme::well_fill())
             .border_1()
             .border_color(rgb(theme::border()))
             .text_size(px(12.5))
@@ -952,11 +975,11 @@ impl SettingsPanel {
             .items_center()
             .gap(px(8.0))
             .continuous(7.0)
-            .bg(rgb(theme::tab_active()))
+            .bg(theme::control_fill())
             .border_1()
             .border_color(rgb(if open { theme::accent() } else { theme::border() }))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(theme::row_active())))
+            .hover(|s| s.bg(theme::row_fill()))
             .children(current.map(Self::theme_swatch))
             .child(
                 div()
@@ -981,7 +1004,7 @@ impl SettingsPanel {
                 .flex_col()
                 .gap(px(1.0))
                 .continuous(9.0)
-                .bg(rgb(theme::popover()))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_lg()
@@ -1005,7 +1028,7 @@ impl SettingsPanel {
                         .gap(px(8.0))
                         .continuous(6.0)
                         .cursor_pointer()
-                        .when(highlighted, |r| r.bg(rgb(theme::row_active())))
+                        .when(highlighted, |r| r.bg(theme::row_fill()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.theme_highlight != index {
                                 this.theme_highlight = index;
@@ -1144,11 +1167,11 @@ impl SettingsPanel {
             .items_center()
             .gap(px(8.0))
             .continuous(7.0)
-            .bg(rgb(theme::tab_active()))
+            .bg(theme::control_fill())
             .border_1()
             .border_color(rgb(border))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(theme::row_active())))
+            .hover(|s| s.bg(theme::row_fill()))
             .child(div().flex_1().min_w_0().text_ellipsis().whitespace_nowrap().overflow_hidden().text_size(px(12.5)).child(label))
             .child(icon("chevron", 11.0, theme::muted()))
             .on_click(cx.listener(move |this, _, window, cx| this.open_font_menu(target, window, cx)));
@@ -1193,7 +1216,7 @@ impl SettingsPanel {
                         .gap(px(8.0))
                         .continuous(6.0)
                         .cursor_pointer()
-                        .when(highlighted, |r| r.bg(rgb(theme::row_active())))
+                        .when(highlighted, |r| r.bg(theme::row_fill()))
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.font_highlight != index {
                                 this.font_highlight = index;
@@ -1233,7 +1256,7 @@ impl SettingsPanel {
                 .flex_col()
                 .overflow_hidden()
                 .continuous(9.0)
-                .bg(rgb(theme::popover()))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_lg()
@@ -1393,6 +1416,7 @@ impl SettingsPanel {
         let mut out = Vec::new();
         match section {
             Section::Appearance => {
+                let frosted = s.material == crate::material::Material::Frosted && s.material_unavailable.is_none();
                 out.push(Self::group(
                     Some("Layout"),
                     vec![
@@ -1407,8 +1431,49 @@ impl SettingsPanel {
                 ));
                 out.push(Self::group(
                     Some("Colors"),
-                    vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)],
+                    if frosted {
+                        vec![Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)]
+                    } else {
+                        vec![
+                            Self::row("Theme", None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false),
+                            Self::row(
+                                "Match running app",
+                                Some("Window and padding take on the background of the focused app or page".into()),
+                                Some(Self::switch(
+                                    "settings-match-app",
+                                    "Match running app",
+                                    s.match_running_app,
+                                    SettingsEvent::SetMatchRunningApp,
+                                    cx,
+                                )),
+                                false,
+                            ),
+                        ]
+                    },
                 ));
+                let unavailable = s.material_unavailable.filter(|_| s.material == crate::material::Material::Frosted);
+                let mut material = vec![Self::row("Window", unavailable.map(Into::into), Some(self.material_control(cx)), narrow)];
+                if frosted {
+                    material.push(Self::row(
+                        "Tint with running app",
+                        Some("The blur takes on the background of the focused app or page".into()),
+                        Some(Self::switch("settings-tint-app", "Tint with running app", s.tint_with_app, SettingsEvent::SetTintWithApp, cx)),
+                        false,
+                    ));
+                    material.push(Self::row(
+                        "Translucent app backgrounds",
+                        Some("Full-screen apps show the blur through their own background".into()),
+                        Some(Self::switch(
+                            "settings-translucent-apps",
+                            "Translucent app backgrounds",
+                            s.translucent_apps,
+                            SettingsEvent::SetTranslucentApps,
+                            cx,
+                        )),
+                        false,
+                    ));
+                }
+                out.push(Self::group(Some("Material"), material));
                 out.push(Self::group(
                     Some("Font"),
                     vec![Self::row("Interface font", s.ui_font.font_status().map(Into::into), Some(self.font_dropdown(FontTarget::Ui, cx)), narrow)],
@@ -1696,8 +1761,8 @@ impl SettingsPanel {
                     .gap(px(9.0))
                     .continuous(7.0)
                     .cursor_pointer()
-                    .when(selected, |s| s.bg(rgb(theme::row_active())))
-                    .when(!selected, |s| s.hover(|s| s.bg(rgb(theme::tab_hover()))))
+                    .when(selected, |s| s.bg(theme::row_fill()))
+                    .when(!selected, |s| s.hover(|s| s.bg(theme::hover_fill())))
                     .when(dimmed, |s| s.opacity(0.45))
                     .child(
                         div().size(px(22.0)).flex_none().flex().items_center().justify_center().continuous(6.0).bg(rgb(section.tint())).child(icon(
@@ -1727,8 +1792,7 @@ impl SettingsPanel {
             .flex_col()
             .border_r_1()
             .border_color(rgb(theme::border()))
-            .bg(rgb(theme::popover()))
-            .continuous_l(crate::radius::concentric(CARD_RADIUS, 1.0))
+            .bg(theme::group_fill())
             // Ends the scrolled list's clip above the bottom corner arc.
             .pb(px(6.0))
             .child(
@@ -1740,7 +1804,7 @@ impl SettingsPanel {
                         .items_center()
                         .gap(px(6.0))
                         .continuous(7.0)
-                        .bg(rgb(theme::background()))
+                        .bg(theme::well_fill())
                         .border_1()
                         .border_color(rgb(theme::border()))
                         .child(icon("settings-search", 13.0, theme::muted()))
@@ -1780,7 +1844,7 @@ fn keycap(shortcut: &str) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .continuous(5.0)
-                .bg(rgb(theme::tab_active()))
+                .bg(theme::control_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .text_size(px(11.5))
@@ -1809,7 +1873,7 @@ impl Render for SettingsPanel {
                     .px(px(12.0))
                     .py(px(8.0))
                     .continuous(8.0)
-                    .bg(rgb(theme::tab_hover()))
+                    .bg(theme::hover_fill())
                     .text_size(px(12.0))
                     .text_color(rgb(theme::muted()))
                     .child(message),
@@ -1837,15 +1901,12 @@ impl Render for SettingsPanel {
             .min_h_0()
             .flex()
             .overflow_hidden()
-            // The host card's content mask is rectangular (GPUI clips to
-            // bounds, not to the corner radius), so the panel's own fills
-            // must round to the card's inner radius or they square it off.
-            .continuous(crate::radius::concentric(CARD_RADIUS, 1.0))
             .occlude()
             .font_family(theme::ui_font())
             .text_size(px(13.0))
             .text_color(rgb(theme::foreground()))
-            .bg(rgb(theme::background()))
+            // Frosted, the card's veil is the panel's.
+            .when(theme::veils().is_none(), |el| el.bg(rgb(theme::background())))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if this.theme_menu_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
@@ -1897,7 +1958,7 @@ impl Render for SettingsPanel {
                                     .justify_center()
                                     .continuous(12.0)
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(theme::tab_hover())))
+                                    .hover(|s| s.bg(theme::hover_fill()))
                                     .child(icon("close", 12.0, theme::muted()))
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Close))),
                             ),

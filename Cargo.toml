@@ -22,8 +22,8 @@ iroh-mdns-address-lookup = "=0.6.0"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 data-encoding = "2"
 chacha20poly1305 = "0.10"
-gpui = { git = "https://github.com/nitishxyz/zed", rev = "b36b2e8276c7054dc0a32083156859e4156a9c16", default-features = false, features = ["font-kit"] }
-gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "b36b2e8276c7054dc0a32083156859e4156a9c16", default-features = false, features = ["font-kit"] }
+gpui = { git = "https://github.com/nitishxyz/zed", rev = "890dcf542c8e3545d9e612abd66f398b4d429a13", default-features = false, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "890dcf542c8e3545d9e612abd66f398b4d429a13", default-features = false, features = ["font-kit"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

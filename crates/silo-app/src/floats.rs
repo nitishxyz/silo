@@ -146,7 +146,7 @@ impl Workspace {
     /// While a float is dragged: edge zones on tiled pane `target` that dock
     /// it there. The server docks a block second, so only the right and
     /// bottom edges are offered.
-    pub(crate) fn dock_zones(&self, target: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn dock_zones(&self, target: &str, fill: CardCorners, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if self.float_drag.as_ref().is_none_or(|d| d.grab != Grab::Move) {
             return Vec::new();
         }
@@ -155,12 +155,16 @@ impl Workspace {
             .map(|axis| {
                 let target = target.to_owned();
                 let zone = div().id(gpui::ElementId::Name(format!("dock-{axis:?}-{target}").into())).absolute().right_0().bottom_0().occlude();
+                let corners = match axis {
+                    Axis::Horizontal => CardCorners { top_left: 0.0, bottom_left: 0.0, ..fill },
+                    Axis::Vertical => CardCorners { top_left: 0.0, top_right: 0.0, ..fill },
+                };
                 let zone =
                     match axis {
-                        Axis::Horizontal => zone.top_0().w(relative(ZONE)).drag_over::<Dragged>(|s, _, _, _| {
+                        Axis::Horizontal => zone.top_0().w(relative(ZONE)).continuous_corners(corners).drag_over::<Dragged>(|s, _, _, _| {
                             s.bg(rgb(theme::accent()).opacity(0.08)).border_r_2().border_color(rgb(theme::accent()))
                         }),
-                        Axis::Vertical => zone.left_0().h(relative(ZONE)).drag_over::<Dragged>(|s, _, _, _| {
+                        Axis::Vertical => zone.left_0().h(relative(ZONE)).continuous_corners(corners).drag_over::<Dragged>(|s, _, _, _| {
                             s.bg(rgb(theme::accent()).opacity(0.08)).border_b_2().border_color(rgb(theme::accent()))
                         }),
                     };

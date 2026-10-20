@@ -94,6 +94,16 @@ pub struct Workspace {
     pub(crate) float_drag: Option<crate::floats::FloatDrag>,
     /// A press on empty titlebar space that moves the window once dragged.
     pub(crate) titlebar_move: bool,
+    /// The window surface easing toward the focused block's backdrop, the
+    /// theme background it started from, and this frame's chrome colours.
+    blend: crate::adaptive::Blend,
+    blend_theme: u32,
+    pub(crate) chrome: crate::adaptive::Chrome,
+    /// System › Reduce transparency, kept current by `_transparency`.
+    reduce_transparency: bool,
+    _transparency: Task<()>,
+    /// The window background appearance last applied (blurred or not).
+    blurred: Option<bool>,
     /// This window's snapshot of the app preferences (see `sync_hosts`).
     state: AppState,
     _checkpoints: Task<()>,
@@ -135,6 +145,24 @@ impl Workspace {
         let host_events = cx.subscribe_in(&shared, window, |this, _, event: &HostEvent, window, cx| this.host_event(event, window, cx));
         let offer_events =
             cx.subscribe_in(&shared, window, |this, _, event: &crate::offers::OfferEvent, window, cx| this.offer_event(event, window, cx));
+        let mut reduce = crate::material::watch();
+        let reduce_transparency = *reduce.borrow_and_update();
+        let transparency = cx.spawn(async move |this, cx| {
+            while reduce.changed().await.is_ok() {
+                let value = *reduce.borrow_and_update();
+                tracing::debug!(reduce = value, "reduce transparency");
+                if this
+                    .update(cx, |this, cx| {
+                        this.reduce_transparency = value;
+                        this.refresh_settings(None, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
         let mut this = Self {
             rt,
             home: home.clone(),
@@ -171,6 +199,12 @@ impl Workspace {
             tab_dragging: None,
             float_drag: None,
             titlebar_move: false,
+            blend: crate::adaptive::Blend::new(theme::background()),
+            blend_theme: theme::background(),
+            chrome: crate::adaptive::Chrome::on(theme::background()),
+            reduce_transparency,
+            _transparency: transparency,
+            blurred: None,
             state,
             _checkpoints: checkpoints,
             checkpointed: HashMap::new(),
@@ -637,6 +671,7 @@ impl Workspace {
                             this.flash(message.clone(), cx);
                             cx.notify();
                         }
+                        PaneEvent::Backdrop => cx.notify(),
                     });
                     self.panes.insert(block, (pane, subscription));
                 }
@@ -711,7 +746,8 @@ impl Workspace {
             let blocks = new.layout.blocks();
             if blocks.len() > 1 && blocks.contains(&block) {
                 tracing::debug!(%block, zoomed = new.zoomed, "zoom motion");
-                self.motion.start_zoom(block, new.zoomed, now);
+                let settle = if self.frosted() { crate::motion::ZOOM_SETTLE } else { std::time::Duration::ZERO };
+                self.motion.start_zoom(block, new.zoomed, settle, now);
             }
         }
         // Pane motion only inside a window that stays active and unzoomed;
@@ -743,7 +779,8 @@ impl Workspace {
                 // decides when the block was not a direct split child.
                 let edge = crate::layout::sibling_side(&old_active.layout, id).unwrap_or_else(|| motion::exit_edge(slot, body));
                 tracing::debug!(block = %id, ?edge, "pane ghost");
-                self.motion.pane_ghosts.push(PaneGhost { frame, slot, edge, title, started: now });
+                let fill = self.card_fill(id, cx);
+                self.motion.pane_ghosts.push(PaneGhost { frame, slot, edge, title, fill, started: now });
             }
         }
         for id in blocks.added {
@@ -959,6 +996,139 @@ impl Workspace {
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.show_pane_headers = show, cx));
     }
 
+    pub(crate) fn match_running_app(&self) -> bool {
+        self.state.match_running_app
+    }
+
+    pub(crate) fn set_match_running_app(&mut self, on: bool, cx: &mut Context<Self>) {
+        tracing::debug!(on, "match running app");
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.match_running_app = on, cx));
+    }
+
+    /// The background block `id`'s program or page paints, when the chrome
+    /// matches running apps.
+    pub(crate) fn backdrop(&self, id: &str, cx: &gpui::App) -> Option<u32> {
+        let adaptive = if self.frosted() { self.state.tint_with_app } else { self.state.match_running_app };
+        if !adaptive {
+            return None;
+        }
+        match (self.panes.get(id), self.browsers.get(id)) {
+            (Some((pane, _)), _) => pane.read(cx).backdrop(),
+            (None, Some((pane, _))) => pane.read(cx).backdrop(),
+            (None, None) => None,
+        }
+    }
+
+    /// The fill of block `id`'s card: its backdrop, else the theme's.
+    pub(crate) fn card_fill(&self, id: &str, cx: &gpui::App) -> u32 {
+        self.backdrop(id, cx).unwrap_or_else(theme::background)
+    }
+
+    /// The material the user chose and why Frosted cannot render, if so.
+    pub(crate) fn material(&self) -> (crate::material::Material, Result<(), crate::material::Unavailable>) {
+        let available = crate::material::availability(crate::material::blur_supported(), self.reduce_transparency);
+        (self.state.material, available)
+    }
+
+    /// The window renders frosted (blurred, with veils).
+    pub(crate) fn frosted(&self) -> bool {
+        let (choice, available) = self.material();
+        crate::material::effective(choice, available) == crate::material::Material::Frosted
+    }
+
+    pub(crate) fn set_material(&mut self, material: crate::material::Material, cx: &mut Context<Self>) {
+        tracing::debug!(?material, "material");
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.material = material, cx));
+    }
+
+    pub(crate) fn tint_with_app(&self) -> bool {
+        self.state.tint_with_app
+    }
+
+    pub(crate) fn set_tint_with_app(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.tint_with_app = on, cx));
+    }
+
+    pub(crate) fn translucent_apps(&self) -> bool {
+        self.state.translucent_apps
+    }
+
+    pub(crate) fn set_translucent_apps(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.translucent_apps = on, cx));
+    }
+
+    /// The colours of a card filled with `fill`: when frosted, a veil at
+    /// the window's one alpha, so card and window are one material.
+    pub(crate) fn card_chrome(&self, fill: u32) -> crate::adaptive::Chrome {
+        if self.frosted() { crate::adaptive::Chrome::veiled(fill, self.chrome.alpha) } else { crate::adaptive::Chrome::on(fill) }
+    }
+
+    /// How block `id`'s terminal paints cell backgrounds on its card of
+    /// colour `fill`: frosted, the default background and the card's colour
+    /// are left to the card (veiled, or its opaque look when floating).
+    pub(crate) fn translucency(&self, id: &str, fill: u32, card: crate::adaptive::Chrome, cx: &gpui::App) -> Option<silo_render::Translucency> {
+        let byte = |a: f32| (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+        self.frosted().then(|| silo_render::Translucency {
+            card: fill,
+            veiled: self.translucent_apps().then(|| self.panes.get(id).and_then(|(p, _)| p.read(cx).backdrop())).flatten(),
+            opaque_alpha: byte(crate::material::CELL_OPAQUE.max(card.alpha)),
+        })
+    }
+
+    /// Blur behind the window exactly while it renders frosted.
+    fn apply_material(&mut self, window: &mut Window) {
+        let frosted = self.frosted();
+        if self.blurred != Some(frosted) {
+            self.blurred = Some(frosted);
+            window.set_background_appearance(if frosted {
+                gpui::WindowBackgroundAppearance::Blurred
+            } else {
+                gpui::WindowBackgroundAppearance::Opaque
+            });
+        }
+    }
+
+    /// Step the window surface toward the focused block's backdrop (fully
+    /// when its pane fills the window) and derive this frame's chrome.
+    fn step_chrome(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) {
+        let theme_bg = theme::background();
+        let alone = self.active_window().is_some_and(|w| w.zoomed || crate::floats::window_blocks(w).len() <= 1);
+        let backdrop = self.focused_block(window, cx).and_then(|id| self.backdrop(&id, cx));
+        let target = crate::adaptive::chrome_target(theme_bg, backdrop, alone);
+        if self.blend_theme != theme_bg {
+            self.blend_theme = theme_bg;
+            self.blend = crate::adaptive::Blend::new(target);
+        }
+        let (surface, moving) = self.blend.step(target, now, !cx.reduce_motion());
+        if moving {
+            window.request_animation_frame();
+        }
+        self.chrome = if self.frosted() {
+            crate::adaptive::Chrome::veiled(surface, self.veil_alpha(surface, cx))
+        } else {
+            crate::adaptive::Chrome::on(surface)
+        };
+        // Floating surfaces drawn after this (this window's overlays) use
+        // the same material.
+        theme::set_veils((self.chrome.alpha < 1.0).then(|| crate::material::overlay(surface, self.chrome.alpha, theme_bg, theme::foreground())));
+    }
+
+    /// The one veil alpha of this frame: the least at which text reads on
+    /// the window surface and on every visible card, the theme's terminal
+    /// foreground included on terminal cards whose own colour it reads on
+    /// (a program on a colour it does not read on uses its own text).
+    fn veil_alpha(&self, surface: u32, cx: &gpui::App) -> f32 {
+        let (theme_bg, fg) = (theme::background(), theme::foreground());
+        let alpha = |color: u32, text: &[u32]| crate::material::readable_alpha(color, crate::material::VEIL, theme_bg, text);
+        let mut veil = alpha(surface, &[]);
+        for id in self.active_window().map(crate::floats::window_blocks).unwrap_or_default() {
+            let fill = self.card_fill(&id, cx);
+            let fg_text = self.panes.contains_key(&id) && theme::contrast(fg, fill) >= theme::TEXT_CONTRAST;
+            veil = veil.max(if fg_text { alpha(fill, &[fg]) } else { alpha(fill, &[]) });
+        }
+        veil
+    }
+
     /// The stored UI font preference (empty = Automatic).
     pub(crate) fn ui_font_family(&self) -> &str {
         &self.state.ui_font_family
@@ -1052,6 +1222,8 @@ impl Render for Workspace {
         if self.motion.prune(now) {
             window.request_animation_frame();
         }
+        self.step_chrome(now, window, cx);
+        self.apply_material(window);
         // A click on bare chrome (titlebar, gaps, menus) focuses the
         // workspace itself; hand focus back to the terminal so typing
         // keeps working. Overlays own their focus and are left alone.
@@ -1082,14 +1254,18 @@ impl Render for Workspace {
             Some(server) => Some(self.render_incompatible(&server, cx)),
             None => self.render_remote_problem(cx),
         };
+        // Frosted: no fill stacks under the cards; the titlebar, gutters
+        // and cards each paint the one veil.
+        let frosted = self.frosted();
+        let cards = self.active_window().is_some();
         let body: AnyElement = match self.active_window().cloned() {
             Some(w) => match card {
-                // The last content stays painted, read-only, under the card.
+                // The last content stays painted, read-only, around the card.
                 Some(card) => div()
                     .relative()
                     .size_full()
                     .child(self.render_body(&w, now, window, cx))
-                    .child(div().id("incompatible-scrim").occlude().absolute().inset_0().bg(gpui::rgba((theme::surface() << 8) | 0xd8)).child(card))
+                    .child(div().id("incompatible-scrim").occlude().absolute().inset_0().child(card))
                     .into_any_element(),
                 None => self.render_body(&w, now, window, cx),
             },
@@ -1123,7 +1299,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(theme::surface()))
+            .when(!frosted, |el| el.bg(self.chrome.fill()))
             .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .map(|el| crate::commands::handle_actions(el, cx))
@@ -1136,8 +1312,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SelectWindow7, window, cx| this.number_key(6, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow8, window, cx| this.number_key(7, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow9, window, cx| this.number_key(8, window, cx)))
-            .child(titlebar)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(div().flex_none().when(frosted, |el| el.bg(self.chrome.fill())).child(titlebar))
+            .child(div().flex_1().min_h_0().when(frosted && !cards, |el| el.bg(self.chrome.fill())).child(body))
             .when_some(self.status_bar(), |el, status| {
                 el.child(
                     div().absolute().bottom(px(8.0)).left_0().right_0().flex().justify_center().child(
@@ -1145,7 +1321,7 @@ impl Render for Workspace {
                             .px(px(10.0))
                             .py(px(4.0))
                             .continuous(8.0)
-                            .bg(rgb(theme::popover()))
+                            .bg(theme::overlay_fill())
                             .border_1()
                             .border_color(rgb(theme::border()))
                             .text_size(px(11.0))

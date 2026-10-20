@@ -113,7 +113,7 @@ fn paint_text(text: &PreparedText, origin: Point<Pixels>, metrics: CellMetrics, 
 }
 
 fn paint(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels>, metrics: CellMetrics, selection: Rgba, window: &mut Window) {
-    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+    window.with_content_mask(Some(gpui::ContentMask::new(bounds)), |window| {
         // One paint layer for the whole grid. GPUI otherwise assigns every
         // primitive its own z-order by inserting its bounds into the scene's
         // R-tree, which is the dominant UI-thread cost of a Braille-heavy
@@ -169,7 +169,8 @@ fn paint_grid(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels
 }
 
 /// Predicted cells in their own layer above the grid, so the background
-/// covers the mirror's glyph: default background, default foreground glyph,
+/// covers the mirror's glyph: default background (none over a frosted
+/// card, whose veil is the default background), default foreground glyph,
 /// and the muted underline as the only cue.
 fn paint_predicted(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
     let frame = &prepared.frame;
@@ -177,11 +178,13 @@ fn paint_predicted(prepared: &PreparedFrame, overlay: &Overlay, bounds: Bounds<P
     if quads.is_empty() {
         return;
     }
-    let mask = Some(gpui::ContentMask { bounds });
+    let mask = Some(gpui::ContentMask::new(bounds));
     window.with_content_mask(mask, |window| {
         window.paint_layer(bounds, |window| {
             for (cell, quad, line) in quads {
-                window.paint_quad(fill(quad, rgb(frame.background)));
+                if crate::cell_alpha(frame.background, frame.background, prepared.translucency).is_some() {
+                    window.paint_quad(fill(quad, rgb(frame.background)));
+                }
                 window.paint_quad(fill(line, overlay.predicted_underline));
                 if cell.text.is_empty() {
                     continue;
@@ -228,7 +231,7 @@ pub fn terminal_canvas(
             if let Some((row, column)) = overlay.predicted_cursor {
                 (caret.row, caret.column) = (row, column);
             }
-            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            window.with_content_mask(Some(gpui::ContentMask::new(bounds)), |window| {
                 crate::cursor::paint(caret, cursor, bounds, metrics, window);
             });
         },

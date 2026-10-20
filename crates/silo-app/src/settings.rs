@@ -127,6 +127,11 @@ impl Workspace {
         SettingsSnapshot {
             density: self.density(),
             show_pane_headers: self.pane_headers(),
+            match_running_app: self.match_running_app(),
+            material: self.material().0,
+            material_unavailable: self.material().1.err().map(crate::material::Unavailable::reason),
+            tint_with_app: self.tint_with_app(),
+            translucent_apps: self.translucent_apps(),
             ui_font,
             terminal,
             hosts,
@@ -345,6 +350,22 @@ impl Workspace {
                 self.set_pane_headers(*show, cx);
                 None
             }
+            SettingsEvent::SetMatchRunningApp(on) => {
+                self.set_match_running_app(*on, cx);
+                None
+            }
+            SettingsEvent::SetMaterial(material) => {
+                self.set_material(*material, cx);
+                None
+            }
+            SettingsEvent::SetTintWithApp(on) => {
+                self.set_tint_with_app(*on, cx);
+                None
+            }
+            SettingsEvent::SetTranslucentApps(on) => {
+                self.set_translucent_apps(*on, cx);
+                None
+            }
             SettingsEvent::SetUiFontFamily(family) => {
                 self.set_ui_font_family(family.clone(), window, cx);
                 None
@@ -465,7 +486,6 @@ impl Workspace {
                 .flex_col()
                 .items_center()
                 .pt(px(TITLEBAR_HEIGHT + 12.0))
-                .bg(rgb(0x0000_0000).opacity(0.25))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.close_settings(window, cx)))
                 .child(
                     div()
@@ -474,10 +494,9 @@ impl Workspace {
                         .w(px(width))
                         .h(px(height))
                         .continuous(CARD_RADIUS)
-                        // Clips to the bounds inside the border; the panel
-                        // rounds its own fills to the inner radius.
-                        .overflow_hidden()
-                        .bg(rgb(theme::background()))
+                        // Clips the panel to the corners inside the border.
+                        .rounded_clip()
+                        .bg(if theme::veils().is_some() { theme::overlay_fill() } else { rgb(theme::background()) })
                         .border_1()
                         .border_color(rgb(theme::border()))
                         .shadow_xl()

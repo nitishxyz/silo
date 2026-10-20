@@ -13,5 +13,5 @@ mod sprite;
 mod surface;
 
 pub use geometry::{CellMetrics, FontSettings, font_generation, set_terminal_font, terminal_font, terminal_font_size};
-pub use prepare::{FrameOptions, FramePreparer, PreparedFrame};
+pub use prepare::{FrameOptions, FramePreparer, PreparedFrame, Translucency, cell_alpha};
 pub use surface::{Overlay, Predicted, terminal_canvas};

@@ -37,6 +37,68 @@ addEventListener('focusout', () => setTimeout(report), true);
 report();
 })()";
 
+/// Run in the main frame on load (`__TAG__` replaced by the browser's
+/// theme tag): reports the page's colour as `#rrggbb`, or empty for none,
+/// whenever it changes. The colour is a `theme-color` meta matching the
+/// current appearance, else the background of the root or body when it is
+/// a plain opaque colour. Any CSS colour is normalized by painting it.
+const THEME_SCRIPT: &str = r#"(() => {
+if (window !== top || window.__siloTheme) return;
+window.__siloTheme = true;
+const log = console.log.bind(console);
+const canvas = document.createElement('canvas');
+canvas.width = canvas.height = 1;
+const pen = canvas.getContext('2d', { willReadFrequently: true });
+const hex = c => {
+  if (!c || /currentcolor/i.test(c) || !CSS.supports('color', c)) return '';
+  pen.clearRect(0, 0, 1, 1);
+  pen.fillStyle = '#000';
+  pen.fillStyle = c;
+  pen.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = pen.getImageData(0, 0, 1, 1).data;
+  if (a === 0) return '';
+  const over = v => Math.round((v * a + 255 * (255 - a)) / 255);
+  return '#' + [r, g, b].map(v => over(v).toString(16).padStart(2, '0')).join('');
+};
+const color = () => {
+  for (const m of document.querySelectorAll('meta[name="theme-color" i]')) {
+    const media = m.getAttribute('media');
+    const c = hex((m.getAttribute('content') || '').trim());
+    if (c && (!media || matchMedia(media).matches)) return c;
+  }
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    const style = getComputedStyle(el);
+    if (style.backgroundImage !== 'none') continue;
+    const c = hex(style.backgroundColor);
+    if (c) return c;
+  }
+  return '';
+};
+let last;
+const report = () => {
+  const c = color();
+  if (c !== last) { last = c; log('__TAG__' + c); }
+};
+let queued = false;
+const soon = () => {
+  if (queued) return;
+  queued = true;
+  setTimeout(() => { queued = false; report(); }, 100);
+};
+const start = () => {
+  const observer = new MutationObserver(soon);
+  if (document.head) observer.observe(document.head, { childList: true, subtree: true, attributes: true });
+  observer.observe(document.documentElement, { attributes: true });
+  if (document.body) observer.observe(document.body, { attributes: true });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', soon);
+  setInterval(report, 2500);
+  report();
+};
+if (document.readyState === 'loading') addEventListener('DOMContentLoaded', start); else start();
+addEventListener('load', report);
+})()"#;
+
 wrap_render_handler! {
     pub(crate) struct ViewHandler {
         shared: Arc<Shared>,
@@ -142,6 +204,10 @@ wrap_display_handler! {
             _line: c_int,
         ) -> c_int {
             let Some(message) = message.map(ToString::to_string) else { return 0 };
+            if let Some(color) = message.strip_prefix(self.shared.theme_tag.as_str()) {
+                self.shared.push(Event::ThemeColor(crate::color::parse(color)));
+                return 1;
+            }
             let Some(state) = message.strip_prefix(FOCUS_TAG) else { return 0 };
             self.shared.push(Event::EditableFocus(state == "1"));
             1
@@ -225,6 +291,10 @@ wrap_load_handler! {
             frame.execute_java_script(Some(&CefString::from(FOCUS_SCRIPT)), None, 0);
             let main = frame.is_main() != 0;
             if main {
+                // The old page's colour goes with it.
+                self.shared.push(Event::ThemeColor(None));
+                let script = THEME_SCRIPT.replace("__TAG__", &self.shared.theme_tag);
+                frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
                 self.shared.push(Event::EditableFocus(false));
             }
             if main && self.shared.focused.load(Ordering::Relaxed)

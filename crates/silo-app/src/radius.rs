@@ -27,7 +27,7 @@ pub const MIN_NESTED: f32 = 4.0;
 
 /// Comfortable pane card corners away from the window corners (and every
 /// corner in fullscreen, where the window has none).
-pub const CARD: f32 = 10.0;
+pub const CARD: f32 = 14.0;
 /// Small icon buttons (pane header actions).
 pub const CONTROL: f32 = 6.0;
 /// Rows of dropdown menus and popovers.

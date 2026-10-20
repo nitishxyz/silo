@@ -23,6 +23,9 @@ pub enum Event {
     Progress(f64),
     /// Whether the page's focused element takes text (field, contenteditable).
     EditableFocus(bool),
+    /// The page's colour (`theme-color`, else its opaque background) as
+    /// `0x00RRGGBB`; `None` when it has none.
+    ThemeColor(Option<u32>),
     /// The page asked for a new window; open it as a new browser block.
     Popup(String),
     CursorChanged(Cursor),
@@ -77,6 +80,15 @@ pub(crate) struct Shared {
     /// Last external file drop on the page: the navigation Chromium starts
     /// when the page ignores it is cancelled.
     pub(crate) dropped: Mutex<Option<Instant>>,
+    /// Console prefix of the main frame's theme reports: random, so no
+    /// other frame or page script can forge one.
+    pub(crate) theme_tag: String,
+}
+
+/// A fresh random theme tag.
+pub(crate) fn theme_tag() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    format!("\u{1}silo-theme-{:016x}:", std::collections::hash_map::RandomState::new().build_hasher().finish())
 }
 
 /// How long a user input counts as a gesture (Chromium's user activation).

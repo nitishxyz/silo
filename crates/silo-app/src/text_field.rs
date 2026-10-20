@@ -31,6 +31,8 @@ pub struct TextField {
     /// The last render showed a caret; the blink timer runs while it does.
     caret: bool,
     blink_task: Option<Task<()>>,
+    /// The colours of the surface behind the field; the theme's if unset.
+    palette: Option<crate::adaptive::Chrome>,
 }
 
 /// One edit of the field's text.
@@ -76,6 +78,14 @@ impl TextField {
             blink: Blink::default(),
             caret: false,
             blink_task: None,
+            palette: None,
+        }
+    }
+
+    pub fn set_palette(&mut self, palette: Option<crate::adaptive::Chrome>, cx: &mut Context<Self>) {
+        if self.palette != palette {
+            self.palette = palette;
+            cx.notify();
         }
     }
 
@@ -218,15 +228,19 @@ impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         let empty = self.text.is_empty();
+        let palette = self.palette.unwrap_or_else(|| {
+            let solid = crate::adaptive::Chrome::on(theme::background());
+            theme::veils().map_or(solid, |v| crate::adaptive::Chrome { muted: v.muted, ..solid })
+        });
         let caret = self.caret_phase(focused && window.is_window_active() && !self.all, cx).then(|| {
-            let caret = div().absolute().top(px(1.0)).bottom(px(1.0)).w(px(1.5)).bg(rgb(theme::accent()));
+            let caret = div().absolute().top(px(1.0)).bottom(px(1.0)).w(px(1.5)).bg(rgb(palette.accent));
             if empty { caret.left_0() } else { caret.right(px(-2.0)) }
         });
         let content = if empty {
-            div().text_color(rgb(theme::muted())).child(self.placeholder.clone())
+            div().text_color(rgb(palette.muted)).child(self.placeholder.clone())
         } else {
             div()
-                .text_color(rgb(theme::foreground()))
+                .text_color(rgb(palette.ink))
                 .when(self.all, |el| el.continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)))
                 .child(self.text.clone())
         };

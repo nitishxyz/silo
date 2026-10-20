@@ -1,5 +1,6 @@
 //! Silo: GPUI client for the silo terminal multiplexer daemon.
 
+mod adaptive;
 mod add_host;
 mod appearance;
 mod assets;
@@ -21,6 +22,7 @@ mod incompatible;
 mod keys;
 mod latency;
 mod layout;
+mod material;
 mod motion;
 mod offers;
 mod palette;

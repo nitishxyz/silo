@@ -302,7 +302,7 @@ impl Workspace {
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
-                .when(!primary, |el| el.bg(rgb(theme::tab_active())).hover(|s| s.bg(rgb(theme::row_active()))))
+                .when(!primary, |el| el.bg(theme::control_fill()).hover(|s| s.bg(theme::row_fill())))
                 .child(label)
         };
         let cards = shared.offers.cards.iter().enumerate().map(|(i, card)| {
@@ -316,7 +316,7 @@ impl Workspace {
                 .gap(px(10.0))
                 .p(px(14.0))
                 .continuous(12.0)
-                .bg(rgb(theme::popover()))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_xl()

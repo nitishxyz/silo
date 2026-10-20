@@ -220,11 +220,32 @@ pub struct AppState {
     /// `terminal.json`. Absent in older files, which keeps the default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ui_font_family: String,
+    /// Card padding and window chrome take on the running app's background.
+    #[serde(default = "yes")]
+    pub match_running_app: bool,
+    /// Window material; Frosted renders only where blur is available.
+    #[serde(default)]
+    pub material: crate::material::Material,
+    /// Frosted: the running app's colour tints the veils.
+    #[serde(default = "yes")]
+    pub tint_with_app: bool,
+    /// Frosted: an app's own backdrop is veiled too, not just the default.
+    #[serde(default)]
+    pub translucent_apps: bool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self { last_session: None, density: Density::default(), show_pane_headers: true, ui_font_family: String::new() }
+        Self {
+            last_session: None,
+            density: Density::default(),
+            show_pane_headers: true,
+            ui_font_family: String::new(),
+            match_running_app: true,
+            material: crate::material::Material::Solid,
+            tint_with_app: true,
+            translucent_apps: false,
+        }
     }
 }
 
@@ -329,14 +350,26 @@ pub(crate) mod tests {
         assert_eq!(old.density, Density::Comfortable);
         assert!(old.show_pane_headers);
         assert_eq!(old.ui_font_family, "", "Automatic UI font");
+        assert!(old.match_running_app);
+        assert_eq!((old.material, old.tint_with_app, old.translucent_apps), (crate::material::Material::Solid, true, false));
         let dir = std::env::temp_dir().join(format!("silo-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let state = AppState { last_session: None, density: Density::Compact, show_pane_headers: false, ui_font_family: String::new() };
+        let state = AppState {
+            last_session: None,
+            density: Density::Compact,
+            show_pane_headers: false,
+            ui_font_family: String::new(),
+            match_running_app: false,
+            material: crate::material::Material::Frosted,
+            tint_with_app: false,
+            translucent_apps: true,
+        };
         save_state(&dir, &state);
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
         assert!(!text.contains("ui_font_family"), "Automatic is not written: {text}");
         let back = load_state(&dir);
-        assert_eq!((back.density, back.show_pane_headers), (Density::Compact, false));
+        assert_eq!((back.density, back.show_pane_headers, back.match_running_app), (Density::Compact, false, false));
+        assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         // The exact family persists, independent of the terminal font.
         let state = AppState { ui_font_family: "Helvetica Neue".into(), ..state };
         save_state(&dir, &state);

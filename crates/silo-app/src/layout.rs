@@ -32,9 +32,6 @@ const OUTER: f32 = 8.0;
 const GAP: f32 = 6.0;
 /// Pointer target of a divider, centred on it.
 const DIVIDER_HIT: f32 = 6.0;
-/// Width of the corner ring over browser surfaces: covers a corner of
-/// radius ≤ 12 (r·(√2−1)) and stays inside the gap between cards.
-const CAP: f32 = 5.0;
 
 /// Which window edges a pane card lies along, and the window's corner
 /// radius when its corners are visible behind the cards.
@@ -70,9 +67,14 @@ impl Workspace {
         let place = Placement { window: corner, left: true, right: true, bottom: true };
         let zoom = self.motion.zoom_frame(now).filter(|(block, ..)| w.layout.blocks().iter().any(|b| b == block));
         let content = if zoom.is_some() {
-            // Siblings stay tiled under the pane growing over them.
+            // Siblings stay tiled under the pane growing over them, and are
+            // gone once it is whole (Frosted: it then settles to its veil).
             let focused = self.focused_block(window, cx);
-            self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
+            if self.motion.zoom_state(now).is_some_and(|(extent, _)| extent >= 1.0) {
+                div().size_full().into_any_element()
+            } else {
+                self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
+            }
         } else if w.zoomed {
             self.render_layout(&Layout::block(w.focused.clone()), &[], Some(&w.focused), false, true, None, place, now, cx)
         } else {
@@ -82,11 +84,22 @@ impl Workspace {
         let zoom = zoom.map(|(block, rect, area)| self.render_zoom(block, w.zoomed, rect, area, place, now, cx));
         let area = self.motion.measured.area.clone();
         let floats = self.render_floats(w, now, window, cx);
+        // Frosted: the margins around the cards carry the window veil; the
+        // cards carry their own, never stacked on it.
+        let margins = (comfortable && self.frosted()).then(|| {
+            let strip = || div().absolute().bg(self.chrome.fill());
+            [
+                strip().top_0().bottom_0().left_0().w(px(OUTER)),
+                strip().top_0().bottom_0().right_0().w(px(OUTER)),
+                strip().bottom_0().left(px(OUTER)).right(px(OUTER)).h(px(OUTER)),
+            ]
+        });
         div()
             .relative()
             .size_full()
             .min_h_0()
             .when(comfortable, |el| el.px(px(OUTER)).pb(px(OUTER)))
+            .children(margins.into_iter().flatten())
             .child(
                 div()
                     .relative()
@@ -102,7 +115,7 @@ impl Workspace {
 
     /// The pane being zoomed or unzoomed, clipped to `rect`, between its
     /// slot and the whole pane `area`. Inside, it keeps the zoomed size;
-    /// the clip is rectangular, so a corner ring rounds it like a card.
+    /// the clip has the card's corners, and an outline borders it like one.
     #[allow(clippy::too_many_arguments)]
     fn render_zoom(
         &self,
@@ -116,7 +129,7 @@ impl Workspace {
     ) -> AnyElement {
         let corners = place.corners();
         let cell = self.render_cell(block, true, false, zoomed, None, corners, now, cx);
-        let ring = (self.density() == Density::Comfortable).then(|| corner_ring(corners));
+        let outline = (self.density() == Density::Comfortable).then(|| card_outline(corners, self.card_fill(block, cx)));
         div()
             .absolute()
             .left(rect.origin.x - area.origin.x)
@@ -127,10 +140,11 @@ impl Workspace {
                 div()
                     .absolute()
                     .inset_0()
-                    .overflow_hidden()
+                    .continuous_corners(corners)
+                    .rounded_clip()
                     .child(div().absolute().top_0().left_0().w(area.size.width).h(area.size.height).child(cell)),
             )
-            .children(ring.into_iter().flatten())
+            .children(outline)
             .into_any_element()
     }
 
@@ -188,7 +202,8 @@ impl Workspace {
                 // Double-click a divider to even out its split. Its hit area
                 // is wider than a Compact hairline and overlays both panes.
                 let split = path.to_vec();
-                let divider = div().flex_none().when_some(fill, |el, c| el.bg(rgb(c)));
+                let divider =
+                    div().flex_none().when_some(fill, |el, c| el.bg(rgb(c))).when(fill.is_none() && self.frosted(), |el| el.bg(self.chrome.fill()));
                 let hit = div().id(gpui::ElementId::Name(format!("divider-{split:?}").into())).absolute().occlude().on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
@@ -237,10 +252,13 @@ impl Workspace {
         // Floats are always cards, so they read as floating.
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         let comfortable = floating || self.density() == Density::Comfortable;
+        let frosted = self.frosted();
+        let browser = self.browsers.contains_key(id);
         let headers = self.pane_headers();
-        let docks = if floating { Vec::new() } else { self.dock_zones(id, cx) };
-        // Fills inside the 1px outline (the content mask is rectangular).
+        // Corners just inside the 1px outline, for overlays (wash, drop
+        // outline, docks) and the page that fill the card's rounded clip.
         let fill = corners.inset(1.0);
+        let docks = if floating { Vec::new() } else { self.dock_zones(id, fill, cx) };
         let entering = self
             .motion
             .pane_enter
@@ -251,20 +269,37 @@ impl Workspace {
             (None, Some((pane, _))) => pane.clone().into_any_element(),
             (None, None) => div().size_full().into_any_element(),
         };
-        let content = div().relative().flex_1().min_h_0().min_w_0().child(inner);
+        let fill_color = self.card_fill(id, cx);
+        // A float, or the pane zooming over its siblings, sits over the
+        // app's own content, which the window blur does not reach: opaque.
+        // A zoom is a veil in its slot and when whole, opaque in between.
+        let zoom = self.motion.zoom_frame(now).filter(|(block, ..)| *block == id).and(self.motion.zoom_state(now));
+        let palette = match zoom {
+            _ if floating => self.card_chrome(fill_color).floating(),
+            Some((_, cover)) => self.card_chrome(fill_color).toward_floating(cover),
+            None => self.card_chrome(fill_color),
+        };
+        if let Some((pane, _)) = self.browsers.get(id) {
+            let page = if comfortable { (fill.bottom_left, fill.bottom_right) } else { (0.0, 0.0) };
+            pane.update(cx, |pane, cx| {
+                pane.set_palette(palette, cx);
+                pane.set_corners(page, cx);
+            });
+        }
+        if let Some((pane, _)) = self.panes.get(id) {
+            let translucency = self.translucency(id, fill_color, palette, cx);
+            pane.update(cx, |pane, cx| pane.set_translucency(translucency, cx));
+        }
         // Header and terminal are one surface; an inactive pane is dimmed
-        // as a whole so no band appears between them. No listeners on the
-        // wash: clicks and hovers reach the header and terminal below.
-        let dim = if self.browsers.contains_key(id) { theme::INACTIVE_DIM_PAGE } else { theme::INACTIVE_DIM };
-        let wash = dimmed.then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgb(theme::background()).opacity(dim))
-                .when(comfortable, |el| el.continuous_corners(fill))
+        // as a whole so no band appears between them. Solid: a wash of the
+        // card's colour (no listeners: clicks and hovers reach below).
+        // Frosted: the content fades instead, so no second veil appears.
+        let dim = if browser { theme::INACTIVE_DIM_PAGE } else { theme::INACTIVE_DIM };
+        let fade = (dimmed && frosted).then_some(1.0 - dim);
+        let wash = (dimmed && !frosted).then(|| {
+            div().absolute().top_0().left_0().size_full().bg(rgb(fill_color).opacity(dim)).when(comfortable, |el| el.continuous_corners(fill))
         });
+        let content = div().relative().flex_1().min_h_0().min_w_0().when_some(fade, |el, f| el.opacity(f)).child(inner);
         // Drop target for a pane dragged by its header: an accent outline
         // and tint while another pane of this window hovers it.
         let drop = swap.map(|window_id| {
@@ -291,10 +326,14 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .overflow_hidden()
-            .bg(rgb(theme::background()))
-            .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline())))
-            .when(headers, |el| el.child(self.render_pane_header(id, active, zoomed, swap, cx)))
+            .bg(palette.fill())
+            .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(fill_color))))
+            .rounded_clip()
+            .when(headers, |el| {
+                el.child(
+                    div().flex_none().when_some(fade, |el, f| el.opacity(f)).child(self.render_pane_header(id, active, zoomed, swap, palette, cx)),
+                )
+            })
             .child(content)
             .children(wash)
             .children(drop)
@@ -303,21 +342,32 @@ impl Workspace {
             Some((dx, dy)) => div().absolute().left(relative(dx)).top(relative(dy)).size_full().child(card).into_any_element(),
             None => card.into_any_element(),
         };
-        // The page surface is clipped to a rectangle: a ring of window
-        // colour just outside the card's rounded shape hides its corners.
-        let caps = (comfortable && entering.is_none() && self.browsers.contains_key(id)).then(|| corner_ring(corners));
+        // Frosted: the window veil fills the slot outside the card, meeting
+        // the card's veil without overlapping it. Not while zooming over
+        // other panes: its own rounded clip shapes it there.
+        let settled = comfortable && entering.is_none() && zoom.is_none();
+        let veil = (settled && frosted && !floating).then(|| slot_veil(corners, self.chrome.fill()));
         div()
             .relative()
             .size_full()
             .min_w_0()
             .min_h_0()
             .when(entering.is_some(), |el| el.overflow_hidden())
+            .children(veil)
             .child(card)
-            .children(caps.into_iter().flatten())
             .into_any_element()
     }
 
-    fn render_pane_header(&self, id: &str, active: bool, zoomed: bool, swap: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pane_header(
+        &self,
+        id: &str,
+        active: bool,
+        zoomed: bool,
+        swap: Option<&str>,
+        palette: crate::adaptive::Chrome,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (ink, muted, icon_color, accent) = (palette.ink, palette.muted, palette.icon, palette.accent);
         let info = self
             .panes
             .get(id)
@@ -348,9 +398,9 @@ impl Workspace {
                 .size(px(BUTTON))
                 .continuous(control)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::tab_hover_on(theme::background()))))
+                .hover(|s| s.bg(palette.hover()))
                 .tooltip(Tooltip::text(tip))
-                .child(icon(glyph, 13.0, theme::muted()))
+                .child(icon(glyph, 13.0, icon_color))
         };
         let on = |f: fn(&mut Workspace, String, &mut Context<Workspace>)| {
             let block = block.clone();
@@ -378,7 +428,7 @@ impl Workspace {
             .font_family(theme::ui_font())
             .text_size(px(11.5))
             .child({
-                let color = if active { theme::accent() } else { theme::muted() };
+                let color = if active { accent } else { icon_color };
                 if loading { crate::browser_pane::spinner(id, 12.0, color, cx) } else { icon(glyph, 12.0, color).into_any_element() }
             })
             .child(
@@ -391,8 +441,8 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(div().flex_none().text_color(rgb(if active { theme::foreground() } else { theme::muted() })).child(name))
-                    .children(cwd.map(|c| div().min_w_0().text_ellipsis().text_color(rgb(theme::muted())).child(c))),
+                    .child(div().flex_none().text_color(rgb(if active { ink } else { muted })).child(name))
+                    .children(cwd.map(|c| div().min_w_0().text_ellipsis().text_color(rgb(muted)).child(c))),
             )
             // Actions show on the active pane, and on any pane while the
             // pointer is over it; they keep their space so nothing shifts.
@@ -475,6 +525,8 @@ impl Workspace {
                     near(viewport.height - slot.origin.y - slot.size.height),
                 );
                 let canvas = silo_render::terminal_canvas(ghost.frame.clone(), metrics, cursor, selection, silo_render::Overlay::default());
+                // Drawn over the panes growing into its place: opaque.
+                let palette = self.card_chrome(ghost.fill).floating();
                 let header = ghost.title.clone().map(|title| {
                     div()
                         .flex()
@@ -485,8 +537,8 @@ impl Workspace {
                         .pl(px(10.0))
                         .font_family(theme::ui_font())
                         .text_size(px(11.5))
-                        .text_color(rgb(theme::muted()))
-                        .child(icon("terminal", 12.0, theme::muted()))
+                        .text_color(rgb(palette.muted))
+                        .child(icon("terminal", 12.0, palette.icon))
                         .child(title)
                 });
                 Some(
@@ -505,8 +557,11 @@ impl Workspace {
                                 .size_full()
                                 .flex()
                                 .flex_col()
-                                .bg(rgb(theme::background()))
-                                .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline())))
+                                .bg(palette.fill())
+                                .when(comfortable, |el| {
+                                    el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(ghost.fill)))
+                                })
+                                .rounded_clip()
                                 .opacity(1.0 - 0.6 * p)
                                 .children(header)
                                 .child(
@@ -550,7 +605,7 @@ impl Render for PanePill {
             .h(px(24.0))
             .px(px(10.0))
             .continuous(radius::CONTROL)
-            .bg(rgb(theme::background()))
+            .bg(if theme::veils().is_some() { theme::overlay_fill() } else { rgb(theme::background()) })
             .border_1()
             .border_color(rgb(theme::accent()))
             .font_family(theme::ui_font())
@@ -574,19 +629,31 @@ fn can_swap(dragged: &DraggedPane, window: &str, target: &str) -> bool {
     dragged.window_id == window && dragged.block_id != target
 }
 
-/// A ring of window colour just outside a card's rounded shape, and its
-/// outline: rounds content clipped to the card's rectangle.
-fn corner_ring(corners: CardCorners) -> [gpui::Div; 2] {
-    let ring = |r: f32| r + CAP;
+/// A card's outline, for content clipped to the card's shape but drawn at
+/// another size. `fill`: the card's colour.
+fn card_outline(corners: CardCorners, fill: u32) -> gpui::Div {
+    div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline_on(fill))).continuous_corners(corners)
+}
+
+/// The window veil over a card slot outside the card's continuous corners,
+/// as one surface: an inset shadow whose hole is exactly the card's shape
+/// (same SDF as the card's quad), so the two veils meet without overlapping.
+/// The shadow's element overhangs the slot by `SPREAD` (radii grown to
+/// match) and is clipped to it, leaving only the slot's corners.
+fn slot_veil(corners: CardCorners, window: gpui::Rgba) -> gpui::Div {
+    const SPREAD: f32 = 16.0;
+    let grow = |r: f32| if r > 0.0 { r + SPREAD } else { 0.0 };
     let outer = CardCorners {
-        top_left: ring(corners.top_left),
-        top_right: ring(corners.top_right),
-        bottom_right: ring(corners.bottom_right),
-        bottom_left: ring(corners.bottom_left),
+        top_left: grow(corners.top_left),
+        top_right: grow(corners.top_right),
+        bottom_right: grow(corners.bottom_right),
+        bottom_left: grow(corners.bottom_left),
     };
-    let ring = div().absolute().top(px(-CAP)).left(px(-CAP)).right(px(-CAP)).bottom(px(-CAP)).border(px(CAP)).border_color(rgb(theme::surface()));
-    let outline = div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline())).continuous_corners(corners);
-    [ring.continuous_corners(outer), outline]
+    let veil =
+        gpui::BoxShadow { color: window.into(), offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(0.0), spread_radius: px(SPREAD), inset: true };
+    div().absolute().inset_0().overflow_hidden().child(
+        div().absolute().top(px(-SPREAD)).left(px(-SPREAD)).right(px(-SPREAD)).bottom(px(-SPREAD)).continuous_corners(outer).shadow(vec![veil]),
+    )
 }
 
 /// Hover group of one pane card (header actions appear on hover).

@@ -11,6 +11,24 @@ use crate::{hosts::HostState, theme, theme::Continuous as _, workspace::Workspac
 /// How long the note after an upgrade stays in the status bar.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// The opaque card these problems are shown on, over or instead of content.
+fn card() -> gpui::Div {
+    div()
+        .max_w(px(460.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(12.0))
+        .px(px(28.0))
+        .py(px(22.0))
+        .continuous(crate::settings_panel::CARD_RADIUS)
+        .bg(theme::overlay_fill())
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .shadow_xl()
+        .text_center()
+}
+
 impl Workspace {
     /// The active host's incompatible server, if one holds it.
     pub(crate) fn incompatible(&self) -> Option<&silo_client::DifferentBuild> {
@@ -87,13 +105,7 @@ impl Workspace {
             HostState::DifferentBuild => ("Different server build", "Update Silo on that machine.", false),
             _ => return None,
         };
-        let card = div()
-            .max_w(px(460.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(12.0))
-            .text_center()
+        let card = card()
             .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(detail))
             .when(pair, |el| {
@@ -107,7 +119,7 @@ impl Workspace {
                         .continuous(14.0)
                         .text_size(px(12.5))
                         .font_weight(FontWeight::MEDIUM)
-                        .bg(rgb(theme::tab_active()))
+                        .bg(theme::control_fill())
                         .border_1()
                         .border_color(rgb(theme::border()))
                         .cursor_pointer()
@@ -132,7 +144,7 @@ impl Workspace {
             .whitespace_nowrap()
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
-            .bg(rgb(theme::tab_active()))
+            .bg(theme::control_fill())
             .text_color(rgb(theme::foreground()))
             .border_1()
             .border_color(rgb(theme::border()))
@@ -151,13 +163,7 @@ impl Workspace {
             .justify_center()
             .p(px(24.0))
             .child(
-                div()
-                    .max_w(px(460.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(12.0))
-                    .text_center()
+                card()
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(server.message()))
                     .child(muted(silo_client::DifferentBuild::UPGRADE_NOTE.into()))
                     .child(muted(detail))

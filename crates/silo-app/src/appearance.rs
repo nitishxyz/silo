@@ -75,7 +75,7 @@ impl Workspace {
                 .px(px(8.0))
                 .continuous(crate::radius::MENU_ROW)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::tab_hover())))
+                .hover(|s| s.bg(theme::hover_fill()))
                 .child(div().flex_1().child(label))
                 .child(div().size(px(14.0)).flex_none().when(checked, |el| el.child(icon("check", 13.0, theme::accent()))))
         };
@@ -98,7 +98,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .continuous(10.0)
-                .bg(rgb(theme::popover()))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_lg()

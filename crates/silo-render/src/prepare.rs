@@ -56,6 +56,7 @@ pub struct PreparedFrame {
     /// consistent frame even when a newer one has already arrived.
     pub(crate) frame: Arc<Frame>,
     pub(crate) metrics: CellMetrics,
+    pub(crate) translucency: Option<Translucency>,
     pub(crate) backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     pub(crate) selection: Vec<Bounds<Pixels>>,
     pub(crate) sprite_quads: Vec<(Bounds<Pixels>, Hsla)>,
@@ -86,6 +87,27 @@ pub struct FrameOptions {
     /// `selection-foreground`: the text color of selected cells. `None`
     /// leaves selected text in its own colors under the selection tint.
     pub selection_foreground: Option<u32>,
+    /// Over a blurred window: how translucent cell backgrounds are.
+    pub translucency: Option<Translucency>,
+}
+
+/// Cell background opacity over a frosted card. The terminal's default
+/// background, the card's colour and `veiled` (an app's own backdrop) are
+/// left to the card's veil; every other background is painted at
+/// `opaque_alpha`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Translucency {
+    pub card: u32,
+    pub veiled: Option<u32>,
+    pub opaque_alpha: u8,
+}
+
+/// The alpha (0–255) to paint an explicit cell background of `color` at,
+/// or `None` to leave it to the card. Without translucency, opaque.
+#[must_use]
+pub fn cell_alpha(color: u32, default_background: u32, translucency: Option<Translucency>) -> Option<u8> {
+    let Some(t) = translucency else { return Some(u8::MAX) };
+    (color != default_background && color != t.card && Some(color) != t.veiled).then_some(t.opaque_alpha)
 }
 
 /// Builds [`PreparedFrame`]s. One per pane, owned by whatever thread
@@ -121,6 +143,7 @@ impl FramePreparer {
         let mut out = PreparedFrame {
             frame: frame.clone(),
             metrics,
+            translucency: options.translucency,
             backgrounds: Vec::new(),
             selection: Vec::new(),
             sprite_quads: Vec::new(),
@@ -131,7 +154,7 @@ impl FramePreparer {
         let mut views: Vec<CellView<'_>> = Vec::with_capacity(columns);
         for (row, cells) in frame.cells.chunks(columns).enumerate() {
             let y = px(grid_offset(row) * metrics.height);
-            push_backgrounds(&mut out, cells, y, metrics);
+            push_backgrounds(&mut out, cells, y, metrics, frame.background, options.translucency);
             push_selection(&mut out, cells, y, metrics);
             push_decorations(&mut out, cells, y, metrics, selection);
             let planning = profile::start();
@@ -341,7 +364,7 @@ fn cell_bounds(y: Pixels, column: usize, cells: usize, metrics: CellMetrics) -> 
     Bounds::new(point(px(grid_offset(column) * metrics.width), y), size(px(grid_offset(cells) * metrics.width), px(metrics.height)))
 }
 
-fn push_backgrounds(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: CellMetrics) {
+fn push_backgrounds(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics: CellMetrics, default: u32, translucency: Option<Translucency>) {
     let mut start = 0;
     while start < cells.len() {
         if !cells[start].background_explicit {
@@ -353,10 +376,12 @@ fn push_backgrounds(out: &mut PreparedFrame, cells: &[Cell], y: Pixels, metrics:
         while end < cells.len() && cells[end].background_explicit && cells[end].background == color {
             end += 1;
         }
-        out.backgrounds.push((
-            Bounds::new(point(px(grid_offset(start) * metrics.width), y), size(px(grid_offset(end - start) * metrics.width), px(metrics.height))),
-            rgb(color).into(),
-        ));
+        if let Some(alpha) = cell_alpha(color, default, translucency) {
+            out.backgrounds.push((
+                Bounds::new(point(px(grid_offset(start) * metrics.width), y), size(px(grid_offset(end - start) * metrics.width), px(metrics.height))),
+                rgb(color).opacity(f32::from(alpha) / 255.0).into(),
+            ));
+        }
         start = end;
     }
 }
@@ -467,4 +492,25 @@ fn shape_run(layouts: &mut LayoutCache, run: Run, origin: Point<Pixels>, metrics
     }
     let layout = layouts.layout(&run.text, run.bold, run.italic, metrics.font_size, cost);
     PreparedText { layout, origin, inset: px(0.0), starts: run.starts, colors }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Translucency, cell_alpha};
+
+    #[test]
+    fn cell_alpha_veils_only_backdrops() {
+        let (default, tui, other) = (0x0028_2c34, 0x000f_2027, 0x00ff_0000);
+        assert_eq!(cell_alpha(other, default, None), Some(255), "solid: opaque");
+        assert_eq!(cell_alpha(default, default, None), Some(255));
+        let t = Translucency { card: default, veiled: None, opaque_alpha: 230 };
+        assert_eq!(cell_alpha(default, default, Some(t)), None, "the card's veil shows");
+        assert_eq!(cell_alpha(other, default, Some(t)), Some(230), "structure stays crisp");
+        assert_eq!(cell_alpha(tui, default, Some(t)), Some(230), "an app's backdrop stays opaque unless veiled");
+        let tinted = Translucency { card: tui, veiled: Some(tui), ..t };
+        assert_eq!(cell_alpha(tui, default, Some(tinted)), None, "tinted card of the app's colour");
+        assert_eq!(cell_alpha(default, default, Some(tinted)), None, "default background on a tinted card");
+        let theme_card = Translucency { veiled: Some(tui), ..t };
+        assert_eq!(cell_alpha(tui, default, Some(theme_card)), None, "translucent app background on an untinted card");
+    }
 }

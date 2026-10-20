@@ -22,7 +22,7 @@ impl Render for Tooltip {
             .px(px(7.0))
             .py(px(3.0))
             .continuous(radius::TOOLTIP)
-            .bg(rgb(theme::popover()))
+            .bg(theme::overlay_fill())
             .border_1()
             .border_color(rgb(theme::border()))
             .font_family(theme::ui_font())

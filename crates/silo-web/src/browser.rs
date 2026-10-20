@@ -51,6 +51,7 @@ impl Runtime {
             focused: AtomicBool::new(false),
             last_input: Mutex::new(None),
             dropped: Mutex::new(None),
+            theme_tag: crate::shared::theme_tag(),
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };

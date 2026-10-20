@@ -310,6 +310,13 @@ crates/
 xtask          build ghostty, package, sign/notarize, smoke tests
 ```
 
+Window material (`app/src/material.rs`): Solid, or Frosted (compositor blur behind veils). Frosted renders only where
+`blur_supported()` holds and transparency is not reduced; otherwise the window is solid and the choice is kept. macOS
+always qualifies, falling back while Accessibility › Reduce transparency is on (observed via NSWorkspace). Windows 11
+(build 22000+) and blurring Linux compositors (KDE) qualify once the GUI runs there; until then they report unsupported.
+Frosted is one material: titlebar, gutters and every card are one veil at one per-frame alpha (never stacked), raised
+until all text, the terminal foreground included, reads at 4.5:1 over the theme background, black and (lifted) white.
+
 ---
 
 ## 9. Phases

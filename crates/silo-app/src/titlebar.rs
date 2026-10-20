@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, div, prelude::*, px, rgb};
 use silo_proto::control::Method;
 
 use crate::theme::Continuous as _;
@@ -108,6 +108,7 @@ struct TabDrag {
     /// Grab point within the tab; the preview pads it away so the pill
     /// sits just below-right of the pointer.
     offset: gpui::Point<gpui::Pixels>,
+    chrome: crate::adaptive::Chrome,
 }
 
 impl Render for TabDrag {
@@ -120,12 +121,14 @@ impl Render for TabDrag {
             .max_w(px(TAB_MAX))
             .px(px(TAB_PAD))
             .capsule()
-            .bg(rgb(theme::tab_selected_on(theme::surface())))
-            .shadow_md()
+            .map(|el| match theme::veils() {
+                // A floating pill of the material: veil and hairline.
+                Some(_) => el.bg(theme::overlay_fill()).border_1().border_color(rgb(theme::border())).text_color(rgb(theme::foreground())),
+                None => el.bg(rgb(theme::tab_selected_on(self.chrome.surface))).shadow_md().text_color(rgb(self.chrome.ink)),
+            })
             .font_family(theme::ui_font())
             .text_size(px(12.0))
-            .text_color(rgb(theme::foreground()))
-            .child(icon(self.icon, 12.0, theme::accent()))
+            .child(icon(self.icon, 12.0, self.chrome.accent))
             .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()));
         div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
     }
@@ -148,7 +151,7 @@ impl Workspace {
 
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let several = self.view.as_ref().is_some_and(|v| v.session.windows.len() > 1);
-        let strip = theme::surface();
+        let hover = self.chrome.hover();
         let fullscreen = window.is_fullscreen();
         let inset = if fullscreen { FULLSCREEN_INSET } else { TRAFFIC_LIGHTS };
         if self.last_fullscreen.replace(Some(fullscreen)) != Some(fullscreen) {
@@ -181,7 +184,6 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
-            .bg(rgb(strip))
             .font_family(theme::ui_font())
             .child(self.render_pill(cx));
         if let Some(view) = &self.view {
@@ -214,9 +216,21 @@ impl Workspace {
             let mut child = 0;
             let mut active_child = None;
             let mut active_entering = false;
+            let (fade_left, fade_right) = edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x));
+            let strip = self.tab_scroll.bounds();
+            // Tabs fade out where the strip scrolls on, by their own
+            // opacity (no overlay to stack on a frosted titlebar).
+            let fade = |child: usize| {
+                self.tab_scroll.bounds_for_item(child).map_or(1.0, |tab| {
+                    let ramp = |inset: gpui::Pixels| 0.3 + 0.7 * (f32::from(inset) / FADE_WIDTH).clamp(0.0, 1.0);
+                    let left = if fade_left { ramp(tab.left() - strip.left()) } else { 1.0 };
+                    let right = if fade_right { ramp(strip.right() - tab.right()) } else { 1.0 };
+                    left.min(right)
+                })
+            };
             for (index, w) in view.session.windows.iter().enumerate() {
                 while let Some(ghost) = ghosts.next_if(|g| g.index <= index) {
-                    if let Some(ghost) = render_tab_ghost(ghost, now) {
+                    if let Some(ghost) = render_tab_ghost(ghost, self.chrome, now) {
                         tabs = tabs.child(ghost);
                         child += 1;
                     }
@@ -227,35 +241,14 @@ impl Workspace {
                     active_child = Some(child);
                     active_entering = appear < 1.0;
                 }
-                tabs = tabs.child(self.render_tab(w, index, selected, several, strip, appear, now, cx));
+                tabs = tabs.child(self.render_tab(w, index, selected, several, appear, fade(child), now, cx));
                 child += 1;
             }
             for ghost in ghosts {
-                tabs = tabs.children(render_tab_ghost(ghost, now));
+                tabs = tabs.children(render_tab_ghost(ghost, self.chrome, now));
             }
             self.step_tab_reveal(&active_id, active_child, active_entering, !cx.reduce_motion(), window);
-            let (fade_left, fade_right) = edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x));
-            // Fades sit above the clipped tabs, below the fixed controls,
-            // and have no hitbox, so clicks and hovers reach the tabs.
-            let opaque = gpui::Hsla::from(rgb(strip));
-            let clear = opaque.opacity(0.0);
-            let fade = |left: bool| {
-                div().absolute().top_0().bottom_0().w(px(FADE_WIDTH)).map(|el| if left { el.left_0() } else { el.right_0() }).bg(linear_gradient(
-                    if left { 90.0 } else { 270.0 },
-                    linear_color_stop(opaque, 0.0),
-                    linear_color_stop(clear, 1.0),
-                ))
-            };
-            let strip_view = div()
-                .relative()
-                .flex()
-                .flex_row()
-                .h_full()
-                .min_w_0()
-                .flex_shrink(1.0)
-                .child(tabs)
-                .when(fade_left, |el| el.child(fade(true)))
-                .when(fade_right, |el| el.child(fade(false)));
+            let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
             let comfortable = self.density() == crate::hosts::Density::Comfortable;
             let menu_open = self.appearance_menu.open;
             // The strip and the empty space after it take tab drops. The
@@ -298,13 +291,13 @@ impl Workspace {
                         .ml(px(6.0))
                         .size(px(PILL_HEIGHT))
                         .capsule()
-                        .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
+                        .hover(|s| s.bg(hover))
                         .cursor_pointer()
-                        .when(menu_open, |el| el.bg(rgb(theme::tab_hover_on(strip))))
+                        .when(menu_open, |el| el.bg(hover))
                         .when(!menu_open, |el| {
                             el.tooltip(crate::tooltip::Tooltip::text(if comfortable { "Appearance: Comfortable" } else { "Appearance: Compact" }))
                         })
-                        .child(icon("eye", 15.0, theme::muted()))
+                        .child(icon("eye", 15.0, self.chrome.icon))
                         .map(claim_press)
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance_menu(window, cx))),
                 )
@@ -318,10 +311,10 @@ impl Workspace {
                         .ml(px(2.0))
                         .size(px(PILL_HEIGHT))
                         .capsule()
-                        .hover(|s| s.bg(rgb(theme::tab_hover_on(strip))))
+                        .hover(|s| s.bg(hover))
                         .cursor_pointer()
                         .tooltip(crate::tooltip::Tooltip::text("New Tab  ⌘T"))
-                        .child(icon("plus", 15.0, theme::muted()))
+                        .child(icon("plus", 15.0, self.chrome.icon))
                         .map(claim_press)
                         .on_click(cx.listener(|this, _, window, cx| this.new_window(window, cx))),
                 );
@@ -376,8 +369,8 @@ impl Workspace {
         index: usize,
         selected: bool,
         several: bool,
-        strip: u32,
         appear: f32,
+        fade: f32,
         now: Instant,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -385,18 +378,24 @@ impl Workspace {
         let close = self.motion.close_button(&w.id, now);
         let title = self.window_title(w, cx);
         let glyph = self.tab_icon(w);
-        let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default() };
+        let chrome = self.chrome;
+        // The colour of the app running in another tab, where it shows.
+        let swatch = (!selected)
+            .then(|| self.backdrop(&w.focused, cx).or_else(|| crate::floats::window_blocks(w).iter().find_map(|b| self.backdrop(b, cx))))
+            .flatten()
+            .filter(|&c| chrome.shows(c));
+        let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
         let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
         let workspace = cx.entity().downgrade();
         let window_id = w.id.clone();
         let group = format!("tab-{}", w.id);
-        let hover = theme::tab_hover_on(strip);
+        let hover = chrome.hover();
         let hover_id = w.id.clone();
         // Every tab is a full pill on the window background: inactive ones
         // only show a fill on hover, the current one a subtle step brighter.
-        let fill = theme::tab_selected_on(strip);
+        let fill = chrome.selected();
         let label = div()
             .flex()
             .flex_row()
@@ -409,10 +408,11 @@ impl Workspace {
             // pill's right edge.
             .pr(px(TAB_PAD - (TAB_PAD - CLOSE_INSET) * close))
             .capsule()
-            .when(several && selected, |el| el.bg(rgb(fill)))
-            .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(rgb(hover))))
-            .child(icon(glyph, 12.0, if primary { theme::accent() } else { theme::muted() }))
+            .when(several && selected, |el| el.bg(fill))
+            .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
+            .child(icon(glyph, 12.0, if primary { chrome.accent } else { chrome.icon }))
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))))
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {
                 el.child(
@@ -425,8 +425,8 @@ impl Workspace {
                             .size(px(CLOSE_SIZE))
                             .flex_none()
                             .capsule()
-                            .hover(|s| s.bg(rgb(theme::tab_hover_on(hover))))
-                            .child(icon("close", 12.0, theme::muted()))
+                            .hover(|s| s.bg(hover))
+                            .child(icon("close", 12.0, chrome.icon))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.call(Method::WindowClose { window_id: window_id.clone() });
@@ -445,11 +445,11 @@ impl Workspace {
             .flex_none()
             // Content-sized: no minimum width, so nothing pads the end.
             .max_w(px(TAB_MAX * appear))
-            .when(entering, |el| el.overflow_hidden().opacity(appear))
+            .when(entering, |el| el.overflow_hidden())
             // The source stays in place, faded, under the drag preview.
-            .when(self.tab_dragging.as_ref() == Some(&w.id), |el| el.opacity(0.4))
+            .opacity(fade * appear * if self.tab_dragging.as_ref() == Some(&w.id) { 0.4 } else { 1.0 })
             .text_size(px(12.0))
-            .text_color(rgb(theme::foreground()).opacity(if primary { 1.0 } else { 0.7 }))
+            .text_color(rgb(if primary { chrome.ink } else { chrome.secondary }))
             .cursor_pointer()
             .child(label)
             .when_some(insert, |el, after| {
@@ -461,7 +461,7 @@ impl Workspace {
                         .w(px(2.0))
                         .map(|el| if after { el.right(px(-(TAB_GAP + 2.0) / 2.0)) } else { el.left(px(-(TAB_GAP + 2.0) / 2.0)) })
                         .continuous(1.0)
-                        .bg(rgb(theme::accent())),
+                        .bg(rgb(chrome.accent)),
                 )
             })
             .map(claim_press)
@@ -545,7 +545,7 @@ impl Workspace {
         let host = &self.hosts[self.active_host];
         let name = self.view.as_ref().map_or_else(|| "—".to_owned(), |v| v.session.name.clone());
         let open = self.switcher.is_some();
-        let strip = theme::surface();
+        let chrome = self.chrome;
         // One line at tab scale: session name, then the host, muted.
         div()
             .id("session-pill")
@@ -562,10 +562,10 @@ impl Workspace {
             .whitespace_nowrap()
             .text_size(px(12.0))
             // Plain until the switcher is open; a faint wash on hover.
-            .when(open, |el| el.bg(rgb(theme::tab_active())))
-            .when(!open, |el| el.hover(|s| s.bg(rgb(theme::tab_hover_on(strip)))))
+            .when(open, |el| el.bg(chrome.tint(0.11)))
+            .when(!open, |el| el.hover(|s| s.bg(chrome.hover())))
             .cursor_pointer()
-            .child(icon(if host.info.local { "laptop" } else { "globe" }, 13.0, theme::foreground()))
+            .child(icon(if host.info.local { "laptop" } else { "globe" }, 13.0, chrome.ink))
             .child(
                 div()
                     .min_w_0()
@@ -573,7 +573,7 @@ impl Workspace {
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(theme::foreground()))
+                    .text_color(rgb(chrome.ink))
                     .child(name),
             )
             .child(
@@ -583,7 +583,7 @@ impl Workspace {
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(px(11.0))
-                    .text_color(rgb(theme::muted()))
+                    .text_color(rgb(chrome.muted))
                     .child(host.info.name.clone()),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
@@ -602,7 +602,7 @@ impl Workspace {
 
 /// A closed tab collapsing in width and fading at its old position. Visual
 /// only: no listeners, and the server close was already sent.
-fn render_tab_ghost(ghost: &TabGhost, now: Instant) -> Option<AnyElement> {
+fn render_tab_ghost(ghost: &TabGhost, chrome: crate::adaptive::Chrome, now: Instant) -> Option<AnyElement> {
     let gone = motion::progress(ghost.started, motion::TAB_EXIT, now)?;
     let keep = 1.0 - gone;
     Some(
@@ -617,7 +617,7 @@ fn render_tab_ghost(ghost: &TabGhost, now: Instant) -> Option<AnyElement> {
             .overflow_hidden()
             .opacity(keep)
             .text_size(px(12.0))
-            .text_color(rgb(theme::muted()))
+            .text_color(rgb(chrome.secondary))
             .child(
                 div()
                     .flex()
@@ -627,7 +627,7 @@ fn render_tab_ghost(ghost: &TabGhost, now: Instant) -> Option<AnyElement> {
                     .min_w_0()
                     .px(px(10.0))
                     .capsule()
-                    .child(icon(ghost.icon, 12.0, theme::muted()))
+                    .child(icon(ghost.icon, 12.0, chrome.icon))
                     .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ghost.title.clone())),
             )
             .into_any_element(),

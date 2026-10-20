@@ -195,6 +195,8 @@ pub enum BrowserPaneEvent {
     Activated,
     /// The page asked for a new window.
     Popup(String),
+    /// The page's colour changed.
+    Backdrop,
 }
 
 impl gpui::EventEmitter<BrowserPaneEvent> for BrowserPane {}
@@ -237,6 +239,12 @@ pub struct BrowserPane {
     editable: bool,
     /// Load progress, 0.0–1.0.
     progress: f64,
+    /// The page's colour (`theme-color` or background).
+    theme_color: Option<u32>,
+    /// The colours of the card behind the toolbar.
+    palette: crate::adaptive::Chrome,
+    /// Radii of the page's bottom corners: the card's, inside its border.
+    corners: (f32, f32),
     debounce: Debounce,
     report_task: Option<gpui::Task<()>>,
     error: Option<String>,
@@ -296,6 +304,9 @@ impl BrowserPane {
             span: Span::default(),
             editable: false,
             progress: 1.0,
+            theme_color: None,
+            palette: crate::adaptive::Chrome::on(crate::theme::background()),
+            corners: (0.0, 0.0),
             debounce: Debounce::default(),
             report_task: None,
             error: None,
@@ -378,6 +389,28 @@ impl BrowserPane {
 
     pub fn favicon(&self) -> Option<String> {
         self.state.as_ref()?.favicon.clone()
+    }
+
+    /// The page's colour, while it has one.
+    pub fn backdrop(&self) -> Option<u32> {
+        self.theme_color
+    }
+
+    /// The card's colours behind the toolbar, set by the workspace.
+    pub fn set_palette(&mut self, palette: crate::adaptive::Chrome, cx: &mut gpui::Context<Self>) {
+        if self.palette != palette {
+            self.palette = palette;
+            self.address.update(cx, |address, cx| address.set_palette(Some(palette), cx));
+            cx.notify();
+        }
+    }
+
+    /// The page's bottom corner radii (left, right), set by the workspace.
+    pub fn set_corners(&mut self, corners: (f32, f32), cx: &mut gpui::Context<Self>) {
+        if self.corners != corners {
+            self.corners = corners;
+            cx.notify();
+        }
     }
 
     pub fn bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
@@ -495,10 +528,19 @@ impl BrowserPane {
                     cx.notify();
                 }
                 silo_web::Event::EditableFocus(editable) => self.editable = editable,
+                silo_web::Event::ThemeColor(color) => {
+                    if self.theme_color != color {
+                        self.theme_color = color;
+                        cx.emit(BrowserPaneEvent::Backdrop);
+                    }
+                }
                 silo_web::Event::Popup(url) => cx.emit(BrowserPaneEvent::Popup(url)),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
-                silo_web::Event::Closed => self.page = None,
+                silo_web::Event::Closed => {
+                    self.page = None;
+                    self.theme_color = None;
+                }
             }
         }
         if changed {
@@ -857,7 +899,9 @@ fn page_canvas(entity: gpui::Entity<BrowserPane>) -> impl gpui::IntoElement {
             let scale = window.scale_factor();
             entity.update(cx, |pane, cx| pane.layout(bounds, scale, cx));
             if let Some(frame) = entity.read(cx).page.as_ref().and_then(|p| p.frame()) {
-                window.paint_surface(bounds, frame.buffer);
+                let (left, right) = entity.read(cx).corners;
+                let corners = gpui::Corners { bottom_left: gpui::px(left), bottom_right: gpui::px(right), ..Default::default() };
+                window.paint_rounded_surface(bounds, frame.buffer, corners, crate::theme::CORNER_SMOOTHING);
             }
             let focus = entity.read(cx).focus.clone();
             window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, entity.clone()), cx);
@@ -914,6 +958,7 @@ impl BrowserPane {
     fn strip(&self, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use crate::theme::Continuous as _;
         use gpui::{div, prelude::*, px, rgb};
+        let palette = self.palette;
         let button = |id: &'static str, glyph: &'static str, tip: &'static str, enabled: bool| {
             div()
                 .id(id)
@@ -923,9 +968,9 @@ impl BrowserPane {
                 .justify_center()
                 .size(px(22.0))
                 .continuous(crate::radius::CONTROL)
-                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(rgb(crate::theme::tab_hover_on(crate::theme::background())))))
+                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(palette.hover())))
                 .tooltip(crate::tooltip::Tooltip::text(tip))
-                .child(crate::assets::icon(glyph, 13.0, if enabled { crate::theme::foreground() } else { crate::theme::muted() }))
+                .child(crate::assets::icon(glyph, 13.0, if enabled { palette.ink } else { palette.icon }))
         };
         let loading = self.loading();
         let favicon = self.favicon().and_then(|f| favicon_image(&f));
@@ -935,9 +980,8 @@ impl BrowserPane {
             button("browser-reload", "reload", "Reload  ⌘R", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload()))
         };
         #[allow(clippy::cast_possible_truncation)]
-        let progress = (loading && self.progress < 1.0).then(|| {
-            div().absolute().left_0().bottom_0().h(px(2.0)).w(gpui::relative(self.progress.max(0.05) as f32)).bg(rgb(crate::theme::accent()))
-        });
+        let progress = (loading && self.progress < 1.0)
+            .then(|| div().absolute().left_0().bottom_0().h(px(2.0)).w(gpui::relative(self.progress.max(0.05) as f32)).bg(rgb(palette.accent)));
         div()
             .relative()
             .flex()
@@ -947,7 +991,7 @@ impl BrowserPane {
             .h(px(STRIP))
             .px(px(4.0))
             .border_b_1()
-            .border_color(rgb(crate::theme::border()))
+            .border_color(palette.tint(0.13))
             .text_size(px(12.0))
             .child(button("browser-back", "back", "Back  ⌘←", self.history_step(-1)).on_click(cx.listener(|this, _, _, _| this.back())))
             .child(button("browser-forward", "forward", "Forward  ⌘→", self.history_step(1)).on_click(cx.listener(|this, _, _, _| this.forward())))
@@ -960,6 +1004,7 @@ impl BrowserPane {
                     .flex_1()
                     .min_w_0()
                     .px(px(6.0))
+                    .when(palette.alpha < 1.0, |el| el.h(px(22.0)).continuous(crate::radius::CONTROL).bg(palette.tint(0.07)))
                     .children(favicon.map(|f| gpui::img(f).size(px(14.0)).flex_none()))
                     .child(self.address.clone()),
             )
@@ -1071,6 +1116,7 @@ impl crate::workspace::Workspace {
             match event {
                 BrowserPaneEvent::Activated => this.pane_activated(block),
                 BrowserPaneEvent::Popup(url) => this.split_browser(block, Some(url.clone())),
+                BrowserPaneEvent::Backdrop => {}
             }
             cx.notify();
         });

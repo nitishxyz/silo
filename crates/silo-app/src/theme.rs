@@ -73,20 +73,14 @@ pub fn ui_font_state() -> UiFont {
 /// draws capsules with circular tips and curvature-continuous joins.
 pub const CORNER_SMOOTHING: f32 = 4.0;
 
-/// Continuous corners. Smoothing is per element (not inherited), and content
-/// masks stay rectangular, so a child whose fill reaches a parent's corner
-/// must repeat the parent's curve with these helpers too.
+/// Continuous corners. Smoothing is per element (not inherited); content
+/// masks are rectangular unless the parent uses `rounded_clip`, so otherwise
+/// a child whose fill reaches a parent's corner must repeat its curve too.
 pub trait Continuous: gpui::Styled + Sized {
     /// Continuous corners at `radius` on every corner.
     #[must_use]
     fn continuous(self, radius: f32) -> Self {
         self.rounded(gpui::px(radius)).corner_smoothing(CORNER_SMOOTHING)
-    }
-
-    /// Continuous corners on the left side only.
-    #[must_use]
-    fn continuous_l(self, radius: f32) -> Self {
-        self.rounded_l(gpui::px(radius)).corner_smoothing(CORNER_SMOOTHING)
     }
 
     /// Continuous corners with a radius per corner.
@@ -304,10 +298,11 @@ fn channels(c: u32) -> [f32; 3] {
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+#[must_use]
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     let (a, b) = (channels(a), channels(b));
-    let c: Vec<u32> = (0..3).map(|i| (a[i] + (b[i] - a[i]) * t).round().clamp(0.0, 255.0) as u32).collect();
-    (c[0] << 16) | (c[1] << 8) | c[2]
+    let c = |i: usize| (a[i] + (b[i] - a[i]) * t).round().clamp(0.0, 255.0) as u32;
+    (c(0) << 16) | (c(1) << 8) | c(2)
 }
 
 fn luminance(c: u32) -> f32 {
@@ -315,9 +310,120 @@ fn luminance(c: u32) -> f32 {
     (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
 }
 
+/// WCAG relative luminance (linearized sRGB), 0–1.
+#[must_use]
+pub fn relative_luminance(c: u32) -> f32 {
+    let linear = |v: f32| {
+        let v = v / 255.0;
+        if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let [r, g, b] = channels(c);
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG contrast ratio, 1–21.
+#[must_use]
+pub fn contrast(a: u32, b: u32) -> f32 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+const DARK_INK: u32 = 0x001d_1d1f;
+const LIGHT_INK: u32 = 0x00f5_f5f7;
+
+/// Minimum contrast of text, and of icons and other non-text marks.
+pub const TEXT_CONTRAST: f32 = 4.5;
+pub const ICON_CONTRAST: f32 = 3.0;
+
+/// Text on `bg`: the theme foreground on the theme background or wherever
+/// it reads, else near-black or near-white, else pure black or white.
+#[must_use]
+pub fn ink_on(bg: u32) -> u32 {
+    ink_for(bg, background(), foreground())
+}
+
+fn ink_for(bg: u32, theme_bg: u32, fg: u32) -> u32 {
+    if bg == theme_bg || contrast(fg, bg) >= TEXT_CONTRAST {
+        return fg;
+    }
+    let soft = if contrast(DARK_INK, bg) >= contrast(LIGHT_INK, bg) { DARK_INK } else { LIGHT_INK };
+    if contrast(soft, bg) >= TEXT_CONTRAST {
+        soft
+    } else if contrast(0, bg) >= contrast(0x00ff_ffff, bg) {
+        0
+    } else {
+        0x00ff_ffff
+    }
+}
+
+/// An ink reading at 4.5:1 on every one of `bgs` (what a veil may look
+/// like): the theme foreground if it does, else near-black or near-white,
+/// else pure black or white.
+#[must_use]
+pub fn reads_on_all(bgs: &[u32]) -> Option<u32> {
+    ink_all(bgs, foreground())
+}
+
+fn ink_all(bgs: &[u32], fg: u32) -> Option<u32> {
+    [fg, DARK_INK, LIGHT_INK, 0, 0x00ff_ffff].into_iter().find(|&c| bgs.iter().all(|&b| contrast(c, b) >= TEXT_CONTRAST))
+}
+
+/// [`reads_on_all`], or the candidate whose worst contrast is best.
+#[must_use]
+pub fn ink_on_all(bgs: &[u32]) -> u32 {
+    reads_on_all(bgs).unwrap_or_else(|| {
+        let worst = |c: u32| bgs.iter().map(|&b| contrast(c, b)).fold(f32::MAX, f32::min);
+        if worst(0) >= worst(0x00ff_ffff) { 0 } else { 0x00ff_ffff }
+    })
+}
+
+/// The colour `from` of the way from `bg` toward `ink`, or the smallest
+/// step past it that reaches `min` contrast (at most `ink` itself).
+#[must_use]
+pub fn toward_ink(bg: u32, ink: u32, from: f32, min: f32) -> u32 {
+    reading(bg, ink, &[bg], from, min)
+}
+
+/// [`toward_ink`] from `base`, reaching `min` on every one of `bgs`.
+#[must_use]
+pub fn reading(base: u32, ink: u32, bgs: &[u32], from: f32, min: f32) -> u32 {
+    let mut t = from;
+    loop {
+        let c = mix(base, ink, t);
+        if t >= 1.0 || bgs.iter().all(|&b| contrast(c, b) >= min) {
+            return c;
+        }
+        t = (t + 0.025).min(1.0);
+    }
+}
+
+/// Secondary text on `bg`.
+#[must_use]
+pub fn muted_on(bg: u32) -> u32 {
+    toward_ink(bg, ink_on(bg), 0.55, TEXT_CONTRAST)
+}
+
+/// Secondary icons on `bg`.
+#[must_use]
+pub fn icon_muted_on(bg: u32) -> u32 {
+    toward_ink(bg, ink_on(bg), 0.55, ICON_CONTRAST)
+}
+
+/// The accent on `bg`, or its ink where the accent would not read.
+#[must_use]
+pub fn accent_on(bg: u32) -> u32 {
+    if bg == background() || contrast(accent(), bg) >= ICON_CONTRAST { accent() } else { ink_on(bg) }
+}
+
+/// A light colour (dark ink reads on it).
+#[must_use]
+pub fn light(c: u32) -> bool {
+    luminance(c) > 0.5
+}
+
 #[must_use]
 pub fn is_light() -> bool {
-    luminance(background()) > 0.5
+    light(background())
 }
 
 // ---- palette accessors (chrome derives from bg/fg) ----
@@ -336,26 +442,81 @@ pub fn foreground() -> u32 {
 pub fn surface() -> u32 {
     background()
 }
-/// Neutral 1px outline of a Comfortable pane card.
+/// Neutral 1px outline of a Comfortable pane card filled with `fill`.
 #[must_use]
-pub fn card_outline() -> u32 {
-    mix(surface(), foreground(), if is_light() { 0.12 } else { 0.10 })
+pub fn card_outline_on(fill: u32) -> u32 {
+    mix(fill, ink_on(fill), if light(fill) { 0.12 } else { 0.10 })
 }
 /// Fill of the current tab on `surface`: a subtle step above the rest.
 #[must_use]
 pub fn tab_selected_on(surface: u32) -> u32 {
-    mix(surface, foreground(), if is_light() { 0.08 } else { 0.10 })
-}
-/// Hover fill on `surface`: only slightly lighter (darker on light themes)
-/// than the surface itself.
-#[must_use]
-pub fn tab_hover_on(surface: u32) -> u32 {
-    mix(surface, foreground(), if is_light() { 0.06 } else { 0.07 })
+    mix(surface, ink_on(surface), if light(surface) { 0.08 } else { 0.10 })
 }
 /// Overlay that dims inactive panes: the background at this alpha.
 pub const INACTIVE_DIM: f32 = 0.38;
 /// The same overlay over a web page: lighter, since pages are mostly bright.
 pub const INACTIVE_DIM_PAGE: f32 = 0.14;
+
+/// This frame's Frosted colours, set by the workspace; `None` when solid.
+/// Surfaces over the app's own content (palette, menus, sheets, tooltips,
+/// settings, floats) cannot be translucent: the window blur only blurs
+/// what is behind the window. They take the material's look as one opaque
+/// colour, so there is no alpha here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Veils {
+    pub overlay: u32,
+    /// Secondary text on it.
+    pub muted: u32,
+}
+
+thread_local! {
+    static VEILS: std::cell::Cell<Option<Veils>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_veils(veils: Option<Veils>) {
+    VEILS.set(veils);
+}
+
+#[must_use]
+pub fn veils() -> Option<Veils> {
+    VEILS.get()
+}
+
+/// Ink of the theme foreground at `amount` over a veil.
+fn tint(amount: f32) -> gpui::Rgba {
+    gpui::rgb(foreground()).opacity(amount)
+}
+
+/// Fill of surfaces over the app's own content: always opaque.
+#[must_use]
+pub fn overlay_fill() -> gpui::Rgba {
+    gpui::rgb(veils().map_or_else(popover, |v| v.overlay))
+}
+/// Panels and grouped rows inside a floating surface (never a second veil).
+#[must_use]
+pub fn group_fill() -> gpui::Rgba {
+    if veils().is_some() { tint(0.04) } else { gpui::rgb(popover()) }
+}
+/// Buttons, switch tracks, segmented controls.
+#[must_use]
+pub fn control_fill() -> gpui::Rgba {
+    if veils().is_some() { tint(0.10) } else { gpui::rgb(tab_active()) }
+}
+/// Selected rows, pressed controls.
+#[must_use]
+pub fn row_fill() -> gpui::Rgba {
+    if veils().is_some() { tint(0.14) } else { gpui::rgb(row_active()) }
+}
+/// Hovered rows.
+#[must_use]
+pub fn hover_fill() -> gpui::Rgba {
+    if veils().is_some() { tint(0.06) } else { gpui::rgb(tab_hover()) }
+}
+/// Text input wells.
+#[must_use]
+pub fn well_fill() -> gpui::Rgba {
+    if veils().is_some() { tint(0.06) } else { gpui::rgb(background()) }
+}
 
 #[must_use]
 pub fn tab_hover() -> u32 {
@@ -377,9 +538,10 @@ pub fn row_active() -> u32 {
 pub fn border() -> u32 {
     mix(background(), foreground(), 0.13)
 }
+/// Secondary text; frosted, it reads on the overlay veil.
 #[must_use]
 pub fn muted() -> u32 {
-    mix(background(), foreground(), 0.55)
+    veils().map_or_else(|| mix(background(), foreground(), 0.55), |v| v.muted)
 }
 /// The theme's bright blue.
 #[must_use]
@@ -430,17 +592,94 @@ mod tests {
     }
 
     #[test]
+    fn overlays_are_opaque_when_frosted() {
+        super::set_veils(Some(super::Veils { overlay: 0x0012_3456, muted: 0x0080_8080 }));
+        let fill = super::overlay_fill();
+        super::set_veils(None);
+        assert!((fill.a - 1.0).abs() < f32::EPSILON);
+        assert_eq!(fill, gpui::rgb(0x0012_3456));
+    }
+
+    #[test]
+    fn contrast_follows_relative_luminance() {
+        assert!((super::relative_luminance(0x00ff_ffff) - 1.0).abs() < 1e-4);
+        assert!(super::relative_luminance(0).abs() < 1e-6);
+        assert!((super::contrast(0, 0x00ff_ffff) - 21.0).abs() < 1e-3);
+        assert!((super::contrast(0x0012_3456, 0x0012_3456) - 1.0).abs() < 1e-6);
+        // sRGB mid-grey is darker than half: #777 on white is just under 4.5:1.
+        assert!(super::contrast(0x0077_7777, 0x00ff_ffff) < 4.5);
+        assert!(super::contrast(0x0076_7676, 0x00ff_ffff) >= 4.5);
+    }
+
+    #[test]
+    fn ink_keeps_the_theme_foreground_where_it_reads() {
+        let (bg, fg) = (0x0028_2c34, 0x00ab_b2bf);
+        assert_eq!(super::ink_for(bg, bg, fg), fg, "the theme pair is never second-guessed");
+        assert_eq!(super::ink_for(0x001e_1b4b, bg, fg), fg, "a dark backdrop keeps it");
+        assert_eq!(super::ink_for(0x00f0_f0e8, bg, fg), super::DARK_INK, "light backdrop: dark ink");
+        assert_eq!(super::ink_for(0x00fa_fafa, 0x00ff_ffff, 0x0090_9090), super::DARK_INK);
+        assert_eq!(super::ink_for(0x0010_1010, 0x00ff_ffff, 0x0030_3030), super::LIGHT_INK, "dark backdrop of a light theme");
+        assert_eq!(super::ink_for(0x0080_8080, bg, fg), 0, "mid grey: near-black is short of 4.5:1, so pure black");
+    }
+
+    /// Backdrops across the range, including the hard middle.
+    const BACKDROPS: [u32; 14] = [
+        0x00ff_ffff,
+        0x00c0_c0c0,
+        0x0080_8080,
+        0x0076_7676,
+        0x0060_6060,
+        0x003a_6ea5,
+        0x0000_0000,
+        0x00ff_0000,
+        0x0000_ff00,
+        0x0000_00ff,
+        0x00ff_ff00,
+        0x00ff_00ff,
+        0x0000_ffff,
+        0x00f4_ecd8,
+    ];
+
+    #[test]
+    fn ink_and_muted_reach_their_contrast_on_any_backdrop() {
+        use super::{ICON_CONTRAST, TEXT_CONTRAST, contrast, ink_for, toward_ink};
+        for (theme_bg, fg) in [(0x0028_2c34, 0x00ab_b2bf), (0x00fa_fafa, 0x0038_3a42)] {
+            for bg in BACKDROPS {
+                let ink = ink_for(bg, theme_bg, fg);
+                assert!(contrast(ink, bg) >= TEXT_CONTRAST, "ink {ink:06x} on {bg:06x}: {}", contrast(ink, bg));
+                for (from, min) in [(0.55, TEXT_CONTRAST), (0.7, TEXT_CONTRAST), (0.55, ICON_CONTRAST)] {
+                    let c = toward_ink(bg, ink, from, min);
+                    assert!(contrast(c, bg) >= min, "{c:06x} on {bg:06x}: {} < {min}", contrast(c, bg));
+                }
+                let icon = toward_ink(bg, ink, 0.55, ICON_CONTRAST);
+                let text = toward_ink(bg, ink, 0.55, TEXT_CONTRAST);
+                assert!(contrast(icon, bg) <= contrast(text, bg) + 1e-3, "icons stay at most as strong as text");
+            }
+        }
+    }
+
+    #[test]
+    fn muted_keeps_its_step_where_it_already_reads() {
+        let (bg, ink) = (0x0000_0000, 0x00ff_ffff);
+        assert_eq!(super::toward_ink(bg, ink, 0.55, super::TEXT_CONTRAST), super::mix(bg, ink, 0.55));
+        let (bg, ink) = (0x0076_7676, 0x00ff_ffff);
+        assert_eq!(super::toward_ink(bg, ink, 0.55, super::TEXT_CONTRAST), ink, "only the ink itself reads on #767676");
+    }
+
+    #[test]
+    fn mix_blends_channels() {
+        assert_eq!(super::mix(0, 0x00ff_ffff, 0.0), 0);
+        assert_eq!(super::mix(0, 0x00ff_ffff, 1.0), 0x00ff_ffff);
+        assert_eq!(super::mix(0x0000_00ff, 0x00ff_0000, 0.5), 0x0080_0080);
+    }
+
+    #[test]
     fn rounded_surfaces_are_continuous() {
         const { assert!(CORNER_SMOOTHING > 2.0, "2.0 or below renders circular corners") };
         let card = style(gpui::div().continuous(12.0));
         assert_eq!(card.corner_smoothing, Some(CORNER_SMOOTHING));
         assert_eq!(card.corner_radii.top_left, Some(px(12.0).into()));
         assert_eq!(card.corner_radii.bottom_right, Some(px(12.0).into()));
-
-        let side = style(gpui::div().continuous_l(11.0));
-        assert_eq!(side.corner_smoothing, Some(CORNER_SMOOTHING));
-        assert_eq!(side.corner_radii.bottom_left, Some(px(11.0).into()));
-        assert_eq!(side.corner_radii.top_right, None);
 
         let pill = style(gpui::div().capsule());
         assert_eq!(pill.corner_smoothing, Some(CORNER_SMOOTHING));

@@ -7,6 +7,7 @@
 #![cfg(target_os = "macos")]
 
 mod browser;
+mod color;
 mod cr_app;
 mod frame;
 mod handlers;

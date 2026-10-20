@@ -342,7 +342,7 @@ impl Workspace {
                     .h(px(34.0))
                     .px(px(10.0))
                     .continuous(8.0)
-                    .bg(rgb(theme::background()))
+                    .bg(theme::well_fill())
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .child(input.clone()),
@@ -357,7 +357,7 @@ impl Workspace {
                 .text_size(px(13.0))
                 .cursor_pointer()
                 .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())))
-                .when(!primary, |el| el.bg(rgb(theme::tab_active())).hover(|s| s.bg(rgb(theme::row_active()))))
+                .when(!primary, |el| el.bg(theme::control_fill()).hover(|s| s.bg(theme::row_fill())))
                 .child(label)
         };
         let tab = |id: &'static str, label: &'static str, mode: Mode| {
@@ -372,7 +372,7 @@ impl Workspace {
                 .continuous(6.0)
                 .text_size(px(12.5))
                 .cursor_pointer()
-                .when(selected, |el| el.bg(rgb(theme::tab_active())).font_weight(FontWeight::MEDIUM))
+                .when(selected, |el| el.bg(theme::control_fill()).font_weight(FontWeight::MEDIUM))
                 .when(!selected, |el| el.text_color(rgb(theme::muted())).hover(|s| s.text_color(rgb(theme::foreground()))))
                 .child(label)
                 .on_click(cx.listener(move |this, _, window, cx| this.set_add_mode(mode, window, cx)))
@@ -388,7 +388,7 @@ impl Workspace {
                 .pl(px(10.0))
                 .pr(px(4.0))
                 .continuous(8.0)
-                .bg(rgb(theme::background()))
+                .bg(theme::well_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .child(
@@ -410,8 +410,8 @@ impl Workspace {
                         .continuous(6.0)
                         .text_size(px(12.0))
                         .cursor_pointer()
-                        .bg(rgb(theme::tab_active()))
-                        .hover(|s| s.bg(rgb(theme::row_active())))
+                        .bg(theme::control_fill())
+                        .hover(|s| s.bg(theme::row_fill()))
                         .child(if copied { "Copied" } else { "Copy" })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
@@ -438,7 +438,7 @@ impl Workspace {
             .gap(px(14.0))
             .p(px(20.0))
             .continuous(14.0)
-            .bg(rgb(theme::popover()))
+            .bg(theme::overlay_fill())
             .border_1()
             .border_color(rgb(theme::border()))
             .shadow_xl()
@@ -452,7 +452,7 @@ impl Workspace {
                     .gap(px(2.0))
                     .p(px(2.0))
                     .continuous(8.0)
-                    .bg(rgb(theme::background()))
+                    .bg(theme::well_fill())
                     .child(tab("add-host-mode-ticket", "Paste ticket", Mode::Ticket))
                     .child(tab("add-host-mode-join", "Run on the other machine", Mode::Join)),
             );
@@ -517,7 +517,6 @@ impl Workspace {
                 .items_start()
                 .justify_center()
                 .pt(px(90.0))
-                .bg(gpui::rgba(0x0000_0088))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.close_add_host(window, cx)))
                 .child(card)
                 .into_any_element(),

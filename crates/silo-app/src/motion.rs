@@ -24,6 +24,9 @@ pub const TAB_EXIT: Duration = Duration::from_millis(180);
 pub const PANE_ENTER: Duration = Duration::from_millis(210);
 pub const PANE_EXIT: Duration = Duration::from_millis(200);
 pub const PANE_ZOOM: Duration = Duration::from_millis(220);
+/// Frosted: a zoomed pane's turn, while whole, between opaque (over its
+/// siblings) and its veil (nothing under it).
+pub const ZOOM_SETTLE: Duration = Duration::from_millis(100);
 pub const CLOSE_BUTTON: Duration = Duration::from_millis(140);
 
 /// Cubic ease-out.
@@ -144,22 +147,41 @@ pub struct PaneGhost {
     pub edge: Edge,
     /// Header label when pane headers were shown.
     pub title: Option<String>,
+    /// The card's fill (its block's backdrop or the theme background).
+    pub fill: u32,
     pub started: Instant,
 }
 
 /// A pane growing from its tiled slot to the whole pane area (zoom), or
 /// shrinking back (unzoom). The terminal keeps the zoomed size until the
-/// pane lands in its slot, so its grid resizes once.
+/// pane lands in its slot, so its grid resizes once. With a `settle`, the
+/// whole pane then fades to its veil (zoom), or first turns opaque (unzoom).
 pub struct Zoom {
     pub block: String,
     pub expanding: bool,
     pub started: Instant,
+    pub settle: Duration,
 }
 
 impl Zoom {
-    /// How far the pane covers the pane area (0 = its slot, 1 = all).
-    pub fn extent(&self, now: Instant) -> Option<f32> {
-        progress(self.started, PANE_ZOOM, now).map(|p| if self.expanding { p } else { 1.0 - p })
+    /// How far the pane covers the pane area (0 = its slot, 1 = all), and
+    /// how opaque it is over its veil (1 while it moves over its siblings).
+    pub fn frame(&self, now: Instant) -> Option<(f32, f32)> {
+        let (moving, settle) = (PANE_ZOOM.mul_f32(slowdown()), self.settle.mul_f32(slowdown()));
+        let t = now.saturating_duration_since(self.started);
+        if t >= moving + settle {
+            return None;
+        }
+        let part = |t: Duration, of: Duration| if of.is_zero() { 1.0 } else { (t.as_secs_f32() / of.as_secs_f32()).min(1.0) };
+        // Near its slot it overlaps little, so it turns opaque gradually.
+        let near_slot = |extent: f32| (extent * 6.0).min(1.0);
+        Some(if self.expanding {
+            let extent = ease_out(part(t, moving));
+            (extent, if t < moving { near_slot(extent) } else { 1.0 - part(t - moving, settle) })
+        } else {
+            let extent = 1.0 - ease_out(part(t.saturating_sub(settle), moving));
+            (extent, if t < settle { part(t, settle) } else { near_slot(extent) })
+        })
     }
 }
 
@@ -216,7 +238,7 @@ impl Motion {
         self.pane_enter.retain(|_, (s, _)| progress(*s, PANE_ENTER, now).is_some());
         self.tab_ghosts.retain(|g| progress(g.started, TAB_EXIT, now).is_some());
         self.pane_ghosts.retain(|g| progress(g.started, PANE_EXIT, now).is_some());
-        if self.zoom.as_ref().is_some_and(|z| z.extent(now).is_none()) {
+        if self.zoom.as_ref().is_some_and(|z| z.frame(now).is_none()) {
             self.zoom = None;
         }
         if self.unhover.as_ref().is_some_and(|(_, s)| progress(*s, CLOSE_BUTTON, now).is_none()) {
@@ -240,23 +262,44 @@ impl Motion {
         }
     }
 
-    /// Zoom (`expanding`) or unzoom `block`, continuing from the current
-    /// extent when it is already moving.
-    pub fn start_zoom(&mut self, block: String, expanding: bool, now: Instant) {
-        let current = self.zoom.as_ref().filter(|z| z.block == block).and_then(|z| z.extent(now));
-        let start = current.map_or(0.0, |extent| if expanding { extent } else { 1.0 - extent });
-        let elapsed = PANE_ZOOM.mul_f32(slowdown()).mul_f32(linear_for(start));
-        self.zoom = Some(Zoom { block, expanding, started: now.checked_sub(elapsed).unwrap_or(now) });
+    /// Zoom (`expanding`) or unzoom `block`, continuing from where it is
+    /// when it is already moving.
+    pub fn start_zoom(&mut self, block: String, expanding: bool, settle: Duration, now: Instant) {
+        let current = self.zoom.as_ref().filter(|z| z.block == block).and_then(|z| z.frame(now));
+        let (moving, settled) = (PANE_ZOOM.mul_f32(slowdown()), settle.mul_f32(slowdown()));
+        let elapsed = match current {
+            None => Duration::ZERO,
+            Some((extent, cover)) if extent >= 1.0 => {
+                if expanding {
+                    moving + settled.mul_f32(1.0 - cover)
+                } else {
+                    settled.mul_f32(cover)
+                }
+            }
+            Some((extent, _)) => {
+                if expanding {
+                    moving.mul_f32(linear_for(extent))
+                } else {
+                    settled + moving.mul_f32(linear_for(1.0 - extent))
+                }
+            }
+        };
+        self.zoom = Some(Zoom { block, expanding, started: now.checked_sub(elapsed).unwrap_or(now), settle });
     }
 
     /// The running zoom animation's block and current clip rect within the
     /// pane area, once the pane area and the block's slot were measured.
     pub fn zoom_frame(&self, now: Instant) -> Option<(&str, Bounds<Pixels>, Bounds<Pixels>)> {
         let zoom = self.zoom.as_ref()?;
-        let extent = zoom.extent(now)?;
+        let (extent, _) = zoom.frame(now)?;
         let area = self.measured.area.get()?;
         let slot = self.measured.cells.borrow().get(&zoom.block).copied()?;
         Some((zoom.block.as_str(), lerp(slot, area, extent), area))
+    }
+
+    /// The running zoom's extent and opacity (see [`Zoom::frame`]).
+    pub fn zoom_state(&self, now: Instant) -> Option<(f32, f32)> {
+        self.zoom.as_ref()?.frame(now)
     }
 
     /// Hover entered or left tab `id`. Leaving only affects the tab that
@@ -386,7 +429,7 @@ mod tests {
     fn zoom_reverses_from_its_current_extent() {
         let mut m = Motion::default();
         let t0 = Instant::now() + Duration::from_secs(1);
-        m.start_zoom("a".into(), true, t0);
+        m.start_zoom("a".into(), true, Duration::ZERO, t0);
         assert!(m.zoom_frame(t0).is_none(), "nothing to draw before the slot was measured");
         let slot = Bounds::new(point(px(500.), px(0.)), size(px(500.), px(600.)));
         let area = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.)));
@@ -395,15 +438,34 @@ mod tests {
         assert_eq!(m.zoom_frame(t0), Some(("a", slot, area)));
         let mid = t0 + PANE_ZOOM / 2;
         let (_, rect, _) = m.zoom_frame(mid).unwrap();
-        m.start_zoom("a".into(), false, mid);
+        m.start_zoom("a".into(), false, Duration::ZERO, mid);
         let (_, reversed, _) = m.zoom_frame(mid).unwrap();
         assert!(f32::from((reversed.origin.x - rect.origin.x).abs()) < 0.5, "unzoom starts where zoom was");
         assert!(m.prune(mid));
         assert!(!m.prune(mid + PANE_ZOOM));
         assert!(m.zoom.is_none());
-        m.start_zoom("a".into(), true, mid);
+        m.start_zoom("a".into(), true, Duration::ZERO, mid);
         m.forget_blocks(&["a".into()]);
         assert!(m.zoom.is_none() && m.measured.cells.borrow().is_empty());
+    }
+
+    #[test]
+    fn frosted_zoom_settles_while_whole() {
+        let mut m = Motion::default();
+        let t0 = Instant::now() + Duration::from_secs(1);
+        m.start_zoom("a".into(), true, ZOOM_SETTLE, t0);
+        assert_eq!(m.zoom_state(t0), Some((0.0, 0.0)), "a veil in its slot");
+        let (extent, cover) = m.zoom_state(t0 + PANE_ZOOM / 2).unwrap();
+        assert!(extent < 1.0 && (cover - 1.0).abs() < f32::EPSILON, "opaque over its siblings");
+        let settling = t0 + PANE_ZOOM + ZOOM_SETTLE / 2;
+        let (extent, cover) = m.zoom_state(settling).unwrap();
+        assert!((extent - 1.0).abs() < f32::EPSILON && cover > 0.0 && cover < 1.0, "fades once whole");
+        m.start_zoom("a".into(), false, ZOOM_SETTLE, settling);
+        let (extent, reversed) = m.zoom_state(settling).unwrap();
+        assert!((extent - 1.0).abs() < f32::EPSILON && (reversed - cover).abs() < 1e-3, "unzoom continues the fade");
+        let (extent, cover) = m.zoom_state(settling + ZOOM_SETTLE).unwrap();
+        assert!(extent < 1.0 && cover > 0.99, "turns opaque before it shrinks");
+        assert!(m.zoom_state(settling + ZOOM_SETTLE + PANE_ZOOM).is_none());
     }
 
     #[test]

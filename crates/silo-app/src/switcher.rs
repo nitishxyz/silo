@@ -268,7 +268,7 @@ impl Workspace {
             .max_h(px((f32::from(window.viewport_size().height) - TITLEBAR_HEIGHT - 16.0).max(160.0)))
             .overflow_y_scroll()
             .continuous(10.0)
-            .bg(rgb(theme::popover()))
+            .bg(theme::overlay_fill())
             .border_1()
             .border_color(rgb(theme::border()))
             .shadow_lg()
@@ -339,8 +339,8 @@ impl Workspace {
             .mx(px(4.0))
             .px(px(8.0))
             .continuous(crate::radius::MENU_ROW)
-            .when(selected, |el| el.bg(rgb(theme::row_active())))
-            .when(!selected, |el| el.hover(|s| s.bg(rgb(theme::tab_hover()))))
+            .when(selected, |el| el.bg(theme::row_fill()))
+            .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
             .cursor_pointer()
             .child(div().w(px(14.0)).flex_none().flex().justify_center().map(|el| {
                 if is_session {

@@ -167,7 +167,7 @@ impl RenderOnce for Toggle {
             .capsule()
             .border_1()
             .border_color(rgb(theme::border()))
-            .bg(rgb(theme::tab_active()))
+            .bg(theme::control_fill())
             .child(active_track)
             .child(thumb);
 
@@ -222,13 +222,22 @@ pub struct Segmented {
     selected: usize,
     segment_width: f32,
     on_select: Option<SelectHandler>,
+    unavailable: Option<(usize, SharedString)>,
 }
 
 impl Segmented {
     pub fn new(id: impl Into<ElementId>, segments: impl IntoIterator<Item = impl Into<SharedString>>, selected: usize) -> Self {
         let segments: Vec<SharedString> = segments.into_iter().map(Into::into).collect();
         debug_assert!((2..=3).contains(&segments.len()), "a segmented control holds 2 to 3 segments");
-        Self { id: id.into(), segments, selected, segment_width: 84.0, on_select: None }
+        Self { id: id.into(), segments, selected, segment_width: 84.0, on_select: None, unavailable: None }
+    }
+
+    /// Segment `index` cannot be chosen now: dimmed, `reason` as its
+    /// tooltip. It may still be the selected (saved) choice.
+    #[must_use]
+    pub fn unavailable(mut self, index: usize, reason: impl Into<SharedString>) -> Self {
+        self.unavailable = Some((index, reason.into()));
+        self
     }
 
     #[must_use]
@@ -287,9 +296,12 @@ impl RenderOnce for Segmented {
 
         let id = self.id.clone();
         let handler = self.on_select;
+        let blocked = self.unavailable.as_ref().map(|(i, _)| *i);
         let mut row = div().relative().size_full().flex().child(thumb);
         for (index, label) in segments.into_iter().enumerate() {
             let is_selected = index == selected;
+            let reason = self.unavailable.clone().filter(|(i, _)| *i == index).map(|(_, r)| r);
+            let off = reason.is_some();
             let click = handler.clone();
             let a11y = handler.clone();
             let keys = handler.clone();
@@ -317,15 +329,17 @@ impl RenderOnce for Segmented {
                     .text_color(rgb(if is_selected { theme::on_accent() } else { theme::muted() }))
                     .track_focus(&handle)
                     .focus_visible(move |s| s.border_color(rgb(theme::on_accent())))
-                    .cursor_pointer()
-                    .when(!is_selected, |s| s.hover(|s| s.text_color(rgb(theme::foreground()))))
+                    .when(off, |s| s.opacity(0.45))
+                    .when_some(reason, |s, r| s.tooltip(crate::tooltip::Tooltip::text(r)))
+                    .when(!off, |s| s.cursor_pointer())
+                    .when(!is_selected && !off, |s| s.hover(|s| s.text_color(rgb(theme::foreground()))))
                     .on_click(move |_, window, cx| {
-                        if let (false, Some(h)) = (is_selected, &click) {
+                        if let (false, false, Some(h)) = (is_selected, off, &click) {
                             h(index, window, cx);
                         }
                     })
                     .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
-                        if let (false, Some(h)) = (is_selected, &a11y) {
+                        if let (false, false, Some(h)) = (is_selected, off, &a11y) {
                             h(index, window, cx);
                         }
                     })
@@ -342,7 +356,7 @@ impl RenderOnce for Segmented {
                         if let Some(target) = target {
                             cx.stop_propagation();
                             focus_keys[target].focus(window, cx);
-                            if let (true, Some(h)) = (target != selected, &keys) {
+                            if let (true, Some(h)) = (target != selected && Some(target) != blocked, &keys) {
                                 h(target, window, cx);
                             }
                         }
@@ -360,7 +374,7 @@ impl RenderOnce for Segmented {
             .capsule()
             .border_1()
             .border_color(rgb(theme::border()))
-            .bg(rgb(theme::tab_active()))
+            .bg(theme::control_fill())
             .child(row)
     }
 }

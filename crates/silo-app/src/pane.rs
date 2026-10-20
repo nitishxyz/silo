@@ -36,6 +36,12 @@ use crate::{
 
 pub const PADDING: f32 = 6.0;
 
+/// Radius of a surface `inset` points inside the terminal's padded area,
+/// concentric with the card's corner (1pt border + [`PADDING`] out).
+fn nested(inset: f32) -> f32 {
+    crate::radius::concentric(crate::radius::CARD, 1.0 + PADDING + inset)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Connecting,
@@ -52,6 +58,8 @@ pub enum PaneEvent {
     ClipboardWrite(String),
     /// A brief message for the status bar.
     Notice(String),
+    /// The program's backdrop colour changed.
+    Backdrop,
 }
 
 /// Files on their way to the block's (remote) host.
@@ -110,6 +118,13 @@ pub struct Pane {
     prepared_key: Option<(u64, u32, u32, u32, u32)>,
     preparing: bool,
     last_frame: Option<Arc<Frame>>,
+    /// Background the program paints, when it is not the configured one.
+    backdrop: crate::adaptive::Stable,
+    backdrop_at: Option<Instant>,
+    backdrop_counts: Vec<(u32, u32)>,
+    backdrop_task: Option<Task<()>>,
+    /// Cell background translucency over a frosted card.
+    translucency: Option<silo_render::Translucency>,
     content_bounds: Option<Bounds<Pixels>>,
     /// Grid this client wants for the block (from its pixel layout).
     grid: Option<GridSize>,
@@ -216,6 +231,11 @@ impl Pane {
             prepared_key: None,
             preparing: false,
             last_frame: None,
+            backdrop: crate::adaptive::Stable::default(),
+            backdrop_at: None,
+            backdrop_counts: Vec::new(),
+            backdrop_task: None,
+            translucency: None,
             content_bounds: None,
             grid: None,
             size_task: None,
@@ -263,6 +283,56 @@ impl Pane {
 
     pub fn title(&self) -> String {
         self.info.as_ref().map_or_else(|| "shell".into(), block_title)
+    }
+
+    /// The program's backdrop ([`crate::adaptive::terminal_backdrop`]).
+    pub fn backdrop(&self) -> Option<u32> {
+        self.backdrop.value()
+    }
+
+    /// Set by the workspace from the window material and the card's fill.
+    pub fn set_translucency(&mut self, translucency: Option<silo_render::Translucency>, cx: &mut Context<Self>) {
+        if self.translucency != translucency {
+            self.translucency = translucency;
+            self.generation += 1;
+            cx.notify();
+        }
+    }
+
+    /// Re-sample the backdrop from the last frame, at most every
+    /// [`crate::adaptive::SAMPLE_INTERVAL`].
+    fn sample_backdrop(&mut self, cx: &mut Context<Self>) {
+        if self.backdrop_task.is_some() {
+            return;
+        }
+        let wait = self.backdrop_at.map_or(Duration::ZERO, |at| crate::adaptive::SAMPLE_INTERVAL.saturating_sub(at.elapsed()));
+        if wait.is_zero() {
+            self.update_backdrop(cx);
+            return;
+        }
+        self.backdrop_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.backdrop_task = None;
+                pane.update_backdrop(cx);
+            });
+        }));
+    }
+
+    /// Sample once; a change is adopted on the next agreeing sample, which
+    /// is scheduled even when no new frame arrives.
+    fn update_backdrop(&mut self, cx: &mut Context<Self>) {
+        self.backdrop_at = Some(Instant::now());
+        let default = self.mirror.config().map_or_else(theme::background, |c| c.background);
+        let keep = self.backdrop.value();
+        let counts = &mut self.backdrop_counts;
+        let sample = self.last_frame.as_deref().and_then(|frame| crate::adaptive::terminal_backdrop(frame, default, keep, counts));
+        if self.backdrop.feed(sample) {
+            cx.emit(PaneEvent::Backdrop);
+        }
+        if self.backdrop.pending() {
+            self.sample_backdrop(cx);
+        }
     }
 
     /// An iroh connection: the only kind that predicts (docs/PHASE5.md §4.1).
@@ -840,8 +910,8 @@ impl Pane {
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .continuous(10.0)
-                .bg(rgb(theme::popover()))
+                .continuous(nested(8.0))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_xl()
@@ -887,7 +957,7 @@ impl Pane {
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .cursor_pointer()
                 .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
-                .when(!primary, |el| el.bg(rgb(theme::tab_active())).hover(|s| s.bg(rgb(theme::row_active()))))
+                .when(!primary, |el| el.bg(theme::control_fill()).hover(|s| s.bg(theme::row_fill())))
                 .child(label)
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| this.confirm_paste(primary, cx)))
@@ -903,8 +973,8 @@ impl Pane {
                 .flex_col()
                 .gap(px(8.0))
                 .p(px(12.0))
-                .continuous(10.0)
-                .bg(rgb(theme::popover()))
+                .continuous(nested(8.0))
+                .bg(theme::overlay_fill())
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .shadow_xl()
@@ -1092,13 +1162,15 @@ impl Pane {
         let Ok(frame) = vt.frame() else { return };
         let frame = Arc::new(frame);
         self.last_frame = Some(frame.clone());
+        self.sample_backdrop(cx);
         self.preparing = true;
         let preparer = self.preparer.clone();
+        let options = FrameOptions { translucency: self.translucency, ..FrameOptions::default() };
         cx.spawn(async move |this, cx| {
             let prepared = cx
                 .background_spawn(async move {
                     let mut preparer = preparer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    preparer.prepare(&frame, metrics, FrameOptions::default())
+                    preparer.prepare(&frame, metrics, options)
                 })
                 .await;
             let _ = this.update(cx, |pane, cx| {
@@ -1257,7 +1329,9 @@ impl Render for Pane {
         let applied = self.mirror.size();
         let edge_x = self.grid.filter(|g| sized_elsewhere && applied.columns < g.columns).map(|_| px(f32::from(applied.columns) * metrics.width));
         let edge_y = self.grid.filter(|g| sized_elsewhere && applied.rows < g.rows).map(|_| px(f32::from(applied.rows) * metrics.height));
-        let outside = || div().absolute().bg(rgb(theme::surface())).border_color(rgb(theme::border()));
+        // Frosted, the card's veil already is that fill.
+        let solid = self.translucency.is_none();
+        let outside = || div().absolute().when(solid, |el| el.bg(rgb(theme::surface()))).border_color(rgb(theme::border()));
         let (cells, predicted_cursor) = self.predictor.overlay();
         let overlay = Overlay {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
@@ -1374,7 +1448,7 @@ impl Render for Pane {
                         .top_0()
                         .left_0()
                         .size_full()
-                        .continuous(6.0)
+                        .continuous(nested(0.0))
                         .drag_over::<gpui::ExternalPaths>(|s, _, _, _| {
                             s.bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent()))
                         })
@@ -1391,8 +1465,8 @@ impl Render for Pane {
                             .right(px(4.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(4.0)
-                            .bg(rgb(theme::tab_active()))
+                            .continuous(nested(4.0))
+                            .bg(theme::overlay_fill())
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
                             .child(text),
@@ -1409,8 +1483,8 @@ impl Render for Pane {
                             .gap(px(8.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(4.0)
-                            .bg(rgb(theme::tab_active()))
+                            .continuous(nested(4.0))
+                            .bg(theme::overlay_fill())
                             .border_1()
                             .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::foreground()).opacity(0.75))
@@ -1439,7 +1513,7 @@ impl Render for Pane {
                             .px(px(6.0))
                             .py(px(2.0))
                             .continuous(4.0)
-                            .bg(rgb(theme::tab_active()))
+                            .bg(theme::overlay_fill())
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
                             .child(format!("sized by {owner}"))
