@@ -23,6 +23,9 @@ plist() { # exe id [helper]
   <key>CFBundleName</key><string>$1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Web pages in Silo can use your phone or a security key to sign in.</string>
+  <key>NSCameraUsageDescription</key><string>Web pages in Silo can ask to use the camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Web pages in Silo can ask to use the microphone.</string>
   ${3:+<key>LSUIElement</key><true/>}
 </dict></plist>
 PLIST

@@ -9,7 +9,7 @@ use std::{
 };
 
 use silo_client::{
-    BuildMismatch, Control, DataStream, Mirror, Unauthorized,
+    Control, DataStream, Mirror, Unauthorized,
     transport::{Conn, EndpointAddr, Net, PairTicket, RelayConfig},
 };
 use silo_proto::{
@@ -124,22 +124,6 @@ async fn pair_reconnect_and_attach() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wrong_build_is_build_mismatch() {
-    let home = temp_home("build");
-    let task = start(&home).await;
-    let control = owner(&home).await;
-    let ticket = invite(&control).await;
-    let net = device(&home, "a").await;
-    let rc = net.dial(ticket.addr.clone()).await.unwrap();
-    let error = Control::connect_build(Conn::Iroh(rc), "laptop", false, "other-build").await.err().unwrap();
-    assert!(error.downcast_ref::<BuildMismatch>().is_some(), "{error:#}");
-    // Nothing spawned for the client: its directory holds only the identity.
-    assert!(!paths::socket(&home.join("client-a")).exists());
-    net.close().await.unwrap();
-    shutdown(control, task).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn unpaired_device_is_unauthorized() {
     let home = temp_home("unauth");
     let task = start(&home).await;
@@ -170,4 +154,49 @@ async fn server_exit_resolves_closed() {
     assert!(remote.call_value(Method::SessionList {}).await.is_err());
     drop(remote);
     net.close().await.unwrap();
+}
+
+/// The upgrade stream works across builds; only refusals are exercised so
+/// the test binary (the in-process server's executable) is never replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_stream_checks_and_refuses() {
+    use silo_client::upgrade::{self, Refused};
+    let home = temp_home("upgrade");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let ticket = invite(&control).await;
+
+    let stranger = device(&home, "x").await;
+    let rc = stranger.dial(ticket.addr.clone()).await.unwrap();
+    let error = upgrade::open(&Conn::Iroh(rc)).await.err().unwrap();
+    assert_eq!(error.downcast_ref::<Refused>().unwrap().code, "unauthorized", "{error:#}");
+    stranger.close().await.unwrap();
+
+    let net = device(&home, "a").await;
+    let (paired, _) = silo_client::pair(&net, &ticket, "laptop").await.unwrap();
+    paired.call_value(Method::SessionCreate { name: None, spawn: shell(), kind: silo_proto::model::BlockKind::Terminal, url: None }).await.unwrap();
+    drop(paired);
+    let script = home.join("fake-silo");
+    let cases = [
+        (format!("silo {} ({})", env!("CARGO_PKG_VERSION"), silo_proto::BUILD), silo_proto::upgrade::UP_TO_DATE),
+        ("silo 0.0.1 (other)".to_owned(), silo_proto::upgrade::NEWER),
+        ("not silo".to_owned(), "invalid"),
+    ];
+    for (version, code) in cases {
+        std::fs::write(&script, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        // Held: the connection must outlive the stream.
+        let conn = Conn::Iroh(net.dial(ticket.addr.clone()).await.unwrap());
+        let opened = timeout(T, upgrade::open(&conn)).await.unwrap().unwrap();
+        assert_eq!(opened.host.build, silo_proto::BUILD);
+        assert_eq!(opened.host.platform, silo_proto::upgrade::platform());
+        assert_eq!(opened.host.sessions.len(), 1);
+        let error = timeout(T, opened.send(&script, false)).await.unwrap().err().unwrap();
+        assert_eq!(error.downcast_ref::<Refused>().unwrap().code, code, "{error:#}");
+    }
+    let exe_dir = std::env::current_exe().unwrap().canonicalize().unwrap().parent().unwrap().to_owned();
+    let leftovers =
+        std::fs::read_dir(exe_dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with(".silo.upgrade."));
+    assert_eq!(leftovers.count(), 0);
+    net.close().await.unwrap();
+    shutdown(control, task).await;
 }

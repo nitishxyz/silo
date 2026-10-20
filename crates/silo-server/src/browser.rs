@@ -100,6 +100,7 @@ impl BrowserBlock {
                 return Err(RpcError::bad_request("zoom must be finite"));
             }
             BrowserCommand::Zoom { zoom } => self.state.zoom = *zoom,
+            BrowserCommand::Unknown => return Err(RpcError::bad_request("unknown browser command")),
         }
         Ok(())
     }

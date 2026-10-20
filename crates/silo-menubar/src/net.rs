@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use silo_client::{Control, DifferentBuild, Events, PING_TIMEOUT_LOCAL, mismatch};
+use silo_client::{Control, Events, IncompatibleServer, PING_TIMEOUT_LOCAL, mismatch};
 use silo_proto::{
     control::{Event, Method, ServerInfo},
     model::SessionSummary,
@@ -24,7 +24,7 @@ pub struct MenuState {
     pub server: Option<ServerInfo>,
     pub sessions: usize,
     /// A server of a different build holds the state directory.
-    pub incompatible: Option<DifferentBuild>,
+    pub incompatible: Option<IncompatibleServer>,
     pub busy: Option<&'static str>,
     pub error: Option<String>,
     /// A server holds the socket but stopped answering pings.
@@ -43,7 +43,7 @@ impl MenuState {
                 n => format!("Silo — Running · {n} sessions"),
             },
             (None, _) if self.unresponsive => "Silo — Not responding".to_owned(),
-            (None, Some(_)) => format!("Silo — {}", DifferentBuild::LABEL),
+            (None, Some(_)) => format!("Silo — {}", IncompatibleServer::LABEL),
             (None, None) => "Silo — Not running".to_owned(),
         }
     }
@@ -135,7 +135,7 @@ async fn run(config: Config, shared: Arc<Shared>, mut cmds: mpsc::UnboundedRecei
             }
             Err(error) => {
                 // Another build: describe it, never start a second server.
-                let incompatible = mismatch::different_build(&config.home, &error).await;
+                let incompatible = mismatch::incompatible_server(&config.home, &error).await;
                 let changed = shared.state.lock().is_ok_and(|s| s.incompatible != incompatible || s.unresponsive);
                 if changed {
                     shared.update(|s| {
@@ -237,8 +237,8 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
 mod tests {
     use super::*;
 
-    fn other(sessions: Option<usize>) -> DifferentBuild {
-        DifferentBuild { build: Some("0123456789abcdef".into()), pid: Some(1), version: None, sessions }
+    fn other(sessions: Option<usize>) -> IncompatibleServer {
+        IncompatibleServer { build: Some("0123456789abcdef".into()), pid: Some(1), version: None, sessions }
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(state.status(), "Silo — Not running");
         assert_eq!(state.running_sessions(), 0);
         state.incompatible = Some(other(Some(2)));
-        assert_eq!(state.status(), "Silo — Different server build");
+        assert_eq!(state.status(), "Silo — Incompatible server");
         assert_eq!(state.running_sessions(), 2);
         state.unresponsive = true;
         assert_eq!(state.status(), "Silo — Not responding");
@@ -256,6 +256,7 @@ mod tests {
             pid: 2,
             server_id: String::new(),
             endpoint_id: String::new(),
+            hostname: String::new(),
             remote_error: None,
             endpoint_addr: None,
             idle_exit_secs: 0,

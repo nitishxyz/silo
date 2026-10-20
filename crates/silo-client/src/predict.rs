@@ -186,7 +186,9 @@ impl Predictor {
             | ServerData::SnapshotDone
             | ServerData::Output { .. }
             | ServerData::ClipboardWrite { .. }
-            | ServerData::ClipboardRead { .. } => {}
+            | ServerData::ClipboardRead { .. }
+            | ServerData::ClipboardReadUnknown { .. }
+            | ServerData::Unknown(_) => {}
         }
     }
 }

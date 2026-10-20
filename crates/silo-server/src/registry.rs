@@ -151,6 +151,21 @@ pub struct ClientEntry {
     /// The remote connection this client's control stream runs on; data
     /// tickets it is issued are redeemable only there (`None`: unix).
     pub origin: Option<u64>,
+    /// What the client advertised in its hello (see `silo_proto::compat`).
+    pub features: Vec<String>,
+}
+
+impl ClientEntry {
+    /// Whether the client advertised `feature` (`None`: needs none).
+    fn supports(&self, feature: Option<&str>) -> bool {
+        feature.is_none_or(|f| self.features.iter().any(|x| x == f))
+    }
+}
+
+/// The feature (`silo_proto::compat::feature`) a client must advertise to
+/// receive `event`; none yet, every protocol-1 client knows every event.
+fn needed_feature(_event: &Event) -> Option<&'static str> {
+    None
 }
 
 struct Ticket {
@@ -178,6 +193,8 @@ pub struct Registry {
     /// failed: the block shows its restored screen, and the program lives
     /// on (no hangup) until the next upgrade carries it or the block closes.
     pub parked: HashMap<BlockId, silo_pty::Detached>,
+    /// Start a session whenever none is left (see `keep_session`).
+    keep_session: bool,
 }
 
 fn new_id(prefix: char) -> String {
@@ -206,6 +223,7 @@ impl Registry {
             tree_dirty: false,
             persist_kick: Arc::new(Notify::new()),
             parked: HashMap::new(),
+            keep_session: false,
         }
     }
 
@@ -219,6 +237,24 @@ impl Registry {
             reg.remove_block(&id);
         }
         reg
+    }
+
+    /// From now on never sit at zero sessions; start one now if none.
+    pub fn keep_session(&mut self) {
+        self.keep_session = true;
+        self.keep_one();
+    }
+
+    /// With `keep_session`, a fresh session (login shell in the home
+    /// directory) when the last one is gone.
+    fn keep_one(&mut self) {
+        if !self.keep_session || !self.sessions.is_empty() {
+            return;
+        }
+        let spawn = SpawnSpec::default();
+        if let Err(error) = self.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None }) {
+            tracing::error!("start default session: {}", error.message);
+        }
     }
 
     /// The channel block actors report to.
@@ -271,7 +307,7 @@ impl Registry {
         let id = self.next_client;
         self.next_client += 1;
         let label = short_client_name(&name).to_owned();
-        self.clients.insert(id, ClientEntry { name, label, passive, events: None, close: None, attached: 0, origin: None });
+        self.clients.insert(id, ClientEntry { name, label, passive, events: None, close: None, attached: 0, origin: None, features: Vec::new() });
         id
     }
 
@@ -312,12 +348,14 @@ impl Registry {
     }
 
     fn emit_to(&mut self, event: Event, owner_only: bool) {
+        let needs = needed_feature(&event);
         self.seq += 1;
         let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
         let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
             return;
         };
-        for client in self.clients.values_mut().filter(|c| !owner_only || c.origin.is_none()) {
+        let wanted = |c: &ClientEntry| (!owner_only || c.origin.is_none()) && c.supports(needs);
+        for client in self.clients.values_mut().filter(|c| wanted(c)) {
             let Some(sink) = &client.events else { continue };
             let overflow = sink.queued.load(std::sync::atomic::Ordering::Acquire) > EVENT_BACKLOG;
             if overflow || !sink.send(frame.clone()) {
@@ -423,6 +461,10 @@ impl Registry {
     }
 
     fn spawn_block(&mut self, session_id: &str, new: &New<'_>, fallback: TermSize) -> Result<BlockId, RpcError> {
+        // A newer client's kind: never stand in a shell for it.
+        if new.kind == BlockKind::Unknown {
+            return Err(RpcError::bad_request("unsupported block kind"));
+        }
         let id = self.fresh_id('b');
         let spawn = new.spawn;
         let size = spawn.size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(fallback);
@@ -511,6 +553,7 @@ impl Registry {
         fn size(layout: &Layout, reg: &Registry) -> Option<TermSize> {
             match layout {
                 Layout::Block { id } => reg.block_info(id).filter(|i| i.kind == BlockKind::Terminal).map(|i| i.size),
+                Layout::Unknown => None,
                 Layout::Split { axis, first, second, .. } => {
                     let (a, b) = (size(first, reg)?, size(second, reg)?);
                     Some(match axis {
@@ -703,6 +746,7 @@ impl Registry {
         self.sessions.remove(si);
         self.emit(Event::SessionClosed { session_id: sid });
         self.sessions_changed();
+        self.keep_one();
         Ok(())
     }
 
@@ -776,6 +820,7 @@ impl Registry {
             self.session_changed(si);
         }
         self.sessions_changed();
+        self.keep_one();
     }
 
     pub fn issue_ticket(&mut self, client_id: ClientId, block_id: &str) -> Result<DataTicket, RpcError> {
@@ -1067,6 +1112,34 @@ mod tests {
     }
 
     #[test]
+    fn feature_events_reach_only_clients_advertising_it() {
+        let client = |features: &[&str]| ClientEntry {
+            name: String::new(),
+            label: String::new(),
+            passive: false,
+            events: None,
+            close: None,
+            attached: 0,
+            origin: None,
+            features: features.iter().map(|&f| f.to_owned()).collect(),
+        };
+        assert!(client(&[]).supports(None));
+        assert!(!client(&[]).supports(Some("synthetic")));
+        assert!(client(&["synthetic"]).supports(Some("synthetic")));
+        assert_eq!(needed_feature(&Event::BlockBell { block_id: "b".into() }), None);
+    }
+
+    #[test]
+    fn unknown_block_kinds_are_rejected() {
+        let (mut reg, _rx) = registry();
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None };
+        let blocks = reg.blocks.len();
+        assert_eq!(reg.split("a", Axis::Horizontal, &new).unwrap_err().code, "bad_request");
+        assert_eq!(reg.create_session(None, &new).unwrap_err().code, "bad_request");
+        assert_eq!(reg.blocks.len(), blocks);
+    }
+
+    #[test]
     fn closing_a_focused_float_returns_to_the_previous_block() {
         let (mut reg, _rx) = registry();
         reg.focus("c").unwrap();
@@ -1196,5 +1269,20 @@ mod tests {
         let (_, tree_dirty) = reg.take_dirty(false);
         assert!(tree_dirty, "the emptied tree is committed");
         assert_eq!(reg.close_block("c").unwrap_err().code, "not_found");
+    }
+
+    #[tokio::test]
+    async fn keep_session_replaces_the_last_one() {
+        let (mut reg, _rx) = registry();
+        reg.keep_session();
+        assert_eq!(reg.sessions.len(), 1, "a session already exists");
+        reg.close_session("s").unwrap();
+        assert_eq!(reg.sessions.len(), 1);
+        let fresh = reg.sessions[0].id.clone();
+        assert_ne!(fresh, "s");
+        let block = reg.sessions[0].blocks()[0].clone();
+        reg.close_block(&block).unwrap();
+        assert_eq!(reg.sessions.len(), 1, "closing its last block starts another");
+        assert_ne!(reg.sessions[0].id, fresh);
     }
 }

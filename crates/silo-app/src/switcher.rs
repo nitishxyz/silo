@@ -54,15 +54,12 @@ impl Workspace {
 
     fn open_switcher(&mut self, rename: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_palette(window, cx);
-        let placeholder = if rename.is_some() { "Rename session" } else { "Filter or create…" };
+        // Renaming starts empty, showing the current name; empty keeps it.
+        let placeholder = rename.as_ref().map_or_else(|| "Filter or create…".to_owned(), |(_, name)| name.clone());
         let field = cx.new(|cx| TextField::new(placeholder, cx));
-        if let Some((_, name)) = &rename {
-            field.update(cx, |f, cx| f.set_text(name.clone(), cx));
-        }
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.field_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
-        let filter = rename.as_ref().map(|r| r.1.clone()).unwrap_or_default();
-        self.switcher = Some(Switcher { field, filter, selected: 0, renaming: rename.map(|r| r.0), _sub: sub });
+        self.switcher = Some(Switcher { field, filter: String::new(), selected: 0, renaming: rename.map(|r| r.0), _sub: sub });
         self.select_current();
         // Deferred: a mouse-down that opened us may still focus its target.
         focus.focus(window, cx);
@@ -222,7 +219,7 @@ impl Workspace {
             match row {
                 Row::Header { host } => {
                     let entry = &self.hosts[host];
-                    let state = state_label(&entry.state, entry.info.local);
+                    let state = state_label(&entry.state, entry.info.local).map(str::to_owned).or_else(|| older(entry));
                     let dot = state_color(&entry.state);
                     list = list.child(
                         div()
@@ -385,6 +382,14 @@ impl Workspace {
     }
 }
 
+/// A connected host of an older build lacking features this app has: its
+/// version, e.g. "0.1.0 · older".
+pub(crate) fn older(entry: &crate::hosts_state::HostEntry) -> Option<String> {
+    let hello = entry.control.as_ref()?.hello();
+    let missing = silo_proto::compat::missing(&hello.features);
+    (!missing.is_empty()).then(|| format!("{} · older", hello.server.version))
+}
+
 /// Quiet label after a host's name; none while connected.
 pub(crate) fn state_label(state: &HostState, local: bool) -> Option<&'static str> {
     match state {
@@ -393,7 +398,7 @@ pub(crate) fn state_label(state: &HostState, local: bool) -> Option<&'static str
         HostState::Unreachable(_) if local => Some("unavailable"),
         HostState::Unreachable(_) => Some("offline"),
         HostState::NotPaired => Some("not paired"),
-        HostState::DifferentBuild => Some("different build"),
+        HostState::Incompatible => Some("incompatible"),
     }
 }
 
@@ -402,7 +407,7 @@ pub(crate) fn state_color(state: &HostState) -> u32 {
         HostState::Connected => theme::accent(),
         HostState::Connecting => theme::muted(),
         HostState::Unreachable(_) => theme::border(),
-        HostState::NotPaired | HostState::DifferentBuild => theme::danger(),
+        HostState::NotPaired | HostState::Incompatible => theme::danger(),
     }
 }
 

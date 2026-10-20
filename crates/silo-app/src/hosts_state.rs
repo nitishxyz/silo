@@ -32,8 +32,8 @@ pub struct HostEntry {
     pub sessions: Vec<SessionSummary>,
     /// Stop Server: the connection loop waits instead of respawning.
     pub paused: Arc<AtomicBool>,
-    /// A server of a different build holds this host.
-    pub incompatible: Option<silo_client::DifferentBuild>,
+    /// An incompatible local server holds this host.
+    pub incompatible: Option<silo_client::IncompatibleServer>,
     /// Removed via Remove Host…; kept so host indices stay stable.
     pub removed: bool,
 }
@@ -149,9 +149,8 @@ impl HostsState {
         hosts
     }
 
-    /// hosts.json changed (e.g. `silo hosts add`): connect new hosts,
-    /// drop removed ones, take new names. The app's own writes already
-    /// match `entries`, so they change nothing.
+    /// hosts.json changed (e.g. `silo remote install`): connect and
+    /// announce new hosts, drop removed ones, take new names.
     fn watch_hosts(&mut self, cx: &mut Context<Self>) {
         let stamp = hosts::stamp(&self.home);
         if stamp == self.hosts_stamp {
@@ -175,7 +174,8 @@ impl HostsState {
             self.rename(index, name, cx);
         }
         for host in plan.add {
-            self.add(HostInfo::remote(self.home.clone(), &host), cx);
+            let index = self.add(HostInfo::remote(self.home.clone(), &host), cx);
+            cx.emit(crate::offers::OfferEvent::Added { host: index, name: host.name, invite: None });
         }
     }
 
@@ -324,10 +324,11 @@ impl HostsState {
                 entry.state = HostState::Unreachable(reason.clone());
             }
             ConnEvent::Quit => cx.quit(),
+            ConnEvent::Resync => self.refresh_sessions(host, cx),
             ConnEvent::Addr(addr) => self.save_addr(host, addr),
             ConnEvent::NotPaired => (entry.control, entry.state) = (None, HostState::NotPaired),
-            ConnEvent::RemoteBuild => (entry.control, entry.state) = (None, HostState::DifferentBuild),
-            ConnEvent::DifferentBuild(server) => {
+            ConnEvent::Incompatible => (entry.control, entry.state) = (None, HostState::Incompatible),
+            ConnEvent::IncompatibleServer(server) => {
                 entry.control = None;
                 entry.sessions.clear();
                 entry.state = HostState::Unreachable(server.headline());

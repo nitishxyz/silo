@@ -19,12 +19,15 @@ pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 pub enum Kind {
     Terminal,
     Browser,
+    /// A newer server's block kind: no pane, a "Not supported" card.
+    Unsupported,
 }
 
 #[must_use]
 pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     match info.map(|i| i.kind) {
         Some(BlockKind::Browser) => Kind::Browser,
+        Some(BlockKind::Unknown) => Kind::Unsupported,
         _ => Kind::Terminal,
     }
 }
@@ -45,6 +48,7 @@ pub fn icon_for(kind: Kind, loading: bool, favicon: bool) -> Icon {
         Kind::Browser if loading => Icon::Spinner,
         Kind::Browser if favicon => Icon::Favicon,
         Kind::Browser => Icon::Glyph("globe"),
+        Kind::Unsupported => Icon::Glyph("info"),
     }
 }
 
@@ -839,6 +843,7 @@ impl BrowserPane {
                     state.zoom = *zoom;
                 }
             }
+            BrowserCommand::Unknown => {}
         }
         cx.notify();
     }
@@ -1513,8 +1518,21 @@ impl crate::workspace::Workspace {
 
     /// New Browser: a blank browser beside `block`, address bar focused.
     pub(crate) fn new_browser(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let Some(control) = self.control() else { return };
         let method = browser_split(block.clone(), self.auto_axis(&block), None);
+        self.create_browser(method, window, cx);
+    }
+
+    /// New Browser Tab: a tab holding a blank browser, address bar focused.
+    pub(crate) fn new_browser_tab(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(view) = &self.view else { return };
+        let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
+        let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Browser, url: None };
+        self.create_browser(method, window, cx);
+    }
+
+    /// Create a browser block with `method`, then focus its address bar.
+    fn create_browser(&mut self, method: Method, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(control) = self.control() else { return };
         let task = self.rt.spawn(async move { control.call::<silo_proto::control::Created>(method).await });
         cx.spawn_in(window, async move |this, cx| {
             let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
@@ -1523,7 +1541,10 @@ impl crate::workspace::Workspace {
                     this.address_pending = Some(created.block_id);
                     this.focus_new_browser(window, cx);
                 }
-                Err(error) => tracing::warn!("new browser: {error:#}"),
+                Err(error) => {
+                    tracing::warn!("new browser: {error:#}");
+                    this.flash(this.failed(&error, "Could not open a browser."), cx);
+                }
             });
         })
         .detach();

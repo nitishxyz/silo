@@ -23,31 +23,48 @@ use crate::{
     model::{TermSize, TerminalConfig},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DataHello {
-    /// The client's [`crate::BUILD`]; must equal the server's.
+    /// The client's [`crate::PROTOCOL`] and [`crate::VT`]; must equal the
+    /// server's.
+    #[serde(default)]
+    pub protocol: u32,
+    #[serde(default)]
+    pub vt: String,
+    /// The client's [`crate::BUILD`], for display.
     pub build: String,
     pub ticket: String,
     #[serde(default)]
     pub resume: Option<Resume>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+impl DataHello {
+    /// This build's hello for `ticket`.
+    #[must_use]
+    pub fn ours(ticket: String, resume: Option<Resume>) -> Self {
+        Self { protocol: crate::PROTOCOL, vt: crate::VT.to_owned(), build: crate::BUILD.to_owned(), ticket, resume }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct Resume {
     pub epoch: u64,
     pub offset: u64,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum StartMode {
     /// Output continues from the client's resume offset.
     Resume,
     /// A native snapshot follows; output continues from `offset`.
     Snapshot,
+    /// A newer server's mode: the stream cannot be applied.
+    #[serde(other)]
+    Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Welcome {
     pub epoch: u64,
     pub mode: StartMode,
@@ -56,7 +73,7 @@ pub struct Welcome {
     pub size: TermSize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Reject {
     pub code: String,
     pub reason: String,
@@ -170,6 +187,14 @@ pub enum ServerData {
         request: u64,
         kind: ClipKind,
     },
+    /// A clipboard read of a kind this side does not know (a newer
+    /// server's): answer `None` for `request`.
+    ClipboardReadUnknown {
+        request: u64,
+        kind: u8,
+    },
+    /// A frame of a newer server; skipped.
+    Unknown(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,17 +211,21 @@ pub enum ClientData {
     /// This client's desired terminal configuration; applied while it owns
     /// the block (same ownership as size).
     Config(TerminalConfig),
-    /// Answer to [`ServerData::ClipboardRead`]; `None` when unavailable.
+    /// Answer to [`ServerData::ClipboardRead`]; `None` when unavailable
+    /// (or in a format this side does not know).
     ClipboardContent {
         request: u64,
         content: Option<Clip>,
     },
     /// Put `content` (text or image) on the host's system clipboard before
     /// the input that follows on this stream (a paste) is processed. Above
-    /// [`MAX_CLIP_BYTES`], or on hosts without a system clipboard, ignored.
+    /// [`MAX_CLIP_BYTES`], or on hosts without a system clipboard, ignored;
+    /// content in a format this side does not know is [`Self::Unknown`].
     ClipboardPush {
         content: Clip,
     },
+    /// A frame of a newer client; skipped.
+    Unknown(u8),
 }
 
 fn size_bytes(size: TermSize) -> [u8; 8] {
@@ -240,7 +269,7 @@ fn clip_kind_byte(kind: ClipKind) -> u8 {
 }
 
 /// `tag: u8 | body`: 0 none, 1 text (UTF-8), 2 image (`mime_len: u16 LE |
-/// mime | data`), 3 types (newline-separated).
+/// mime | data`), 3 types (newline-separated). A newer tag reads as none.
 fn clip_bytes(content: Option<&Clip>) -> Vec<u8> {
     match content {
         None => vec![0],
@@ -273,7 +302,7 @@ fn parse_clip(bytes: &[u8]) -> io::Result<Option<Clip>> {
             let text = utf8(body)?;
             Some(Clip::Types(text.split('\n').filter(|t| !t.is_empty()).map(str::to_owned).collect()))
         }
-        _ => return Err(invalid("unknown clipboard content")),
+        _ => None,
     })
 }
 
@@ -313,11 +342,13 @@ impl ServerData {
                 payload.push(clip_kind_byte(*clip));
                 Frame::new(kind::CLIPBOARD_READ, payload)
             }
+            Self::ClipboardReadUnknown { request, kind: clip } => Frame::new(kind::CLIPBOARD_READ, [&request.to_le_bytes()[..], &[*clip]].concat()),
+            Self::Unknown(kind) => Frame::new(*kind, Vec::new()),
         }
     }
 
     /// # Errors
-    /// Unknown kind or malformed payload.
+    /// Malformed payload (an unknown kind is [`Self::Unknown`]).
     pub fn from_frame(frame: Frame) -> io::Result<Self> {
         let p = frame.payload;
         Ok(match frame.kind {
@@ -341,20 +372,24 @@ impl ServerData {
                 let location = match p.first() {
                     Some(0) => ClipboardLocation::Standard,
                     Some(1) => ClipboardLocation::Primary,
-                    _ => return Err(invalid("bad clipboard location")),
+                    // A newer location: skipped.
+                    Some(_) => return Ok(Self::Unknown(frame.kind)),
+                    None => return Err(invalid("short clipboard write")),
                 };
                 Self::ClipboardWrite { location, text: String::from_utf8(p[1..].to_vec()).map_err(|_| invalid("clipboard text is not UTF-8"))? }
             }
             kind::CLIPBOARD_READ => {
+                let request = parse_u64(&p)?;
                 let clip = match p.get(8) {
                     Some(0) => ClipKind::Text,
                     Some(1) => ClipKind::Image,
                     Some(2) => ClipKind::Types,
-                    _ => return Err(invalid("bad clipboard kind")),
+                    Some(&other) => return Ok(Self::ClipboardReadUnknown { request, kind: other }),
+                    None => return Err(invalid("short clipboard read")),
                 };
-                Self::ClipboardRead { request: parse_u64(&p)?, kind: clip }
+                Self::ClipboardRead { request, kind: clip }
             }
-            other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
+            other => Self::Unknown(other),
         })
     }
 }
@@ -371,11 +406,12 @@ impl ClientData {
                 Frame::new(kind::CLIPBOARD_CONTENT, [&request.to_le_bytes()[..], &clip_bytes(content.as_ref())].concat())
             }
             Self::ClipboardPush { content } => Frame::new(kind::CLIPBOARD_PUSH, clip_bytes(Some(content))),
+            Self::Unknown(kind) => Frame::new(*kind, Vec::new()),
         }
     }
 
     /// # Errors
-    /// Unknown kind or malformed payload.
+    /// Malformed payload (an unknown kind is [`Self::Unknown`]).
     pub fn from_frame(frame: Frame) -> io::Result<Self> {
         Ok(match frame.kind {
             kind::INPUT => Self::Input(frame.payload),
@@ -385,8 +421,11 @@ impl ClientData {
             kind::CLIPBOARD_CONTENT => {
                 Self::ClipboardContent { request: parse_u64(&frame.payload)?, content: parse_clip(frame.payload.get(8..).unwrap_or_default())? }
             }
-            kind::CLIPBOARD_PUSH => Self::ClipboardPush { content: parse_clip(&frame.payload)?.ok_or_else(|| invalid("empty clipboard push"))? },
-            other => return Err(invalid(&format!("unexpected data frame kind {other:#x}"))),
+            kind::CLIPBOARD_PUSH => match parse_clip(&frame.payload)? {
+                Some(content) => Self::ClipboardPush { content },
+                None => Self::Unknown(frame.kind),
+            },
+            other => Self::Unknown(other),
         })
     }
 }
@@ -422,6 +461,7 @@ mod tests {
             ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text: String::new() },
             ServerData::ClipboardRead { request: u64::MAX, kind: ClipKind::Image },
             ServerData::ClipboardRead { request: 1, kind: ClipKind::Types },
+            ServerData::ClipboardReadUnknown { request: 9, kind: 0x7f },
         ] {
             assert_eq!(ServerData::from_frame(message.to_frame()).unwrap(), message);
         }
@@ -441,7 +481,13 @@ mod tests {
             assert_eq!(serde_json::from_str::<Option<Clip>>(&json).unwrap(), content, "{json}");
         }
         assert!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_CONTENT, vec![0; 8])).is_err());
-        assert!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_PUSH, vec![0])).is_err());
+        assert!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_PUSH, vec![])).is_err());
+        // Newer clipboard formats and locations are skipped, not errors.
+        assert_eq!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_PUSH, vec![0])).unwrap(), ClientData::Unknown(kind::CLIPBOARD_PUSH));
+        assert_eq!(ClientData::from_frame(Frame::new(kind::CLIPBOARD_PUSH, vec![9, 1])).unwrap(), ClientData::Unknown(kind::CLIPBOARD_PUSH));
+        let content = ClientData::from_frame(Frame::new(kind::CLIPBOARD_CONTENT, [&5u64.to_le_bytes()[..], &[9, 1]].concat())).unwrap();
+        assert_eq!(content, ClientData::ClipboardContent { request: 5, content: None });
+        assert_eq!(ServerData::from_frame(Frame::new(kind::CLIPBOARD_WRITE, vec![7, b'x'])).unwrap(), ServerData::Unknown(kind::CLIPBOARD_WRITE));
         let light = TerminalConfig { background: 0x00ff_ffff, foreground: 0, scrollback_lines: 500, ..TerminalConfig::default() };
         assert!(light.is_light() && !TerminalConfig::default().is_light());
         for message in [ClientData::Input(b"ls\r".to_vec()), ClientData::Resize(size), ClientData::Ack(99), ClientData::Config(light)] {

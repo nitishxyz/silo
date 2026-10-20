@@ -31,7 +31,7 @@ fn card() -> gpui::Div {
 
 impl Workspace {
     /// The active host's incompatible server, if one holds it.
-    pub(crate) fn incompatible(&self) -> Option<&silo_client::DifferentBuild> {
+    pub(crate) fn incompatible(&self) -> Option<&silo_client::IncompatibleServer> {
         self.hosts.get(self.active_host)?.incompatible.as_ref()
     }
 
@@ -102,7 +102,7 @@ impl Workspace {
         let host = self.active_host;
         let (title, detail, pair) = match self.hosts.get(host)?.state {
             HostState::NotPaired => ("Not paired", "This Mac is no longer paired with that machine.", true),
-            HostState::DifferentBuild => ("Different server build", "Update Silo on that machine.", false),
+            HostState::Incompatible => ("Incompatible server", "Upgrade Silo on that machine.", false),
             _ => return None,
         };
         let card = card()
@@ -131,7 +131,7 @@ impl Workspace {
         Some(div().size_full().flex().items_center().justify_center().p(px(24.0)).child(card).into_any_element())
     }
 
-    pub(crate) fn render_incompatible(&self, server: &silo_client::DifferentBuild, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_incompatible(&self, server: &silo_client::IncompatibleServer, cx: &mut Context<Self>) -> AnyElement {
         let upgrading = self.upgrading;
         let button = div()
             .id("incompatible-upgrade")
@@ -165,7 +165,7 @@ impl Workspace {
             .child(
                 card()
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).child(server.message()))
-                    .child(muted(silo_client::DifferentBuild::UPGRADE_NOTE.into()))
+                    .child(muted(silo_client::IncompatibleServer::UPGRADE_NOTE.into()))
                     .child(muted(detail))
                     .child(button)
                     .when_some(self.status.clone(), |el, status| el.child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(status))),

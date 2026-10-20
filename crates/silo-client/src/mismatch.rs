@@ -12,13 +12,13 @@ use std::{
 use anyhow::{Context, bail, ensure};
 use silo_proto::{control::Method, paths};
 
-use crate::{Control, control::BuildMismatch};
+use crate::{Control, control::IncompatibleProtocol};
 
 const NAME: &str = "silo (different build)";
 
 /// A server of a different build owns the state directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DifferentBuild {
+pub struct IncompatibleServer {
     /// Its build, pid and version from `runtime.json`.
     pub build: Option<String>,
     pub pid: Option<u32>,
@@ -27,17 +27,17 @@ pub struct DifferentBuild {
     pub sessions: Option<usize>,
 }
 
-impl DifferentBuild {
+impl IncompatibleServer {
     /// Short status, e.g. for a menu line.
-    pub const LABEL: &str = "Different server build";
+    pub const LABEL: &str = "Incompatible server";
 
-    /// E.g. "A different Silo server build is running (3 sessions)."
+    /// E.g. "An incompatible Silo server is running (3 sessions)."
     #[must_use]
     pub fn headline(&self) -> String {
         match self.sessions {
-            Some(1) => "A different Silo server build is running (1 session).".into(),
-            Some(n) => format!("A different Silo server build is running ({n} sessions)."),
-            None => "A different Silo server build is running.".into(),
+            Some(1) => "An incompatible Silo server is running (1 session).".into(),
+            Some(n) => format!("An incompatible Silo server is running ({n} sessions)."),
+            None => "An incompatible Silo server is running.".into(),
         }
     }
 
@@ -51,35 +51,35 @@ impl DifferentBuild {
     pub const UPGRADE_NOTE: &str = "Sessions keep running; a very old server's sessions end.";
 }
 
-impl std::fmt::Display for DifferentBuild {
+impl std::fmt::Display for IncompatibleServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.headline())
     }
 }
 
-impl std::error::Error for DifferentBuild {}
+impl std::error::Error for IncompatibleServer {}
 
 /// Whether `error` is a build rejection.
 #[must_use]
 pub fn is_mismatch(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<BuildMismatch>().is_some()
+    error.downcast_ref::<IncompatibleProtocol>().is_some()
 }
 
 /// The server of another build for `home`, if `error` (from a local
 /// connect) is a build rejection and a server holds the state directory.
-pub async fn different_build(home: &Path, error: &anyhow::Error) -> Option<DifferentBuild> {
+pub async fn incompatible_server(home: &Path, error: &anyhow::Error) -> Option<IncompatibleServer> {
     if is_mismatch(error) && server_lock_held(home) { Some(inspect(home).await) } else { None }
 }
 
 /// Describe the server that rejected our build: `runtime.json`, plus a
 /// best-effort session count.
-pub async fn inspect(home: &Path) -> DifferentBuild {
+pub async fn inspect(home: &Path) -> IncompatibleServer {
     let runtime = read_runtime(home);
     let sessions = match runtime.as_ref().and_then(|r| r.build.as_deref()) {
         Some(build) => count_sessions(home, build).await,
         None => None,
     };
-    DifferentBuild {
+    IncompatibleServer {
         build: runtime.as_ref().and_then(|r| r.build.clone()),
         pid: runtime.as_ref().map(|r| r.pid),
         version: runtime.map(|r| r.version),
@@ -130,7 +130,7 @@ pub fn server_lock_held(home: &Path) -> bool {
 ///
 /// # Errors
 /// The server could not be asked or signalled, or did not exit in time.
-pub async fn stop(home: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
+pub async fn stop(home: &Path, server: &IncompatibleServer) -> anyhow::Result<()> {
     let asked = match &server.build {
         Some(build) => ask_shutdown(home, build).await,
         None => false,
@@ -157,7 +157,7 @@ pub async fn stop(home: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
 /// # Errors
 /// The successor could not take over, or the old server could not be
 /// stopped.
-pub async fn upgrade(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<Upgraded> {
+pub async fn upgrade(home: &Path, server_exe: &Path, server: &IncompatibleServer) -> anyhow::Result<Upgraded> {
     match take_over(home, server_exe, server).await {
         Ok(()) => Ok(Upgraded::Live),
         Err(error) if error.is::<NotUpgradable>() => {
@@ -179,7 +179,7 @@ pub enum Upgraded {
 }
 
 /// The live takeover; [`NotUpgradable`] if the server predates it.
-async fn take_over(home: &Path, server_exe: &Path, server: &DifferentBuild) -> anyhow::Result<()> {
+async fn take_over(home: &Path, server_exe: &Path, server: &IncompatibleServer) -> anyhow::Result<()> {
     let mut child = crate::spawn::spawn_server(home, server_exe, &["--takeover", "--idle-exit", "0"])?;
     let socket = paths::socket(home);
     let deadline = Instant::now() + UPGRADE_TIMEOUT;
@@ -267,15 +267,15 @@ mod tests {
 
     const OTHER: &str = "0123456789abcdef";
 
-    fn server(sessions: Option<usize>) -> DifferentBuild {
-        DifferentBuild { build: Some(OTHER.into()), pid: Some(1), version: Some("0.1.0".into()), sessions }
+    fn server(sessions: Option<usize>) -> IncompatibleServer {
+        IncompatibleServer { build: Some(OTHER.into()), pid: Some(1), version: Some("0.1.0".into()), sessions }
     }
 
     #[test]
     fn describes_server() {
-        assert_eq!(server(Some(3)).message(), "A different Silo server build is running (3 sessions). Upgrade it to use this build.");
-        assert_eq!(server(Some(1)).headline(), "A different Silo server build is running (1 session).");
-        assert_eq!(server(None).headline(), "A different Silo server build is running.");
+        assert_eq!(server(Some(3)).message(), "An incompatible Silo server is running (3 sessions). Upgrade it to use this build.");
+        assert_eq!(server(Some(1)).headline(), "An incompatible Silo server is running (1 session).");
+        assert_eq!(server(None).headline(), "An incompatible Silo server is running.");
     }
 
     #[test]
@@ -318,7 +318,8 @@ mod tests {
                 let (mut r, mut w) = stream.into_split();
                 let hello: ClientHello = read_frame(&mut r).await.unwrap().unwrap().parse().unwrap();
                 if hello.build != OTHER {
-                    let error = RpcError::different_build(OTHER, &hello.build);
+                    // A server from before protocol numbers rejected other builds.
+                    let error = RpcError::new("different_build", format!("different build: server {OTHER}, client {}", hello.build));
                     let reply = ServerMessage::Response { id: 0, result: None, error: Some(error) };
                     write_frame(&mut w, &Frame::json(kind::CONTROL, &reply).unwrap()).await.unwrap();
                     continue;
@@ -329,11 +330,12 @@ mod tests {
                     server_id: "other".into(),
                     started_at: 0,
                     endpoint_id: String::new(),
+                    hostname: String::new(),
                     remote_error: None,
                     endpoint_addr: None,
                     idle_exit_secs: 0,
                 };
-                let hello = ServerHello { build: OTHER.into(), client_id: 1, server: info };
+                let hello = ServerHello { protocol: 0, vt: String::new(), features: Vec::new(), build: OTHER.into(), client_id: 1, server: info };
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
                 while let Ok(Some(frame)) = read_frame(&mut r).await {
                     let request: Request = frame.parse().unwrap();
@@ -357,8 +359,8 @@ mod tests {
         let (connections, task) = other_server(&home).await;
         // A missing server binary: any spawn attempt would fail differently.
         let error = crate::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "test").await.err().expect("a different build must not connect");
-        let found = error.downcast_ref::<DifferentBuild>().expect("different build, not a spawn failure");
-        assert_eq!(found, &DifferentBuild { build: Some(OTHER.into()), pid: Some(4242), version: Some("0.0.1".into()), sessions: Some(2) });
+        let found = error.downcast_ref::<IncompatibleServer>().expect("different build, not a spawn failure");
+        assert_eq!(found, &IncompatibleServer { build: Some(OTHER.into()), pid: Some(4242), version: Some("0.0.1".into()), sessions: Some(2) });
         // One rejected hello plus one best-effort look at its sessions.
         assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
         stop(&home, found).await.unwrap();
@@ -411,10 +413,10 @@ mod tests {
         let home = std::env::temp_dir().join(format!("silo-mismatch-old-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let (connections, pid, task) = old_server(&home);
-        let expected = DifferentBuild { build: None, pid: Some(pid), version: Some("0.1.0".into()), sessions: None };
+        let expected = IncompatibleServer { build: None, pid: Some(pid), version: Some("0.1.0".into()), sessions: None };
         for n in 1..=4 {
             let error = crate::connect_or_spawn(&home, Path::new("/nonexistent/silo"), "test").await.err().expect("an old server must not connect");
-            assert_eq!(error.downcast_ref::<DifferentBuild>(), Some(&expected), "reply {}: {error:#}", n - 1);
+            assert_eq!(error.downcast_ref::<IncompatibleServer>(), Some(&expected), "reply {}: {error:#}", n - 1);
             assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), n, "one hello each, no session lookup");
         }
         // It closes on the upgrade request, so the takeover exits 3: one
@@ -459,10 +461,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A real server: the same build connects, a forged build is rejected
-    /// with both builds named, and `runtime.json` records the build.
+    /// A real server: this build connects, `runtime.json` records the
+    /// build, and speaking as another build (inspecting an incompatible
+    /// server) expects that build's reply, which this server is not.
     #[tokio::test]
-    async fn handshake_requires_same_build() {
+    async fn handshake_and_inspection() {
         let home = std::env::temp_dir().join(format!("silo-mismatch-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let config =
@@ -481,10 +484,8 @@ mod tests {
         assert_eq!(control.hello().build, silo_proto::BUILD);
         assert_eq!(read_runtime(&home).unwrap().build.as_deref(), Some(silo_proto::BUILD));
 
-        let error =
-            Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "forged", false, OTHER).await.err().expect("forged build rejected");
-        let rejected = error.downcast_ref::<BuildMismatch>().expect("a build mismatch");
-        assert!(rejected.message.contains(silo_proto::BUILD) && rejected.message.contains(OTHER), "{rejected}");
+        let error = Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "inspect", false, OTHER).await.err().expect("not that build");
+        assert!(error.downcast_ref::<IncompatibleProtocol>().is_some(), "{error:#}");
 
         control.call_value(Method::ServerShutdown {}).await.unwrap();
         server.await.unwrap().unwrap();

@@ -10,7 +10,7 @@ use std::{
 use serde_json::Value;
 use silo_client::{Control, Events};
 use silo_proto::{
-    BUILD, Frame,
+    Frame, PROTOCOL,
     control::{
         Capture, ClientHello, Created, DataTicket, Event, HostOffer, InvitePurpose, Method, OfferSource, PairInvite, PairedDevices, Request,
         RpcError, ServerHello, ServerMessage, SpawnSpec,
@@ -124,14 +124,16 @@ impl Ctl {
 
 async fn data_on(rc: &RemoteConn, ticket: &str) -> Option<u8> {
     let mut stream = rc.open_stream().await.unwrap();
-    let hello = DataHello { build: BUILD.into(), ticket: ticket.into(), resume: None };
+    let hello = DataHello::ours(ticket.into(), None);
     send(&mut stream, &Frame::json(kind::DATA_HELLO, &hello).unwrap()).await;
     timeout(T, read_frame(&mut stream)).await.unwrap().ok().flatten().map(|f| f.kind)
 }
 
-async fn hello_on(rc: &RemoteConn, build: &str, invite: Option<&str>) -> (BiStream, Result<ServerHello, RpcError>) {
+/// A hello speaking `protocol`, from a build other than the server's: only
+/// the protocol decides admission.
+async fn hello_on(rc: &RemoteConn, protocol: u32, invite: Option<&str>) -> (BiStream, Result<ServerHello, RpcError>) {
     let mut stream = rc.open_stream().await.unwrap();
-    let hello = ClientHello { build: build.into(), client_name: "remote-test".into(), token: None, passive: false, invite: invite.map(Into::into) };
+    let hello = ClientHello { protocol, build: "another-build".into(), ..ClientHello::ours("remote-test", false, invite.map(Into::into)) };
     send(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await;
     let reply = match timeout(T, read_frame(&mut stream)).await.unwrap() {
         Ok(Some(frame)) if frame.kind == kind::CONTROL_HELLO => Ok(frame.parse().unwrap()),
@@ -144,9 +146,9 @@ async fn hello_on(rc: &RemoteConn, build: &str, invite: Option<&str>) -> (BiStre
     (stream, reply)
 }
 
-async fn connect(net: &Net, addr: &EndpointAddr, build: &str, invite: Option<&str>) -> Result<Ctl, RpcError> {
+async fn connect(net: &Net, addr: &EndpointAddr, protocol: u32, invite: Option<&str>) -> Result<Ctl, RpcError> {
     let rc = timeout(T, net.dial(addr.clone())).await.unwrap().unwrap();
-    let (stream, reply) = hello_on(&rc, build, invite).await;
+    let (stream, reply) = hello_on(&rc, protocol, invite).await;
     reply.map(|_| Ctl { rc, stream, next: 0 })
 }
 
@@ -177,7 +179,7 @@ async fn control_and_data_over_remote() {
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
 
     let info: silo_proto::control::ServerInfo = serde_json::from_value(ctl.call(Method::ServerInfo {}).await.unwrap()).unwrap();
     assert_eq!(info.endpoint_id, addr.id.to_string());
@@ -188,7 +190,7 @@ async fn control_and_data_over_remote() {
     assert_eq!(ctl.data(&t).await, Some(kind::REJECT));
 
     // A second control stream on the same connection gets no reply.
-    let (_, second) = hello_on(&ctl.rc, BUILD, None).await;
+    let (_, second) = hello_on(&ctl.rc, PROTOCOL, None).await;
     assert_eq!(second.unwrap_err().code, "closed");
 
     let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
@@ -207,10 +209,10 @@ async fn unknown_device_denied() {
     let control = owner(&home).await;
     let (_, addr) = invite(&control, 60).await;
     let net = device(&home, "x").await;
-    assert_eq!(code(connect(&net, &addr, BUILD, None).await.map(|_| ())), RpcError::UNAUTHORIZED);
-    assert_eq!(code(connect(&net, &addr, BUILD, Some("silo1garbage")).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, None).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, Some("silo1garbage")).await.map(|_| ())), RpcError::UNAUTHORIZED);
     let forged = PairTicket { addr: addr.clone(), secret: [7; 32] }.encode();
-    assert_eq!(code(connect(&net, &addr, BUILD, Some(&forged)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, Some(&forged)).await.map(|_| ())), RpcError::UNAUTHORIZED);
     let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
     assert!(devices.devices.is_empty());
     net.close().await.unwrap();
@@ -226,10 +228,10 @@ async fn invite_expiry_and_replay_rejected() {
     let (once, _) = invite(&control, 60).await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let a = device(&home, "a").await;
-    assert_eq!(code(connect(&a, &addr, BUILD, Some(&short)).await.map(|_| ())), RpcError::UNAUTHORIZED);
-    connect(&a, &addr, BUILD, Some(&once)).await.unwrap();
+    assert_eq!(code(connect(&a, &addr, PROTOCOL, Some(&short)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    connect(&a, &addr, PROTOCOL, Some(&once)).await.unwrap();
     let b = device(&home, "b").await;
-    assert_eq!(code(connect(&b, &addr, BUILD, Some(&once)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&b, &addr, PROTOCOL, Some(&once)).await.map(|_| ())), RpcError::UNAUTHORIZED);
     a.close().await.unwrap();
     b.close().await.unwrap();
     shutdown(control, task).await;
@@ -242,7 +244,7 @@ async fn paired_device_is_not_owner() {
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
     assert_eq!(code(ctl.call(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairList {}).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairRevoke { id: net.id().to_string() }).await), RpcError::FORBIDDEN);
@@ -263,8 +265,8 @@ async fn data_ticket_bound_to_its_connection() {
     let (ia, addr) = invite(&control, 60).await;
     let (ib, _) = invite(&control, 60).await;
     let (a, b) = (device(&home, "a").await, device(&home, "b").await);
-    let mut ca = connect(&a, &addr, BUILD, Some(&ia)).await.unwrap();
-    let cb = connect(&b, &addr, BUILD, Some(&ib)).await.unwrap();
+    let mut ca = connect(&a, &addr, PROTOCOL, Some(&ia)).await.unwrap();
+    let cb = connect(&b, &addr, PROTOCOL, Some(&ib)).await.unwrap();
     let created = create(&mut ca).await;
     let t = ticket(&mut ca, &created.block_id).await;
     assert_eq!(cb.data(&t).await, Some(kind::REJECT));
@@ -283,18 +285,18 @@ async fn revocation_closes_live_access() {
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
     let created = create(&mut ctl).await;
     let t = ticket(&mut ctl, &created.block_id).await;
     let mut data = ctl.rc.open_stream().await.unwrap();
-    send(&mut data, &Frame::json(kind::DATA_HELLO, &DataHello { build: BUILD.into(), ticket: t, resume: None }).unwrap()).await;
+    send(&mut data, &Frame::json(kind::DATA_HELLO, &DataHello::ours(t, None)).unwrap()).await;
     assert_eq!(timeout(T, read_frame(&mut data)).await.unwrap().unwrap().unwrap().kind, kind::WELCOME);
 
     control.call_value(Method::PairRevoke { id: net.id().to_string() }).await.unwrap();
     timeout(T, ctl.rc.closed()).await.unwrap();
     // Drain whatever was in flight; the stream must end.
     timeout(T, async { while let Ok(Some(_)) = read_frame(&mut data).await {} }).await.unwrap();
-    assert_eq!(code(connect(&net, &addr, BUILD, None).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, None).await.map(|_| ())), RpcError::UNAUTHORIZED);
     let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
     assert!(devices.devices.is_empty());
     net.close().await.unwrap();
@@ -302,17 +304,19 @@ async fn revocation_closes_live_access() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn build_mismatch_does_not_enroll() {
+async fn incompatible_protocol_does_not_enroll() {
     let home = temp_home("build");
     let task = start(&home).await;
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    assert_eq!(code(connect(&net, &addr, "other-build", Some(&invite)).await.map(|_| ())), RpcError::DIFFERENT_BUILD);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL + 1, Some(&invite)).await.map(|_| ())), RpcError::INCOMPATIBLE);
+    // Before protocol numbers (no `protocol` field): incompatible too.
+    assert_eq!(code(connect(&net, &addr, 0, Some(&invite)).await.map(|_| ())), RpcError::INCOMPATIBLE);
     let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
     assert!(devices.devices.is_empty());
     // The invite was not consumed.
-    connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
     net.close().await.unwrap();
     shutdown(control, task).await;
 }
@@ -328,14 +332,14 @@ async fn grants_survive_restart() {
         let (_, addr) = self::invite(&control, 60).await;
         addr
     };
-    drop(connect(&net, &first_addr, BUILD, Some(&invite)).await.unwrap());
+    drop(connect(&net, &first_addr, PROTOCOL, Some(&invite)).await.unwrap());
     shutdown(control, task).await;
 
     let task = start(&home).await;
     let control = owner(&home).await;
     let (_, addr) = self::invite(&control, 60).await;
     assert_eq!(addr.id, first_addr.id, "identity persists");
-    let mut ctl = connect(&net, &addr, BUILD, None).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, None).await.unwrap();
     ctl.call(Method::SessionList {}).await.unwrap();
     drop(ctl);
     net.close().await.unwrap();
@@ -349,7 +353,7 @@ async fn grants_and_identity_survive_takeover() {
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    let ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
 
     let config = silo_server::Config {
         home: home.clone(),
@@ -368,7 +372,7 @@ async fn grants_and_identity_survive_takeover() {
     let control = owner(&home).await;
     let (_, new_addr) = self::invite(&control, 60).await;
     assert_eq!(new_addr.id, addr.id);
-    let mut ctl = connect(&net, &new_addr, BUILD, None).await.unwrap();
+    let mut ctl = connect(&net, &new_addr, PROTOCOL, None).await.unwrap();
     ctl.call(Method::SessionList {}).await.unwrap();
     drop(ctl);
     net.close().await.unwrap();
@@ -388,7 +392,7 @@ async fn invite_ttl_is_bounded_and_overflow_is_harmless() {
     // Remote access still works afterwards.
     let (invite, addr) = invite(&control, 7 * 24 * 3600).await;
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
     let info: silo_proto::control::ServerInfo = serde_json::from_value(ctl.call(Method::ServerInfo {}).await.unwrap()).unwrap();
     assert_eq!(info.remote_error, None);
     drop(ctl);
@@ -418,7 +422,7 @@ async fn unauthenticated_connections_are_limited() {
     // reply at all (not even a ticket rejection).
     let (rc, _first) = pending(&net, &addr).await;
     let mut data = rc.open_stream().await.unwrap();
-    send(&mut data, &Frame::json(kind::DATA_HELLO, &DataHello { build: BUILD.into(), ticket: "00".into(), resume: None }).unwrap()).await;
+    send(&mut data, &Frame::json(kind::DATA_HELLO, &DataHello::ours("00".into(), None)).unwrap()).await;
     assert!(timeout(Duration::from_millis(500), read_frame(&mut data)).await.is_err());
 
     // An oversized hello is refused without being read.
@@ -486,8 +490,8 @@ async fn fixed_port_survives_takeover_and_bind_failure_is_reported() {
     assert_eq!(again, addr);
     let net = device(&home, "a").await;
     // Invites live in memory only: the old server's is gone.
-    assert_eq!(code(connect(&net, &addr, BUILD, Some(&invite)).await.map(|_| ())), RpcError::UNAUTHORIZED);
-    drop(connect(&net, &addr, BUILD, Some(&fresh)).await.unwrap());
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, Some(&invite)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    drop(connect(&net, &addr, PROTOCOL, Some(&fresh)).await.unwrap());
     drop(control);
 
     // A successor that cannot bind keeps serving unix and says why.
@@ -538,7 +542,7 @@ async fn join_invite_only_offers_a_host_once() {
     let (join, addr) = invite_for(&control, 60, InvitePurpose::Join).await;
     let offered = other_host(&home);
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&join.ticket)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&join.ticket)).await.unwrap();
     assert_eq!(code(ctl.call(Method::SessionList {}).await), RpcError::UNAUTHORIZED);
     assert_eq!(code(ctl.call(Method::PairList {}).await), RpcError::UNAUTHORIZED);
     assert_eq!(code(ctl.call(Method::HostOffer { ticket: "silo1garbage".into(), name: "far".into() }).await), "bad_request");
@@ -551,7 +555,7 @@ async fn join_invite_only_offers_a_host_once() {
     );
     // The connection ends, the invite is spent and nothing was paired.
     assert!(timeout(T, read_frame(&mut ctl.stream)).await.unwrap().map_or(true, |f| f.is_none()));
-    assert_eq!(code(connect(&net, &addr, BUILD, Some(&join.ticket)).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(code(connect(&net, &addr, PROTOCOL, Some(&join.ticket)).await.map(|_| ())), RpcError::UNAUTHORIZED);
     let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
     assert_eq!(devices.devices.len(), 1, "only the paired device");
     let leaked = timeout(Duration::from_millis(300), next_offer(&mut paired_events)).await;
@@ -625,13 +629,13 @@ async fn remote_pastes_reach_the_host_clipboard_and_host_copies_come_back() {
     let control = owner(&home).await;
     let (invite, addr) = invite(&control, 60).await;
     let net = device(&home, "a").await;
-    let mut ctl = connect(&net, &addr, BUILD, Some(&invite)).await.unwrap();
+    let mut ctl = connect(&net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
     let created = create(&mut ctl).await;
     let block = created.block_id;
 
     // A push lands before the input after it is processed.
     let mut data = ctl.rc.open_stream().await.unwrap();
-    let hello = DataHello { build: BUILD.into(), ticket: ticket(&mut ctl, &block).await, resume: None };
+    let hello = DataHello::ours(ticket(&mut ctl, &block).await, None);
     send(&mut data, &Frame::json(kind::DATA_HELLO, &hello).unwrap()).await;
     let pasted = Clip::Text("pasted".into());
     send(&mut data, &ClientData::ClipboardPush { content: pasted.clone() }.to_frame()).await;

@@ -74,6 +74,16 @@ impl Hosts {
         Ok(value)
     }
 
+    /// A name for a new host with `id` from its `hostname`, numbered when
+    /// taken; `None` when the host is already known (it keeps its name).
+    pub fn free_name(&self, id: &str, hostname: &str) -> Option<String> {
+        if self.hosts.iter().any(|h| h.id == id) {
+            return None;
+        }
+        let base = if hostname.is_empty() { "silo host" } else { hostname };
+        (1..).map(|n| if n == 1 { base.to_owned() } else { format!("{base} {n}") }).find(|name| !self.hosts.iter().any(|h| &h.name == name))
+    }
+
     /// Add or update the host with `addr`'s id; `name` defaults to the
     /// existing name, else the id's first 10 characters.
     ///
@@ -117,6 +127,18 @@ impl Hosts {
             (Some(host), None) => Ok(host),
             (Some(_), Some(_)) => bail!("{key:?} matches several hosts"),
             _ => bail!("no host {key:?}; add one with `silo hosts add <ticket>`"),
+        }
+    }
+
+    /// The host `key` (see [`Hosts::find`]), or every host when `None`.
+    ///
+    /// # Errors
+    /// See [`Hosts::find`]; no hosts at all.
+    pub fn select(&self, key: Option<&str>) -> anyhow::Result<Vec<Host>> {
+        match key {
+            Some(key) => Ok(vec![self.find(key)?.clone()]),
+            None if self.hosts.is_empty() => bail!("no hosts; add one with `silo remote install` or `silo hosts add`"),
+            None => Ok(self.hosts.clone()),
         }
     }
 

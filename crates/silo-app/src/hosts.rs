@@ -117,7 +117,7 @@ impl Transport {
             Self::Local { home, .. } => {
                 let (control, events) = match Control::connect(&silo_proto::paths::socket(home), client_name).await {
                     Ok(connected) => connected,
-                    Err(error) => match silo_client::mismatch::different_build(home, &error).await {
+                    Err(error) => match silo_client::mismatch::incompatible_server(home, &error).await {
                         Some(server) => return Err(server.into()),
                         None => return Err(error),
                     },
@@ -167,8 +167,9 @@ pub enum HostState {
     Unreachable(String),
     /// The remote server does not know this device (revoked, reset).
     NotPaired,
-    /// The remote server is another build; it can't be upgraded from here.
-    DifferentBuild,
+    /// The remote server speaks another protocol: upgrade it (`silo remote
+    /// upgrade`). Same-protocol builds connect normally.
+    Incompatible,
 }
 
 #[derive(Clone, Debug)]

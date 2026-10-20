@@ -3,17 +3,18 @@
 pub mod clipboard;
 pub mod hosts;
 pub mod link;
+pub mod upgrade;
 
 use std::{path::Path, time::Duration};
 
 use anyhow::{Context, bail};
 use silo_client::{
-    BuildMismatch, Control, Events, Offline, Unauthorized,
+    Control, Events, IncompatibleProtocol, Offline, Unauthorized,
     transport::{EndpointAddr, Net, PairTicket, RelayConfig},
 };
 use silo_proto::{
     control::{Method, PairInvite, PairedDevice, PairedDevices, ServerInfo},
-    model::SessionSummary,
+    model::{BlockKind, SessionSummary, SessionView},
 };
 
 use crate::hosts::{Hosts, client_dir};
@@ -91,7 +92,7 @@ async fn bind(home: &Path, options: &NetOptions) -> anyhow::Result<Net> {
 /// A clear message for the typed remote failures.
 #[must_use]
 pub fn explain(error: anyhow::Error) -> anyhow::Error {
-    if let Some(e) = error.downcast_ref::<BuildMismatch>() {
+    if let Some(e) = error.downcast_ref::<IncompatibleProtocol>() {
         return anyhow::anyhow!("the remote host runs a different silo build ({e}); install the same build on both sides");
     }
     if let Some(e) = error.downcast_ref::<Unauthorized>() {
@@ -130,7 +131,8 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
     }
 }
 
-/// Redeem `ticket` and store the host under `name`.
+/// Redeem `ticket` and store the host under `name`, else the server's
+/// hostname.
 ///
 /// # Errors
 /// Pairing failed or `hosts.json` could not be written.
@@ -139,12 +141,19 @@ pub async fn add_host(home: &Path, ticket: &str, name: Option<String>, options: 
     let net = bind(home, options).await?;
     let paired = match silo_client::pair(&net, &ticket, client_name).await {
         // Prefer the server's own view of its address over the ticket's.
-        Ok((control, _)) => current_addr(&control).await.map(|addr| addr.filter(|a| a.id == ticket.addr.id)),
+        Ok((control, _)) => {
+            let hostname = control.hello().server.hostname.clone();
+            current_addr(&control).await.map(|addr| (addr.filter(|a| a.id == ticket.addr.id), hostname))
+        }
         Err(error) => Err(explain(error)),
     };
     let _ = net.close().await;
-    let addr = paired?.unwrap_or(ticket.addr);
-    Hosts::update(home, |hosts| Ok(hosts.upsert(addr, name)?.clone()))
+    let (addr, hostname) = paired?;
+    let addr = addr.unwrap_or(ticket.addr);
+    Hosts::update(home, |hosts| {
+        let name = name.or_else(|| hosts.free_name(&addr.id.to_string(), &hostname));
+        Ok(hosts.upsert(addr, name)?.clone())
+    })
 }
 
 /// Fresh `server.info`.
@@ -222,6 +231,29 @@ pub async fn sessions(control: &Control) -> anyhow::Result<Vec<SessionSummary>> 
     control.call(Method::SessionList {}).await
 }
 
+/// The sessions stopping the server would lose something in: all of them,
+/// unless the only one is an idle default (one window holding one running
+/// shell, at its prompt, nobody attached), which a service server starts
+/// by itself. `view` is the only session's view; `shell` the login shell.
+/// A shell that set its own title reads as busy.
+#[must_use]
+pub fn sessions_to_end(sessions: &[SessionSummary], view: Option<&SessionView>, shell: Option<&str>) -> usize {
+    let idle = |summary: &SessionSummary, view: &SessionView| {
+        let [block] = view.blocks.as_slice() else { return false };
+        let shell = shell.and_then(|s| Path::new(s).file_name()?.to_str());
+        let title = block.title.trim_start_matches('-');
+        summary.windows == 1
+            && summary.attached_clients == 0
+            && block.kind == BlockKind::Terminal
+            && block.lifecycle.is_running()
+            && (title == "shell" || shell == Some(title))
+    };
+    match (sessions, view) {
+        ([summary], Some(view)) if idle(summary, view) => 0,
+        _ => sessions.len(),
+    }
+}
+
 /// One line per session, as `silo ls` prints them.
 #[must_use]
 pub fn format_sessions(sessions: &[SessionSummary]) -> String {
@@ -251,6 +283,46 @@ mod tests {
     use silo_client::transport::{EndpointAddr, Identity};
 
     use super::*;
+
+    #[test]
+    fn idle_default_session_is_not_worth_asking() {
+        let summary = |windows: usize, attached_clients: usize| SessionSummary {
+            id: "s1".into(),
+            name: "halka-pebble".into(),
+            windows,
+            blocks: 1,
+            attached_clients,
+            created_at: 0,
+        };
+        let view = |blocks: &[(&str, &str)]| -> SessionView {
+            let blocks: Vec<_> = blocks
+                .iter()
+                .enumerate()
+                .map(|(i, (title, lifecycle))| {
+                    serde_json::json!({"id": format!("b{i}"), "session_id": "s1", "kind": "terminal", "title": title,
+                        "lifecycle": lifecycle, "size": {"columns": 80, "rows": 24}, "owner_name": null})
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({
+                "session": {"id": "s1", "name": "halka-pebble", "windows": [], "active_window": "w1", "revision": 0, "created_at": 0},
+                "blocks": blocks,
+            }))
+            .unwrap()
+        };
+        let zsh = Some("/bin/zsh");
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("zsh", "running")])), zsh), 0);
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("-zsh", "running")])), zsh), 0);
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("shell", "running")])), None), 0);
+        // A program running, a title of its own, a client, more blocks or windows.
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("vim", "running")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("me@box: ~", "running")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("zsh", "exited")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(1, 1)], Some(&view(&[("zsh", "running")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(2, 0)], Some(&view(&[("zsh", "running")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(1, 0)], Some(&view(&[("zsh", "running"), ("zsh", "running")])), zsh), 1);
+        assert_eq!(sessions_to_end(&[summary(1, 0), summary(1, 0)], None, zsh), 2);
+        assert_eq!(sessions_to_end(&[], None, zsh), 0);
+    }
 
     #[test]
     fn durations() {

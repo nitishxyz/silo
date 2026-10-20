@@ -5,8 +5,12 @@
 #   curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh -s -- join <ticket>
 #   curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh -s -- --version v0.1.0
 #
+# Downloads silo-<os>-<arch>.tar.gz from the GitHub release, checks it
+# against the release's SHA256SUMS and installs silo to ~/.local/bin.
+#
 # Options (before any silo arguments):
-#   --version <tag>   install that release instead of the latest (or SILO_VERSION)
+#   --version <tag>   install that release (v0.1.0 or 0.1.0) instead of the
+#                     latest (or SILO_VERSION)
 #   --no-start        install only; do not run silo afterwards
 # Then runs `silo up`, followed by `silo <args>` if arguments remain. With
 # `join <ticket>` or `up ...` only that command runs (it starts the server).
@@ -59,6 +63,9 @@ main() {
     if [ "${1:-}" = join ] && [ -z "${2:-}" ]; then
         die "usage: sh -s -- join <ticket>"
     fi
+    case $version in
+        [0-9]*) version=v$version ;;
+    esac
 
     case $(uname -s) in
         Linux) os=linux ;;
@@ -113,10 +120,11 @@ main() {
 
     say "downloading ${version:-latest} for $os-$arch"
     fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
-    fetch "$base/$asset.sha256" "$tmp/$asset.sha256" || die "download failed: $base/$asset.sha256"
-    expected=$(cut -d' ' -f1 < "$tmp/$asset.sha256")
+    fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
+    expected=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$tmp/SHA256SUMS")
+    [ -n "$expected" ] || die "$asset is not listed in SHA256SUMS"
     actual=$(sha256 "$tmp/$asset")
-    [ -n "$expected" ] && [ "$expected" = "$actual" ] || die "checksum mismatch for $asset"
+    [ "$expected" = "$actual" ] || die "checksum mismatch for $asset"
 
     tar -xzf "$tmp/$asset" -C "$tmp" silo || die "bad archive: $asset"
 

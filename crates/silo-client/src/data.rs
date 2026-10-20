@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow, bail};
 use silo_proto::{
-    BUILD, Frame,
+    Frame,
     control::{DataTicket, Method},
     data::{ClientData, DataHello, Reject, Resume, ServerData, Welcome},
     kind, read_frame, spawn_reader, write_frame,
@@ -40,7 +40,7 @@ impl DataStream {
     pub async fn open(control: &Control, block_id: &str, resume: Option<Resume>) -> anyhow::Result<Self> {
         let ticket: DataTicket = control.call(Method::DataConnect { block_id: block_id.to_owned() }).await?;
         let mut stream = control.conn().open_stream().await.context("open data stream")?;
-        let hello = DataHello { build: BUILD.to_owned(), ticket: ticket.ticket, resume };
+        let hello = DataHello::ours(ticket.ticket, resume);
         write_frame(&mut stream, &Frame::json(kind::DATA_HELLO, &hello)?).await?;
         stream.flush().await?;
         let first = read_frame(&mut stream).await?.ok_or_else(|| anyhow!("data stream closed during hello"))?;

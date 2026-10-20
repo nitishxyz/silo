@@ -4,11 +4,12 @@
 //! cursor modes. A few macOS chords have no useful *legacy* encoding though:
 //! Cmd+Backspace loses the Cmd and arrives as a plain DEL, Ctrl+Backspace
 //! is ^H, and Option/Cmd+arrows are xterm modifier sequences that shells do
-//! not bind. Like Ghostty's default macOS bindings, these are rewritten to
-//! the bytes shells understand — but only when the encoder produced the
-//! legacy form, so apps that enabled the kitty protocol still receive the
-//! exact Backspace chord with its modifiers. (Modified arrows look the same
-//! in both protocols and are always mapped, like Ghostty's defaults.)
+//! not bind. These are rewritten to the bytes shells understand. Like
+//! Ghostty's default macOS bindings (`super+backspace=text:\x15`,
+//! `alt+left=esc:b`, ...), Cmd+Backspace and the modified arrows are mapped
+//! in every mode, kitty protocol included, so TUIs get the same line
+//! editing as shells. Ctrl+Backspace is not a Ghostty default: it is only
+//! rewritten from its legacy ^H, so kitty-protocol apps see the real chord.
 
 /// Which chord: exactly one of Cmd, Ctrl and Option, without Shift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,21 +40,21 @@ pub fn terminal_cmd_key(key: &str) -> bool {
 /// Replacement bytes for a key press, given what the encoder produced.
 #[must_use]
 pub fn edit_override(key: &str, chord: Option<Chord>, encoded: &[u8]) -> Option<&'static [u8]> {
-    let replacement: (&[u8], &'static [u8]) = match (key, chord?) {
+    let (legacy, replacement): (Option<&[u8]>, &'static [u8]) = match (key, chord?) {
         // Delete to the start of the line (readline unix-line-discard).
-        ("backspace", Chord::Cmd) => (b"\x7f", b"\x15"),
+        ("backspace", Chord::Cmd) => (None, b"\x15"),
         // Delete the previous word (unix-word-rubout).
-        ("backspace", Chord::Ctrl) => (b"\x08", b"\x17"),
+        ("backspace", Chord::Ctrl) => (Some(b"\x08"), b"\x17"),
         // Option+Backspace is already ESC DEL (backward-kill-word).
         // Word left/right (readline backward-word / forward-word).
-        ("left", Chord::Alt) => (b"\x1b[1;3D", b"\x1bb"),
-        ("right", Chord::Alt) => (b"\x1b[1;3C", b"\x1bf"),
+        ("left", Chord::Alt) => (Some(b"\x1b[1;3D"), b"\x1bb"),
+        ("right", Chord::Alt) => (Some(b"\x1b[1;3C"), b"\x1bf"),
         // Start/end of line.
-        ("left", Chord::Cmd) => (b"\x1b[1;9D", b"\x01"),
-        ("right", Chord::Cmd) => (b"\x1b[1;9C", b"\x05"),
+        ("left", Chord::Cmd) => (Some(b"\x1b[1;9D"), b"\x01"),
+        ("right", Chord::Cmd) => (Some(b"\x1b[1;9C"), b"\x05"),
         _ => return None,
     };
-    (encoded == replacement.0).then_some(replacement.1)
+    legacy.is_none_or(|legacy| encoded == legacy).then_some(replacement)
 }
 
 #[cfg(test)]
@@ -96,14 +97,13 @@ mod tests {
         let mut vt = TerminalCore::new(GridSize::new(20, 4).unwrap()).unwrap();
         // CSI > 1 u: disambiguate escape codes.
         vt.write_output(b"\x1b[>1u").unwrap();
-        // Modified arrows keep their CSI form under the kitty protocol, so
-        // the arrow mappings apply there too — as Ghostty's own macOS
-        // defaults (alt+left=esc:b) do.
-        for (key, chord) in [("backspace", Chord::Cmd), ("backspace", Chord::Ctrl), ("backspace", Chord::Alt)] {
+        for (key, chord) in [("backspace", Chord::Ctrl), ("backspace", Chord::Alt)] {
             let encoded = encode(&mut vt, key, chord, false);
             assert!(encoded.starts_with(b"\x1b["), "{key} {chord:?}: {encoded:?}");
             assert_eq!(edit_override(key, Some(chord), &encoded), None, "{key} {chord:?}");
         }
+        // Cmd+Backspace deletes the line in TUIs too, as Ghostty's default.
+        assert_eq!(send(&mut vt, "backspace", Chord::Cmd), b"\x15");
     }
 
     #[test]

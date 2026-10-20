@@ -1,0 +1,99 @@
+{
+  "HostBuild": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "build": {
+        "type": "string"
+      },
+      "platform": {
+        "type": "string"
+      },
+      "sessions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "version": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "build",
+      "platform",
+      "sessions"
+    ],
+    "title": "HostBuild",
+    "type": "object"
+  },
+  "UpgradeBinary": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "force": {
+        "default": false,
+        "type": "boolean"
+      },
+      "release": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "sha256": {
+        "type": "string"
+      },
+      "size": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "size",
+      "sha256"
+    ],
+    "title": "UpgradeBinary",
+    "type": "object"
+  },
+  "UpgradeHello": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "UpgradeHello",
+    "type": "object"
+  },
+  "UpgradeRejected": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "code": {
+        "type": "string"
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "reason"
+    ],
+    "title": "UpgradeRejected",
+    "type": "object"
+  },
+  "UpgradeStarted": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "build": {
+        "type": "string"
+      },
+      "version": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "build"
+    ],
+    "title": "UpgradeStarted",
+    "type": "object"
+  }
+}

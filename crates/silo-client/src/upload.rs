@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
 use silo_proto::{
-    BUILD, Frame,
+    Frame,
     control::{DataTicket, Method},
     data::Reject,
     drops::human_size,
@@ -106,7 +106,7 @@ pub async fn upload(control: &Control, block_id: &str, files: Vec<Upload>, mut p
     let (reader, mut writer) = tokio::io::split(stream);
     let mut replies = spawn_reader(reader, 4);
     let send = async {
-        write_frame(&mut writer, &Frame::json(kind::UPLOAD_HELLO, &UploadHello { build: BUILD.to_owned(), ticket: ticket.ticket, total })?).await?;
+        write_frame(&mut writer, &Frame::json(kind::UPLOAD_HELLO, &UploadHello::ours(ticket.ticket, total))?).await?;
         let mut sent = 0;
         progress(sent, total);
         let mut buf = vec![0; CHUNK];

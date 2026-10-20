@@ -26,6 +26,7 @@ mod latency;
 mod layout;
 mod material;
 mod motion;
+mod new_tab_menu;
 mod offers;
 mod palette;
 mod pane;

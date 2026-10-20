@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Builds the pinned libghostty-vt static library into target/ghostty/<rev>/runtime,
 # or, given a Rust target triple, cross-compiles it into runtime-<triple>.
+# Always for the architecture's baseline CPU: zig otherwise targets the build
+# machine's CPU, and the binary dies with SIGILL on older ones.
 set -euo pipefail
 target=${1:-}
 cross=()
+cpu=baseline
 case "$target" in
     "") ;;
     x86_64-unknown-linux-gnu) cross=(-Dtarget=x86_64-linux-gnu) ;;
@@ -32,7 +35,7 @@ fi
 
 cache="$root/target/ghostty/$revision"
 runtime="$cache/runtime${target:+-$target}"
-if [[ -f $runtime/silo-revision && $(cat "$runtime/silo-revision") == "$revision" ]]; then
+if [[ -f $runtime/silo-revision && $(cat "$runtime/silo-revision") == "$revision" && -f $runtime/silo-cpu && $(cat "$runtime/silo-cpu") == "$cpu" ]]; then
     echo "$runtime"
     exit 0
 fi
@@ -44,9 +47,10 @@ if [[ ! -d $cache/source/.git ]]; then
 fi
 (
     cd "$cache/source"
-    "$zig" build ${cross[@]+"${cross[@]}"} -Demit-lib-vt=true -Doptimize=ReleaseFast -Dsimd=false \
+    "$zig" build ${cross[@]+"${cross[@]}"} -Dcpu="$cpu" -Demit-lib-vt=true -Doptimize=ReleaseFast -Dsimd=false \
         -Dvt-features=-kitty-graphics --prefix "$runtime" >&2
 )
 printf '%s\n' "${target:-host}" > "$runtime/silo-target"
+printf '%s\n' "$cpu" > "$runtime/silo-cpu"
 printf '%s\n' "$revision" > "$runtime/silo-revision"
 echo "$runtime"

@@ -278,6 +278,7 @@ impl Workspace {
                         .into_any_element(),
                 }
             }
+            Layout::Unknown => unsupported(),
         }
     }
 
@@ -314,6 +315,7 @@ impl Workspace {
         let inner: AnyElement = match (self.panes.get(id), self.browsers.get(id)) {
             (Some((pane, _)), _) => pane.clone().into_any_element(),
             (None, Some((pane, _))) => pane.clone().into_any_element(),
+            (None, None) if crate::browser_pane::kind_of(self.block_info(id)) == crate::browser_pane::Kind::Unsupported => unsupported(),
             (None, None) => div().size_full().into_any_element(),
         };
         let fill_color = self.card_fill(id, cx);
@@ -725,10 +727,17 @@ pub fn header_labels(info: Option<&BlockInfo>) -> (String, Option<String>) {
     (name, cwd)
 }
 
+/// What a newer host's pane or layout node shows here.
+pub(crate) const UNSUPPORTED: &str = "Update Silo to show this pane";
+
+fn unsupported() -> AnyElement {
+    div().size_full().flex().items_center().justify_center().text_size(px(12.0)).text_color(rgb(theme::muted())).child(UNSUPPORTED).into_any_element()
+}
+
 /// The axis of the split directly holding block `id`.
 pub(crate) fn parent_axis(layout: &Layout, id: &str) -> Option<Axis> {
     match layout {
-        Layout::Block { .. } => None,
+        Layout::Block { .. } | Layout::Unknown => None,
         Layout::Split { axis, first, second, .. } => {
             let direct = [first, second].iter().any(|child| matches!(&***child, Layout::Block { id: b } if b == id));
             if direct { Some(*axis) } else { parent_axis(first, id).or_else(|| parent_axis(second, id)) }
@@ -814,6 +823,7 @@ pub(crate) type RatioChange = (Vec<usize>, f32);
 fn leaf_path(layout: &Layout, id: &str) -> Option<Vec<usize>> {
     match layout {
         Layout::Block { id: b } => (b == id).then(Vec::new),
+        Layout::Unknown => None,
         Layout::Split { first, second, .. } => [first, second].into_iter().enumerate().find_map(|(i, child)| {
             let mut path = leaf_path(child, id)?;
             path.insert(0, i);
@@ -827,14 +837,14 @@ fn node_at<'a>(layout: &'a Layout, path: &[usize]) -> Option<&'a Layout> {
         (_, None) => Some(layout),
         (Layout::Split { first, .. }, Some((0, rest))) => node_at(first, rest),
         (Layout::Split { second, .. }, Some((_, rest))) => node_at(second, rest),
-        (Layout::Block { .. }, Some(_)) => None,
+        (Layout::Block { .. } | Layout::Unknown, Some(_)) => None,
     }
 }
 
 fn split_ratio(layout: &Layout, path: &[usize]) -> Option<(Axis, f32)> {
     match node_at(layout, path)? {
         Layout::Split { axis, ratio, .. } => Some((*axis, *ratio)),
-        Layout::Block { .. } => None,
+        Layout::Block { .. } | Layout::Unknown => None,
     }
 }
 
@@ -847,6 +857,7 @@ fn change(path: &[usize], old: f32, new: f32) -> Option<RatioChange> {
 pub(crate) fn same_shape(a: &Layout, b: &Layout) -> bool {
     match (a, b) {
         (Layout::Block { id: x }, Layout::Block { id: y }) => x == y,
+        (Layout::Unknown, Layout::Unknown) => true,
         (Layout::Split { axis: ax, first: a1, second: a2, .. }, Layout::Split { axis: bx, first: b1, second: b2, .. }) => {
             ax == bx && same_shape(a1, b1) && same_shape(a2, b2)
         }

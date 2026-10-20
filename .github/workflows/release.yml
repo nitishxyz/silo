@@ -1,11 +1,18 @@
 name: release
 
-# Builds the `silo` CLI/server for Linux (x86_64, aarch64) and macOS (arm64)
-# and publishes them on the GitHub Release for the tag:
-#   silo-<os>-<arch>.tar.gz          (contains the `silo` binary)
-#   silo-<os>-<arch>.tar.gz.sha256
-#   build-id                         (silo_proto::BUILD; identical on every
-#                                     platform for one commit)
+# Builds Silo for Linux (x86_64, aarch64) and macOS (arm64) and publishes the
+# GitHub Release for a `v*` tag:
+#   silo-linux-x86_64.tar.gz     `silo` CLI/server
+#   silo-linux-aarch64.tar.gz
+#   silo-macos-aarch64.tar.gz
+#   Silo-<version>.dmg           the app, ad-hoc signed (not notarized)
+#   build-id                     silo_proto::BUILD, identical on every platform
+#   SHA256SUMS                   covers every other asset (site/install.sh
+#                                verifies downloads against it)
+#
+# workflow_dispatch builds the selected ref (or an existing tag) and uploads
+# the assets as the `release` artifact; with dry_run unchecked and a tag
+# given it publishes that tag's release.
 #
 # Linux builds run on ubuntu-22.04 runners, so the binaries need glibc 2.35
 # or newer (Debian 12, Ubuntu 22.04, RHEL/Rocky 10, Fedora 36+). The
@@ -17,17 +24,22 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build and publish (empty = build the selected ref, no release)
+        description: Existing tag to build (empty = the selected ref)
         required: false
         default: ""
+      dry_run:
+        description: Build and upload artifacts only; create no release
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 env:
-  # rustc peaks at several GB per job on the larger crates (iroh, ghostty
-  # bindings); two jobs stay well inside the runner's memory.
-  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
 
@@ -38,34 +50,39 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: linux, arch: x86_64, runner: ubuntu-22.04 }
-          - { os: linux, arch: aarch64, runner: ubuntu-22.04-arm }
-          - { os: macos, arch: aarch64, runner: macos-14 }
+          - { os: linux, arch: x86_64, runner: ubuntu-22.04, jobs: 2 }
+          - { os: linux, arch: aarch64, runner: ubuntu-22.04-arm, jobs: 2 }
+          - { os: macos, arch: aarch64, runner: macos-15, jobs: 3 }
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     env:
       ASSET: silo-${{ matrix.os }}-${{ matrix.arch }}
+      # rustc peaks at several GB per job on the larger crates (iroh, ghostty
+      # bindings); this stays inside the runners' memory.
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
           cache-on-failure: true
-      # libghostty-vt depends only on GHOSTTY_REV and the build script.
-      - uses: actions/cache@v4
-        with:
-          path: target/ghostty/*/runtime
-          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('GHOSTTY_REV', 'scripts/build-ghostty.sh') }}
-      - name: Build libghostty-vt
-        run: ZIG="$(command -v zig)" bash scripts/build-ghostty.sh
+      - uses: ./.github/actions/ghostty
+      - if: matrix.os == 'macos'
+        uses: ./.github/actions/cef
+      - name: Fetch dependencies
+        run: cargo fetch --locked
       - name: Build silo
+        if: matrix.os == 'linux'
         run: cargo build -p silo-cli --release --locked
-      - name: Package
+      # Builds silo, silo-menubar, the CEF helper and the app into
+      # target/Silo.app (ad-hoc signed).
+      - name: Build Silo.app
+        if: matrix.os == 'macos'
+        run: scripts/bundle-macos.sh
+      - name: Package silo
         run: |
           set -eu
           bin=target/release/silo
@@ -86,13 +103,35 @@ jobs:
           mkdir -p stage dist
           cp "$bin" stage/silo
           COPYFILE_DISABLE=1 tar -C stage -czf "dist/$ASSET.tar.gz" silo
-          (cd dist && shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256")
           printf '%s\n' "$id" > "dist/build-id-$ASSET"
           {
             echo "### $ASSET"
-            echo "- build id: \`$id\`"
-            echo "- sha256: \`$(cut -d' ' -f1 "dist/$ASSET.tar.gz.sha256")\`"
+            echo "- \`$("$bin" --version)\`, build id \`$id\`"
+            echo "- $ASSET.tar.gz: $(du -h "dist/$ASSET.tar.gz" | cut -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Package Silo.app
+        if: matrix.os == 'macos'
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          dmg="dist/Silo-$version.dmg"
+          stage=$(mktemp -d)
+          ditto target/Silo.app "$stage/Silo.app"
+          ln -s /Applications "$stage/Applications"
+          # hdiutil occasionally fails with "Resource busy" on hosted runners.
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname Silo -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"; then break; fi
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep $((attempt * 5))
+          done
+          codesign --force --sign - --timestamp=none "$dmg"
+          hdiutil verify "$dmg"
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          codesign --verify --deep --strict "$mnt/Silo.app"
+          cmp "$mnt/Silo.app/Contents/MacOS/silo-server" target/Silo.app/Contents/MacOS/silo-server
+          hdiutil detach "$mnt"
+          echo "- $(basename "$dmg"): $(du -h "$dmg" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Report glibc requirement
         if: matrix.os == 'linux'
         run: |
@@ -100,26 +139,38 @@ jobs:
           glibc=$(objdump -T target/release/silo | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
           echo "requires $glibc"
           echo "- requires \`$glibc\`" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - name: Check baseline CPU
+        if: matrix.os == 'linux' && matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-user > /dev/null
+          .github/scripts/check-baseline-cpu.sh target/release/silo
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ASSET }}
           path: dist/*
           if-no-files-found: error
+          compression-level: 0
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag || github.ref_name }}
+      PUBLISH: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.tag != '') }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
+          pattern: silo-*
           merge-multiple: true
       - name: Check build ids agree
         run: |
@@ -133,8 +184,42 @@ jobs:
           fi
           printf '%s\n' "$ids" > build-id
           rm build-id-*
+      - name: Check assets
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$PUBLISH" = true ] && [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match the workspace version $version" >&2
+            exit 1
+          fi
+          cd dist
+          for asset in silo-linux-x86_64.tar.gz silo-linux-aarch64.tar.gz silo-macos-aarch64.tar.gz "Silo-$version.dmg" build-id; do
+            [ -s "$asset" ] || { echo "missing $asset" >&2; exit 1; }
+          done
+          [ "$(find . -type f | wc -l)" -eq 5 ] || { echo "unexpected assets:" >&2; ls -l >&2; exit 1; }
+          sha256sum -- * > SHA256SUMS
           ls -l
+          cat SHA256SUMS
+          {
+            echo "### Assets"
+            echo '```'
+            ls -l
+            echo
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test install.sh
+        run: |
+          sh .github/scripts/test-install.sh
+          sh .github/scripts/test-install.sh dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
       - name: Publish
+        if: env.PUBLISH == 'true'
         run: |
           set -eu
           cd dist
@@ -143,5 +228,5 @@ jobs:
           else
             prerelease=
             case "$TAG" in *-*) prerelease=--prerelease ;; esac
-            gh release create "$TAG" ./* --verify-tag --title "$TAG" --generate-notes $prerelease
+            gh release create "$TAG" ./* --verify-tag --title "Silo ${TAG#v}" --generate-notes $prerelease
           fi

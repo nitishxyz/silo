@@ -17,6 +17,7 @@ pub mod remote;
 pub mod shell;
 pub mod sysclip;
 pub mod tunnel;
+pub mod upgrade;
 
 use std::{
     os::fd::AsFd,
@@ -40,6 +41,9 @@ pub struct Config {
     pub home: PathBuf,
     /// Exit after this long with no sessions and no clients.
     pub idle_exit: Option<Duration>,
+    /// Never sit at zero sessions: start one when there are none (at start
+    /// and when the last one closes). For servers that do not idle out.
+    pub keep_session: bool,
     /// How often running blocks are checkpointed to `<home>/state`.
     pub checkpoint_interval: Duration,
     /// Relays used by the remote (iroh) endpoint.
@@ -60,6 +64,7 @@ impl Default for Config {
         Self {
             home: paths::home(),
             idle_exit: None,
+            keep_session: false,
             checkpoint_interval: Duration::from_secs(5),
             relay: RelayConfig::Default,
             mdns: true,
@@ -187,6 +192,16 @@ impl Server {
     }
 }
 
+/// This machine's hostname; empty if it has none.
+pub fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    #[allow(unsafe_code)]
+    // SAFETY: the buffer is valid for its length.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    if ok { String::from_utf8_lossy(&buf[..len]).into_owned() } else { String::new() }
+}
+
 fn prepare_home(home: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("create {}", home.display()))?;
     set_mode(home, 0o700);
@@ -295,6 +310,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         server_id: persist.server_id().to_owned(),
         started_at,
         endpoint_id: identity.node_id(),
+        hostname: hostname(),
         remote_error,
         endpoint_addr: None,
         idle_exit_secs: config.idle_exit.map_or(0, |d| d.as_secs().max(1)),
@@ -327,6 +343,9 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         last_activity: Mutex::new(Instant::now()),
         clipboard: HostClipboard { system: config.system_clipboard.clone(), ..HostClipboard::default() },
     });
+    if config.keep_session {
+        server.registry.lock().unwrap().keep_session();
+    }
     let _clipboard_task = AbortOnDrop(tokio::spawn(watch_clipboard(server.clone())));
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
     let (incoming, tunnels) = incoming.unzip();

@@ -13,7 +13,7 @@ use std::{
 };
 
 use silo_client::{
-    Control, DifferentBuild,
+    Control, IncompatibleServer,
     mismatch::Upgraded,
     runtime,
     service::{self, Action, Manager, Service},
@@ -27,16 +27,18 @@ use crate::hosts::Transport;
 pub enum ConnEvent {
     Connected(Control),
     Event(Event),
+    /// An event arrived unreadable: re-fetch what events keep current.
+    Resync,
     Disconnected(String),
-    /// A server of a different build holds this host; nothing was spawned.
+    /// An incompatible local server holds this host; nothing was spawned.
     /// Sent again only when its description changes.
-    DifferentBuild(DifferentBuild),
+    IncompatibleServer(IncompatibleServer),
     /// The remote server reported a new route (already used for reconnects).
     Addr(silo_client::transport::EndpointAddr),
     /// The remote server refused this device; the loop stops.
     NotPaired,
-    /// The remote server is another build; polled slowly.
-    RemoteBuild,
+    /// The remote server speaks another protocol; polled slowly.
+    Incompatible,
     /// "Quit Silo" stopped the server on purpose: quit, don't reconnect.
     Quit,
 }
@@ -48,13 +50,20 @@ const UPGRADING_RETRY: Duration = Duration::from_millis(300);
 /// How often a connected remote host's address is re-read.
 const ADDR_REFRESH: Duration = Duration::from_secs(300);
 
+/// Delay before bringing the local server up again after failed attempt
+/// `attempt` (0-based), or while a server of another build serves:
+/// doubling from 5 s, capped at 5 min.
+fn ensure_retry(attempt: u32) -> Duration {
+    Duration::from_secs(5u64.saturating_mul(1 << attempt.min(6)).min(300))
+}
+
 /// Why a connect attempt failed, as far as the UI cares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     Unreachable,
     Upgrading,
     NotPaired,
-    DifferentBuild,
+    Incompatible,
 }
 
 #[must_use]
@@ -63,8 +72,8 @@ pub fn classify(error: &anyhow::Error) -> Failure {
         Failure::Upgrading
     } else if error.downcast_ref::<silo_client::Unauthorized>().is_some() {
         Failure::NotPaired
-    } else if error.downcast_ref::<silo_client::BuildMismatch>().is_some() {
-        Failure::DifferentBuild
+    } else if error.downcast_ref::<silo_client::IncompatibleProtocol>().is_some() {
+        Failure::Incompatible
     } else {
         Failure::Unreachable
     }
@@ -220,11 +229,63 @@ async fn up(svc: &Service) -> anyhow::Result<Vec<String>> {
 /// Bring the server up as `svc` runs it: install or refresh the launchd
 /// job, take over a server of another build live, adopt an unmanaged one,
 /// or start a plain server. Failures are logged; the connection loop
-/// reports what it then finds.
-async fn ensure(svc: &Service) {
+/// reports what it then finds and retries. Whether it succeeded.
+async fn ensure(svc: &Service) -> bool {
     match up(svc).await {
-        Ok(notes) => notes.iter().for_each(|note| tracing::info!("service: {note}")),
-        Err(error) => tracing::warn!("start server: {error:#}"),
+        Ok(notes) => {
+            notes.iter().for_each(|note| tracing::info!("service: {note}"));
+            true
+        }
+        Err(error) => {
+            tracing::warn!("start server: {error:#}");
+            false
+        }
+    }
+}
+
+/// When the local server should next be brought up ([`ensure`]): due at
+/// start, again with backoff after a failure or while a compatible server
+/// of another build (not taken over yet) serves.
+#[derive(Debug)]
+struct Ensure {
+    due: Option<tokio::time::Instant>,
+    attempt: u32,
+}
+
+impl Ensure {
+    fn now() -> Self {
+        Self { due: Some(tokio::time::Instant::now()), attempt: 0 }
+    }
+
+    fn is_due(&self) -> bool {
+        self.due.is_some_and(|due| due <= tokio::time::Instant::now())
+    }
+
+    /// Record an attempt's outcome.
+    fn done(&mut self, ok: bool) {
+        if ok {
+            self.attempt = 0;
+            self.due = None;
+        } else {
+            self.due = Some(tokio::time::Instant::now() + ensure_retry(self.attempt));
+            self.attempt = self.attempt.saturating_add(1);
+        }
+    }
+
+    /// Connected to a server of `build`: another build is taken over later.
+    fn connected(&mut self, build: &str) {
+        if build == silo_proto::BUILD {
+            *self = Self { due: None, attempt: 0 };
+        } else if self.due.is_none() {
+            self.due = Some(tokio::time::Instant::now() + ensure_retry(self.attempt));
+        }
+    }
+
+    async fn wait(&self) {
+        match self.due {
+            Some(due) => tokio::time::sleep_until(due).await,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -263,7 +324,7 @@ fn revive_with(svc: &Service, runner: &dyn service::Runner) -> anyhow::Result<Op
 ///
 /// # Errors
 /// The old server could not be replaced or this build's started.
-pub async fn upgrade(svc: &Service, server: &DifferentBuild) -> anyhow::Result<Upgraded> {
+pub async fn upgrade(svc: &Service, server: &IncompatibleServer) -> anyhow::Result<Upgraded> {
     let upgraded = silo_client::mismatch::upgrade(&svc.silo_home, &svc.exe, server).await?;
     tracing::info!(?upgraded, "upgraded server");
     up(svc).await?;
@@ -299,16 +360,16 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
     let name = client_name();
     let remote = transport.is_remote();
     let mut attempt = 0u32;
-    let mut remote_build = false;
-    let mut incompatible: Option<DifferentBuild> = None;
-    let mut ensured = false;
+    let mut incompatible_remote = false;
+    let mut incompatible: Option<IncompatibleServer> = None;
+    let mut ensured = Ensure::now();
     loop {
         if paused.load(Ordering::Acquire) {
             if tx.is_closed() {
                 return;
             }
             // Start Server after Stop: up again (Stop disabled the launchd job).
-            ensured = false;
+            ensured = Ensure::now();
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         }
@@ -321,9 +382,9 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
             return;
         }
         if let Transport::Local { service: Ok(service), .. } = &transport
-            && !std::mem::replace(&mut ensured, true)
+            && ensured.is_due()
         {
-            ensure(service).await;
+            ensured.done(ensure(service).await);
         }
         // A stopped server accepts the socket but never answers the hello.
         let limit = if remote { silo_client::PING_TIMEOUT_IROH } else { silo_client::PING_TIMEOUT_LOCAL };
@@ -331,12 +392,19 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
         match connected {
             Ok((control, mut events)) => {
                 attempt = 0;
-                remote_build = false;
+                incompatible_remote = false;
                 incompatible = None;
                 let pid = control.hello().server.pid;
                 tracing::info!(pid, "connected to silo server");
+                let local = match &transport {
+                    Transport::Local { service: Ok(service), .. } => Some(service.clone()),
+                    _ => None,
+                };
                 if let Transport::Local { home, .. } = &transport {
                     silo_proto::paths::clear_quit(home, Some(pid));
+                }
+                if local.is_some() {
+                    ensured.connected(&control.hello().build);
                 }
                 if tx.send(ConnEvent::Connected(control.clone())).is_err() {
                     return;
@@ -346,6 +414,7 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                 let mut info = tokio::time::interval(ADDR_REFRESH);
                 let heartbeat = control.clone().heartbeat();
                 tokio::pin!(heartbeat);
+                let mut stale = control.stale();
                 let mut hung = false;
                 loop {
                     tokio::select! {
@@ -353,6 +422,19 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                             let Some((_, event)) = event else { break };
                             if tx.send(ConnEvent::Event(event)).is_err() {
                                 return;
+                            }
+                        }
+                        Ok(()) = stale.changed() => {
+                            if tx.send(ConnEvent::Resync).is_err() {
+                                return;
+                            }
+                        }
+                        // A compatible server of another build: take it over
+                        // to this one (the connection then drops and comes
+                        // back to the new server).
+                        () = ensured.wait(), if local.is_some() => {
+                            if let Some(service) = &local {
+                                ensured.done(ensure(service).await);
                             }
                         }
                         () = &mut heartbeat => {
@@ -391,12 +473,12 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                 }
             }
             Err(error) => {
-                if let Some(server) = error.downcast_ref::<DifferentBuild>() {
+                if let Some(server) = error.downcast_ref::<IncompatibleServer>() {
                     // Slow, quiet polling: nothing is spawned meanwhile.
                     if incompatible.as_ref() != Some(server) {
                         tracing::info!(?server, "incompatible server");
                         incompatible = Some(server.clone());
-                        if tx.send(ConnEvent::DifferentBuild(server.clone())).is_err() {
+                        if tx.send(ConnEvent::IncompatibleServer(server.clone())).is_err() {
                             return;
                         }
                     }
@@ -414,14 +496,14 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                         let _ = tx.send(ConnEvent::NotPaired);
                         return;
                     }
-                    Failure::DifferentBuild => {
-                        if !std::mem::replace(&mut remote_build, true) && tx.send(ConnEvent::RemoteBuild).is_err() {
+                    Failure::Incompatible => {
+                        if !std::mem::replace(&mut incompatible_remote, true) && tx.send(ConnEvent::Incompatible).is_err() {
                             return;
                         }
                         backoff(u32::MAX, remote, jitter())
                     }
                     Failure::Unreachable => {
-                        remote_build = false;
+                        incompatible_remote = false;
                         let reason = match &transport {
                             Transport::Local { service: Err(reason), .. } => reason.clone(),
                             Transport::Local { home, service: Ok(service) } => {
@@ -633,12 +715,31 @@ mod tests {
         assert_eq!(ms(3, true, 7.0), 2000);
     }
 
+    #[tokio::test]
+    async fn ensure_retries_failures_and_other_builds() {
+        assert_eq!([0, 1, 2, 6, 40].map(|a| ensure_retry(a).as_secs()), [5, 10, 20, 300, 300]);
+        let mut ensure = Ensure::now();
+        assert!(ensure.is_due());
+        let start = tokio::time::Instant::now();
+        ensure.done(false);
+        ensure.done(false);
+        assert!(!ensure.is_due());
+        assert!(ensure.due.unwrap() >= start + Duration::from_secs(10), "backs off");
+        ensure.done(true);
+        assert!(ensure.due.is_none() && ensure.attempt == 0);
+        // Connected to another (compatible) build: due again later.
+        ensure.connected("another");
+        assert!(!ensure.is_due() && ensure.due.is_some());
+        ensure.connected(silo_proto::BUILD);
+        assert!(ensure.due.is_none());
+    }
+
     #[test]
     fn errors_map_to_failures() {
         let message = String::from("why");
         assert_eq!(classify(&silo_client::Upgrading { message: message.clone() }.into()), Failure::Upgrading);
         assert_eq!(classify(&silo_client::Unauthorized { message: message.clone() }.into()), Failure::NotPaired);
-        assert_eq!(classify(&silo_client::BuildMismatch { message }.into()), Failure::DifferentBuild);
+        assert_eq!(classify(&silo_client::IncompatibleProtocol { message }.into()), Failure::Incompatible);
         assert_eq!(classify(&anyhow::anyhow!("dial server")), Failure::Unreachable);
         // Context added on the way up keeps the type.
         let wrapped = anyhow::Error::from(silo_client::Unauthorized { message: "x".into() }).context("hello");

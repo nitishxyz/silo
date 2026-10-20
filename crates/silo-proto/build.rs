@@ -17,4 +17,10 @@ fn main() {
     }
     let id = build_id::hash(&root, &sources.files).expect("hash workspace sources");
     println!("cargo:rustc-env=SILO_BUILD_ID={id}");
+    // `VT`: terminal snapshots are libghostty's GHOSTSNP records, which
+    // carry no compatibility guarantee across ghostty revisions.
+    let rev_file = root.join("GHOSTTY_REV");
+    println!("cargo:rerun-if-changed={}", rev_file.display());
+    let rev = std::fs::read_to_string(&rev_file).expect("GHOSTTY_REV");
+    println!("cargo:rustc-env=SILO_VT_FORMAT=ghostsnp1-{}", rev.trim());
 }

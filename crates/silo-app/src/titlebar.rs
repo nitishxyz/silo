@@ -146,6 +146,7 @@ impl Workspace {
         match crate::browser_pane::kind_of(block) {
             crate::browser_pane::Kind::Browser => "globe",
             crate::browser_pane::Kind::Terminal => "terminal",
+            crate::browser_pane::Kind::Unsupported => "info",
         }
     }
 
@@ -269,6 +270,7 @@ impl Workspace {
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
             let comfortable = !compact;
             let menu_open = self.appearance_menu.open;
+            let new_tab_open = self.new_tab_menu.open;
             // The strip and the empty space after it take tab drops. The
             // space after the last tab means "move to the end".
             let last = view.session.windows.len().saturating_sub(1);
@@ -331,10 +333,12 @@ impl Workspace {
                         .capsule()
                         .hover(|s| s.bg(hover))
                         .cursor_pointer()
-                        .tooltip(crate::tooltip::Tooltip::text("New Tab  ⌘T"))
+                        .when(new_tab_open, |el| el.bg(hover))
+                        .when(!new_tab_open, |el| el.tooltip(crate::tooltip::Tooltip::text("New Tab")))
                         .child(icon("plus", 15.0, self.chrome.icon))
+                        .child(self.new_tab_menu.button_probe())
                         .map(claim_press)
-                        .on_click(cx.listener(|this, _, window, cx| this.new_window(window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_new_tab_menu(window, cx))),
                 );
         }
         bar.into_any_element()

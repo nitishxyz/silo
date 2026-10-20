@@ -23,7 +23,7 @@ use silo_proto::{
 };
 
 #[derive(Parser)]
-#[command(name = "silo", version, about = "Block terminal multiplexer")]
+#[command(name = "silo", version = version(), about = "Block terminal multiplexer")]
 struct Cli {
     /// Use a remote host: a stored host (name or id prefix) or a pairing
     /// ticket.
@@ -208,13 +208,48 @@ enum ClipboardCommand {
 #[derive(Subcommand)]
 enum RemoteCommand {
     /// Install silo on `target` (an ssh destination), start it and add it
-    /// as a host here.
+    /// as a host here. `target` downloads the published release of this
+    /// silo's version number; for a dev build that release may be another
+    /// build than this one (`--local` sends this one).
     Install {
         target: String,
-        /// Upload this silo binary instead of downloading the release.
+        /// Upload this silo instead (it must run on `target`).
+        #[arg(long, conflicts_with = "binary")]
+        local: bool,
+        /// Upload this silo binary instead.
         #[arg(long)]
         binary: Option<PathBuf>,
     },
+    /// Upgrade a paired host (name or id prefix) live, sessions kept: it
+    /// downloads the published release of this silo's version number (for a
+    /// dev build, maybe another build than this one; `--local` sends this
+    /// one). Skips hosts on that build, refuses newer ones.
+    #[command(group = clap::ArgGroup::new("target").required(true))]
+    Upgrade {
+        #[arg(value_name = "HOST", group = "target")]
+        name: Option<String>,
+        /// Every paired host.
+        #[arg(long, group = "target")]
+        all: bool,
+        /// Go over ssh to this destination instead (silo in ~/.local/bin).
+        #[arg(long, value_name = "DESTINATION", group = "target")]
+        ssh: Option<String>,
+        /// Send this silo instead (it must run on the host).
+        #[arg(long, conflicts_with = "binary")]
+        local: bool,
+        /// Send this silo binary instead.
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Install even when the host runs this build or a newer version.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// `silo --version`: version and build, read by `silo remote upgrade`.
+fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| silo_proto::upgrade::version_text(env!("CARGO_PKG_VERSION"), silo_proto::BUILD))
 }
 
 #[derive(Subcommand)]
@@ -228,7 +263,10 @@ enum HostsCommand {
     /// List remembered hosts.
     Ls,
     /// Forget a host (by name or id prefix).
-    Rm { host: String },
+    Rm {
+        #[arg(value_name = "HOST")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -387,6 +425,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             let home = paths::home();
             let takeover = takeover || (adopt && silo_client::mismatch::server_lock_held(&home));
             tracing::info!(daemon, takeover, adopt, ?idle_exit, pid = std::process::id(), "silo server starting");
+            silo_server::upgrade::clean_stale_beside_exe();
             let idle_exit = match idle_exit {
                 Some(0) => None,
                 Some(secs) => Some(Duration::from_secs(secs)),
@@ -399,6 +438,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             let config = silo_server::Config {
                 home,
                 idle_exit,
+                keep_session: idle_exit.is_none(),
                 relay,
                 mdns: !no_mdns,
                 port,
@@ -521,7 +561,17 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             Ok(0)
         }
         Command::Join { ticket } => join(&ticket).await,
-        Command::Remote { command: RemoteCommand::Install { target, binary } } => remote_install(&target, binary.as_deref()).await,
+        Command::Remote { command: RemoteCommand::Install { target, local, binary } } => {
+            remote_install(&target, &silo_cli::upgrade::Source::new(local, binary)).await
+        }
+        Command::Remote { command: RemoteCommand::Upgrade { name, all, ssh, local, binary, force } } => {
+            let target = match (ssh, all) {
+                (Some(destination), _) => UpgradeTarget::Ssh(destination),
+                (None, true) => UpgradeTarget::All,
+                (None, false) => UpgradeTarget::Host(name.context("name a host, or pass --all or --ssh")?),
+            };
+            remote_upgrade(target, &silo_cli::upgrade::Source::new(local, binary), force).await
+        }
         Command::Down { yes } => down(yes).await,
         Command::Status => show_status().await,
         Command::KillServer => {
@@ -617,8 +667,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                         println!("{}  {}", h.name, h.id);
                     }
                 }
-                HostsCommand::Rm { host } => {
-                    let removed = Hosts::update(&home, |hosts| hosts.remove(&host))?;
+                HostsCommand::Rm { name } => {
+                    let removed = Hosts::update(&home, |hosts| hosts.remove(&name))?;
                     println!("removed {} ({})", removed.name, removed.id);
                 }
             }
@@ -631,25 +681,15 @@ fn client_name() -> String {
     format!("silo cli {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id())
 }
 
-/// This machine's hostname; empty if it has none.
-fn raw_hostname() -> String {
-    let mut buf = [0u8; 256];
-    #[allow(unsafe_code)]
-    // SAFETY: the buffer is valid for its length.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    if ok { String::from_utf8_lossy(&buf[..len]).into_owned() } else { String::new() }
-}
-
 /// How this machine's server is named when offered to another.
 fn hostname() -> String {
-    let host = raw_hostname();
+    let host = silo_server::hostname();
     if host.is_empty() { "silo host".to_owned() } else { host }
 }
 
 /// How this device is named on hosts it pairs with.
 fn device_name() -> String {
-    let host = raw_hostname();
+    let host = silo_server::hostname();
     if host.is_empty() { "silo cli".to_owned() } else { format!("silo cli on {host}") }
 }
 
@@ -774,8 +814,42 @@ fn run_interactive(argv: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn remote_install(target: &str, binary: Option<&std::path::Path>) -> anyhow::Result<i32> {
+/// What `silo remote upgrade` upgrades.
+enum UpgradeTarget {
+    Host(String),
+    All,
+    Ssh(String),
+}
+
+async fn remote_upgrade(target: UpgradeTarget, source: &silo_cli::upgrade::Source, force: bool) -> anyhow::Result<i32> {
+    let candidate = silo_cli::upgrade::Candidate::new(source)?;
+    let home = paths::home();
+    let hosts = match target {
+        UpgradeTarget::Ssh(destination) => {
+            println!("{}", silo_cli::upgrade::over_ssh(&destination, &candidate, force)?);
+            return Ok(0);
+        }
+        UpgradeTarget::All => Hosts::load(&home)?.select(None)?,
+        UpgradeTarget::Host(name) => Hosts::load(&home)?.select(Some(&name))?,
+    };
+    let mut failed = false;
+    for host in &hosts {
+        match silo_cli::upgrade::paired(&home, host, &candidate, force, &NetOptions::default()).await {
+            Ok(line) => println!("{line}"),
+            Err(error) if hosts.len() == 1 => return Err(error),
+            Err(error) => {
+                eprintln!("silo: {error:#}");
+                failed = true;
+            }
+        }
+    }
+    Ok(i32::from(failed))
+}
+
+async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> anyhow::Result<i32> {
+    use silo_cli::upgrade::Candidate;
     let install = link::Install::new(target)?;
+    let candidate = Candidate::new(source)?;
     let (control, mut events, _net) = connect(None).await?;
     link::require_remote(&control).await?;
     let detect = install.detect();
@@ -784,25 +858,22 @@ async fn remote_install(target: &str, binary: Option<&std::path::Path>) -> anyho
         bail!("could not reach {target} over ssh ({})", output.status);
     }
     let platform = link::Platform::from_uname(&String::from_utf8_lossy(&output.stdout))?;
-    if let Some(binary) = binary {
-        let mut header = [0u8; 64];
-        let mut file = std::fs::File::open(binary).with_context(|| format!("open {}", binary.display()))?;
-        let n = std::io::Read::read(&mut file, &mut header)?;
-        if link::Platform::of_binary(&header[..n]) != Some(platform) {
-            bail!("{} is not a binary for {target} (needs {})", binary.display(), platform.asset());
-        }
+    candidate.check_platform(target, platform.name())?;
+    if let Candidate::Release { version } = &candidate {
+        silo_cli::upgrade::check_release(&install, platform, version)?;
     }
     control.subscribe().await?;
     let invite = link::invite(&control, link::INSTALL_JOIN_TTL, InvitePurpose::Join).await?;
-    match binary {
-        Some(binary) => {
-            eprintln!("silo: uploading {} to {target}", binary.display());
-            run_interactive(&install.upload(binary))?;
+    match &candidate {
+        Candidate::File { path, .. } => {
+            eprintln!("silo: uploading {} to {target}", path.display());
+            run_interactive(&install.upload(path))?;
+            silo_cli::upgrade::check_staged(&install)?;
             run_interactive(&install.join_uploaded(&invite.ticket))?;
         }
-        None => {
-            eprintln!("silo: installing {} on {target}", platform.asset());
-            run_interactive(&install.join_download(&invite.ticket))?;
+        Candidate::Release { version } => {
+            eprintln!("silo: installing silo {version} ({}) on {target}", platform.name());
+            run_interactive(&install.join_download(version, &invite.ticket))?;
         }
     }
     let offer = link::wait_offer(&mut events, &invite.invite_id, Duration::from_secs(30)).await?;
@@ -816,7 +887,14 @@ async fn down(yes: bool) -> anyhow::Result<i32> {
     let svc = local_service(&runner)?;
     let (server, control) = probe_server().await;
     let sessions = match (&control, server) {
-        (Some(control), _) => Some(silo_cli::sessions(control).await?.len()),
+        (Some(control), _) => {
+            let sessions = silo_cli::sessions(control).await?;
+            let view = match sessions.as_slice() {
+                [only] => Some(control.call::<SessionView>(Method::SessionView { session_id: only.id.clone() }).await?),
+                _ => None,
+            };
+            Some(silo_cli::sessions_to_end(&sessions, view.as_ref(), std::env::var("SHELL").ok().as_deref()))
+        }
         (None, service::Server::Other) => silo_client::mismatch::inspect(&paths::home()).await.sessions,
         (None, service::Server::Unresponsive) => None,
         (None, _) => Some(0),
@@ -963,7 +1041,7 @@ async fn connect_existing() -> anyhow::Result<(Option<Control>, Option<Events>)>
     let home = paths::home();
     match Control::connect(&paths::socket(&home), &client_name()).await {
         Ok((control, events)) => Ok((Some(control), Some(events))),
-        Err(error) => match silo_client::mismatch::different_build(&home, &error).await {
+        Err(error) => match silo_client::mismatch::incompatible_server(&home, &error).await {
             Some(server) => Err(server.into()),
             None => Ok((None, None)),
         },
@@ -1075,17 +1153,55 @@ mod tests {
         assert!(matches!(Cli::parse_from(["silo", "status"]).command, Some(Command::Status)));
         assert!(matches!(Cli::parse_from(["silo", "join", "silo1abc"]).command, Some(Command::Join { ticket }) if ticket == "silo1abc"));
         assert!(Cli::try_parse_from(["silo", "join"]).is_err());
-        let Some(Command::Remote { command: RemoteCommand::Install { target, binary } }) =
+        let Some(Command::Remote { command: RemoteCommand::Install { target, binary, local: false } }) =
             Cli::parse_from(["silo", "remote", "install", "me@box", "--binary", "/tmp/silo"]).command
         else {
             panic!()
         };
         assert_eq!((target.as_str(), binary), ("me@box", Some(PathBuf::from("/tmp/silo"))));
-        let Some(Command::Remote { command: RemoteCommand::Install { binary: None, .. } }) =
+        let Some(Command::Remote { command: RemoteCommand::Install { binary: None, local: false, .. } }) =
             Cli::parse_from(["silo", "remote", "install", "box"]).command
         else {
             panic!()
         };
+        let Some(Command::Remote { command: RemoteCommand::Install { binary: None, local: true, .. } }) =
+            Cli::parse_from(["silo", "remote", "install", "box", "--local"]).command
+        else {
+            panic!()
+        };
+        assert!(Cli::try_parse_from(["silo", "remote", "install", "box", "--local", "--binary", "/tmp/silo"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "remote", "install", "box", "--download"]).is_err());
+        use silo_cli::upgrade::Source;
+        assert_eq!(Source::new(false, None), Source::Release);
+        assert_eq!(Source::new(true, None), Source::Local);
+        assert_eq!(Source::new(false, Some("/tmp/silo".into())), Source::Binary("/tmp/silo".into()));
+        let Some(Command::Remote { command: RemoteCommand::Upgrade { name, all: false, ssh: None, local: false, binary: None, force: false } }) =
+            Cli::parse_from(["silo", "remote", "upgrade", "mini"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(name.as_deref(), Some("mini"));
+        assert!(Cli::parse_from(["silo", "remote", "upgrade", "mini"]).host.is_none());
+        let Some(Command::Remote { command: RemoteCommand::Upgrade { name: None, all: true, force: true, binary, .. } }) =
+            Cli::parse_from(["silo", "remote", "upgrade", "--all", "--force", "--binary", "/tmp/silo"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(binary, Some(PathBuf::from("/tmp/silo")));
+        let Some(Command::Remote { command: RemoteCommand::Upgrade { name: None, ssh, local: true, .. } }) =
+            Cli::parse_from(["silo", "remote", "upgrade", "--ssh", "me@box", "--local"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(ssh.as_deref(), Some("me@box"));
+        assert!(Cli::try_parse_from(["silo", "remote", "upgrade", "mini", "--local", "--binary", "/tmp/silo"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "remote", "upgrade"]).is_err());
+        let cli = Cli::parse_from(["silo", "hosts", "rm", "mini"]);
+        assert!(cli.host.is_none());
+        assert!(matches!(cli.command, Some(Command::Hosts { command: HostsCommand::Rm { name } }) if name == "mini"));
+        assert!(Cli::try_parse_from(["silo", "remote", "upgrade", "mini", "--all"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "remote", "upgrade", "--all", "--ssh", "me@box"]).is_err());
+        assert_eq!(version(), format!("{} ({})", env!("CARGO_PKG_VERSION"), silo_proto::BUILD));
         let Some(Command::Server { adopt: true, takeover: false, .. }) = Cli::parse_from(["silo", "server", "--adopt"]).command else { panic!() };
         assert!(Cli::try_parse_from(["silo", "server", "--adopt", "--takeover"]).is_err());
     }

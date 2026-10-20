@@ -74,7 +74,10 @@ impl Workspace {
                 id: index.to_string(),
                 name: h.info.name.clone(),
                 address: h.info.transport.remote_id().unwrap_or_default(),
-                status: host_status(&h.state, h.paused.load(std::sync::atomic::Ordering::Acquire)),
+                status: match crate::switcher::older(h) {
+                    Some(older) if h.state == HostState::Connected => format!("Connected · {older}"),
+                    _ => host_status(&h.state, h.paused.load(std::sync::atomic::Ordering::Acquire)),
+                },
                 removable: !h.info.local,
             })
             .collect();
@@ -86,7 +89,7 @@ impl Workspace {
         let server = SettingsServer {
             status: match (connected, paused, local.map(|h| &h.state)) {
                 (Some(_), _, _) => "Running".into(),
-                (None, _, _) if incompatible.is_some() => silo_client::DifferentBuild::LABEL.into(),
+                (None, _, _) if incompatible.is_some() => silo_client::IncompatibleServer::LABEL.into(),
                 (None, true, _) => "Stopped".into(),
                 (None, false, Some(HostState::Unreachable(reason))) => {
                     format!("Unavailable: {reason}")
@@ -516,7 +519,7 @@ fn host_status(state: &HostState, paused: bool) -> String {
         HostState::Connected => "Connected".into(),
         HostState::Unreachable(reason) => format!("Unreachable: {reason}"),
         HostState::NotPaired => "Not paired".into(),
-        HostState::DifferentBuild => "Different server build".into(),
+        HostState::Incompatible => "Incompatible — upgrade".into(),
     }
 }
 
@@ -567,7 +570,7 @@ mod tests {
         assert_eq!(seen(100, 100 + 3 * 3600), "Last seen 3 h ago");
         assert_eq!(seen(100, 100 + 2 * 86_400), "Last seen 2 d ago");
         assert_eq!(host_status(&HostState::NotPaired, false), "Not paired");
-        assert_eq!(host_status(&HostState::DifferentBuild, false), "Different server build");
+        assert_eq!(host_status(&HostState::Incompatible, false), "Incompatible — upgrade");
         assert_eq!(crate::switcher::state_label(&HostState::Unreachable("x".into()), false), Some("offline"));
         assert_eq!(crate::switcher::state_label(&HostState::NotPaired, false), Some("not paired"));
         assert_eq!(crate::switcher::state_label(&HostState::Connected, false), None);

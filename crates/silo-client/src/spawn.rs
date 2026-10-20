@@ -21,7 +21,7 @@ pub async fn server_running(home: &Path) -> bool {
 /// if none is running. Concurrent callers serialise on `start.lock`.
 ///
 /// Never starts a second server while one holds the server lock: an
-/// server of another build fails with [`mismatch::DifferentBuild`] at once, one that
+/// server of another build fails with [`mismatch::IncompatibleServer`] at once, one that
 /// does not answer fails after a short wait.
 ///
 /// # Errors
@@ -122,9 +122,9 @@ pub(crate) fn spawn_server(home: &Path, server_exe: &Path, args: &[&str]) -> any
 }
 
 /// Turn a build rejection by the server holding `home` into
-/// [`mismatch::DifferentBuild`]; other errors pass.
+/// [`mismatch::IncompatibleServer`]; other errors pass.
 async fn incompatible(home: &Path, error: &anyhow::Error) -> anyhow::Result<()> {
-    match mismatch::different_build(home, error).await {
+    match mismatch::incompatible_server(home, error).await {
         Some(server) => Err(server.into()),
         None => Ok(()),
     }

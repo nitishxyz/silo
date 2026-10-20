@@ -137,6 +137,10 @@ impl Mirror {
                 self.awaiting_head = true;
                 self.complete = false;
             }
+            StartMode::Unknown => {
+                self.invalid = true;
+                bail!("the server starts the stream in a mode this build does not know");
+            }
         }
         self.invalid = false;
         self.size = welcome.size;
@@ -232,9 +236,13 @@ impl Mirror {
             }
             // Prediction metadata: the caller hands these to its
             // `Predictor::server`; they never move `next_offset` or acks.
-            ServerData::InputAck { .. } | ServerData::TtyMode { .. } | ServerData::ClipboardWrite { .. } | ServerData::ClipboardRead { .. } => {
-                Ok(Applied::None)
-            }
+            // A newer server's frames are skipped.
+            ServerData::InputAck { .. }
+            | ServerData::TtyMode { .. }
+            | ServerData::ClipboardWrite { .. }
+            | ServerData::ClipboardRead { .. }
+            | ServerData::ClipboardReadUnknown { .. }
+            | ServerData::Unknown(_) => Ok(Applied::None),
         }
     }
 
@@ -335,7 +343,7 @@ pub fn engine_config(config: &TerminalConfig) -> (TerminalColors, TerminalDefaul
     };
     let defaults = TerminalDefaults {
         cursor_shape: Some(match config.cursor_shape {
-            CursorShape::Block => silo_vt::CursorShape::Block,
+            CursorShape::Block | CursorShape::Unknown => silo_vt::CursorShape::Block,
             CursorShape::Bar => silo_vt::CursorShape::Bar,
             CursorShape::Underline => silo_vt::CursorShape::Underline,
             CursorShape::Hollow => silo_vt::CursorShape::Hollow,

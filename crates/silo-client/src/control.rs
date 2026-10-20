@@ -77,14 +77,16 @@ macro_rules! server_error {
 }
 
 server_error! {
-    /// The server rejected our hello because it is a different build.
-    BuildMismatch;
+    /// The server speaks an incompatible protocol (or predates protocol numbers).
+    IncompatibleProtocol;
     /// The server refused our device: not paired, revoked or a bad invite.
     Unauthorized;
     /// The server is handing over to a new build; retry shortly.
     Upgrading;
     /// The server has no reachable address yet (`pair.create`); retry.
     Offline;
+    /// The server does not know the method: it is older than this client.
+    NotSupported;
 }
 
 const UPGRADING: &str = "upgrading";
@@ -94,7 +96,8 @@ const OFFLINE: &str = "offline";
 fn typed(error: RpcError) -> anyhow::Error {
     let message = error.message.clone();
     match error.code.as_str() {
-        RpcError::DIFFERENT_BUILD => BuildMismatch { message }.into(),
+        RpcError::INCOMPATIBLE => IncompatibleProtocol { message }.into(),
+        RpcError::METHOD_NOT_FOUND => NotSupported { message }.into(),
         RpcError::UNAUTHORIZED => Unauthorized { message }.into(),
         UPGRADING => Upgrading { message }.into(),
         OFFLINE => Offline { message }.into(),
@@ -102,23 +105,30 @@ fn typed(error: RpcError) -> anyhow::Error {
     }
 }
 
-/// The server does not speak `build`'s hello.
-fn not_this_build() -> anyhow::Error {
-    BuildMismatch { message: "the server did not complete this build's hello".into() }.into()
+/// The server does not speak this protocol's hello.
+fn incompatible_hello() -> anyhow::Error {
+    IncompatibleProtocol { message: "the server did not complete this protocol's hello".into() }.into()
 }
 
-/// `build`'s hello reply. Any other shape, an unknown rejection or another
-/// build's hello comes from a server of another build: [`BuildMismatch`].
+/// The hello reply of a compatible server ([`silo_proto::compat::check`]),
+/// or, when speaking as another `build` (best-effort inspection of an old
+/// server), of that build. Any other shape or an unknown rejection is
+/// [`IncompatibleProtocol`].
 fn server_hello(reply: &Frame, build: &str) -> anyhow::Result<ServerHello> {
     if reply.kind == kind::CONTROL_HELLO {
-        return reply.parse::<ServerHello>().ok().filter(|h| h.build == build).ok_or_else(not_this_build);
+        let hello = reply.parse::<ServerHello>().map_err(|_| incompatible_hello())?;
+        if build != BUILD {
+            return if hello.build == build { Ok(hello) } else { Err(incompatible_hello()) };
+        }
+        silo_proto::compat::check(hello.protocol, &hello.vt).map_err(|e| IncompatibleProtocol { message: e.message })?;
+        return Ok(hello);
     }
     match reply.parse::<ServerMessage>() {
         Ok(ServerMessage::Response { error: Some(error), .. }) => match typed(error) {
-            e if e.is::<RpcError>() => Err(not_this_build()),
+            e if e.is::<RpcError>() => Err(incompatible_hello()),
             e => Err(e),
         },
-        _ => Err(not_this_build()),
+        _ => Err(incompatible_hello()),
     }
 }
 
@@ -136,6 +146,8 @@ struct Inner {
     conn: Conn,
     client_name: String,
     closed: watch::Receiver<bool>,
+    /// Bumped when a known event failed to parse (see [`Control::stale`]).
+    stale: watch::Receiver<u64>,
     /// Set to stop the reader and writer: the connection closes locally.
     shutdown: watch::Sender<bool>,
 }
@@ -169,13 +181,13 @@ impl Control {
         Self::connect_build(Conn::Unix(socket.to_owned()), client_name, passive, BUILD).await
     }
 
-    /// Hello over `conn` announcing `build`. Only for best-effort
-    /// `session.list` / `server.shutdown` on a server of another build,
-    /// whose shapes may differ.
+    /// Hello over `conn` announcing `build`: [`BUILD`] for any compatible
+    /// server; another build only for best-effort `session.list` /
+    /// `server.shutdown` on an incompatible server of that build.
     ///
     /// # Errors
     /// Connection or handshake failure; a build rejection is a
-    /// [`BuildMismatch`], a refused device [`Unauthorized`].
+    /// [`IncompatibleProtocol`], a refused device [`Unauthorized`].
     pub async fn connect_build(conn: Conn, client_name: &str, passive: bool, build: &str) -> anyhow::Result<(Self, Events)> {
         Self::handshake(conn, client_name, passive, build, None).await
     }
@@ -189,13 +201,13 @@ impl Control {
         invite: Option<String>,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let hello = ClientHello { build: build.to_owned(), client_name: client_name.to_owned(), token: None, passive, invite };
+        let hello = ClientHello { build: build.to_owned(), ..ClientHello::ours(client_name, passive, invite) };
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;
         let hello = match read_frame(&mut stream).await {
             Ok(Some(reply)) => server_hello(&reply, build)?,
-            Ok(None) => return Err(not_this_build()),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Err(not_this_build()),
+            Ok(None) => return Err(incompatible_hello()),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Err(incompatible_hello()),
             Err(e) => return Err(e.into()),
         };
         let (reader, mut writer) = tokio::io::split(stream);
@@ -219,6 +231,7 @@ impl Control {
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (closed_tx, closed_rx) = watch::channel(false);
+        let (stale_tx, stale_rx) = watch::channel(0u64);
         let reader_pending = pending.clone();
         let mut frames = spawn_reader(reader, 256);
         let remote = match &conn {
@@ -240,6 +253,10 @@ impl Control {
                     _ = reader_stop.wait_for(|stop| *stop) => break,
                 };
                 let Some(Ok(frame)) = frame else { break };
+                // A newer server's frame kinds are skipped.
+                if frame.kind != kind::CONTROL {
+                    continue;
+                }
                 match frame.parse::<ServerMessage>() {
                     Ok(ServerMessage::Response { id, result, error }) => {
                         let waiter = reader_pending.lock().unwrap().as_mut().and_then(|p| p.remove(&id));
@@ -253,19 +270,49 @@ impl Control {
                     Ok(ServerMessage::Event { seq, event }) => {
                         let _ = events_tx.send((seq, *event));
                     }
+                    Ok(ServerMessage::UnknownEvent { seq }) => tracing::debug!(seq, "skipped an unknown event"),
+                    Ok(ServerMessage::MalformedEvent { seq, event, error }) => {
+                        tracing::warn!(seq, event, "unreadable event, resyncing: {error}");
+                        stale_tx.send_modify(|n| *n += 1);
+                    }
                     Err(e) => tracing::warn!("bad control message: {e}"),
                 }
             }
             reader_pending.lock().unwrap().take();
             let _ = closed_tx.send(true);
         });
-        let inner = Inner { tx, pending, next_id: AtomicU64::new(1), hello, conn, client_name: client_name.to_owned(), closed: closed_rx, shutdown };
+        let inner = Inner {
+            tx,
+            pending,
+            next_id: AtomicU64::new(1),
+            hello,
+            conn,
+            client_name: client_name.to_owned(),
+            closed: closed_rx,
+            stale: stale_rx,
+            shutdown,
+        };
         Ok((Self { inner: Arc::new(inner) }, events_rx))
     }
 
     #[must_use]
     pub fn hello(&self) -> &ServerHello {
         &self.inner.hello
+    }
+
+    /// Changes whenever an event this build knows arrived unreadable (a
+    /// newer server's data inside it): state built from events is stale,
+    /// re-fetch it.
+    #[must_use]
+    pub fn stale(&self) -> watch::Receiver<u64> {
+        self.inner.stale.clone()
+    }
+
+    /// Whether the server advertises `feature` (see
+    /// [`silo_proto::compat::feature`]).
+    #[must_use]
+    pub fn peer_supports(&self, feature: &str) -> bool {
+        self.inner.hello.features.iter().any(|f| f == feature)
     }
 
     #[must_use]
@@ -428,11 +475,12 @@ mod tests {
                 server_id: String::new(),
                 started_at: 0,
                 endpoint_id: String::new(),
+                hostname: String::new(),
                 remote_error: None,
                 endpoint_addr: None,
                 idle_exit_secs: 0,
             };
-            let hello = ServerHello { build: BUILD.to_owned(), client_id: 1, server: info };
+            let hello = ServerHello::ours(1, info);
             write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
             std::future::pending::<()>().await;
         });
@@ -445,11 +493,22 @@ mod tests {
 
     #[test]
     fn foreign_hellos_are_build_mismatches() {
-        let mismatch = |frame: Frame| server_hello(&frame, BUILD).unwrap_err().is::<BuildMismatch>();
+        let mismatch = |frame: Frame| server_hello(&frame, BUILD).unwrap_err().is::<IncompatibleProtocol>();
         let rejected =
             |code: &str| Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(RpcError::new(code, "x")) }).unwrap();
         assert!(mismatch(rejected("protocol")));
         assert!(mismatch(Frame::json(kind::CONTROL_HELLO, &serde_json::json!({"protocol": 1, "client_id": 1})).unwrap()));
+        let other_protocol = serde_json::json!({
+            "protocol": silo_proto::PROTOCOL + 1, "vt": silo_proto::VT, "build": "b", "client_id": 1,
+            "server": {"version": "9", "pid": 1, "server_id": "s", "started_at": 0, "endpoint_id": "e", "idle_exit_secs": 0}
+        });
+        let error = server_hello(&Frame::json(kind::CONTROL_HELLO, &other_protocol).unwrap(), BUILD).unwrap_err();
+        assert!(error.downcast_ref::<IncompatibleProtocol>().unwrap().message.contains("protocol"), "{error:#}");
+        let other_build = serde_json::json!({
+            "protocol": silo_proto::PROTOCOL, "vt": silo_proto::VT, "build": "another", "client_id": 1,
+            "server": {"version": "9", "pid": 1, "server_id": "s", "started_at": 0, "endpoint_id": "e", "idle_exit_secs": 0}
+        });
+        assert_eq!(server_hello(&Frame::json(kind::CONTROL_HELLO, &other_build).unwrap(), BUILD).unwrap().build, "another");
         assert!(mismatch(Frame::new(kind::CONTROL_HELLO, b"garbage".to_vec())));
         assert!(mismatch(Frame::new(kind::CONTROL, b"garbage".to_vec())));
         assert!(server_hello(&rejected(RpcError::UNAUTHORIZED), BUILD).unwrap_err().is::<Unauthorized>());
@@ -458,7 +517,8 @@ mod tests {
 
     #[test]
     fn server_errors_are_typed() {
-        assert_eq!(code(RpcError::DIFFERENT_BUILD).downcast_ref::<BuildMismatch>().unwrap().message, "why");
+        assert_eq!(code(RpcError::INCOMPATIBLE).downcast_ref::<IncompatibleProtocol>().unwrap().message, "why");
+        assert!(code(RpcError::METHOD_NOT_FOUND).downcast_ref::<NotSupported>().is_some());
         assert!(code(RpcError::UNAUTHORIZED).downcast_ref::<Unauthorized>().is_some());
         assert!(code("upgrading").downcast_ref::<Upgrading>().is_some());
         assert!(code("offline").downcast_ref::<Offline>().is_some());

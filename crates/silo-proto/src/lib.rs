@@ -8,6 +8,7 @@
 //! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket.
 
 pub mod api;
+pub mod compat;
 pub mod control;
 pub mod data;
 pub mod drops;
@@ -15,6 +16,7 @@ pub mod frame;
 pub mod model;
 pub mod offer;
 pub mod paths;
+pub mod upgrade;
 pub mod upload;
 
 #[cfg(test)]
@@ -22,10 +24,19 @@ mod build_id;
 
 pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 
-/// Build id: a hash of every workspace source (see `build.rs`). Server and
-/// client hellos carry it and must match exactly; there is no other
-/// protocol versioning.
+/// Build id: a hash of every workspace source (see `build.rs`). Hellos
+/// carry it for display and upgrade decisions; peers of any build work
+/// together when they speak the same [`PROTOCOL`] and [`VT`].
 pub const BUILD: &str = env!("SILO_BUILD_ID");
+
+/// Wire compatibility number, bumped only for incompatible changes (see
+/// [`compat`] for the additive rules and `protocol.json`).
+pub const PROTOCOL: u32 = 1;
+
+/// Terminal snapshot format: libghostty's GHOSTSNP records of the pinned
+/// ghostty revision, which carry no compatibility guarantee across
+/// revisions, so peers must agree on it exactly.
+pub const VT: &str = env!("SILO_VT_FORMAT");
 
 /// The install script (`curl -fsSL … | sh`) for the CLI and server.
 pub const INSTALL_URL: &str = "https://nitishxyz.github.io/silo/install.sh";
@@ -89,4 +100,18 @@ pub mod kind {
     // Upload stream, server -> client (or `REJECT`).
     /// JSON [`crate::upload::Uploaded`].
     pub const UPLOADED: u8 = 0x8e;
+
+    // Upgrade stream (stable across builds, see `crate::upgrade`).
+    /// JSON [`crate::upgrade::UpgradeHello`].
+    pub const UPGRADE_HELLO: u8 = 0x30;
+    /// JSON [`crate::upgrade::UpgradeBinary`].
+    pub const UPGRADE_BINARY: u8 = 0x31;
+    /// Bytes of the binary.
+    pub const UPGRADE_CHUNK: u8 = 0x32;
+    /// JSON [`crate::upgrade::HostBuild`].
+    pub const HOST_BUILD: u8 = 0xb0;
+    /// JSON [`crate::upgrade::UpgradeStarted`].
+    pub const UPGRADE_STARTED: u8 = 0xb1;
+    /// JSON [`crate::upgrade::UpgradeRejected`].
+    pub const UPGRADE_REJECTED: u8 = 0xb2;
 }

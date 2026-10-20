@@ -1770,7 +1770,7 @@ pub fn engine_config(config: &TerminalConfig) -> (TerminalColors, TerminalDefaul
     };
     let defaults = TerminalDefaults {
         cursor_shape: Some(match config.cursor_shape {
-            CursorShape::Block => silo_vt::CursorShape::Block,
+            CursorShape::Block | CursorShape::Unknown => silo_vt::CursorShape::Block,
             CursorShape::Bar => silo_vt::CursorShape::Bar,
             CursorShape::Underline => silo_vt::CursorShape::Underline,
             CursorShape::Hollow => silo_vt::CursorShape::Hollow,

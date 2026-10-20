@@ -45,6 +45,8 @@ pub struct Workspace {
     pub(crate) hosts: Vec<HostEntry>,
     pub(crate) active_host: usize,
     pub(crate) status: Option<String>,
+    /// The `flash` message still showing; connecting keeps it.
+    pub(crate) flashing: Option<String>,
     /// Upgrade Server is running (see `upgrade_server`).
     pub(crate) upgrading: bool,
     /// Shown in the status bar once the upgraded server connects.
@@ -61,9 +63,6 @@ pub struct Workspace {
     pub(crate) divider_drag: Option<crate::layout::DividerDrag>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
-    /// The shown session was closed and none replaced it: (re)connecting
-    /// keeps the empty state instead of creating a session.
-    emptied: bool,
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
     /// Browser blocks' panes (terminal blocks are in `panes`).
     pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
@@ -79,6 +78,7 @@ pub struct Workspace {
     pub(crate) picker: Option<crate::window_picker::WindowPicker>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
+    pub(crate) new_tab_menu: crate::new_tab_menu::NewTabMenu,
     pub(crate) settings: Option<crate::settings::SettingsModal>,
     pub(crate) pairing: crate::settings::Pairing,
     /// Last fullscreen state the titlebar was laid out for.
@@ -172,6 +172,7 @@ impl Workspace {
             hosts: Vec::new(),
             active_host,
             status: Some("connecting to server…".into()),
+            flashing: None,
             upgrading: false,
             notice: None,
             view: None,
@@ -180,7 +181,6 @@ impl Workspace {
             ratio_flush: None,
             divider_drag: None,
             wanted_session,
-            emptied: false,
             panes: HashMap::new(),
             browsers: HashMap::new(),
             server_focus: None,
@@ -192,6 +192,7 @@ impl Workspace {
             picker: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
+            new_tab_menu: crate::new_tab_menu::NewTabMenu::new(window, cx),
             settings: None,
             pairing: crate::settings::Pairing::default(),
             last_fullscreen: std::cell::Cell::new(None),
@@ -320,6 +321,27 @@ impl Workspace {
         self.hosts.get(self.active_host).and_then(|h| h.control.clone())
     }
 
+    pub(crate) fn block_info(&self, block: &str) -> Option<&silo_proto::model::BlockInfo> {
+        self.view.as_ref()?.blocks.iter().find(|b| b.id == block)
+    }
+
+    /// Whether this window's host has `feature` (see `silo_proto::compat`);
+    /// assumed while it is not connected.
+    pub(crate) fn host_supports(&self, feature: &str) -> bool {
+        self.control().is_none_or(|c| c.peer_supports(feature))
+    }
+
+    /// What this window's host cannot do, said once.
+    pub(crate) fn not_supported(&self) -> String {
+        format!("Not supported by {}", self.hosts[self.active_host].info.name)
+    }
+
+    /// The message for a failed request: an older host's missing method
+    /// says so, anything else is `what`.
+    pub(crate) fn failed(&self, error: &anyhow::Error, what: &str) -> String {
+        if error.is::<silo_client::NotSupported>() { self.not_supported() } else { what.to_owned() }
+    }
+
     /// A connection event, already applied to the shared hosts.
     fn host_event(&mut self, event: &HostEvent, window: &mut Window, cx: &mut Context<Self>) {
         let host = event.host;
@@ -347,7 +369,7 @@ impl Workspace {
                 }
             }
             ConnEvent::Quit | ConnEvent::Addr(_) => {}
-            ConnEvent::NotPaired | ConnEvent::RemoteBuild | ConnEvent::DifferentBuild(_) => {
+            ConnEvent::NotPaired | ConnEvent::Incompatible | ConnEvent::IncompatibleServer(_) => {
                 self.refresh_settings(None, cx);
                 if active {
                     // A different build keeps the last content painted,
@@ -357,6 +379,11 @@ impl Workspace {
                 }
             }
             ConnEvent::Event(Event::SessionsChanged { .. }) => self.save_tree(cx),
+            ConnEvent::Resync if active => {
+                let shown = self.view.as_ref().map(|v| v.session.id.clone());
+                self.choose_session(shown, window, cx);
+            }
+            ConnEvent::Resync => {}
             ConnEvent::Event(_) if !active => {}
             ConnEvent::Event(Event::SessionChanged { view }) => {
                 let stale = self.ahead_of.is_some_and(|base| view.session.revision <= base);
@@ -373,10 +400,9 @@ impl Workspace {
                     self.view = None;
                     self.server_focus = None;
                     self.address_pending = None;
-                    self.emptied = true;
                     self.motion.reset();
                     self.focus.focus(window, cx);
-                    self.choose_session(None, false, window, cx);
+                    self.choose_session(None, window, cx);
                 }
             }
             ConnEvent::Event(Event::BlockChanged { block }) => {
@@ -421,7 +447,7 @@ impl Workspace {
         }
         // The view after a reconnect only records ids.
         self.motion.reset();
-        self.status = None;
+        self.clear_status();
         self.upgrade_connected(cx);
         for (pane, _) in self.panes.values() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
@@ -430,7 +456,7 @@ impl Workspace {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
-        self.choose_session(preferred, !self.emptied, window, cx);
+        self.choose_session(preferred, window, cx);
     }
 
     /// Show `session_id` on `host`, detaching the current session's blocks.
@@ -454,7 +480,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.choose_session(Some(session_id), false, window, cx);
+        self.choose_session(Some(session_id), window, cx);
     }
 
     /// Show `host` (its cached tree until it connects, then its last or
@@ -471,7 +497,7 @@ impl Workspace {
         self.show_cached(window, cx);
         if self.control().is_some() {
             let wanted = self.wanted_session.take();
-            self.choose_session(wanted, !self.emptied, window, cx);
+            self.choose_session(wanted, window, cx);
         }
         cx.notify();
     }
@@ -501,13 +527,15 @@ impl Workspace {
         }
     }
 
-    /// Create a session (named, or numbered by the server) and show it.
+    /// Create a session on this window's host (named, or numbered by the
+    /// server) and show it, in the focused block's directory, else the
+    /// server's home.
     pub(crate) fn create_session(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.active_host;
         let Some(control) = self.control() else {
             return;
         };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx)).or_else(|| std::env::var("HOME").ok());
+        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
         let task = self.rt.spawn(async move {
             control
                 .call::<Created>(Method::SessionCreate {
@@ -525,7 +553,7 @@ impl Workspace {
             Ok(Err(error)) => {
                 let _ = this.update(cx, |this, cx| {
                     tracing::warn!("create session: {error:#}");
-                    this.status = Some("Could not create the session.".into());
+                    this.status = Some(this.failed(&error, "Could not create the session."));
                     cx.notify();
                 });
             }
@@ -538,9 +566,9 @@ impl Workspace {
         self.call(Method::SessionRename { session_id, name });
     }
 
-    /// Attach to `preferred`, else the newest session, else a new one
-    /// (`create`) or none.
-    pub(crate) fn choose_session(&mut self, preferred: Option<String>, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Attach to `preferred`, else the newest session, else a new one (a
+    /// host is never shown without a session, like servers keep one).
+    pub(crate) fn choose_session(&mut self, preferred: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(control) = self.control() else {
             return;
         };
@@ -552,33 +580,21 @@ impl Workspace {
                 .map(|s| s.id.clone());
             let id = match pick {
                 Some(id) => id,
-                None if create => {
-                    let home = std::env::var("HOME").ok();
-                    let spawn = SpawnSpec { cwd: home, command: Vec::new(), size: None };
+                None => {
+                    let spawn = SpawnSpec { cwd: None, command: Vec::new(), size: None };
                     let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await?;
                     created.session_id
                 }
-                None => return Ok(None),
             };
-            control.call::<SessionView>(Method::SessionView { session_id: id }).await.map(Some)
+            control.call::<SessionView>(Method::SessionView { session_id: id }).await
         });
         cx.spawn_in(window, async move |this, cx| {
             let view = match task.await {
-                Ok(Ok(Some(view))) => view,
-                Ok(Ok(None)) => {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        if this.view.is_none() {
-                            window.set_window_title("silo");
-                            this.status = Some("No sessions. Press ⇧⌘N to start one.".into());
-                            cx.notify();
-                        }
-                    });
-                    return;
-                }
+                Ok(Ok(view)) => view,
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
                         tracing::warn!("open session: {error:#}");
-                        this.status = Some("Could not open the session.".into());
+                        this.status = Some(this.failed(&error, "Could not open the session."));
                         cx.notify();
                     });
                     return;
@@ -590,7 +606,7 @@ impl Workspace {
                     this.detach_view();
                 }
                 this.server_focus = None;
-                this.status = None;
+                this.clear_status();
                 this.set_view(view, window, cx);
                 this.upgrade_connected(cx);
             });
@@ -605,7 +621,6 @@ impl Workspace {
 
     fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
         self.ahead_of = None;
-        self.emptied = false;
         window.set_window_title(&format!("{} — silo", view.session.name));
         if self.active_host == 0 {
             let id = view.session.id.clone();
@@ -625,17 +640,15 @@ impl Workspace {
         self.panes.retain(|id, _| all.contains(id));
         self.browsers.retain(|id, _| all.contains(id));
         let active = self.active_window().cloned();
-        let browsers: Vec<String> = view
-            .blocks
-            .iter()
-            .filter(|b| crate::browser_pane::kind_of(Some(b)) == crate::browser_pane::Kind::Browser)
-            .map(|b| b.id.clone())
-            .collect();
+        let of_kind =
+            |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
+        let browsers = of_kind(crate::browser_pane::Kind::Browser);
+        let unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
         if let Some(active) = &active {
             for block in crate::floats::window_blocks(active) {
                 if browsers.contains(&block) {
                     self.ensure_browser(&block, window, cx);
-                } else if !self.panes.contains_key(&block) {
+                } else if !self.panes.contains_key(&block) && !unsupported.contains(&block) {
                     let control = self.control();
                     let rt = self.rt.clone();
                     let id = block.clone();
@@ -857,15 +870,17 @@ impl Workspace {
         self.ahead_of = base;
         let task = self.rt.spawn(async move { control.call_value(method).await });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(_)) = task.await {
-                return;
-            }
+            let error = match task.await {
+                Ok(Ok(_)) => return,
+                Ok(Err(error)) => error,
+                Err(error) => error.into(),
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.ahead_of.is_some() && this.ahead_of == base {
                     this.ahead_of = None;
                     revert(this);
                 }
-                this.flash(failure.into(), cx);
+                this.flash(this.failed(&error, failure), cx);
                 cx.notify();
             });
         })
@@ -1287,6 +1302,7 @@ impl Render for Workspace {
         };
         let ghosts = self.render_pane_ghosts(now, window);
         let appearance = self.render_appearance_menu(cx);
+        let new_tab = self.render_new_tab_menu(window, cx);
         let settings = self.render_settings(window, cx);
         let titlebar = self.render_titlebar(window, cx);
         let switcher = self.render_switcher(window, cx);
@@ -1335,6 +1351,7 @@ impl Render for Workspace {
             })
             .children(ghosts)
             .children(appearance)
+            .children(new_tab)
             .children(settings)
             .children(switcher)
             .children(offers)

@@ -348,12 +348,15 @@ fn launchd_pid(print: &str) -> Option<u32> {
     print.lines().find_map(|line| line.trim().strip_prefix("pid = ")?.trim().parse().ok())
 }
 
-/// The server for `home`, if one of this build answers, and how it runs.
+/// The server for `home`, if one of this build answers, and how it runs. A
+/// compatible server of another build answers too, but is `Other`: it is
+/// taken over to this build.
 pub async fn probe_server(home: &Path, client_name: &str) -> (Server, Option<Control>) {
     match Control::connect(&paths::socket(home), client_name).await {
+        Ok((control, _)) if control.hello().build != silo_proto::BUILD => (Server::Other, None),
         Ok((control, _)) if control.hello().server.idle_exit_secs == 0 => (Server::Current, Some(control)),
         Ok((control, _)) => (Server::Idle, Some(control)),
-        Err(error) if crate::mismatch::different_build(home, &error).await.is_some() => (Server::Other, None),
+        Err(error) if crate::mismatch::incompatible_server(home, &error).await.is_some() => (Server::Other, None),
         Err(_) if crate::mismatch::server_lock_held(home) => (Server::Unresponsive, None),
         Err(_) => (Server::Absent, None),
     }

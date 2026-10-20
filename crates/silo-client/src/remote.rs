@@ -27,7 +27,7 @@ impl Control {
     /// # Errors
     /// Dial or handshake failure; a refused device is
     /// [`Unauthorized`](crate::Unauthorized), another build is
-    /// [`BuildMismatch`](crate::BuildMismatch).
+    /// [`IncompatibleProtocol`](crate::IncompatibleProtocol).
     pub async fn connect_remote(
         net: &Net,
         addr: EndpointAddr,

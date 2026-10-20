@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use silo_proto::{
-    BUILD, Frame, api,
+    Frame, api, compat,
     control::{
         ApiMethod, BrowserCommand, ClientHello, Empty, Event, METHODS, Method, OfferSource, PairInvite, PairedDevices, Pasted, Request, RpcError,
         ServerHello, ServerMessage,
@@ -86,6 +86,7 @@ where
         (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
         (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
         (kind::UPLOAD_HELLO, Expect::Any | Expect::Data) => upload(server, first, reader, writer, peer).await,
+        (kind::UPGRADE_HELLO, Expect::Any | Expect::Control) => crate::upgrade::serve(server, reader, writer, peer).await,
         other => {
             tracing::debug!("unexpected first frame {:#x}", other.0);
             Ok(())
@@ -165,9 +166,9 @@ where
 {
     let hello: ClientHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
-    // Builds are compared first: a mismatched build never enrolls.
-    let admitted = if hello.build != BUILD {
-        Err(RpcError::different_build(BUILD, &hello.build))
+    // Compatibility is checked first: an incompatible peer never enrolls.
+    let admitted = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
+        Err(error)
     } else if let Peer::Remote { endpoint_id, .. } = &peer {
         let mut auth = server.auth();
         // Checked under the lock: once the upgrade commits, pairing is
@@ -203,10 +204,11 @@ where
             entry.close = Some(close_tx);
             entry.origin = peer.conn_id();
             entry.label = label(&hello.client_name, device.as_deref());
+            entry.features.clone_from(&hello.features);
         }
         id
     };
-    let reply = ServerHello { build: BUILD.to_owned(), client_id, server: server.info_now().await };
+    let reply = ServerHello::ours(client_id, server.info_now().await);
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
     // Join connections get no data streams.
@@ -238,8 +240,14 @@ where
                 let request: Request = match frame.parse() {
                     Ok(request) => request,
                     Err(e) => {
-                        let id = serde_json::from_slice::<Value>(&frame.payload).ok().and_then(|v| v.get("id")?.as_u64()).unwrap_or(0);
-                        respond(&tx, id, Err(RpcError::bad_request(e.to_string())));
+                        let raw = serde_json::from_slice::<Value>(&frame.payload).ok();
+                        let id = raw.as_ref().and_then(|v| v.get("id")?.as_u64()).unwrap_or(0);
+                        let method = raw.as_ref().and_then(|v| v.get("method")?.as_str().map(str::to_owned));
+                        let error = match method {
+                            Some(method) if !METHODS.iter().any(|(name, _)| *name == method) => RpcError::method_not_found(&method),
+                            _ => RpcError::bad_request(e.to_string()),
+                        };
+                        respond(&tx, id, Err(error));
                         continue;
                     }
                 };
@@ -320,8 +328,9 @@ fn browser(server: &Server, block_id: &str, command: BrowserCommand) -> Result<V
 
 /// A join-invite connection (`joining`) may only call `host.offer`, which
 /// nobody else may. Owner-only methods: pairing and stopping the server.
-/// (Upgrades arrive only over the unix socket.) Everything else is open to
-/// paired devices.
+/// (Handoffs arrive only over the unix socket; a paired device may install
+/// a new build through an upgrade stream, see [`crate::upgrade`].)
+/// Everything else is open to paired devices.
 fn permitted(peer: &Peer, joining: bool, method: &Method) -> Result<(), RpcError> {
     match (joining, method) {
         (true, Method::HostOffer { .. }) => return Ok(()),
@@ -544,8 +553,8 @@ where
         tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason: reason.into() })?);
         Ok(())
     };
-    if hello.build != BUILD {
-        reject(RpcError::DIFFERENT_BUILD, &RpcError::different_build(BUILD, &hello.build).message)?;
+    if let Err(error) = compat::check(hello.protocol, &hello.vt) {
+        reject(&error.code, &error.message)?;
     } else if let Some((block_id, client_id)) = redeemed {
         let block = {
             let reg = server.registry.lock().unwrap();
@@ -621,8 +630,8 @@ where
     let hello: UploadHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
     let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
-    let result = if hello.build != BUILD {
-        Err((RpcError::DIFFERENT_BUILD, RpcError::different_build(BUILD, &hello.build).message))
+    let result = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
+        Err((RpcError::INCOMPATIBLE, error.message))
     } else if let Some((block_id, _)) = redeemed {
         if server.registry.lock().unwrap().blocks.get(&block_id).and_then(Block::terminal).is_some() {
             let mut frames = spawn_reader(reader, 16);

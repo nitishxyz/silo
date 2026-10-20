@@ -88,24 +88,29 @@ impl AddHostSheet {
 pub(crate) fn pair_error(error: &anyhow::Error) -> &'static str {
     match classify(error) {
         Failure::NotPaired => "Ticket expired or already used.",
-        Failure::DifferentBuild => "That machine runs a different Silo build.",
+        Failure::Incompatible => "That machine runs an incompatible Silo.",
         Failure::Upgrading => "That machine is updating. Try again.",
         Failure::Unreachable => "Can't reach that machine.",
     }
 }
 
-/// The saved name: the typed one, else a short form of the id.
-pub(crate) fn host_name(typed: &str, id: &str) -> String {
-    let typed = typed.trim();
-    if typed.is_empty() { id.get(..8).unwrap_or(id).to_owned() } else { typed.to_owned() }
+/// The saved name: the typed one, else the server's hostname.
+pub(crate) fn host_name(typed: &str, hostname: &str) -> String {
+    [typed.trim(), hostname.trim()].into_iter().find(|n| !n.is_empty()).unwrap_or("silo host").to_owned()
 }
 
-/// Pair this device with `ticket`'s server in the background; its address.
-pub(crate) fn pair(rt: &tokio::runtime::Handle, home: PathBuf, ticket: PairTicket) -> tokio::task::JoinHandle<anyhow::Result<EndpointAddr>> {
+/// Pair this device with `ticket`'s server in the background; its address
+/// and hostname.
+pub(crate) fn pair(
+    rt: &tokio::runtime::Handle,
+    home: PathBuf,
+    ticket: PairTicket,
+) -> tokio::task::JoinHandle<anyhow::Result<(EndpointAddr, String)>> {
     let client = crate::conn::client_name();
     rt.spawn(async move {
         let net = crate::remote::net(&home).await?;
-        silo_client::pair(net, &ticket, &client).await.map(|_| ticket.addr)
+        let (control, _) = silo_client::pair(net, &ticket, &client).await?;
+        Ok((ticket.addr, control.hello().server.hostname.clone()))
     })
 }
 
@@ -279,8 +284,8 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(addr) => {
-                    let host = RemoteHost::new(addr, host_name(&typed, &id));
+                Ok((addr, hostname)) => {
+                    let host = RemoteHost::new(addr, host_name(&typed, &hostname));
                     match this.save_host(host, replace, window, cx) {
                         Ok(()) => this.close_add_host(window, cx),
                         Err(error) => this.sheet_error(error, cx),
@@ -321,13 +326,12 @@ impl Workspace {
         Ok(())
     }
 
-    /// Persist a paired host (replacing its old entry) and connect to it.
+    /// Persist a paired host (replacing its old entry), connect to it and
+    /// show it.
     fn save_host(&mut self, host: RemoteHost, replace: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let index = self.shared.update(cx, |shared, cx| shared.save_remote(host, replace, cx))?;
         self.sync_hosts(cx);
-        if replace.is_some() {
-            self.switch_host(index, window, cx);
-        }
+        self.switch_host(index, window, cx);
         Ok(())
     }
 
@@ -532,15 +536,16 @@ mod tests {
     fn pairing_errors_are_short() {
         let message = String::from("why");
         assert_eq!(pair_error(&silo_client::Unauthorized { message: message.clone() }.into()), "Ticket expired or already used.");
-        assert_eq!(pair_error(&silo_client::BuildMismatch { message }.into()), "That machine runs a different Silo build.");
+        assert_eq!(pair_error(&silo_client::IncompatibleProtocol { message }.into()), "That machine runs an incompatible Silo.");
         assert_eq!(pair_error(&anyhow::anyhow!("dial server")), "Can't reach that machine.");
         assert!(PairTicket::decode("silo1notbase32!").is_err());
     }
 
     #[test]
-    fn default_name_is_short_id() {
-        assert_eq!(host_name("  ", "abcdef0123456789"), "abcdef01");
-        assert_eq!(host_name(" mini ", "abcdef0123456789"), "mini");
+    fn default_name_is_hostname() {
+        assert_eq!(host_name("  ", "mini.local"), "mini.local");
+        assert_eq!(host_name(" mini ", "mini.local"), "mini");
+        assert_eq!(host_name("", ""), "silo host");
     }
 
     #[test]

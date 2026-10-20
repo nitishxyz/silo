@@ -57,27 +57,30 @@ enum Step {
 
 #[derive(Clone, Debug)]
 enum Input {
-    RenameSession(String),
-    RenameTab(String),
-    HostName(usize),
+    /// (session id, current name)
+    RenameSession(String, String),
+    /// (window id, current title)
+    RenameTab(String, String),
+    /// (host index, current name)
+    HostName(usize, String),
     OpenUrl(String),
 }
 
 impl Input {
     fn prompt(&self) -> String {
         match self {
-            Self::RenameSession(_) => "Rename session".into(),
-            Self::RenameTab(_) => "Rename tab (empty to reset)".into(),
-            Self::HostName(_) => "Rename host".into(),
+            Self::RenameSession(..) => "Rename session".into(),
+            Self::RenameTab(..) => "Rename tab (empty to reset)".into(),
+            Self::HostName(..) => "Rename host".into(),
             Self::OpenUrl(_) => "Open in a new browser".into(),
         }
     }
 
-    fn placeholder(&self) -> &'static str {
+    /// Rename fields start empty, showing the current name.
+    fn placeholder(&self) -> String {
         match self {
-            Self::RenameSession(_) | Self::RenameTab(_) => "New name",
-            Self::HostName(_) => "Host name",
-            Self::OpenUrl(_) => "Address",
+            Self::RenameSession(_, current) | Self::RenameTab(_, current) | Self::HostName(_, current) => current.clone(),
+            Self::OpenUrl(_) => "Address".into(),
         }
     }
 }
@@ -108,6 +111,9 @@ impl Workspace {
                 self.close_picker(window, cx);
             }
             return;
+        }
+        if command.feature().is_some_and(|f| !self.host_supports(f)) {
+            return self.flash(self.not_supported(), cx);
         }
         // Restart Server on an incompatible server is the upgrade, which
         // keeps sessions when it can and says so when it could not.
@@ -148,7 +154,7 @@ impl Workspace {
             Command::RenameSession => {
                 if let Some(view) = &self.view {
                     let (id, name) = (view.session.id.clone(), view.session.name.clone());
-                    self.open_palette_step(Step::Input(Input::RenameSession(id)), name, window, cx);
+                    self.open_palette_step(Step::Input(Input::RenameSession(id, name)), String::new(), window, cx);
                 }
             }
             Command::CloseSession => {
@@ -160,6 +166,7 @@ impl Workspace {
             Command::NextSession => self.step_session(1, window, cx),
             Command::PreviousSession => self.step_session(-1, window, cx),
             Command::NewTab => self.new_window(window, cx),
+            Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
                     self.call(Method::WindowClose { window_id: w.id.clone() });
@@ -168,7 +175,7 @@ impl Workspace {
             Command::RenameTab => {
                 if let Some(w) = self.active_window().cloned() {
                     let current = w.name.clone().unwrap_or_else(|| self.window_title(&w, cx));
-                    self.open_palette_step(Step::Input(Input::RenameTab(w.id.clone())), current, window, cx);
+                    self.open_palette_step(Step::Input(Input::RenameTab(w.id.clone(), current)), String::new(), window, cx);
                 }
             }
             Command::NextTab => self.step_tab(1),
@@ -322,6 +329,9 @@ impl Workspace {
         let local = host.is_some_and(|h| h.info.local);
         let tabs = self.view.as_ref().map_or(0, |v| v.session.windows.len());
         let panes = self.active_window().map_or(0, |w| w.layout.blocks().len());
+        if command.feature().is_some_and(|f| !self.host_supports(f)) {
+            return false;
+        }
         match command {
             Command::StartServer => local && paused,
             Command::StopServer => local && connected,
@@ -351,6 +361,7 @@ impl Workspace {
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
+            | Command::NewBrowserTab
             | Command::CloseTab
             | Command::RenameTab
             | Command::SplitRight
@@ -368,9 +379,14 @@ impl Workspace {
     /// A status message that clears itself after a few seconds.
     pub(crate) fn flash(&mut self, message: String, cx: &mut Context<Self>) {
         self.status = Some(message.clone());
+        self.flashing = Some(message.clone());
+        cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
+                if this.flashing.as_deref() == Some(message.as_str()) {
+                    this.flashing = None;
+                }
                 if this.status.as_deref() == Some(message.as_str()) {
                     this.status = None;
                     cx.notify();
@@ -378,6 +394,13 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Clear the status line, except a flash still showing.
+    pub(crate) fn clear_status(&mut self) {
+        if self.status != self.flashing {
+            self.status = None;
+        }
     }
 
     fn step_tab(&mut self, step: isize) {
@@ -498,7 +521,7 @@ impl Workspace {
     /// Ask for a new name of remote host `index`.
     pub(crate) fn open_rename_host(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.hosts.get(index).map(|h| h.info.name.clone()).unwrap_or_default();
-        self.open_palette_step(Step::Input(Input::HostName(index)), name, window, cx);
+        self.open_palette_step(Step::Input(Input::HostName(index, name)), String::new(), window, cx);
     }
 
     fn open_palette_step(&mut self, step: Step, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -517,7 +540,7 @@ impl Workspace {
         palette.error = None;
         let placeholder = match &step {
             Step::Search => "Type a command or session…".to_owned(),
-            Step::Input(input) => input.placeholder().to_owned(),
+            Step::Input(input) => input.placeholder(),
             Step::Confirm(_) => "↩ confirm · esc back".into(),
             Step::RemoveHost => "Choose a host to remove".into(),
         };
@@ -636,14 +659,14 @@ impl Workspace {
             cx.notify();
         };
         match input {
-            Input::RenameSession(id) => {
-                if text.is_empty() {
-                    return fail(self, "A session needs a name.".into(), cx);
+            // Empty keeps the current name.
+            Input::RenameSession(id, _) => {
+                if !text.is_empty() {
+                    self.rename_session(id, text);
                 }
-                self.rename_session(id, text);
                 self.close_palette(window, cx);
             }
-            Input::RenameTab(window_id) => {
+            Input::RenameTab(window_id, _) => {
                 self.call(Method::WindowRename { window_id, name: (!text.is_empty()).then_some(text) });
                 self.close_palette(window, cx);
             }
@@ -654,7 +677,8 @@ impl Workspace {
                 self.split_browser(block, Some(url));
                 self.close_palette(window, cx);
             }
-            Input::HostName(index) => match self.rename_host(index, text, cx) {
+            Input::HostName(..) if text.is_empty() => self.close_palette(window, cx),
+            Input::HostName(index, _) => match self.rename_host(index, text, cx) {
                 Ok(()) => {
                     self.close_palette(window, cx);
                     self.refresh_settings(None, cx);
@@ -851,5 +875,18 @@ impl Workspace {
                 .child(card)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_fields_show_the_current_name() {
+        assert_eq!(Input::RenameSession("s1".into(), "work".into()).placeholder(), "work");
+        assert_eq!(Input::RenameTab("w1".into(), "zsh".into()).placeholder(), "zsh");
+        assert_eq!(Input::HostName(1, "mini".into()).placeholder(), "mini");
+        assert_eq!(Input::OpenUrl("b1".into()).placeholder(), "Address");
     }
 }

@@ -856,7 +856,7 @@ impl SettingsPanel {
                 CursorShape::Bar => base.w(px(2.0)).bg(rgb(cursor)),
                 CursorShape::Underline => div().flex().items_end().h(px(size * 1.25)).child(div().h(px(2.0)).w(px(size * 0.6)).bg(rgb(cursor))),
                 CursorShape::Hollow => base.border_1().border_color(rgb(cursor)),
-                CursorShape::Block => base.bg(rgb(cursor)),
+                CursorShape::Block | CursorShape::Unknown => base.bg(rgb(cursor)),
             }
         };
         let mut swatches = div().flex().gap(px(4.0)).pt(px(6.0));

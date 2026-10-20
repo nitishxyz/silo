@@ -12,14 +12,16 @@ pub mod runtime;
 pub mod service;
 mod spawn;
 pub mod tunnel;
+pub mod upgrade;
 mod upload;
 
 pub use control::{
-    BuildMismatch, Closed, Control, Events, Offline, PING_EVERY, PING_TIMEOUT_IROH, PING_TIMEOUT_LOCAL, TimedOut, Unauthorized, Upgrading,
+    Closed, Control, Events, IncompatibleProtocol, NotSupported, Offline, PING_EVERY, PING_TIMEOUT_IROH, PING_TIMEOUT_LOCAL, TimedOut, Unauthorized,
+    Upgrading,
 };
 pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};
-pub use mismatch::DifferentBuild;
+pub use mismatch::IncompatibleServer;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
 pub use remote::{client_identity, offer_host, pair};
 pub use spawn::{connect_or_spawn, server_running};

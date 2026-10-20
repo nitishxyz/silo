@@ -10,10 +10,23 @@ use crate::{
 };
 
 /// First frame on a control stream.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ClientHello {
-    /// The client's [`crate::BUILD`]; the server rejects any other build.
+    /// The client's [`crate::PROTOCOL`]; admitted only when equal (0: a
+    /// client from before protocol numbers).
+    #[serde(default)]
+    pub protocol: u32,
+    /// The client's [`crate::VT`]; admitted only when equal.
+    #[serde(default)]
+    pub vt: String,
+    /// The client's crate version, for display.
+    #[serde(default)]
+    pub version: String,
+    /// The client's [`crate::BUILD`], for display.
     pub build: String,
+    /// The client's [`crate::compat::FEATURES`].
+    #[serde(default)]
+    pub features: Vec<String>,
     /// Human-readable client name, e.g. "Silo 0.1.0 (macOS)" or "silo cli".
     pub client_name: String,
     /// Shared secret proving the client may adopt this server (local only).
@@ -30,13 +43,55 @@ pub struct ClientHello {
     pub invite: Option<String>,
 }
 
+impl ClientHello {
+    /// This build's hello.
+    #[must_use]
+    pub fn ours(client_name: &str, passive: bool, invite: Option<String>) -> Self {
+        Self {
+            protocol: crate::PROTOCOL,
+            vt: crate::VT.to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            build: crate::BUILD.to_owned(),
+            features: crate::compat::features(),
+            client_name: client_name.to_owned(),
+            token: None,
+            passive,
+            invite,
+        }
+    }
+}
+
 /// Reply to [`ClientHello`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ServerHello {
-    /// The server's [`crate::BUILD`].
+    /// The server's [`crate::PROTOCOL`].
+    #[serde(default)]
+    pub protocol: u32,
+    /// The server's [`crate::VT`].
+    #[serde(default)]
+    pub vt: String,
+    /// The server's [`crate::BUILD`] (its version is in `server`).
     pub build: String,
+    /// The server's [`crate::compat::FEATURES`].
+    #[serde(default)]
+    pub features: Vec<String>,
     pub client_id: ClientId,
     pub server: ServerInfo,
+}
+
+impl ServerHello {
+    /// This build's reply.
+    #[must_use]
+    pub fn ours(client_id: ClientId, server: ServerInfo) -> Self {
+        Self {
+            protocol: crate::PROTOCOL,
+            vt: crate::VT.to_owned(),
+            build: crate::BUILD.to_owned(),
+            features: crate::compat::features(),
+            client_id,
+            server,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -47,6 +102,10 @@ pub struct ServerInfo {
     pub started_at: u64,
     /// The server's iroh EndpointId.
     pub endpoint_id: String,
+    /// The machine's hostname (empty if it has none): the default name
+    /// of the host on devices that pair with it.
+    #[serde(default)]
+    pub hostname: String,
     /// Why remote (iroh) access is unavailable; `None` while it serves.
     #[serde(default)]
     pub remote_error: Option<String>,
@@ -357,12 +416,19 @@ impl RpcError {
     pub fn internal(message: impl std::fmt::Display) -> Self {
         Self::new("internal", message.to_string())
     }
-    /// Hello rejection: the client is a different build than the server.
-    pub fn different_build(server: &str, client: &str) -> Self {
-        Self::new(Self::DIFFERENT_BUILD, format!("different build: server {server}, client {client}"))
+    /// Hello rejection: the peer speaks an incompatible protocol (see
+    /// [`crate::compat::check`]).
+    pub fn incompatible(what: impl std::fmt::Display) -> Self {
+        Self::new(Self::INCOMPATIBLE, format!("incompatible: the other side speaks {what}"))
     }
-    /// Code of [`RpcError::different_build`].
-    pub const DIFFERENT_BUILD: &str = "different_build";
+    /// Code of [`RpcError::incompatible`].
+    pub const INCOMPATIBLE: &str = "incompatible";
+    /// The server does not know the method (a newer client's).
+    pub fn method_not_found(method: &str) -> Self {
+        Self::new(Self::METHOD_NOT_FOUND, format!("{method} is not supported by this server"))
+    }
+    /// Code of [`RpcError::method_not_found`].
+    pub const METHOD_NOT_FOUND: &str = "method_not_found";
     /// Code of [`RpcError::unauthorized`].
     pub const UNAUTHORIZED: &str = "unauthorized";
     /// Code of [`RpcError::forbidden`].
@@ -385,7 +451,7 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ServerMessage {
     Response {
@@ -400,9 +466,45 @@ pub enum ServerMessage {
         #[serde(flatten)]
         event: Box<Event>,
     },
+    /// An event this side does not know (a newer peer's); skipped.
+    UnknownEvent { seq: u64 },
+    /// A known event whose data does not parse (a newer peer's variant
+    /// inside it): the receiver's view of it is stale; re-fetch.
+    MalformedEvent { seq: u64, event: String, error: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for ServerMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Response {
+            id: u64,
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<RpcError>,
+        }
+        let mut value = Value::deserialize(deserializer)?;
+        if let Some(seq) = value.as_object_mut().and_then(|o| o.remove("seq")) {
+            let seq = seq.as_u64().ok_or_else(|| serde::de::Error::custom("seq is not a number"))?;
+            let name = value.get("event").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if !EVENTS.contains(&name.as_str()) {
+                return Ok(Self::UnknownEvent { seq });
+            }
+            return Ok(match serde_json::from_value::<Event>(value) {
+                Ok(event) => Self::Event { seq, event: Box::new(event) },
+                Err(error) => Self::MalformedEvent { seq, event: name, error: error.to_string() },
+            });
+        }
+        let Response { id, result, error } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self::Response { id, result, error })
+    }
+}
+
+/// The wire name of every [`Event`].
+pub const EVENTS: &[&str] =
+    &["sessions.changed", "session.changed", "session.closed", "block.changed", "block.bell", "ui.open_session", "browser.command", "host.offered"];
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", content = "data")]
 pub enum Event {
     #[serde(rename = "sessions.changed")]
@@ -437,7 +539,7 @@ pub enum InvitePurpose {
 }
 
 /// A server offered for linking.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HostOffer {
     /// The offering server's `silo1…` pairing ticket.
     pub ticket: String,
@@ -448,23 +550,35 @@ pub struct HostOffer {
     pub source: OfferSource,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum OfferSource {
     /// Printed (OSC 7717) in this terminal block, e.g. over SSH.
     Terminal { block_id: BlockId },
     /// Sent over the join invite `invite_id`.
     Join { invite_id: String },
+    /// A newer source; such offers are ignored.
+    #[serde(other)]
+    Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BrowserCommand {
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     Back,
     Forward,
-    Reload { ignore_cache: bool },
-    Zoom { zoom: f32 },
+    Reload {
+        ignore_cache: bool,
+    },
+    Zoom {
+        zoom: f32,
+    },
+    /// A newer command; skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 // Typed results.
@@ -479,7 +593,6 @@ pub struct Dock {
 
 /// The `{}` result of methods that only acknowledge.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Empty {}
 
 /// Element of `api.list`.
@@ -591,5 +704,32 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, ServerMessage::Event { seq: 9, event } if matches!(*event, Event::BlockBell { .. })), "{json}");
+    }
+
+    /// [`EVENTS`] names exactly the variants of [`Event`].
+    #[test]
+    fn events_lists_every_event() {
+        fn names(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(name) = map.get("properties").and_then(|p| p.get("event")).and_then(|e| e.get("const").or_else(|| e.get("enum"))) {
+                        match name {
+                            Value::Array(all) => out.extend(all.iter().filter_map(Value::as_str).map(str::to_owned)),
+                            other => out.extend(other.as_str().map(str::to_owned)),
+                        }
+                    }
+                    map.values().for_each(|v| names(v, out));
+                }
+                Value::Array(items) => items.iter().for_each(|v| names(v, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        names(&schemars::schema_for!(Event).to_value(), &mut found);
+        found.sort();
+        found.dedup();
+        let mut listed: Vec<String> = EVENTS.iter().map(|&e| e.to_owned()).collect();
+        listed.sort();
+        assert_eq!(found, listed);
     }
 }

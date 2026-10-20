@@ -9,7 +9,7 @@ use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
     commands::Command,
-    switcher::{state_color, state_label},
+    switcher::{older, state_color, state_label},
     text_field::{FieldEvent, TextField},
     theme,
     workspace::Workspace,
@@ -189,7 +189,7 @@ impl Workspace {
         let Some(control) = self.control() else {
             return self.flash(format!("{} is not connected.", self.hosts[host].info.name), cx);
         };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx)).or_else(|| std::env::var("HOME").ok());
+        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
         let create = Method::SessionCreate { name, spawn, kind: BlockKind::Terminal, url: None };
         let task = self.rt.spawn(async move { control.call::<Created>(create).await });
@@ -197,7 +197,7 @@ impl Workspace {
             Ok(Ok(created)) => cx.update(|cx| open_in_new_window(host, created.session_id, cx)),
             Ok(Err(error)) => {
                 tracing::warn!("create session: {error:#}");
-                let _ = this.update(cx, |this, cx| this.flash("Could not create the session.".into(), cx));
+                let _ = this.update(cx, |this, cx| this.flash(this.failed(&error, "Could not create the session."), cx));
             }
             Err(_) => {}
         })
@@ -225,7 +225,7 @@ impl Workspace {
 
     fn picker_header(&self, host: usize) -> AnyElement {
         let entry = &self.hosts[host];
-        let state = state_label(&entry.state, entry.info.local);
+        let state = state_label(&entry.state, entry.info.local).map(str::to_owned).or_else(|| older(entry));
         div()
             .flex()
             .flex_row()

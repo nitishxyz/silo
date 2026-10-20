@@ -7,7 +7,7 @@ use std::{
 
 use silo_client::{Control, DataStream, Upload, UploadSource, upload};
 use silo_proto::{
-    BUILD, Frame,
+    Frame,
     control::{Capture, Created, DataTicket, Method, Pasted, SpawnSpec},
     data::{ClientData, Clip, ClipKind, ClipboardLocation, Reject, ServerData},
     kind,
@@ -252,7 +252,7 @@ async fn uploads_over_the_limit_are_refused() {
     // The server enforces it too.
     let ticket: DataTicket = control.call(Method::DataConnect { block_id: block.clone() }).await.unwrap();
     let mut stream = control.conn().open_stream().await.unwrap();
-    let hello = UploadHello { build: BUILD.to_owned(), ticket: ticket.ticket, total: MAX_UPLOAD + 1 };
+    let hello = UploadHello::ours(ticket.ticket, MAX_UPLOAD + 1);
     write_frame(&mut stream, &Frame::json(kind::UPLOAD_HELLO, &hello).unwrap()).await.unwrap();
     stream.flush().await.unwrap();
     let reply = tokio::time::timeout(TIMEOUT, read_frame(&mut stream)).await.unwrap().unwrap().unwrap();

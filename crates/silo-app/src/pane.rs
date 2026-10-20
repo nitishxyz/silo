@@ -86,6 +86,7 @@ pub fn lifecycle_label(lifecycle: Lifecycle, exited: Option<i32>) -> Option<Stri
         (Lifecycle::Exited, Some(code)) => Some(format!("Process exited (code {code})")),
         (Lifecycle::Exited, None) => Some("Process exited".into()),
         (Lifecycle::Restored, _) => Some("Restored · process exited".into()),
+        (Lifecycle::Unknown, _) => Some("Not running".into()),
     }
 }
 
@@ -487,6 +488,11 @@ impl Pane {
             match &data {
                 ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text } => cx.emit(PaneEvent::ClipboardWrite(text.clone())),
                 ServerData::ClipboardRead { request, kind } => self.clipboard_read(*request, *kind, cx),
+                ServerData::ClipboardReadUnknown { request, .. } => {
+                    if let Some(sender) = &self.sender {
+                        sender.send(&ClientData::ClipboardContent { request: *request, content: None });
+                    }
+                }
                 _ => {}
             }
             match self.mirror.apply(data) {

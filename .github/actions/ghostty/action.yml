@@ -1,0 +1,49 @@
+name: libghostty-vt
+description: >
+  Restores or builds the pinned libghostty-vt runtime (scripts/build-ghostty.sh)
+  with its zig toolchain, both cached outside the Rust cache.
+
+runs:
+  using: composite
+  steps:
+    - id: zig
+      shell: bash
+      run: |
+        version=$(sed -n 's/^zig_version=//p' scripts/build-ghostty.sh)
+        case "$(uname -s)-$(uname -m)" in
+          Darwin-arm64) target=aarch64-macos ;;
+          Linux-x86_64) target=x86_64-linux ;;
+          Linux-aarch64) target=aarch64-linux ;;
+          *) echo "unsupported runner" >&2; exit 1 ;;
+        esac
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "dir=$HOME/.cache/silo-zig/zig-$target-$version" >> "$GITHUB_OUTPUT"
+        echo "url=https://ziglang.org/download/$version/zig-$target-$version.tar.xz" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/silo-zig
+        key: zig-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}
+    # The runtime depends only on GHOSTTY_REV and the build script, which
+    # pins zig and the baseline CPU.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: target/ghostty/*/runtime
+        key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('GHOSTTY_REV', 'scripts/build-ghostty.sh') }}
+    - shell: bash
+      env:
+        ZIG_DIR: ${{ steps.zig.outputs.dir }}
+        ZIG_URL: ${{ steps.zig.outputs.url }}
+      run: |
+        set -euo pipefail
+        if [[ ! -x $ZIG_DIR/zig ]]; then
+          mkdir -p "$(dirname "$ZIG_DIR")"
+          curl -fsSL --retry 3 "$ZIG_URL" | tar xJ -C "$(dirname "$ZIG_DIR")"
+        fi
+        # The Rust cache may bring back a partial ghostty checkout from
+        # target/; the runtime cache above is what counts.
+        for source in target/ghostty/*/source; do
+          [[ -f $source/build.zig ]] || rm -rf "$source"
+        done
+        ZIG="$ZIG_DIR/zig" bash scripts/build-ghostty.sh
+        # Only the runtime is needed; keep the source out of the Rust cache.
+        rm -rf target/ghostty/*/source target/tools

@@ -1,36 +1,50 @@
 name: pages
 
-# Publishes site/ (index.html, install.sh) to https://nitishxyz.github.io/silo/.
-# Requires Pages with source "GitHub Actions" (build_type=workflow).
+# Publishes site/ (index.html, install.sh) to https://nitishxyz.github.io/silo/
+# from main. Requires Pages with source "GitHub Actions" (build_type=workflow).
+# Other branches and pull requests only check install.sh.
 
 on:
   push:
-    branches: [main]
-    paths: ["site/**", ".github/workflows/pages.yml"]
+    branches: ["**"]
+    paths: ["site/**", ".github/workflows/pages.yml", ".github/scripts/test-install.sh"]
+  pull_request:
+    paths: ["site/**", ".github/workflows/pages.yml", ".github/scripts/test-install.sh"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check install.sh
+        run: |
+          sh -n site/install.sh
+          shellcheck site/install.sh .github/scripts/test-install.sh .github/scripts/check-baseline-cpu.sh
+          sh .github/scripts/test-install.sh
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Check install.sh
-        run: sh -n site/install.sh && shellcheck site/install.sh
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

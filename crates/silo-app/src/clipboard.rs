@@ -28,11 +28,25 @@ pub fn is_paste_gesture(key: &str, modifiers: &gpui::Modifiers) -> bool {
     key.eq_ignore_ascii_case("v") && !modifiers.alt && (modifiers.platform != modifiers.control) && (!modifiers.platform || !modifiers.shift)
 }
 
-/// `path` as one POSIX shell word.
+/// `path` as one POSIX shell word, backslash-escaped like Terminal, iTerm
+/// and Ghostty paste dropped files (TUIs detect dropped paths in that
+/// form). A newline can't be backslash-escaped, so such a path is quoted.
 #[must_use]
 pub fn shell_quote(path: &str) -> String {
-    let plain = !path.is_empty() && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-+,:@%=".contains(&b));
-    if plain { path.to_owned() } else { format!("'{}'", path.replace('\'', r"'\''")) }
+    if path.is_empty() {
+        return "''".to_owned();
+    }
+    if path.contains('\n') {
+        return format!("'{}'", path.replace('\'', r"'\''"));
+    }
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii() && !c.is_ascii_alphanumeric() && !"/._-+,:@%=".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[must_use]
@@ -259,11 +273,13 @@ mod tests {
     #[test]
     fn quoting() {
         assert_eq!(shell_quote("/tmp/a.txt"), "/tmp/a.txt");
-        assert_eq!(shell_quote("/tmp/my file"), "'/tmp/my file'");
-        assert_eq!(shell_quote("/tmp/it's"), r"'/tmp/it'\''s'");
-        assert_eq!(shell_quote("$HOME;rm"), "'$HOME;rm'");
+        assert_eq!(shell_quote("/tmp/my file"), r"/tmp/my\ file");
+        assert_eq!(shell_quote("/tmp/it's"), r"/tmp/it\'s");
+        assert_eq!(shell_quote("$HOME;rm"), r"\$HOME\;rm");
+        assert_eq!(shell_quote("/tmp/café 1.png"), r"/tmp/café\ 1.png");
+        assert_eq!(shell_quote("/a\nb"), "'/a\nb'");
         assert_eq!(shell_quote(""), "''");
-        assert_eq!(quoted(&["/a", "/b c"]), "/a '/b c'");
+        assert_eq!(quoted(&["/a", "/b c"]), r"/a /b\ c");
     }
 
     fn contents(paths: &[&str], text: Option<&str>, image: bool) -> Contents {

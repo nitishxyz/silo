@@ -27,7 +27,7 @@ impl TermSize {
 }
 
 /// Cursor shape a DECSCUSR reset restores.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorShape {
     #[default]
@@ -35,6 +35,9 @@ pub enum CursorShape {
     Bar,
     Underline,
     Hollow,
+    /// A newer peer's shape: drawn as a block.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Effective terminal configuration of a block: the defaults the
@@ -43,7 +46,7 @@ pub enum CursorShape {
 /// (OSC 4/10/11/12, DECSCUSR) still win. Carried by value, never as a path
 /// to a local file, so remote clients see the same state.
 /// Colors are `0x00RRGGBB`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalConfig {
     pub foreground: u32,
     pub background: u32,
@@ -149,6 +152,9 @@ pub enum Layout {
         first: Box<Layout>,
         second: Box<Layout>,
     },
+    /// A newer server's node: shown as unsupported, left as is.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Layout {
@@ -172,6 +178,7 @@ impl Layout {
                 first.collect(out);
                 second.collect(out);
             }
+            Self::Unknown => {}
         }
     }
 
@@ -180,6 +187,7 @@ impl Layout {
         match self {
             Self::Block { id } => id == block,
             Self::Split { first, second, .. } => first.contains(block) || second.contains(block),
+            Self::Unknown => false,
         }
     }
 
@@ -191,7 +199,7 @@ impl Layout {
                 *self = Self::Split { axis, ratio: 0.5, first: Box::new(old), second: Box::new(Self::block(new)) };
                 true
             }
-            Self::Block { .. } => false,
+            Self::Block { .. } | Self::Unknown => false,
             Self::Split { first, second, .. } => first.split(target, new.clone(), axis) || second.split(target, new, axis),
         }
     }
@@ -202,7 +210,7 @@ impl Layout {
     pub fn remove(self, target: &str) -> Option<Self> {
         match self {
             Self::Block { ref id } if id == target => None,
-            Self::Block { .. } => Some(self),
+            Self::Block { .. } | Self::Unknown => Some(self),
             Self::Split { axis, ratio, first, second } => match ((*first).remove(target), (*second).remove(target)) {
                 (Some(a), Some(b)) => Some(Self::Split { axis, ratio, first: Box::new(a), second: Box::new(b) }),
                 (Some(a), None) => Some(a),
@@ -222,7 +230,7 @@ impl Layout {
             match layout {
                 Layout::Block { id } if id == a => b.clone_into(id),
                 Layout::Block { id } if id == b => a.clone_into(id),
-                Layout::Block { .. } => {}
+                Layout::Block { .. } | Layout::Unknown => {}
                 Layout::Split { first, second, .. } => {
                     walk(first, a, b);
                     walk(second, a, b);
@@ -321,6 +329,9 @@ pub enum BlockKind {
     #[default]
     Terminal,
     Browser,
+    /// A block kind of a newer server: shown as unsupported.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether a block still has a process behind it.
@@ -335,6 +346,9 @@ pub enum Lifecycle {
     /// Rebuilt from a saved snapshot (crash, reboot); no process, input is
     /// ignored, exit status unknown.
     Restored,
+    /// A newer server's state: treated as not running.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Lifecycle {
@@ -610,5 +624,17 @@ mod tests {
         assert!(!layout.swap("a", "x"));
         assert!(layout.swap("c", "a"));
         assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn newer_layout_nodes_and_states_parse() {
+        let json = serde_json::json!({"type": "split", "axis": "horizontal", "ratio": 0.5,
+            "first": {"type": "block", "id": "a"}, "second": {"type": "stack", "ids": ["b"]}});
+        let mut layout: Layout = serde_json::from_value(json).unwrap();
+        assert_eq!(layout.blocks(), ["a"]);
+        assert!(!layout.split("b", "c".into(), Axis::Vertical));
+        assert_eq!(layout.clone().remove("a"), Some(Layout::Unknown));
+        let state: Lifecycle = serde_json::from_value(serde_json::json!("paused")).unwrap();
+        assert!(!state.is_running());
     }
 }

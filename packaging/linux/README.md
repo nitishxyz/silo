@@ -19,8 +19,20 @@ built for a different target. A C cross compiler for `silo-vt`'s adapter
 
 On machines with little memory (8 GB or less), limit parallel rustc jobs
 (`CARGO_BUILD_JOBS=2`): full-width builds have been OOM-killed. CI
-(`.github/workflows/linux.yml`) does the same and uploads the release
-binary as the `silo-linux-x86_64` artifact.
+(`.github/workflows/ci.yml`) does the same.
+
+libghostty-vt is built for the architecture's baseline CPU, so a binary
+built on a newer machine (e.g. with AVX-512) still runs on older ones. CI
+checks this for x86_64 (`.github/scripts/check-baseline-cpu.sh`).
+
+## Releases
+
+A `v*` tag runs `.github/workflows/release.yml`, which publishes
+`silo-linux-x86_64.tar.gz`, `silo-linux-aarch64.tar.gz` (glibc 2.35+),
+`silo-macos-aarch64.tar.gz`, `Silo-<version>.dmg`, `build-id` and
+`SHA256SUMS`. `site/install.sh` (served at
+`https://nitishxyz.github.io/silo/install.sh`) installs the release for the
+machine, verified against `SHA256SUMS`.
 
 ## Install
 
@@ -46,10 +58,14 @@ server: keep them in agreement. Logs go to the journal: `journalctl --user -u si
 ## Pairing
 
 From a Mac running Silo, `silo remote install <ssh-target>` installs silo on
-the machine, starts it and adds it as a host (`--binary <path>` uploads a
-local build instead of downloading the release). `silo join <ticket>` offers
-this machine to the one whose join ticket it is. Running `silo up` over SSH
-from a Silo terminal offers the machine inline (`--no-offer` skips that).
+the machine, starts it and adds it as a host. The machine downloads the
+release of the running silo's version (`v<version>` on GitHub) with
+`install.sh`; `--local` uploads the running silo instead (it must run on the
+machine) and `--binary <path>` another build. An uploaded binary is run once
+(`--version`) on the machine before it is installed, so one built for another
+CPU or platform is refused with the reason. `silo join <ticket>` offers this
+machine to the one whose join ticket it is. Running `silo up` over SSH from a
+Silo terminal offers the machine inline (`--no-offer` skips that).
 
 Otherwise run `silo pair` on the server to print a pairing ticket and enter
 it on the client device (`silo hosts add <ticket>` for the CLI).
@@ -75,12 +91,13 @@ port is already in use).
 
 ## Stop
 
-`silo down` stops the server, disables the unit and removes it. It asks
-first when sessions are running (`--yes` skips the question): the server's
+`silo down` stops the server, disables the unit and removes it. It asks first
+when sessions are running (`--yes` skips the question), except for an idle
+default session (one shell at its prompt, nobody attached): the server's
 shutdown hangs up every shell it runs. systemd signals only the server
 (`KillMode=process`); if it ignores the signal, systemd SIGKILLs only the
-server after `TimeoutStopSec`, and its shells then lose their terminal and
-get SIGHUP from the kernel.
+server after `TimeoutStopSec`, and its shells then lose their terminal and get
+SIGHUP from the kernel.
 
 ## Upgrade
 
@@ -88,6 +105,18 @@ Re-run `install.sh` (it installs the new release and runs `silo up`), or
 install a build with `install -m755 silo ~/.local/bin/silo` and run `silo up`.
 Both replace the file by rename, so the running server keeps its binary;
 do not `cp` over it.
+
+From another machine, `silo remote upgrade <host>` (a paired host, by name or
+id prefix; `--all` for every one) upgrades it over the paired connection: the
+host downloads the release of the running silo's version for its platform and
+checks it against the release's `SHA256SUMS` (`--local` sends the running
+silo, `--binary PATH` another build, instead). The host checks the binary
+(sha256, its `--version`), renames it over its executable and runs its `silo
+up` as below. It skips a host already on that build and refuses one running a
+newer version unless `--force`. If the takeover fails, the host restores the
+previous binary and keeps serving. `--ssh <destination>` does the same over
+ssh for a host that cannot be reached otherwise (silo in `~/.local/bin`; the
+release is fetched there with `install.sh`).
 
 It reloads the unit, whose `ExecReload` runs `silo server --takeover --daemon
 --idle-exit 0` inside the service. The successor takes every session over

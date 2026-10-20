@@ -73,6 +73,7 @@ commands! {
     PreviousSession => "Previous Session", "Sessions", ["cmd-alt-["];
     // Tabs
     NewTab => "New Tab", "Tabs", ["cmd-t"];
+    NewBrowserTab => "New Browser Tab", "Tabs", ["cmd-alt-t"];
     CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
     RenameTab => "Rename Tab…", "Tabs", [];
     NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
@@ -133,6 +134,13 @@ commands! {
 }
 
 impl Command {
+    /// The host feature (`silo_proto::compat::feature`) the command needs;
+    /// none yet, every protocol-1 host has what these use.
+    #[must_use]
+    pub fn feature(self) -> Option<&'static str> {
+        None
+    }
+
     /// The shortcut hint in macOS notation, e.g. `⇧⌘N`.
     #[must_use]
     pub fn hint(self) -> Option<String> {

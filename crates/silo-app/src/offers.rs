@@ -67,8 +67,9 @@ impl Offers {
         }
         match &offer.source {
             OfferSource::Join { invite_id } if from_local && self.invites.contains(invite_id) => Verdict::Accept,
-            // Someone else's invite (or server): theirs to accept.
-            OfferSource::Join { .. } => Verdict::Ignore,
+            // Someone else's invite (or server): theirs to accept. A newer
+            // server's sources are not understood.
+            OfferSource::Join { .. } | OfferSource::Unknown => Verdict::Ignore,
             OfferSource::Terminal { .. } if self.dismissed.contains(&offer.ticket) => Verdict::Ignore,
             OfferSource::Terminal { .. } => match self.cards.iter().position(|c| c.offer.endpoint_id == *id) {
                 Some(i) if self.cards[i].offer.ticket == offer.ticket && !expired(&self.cards[i], now) => Verdict::Ignore,
@@ -107,16 +108,17 @@ pub fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-/// A linked (or failed) offer, for every window.
+/// A linked (or failed) offer, or a host added outside the app, for every
+/// window.
 pub enum OfferEvent {
-    Added { name: String, invite: Option<String> },
+    Added { host: usize, name: String, invite: Option<String> },
     Failed { error: &'static str, invite: Option<String> },
 }
 
 fn invite_of(offer: &HostOffer) -> Option<String> {
     match &offer.source {
         OfferSource::Join { invite_id } => Some(invite_id.clone()),
-        OfferSource::Terminal { .. } => None,
+        OfferSource::Terminal { .. } | OfferSource::Unknown => None,
     }
 }
 
@@ -223,20 +225,20 @@ impl HostsState {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |this, cx| {
                 this.offers.linking.remove(&offer.endpoint_id);
-                let addr = match result {
-                    Ok(addr) => addr,
+                let (addr, hostname) = match result {
+                    Ok(paired) => paired,
                     Err(error) => {
                         tracing::info!("linking {} failed: {error:#}", offer.name);
                         return this.link_failed(&offer, crate::add_host::pair_error(&error), cx);
                     }
                 };
-                let name = crate::add_host::host_name(&offer.name, &offer.endpoint_id);
+                let name = crate::add_host::host_name(&offer.name, &hostname);
                 let id = addr.id.to_string();
                 let replace = this.entries().iter().position(|h| !h.removed && h.info.transport.remote_id().as_deref() == Some(id.as_str()));
                 match this.save_remote(RemoteHost::new(addr, name.clone()), replace, cx) {
-                    Ok(_) => {
+                    Ok(host) => {
                         this.offers.cards.retain(|c| c.offer.endpoint_id != offer.endpoint_id);
-                        cx.emit(OfferEvent::Added { name, invite: invite_of(&offer) });
+                        cx.emit(OfferEvent::Added { host, name, invite: invite_of(&offer) });
                         cx.notify();
                     }
                     Err(error) => {
@@ -260,22 +262,36 @@ impl HostsState {
     }
 }
 
+/// Whether `window` is the frontmost Silo window.
+fn frontmost(window: &Window, cx: &gpui::App) -> bool {
+    let silo = |w: &gpui::AnyWindowHandle| w.downcast::<Workspace>().is_some();
+    let front = cx.window_stack().and_then(|stack| stack.into_iter().find(silo)).or_else(|| cx.windows().into_iter().find(silo));
+    front.is_some_and(|w| w.window_id() == window.window_handle().window_id())
+}
+
 impl Workspace {
     /// A linked or failed offer: the window waiting on its invite (or
-    /// else the active one) says so.
+    /// else the frontmost one, even while another app is active) says
+    /// so, and shows the added host.
     pub(crate) fn offer_event(&mut self, event: &OfferEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_hosts(cx);
         let (invite, message) = match event {
-            OfferEvent::Added { name, invite } => (invite, format!("{name} added")),
+            OfferEvent::Added { name, invite, .. } => (invite, format!("{name} added")),
             OfferEvent::Failed { error, invite } => (invite, (*error).to_owned()),
         };
-        if invite.is_some() && self.join_invite() == invite.as_deref() {
+        let announce = if invite.is_some() && self.join_invite() == invite.as_deref() {
             match event {
                 OfferEvent::Added { .. } => self.close_add_host(window, cx),
                 OfferEvent::Failed { error, .. } => return self.sheet_error(*error, cx),
             }
-            self.flash(message, cx);
-        } else if window.is_window_active() {
+            true
+        } else {
+            frontmost(window, cx)
+        };
+        if announce {
+            if let OfferEvent::Added { host, .. } = event {
+                self.switch_host(*host, window, cx);
+            }
             self.flash(message, cx);
         }
         cx.notify();
