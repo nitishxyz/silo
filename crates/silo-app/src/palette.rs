@@ -260,6 +260,13 @@ impl Workspace {
                     self.flash("No remote hosts to remove.".into(), cx);
                 }
             }
+            Command::RenameHost => {
+                if self.available(Command::RenameHost) {
+                    self.open_rename_host(self.active_host, window, cx);
+                } else {
+                    self.flash("This Mac cannot be renamed.".into(), cx);
+                }
+            }
             Command::Copy => {
                 if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
                     browser.read(cx).edit(silo_web::Edit::Copy);
@@ -379,6 +386,7 @@ impl Workspace {
             | Command::EqualizePanes
             | Command::ZoomPane => panes > 1,
             Command::RemoveHost => self.hosts.iter().any(|h| !h.info.local && !h.removed),
+            Command::RenameHost => host.is_some_and(|h| !h.info.local && !h.removed),
             // On the server's focused block: tiled with a sibling, or floating.
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
@@ -544,10 +552,14 @@ impl Workspace {
         }
     }
 
-    /// Ask for a new name of remote host `index`.
+    /// Ask for a new name of remote host `index`, starting from the current
+    /// one, selected.
     pub(crate) fn open_rename_host(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.hosts.get(index).map(|h| h.info.name.clone()).unwrap_or_default();
-        self.open_palette_step(Step::Input(Input::HostName(index, name)), String::new(), window, cx);
+        self.open_palette_step(Step::Input(Input::HostName(index, name.clone())), name, window, cx);
+        if let Some(field) = self.palette.as_ref().map(|p| p.field.clone()) {
+            field.update(cx, |f, cx| f.select_all(cx));
+        }
     }
 
     fn open_palette_step(&mut self, step: Step, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -717,7 +729,8 @@ impl Workspace {
             FieldEvent::Up | FieldEvent::Down => {}
             FieldEvent::Cancel => {
                 match &palette.step {
-                    Step::Search => self.close_palette(window, cx),
+                    // A host rename is its own errand, from ⌘P or Settings.
+                    Step::Search | Step::Input(Input::HostName(..)) => self.close_palette(window, cx),
                     _ => self.open_palette_step(Step::Search, String::new(), window, cx),
                 }
                 return;
@@ -862,6 +875,7 @@ impl Workspace {
                 self.close_palette(window, cx);
                 self.switch_host(index, window, cx);
             }
+            Target::RenameHost(index) => self.open_rename_host(index, window, cx),
             Target::Upgrade(index) => {
                 self.close_palette(window, cx);
                 self.switch_host(index, window, cx);
@@ -1070,6 +1084,7 @@ impl Workspace {
             Step::Choice(id, _) | Step::Number(id) => Some(id.setting().title.to_owned()),
         };
         let footer = match &palette.step {
+            Step::Input(Input::HostName(..)) => Some("↩ rename · esc cancel"),
             Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back"),
             Step::Choice(_, Some(_)) => Some("↩ keep · esc restore"),
             Step::Choice(_, None) => Some("↩ apply · esc back"),

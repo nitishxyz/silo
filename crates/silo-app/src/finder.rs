@@ -136,6 +136,7 @@ pub enum Target {
     Setting(SettingId),
     Session { host: usize, id: String },
     Host(usize),
+    RenameHost(usize),
     Upgrade(usize),
     Tab { index: usize },
     Pane { index: usize, block: String },
@@ -337,7 +338,7 @@ impl Workspace {
     fn finder_sources(&self, scope: Scope, snapshot: &SettingsSnapshot, cx: &gpui::App) -> Vec<Item> {
         let mut out = Vec::new();
         if scope.includes(Group::Commands) {
-            for &command in Command::ALL.iter().filter(|c| **c != Command::AddHost && self.available(**c)) {
+            for &command in Command::ALL.iter().filter(|c| !matches!(c, Command::AddHost | Command::RenameHost) && self.available(**c)) {
                 let mut item = Item::new(Target::Command(command), Group::Commands, command.title(), command_key(command));
                 item.detail = Some(self.subtitle(command).map_or_else(|| command.group().to_owned(), |s| format!("{} · {s}", command.group())));
                 item.right = command.hint().map(Right::Shortcut);
@@ -345,6 +346,18 @@ impl Workspace {
                 out.push(item);
             }
         }
+        // Renaming the shown host is a command; the others' sit after
+        // their Go to entries, so a bare name still goes there first.
+        let remotes: Vec<(usize, String, String)> = self
+            .hosts
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| !h.removed)
+            .filter_map(|(index, h)| Some((index, h.info.transport.remote_id()?, h.info.name.clone())))
+            .collect();
+        let (rename_shown, rename_others): (Vec<Item>, Vec<Item>) =
+            rename_items(&remotes, self.active_host).into_iter().filter(|i| scope.includes(i.group)).partition(|i| i.group == Group::Commands);
+        out.extend(rename_shown);
         if scope.includes(Group::Settings) {
             for setting in SETTINGS.iter().filter(|s| s.id.visible(snapshot)) {
                 let mut item = Item::new(Target::Setting(setting.id), Group::Settings, setting.title, setting_key(setting.id));
@@ -387,6 +400,7 @@ impl Workspace {
                     out.push(item);
                 }
             }
+            out.extend(rename_others);
             let mut add = Item::new(Target::Command(Command::AddHost), Group::Machines, Command::AddHost.title(), command_key(Command::AddHost));
             add.detail = Command::AddHost.subtitle().map(str::to_owned);
             out.push(add);
@@ -456,6 +470,32 @@ impl Workspace {
 /// Mac), which survives other hosts being added or removed.
 fn host_key(host: &crate::hosts_state::HostEntry) -> String {
     host.info.transport.remote_id().unwrap_or_else(|| "local".into())
+}
+
+/// Rename entries of the remote hosts, given as (index, EndpointId, name);
+/// this Mac is not renamed. The shown host's comes first, as the Rename
+/// Host… command; the others' are under Machines.
+#[must_use]
+pub fn rename_items(remotes: &[(usize, String, String)], active: usize) -> Vec<Item> {
+    let mut out: Vec<Item> = remotes
+        .iter()
+        .map(|(index, id, name)| {
+            let mut item = if *index == active {
+                let command = Command::RenameHost;
+                let mut item = Item::new(Target::RenameHost(*index), Group::Commands, command.title(), command_key(command));
+                item.detail = Some(format!("{} · {name}", command.group()));
+                item
+            } else {
+                let mut item = Item::new(Target::RenameHost(*index), Group::Machines, name.clone(), format!("rename:{id}"));
+                item.lead = "Rename ";
+                item
+            };
+            item.keywords = format!("rename host machine {name}");
+            item
+        })
+        .collect();
+    out.sort_by_key(|i| i.target != Target::RenameHost(active));
+    out
 }
 
 #[must_use]
@@ -594,6 +634,42 @@ mod tests {
         assert_eq!(session_key("local", "s1"), "session:local:s1");
         assert_ne!(session_key("1a33ca7b", "s1"), session_key("local", "s1"));
         assert!(!session_key("1a33ca7b", "s1").contains(":0:") && !session_key("1a33ca7b", "s1").contains(":1:"));
+    }
+
+    #[test]
+    fn the_shown_host_is_renamed_first() {
+        let remotes = [(1, "aaa".to_owned(), "mini".to_owned()), (2, "bbb".to_owned(), "studio".to_owned())];
+        let items = rename_items(&remotes, 2);
+        assert_eq!(items[0].target, Target::RenameHost(2));
+        assert_eq!((items[0].group, items[0].text.as_str()), (Group::Commands, "Rename Host…"));
+        assert_eq!(items[0].detail.as_deref(), Some("Hosts · studio"));
+        assert_eq!(items[1].target, Target::RenameHost(1));
+        assert_eq!((items[1].group, items[1].lead, items[1].text.as_str()), (Group::Machines, "Rename ", "mini"));
+        // This Mac (index 0, not a remote) is the shown host: no command.
+        let items = rename_items(&remotes, 0);
+        assert!(items.iter().all(|i| i.group == Group::Machines && i.target != Target::RenameHost(0)));
+        assert!(rename_items(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn host_renames_match_rename_host_and_the_name() {
+        let remotes = [(1, "aaa".to_owned(), "mini".to_owned()), (2, "bbb".to_owned(), "studio".to_owned())];
+        let targets = |query: &str| -> Vec<Target> {
+            let items: Vec<Item> = rename_items(&remotes, 2)
+                .into_iter()
+                .filter_map(|mut i| {
+                    i.found = score(query, &i.text, &i.keywords)?;
+                    Some(i)
+                })
+                .collect();
+            rank(items, &[], None).into_iter().map(|i| i.target).collect()
+        };
+        assert_eq!(targets("rename"), [Target::RenameHost(2), Target::RenameHost(1)]);
+        assert_eq!(targets("host"), [Target::RenameHost(2), Target::RenameHost(1)]);
+        assert_eq!(targets("studio"), [Target::RenameHost(2)]);
+        assert_eq!(targets("rename studio"), [Target::RenameHost(2)]);
+        assert_eq!(targets("mini"), [Target::RenameHost(1)]);
+        assert!(targets("zzz").is_empty());
     }
 
     #[test]

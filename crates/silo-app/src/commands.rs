@@ -104,6 +104,7 @@ commands! {
     OpenUrl => "Open URL…", "Browser", [];
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
+    RenameHost => "Rename Host…", "Hosts", [];
     RemoveHost => "Remove Host…", "Hosts", [];
     // Edit & terminal
     Copy => "Copy", "Edit", ["cmd-c"];
