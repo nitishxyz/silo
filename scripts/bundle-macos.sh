@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Build target/Silo.app: the GPUI client, the `silo` server/CLI binary (as
-# silo-server) and the silo-menubar agent in Contents/MacOS, ad-hoc signed.
+# silo-server) and the silo-menubar agent in Contents/MacOS.
+#
+# Signed ad-hoc, or with SILO_SIGN_IDENTITY (a Developer ID Application
+# identity in the keychain) under the hardened runtime with secure
+# timestamps, ready for notarization (.github/workflows/release.yml).
 #
 #   scripts/bundle-macos.sh            # release build
 #   PROFILE=debug scripts/bundle-macos.sh
@@ -92,19 +96,33 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Inside out. Renderer and GPU helpers JIT. Ad-hoc signatures have no team
-# ID, so hardened runtime (library validation) waits for a real identity.
+# Inside out, with Chrome's entitlements: the Renderer and GPU helpers JIT,
+# and the app (the responsible process for its helpers) may use the camera
+# and microphone. Everything carries one team ID, so library validation
+# holds. Ad-hoc signatures have no team ID, so they skip the hardened
+# runtime.
+identity="${SILO_SIGN_IDENTITY:--}"
+if [[ "$identity" == - ]]; then
+  sign() { codesign --force --sign - --timestamp=none "$@"; }
+else
+  sign() { codesign --force --sign "$identity" --options runtime --timestamp "$@"; }
+fi
+entitlements() { # file keys...
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo '<plist version="1.0"><dict>'
+    for key in "${@:2}"; do echo "  <key>$key</key><true/>"; done
+    echo '</dict></plist>'
+  } > "$1"
+}
 jit="$root/target/helper-jit.entitlements"
-cat > "$jit" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>com.apple.security.cs.allow-jit</key><true/>
-  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
-</dict></plist>
-PLIST
-sign() { codesign --force --sign - --timestamp=none "$@"; }
-find "$app/Contents/Frameworks/$framework/Libraries" -name '*.dylib' -print0 | xargs -0 -I{} codesign --force --sign - --timestamp=none {}
+entitlements "$jit" com.apple.security.cs.allow-jit
+devices="$root/target/app.entitlements"
+entitlements "$devices" com.apple.security.device.audio-input com.apple.security.device.camera
+for lib in "$app/Contents/Frameworks/$framework/Libraries/"*.dylib; do
+  sign "$lib"
+done
 sign "$app/Contents/Frameworks/$framework"
 for helper in "${helpers[@]}"; do
   case "$helper" in
@@ -112,9 +130,8 @@ for helper in "${helpers[@]}"; do
     *) sign "$helper" ;;
   esac
 done
-codesign --force --sign - --timestamp=none "$app/Contents/MacOS/silo-server"
-codesign --force --sign - --timestamp=none "$app/Contents/MacOS/silo-menubar"
-codesign --force --sign - --timestamp=none "$app/Contents/MacOS/Silo"
-codesign --force --sign - --timestamp=none "$app"
+sign "$app/Contents/MacOS/silo-server"
+sign "$app/Contents/MacOS/silo-menubar"
+sign --entitlements "$devices" "$app"
 codesign --verify --deep --strict "$app"
 echo "built $app"

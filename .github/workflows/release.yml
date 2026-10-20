@@ -5,14 +5,22 @@ name: release
 #   silo-linux-x86_64.tar.gz     `silo` CLI/server
 #   silo-linux-aarch64.tar.gz
 #   silo-macos-aarch64.tar.gz
-#   Silo-<version>.dmg           the app, ad-hoc signed (not notarized)
+#   Silo-<version>.dmg           the app; Developer ID signed, notarized and
+#                                stapled (app and DMG)
 #   build-id                     silo_proto::BUILD, identical on every platform
 #   SHA256SUMS                   covers every other asset (site/install.sh
 #                                verifies downloads against it)
 #
+# The macOS `silo` binary is Developer ID signed and notarized too (a bare
+# binary cannot be stapled; Gatekeeper looks its ticket up online). Signing
+# is mandatory: the macOS build fails without the APPLE_* secrets.
+#
 # workflow_dispatch builds the selected ref (or an existing tag) and uploads
 # the assets as the `release` artifact; with dry_run unchecked and a tag
-# given it publishes that tag's release.
+# given it publishes that tag's release, replacing existing assets. A tag
+# build takes its sources from the tag but the signing tooling
+# (scripts/bundle-macos.sh, .github/scripts/notarize.sh) from this
+# workflow's commit.
 #
 # Linux builds run on ubuntu-22.04 runners, so the binaries need glibc 2.35
 # or newer (Debian 12, Ubuntu 22.04, RHEL/Rocky 10, Fedora 36+). The
@@ -69,19 +77,69 @@ jobs:
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
           cache-on-failure: true
+      - name: Use this workflow's signing tooling
+        if: matrix.os == 'macos' && inputs.tag != ''
+        run: |
+          git fetch --no-tags --depth 1 origin "$GITHUB_SHA"
+          git checkout FETCH_HEAD -- scripts/bundle-macos.sh .github/scripts/notarize.sh
       - uses: ./.github/actions/ghostty
       - if: matrix.os == 'macos'
         uses: ./.github/actions/cef
+      - name: Import signing certificate
+        if: matrix.os == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID SILO_SIGN_IDENTITY; do
+            [ -n "${!name}" ] || { echo "$name is not set (repository secrets)" >&2; exit 1; }
+          done
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          cert="$RUNNER_TEMP/signing.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$cert" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
+          rm -f "$cert"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" > /dev/null
+          security list-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -qF "\"$SILO_SIGN_IDENTITY\"" || {
+            echo "the certificate holds no valid identity named by APPLE_SIGNING_IDENTITY" >&2
+            exit 1
+          }
       - name: Fetch dependencies
         run: cargo fetch --locked
       - name: Build silo
         if: matrix.os == 'linux'
         run: cargo build -p silo-cli --release --locked
       # Builds silo, silo-menubar, the CEF helper and the app into
-      # target/Silo.app (ad-hoc signed).
+      # target/Silo.app (Developer ID signed, hardened runtime).
       - name: Build Silo.app
         if: matrix.os == 'macos'
+        env:
+          SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/bundle-macos.sh
+      - name: Sign and notarize silo
+        if: matrix.os == 'macos'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          bin=target/release/silo
+          codesign --force --sign "$SILO_SIGN_IDENTITY" --options runtime --timestamp "$bin"
+          codesign --verify --strict "$bin"
+          ditto -c -k "$bin" "$RUNNER_TEMP/silo.zip"
+          .github/scripts/notarize.sh "$RUNNER_TEMP/silo.zip"
       - name: Package silo
         run: |
           set -eu
@@ -111,10 +169,20 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Package Silo.app
         if: matrix.os == 'macos'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -eu
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           dmg="dist/Silo-$version.dmg"
+          # Staple the app itself so it passes Gatekeeper offline once
+          # copied out of the DMG.
+          ditto -c -k --keepParent target/Silo.app "$RUNNER_TEMP/Silo.zip"
+          .github/scripts/notarize.sh "$RUNNER_TEMP/Silo.zip"
+          xcrun stapler staple target/Silo.app
           stage=$(mktemp -d)
           ditto target/Silo.app "$stage/Silo.app"
           ln -s /Applications "$stage/Applications"
@@ -124,14 +192,23 @@ jobs:
             [ "$attempt" -lt 5 ] || exit 1
             sleep $((attempt * 5))
           done
-          codesign --force --sign - --timestamp=none "$dmg"
+          codesign --force --sign "$SILO_SIGN_IDENTITY" --timestamp "$dmg"
           hdiutil verify "$dmg"
+          .github/scripts/notarize.sh "$dmg"
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl -a -t open --context context:primary-signature -vv "$dmg"
           mnt=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
           codesign --verify --deep --strict "$mnt/Silo.app"
+          xcrun stapler validate "$mnt/Silo.app"
+          spctl -a -vv "$mnt/Silo.app"
           cmp "$mnt/Silo.app/Contents/MacOS/silo-server" target/Silo.app/Contents/MacOS/silo-server
           hdiutil detach "$mnt"
           echo "- $(basename "$dmg"): $(du -h "$dmg" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Delete signing keychain
+        if: always() && matrix.os == 'macos'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
       - name: Report glibc requirement
         if: matrix.os == 'linux'
         run: |
