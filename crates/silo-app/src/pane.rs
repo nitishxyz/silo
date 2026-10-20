@@ -494,6 +494,14 @@ impl Pane {
         // A short batch drained everything received so far.
         let idle = batch.len() < 512;
         for data in batch {
+            if self.remote() {
+                match &data {
+                    ServerData::Output { offset, bytes } => {
+                        tracing::debug!(target: "silo::predict", "DBG out @{offset} {:?}", String::from_utf8_lossy(bytes))
+                    }
+                    other => tracing::debug!(target: "silo::predict", "DBG frame {other:?}"),
+                }
+            }
             self.predictor.server(&data);
             match &data {
                 ServerData::ClipboardWrite { location: ClipboardLocation::Standard, text } => cx.emit(PaneEvent::ClipboardWrite(text.clone())),
@@ -601,6 +609,7 @@ impl Pane {
             self.predictor.path_rtt(rtt);
         }
         let target = self.predictor.overlay().1.unwrap_or((frame.cursor.row, frame.cursor.column));
+        tracing::debug!(target: "silo::predict", "DBG input {:?}", String::from_utf8_lossy(&bytes));
         self.predictor.input(&bytes, &frame);
         if let Some(trace) = self.trace.as_ref().filter(|_| key) {
             trace.borrow_mut().key(&bytes, target);
@@ -1409,6 +1418,18 @@ impl Render for Pane {
         let solid = self.translucency.is_none();
         let outside = || div().absolute().when(solid, |el| el.bg(rgb(theme::surface()))).border_color(rgb(theme::border()));
         let (cells, predicted_cursor) = self.predictor.overlay();
+        if self.remote()
+            && let Some(prepared) = &self.prepared
+        {
+            let f = prepared.frame();
+            let row = predicted_cursor.map_or(f.cursor.row, |c| c.0);
+            let cols = usize::from(f.size.columns);
+            let line: String = f.cells[usize::from(row) * cols..usize::from(row) * cols + cols.min(60)]
+                .iter()
+                .map(|c| if c.text.is_empty() { " " } else { c.text.as_str() })
+                .collect();
+            tracing::debug!(target: "silo::predict", "DBG render prepared@{} mirror@{} cursor {:?} pred {:?} cells {:?} |{}|", self.prepared_offset, self.mirror.next_offset(), (f.cursor.row, f.cursor.column), predicted_cursor, cells.iter().map(|c| (c.column, c.text.as_str())).collect::<Vec<_>>(), line.trim_end());
+        }
         let overlay = Overlay {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
             predicted_cursor,

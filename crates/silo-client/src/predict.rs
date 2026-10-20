@@ -166,10 +166,14 @@ impl Predictor {
             ServerData::TtyMode { echo, icanon, .. } => {
                 self.tty = Some((echo, icanon));
                 if icanon && !echo {
+                    tracing::debug!(target: "silo::predict", "DBG clear: noecho");
                     self.clear();
                 }
             }
-            ServerData::SnapshotHead(_) | ServerData::Resized { .. } | ServerData::Configured(_) | ServerData::Exited { .. } => self.clear(),
+            ServerData::SnapshotHead(_) | ServerData::Resized { .. } | ServerData::Configured(_) | ServerData::Exited { .. } => {
+                tracing::debug!(target: "silo::predict", "DBG clear: server {data:?}");
+                self.clear();
+            }
             ServerData::SnapshotHistory(_)
             | ServerData::SnapshotDone
             | ServerData::Output { .. }
@@ -188,6 +192,7 @@ impl Predictor {
         let now = Instant::now();
         self.sent += 1;
         if !self.enabled(frame) || !frame.scroll.at_bottom() {
+            tracing::debug!(target: "silo::predict", "DBG clear: input disabled");
             self.clear();
             return;
         }
@@ -204,7 +209,10 @@ impl Predictor {
                     column -= 1;
                     String::new()
                 }
-                _ => return self.boundary(),
+                _ => {
+                    tracing::debug!(target: "silo::predict", byte, "DBG boundary");
+                    return self.boundary();
+                }
             };
             let at = if text.is_empty() { column } else { column - 1 };
             self.cells.retain(|p| (p.cell.row, p.cell.column) != (row, at));
@@ -228,6 +236,7 @@ impl Predictor {
     pub fn judge(&mut self, frame: &Frame, next_offset: u64) {
         if !self.enabled(frame) {
             if !self.cells.is_empty() || self.cursor.is_some() {
+                tracing::debug!(target: "silo::predict", "DBG clear: judge disabled");
                 self.clear();
             }
             return;
@@ -241,6 +250,9 @@ impl Predictor {
         let (mut wrong, mut confirmed) = (false, None);
         self.cells.retain_mut(|p| {
             if count < p.input || next_offset <= offset {
+                if now - p.sent >= expire {
+                    tracing::debug!(target: "silo::predict", cell = ?p.cell, "DBG expired");
+                }
                 return now - p.sent < expire;
             }
             let window = *p.window.get_or_insert(next_offset);
@@ -255,6 +267,7 @@ impl Predictor {
             true
         });
         if wrong {
+            tracing::debug!(target: "silo::predict", late, next_offset, ?self.acked, cells = ?self.cells.iter().map(|p| (&p.cell, p.input, p.window)).collect::<Vec<_>>(), "DBG wrong: rollback");
             return self.clear();
         }
         if let Some(epoch) = confirmed {
@@ -336,6 +349,21 @@ mod tests {
         h.ack();
         h.out(b"b");
         assert_eq!(h.p.overlay(), (vec![], None));
+    }
+
+    #[test]
+    fn dbg_split_echo() {
+        let mut h = H::new(false, false);
+        h.confirm(b'x');
+        h.key(b"a");
+        h.key(b"b");
+        h.key(b"c");
+        assert_eq!(h.shown(), "abc");
+        h.ack();
+        h.out(b"a");
+        assert_eq!(h.shown(), "bc");
+        h.out(b"b");
+        assert_eq!(h.shown(), "c");
     }
 
     #[test]

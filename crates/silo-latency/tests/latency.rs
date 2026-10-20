@@ -66,6 +66,38 @@ async fn bench_echo_at_50ms() {
     assert!(report.misses().is_empty(), "{table}");
 }
 
+/// Typing ahead of the echo: `cargo test -p silo-latency -- --ignored --nocapture type_ahead_probe`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a diagnostic"]
+async fn type_ahead_probe() {
+    let rtt: u64 = std::env::var("PROBE_RTT").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+    let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (gap, gap_max, jitter) = (env("PROBE_GAP", 60), env("PROBE_GAP_MAX", 60), env("PROBE_JITTER", 0));
+    let shell = std::env::var("PROBE_SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let args: Vec<&str> = match shell.as_str() {
+        "/bin/zsh" => vec!["/bin/zsh", "-f"],
+        s => vec![s, "--norc", "--noprofile"],
+    };
+    let link = ProxyConfig { jitter: Duration::from_millis(jitter), ..ProxyConfig::rtt(Duration::from_millis(rtt)) };
+    let gaps = (Duration::from_millis(gap), Duration::from_millis(gap_max));
+    let text = b"echo hello world, this is typing ahead";
+    let typed = match std::env::var("PROBE_TICKET") {
+        Ok(ticket) => {
+            let home = std::path::PathBuf::from(std::env::var("PROBE_HOME").expect("PROBE_HOME for the probe identity"));
+            let args: Vec<&str> = vec!["/bin/bash", "-i"];
+            silo_latency::bench::type_ahead_remote(&home, &ticket, &args, text, gaps).await.unwrap()
+        }
+        Err(_) => silo_latency::bench::type_ahead(link, &args, text, gaps).await.unwrap(),
+    };
+    for line in &typed.log {
+        println!("{line}");
+    }
+    println!("states {} regressions {} exact {}", typed.states, typed.regressions.len(), typed.exact);
+    for line in &typed.regressions {
+        println!("REGRESSION {line}");
+    }
+}
+
 /// The full report with per-stage times and the load rows:
 /// `cargo test -p silo-latency --release -- --ignored --nocapture report`.
 #[tokio::test(flavor = "multi_thread")]

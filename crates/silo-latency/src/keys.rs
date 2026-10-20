@@ -126,6 +126,81 @@ impl Session {
     }
 }
 
+/// What a typist saw while typing ahead of the echo ([`Session::type_ahead`]).
+#[derive(Clone, Debug, Default)]
+pub struct TypedAhead {
+    /// Painted states (mirror plus overlay) after each server frame.
+    pub states: usize,
+    /// States that showed fewer typed characters, or the cursor further
+    /// left, than the state before: visible flicker.
+    pub regressions: Vec<String>,
+    /// The final painted line equals the typed text.
+    pub exact: bool,
+    pub log: Vec<String>,
+}
+
+impl Session {
+    /// Type printable `text` one key every `gaps` (uniform) without
+    /// waiting for echoes, as a person does, and watch every painted state.
+    pub async fn type_ahead(&mut self, text: &[u8], gaps: (Duration, Duration)) -> anyhow::Result<TypedAhead> {
+        let frame = self.frame()?;
+        let (row, start) = (frame.cursor.row, frame.cursor.column);
+        let started = Instant::now();
+        let mut out = TypedAhead::default();
+        let mut last: Option<(usize, u16)> = None;
+        let mut typed = 0;
+        let mut next_key = Instant::now();
+        let settle_until = |typed: usize| typed == text.len();
+        loop {
+            if typed < text.len() && Instant::now() >= next_key {
+                let frame = self.frame()?;
+                self.stream.send(&ClientData::Input(vec![text[typed]]));
+                self.follow_path();
+                self.predictor.input(&[text[typed]], &frame);
+                typed += 1;
+                next_key += gaps.0 + (gaps.1.saturating_sub(gaps.0)).mul_f64(rand::random::<f64>());
+                out.log.push(format!("{:7.1} key {:?}", started.elapsed().as_secs_f64() * 1e3, char::from(text[typed - 1])));
+            } else {
+                let wait = if settle_until(typed) { Duration::from_millis(400) } else { next_key.saturating_duration_since(Instant::now()) };
+                match timeout(wait, self.recv(crate::bench::T)).await {
+                    Ok(applied) => applied?,
+                    Err(_) if settle_until(typed) => break,
+                    Err(_) => continue,
+                }
+            }
+            let frame = self.frame()?;
+            let (cells, cursor) = self.predictor.overlay();
+            let painted_cursor = cursor.unwrap_or((frame.cursor.row, frame.cursor.column)).1;
+            let cell = |column: u16| {
+                cells.iter().find(|c| (c.row, c.column) == (row, column)).map(|c| c.text.clone()).unwrap_or_else(|| {
+                    frame.cells.get(usize::from(row) * usize::from(frame.size.columns) + usize::from(column)).map_or_else(String::new, |c| c.text.clone())
+                })
+            };
+            let shown = (0..typed).take_while(|&i| cell(start + i as u16) == char::from(text[i]).to_string()).count();
+            out.states += 1;
+            let line: String = (0..typed as u16 + 1).map(|i| cell(start + i)).map(|t| if t.is_empty() { " ".into() } else { t }).collect();
+            let state = format!(
+                "{:7.1} shown {shown}/{typed} cursor {} (mirror {}) overlay {} |{line}|",
+                started.elapsed().as_secs_f64() * 1e3,
+                painted_cursor.saturating_sub(start),
+                frame.cursor.column.saturating_sub(start),
+                cells.len()
+            );
+            if let Some((was_shown, was_cursor)) = last
+                && (shown < was_shown || painted_cursor < was_cursor)
+            {
+                out.regressions.push(state.clone());
+            }
+            out.log.push(state);
+            last = Some((shown, painted_cursor));
+        }
+        let frame = self.frame()?;
+        let line: String = (0..text.len() as u16).map(|i| frame.cells[usize::from(row) * usize::from(frame.size.columns) + usize::from(start + i)].text.clone()).collect();
+        out.exact = line.as_bytes() == text && frame.cursor.column == start + text.len() as u16;
+        Ok(out)
+    }
+}
+
 impl Session {
     /// Type `bytes` one by one where nothing echoes, watching the overlay
     /// for `wait` after each; returns whether prediction was ever enabled.

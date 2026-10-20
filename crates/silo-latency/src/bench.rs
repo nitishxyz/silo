@@ -291,6 +291,74 @@ async fn run(home: &Path, links: &[Link], keys: usize, load: bool) -> anyhow::Re
     Ok(Report { keys, rows, passwords })
 }
 
+/// Type `text` into `command` over `link`, a key every `gaps` (uniform), without
+/// waiting for echoes ([`Session::type_ahead`]).
+///
+/// # Errors
+/// As [`bench`].
+pub async fn type_ahead(link: ProxyConfig, command: &[&str], text: &[u8], gaps: (Duration, Duration)) -> anyhow::Result<crate::keys::TypedAhead> {
+    let home = temp_home();
+    let task = start(&home).await?;
+    let result = async {
+        let owner = Control::connect(&paths::socket(&home), "bench").await?.0;
+        let upstream = server_addr(&owner).await?;
+        let proxy = Proxy::spawn((Ipv4Addr::LOCALHOST, 0).into(), upstream.1, link).await?;
+        let ticket = PairTicket { addr: EndpointAddr::new(upstream.0.addr.id).with_ip_addr(proxy.addr()), secret: upstream.0.secret };
+        let identity = silo_client::client_identity(&home.join("client"))?;
+        let options = NetOptions { relay: RelayConfig::Disabled, mdns: false, port: None, pin_initial_path: true };
+        let net = Net::bind_with(&identity, options).await?;
+        let (remote, _events) = timeout(T, silo_client::pair(&net, &ticket, "bench")).await.context("pair timed out")??;
+        let rtt = match remote.conn() {
+            silo_client::transport::Conn::Iroh(conn) => conn.rtt(),
+            silo_client::transport::Conn::Unix(_) => None,
+        };
+        let mut session = Session::open(&remote, command, Predictor::remote(rtt)).await?;
+        // One echoed key confirms the first epoch, as at any prompt.
+        session.key(b'#').await?;
+        let typed = session.type_ahead(text, gaps).await;
+        session.close();
+        drop(remote);
+        net.close().await?;
+        typed
+    }
+    .await;
+    let stopped = stop(&home, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+    let typed = result?;
+    stopped?;
+    Ok(typed)
+}
+
+/// [`type_ahead`] against a real remote server, paired with `ticket` from
+/// a throwaway identity under `home`.
+///
+/// # Errors
+/// Pairing, attach or a key that never echoes.
+pub async fn type_ahead_remote(
+    home: &Path,
+    ticket: &str,
+    command: &[&str],
+    text: &[u8],
+    gaps: (Duration, Duration),
+) -> anyhow::Result<crate::keys::TypedAhead> {
+    let ticket = PairTicket::decode(ticket)?;
+    let identity = silo_client::client_identity(&home.join("client"))?;
+    let net = Net::bind_with(&identity, NetOptions::default()).await?;
+    let (remote, _events) = timeout(Duration::from_secs(30), silo_client::pair(&net, &ticket, "type-ahead probe")).await.context("pair timed out")??;
+    let rtt = match remote.conn() {
+        silo_client::transport::Conn::Iroh(conn) => conn.rtt(),
+        silo_client::transport::Conn::Unix(_) => None,
+    };
+    let mut session = Session::open(&remote, command, Predictor::remote(rtt)).await?;
+    session.key(b'#').await?;
+    let typed = session.type_ahead(text, gaps).await;
+    session.close();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(remote);
+    net.close().await?;
+    typed
+}
+
 /// `(name, command)` of the bench programs; zsh only where installed.
 fn programs() -> Vec<(&'static str, &'static [&'static str])> {
     let mut out: Vec<(&'static str, &'static [&'static str])> = vec![("cat", &["/bin/cat"])];
