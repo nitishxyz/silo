@@ -187,7 +187,7 @@ impl Workspace {
     fn create_in_new_window(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.active_host;
         let Some(control) = self.control() else {
-            return self.flash(format!("{} is not connected.", self.hosts[host].info.name), cx);
+            return self.flash(crate::status::Status::warning(format!("{} is not connected", self.hosts[host].info.name)), cx);
         };
         let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
@@ -197,7 +197,7 @@ impl Workspace {
             Ok(Ok(created)) => cx.update(|cx| open_in_new_window(host, created.session_id, cx)),
             Ok(Err(error)) => {
                 tracing::warn!("create session: {error:#}");
-                let _ = this.update(cx, |this, cx| this.flash(this.failed(&error, "Could not create the session."), cx));
+                let _ = this.update(cx, |this, cx| this.flash(this.failed(&error, "Couldn't create the session"), cx));
             }
             Err(_) => {}
         })

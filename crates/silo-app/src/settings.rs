@@ -329,7 +329,7 @@ impl Workspace {
         theme::install(loaded.prefs, loaded.problem);
         theme::apply_ui_font(self.ui_font_family(), cx);
         self.apply_terminal_theme(Reach::Servers, window, cx);
-        self.flash(problem.unwrap_or_else(|| "Terminal settings reloaded".into()), cx);
+        self.flash(problem.map_or_else(|| crate::status::Status::success("Terminal settings reloaded"), crate::status::Status::warning), cx);
         self.refresh_settings(None, cx);
     }
 
@@ -340,11 +340,13 @@ impl Workspace {
         if !path.exists()
             && let Err(error) = terminal_prefs::save(&self.home, &theme::prefs())
         {
-            self.flash(format!("Could not create the terminal settings file: {error}"), cx);
+            tracing::warn!("create terminal settings file: {error:#}");
+            self.flash(crate::status::Status::error("Couldn't create the terminal settings file"), cx);
             return;
         }
         if let Err(error) = std::process::Command::new("/usr/bin/open").arg("-t").arg(&path).spawn() {
-            self.flash(format!("Could not open the terminal settings file: {error}"), cx);
+            tracing::warn!("open terminal settings file: {error}");
+            self.flash(crate::status::Status::error("Couldn't open the terminal settings file"), cx);
         }
     }
 
@@ -494,7 +496,7 @@ impl Workspace {
                 if let Some(modal) = &self.settings {
                     modal.panel.update(cx, |panel, cx| panel.focus_search(window, cx));
                 }
-                Outcome { error: None, notes: self.status.clone().into_iter().collect() }
+                Outcome { error: None, notes: self.status.as_ref().map(|s| s.text.clone()).into_iter().collect() }
             }
         })
     }
@@ -573,6 +575,13 @@ impl Outcome {
         let mut messages: Vec<String> = self.error.into_iter().chain(self.notes).collect();
         messages.dedup();
         (!messages.is_empty()).then(|| messages.join(" "))
+    }
+
+    /// Everything, as a status: an error if it failed.
+    pub(crate) fn status(self) -> Option<crate::status::Status> {
+        let failed = self.error.is_some();
+        let message = self.message()?;
+        Some(if failed { crate::status::Status::error(message) } else { crate::status::Status::info(message) })
     }
 
     /// The notes, as one hint.

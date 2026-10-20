@@ -15,7 +15,7 @@ use gpui::{App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global
 
 use silo_client::update::{self, Failure, Feed};
 
-use crate::hosts_state::HostsState;
+use crate::{hosts_state::HostsState, status::Status};
 
 /// First automatic check after launch.
 const FIRST_CHECK: Duration = Duration::from_secs(15);
@@ -47,7 +47,7 @@ pub enum State {
 /// A check's outcome for the window that asked for it.
 pub struct UpdateStatus {
     pub requester: EntityId,
-    pub message: String,
+    pub status: Status,
 }
 
 pub struct Updater {
@@ -147,9 +147,9 @@ impl Updater {
         }
     }
 
-    fn tell(&mut self, message: String, cx: &mut Context<Self>) {
+    fn tell(&mut self, status: Status, cx: &mut Context<Self>) {
         if let Some(requester) = self.requester {
-            cx.emit(UpdateStatus { requester, message });
+            cx.emit(UpdateStatus { requester, status });
         }
     }
 
@@ -161,24 +161,24 @@ impl Updater {
             self.requester = requester;
         }
         if self.check.is_some() {
-            let message = match &self.state {
-                State::Downloading(version) => format!("Downloading Silo {version}…"),
-                _ => "Checking for updates…".into(),
+            let status = match &self.state {
+                State::Downloading(version) => Status::progress(format!("Downloading Silo {version}…")),
+                _ => Status::progress("Checking for updates…"),
             };
-            return self.tell(message, cx);
+            return self.tell(status, cx);
         }
         if let State::Ready { version, .. } = &self.state {
-            let message = format!("{}.", ready(version));
+            let status = Status::success(ready(version));
             self.requester = None;
             if let Some(requester) = requester {
-                cx.emit(UpdateStatus { requester, message });
+                cx.emit(UpdateStatus { requester, status });
             }
             return;
         }
         if self.state == State::Installing {
             return;
         }
-        self.tell("Checking for updates…".into(), cx);
+        self.tell(Status::progress("Checking for updates…"), cx);
         self.last_check = Some(SystemTime::now());
         let (rt, feed) = (self.rt.clone(), self.feed.clone());
         self.check = Some(cx.spawn(async move |this, cx| {
@@ -188,16 +188,16 @@ impl Updater {
             };
             let version = match latest.map_err(|e| e.to_string()).and_then(|r| r) {
                 Ok(Some(version)) => version,
-                Ok(None) => return this.update(cx, |this, cx| this.done(None, "Silo is up to date.".into(), cx)).unwrap_or(()),
+                Ok(None) => return this.update(cx, |this, cx| this.done(None, Status::success("Silo is up to date"), cx)).unwrap_or(()),
                 Err(error) => {
                     tracing::warn!("update check: {error}");
-                    return this.update(cx, |this, cx| this.done(None, "Couldn't check for updates.".into(), cx)).unwrap_or(());
+                    return this.update(cx, |this, cx| this.done(None, Status::error("Couldn't check for updates"), cx)).unwrap_or(());
                 }
             };
             tracing::info!(version, "update: newer release, downloading");
             let _ = this.update(cx, |this, cx| {
                 this.state = State::Downloading(version.clone());
-                this.tell(format!("Downloading Silo {version}…"), cx);
+                this.tell(Status::progress(format!("Downloading Silo {version}…")), cx);
             });
             let prepared = {
                 let version = version.clone();
@@ -210,27 +210,27 @@ impl Updater {
             let _ = this.update(cx, |this, cx| match prepared.map_err(|e| Failure::Retry(e.to_string())).and_then(|r| r) {
                 Ok(staged) => {
                     tracing::info!(version, staged = %staged.display(), "update: ready");
-                    let message = format!("{}.", ready(&version));
-                    this.done(Some(State::Ready { version, staged }), message, cx);
+                    let status = Status::success(ready(&version));
+                    this.done(Some(State::Ready { version, staged }), status, cx);
                 }
                 Err(Failure::Unwritable) => {
                     tracing::warn!(version, "update: the app's folder is not writable");
-                    this.done(Some(State::Blocked { version, reason: UNWRITABLE }), format!("{UNWRITABLE}."), cx);
+                    this.done(Some(State::Blocked { version, reason: UNWRITABLE }), Status::warning(UNWRITABLE), cx);
                 }
                 Err(Failure::Retry(error)) => {
                     tracing::warn!(version, "update failed (retrying at the next check): {error}");
-                    this.done(Some(State::Idle), format!("Couldn't download Silo {version}."), cx);
+                    this.done(Some(State::Idle), Status::error(format!("Couldn't download Silo {version}")), cx);
                 }
             });
         }));
     }
 
-    fn done(&mut self, state: Option<State>, message: String, cx: &mut Context<Self>) {
+    fn done(&mut self, state: Option<State>, status: Status, cx: &mut Context<Self>) {
         self.check = None;
         if let Some(state) = state {
             self.state = state;
         }
-        self.tell(message, cx);
+        self.tell(status, cx);
         self.requester = None;
         cx.notify();
     }

@@ -1543,7 +1543,7 @@ impl crate::workspace::Workspace {
                 }
                 Err(error) => {
                     tracing::warn!("new browser: {error:#}");
-                    this.flash(this.failed(&error, "Could not open a browser."), cx);
+                    this.flash(this.failed(&error, "Couldn't open a browser"), cx);
                 }
             });
         })

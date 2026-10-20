@@ -22,8 +22,9 @@ use crate::{
     hosts_state::{HostEntry, HostEvent, HostsState},
     motion::{self, Edge, Motion, PaneGhost, TabGhost},
     pane::{Pane, PaneEvent},
+    status::Status,
     switcher::Switcher,
-    theme::{self, Continuous as _},
+    theme,
 };
 
 actions!(
@@ -33,8 +34,10 @@ actions!(
 
 pub const TITLEBAR_HEIGHT: f32 = 46.0;
 
-/// Status bar while the shown content is the last known (cached) state.
+/// Status while the shown content is the last known (cached) state.
 const OFFLINE: &str = "Offline";
+/// Status while the local server is stopped.
+pub(crate) const SERVER_STOPPED: &str = "Server stopped · ⌘P to start";
 
 pub struct Workspace {
     pub(crate) rt: tokio::runtime::Handle,
@@ -44,9 +47,9 @@ pub struct Workspace {
     /// This window's snapshot of `shared`'s hosts, synced on its changes.
     pub(crate) hosts: Vec<HostEntry>,
     pub(crate) active_host: usize,
-    pub(crate) status: Option<String>,
+    pub(crate) status: Option<Status>,
     /// The `flash` message still showing; connecting keeps it.
-    pub(crate) flashing: Option<String>,
+    pub(crate) flashing: Option<Status>,
     /// Upgrade Server is running (see `upgrade_server`).
     pub(crate) upgrading: bool,
     /// Shown in the status bar once the upgraded server connects.
@@ -160,7 +163,7 @@ impl Workspace {
             cx.observe(&updater, |_, _, cx| cx.notify()),
             cx.subscribe(&updater, |this, _, status: &crate::updater::UpdateStatus, cx| {
                 if status.requester == cx.entity_id() {
-                    this.flash(status.message.clone(), cx);
+                    this.flash(status.status.clone(), cx);
                 }
             }),
         ];
@@ -188,7 +191,7 @@ impl Workspace {
             shared,
             hosts: Vec::new(),
             active_host,
-            status: Some("connecting to server…".into()),
+            status: Some(Status::progress("Connecting to server…")),
             flashing: None,
             upgrading: false,
             notice: None,
@@ -333,7 +336,7 @@ impl Workspace {
         let Some(tree) = self.shared.read(cx).tree(self.active_host).cloned() else {
             return;
         };
-        self.status = Some(OFFLINE.into());
+        self.status = Some(Status::warning(OFFLINE));
         self.set_view(tree.view, window, cx);
     }
 
@@ -356,10 +359,10 @@ impl Workspace {
         format!("Not supported by {}", self.hosts[self.active_host].info.name)
     }
 
-    /// The message for a failed request: an older host's missing method
+    /// The status for a failed request: an older host's missing method
     /// says so, anything else is `what`.
-    pub(crate) fn failed(&self, error: &anyhow::Error, what: &str) -> String {
-        if error.is::<silo_client::NotSupported>() { self.not_supported() } else { what.to_owned() }
+    pub(crate) fn failed(&self, error: &anyhow::Error, what: &str) -> Status {
+        if error.is::<silo_client::NotSupported>() { Status::warning(self.not_supported()) } else { Status::error(what) }
     }
 
     /// A connection event, already applied to the shared hosts.
@@ -380,11 +383,11 @@ impl Workspace {
                 if active {
                     self.motion.reset();
                     self.status = Some(if self.hosts[host].paused.load(std::sync::atomic::Ordering::Acquire) {
-                        "Server stopped — run “Start Server” from the command palette (⌘P)".to_owned()
+                        Status::warning(SERVER_STOPPED)
                     } else if self.view.is_some() {
-                        OFFLINE.to_owned()
+                        Status::warning(OFFLINE)
                     } else {
-                        format!("server unavailable: {reason}")
+                        Status::error(format!("Server unavailable: {reason}"))
                     });
                 }
             }
@@ -495,7 +498,7 @@ impl Workspace {
             if cached {
                 self.show_cached(window, cx);
             } else {
-                self.status = Some(format!("{} is not connected", self.hosts[host].info.name));
+                self.status = Some(Status::warning(format!("{} is not connected", self.hosts[host].info.name)));
             }
             cx.notify();
             return;
@@ -513,7 +516,7 @@ impl Workspace {
         self.detach_view();
         self.active_host = host;
         self.wanted_session = self.shared.read(cx).tree(host).map(|t| t.view.session.id.clone());
-        self.status = Some(format!("Connecting to {}…", self.hosts[host].info.name));
+        self.status = Some(Status::progress(format!("Connecting to {}…", self.hosts[host].info.name)));
         self.show_cached(window, cx);
         if self.control().is_some() {
             let wanted = self.wanted_session.take();
@@ -573,7 +576,7 @@ impl Workspace {
             Ok(Err(error)) => {
                 let _ = this.update(cx, |this, cx| {
                     tracing::warn!("create session: {error:#}");
-                    this.status = Some(this.failed(&error, "Could not create the session."));
+                    this.status = Some(this.failed(&error, "Couldn't create the session"));
                     cx.notify();
                 });
             }
@@ -614,7 +617,7 @@ impl Workspace {
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
                         tracing::warn!("open session: {error:#}");
-                        this.status = Some(this.failed(&error, "Could not open the session."));
+                        this.status = Some(this.failed(&error, "Couldn't open the session"));
                         cx.notify();
                     });
                     return;
@@ -850,7 +853,7 @@ impl Workspace {
 
     fn copied(&mut self, text: String, host: Option<String>, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        self.flash(crate::clipboard::copied_label(host.as_deref()), cx);
+        self.flash(Status::success(crate::clipboard::copied_label(host.as_deref())), cx);
         cx.notify();
     }
 
@@ -1002,7 +1005,7 @@ impl Workspace {
             };
             tracing::warn!("new shell: {error}");
             let _ = this.update(cx, |this, cx| {
-                this.flash("Couldn't start a new shell".into(), cx);
+                this.flash(Status::error("Couldn't start a new shell"), cx);
                 cx.notify();
             });
         })
@@ -1243,9 +1246,9 @@ impl Workspace {
         }
     }
 
-    /// Text of the status bar along the window's bottom edge, if shown.
-    pub(crate) fn status_bar(&self) -> Option<String> {
-        self.status.clone().filter(|_| self.view.is_some() && self.incompatible().is_none())
+    /// The status pill over the bottom of the panes, if shown.
+    pub(crate) fn status_bar(&self) -> Option<&Status> {
+        self.status.as_ref().filter(|_| self.view.is_some() && self.incompatible().is_none())
     }
 
     pub(crate) fn window_title(&self, w: &WindowInfo, cx: &gpui::App) -> String {
@@ -1325,8 +1328,7 @@ impl Render for Workspace {
                     .items_center()
                     .justify_center()
                     .p(px(24.0))
-                    .text_color(rgb(theme::muted()))
-                    .child(div().max_w(px(520.0)).text_center().child(self.status.clone().unwrap_or_default()))
+                    .children(self.status.as_ref().map(|status| crate::status::centred(status, self.chrome.surface, cx)))
                     .into_any_element(),
             },
         };
@@ -1363,22 +1365,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SelectWindow9, window, cx| this.number_key(8, window, cx)))
             .child(div().flex_none().when(frosted, |el| el.bg(self.chrome.fill())).child(titlebar))
             .child(div().flex_1().min_h_0().when(frosted && !cards, |el| el.bg(self.chrome.fill())).child(body))
-            .when_some(self.status_bar(), |el, status| {
-                el.child(
-                    div().absolute().bottom(px(8.0)).left_0().right_0().flex().justify_center().child(
-                        div()
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .continuous(8.0)
-                            .bg(theme::overlay_fill())
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme::muted()))
-                            .child(status),
-                    ),
-                )
-            })
+            .children(self.status_bar().map(|status| crate::status::pill(status, self.panes_bottom() + crate::status::PILL_CLEARANCE, cx)))
             .children(ghosts)
             .children(appearance)
             .children(new_tab)

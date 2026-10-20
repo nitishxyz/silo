@@ -37,6 +37,7 @@ mod remote;
 mod settings;
 mod settings_panel;
 mod settings_table;
+mod status;
 mod switcher;
 mod terminal_prefs;
 mod text_field;

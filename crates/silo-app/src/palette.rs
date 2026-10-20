@@ -8,7 +8,7 @@ use gpui::{
 };
 use silo_proto::{control::Method, model::Axis};
 
-use crate::theme::Continuous as _;
+use crate::{status::Status, theme::Continuous as _};
 
 /// Quiet time after the last resize step before ratios go to the server.
 const RATIO_FLUSH: std::time::Duration = std::time::Duration::from_millis(120);
@@ -139,7 +139,7 @@ impl Workspace {
             return;
         }
         if command.feature().is_some_and(|f| !self.host_supports(f)) {
-            return self.flash(self.not_supported(), cx);
+            return self.flash(Status::warning(self.not_supported()), cx);
         }
         // Restart Server on an incompatible server is the upgrade, which
         // keeps sessions when it can and says so when it could not.
@@ -167,7 +167,7 @@ impl Workspace {
         let block = self.focused_block(window, cx);
         let server_command = matches!(command, Command::StartServer | Command::StopServer | Command::RestartServer);
         if server_command && !self.hosts.get(self.active_host).is_some_and(|h| h.info.local) {
-            self.flash("Switch to This Mac to manage its server.".into(), cx);
+            self.flash(Status::info("Switch to This Mac to manage its server"), cx);
             return;
         }
         match command {
@@ -257,14 +257,14 @@ impl Workspace {
                 if self.hosts.iter().any(|h| !h.info.local && !h.removed) {
                     self.open_palette_step(Step::RemoveHost, String::new(), window, cx);
                 } else {
-                    self.flash("No remote hosts to remove.".into(), cx);
+                    self.flash(Status::info("No remote hosts to remove"), cx);
                 }
             }
             Command::RenameHost => {
                 if self.available(Command::RenameHost) {
                     self.open_rename_host(self.active_host, window, cx);
                 } else {
-                    self.flash("This Mac cannot be renamed.".into(), cx);
+                    self.flash(Status::info("This Mac can't be renamed"), cx);
                 }
             }
             Command::Copy => {
@@ -301,7 +301,7 @@ impl Workspace {
             }
             Command::RestartServer if self.incompatible().is_some() => self.upgrade_server(cx),
             Command::RestartServer => {
-                self.status = Some("Restarting server…".into());
+                self.status = Some(Status::progress("Restarting server…"));
                 self.call(Method::ServerShutdown {});
             }
             Command::StopServer => {
@@ -321,13 +321,13 @@ impl Workspace {
                 }
                 self.detach_view();
                 self.focus.focus(window, cx);
-                self.status = Some("Server stopped. Run “Start Server” from the command palette (⌘P).".into());
+                self.status = Some(Status::warning(crate::workspace::SERVER_STOPPED));
             }
             Command::StartServer => {
                 if let Some(host) = self.hosts.get(self.active_host) {
                     host.paused.store(false, Ordering::Release);
                 }
-                self.status = Some("Starting server…".into());
+                self.status = Some(Status::progress("Starting server…"));
             }
             Command::ShowServerLog => {
                 let log = silo_proto::paths::log(&self.home);
@@ -415,18 +415,18 @@ impl Workspace {
         }
     }
 
-    /// A status message that clears itself after a few seconds.
-    pub(crate) fn flash(&mut self, message: String, cx: &mut Context<Self>) {
-        self.status = Some(message.clone());
-        self.flashing = Some(message.clone());
+    /// A status that clears itself after a few seconds.
+    pub(crate) fn flash(&mut self, status: Status, cx: &mut Context<Self>) {
+        self.status = Some(status.clone());
+        self.flashing = Some(status.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.flashing.as_deref() == Some(message.as_str()) {
+                if this.flashing.as_ref() == Some(&status) {
                     this.flashing = None;
                 }
-                if this.status.as_deref() == Some(message.as_str()) {
+                if this.status.as_ref() == Some(&status) {
                     this.status = None;
                     cx.notify();
                 }
@@ -836,10 +836,10 @@ impl Workspace {
         if let Some(palette) = self.palette.as_mut() {
             drop(palette.step.end_preview());
         }
-        let message = self.apply_settings_event(event, window, cx).and_then(crate::settings::Outcome::message);
+        let status = self.apply_settings_event(event, window, cx).and_then(crate::settings::Outcome::status);
         self.close_palette(window, cx);
-        if let Some(message) = message {
-            self.flash(message, cx);
+        if let Some(status) = status {
+            self.flash(status, cx);
         }
     }
 
@@ -931,7 +931,7 @@ impl Workspace {
             Entry::Back => self.open_palette_step(Step::Search, String::new(), window, cx),
             Entry::RemoveHost(index) => match self.remove_host(index, cx) {
                 Ok(name) => {
-                    self.flash(format!("Removed host “{name}”."), cx);
+                    self.flash(Status::success(format!("Removed “{name}”")), cx);
                     self.close_palette(window, cx);
                 }
                 Err(error) => {

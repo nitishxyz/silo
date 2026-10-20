@@ -58,6 +58,12 @@ impl Placement {
 }
 
 impl Workspace {
+    /// Space between the window's bottom edge and the panes' bottom edge
+    /// (their cards' outline in Comfortable).
+    pub(crate) fn panes_bottom(&self) -> f32 {
+        if self.density() == Density::Comfortable { OUTER } else { 0.0 }
+    }
+
     /// The active window's panes, zoomed to the focused one if set.
     pub(crate) fn render_body(&self, w: &WindowInfo, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let comfortable = self.density() == Density::Comfortable;

@@ -490,7 +490,12 @@ fn tint(amount: f32) -> gpui::Rgba {
 /// Fill of surfaces over the app's own content: always opaque.
 #[must_use]
 pub fn overlay_fill() -> gpui::Rgba {
-    gpui::rgb(veils().map_or_else(popover, |v| v.overlay))
+    gpui::rgb(overlay())
+}
+/// [`overlay_fill`]'s colour.
+#[must_use]
+pub fn overlay() -> u32 {
+    veils().map_or_else(popover, |v| v.overlay)
 }
 /// Panels and grouped rows inside a floating surface (never a second veil).
 #[must_use]
@@ -556,6 +561,16 @@ pub fn accent_highlight() -> u32 {
 #[must_use]
 pub fn danger() -> u32 {
     current().effective.config.palette[1]
+}
+/// The theme's green.
+#[must_use]
+pub fn success() -> u32 {
+    current().effective.config.palette[2]
+}
+/// The theme's yellow.
+#[must_use]
+pub fn warning() -> u32 {
+    current().effective.config.palette[3]
 }
 #[must_use]
 pub fn selection() -> u32 {

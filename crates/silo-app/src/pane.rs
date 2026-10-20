@@ -57,7 +57,7 @@ pub enum PaneEvent {
     /// A program in the block wrote this text to the clipboard.
     ClipboardWrite(String),
     /// A brief message for the status bar.
-    Notice(String),
+    Notice(crate::status::Status),
     /// The program's backdrop colour changed.
     Backdrop,
 }
@@ -873,7 +873,10 @@ impl Pane {
             Some(Paste::Paths(paths)) => self.paste_paths(&paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), cx),
             Some(Paste::SaveImage(png)) => match clipboard::save_png(&silo_proto::paths::home(), &png) {
                 Ok(path) => self.paste_paths(&[path.to_string_lossy().into_owned()], cx),
-                Err(error) => cx.emit(PaneEvent::Notice(format!("Couldn't save the image: {error}"))),
+                Err(error) => {
+                    tracing::warn!("save pasted image: {error:#}");
+                    cx.emit(PaneEvent::Notice(crate::status::Status::error("Couldn't save the image")));
+                }
             },
             Some(Paste::Upload(sources)) => self.upload(sources, cx),
             None => {}
@@ -915,7 +918,7 @@ impl Pane {
 
     fn upload(&mut self, sources: Vec<Source>, cx: &mut Context<Self>) {
         if self.upload.is_some() {
-            cx.emit(PaneEvent::Notice("Upload in progress".into()));
+            cx.emit(PaneEvent::Notice(crate::status::Status::info("Upload in progress")));
             return;
         }
         let Some(control) = self.control.clone().filter(|_| self.status == Status::Live && self.running()) else {
@@ -956,7 +959,10 @@ impl Pane {
                 cx.notify();
                 match result {
                     Ok(Ok(paths)) => pane.paste_paths(&paths, cx),
-                    Ok(Err(error)) => cx.emit(PaneEvent::Notice(format!("Upload failed: {error:#}"))),
+                    Ok(Err(error)) => {
+                        tracing::warn!("upload: {error:#}");
+                        cx.emit(PaneEvent::Notice(crate::status::Status::error("Upload failed")));
+                    }
                     Err(_) => {}
                 }
             });

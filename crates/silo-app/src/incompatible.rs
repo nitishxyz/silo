@@ -6,7 +6,7 @@
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
 use silo_client::mismatch::Upgraded;
 
-use crate::{hosts::HostState, theme, theme::Continuous as _, workspace::Workspace};
+use crate::{hosts::HostState, status::Status, theme, theme::Continuous as _, workspace::Workspace};
 
 /// How long the note after an upgrade stays in the status bar.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
@@ -57,12 +57,12 @@ impl Workspace {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |this, cx| {
                 let notice = match result {
-                    Ok(Upgraded::Live) => "Upgraded.",
-                    Ok(Upgraded::Stopped) => "Upgraded. Old sessions ended.",
+                    Ok(Upgraded::Live) => "Server upgraded",
+                    Ok(Upgraded::Stopped) => "Server upgraded · old sessions ended",
                     Err(error) => {
                         tracing::warn!("upgrade server: {error:#}");
                         this.upgrading = false;
-                        this.status = Some("Could not upgrade the server.".into());
+                        this.status = Some(Status::error("Couldn't upgrade the server"));
                         return cx.notify();
                     }
                 };
@@ -82,12 +82,13 @@ impl Workspace {
     /// session changed) until it has been up for a moment.
     pub(crate) fn upgrade_connected(&mut self, cx: &mut Context<Self>) {
         let Some(notice) = self.notice.clone() else { return };
+        let notice = Status::success(notice);
         self.status = Some(notice.clone());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NOTICE_FOR).await;
             let _ = this.update(cx, |this, cx| {
                 this.notice = None;
-                if this.status.as_deref() == Some(notice.as_str()) {
+                if this.status.as_ref() == Some(&notice) {
                     this.status = None;
                     cx.notify();
                 }
@@ -168,7 +169,7 @@ impl Workspace {
                     .child(muted(silo_client::IncompatibleServer::UPGRADE_NOTE.into()))
                     .child(muted(detail))
                     .child(button)
-                    .when_some(self.status.clone(), |el, status| el.child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(status))),
+                    .children(self.status.as_ref().map(|status| crate::status::inline(status, theme::overlay(), cx))),
             )
             .into_any_element()
     }

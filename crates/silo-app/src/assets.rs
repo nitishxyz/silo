@@ -38,6 +38,8 @@ icons!(
     "lock",
     "lock-off",
     "info",
+    "info-mark",
+    "alert",
     "settings-hard-drive",
     "settings-info",
     "settings-keyboard",

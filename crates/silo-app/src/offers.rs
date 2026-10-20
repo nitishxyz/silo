@@ -274,9 +274,9 @@ impl Workspace {
     /// so, and shows the added host.
     pub(crate) fn offer_event(&mut self, event: &OfferEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_hosts(cx);
-        let (invite, message) = match event {
-            OfferEvent::Added { name, invite, .. } => (invite, format!("{name} added")),
-            OfferEvent::Failed { error, invite } => (invite, (*error).to_owned()),
+        let (invite, status) = match event {
+            OfferEvent::Added { name, invite, .. } => (invite, crate::status::Status::success(format!("{name} added"))),
+            OfferEvent::Failed { error, invite } => (invite, crate::status::Status::error(*error)),
         };
         let announce = if invite.is_some() && self.join_invite() == invite.as_deref() {
             match event {
@@ -291,7 +291,7 @@ impl Workspace {
             if let OfferEvent::Added { host, .. } = event {
                 self.switch_host(*host, window, cx);
             }
-            self.flash(message, cx);
+            self.flash(status, cx);
         }
         cx.notify();
     }
