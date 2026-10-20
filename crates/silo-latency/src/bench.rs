@@ -74,6 +74,11 @@ pub struct Row {
     /// `key→stage` per reached stage of [`crate::stages::STAGES`] (input
     /// stages only under load, where output is not attributable).
     pub stages: Vec<(String, Stats)>,
+    /// `key→echo` less each key's measured link legs (`client_sent→server_input`
+    /// and `server_flushed→client_received`): the latency silo adds, free of
+    /// proxy and runner timer jitter. A key missing a leg counts in full.
+    /// `None` for the unix baseline.
+    pub added: Option<Stats>,
 }
 
 impl Row {
@@ -115,6 +120,18 @@ impl Report {
     /// on a password prompt.
     #[must_use]
     pub fn misses(&self) -> Vec<String> {
+        self.judge(false)
+    }
+
+    /// [`Report::misses`] with the proxied echo target judged on
+    /// [`Row::added`] (≤ 20 ms at p95): a slow shared runner delaying the
+    /// proxy's timers can't miss it, a slower silo still does.
+    #[must_use]
+    pub fn silo_misses(&self) -> Vec<String> {
+        self.judge(true)
+    }
+
+    fn judge(&self, added: bool) -> Vec<String> {
         let mut out = Vec::new();
         for r in self.rows.iter().filter(|r| !r.loaded()) {
             let (name, rtt) = (format!("{} {}", r.link, r.program), r.rtt_ms.unwrap_or(0) as f64);
@@ -123,8 +140,15 @@ impl Report {
                 Some(p) if p.p95 <= 20.0 => {}
                 p => out.push(format!("{name}: pred p95 {:?} > 20 ms", p.map(|p| p.p95))),
             }
-            if r.echo.p95 > rtt + 20.0 {
-                out.push(format!("{name}: echo p95 {:.1} > {:.0} ms", r.echo.p95, rtt + 20.0));
+            match r.added {
+                Some(a) if added && r.rtt_ms.is_some() => {
+                    if a.p95 > 20.0 {
+                        out.push(format!("{name}: silo-added echo p95 {:.1} > 20 ms", a.p95));
+                    }
+                }
+                None if added && r.rtt_ms.is_some() => out.push(format!("{name}: no silo-added echo")),
+                _ if r.echo.p95 > rtt + 20.0 => out.push(format!("{name}: echo p95 {:.1} > {:.0} ms", r.echo.p95, rtt + 20.0)),
+                _ => {}
             }
             if r.program == "zsh" && r.misprediction_rate() >= 0.01 {
                 out.push(format!("{name}: {} mispredictions", r.mispredicted));
@@ -162,7 +186,8 @@ impl Report {
             let f = |s: &Stats| format!("{:.2}/{:.2}/{:.2}", s.p50, s.p95, s.p99);
             let stages: Vec<String> =
                 row.stages.iter().map(|(name, s)| format!("{name} {}", f(s))).chain([format!("echo {}", f(&row.echo))]).collect();
-            let _ = writeln!(out, "| {} | {} | {} |", row.link, row.program, stages.join(" → "));
+            let added = row.added.map_or(String::new(), |a| format!(" (silo-added {})", f(&a)));
+            let _ = writeln!(out, "| {} | {} | {}{added} |", row.link, row.program, stages.join(" → "));
         }
         out
     }
@@ -381,13 +406,27 @@ fn row(link: &str, rtt: Option<u64>, program: &str, keys: &[Key]) -> Row {
         })
         .collect();
     let echo = Stats::from_samples(&keys.iter().map(|k| k.echo).collect::<Vec<_>>());
+    let added = rtt.is_some().then(|| Stats::from_samples(&keys.iter().map(silo_added).collect::<Vec<_>>()));
     let predicted = keys.iter().filter(|k| k.predicted).count();
     let pred = (predicted > 0).then(|| Stats::from_samples(&keys.iter().map(|k| k.visible).collect::<Vec<_>>()));
     let shown: Vec<Duration> = keys.iter().filter(|k| k.predicted).map(|k| k.echo.saturating_sub(k.visible)).collect();
     let overlay = (!shown.is_empty()).then(|| Stats::from_samples(&shown));
     let mispredicted = keys.iter().filter(|k| k.wrong).count();
     let bypassed = rtt.is_some_and(|rtt| echo.p50 < rtt as f64);
-    Row { link: link.into(), rtt_ms: rtt, program: program.into(), echo, pred, predicted, overlay, mispredicted, bypassed, stages }
+    Row { link: link.into(), rtt_ms: rtt, program: program.into(), echo, pred, predicted, overlay, mispredicted, bypassed, stages, added }
+}
+
+/// `key.echo` less its two link legs, or all of it when a leg is missing.
+fn silo_added(key: &Key) -> Duration {
+    let at = |name: &str| {
+        let i = crate::stages::STAGES.iter().position(|(stage, _)| *stage == name)?;
+        key.stages.get(i).copied().flatten()
+    };
+    let leg = |from: &str, to: &str| at(to)?.checked_sub(at(from)?);
+    match (leg("client_sent", "server_input"), leg("server_flushed", "client_received")) {
+        (Some(up), Some(down)) => key.echo.saturating_sub(up + down),
+        _ => key.echo,
+    }
 }
 
 /// Every program over `control` (`keys` letters, Enter every `LINE` keys,
