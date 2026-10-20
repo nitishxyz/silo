@@ -877,7 +877,8 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
         }
     }
     let offer = link::wait_offer(&mut events, &invite.invite_id, Duration::from_secs(30)).await?;
-    let host = silo_cli::add_host(&paths::home(), &offer.ticket, Some(offer.name), &NetOptions::default(), &device_name()).await?;
+    // A reinstall keeps the server's key: the host keeps the name given here.
+    let host = silo_cli::add_host(&paths::home(), &offer.ticket, None, &NetOptions::default(), &device_name()).await?;
     println!("Added {}.", host.name);
     Ok(0)
 }

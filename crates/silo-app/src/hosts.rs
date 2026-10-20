@@ -43,6 +43,27 @@ pub fn find<'a>(hosts: &'a [RemoteHost], id: &str) -> Option<&'a RemoteHost> {
     hosts.iter().find(|h| h.id == id)
 }
 
+/// Save a paired host: a known EndpointId takes the new route and keeps
+/// its name unless the user `chose` one; a new host is named `chosen`,
+/// else `suggested` (its hostname or offered name). The saved host.
+pub fn save(hosts: &mut Vec<RemoteHost>, addr: EndpointAddr, chosen: Option<String>, suggested: &str) -> RemoteHost {
+    let id = addr.id.to_string();
+    match hosts.iter_mut().find(|h| h.id == id) {
+        Some(host) => {
+            host.addr = addr;
+            if let Some(name) = chosen {
+                host.name = name;
+            }
+            host.clone()
+        }
+        None => {
+            let host = RemoteHost::new(addr, chosen.unwrap_or_else(|| suggested.to_owned()));
+            hosts.push(host.clone());
+            host
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct HostsFile {
     #[serde(default)]
@@ -314,6 +335,26 @@ pub(crate) mod tests {
         assert_eq!(loaded, vec![host.clone()]);
         assert!(find(&loaded, &host.id).is_some(), "same EndpointId is a duplicate");
         assert!(find(&loaded, "other").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_known_host_keeps_its_name_when_paired_again() {
+        let dir = temp("save");
+        let mut hosts = Vec::new();
+        let first = addr(&dir.join("a"));
+        assert_eq!(save(&mut hosts, first.clone(), None, "batmini.local").name, "batmini.local", "a new host takes the suggestion");
+        hosts[0].name = "mini".into();
+        // Reinstalled or re-offered: same EndpointId, new route.
+        let moved = EndpointAddr::new(first.id).with_ip_addr("10.0.0.2:5000".parse().unwrap());
+        let saved = save(&mut hosts, moved.clone(), None, "batmini.local");
+        assert_eq!((saved.name.as_str(), &saved.addr), ("mini", &moved));
+        assert_eq!(hosts, vec![saved]);
+        // A name the user types wins.
+        assert_eq!(save(&mut hosts, moved, Some("studio".into()), "batmini.local").name, "studio");
+        // A fresh key is another host, named afresh.
+        let other = save(&mut hosts, addr(&dir.join("b")), None, "batmini.local");
+        assert_eq!((other.name.as_str(), hosts.len()), ("batmini.local", 2));
         let _ = std::fs::remove_dir_all(dir);
     }
 

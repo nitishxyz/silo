@@ -131,7 +131,8 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
     }
 }
 
-/// Redeem `ticket` and store the host under `name`, else the server's
+/// Redeem `ticket` and store the host (see [`hosts::Hosts::pair`]): named
+/// `name` when the user chose one, else as before, else by the server's
 /// hostname.
 ///
 /// # Errors
@@ -150,10 +151,7 @@ pub async fn add_host(home: &Path, ticket: &str, name: Option<String>, options: 
     let _ = net.close().await;
     let (addr, hostname) = paired?;
     let addr = addr.unwrap_or(ticket.addr);
-    Hosts::update(home, |hosts| {
-        let name = name.or_else(|| hosts.free_name(&addr.id.to_string(), &hostname));
-        Ok(hosts.upsert(addr, name)?.clone())
-    })
+    Hosts::update(home, |hosts| Ok(hosts.pair(addr, name, &hostname)?.clone()))
 }
 
 /// Fresh `server.info`.
@@ -393,6 +391,25 @@ mod tests {
         std::fs::write(home.join("hosts.json"), "{ not json").unwrap();
         assert!(Hosts::update(&home, |_| Ok(())).is_err());
         assert_eq!(std::fs::read_to_string(home.join("hosts.json")).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_known_host_keeps_its_name_when_paired_again() {
+        let home = std::env::temp_dir().join(format!("silo-cli-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let (a, b) = (addr(&home.join("a")), addr(&home.join("b")));
+        let mut hosts = Hosts::default();
+        assert_eq!(hosts.pair(a.clone(), None, "batmini.local").unwrap().name, "batmini.local", "a new host takes its hostname");
+        hosts.hosts[0].name = "mini".into();
+        // `silo remote install` again: same key, new route, name kept.
+        let moved = a.clone().with_ip_addr(([10, 0, 0, 1], 1).into());
+        let host = hosts.pair(moved.clone(), None, "batmini.local").unwrap().clone();
+        assert_eq!((host.name.as_str(), &host.addr, hosts.hosts.len()), ("mini", &moved, 1));
+        // `silo hosts add --name` is the user's choice.
+        assert_eq!(hosts.pair(moved, Some("studio".into()), "batmini.local").unwrap().name, "studio");
+        // A fresh key is another host, named afresh.
+        assert_eq!(hosts.pair(b, None, "studio").unwrap().name, "studio 2");
         let _ = std::fs::remove_dir_all(home);
     }
 }

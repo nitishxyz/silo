@@ -17,7 +17,6 @@ use silo_proto::{
 };
 
 use crate::{
-    hosts::RemoteHost,
     hosts_state::HostsState,
     theme::{self, Continuous as _},
     workspace::{TITLEBAR_HEIGHT, Workspace},
@@ -232,11 +231,11 @@ impl HostsState {
                         return this.link_failed(&offer, crate::add_host::pair_error(&error), cx);
                     }
                 };
-                let name = crate::add_host::host_name(&offer.name, &hostname);
+                let suggested = crate::add_host::host_name(&offer.name, &hostname);
                 let id = addr.id.to_string();
                 let replace = this.entries().iter().position(|h| !h.removed && h.info.transport.remote_id().as_deref() == Some(id.as_str()));
-                match this.save_remote(RemoteHost::new(addr, name.clone()), replace, cx) {
-                    Ok(host) => {
+                match this.save_remote(addr, None, &suggested, replace, cx) {
+                    Ok((host, name)) => {
                         this.offers.cards.retain(|c| c.offer.endpoint_id != offer.endpoint_id);
                         cx.emit(OfferEvent::Added { host, name, invite: invite_of(&offer) });
                         cx.notify();

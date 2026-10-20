@@ -1246,19 +1246,21 @@ impl Render for Workspace {
         self.apply_material(window);
         // A click on bare chrome (titlebar, gaps, menus) focuses the
         // workspace itself; hand focus back to the terminal so typing
-        // keeps working. Overlays own their focus and are left alone.
-        if self.focus.is_focused(window)
+        // keeps working. Focus lost with its pane (switching to a host
+        // that is not connected) goes to the workspace, so shortcuts
+        // keep working. Overlays own their focus and are left alone.
+        let terminal = self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused) || self.browsers.contains_key(&w.focused));
+        if ((self.focus.is_focused(window) && terminal) || window.focused(cx).is_none())
             && self.switcher.is_none()
             && self.palette.is_none()
             && self.picker.is_none()
             && self.settings.is_none()
             && self.add_host.is_none()
             && !self.appearance_menu.open
-            && self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused) || self.browsers.contains_key(&w.focused))
         {
             cx.defer_in(window, |this, window, cx| {
                 // Re-check: an overlay may have taken focus meanwhile.
-                if this.focus.is_focused(window)
+                if (this.focus.is_focused(window) || window.focused(cx).is_none())
                     && this.switcher.is_none()
                     && this.palette.is_none()
                     && this.picker.is_none()

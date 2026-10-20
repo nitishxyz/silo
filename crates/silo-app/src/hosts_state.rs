@@ -10,7 +10,7 @@ use std::{
 };
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
-use silo_client::Control;
+use silo_client::{Control, transport::EndpointAddr};
 use silo_proto::{
     control::{Event, Method},
     model::{SessionSummary, SessionView},
@@ -289,18 +289,21 @@ impl HostsState {
         cx.notify();
     }
 
-    /// Persist a paired host (replacing its old entry and, with `replace`,
-    /// its old connection) and connect to it; its index.
-    pub fn save_remote(&mut self, host: RemoteHost, replace: Option<usize>, cx: &mut Context<Self>) -> Result<usize, String> {
-        hosts::update(&self.home, |saved| {
-            saved.retain(|h| h.id != host.id);
-            saved.push(host.clone());
-        })
-        .map_err(|e| format!("Could not save: {e:#}"))?;
+    /// Persist a paired host (see [`hosts::save`] for its name), replace
+    /// the old connection `replace` and connect to it; its index and name.
+    pub fn save_remote(
+        &mut self,
+        addr: EndpointAddr,
+        chosen: Option<String>,
+        suggested: &str,
+        replace: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Result<(usize, String), String> {
+        let host = hosts::update(&self.home, |saved| hosts::save(saved, addr, chosen, suggested)).map_err(|e| format!("Could not save: {e:#}"))?;
         if let Some(index) = replace.filter(|i| *i < self.entries.len()) {
             self.forget(index, cx);
         }
-        Ok(self.add(HostInfo::remote(self.home.clone(), &host), cx))
+        Ok((self.add(HostInfo::remote(self.home.clone(), &host), cx), host.name))
     }
 
     pub fn rename(&mut self, host: usize, name: String, cx: &mut Context<Self>) {

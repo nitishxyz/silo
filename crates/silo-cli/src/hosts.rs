@@ -84,6 +84,17 @@ impl Hosts {
         (1..).map(|n| if n == 1 { base.to_owned() } else { format!("{base} {n}") }).find(|name| !self.hosts.iter().any(|h| &h.name == name))
     }
 
+    /// Save a paired host: a known EndpointId takes the new route and keeps
+    /// its name unless the user `chose` one; a new host is named `chosen`,
+    /// else its `hostname` (see [`Hosts::free_name`]).
+    ///
+    /// # Errors
+    /// `chosen` already belongs to another host.
+    pub fn pair(&mut self, addr: EndpointAddr, chosen: Option<String>, hostname: &str) -> anyhow::Result<&Host> {
+        let name = chosen.or_else(|| self.free_name(&addr.id.to_string(), hostname));
+        self.upsert(addr, name)
+    }
+
     /// Add or update the host with `addr`'s id; `name` defaults to the
     /// existing name, else the id's first 10 characters.
     ///

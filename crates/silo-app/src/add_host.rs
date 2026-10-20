@@ -18,7 +18,7 @@ use silo_proto::control::{InvitePurpose, Method, PairInvite};
 use crate::theme::Continuous as _;
 use crate::{
     conn::{Failure, classify},
-    hosts::{self, RemoteHost},
+    hosts,
     text_field::{FieldEvent, TextField},
     theme,
     workspace::Workspace,
@@ -285,8 +285,8 @@ impl Workspace {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok((addr, hostname)) => {
-                    let host = RemoteHost::new(addr, host_name(&typed, &hostname));
-                    match this.save_host(host, replace, window, cx) {
+                    let typed = Some(typed.trim().to_owned()).filter(|t| !t.is_empty());
+                    match this.save_host(addr, typed, &host_name("", &hostname), replace, window, cx) {
                         Ok(()) => this.close_add_host(window, cx),
                         Err(error) => this.sheet_error(error, cx),
                     }
@@ -326,10 +326,18 @@ impl Workspace {
         Ok(())
     }
 
-    /// Persist a paired host (replacing its old entry), connect to it and
-    /// show it.
-    fn save_host(&mut self, host: RemoteHost, replace: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
-        let index = self.shared.update(cx, |shared, cx| shared.save_remote(host, replace, cx))?;
+    /// Persist a paired host (named `typed`, else as before, else
+    /// `suggested`), connect to it and show it.
+    fn save_host(
+        &mut self,
+        addr: EndpointAddr,
+        typed: Option<String>,
+        suggested: &str,
+        replace: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (index, _) = self.shared.update(cx, |shared, cx| shared.save_remote(addr, typed, suggested, replace, cx))?;
         self.sync_hosts(cx);
         self.switch_host(index, window, cx);
         Ok(())

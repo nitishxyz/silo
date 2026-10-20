@@ -59,7 +59,9 @@ async fn loopback(control: &Control, purpose: InvitePurpose) -> (String, String)
     panic!("server endpoint has no direct address");
 }
 
-/// `silo join` from B with A's join ticket: A sees B's offer and adds it.
+/// `silo join` from B with A's join ticket (as `silo remote install` runs
+/// it): A sees B's offer and adds it. Installed again (same home, so the
+/// same key), B keeps the name A gave it.
 #[tokio::test(flavor = "multi_thread")]
 async fn join_offers_and_adds_host() {
     let a_home = temp_home("join-a");
@@ -78,13 +80,33 @@ async fn join_offers_and_adds_host() {
     timeout(T, silo_cli::link::offer(&b_home, &join, &offer_ticket, "box-b", &options)).await.unwrap().unwrap();
     let offer = silo_cli::link::wait_offer(&mut a_events, &invite_id, T).await.unwrap();
     assert_eq!((offer.name.as_str(), offer.endpoint_id.as_str()), ("box-b", b.hello().server.endpoint_id.as_str()));
-    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, Some(offer.name), &options, "a")).await.unwrap().unwrap();
-    assert_eq!(host.name, "box-b");
+    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, &options, "a")).await.unwrap().unwrap();
+    let hostname = b.hello().server.hostname.clone();
+    assert_eq!(host.name, if hostname.is_empty() { "silo host" } else { hostname.as_str() }, "a new host is named by its hostname");
     assert_eq!(Hosts::load(&a_home).unwrap().hosts, [host]);
     assert_eq!(silo_cli::devices(&b).await.unwrap().len(), 1);
 
     let error = timeout(T, silo_cli::link::offer(&b_home, &join, &offer_ticket, "box-b", &options)).await.unwrap().unwrap_err();
     assert!(format!("{error:#}").contains("expired or already used"), "{error:#}");
+
+    // Renamed, then B is installed again and joins again.
+    Hosts::update(&a_home, |hosts| {
+        hosts.hosts[0].name = "mini".into();
+        Ok(())
+    })
+    .unwrap();
+    b.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(b);
+    timeout(T, b_task).await.unwrap().unwrap();
+    let b_task = start(&b_home).await;
+    let b = Control::connect(&paths::socket(&b_home), "b").await.unwrap().0;
+    let (invite_id, join) = loopback(&a, InvitePurpose::Join).await;
+    let (_, offer_ticket) = loopback(&b, InvitePurpose::Device).await;
+    timeout(T, silo_cli::link::offer(&b_home, &join, &offer_ticket, "box-b", &options)).await.unwrap().unwrap();
+    let offer = silo_cli::link::wait_offer(&mut a_events, &invite_id, T).await.unwrap();
+    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, &options, "a")).await.unwrap().unwrap();
+    assert_eq!((host.name.as_str(), host.id.as_str()), ("mini", b.hello().server.endpoint_id.as_str()), "same key, name kept");
+    assert_eq!(Hosts::load(&a_home).unwrap().hosts, [host]);
 
     for (control, task) in [(a, a_task), (b, b_task)] {
         control.call_value(Method::ServerShutdown {}).await.unwrap();
