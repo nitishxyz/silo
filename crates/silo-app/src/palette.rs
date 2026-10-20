@@ -417,11 +417,16 @@ impl Workspace {
 
     /// A status that clears itself after a few seconds.
     pub(crate) fn flash(&mut self, status: Status, cx: &mut Context<Self>) {
+        self.flash_for(status, std::time::Duration::from_secs(4), cx);
+    }
+
+    /// A status that clears itself after `shown`.
+    pub(crate) fn flash_for(&mut self, status: Status, shown: std::time::Duration, cx: &mut Context<Self>) {
         self.status = Some(status.clone());
         self.flashing = Some(status.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            cx.background_executor().timer(shown).await;
             let _ = this.update(cx, |this, cx| {
                 if this.flashing.as_ref() == Some(&status) {
                     this.flashing = None;
@@ -433,6 +438,14 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// A status kept (like a flash) until the next one replaces it: work
+    /// under way that will report how it went.
+    pub(crate) fn hold(&mut self, status: Status, cx: &mut Context<Self>) {
+        self.status = Some(status.clone());
+        self.flashing = Some(status);
+        cx.notify();
     }
 
     /// Clear the status line, except a flash still showing.

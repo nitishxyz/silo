@@ -270,10 +270,11 @@ pub fn same_identity(running: &Signature, candidate: &Signature) -> Result<(), S
 }
 
 /// The code requirement a team's code must satisfy: Apple-issued, that
-/// team and, for an app, that identifier.
+/// team and, for an app, that identifier. As `codesign -R` takes it: text
+/// after `=` (anything else is read as a file's path).
 fn requirement(team: &str, identifier: Option<&str>) -> String {
     let identifier = identifier.map(|id| format!(" and identifier \"{id}\"")).unwrap_or_default();
-    format!("anchor apple generic{identifier} and certificate leaf[subject.OU] = \"{team}\"")
+    format!("=anchor apple generic{identifier} and certificate leaf[subject.OU] = \"{team}\"")
 }
 
 /// Run `program` (bounded by [`TOOL_TIMEOUT`]); its output.
@@ -342,8 +343,11 @@ pub async fn verify_app(app: &Path, version: &str, running: &Signature) -> Resul
 /// Why an update could not be prepared.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Try again later.
+    /// It could not be downloaded or staged: try again later.
     Retry(String),
+    /// The release is not what it must be (checksums, version, signature):
+    /// try again later.
+    Invalid(String),
     /// The app's folder is not writable: it cannot be replaced.
     Unwritable,
 }
@@ -352,6 +356,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Retry(error) => f.write_str(error),
+            Self::Invalid(error) => write!(f, "the update failed verification: {error}"),
             Self::Unwritable => f.write_str("Silo.app's folder is not writable"),
         }
     }
@@ -377,21 +382,26 @@ fn fresh_stage(app: &Path) -> Result<PathBuf, Failure> {
 /// the release's checksums.
 ///
 /// # Errors
-/// Not published, not downloadable or not matching.
-pub async fn download_image(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf, String> {
+/// Not published or not downloadable ([`Failure::Retry`]), not matching
+/// ([`Failure::Invalid`]).
+pub async fn download_image(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf, Failure> {
     let image = upgrade::app_image(version);
     let sums = dir.join(upgrade::CHECKSUMS);
-    release::fetch(&feed.asset(version, upgrade::CHECKSUMS)?, &sums, feed.https, MAX_LATEST).await.map_err(|(_, e)| e)?.ok_or("no checksums")?;
-    let sums = std::fs::read_to_string(&sums).map_err(|e| e.to_string())?;
-    let expected = upgrade::checksum(&sums, &image).ok_or_else(|| format!("{image} is not in the checksums"))?.to_ascii_lowercase();
+    let fetch = async |file: &str, to: &Path, max: u64| -> Result<(), Failure> {
+        let url = feed.asset(version, file).map_err(Failure::Invalid)?;
+        release::fetch(&url, to, feed.https, max)
+            .await
+            .map_err(|(_, e)| Failure::Retry(e))?
+            .ok_or_else(|| Failure::Retry(format!("{file} is not published")))
+    };
+    fetch(upgrade::CHECKSUMS, &sums, MAX_LATEST).await?;
+    let sums = std::fs::read_to_string(&sums).map_err(|e| Failure::Retry(e.to_string()))?;
+    let expected = upgrade::checksum(&sums, &image).ok_or_else(|| Failure::Invalid(format!("{image} is not in the checksums")))?.to_ascii_lowercase();
     let path = dir.join(&image);
-    release::fetch(&feed.asset(version, &image)?, &path, feed.https, MAX_IMAGE)
-        .await
-        .map_err(|(_, e)| e)?
-        .ok_or_else(|| format!("{image} is not published"))?;
-    if release::sha256_file(&path).map_err(|e| e.to_string())? != expected {
+    fetch(&image, &path, MAX_IMAGE).await?;
+    if release::sha256_file(&path).map_err(|e| Failure::Retry(e.to_string()))? != expected {
         let _ = std::fs::remove_file(&path);
-        return Err(format!("{image} does not match the release's {}", upgrade::CHECKSUMS));
+        return Err(Failure::Invalid(format!("{image} does not match the release's {}", upgrade::CHECKSUMS)));
     }
     Ok(path)
 }
@@ -424,15 +434,15 @@ fn mount_point(path: &Path) -> bool {
 }
 
 /// Mount `image` in `dir`, check its Silo.app and copy it to `dest`.
-async fn unpack(image: &Path, dir: &Path, version: &str, running: &Signature, dest: &Path) -> Result<(), String> {
+async fn unpack(image: &Path, dir: &Path, version: &str, running: &Signature, dest: &Path) -> Result<(), Failure> {
     let mount = dir.join("mnt");
-    std::fs::create_dir(&mount).map_err(|e| format!("create the mount point: {e}"))?;
+    std::fs::create_dir(&mount).map_err(|e| Failure::Retry(format!("create the mount point: {e}")))?;
     let attach = ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"].map(OsStr::new);
-    check("hdiutil", &[&attach[..], &[mount.as_os_str(), image.as_os_str()]].concat()).await?;
+    check("hdiutil", &[&attach[..], &[mount.as_os_str(), image.as_os_str()]].concat()).await.map_err(Failure::Retry)?;
     let _mounted = Mounted(mount.clone());
     let app = mount.join("Silo.app");
-    verify_app(&app, version, running).await?;
-    check("ditto", &[app.as_os_str(), dest.as_os_str()]).await.map(drop)
+    verify_app(&app, version, running).await.map_err(Failure::Invalid)?;
+    check("ditto", &[app.as_os_str(), dest.as_os_str()]).await.map(drop).map_err(Failure::Retry)
 }
 
 /// Download, check and stage release `version` of the Silo.app at `app`
@@ -445,21 +455,18 @@ pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature
     let staged = stage.join("Silo.app");
     let result = async {
         let image = download_image(feed, version, &stage).await?;
-        let mounts = PrivateDir::new().map_err(|e| format!("create a temporary folder: {e}"))?;
+        let mounts = PrivateDir::new().map_err(|e| Failure::Retry(format!("create a temporary folder: {e}")))?;
         let unpacked = unpack(&image, mounts.path(), version, running, &staged).await;
         let _ = std::fs::remove_file(&image);
         let _ = std::fs::remove_file(stage.join(upgrade::CHECKSUMS));
         unpacked?;
-        verify_app(&staged, version, running).await
+        verify_app(&staged, version, running).await.map_err(Failure::Invalid)
     }
     .await;
-    match result {
-        Ok(()) => Ok(staged),
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&stage);
-            Err(Failure::Retry(error))
-        }
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&stage);
     }
+    result.map(|()| staged)
 }
 
 /// Swap `staged` and `app` in one rename: `app` becomes the new app and
@@ -848,9 +855,20 @@ mod tests {
         assert!(same_signer(&adhoc.1, &binary.1).is_err());
         assert_eq!(
             requirement("FRUHQC68JC", Some(APP_ID)),
-            r#"anchor apple generic and identifier "xyz.nitish.silo" and certificate leaf[subject.OU] = "FRUHQC68JC""#
+            r#"=anchor apple generic and identifier "xyz.nitish.silo" and certificate leaf[subject.OU] = "FRUHQC68JC""#
         );
-        assert_eq!(requirement("FRUHQC68JC", None), r#"anchor apple generic and certificate leaf[subject.OU] = "FRUHQC68JC""#);
+        assert_eq!(requirement("FRUHQC68JC", None), r#"=anchor apple generic and certificate leaf[subject.OU] = "FRUHQC68JC""#);
+    }
+
+    /// codesign takes the team's requirement as one and evaluates it:
+    /// Apple's own code is no team's.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn team_requirements_are_evaluated() {
+        let team = Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() };
+        let error = verify_code(Path::new("/usr/bin/true"), &team, false).await.unwrap_err();
+        assert!(error.contains("failed to satisfy"), "{error}");
+        verify_code(Path::new("/usr/bin/true"), &Identity::AdHoc, false).await.unwrap();
     }
 
     #[test]
@@ -973,9 +991,10 @@ mod tests {
         std::fs::create_dir(&out).unwrap();
         let image = download_image(&feed, "0.1.2", &out).await.unwrap();
         assert_eq!(std::fs::read(&image).unwrap(), b"image");
-        assert!(download_image(&feed, "0.1.3", &out).await.unwrap_err().contains("does not match"));
+        assert!(matches!(download_image(&feed, "0.1.3", &out).await, Err(Failure::Invalid(e)) if e.contains("does not match")));
         assert!(!out.join("Silo-0.1.3.dmg").exists(), "a mismatch is not kept");
-        assert!(download_image(&feed, "0.1.4", &out).await.unwrap_err().contains("not in the checksums"));
+        assert!(matches!(download_image(&feed, "0.1.4", &out).await, Err(Failure::Invalid(e)) if e.contains("not in the checksums")));
+        assert!(matches!(download_image(&feed, "0.1.5", &dir.join("missing")).await, Err(Failure::Retry(_))), "not downloadable");
         std::fs::write(dir.join("feed/latest.json"), br#"{"tag_name":"v0.1.2"}"#).unwrap();
         assert_eq!(check_latest(&feed, "0.1.1").await.unwrap().as_deref(), Some("0.1.2"));
         assert_eq!(check_latest(&feed, "0.1.2").await.unwrap(), None);
@@ -1070,11 +1089,11 @@ mod tests {
         assert_eq!(left, ["Silo.app"], "only the app stays staged");
         // The image of 0.1.3 holds 0.1.2: refused, nothing staged.
         let error = prepare(&feed, "0.1.3", &app, &running).await.unwrap_err();
-        assert!(matches!(&error, Failure::Retry(e) if e.contains("not 0.1.3")), "{error:?}");
+        assert!(matches!(&error, Failure::Invalid(e) if e.contains("not 0.1.3")), "{error:?}");
         assert!(!stage_dir(&app).exists());
         // A team-signed app never takes the ad-hoc one.
         let team = (APP_ID.to_owned(), Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() });
         let error = prepare(&feed, "0.1.2", &app, &team).await.unwrap_err();
-        assert!(matches!(&error, Failure::Retry(e) if e.contains("not as the installed copy")), "{error:?}");
+        assert!(matches!(&error, Failure::Invalid(e) if e.contains("not as the installed copy")), "{error:?}");
     }
 }

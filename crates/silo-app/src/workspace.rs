@@ -2,7 +2,11 @@
 //! active window's split layout of terminal panes. The titlebar session
 //! pill switches sessions and hosts (see `switcher.rs`).
 
-use std::{collections::HashMap, path::PathBuf, time::Instant};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, IntoElement, Render, Subscription, Task, Window, actions, div, point, prelude::*, px, rgb,
@@ -22,7 +26,7 @@ use crate::{
     hosts_state::{HostEntry, HostEvent, HostsState},
     motion::{self, Edge, Motion, PaneGhost, TabGhost},
     pane::{Pane, PaneEvent},
-    status::Status,
+    status::{Status, StatusKind},
     switcher::Switcher,
     theme,
 };
@@ -160,7 +164,12 @@ impl Workspace {
             cx.observe(&updater, |_, _, cx| cx.notify()),
             cx.subscribe(&updater, |this, _, status: &crate::updater::UpdateStatus, cx| {
                 if status.requester == cx.entity_id() {
-                    this.flash(status.status.clone(), cx);
+                    match status.status.kind {
+                        // Until the outcome replaces it.
+                        StatusKind::Progress => this.hold(status.status.clone(), cx),
+                        StatusKind::Warning | StatusKind::Error => this.flash_for(status.status.clone(), Duration::from_secs(10), cx),
+                        StatusKind::Info | StatusKind::Success => this.flash(status.status.clone(), cx),
+                    }
                 }
             }),
         ];

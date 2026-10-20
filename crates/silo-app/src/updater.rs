@@ -59,8 +59,8 @@ pub struct Updater {
     feed: Feed,
     state: State,
     last_check: Option<SystemTime>,
-    /// The window waiting for the running check's outcome.
-    requester: Option<EntityId>,
+    /// The windows waiting for the running check's outcome.
+    requesters: Vec<EntityId>,
     hosts: Entity<HostsState>,
     check: Option<Task<()>>,
     _tick: Task<()>,
@@ -129,7 +129,7 @@ impl Updater {
             } else {
                 Task::ready(())
             };
-            Self { rt, app, running, feed, state: State::Idle, last_check: None, requester: None, hosts, check: None, _tick: tick }
+            Self { rt, app, running, feed, state: State::Idle, last_check: None, requesters: Vec::new(), hosts, check: None, _tick: tick }
         });
         cx.set_global(GlobalUpdater(updater));
     }
@@ -154,17 +154,17 @@ impl Updater {
     }
 
     fn tell(&mut self, status: Status, cx: &mut Context<Self>) {
-        if let Some(requester) = self.requester {
-            cx.emit(UpdateStatus { requester, status });
+        for &requester in &self.requesters {
+            cx.emit(UpdateStatus { requester, status: status.clone() });
         }
     }
 
     /// Look for a newer release now; `requester` (a window) is told how it
-    /// went.
+    /// goes. Without one (the automatic checks) failures are only logged.
     pub fn check(&mut self, requester: Option<EntityId>, cx: &mut Context<Self>) {
         let (Some(app), Some(running)) = (self.app.clone(), self.running.clone()) else { return };
-        if requester.is_some() {
-            self.requester = requester;
+        if let Some(requester) = requester.filter(|r| !self.requesters.contains(r)) {
+            self.requesters.push(requester);
         }
         if self.check.is_some() {
             let status = match &self.state {
@@ -175,13 +175,12 @@ impl Updater {
         }
         if let State::Ready { version, .. } = &self.state {
             let status = Status::success(ready(version));
-            self.requester = None;
-            if let Some(requester) = requester {
-                cx.emit(UpdateStatus { requester, status });
-            }
+            self.tell(status, cx);
+            self.requesters.clear();
             return;
         }
         if self.state == State::Installing {
+            self.requesters.clear();
             return;
         }
         self.tell(Status::progress("Checking for updates…"), cx);
@@ -223,6 +222,10 @@ impl Updater {
                     tracing::warn!(version, "update failed (retrying at the next check): {error}");
                     this.done(Some(State::Idle), Status::error(format!("Couldn't download Silo {version}")), cx);
                 }
+                Err(Failure::Invalid(error)) => {
+                    tracing::warn!(version, "update failed verification (retrying at the next check): {error}");
+                    this.done(Some(State::Idle), Status::error(format!("Silo {version} failed verification")), cx);
+                }
             });
         }));
     }
@@ -233,7 +236,7 @@ impl Updater {
             self.state = state;
         }
         self.tell(status, cx);
-        self.requester = None;
+        self.requesters.clear();
         cx.notify();
     }
 

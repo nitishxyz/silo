@@ -3,6 +3,7 @@
 mod adaptive;
 mod add_host;
 mod address;
+mod app_log;
 mod appearance;
 mod assets;
 mod blink;
@@ -61,12 +62,20 @@ fn main() {
     if std::env::args().any(|arg| arg.starts_with("--type=")) {
         std::process::exit(silo_web::run_helper());
     }
-    let filter = tracing_subscriber::EnvFilter::try_new(log_filter(std::env::var("SILO_LOG").ok())).unwrap_or_else(|_| log_filter(None).into());
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+    let home = silo_proto::paths::home();
+    let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
+    {
+        use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
+        let filter = tracing_subscriber::EnvFilter::try_new(log_filter(std::env::var("SILO_LOG").ok())).unwrap_or_else(|_| log_filter(None).into());
+        let file = log.as_ref().ok().map(|log| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(log.clone()));
+        let _ = tracing_subscriber::registry().with(filter).with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)).with(file).try_init();
+    }
+    if let Err(error) = &log {
+        tracing::warn!("app log {}: {error}", home.join("app.log").display());
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("silo-net").enable_all().build().expect("tokio runtime");
     let rt = runtime.handle().clone();
-    let home = silo_proto::paths::home();
     let exe = conn::server_exe();
     tracing::info!(home = %home.display(), server = %exe.display(), "starting Silo");
     let service = conn::local_service(&home, exe.clone());
