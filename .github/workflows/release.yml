@@ -178,15 +178,16 @@ jobs:
           set -eu
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           dmg="dist/Silo-$version.dmg"
-          # The ticket lookup right after notarization can drop the
-          # connection or not find the ticket yet.
-          staple() {
+          # Stapling and validating look the ticket up online; right after
+          # notarization the connection can drop or the ticket not be found yet.
+          stapler() {
             for attempt in 1 2 3 4 5 6; do
-              if xcrun stapler staple "$1"; then return; fi
+              if xcrun stapler "$@"; then return; fi
               [ "$attempt" -lt 6 ] || return 1
               sleep $((attempt * 15))
             done
           }
+          staple() { stapler staple "$1"; }
           # Staple the app itself so it passes Gatekeeper offline once
           # copied out of the DMG.
           ditto -c -k --keepParent target/Silo.app "$RUNNER_TEMP/Silo.zip"
@@ -205,12 +206,12 @@ jobs:
           hdiutil verify "$dmg"
           .github/scripts/notarize.sh "$dmg"
           staple "$dmg"
-          xcrun stapler validate "$dmg"
+          stapler validate "$dmg"
           spctl -a -t open --context context:primary-signature -vv "$dmg"
           mnt=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
           codesign --verify --deep --strict "$mnt/Silo.app"
-          xcrun stapler validate "$mnt/Silo.app"
+          stapler validate "$mnt/Silo.app"
           spctl -a -vv "$mnt/Silo.app"
           cmp "$mnt/Silo.app/Contents/MacOS/silo-server" target/Silo.app/Contents/MacOS/silo-server
           hdiutil detach "$mnt"
