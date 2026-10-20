@@ -254,6 +254,9 @@ pub struct AppState {
     /// Frosted: an app's own backdrop is veiled too, not just the default.
     #[serde(default)]
     pub translucent_apps: bool,
+    /// Look for a newer release at launch and every few hours.
+    #[serde(default = "yes")]
+    pub check_updates: bool,
     /// Pages visited in browser blocks, newest first, per host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_pages: Vec<crate::browser_home::RecentPage>,
@@ -270,6 +273,7 @@ impl Default for AppState {
             material: crate::material::Material::Solid,
             tint_with_app: true,
             translucent_apps: false,
+            check_updates: true,
             recent_pages: Vec::new(),
         }
     }
@@ -398,6 +402,7 @@ pub(crate) mod tests {
         assert_eq!(old.ui_font_family, "", "Automatic UI font");
         assert!(old.match_running_app);
         assert_eq!((old.material, old.tint_with_app, old.translucent_apps), (crate::material::Material::Solid, true, false));
+        assert!(old.check_updates, "updates are checked unless turned off");
         let dir = std::env::temp_dir().join(format!("silo-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let state = AppState {
@@ -409,6 +414,7 @@ pub(crate) mod tests {
             material: crate::material::Material::Frosted,
             tint_with_app: false,
             translucent_apps: true,
+            check_updates: false,
             recent_pages: Vec::new(),
         };
         save_state(&dir, &state);
@@ -417,6 +423,7 @@ pub(crate) mod tests {
         let back = load_state(&dir);
         assert_eq!((back.density, back.show_pane_headers, back.match_running_app), (Density::Compact, false, false));
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
+        assert!(!back.check_updates);
         // The exact family persists, independent of the terminal font.
         let state = AppState { ui_font_family: "Helvetica Neue".into(), ..state };
         save_state(&dir, &state);

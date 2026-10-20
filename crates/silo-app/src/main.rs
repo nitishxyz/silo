@@ -43,6 +43,8 @@ mod text_field;
 mod theme;
 mod titlebar;
 mod tooltip;
+mod update;
+mod updater;
 mod web;
 mod window_picker;
 mod workspace;
@@ -67,7 +69,7 @@ fn main() {
     let home = silo_proto::paths::home();
     let exe = conn::server_exe();
     tracing::info!(home = %home.display(), server = %exe.display(), "starting Silo");
-    let service = conn::local_service(&home, exe);
+    let service = conn::local_service(&home, exe.clone());
     let managed = service.as_ref().ok().filter(|s| s.manager == silo_client::service::Manager::Launchd);
     if let Some(svc) = managed {
         let (home, silo) = (home.clone(), svc.exe.clone());
@@ -152,7 +154,8 @@ fn main() {
             }
         })
         .detach();
-        hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), cx);
+        let hosts = hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), cx);
+        updater::Updater::install(rt.clone(), hosts, &exe, cx);
         if let Err(error) = open_window(None, cx) {
             eprintln!("silo: cannot open window: {error:#}");
             cx.quit();

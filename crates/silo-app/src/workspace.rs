@@ -116,6 +116,11 @@ pub struct Workspace {
     _window: [Subscription; 2],
     /// `shared`'s changes, connection events and offer events.
     _hosts: [Subscription; 3],
+    /// The process's updater, whether this build updates at all, and its
+    /// changes and check outcomes.
+    pub(crate) updater: Entity<crate::updater::Updater>,
+    pub(crate) updates: bool,
+    _updater: [Subscription; 2],
 }
 
 impl Workspace {
@@ -149,6 +154,16 @@ impl Workspace {
         let host_events = cx.subscribe_in(&shared, window, |this, _, event: &HostEvent, window, cx| this.host_event(event, window, cx));
         let offer_events =
             cx.subscribe_in(&shared, window, |this, _, event: &crate::offers::OfferEvent, window, cx| this.offer_event(event, window, cx));
+        let updater = crate::updater::Updater::global(cx);
+        let updates = updater.read(cx).enabled();
+        let updater_subscriptions = [
+            cx.observe(&updater, |_, _, cx| cx.notify()),
+            cx.subscribe(&updater, |this, _, status: &crate::updater::UpdateStatus, cx| {
+                if status.requester == cx.entity_id() {
+                    this.flash(status.message.clone(), cx);
+                }
+            }),
+        ];
         let mut reduce = crate::material::watch();
         let reduce_transparency = *reduce.borrow_and_update();
         let transparency = cx.spawn(async move |this, cx| {
@@ -229,6 +244,9 @@ impl Workspace {
                 }),
             ],
             _hosts: [hosts_changed, host_events, offer_events],
+            updater,
+            updates,
+            _updater: updater_subscriptions,
         };
         this.sync_hosts(cx);
         // Paint the cached tree until the server answers (unless another
@@ -1075,6 +1093,14 @@ impl Workspace {
 
     pub(crate) fn set_translucent_apps(&mut self, on: bool, cx: &mut Context<Self>) {
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.translucent_apps = on, cx));
+    }
+
+    pub(crate) fn check_updates(&self) -> bool {
+        self.state.check_updates
+    }
+
+    pub(crate) fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.check_updates = on, cx));
     }
 
     /// The colours of a card filled with `fill`: when frosted, a veil at

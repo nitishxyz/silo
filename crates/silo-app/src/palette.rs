@@ -344,6 +344,10 @@ impl Workspace {
             Command::ShowPaneHeaders => self.set_pane_headers(true, cx),
             Command::HidePaneHeaders => self.set_pane_headers(false, cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),
+            Command::CheckForUpdates => {
+                let me = cx.entity_id();
+                self.updater.update(cx, |updater, cx| updater.check(Some(me), cx));
+            }
             Command::CommandPalette => self.toggle_palette(window, cx),
             Command::HideSilo => cx.hide(),
             Command::HideOthers => cx.hide_other_apps(),
@@ -391,6 +395,7 @@ impl Workspace {
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
+            Command::CheckForUpdates => self.updates,
             Command::NewSession => connected,
             Command::RenameSession
             | Command::CloseSession

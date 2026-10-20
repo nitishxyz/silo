@@ -25,6 +25,7 @@ pub enum SettingId {
     CursorBlink,
     Scrollback,
     RestoreDefaults,
+    CheckUpdates,
     Shortcuts,
     Hosts,
     PairDevice,
@@ -139,6 +140,15 @@ pub const SETTINGS: &[Setting] = &[
         "reset restore defaults"
     ),
     setting!(SettingId::Shortcuts, "Keyboard shortcuts", "Keyboard shortcuts", Keyboard, None, Open, "shortcuts keys bindings keyboard"),
+    setting!(
+        SettingId::CheckUpdates,
+        "Check for updates automatically",
+        "Check for updates automatically",
+        About,
+        Some("Updates"),
+        Toggle,
+        "update updates upgrade new version release automatic"
+    ),
     setting!(SettingId::Hosts, "Hosts", "Hosts", Hosts, None, Open, "hosts machines remote add remove rename"),
     setting!(
         SettingId::PairDevice,
@@ -194,6 +204,7 @@ impl SettingId {
         match self {
             Self::MatchRunningApp => !frosted(s),
             Self::TintWithApp | Self::TranslucentApps => frosted(s),
+            Self::CheckUpdates => s.updates,
             _ => true,
         }
     }
@@ -207,6 +218,7 @@ impl SettingId {
             Self::TintWithApp => s.tint_with_app,
             Self::TranslucentApps => s.translucent_apps,
             Self::CursorBlink => s.terminal.cursor_blink,
+            Self::CheckUpdates => s.check_updates,
             _ => return None,
         })
     }
@@ -220,6 +232,7 @@ impl SettingId {
             Self::TintWithApp => SettingsEvent::SetTintWithApp(on),
             Self::TranslucentApps => SettingsEvent::SetTranslucentApps(on),
             Self::CursorBlink => SettingsEvent::SetCursorBlink(on),
+            Self::CheckUpdates => SettingsEvent::SetCheckUpdates(on),
             _ => return None,
         })
     }
@@ -232,6 +245,7 @@ impl SettingId {
             Self::TintWithApp => s.tint_with_app = on,
             Self::TranslucentApps => s.translucent_apps = on,
             Self::CursorBlink => s.terminal.cursor_blink = on,
+            Self::CheckUpdates => s.check_updates = on,
             _ => {}
         }
     }

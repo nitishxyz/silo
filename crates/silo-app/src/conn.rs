@@ -125,7 +125,7 @@ fn server_exe_path() -> PathBuf {
     PathBuf::from("silo")
 }
 
-const BUNDLE_ID: &str = "xyz.nitish.silo";
+pub(crate) const BUNDLE_ID: &str = "xyz.nitish.silo";
 
 /// How this Mac's server runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,22 +147,61 @@ struct Origin<'a> {
     user_home: &'a Path,
 }
 
+/// Where a release Silo.app runs from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// (~)/Applications.
+    Installed,
+    /// A disk image or App Translocation.
+    Mounted,
+    /// Anywhere else (a cargo target dir, Downloads).
+    Elsewhere,
+}
+
+/// A release Silo.app running its own server, and where it is; `None`
+/// for debug builds, dev bundles and bare binaries.
+fn release_app<'a>(o: &Origin<'a>) -> Option<(&'a Path, Place)> {
+    let app = bundle_of(o.app_exe).filter(|_| o.release)?;
+    if o.server_exe != app.join("Contents/MacOS/silo-server") || o.bundle_id != Some(BUNDLE_ID) {
+        return None;
+    }
+    let dir = app.parent().unwrap_or(app);
+    let place = if dir == Path::new("/Applications") || dir == o.user_home.join("Applications") {
+        Place::Installed
+    } else if app.starts_with("/Volumes") || app.components().any(|c| c.as_os_str() == "AppTranslocation") {
+        Place::Mounted
+    } else {
+        Place::Elsewhere
+    };
+    Some((app, place))
+}
+
+fn default_home(o: &Origin) -> bool {
+    o.silo_home.is_none_or(OsStr::is_empty)
+}
+
 /// launchd for a release Silo.app running its own server for the default
 /// state directory from where users run apps: (~)/Applications, a disk
 /// image, App Translocation (the job runs a runtime copy, never the
 /// bundle). Elsewhere (a cargo target dir) a plain server.
 fn launch(o: &Origin) -> Launch {
-    if o.silo_home.is_some_and(|h| !h.is_empty()) || !o.release {
-        return Launch::Plain;
+    match release_app(o) {
+        Some((_, Place::Installed | Place::Mounted)) if default_home(o) => Launch::Launchd,
+        _ => Launch::Plain,
     }
-    let Some(app) = bundle_of(o.app_exe) else { return Launch::Plain };
-    if o.server_exe != app.join("Contents/MacOS/silo-server") || o.bundle_id != Some(BUNDLE_ID) {
-        return Launch::Plain;
+}
+
+/// The bundle the updater may replace: the release Silo.app that
+/// [`launch`] runs under launchd, when it is installed ((~)/Applications;
+/// a disk image or a translocated copy cannot be replaced). `anywhere`
+/// (only with the updater's loopback test feed) also takes another folder
+/// and state directory.
+fn updatable<'a>(o: &Origin<'a>, anywhere: bool) -> Option<&'a Path> {
+    match release_app(o)? {
+        (app, Place::Installed) if default_home(o) || anywhere => Some(app),
+        (app, Place::Elsewhere) if anywhere => Some(app),
+        _ => None,
     }
-    let dir = app.parent().unwrap_or(app);
-    let installed = dir == Path::new("/Applications") || dir == o.user_home.join("Applications");
-    let mounted = app.starts_with("/Volumes") || app.components().any(|c| c.as_os_str() == "AppTranslocation");
-    if installed || mounted { Launch::Launchd } else { Launch::Plain }
 }
 
 /// `X.app` for `X.app/Contents/MacOS/Silo`.
@@ -173,27 +212,36 @@ fn bundle_of(exe: &Path) -> Option<&Path> {
 }
 
 /// The `<string>` after `<key>key</key>` in an XML plist.
-fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
     let rest = &plist[plist.find(&format!("<key>{key}</key>"))?..];
     let start = rest.find("<string>")? + "<string>".len();
     Some(rest[start..start + rest[start..].find("</string>")?].trim())
 }
 
-/// This Mac's server: who runs it, or why it can't be started.
-pub fn local_service(home: &Path, server_exe: PathBuf) -> Result<Service, String> {
+/// This process's [`Origin`], given to `f`.
+fn with_origin<T>(server_exe: &Path, f: impl FnOnce(&Origin) -> T) -> T {
     let app_exe = std::env::current_exe().and_then(|e| e.canonicalize()).unwrap_or_default();
     let user_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let plist = bundle_of(&app_exe).and_then(|app| std::fs::read_to_string(app.join("Contents/Info.plist")).ok()).unwrap_or_default();
     let silo_home = std::env::var_os("SILO_HOME");
-    let origin = Origin {
+    f(&Origin {
         silo_home: silo_home.as_deref(),
         release: !cfg!(debug_assertions),
         app_exe: &app_exe,
-        server_exe: &server_exe,
+        server_exe,
         bundle_id: plist_string(&plist, "CFBundleIdentifier"),
         user_home: &user_home,
-    };
-    let launch = launch(&origin);
+    })
+}
+
+/// The Silo.app the updater may replace ([`updatable`]), if this is one.
+pub fn updatable_app(server_exe: &Path, anywhere: bool) -> Option<PathBuf> {
+    with_origin(server_exe, |o| updatable(o, anywhere).map(Path::to_owned))
+}
+
+/// This Mac's server: who runs it, or why it can't be started.
+pub fn local_service(home: &Path, server_exe: PathBuf) -> Result<Service, String> {
+    let launch = with_origin(&server_exe, launch);
     let manager = if launch == Launch::Launchd { service::detect(&service::System) } else { Manager::None };
     tracing::info!(?launch, ?manager, "server launch");
     let exe = if manager == Manager::Launchd { managed_exe(home, &server_exe) } else { Ok(server_exe) };
@@ -596,6 +644,39 @@ mod tests {
         assert_eq!(launch(&Origin { app_exe: dev, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { app_exe: Path::new("/w/target/release/silo-app"), ..base }), Launch::Plain);
     }
+
+    #[test]
+    fn updates_only_an_installed_release_bundle() {
+        let app = Path::new("/Applications/Silo.app/Contents/MacOS/Silo");
+        let server = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        let home = Path::new("/Users/bat");
+        let base = Origin { silo_home: None, release: true, app_exe: app, server_exe: server, bundle_id: Some(BUNDLE_ID), user_home: home };
+        assert_eq!(updatable(&base, false), Some(Path::new("/Applications/Silo.app")));
+        let at = |dir: &str| (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/MacOS/silo-server"));
+        let (exe, srv) = at("/Users/bat/Applications");
+        assert_eq!(
+            updatable(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&srv), ..base }, false),
+            Some(Path::new("/Users/bat/Applications/Silo.app"))
+        );
+        // A disk image or a translocated copy cannot be replaced, even by the test feed.
+        for dir in ["/Volumes/Silo", "/private/var/folders/x/T/AppTranslocation/1234/d"] {
+            let (exe, srv) = at(dir);
+            let o = Origin { app_exe: Path::new(&exe), server_exe: Path::new(&srv), ..base };
+            assert_eq!((updatable(&o, false), updatable(&o, true)), (None, None), "{dir}");
+        }
+        // Elsewhere or another state directory: only with the test feed.
+        let (exe, srv) = at("/tmp/silo-update-test");
+        let elsewhere = Origin { app_exe: Path::new(&exe), server_exe: Path::new(&srv), silo_home: Some(OsStr::new("/tmp/silo-ui")), ..base };
+        assert_eq!(updatable(&elsewhere, false), None);
+        assert_eq!(updatable(&elsewhere, true), Some(Path::new("/tmp/silo-update-test/Silo.app")));
+        assert_eq!(updatable(&Origin { silo_home: Some(OsStr::new("/tmp/silo-ui")), ..base }, false), None);
+        // Never a debug build or a dev bundle.
+        assert_eq!(updatable(&Origin { release: false, ..base }, true), None);
+        assert_eq!(updatable(&Origin { bundle_id: Some("xyz.nitish.silo.dev"), ..base }, true), None);
+        let dev = Path::new("/w/target/debug/SiloDev.app/Contents/MacOS/SiloDev");
+        assert_eq!(updatable(&Origin { app_exe: dev, ..base }, true), None);
+    }
+
     #[test]
     fn reads_bundle_id() {
         let plist =

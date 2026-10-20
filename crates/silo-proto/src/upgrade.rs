@@ -75,11 +75,20 @@ pub struct UpgradeBinary {
 pub const RELEASES: &str = "https://github.com/nitishxyz/silo/releases/download";
 /// The release's checksums file: `sha256sum` output for every asset.
 pub const CHECKSUMS: &str = "SHA256SUMS";
+/// The latest published release (neither draft nor pre-release), as
+/// GitHub's REST API describes it (`tag_name` is `v<version>`).
+pub const LATEST: &str = "https://api.github.com/repos/nitishxyz/silo/releases/latest";
 
 /// The release asset holding `silo` for `platform` (`<os>-<arch>`).
 #[must_use]
 pub fn asset(platform: &str) -> String {
     format!("silo-{platform}.tar.gz")
+}
+
+/// The release asset holding the macOS app (`Silo.app` at its root).
+#[must_use]
+pub fn app_image(version: &str) -> String {
+    format!("Silo-{version}.dmg")
 }
 
 /// Whether `version` is a release version: `MAJOR.MINOR.PATCH` with an

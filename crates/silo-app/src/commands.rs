@@ -127,6 +127,7 @@ commands! {
     OpenSettings => "Settings…", "App", ["cmd-,"];
     ReloadTerminalSettings => "Reload Terminal Settings", "App", [], "Apply changes made by hand";
     OpenTerminalSettingsFile => "Open Terminal Settings File", "App", [];
+    CheckForUpdates => "Check for Updates", "App", [];
     CommandPalette => "Command Palette", "App", ["cmd-p"];
     HideSilo => "Hide Silo", "App", ["cmd-h"];
     HideOthers => "Hide Others", "App", ["cmd-alt-h"];

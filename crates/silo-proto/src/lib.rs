@@ -16,6 +16,7 @@ pub mod frame;
 pub mod model;
 pub mod offer;
 pub mod paths;
+pub mod release;
 pub mod upgrade;
 pub mod upload;
 

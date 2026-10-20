@@ -18,7 +18,9 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use silo_proto::{
-    BUILD, Frame, kind, spawn_reader,
+    BUILD, Frame, kind,
+    release::{fetch, sha256_file},
+    spawn_reader,
     upgrade::{self, Decision, HostBuild, MAX_BINARY, UpgradeBinary, UpgradeRejected, UpgradeStarted},
     write_frame,
 };
@@ -223,9 +225,6 @@ async fn receive(path: &Path, binary: &UpgradeBinary, frames: &mut tokio::sync::
     Ok(())
 }
 
-/// Longest download of one release file.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
-
 /// Fetch release `version` for `platform` into `path` (mode 0755): its
 /// asset, checked against the release's checksums, unpacked. Uses `curl`
 /// and `tar` like install.sh; `base` (`SILO_DOWNLOAD_BASE`) overrides the
@@ -243,11 +242,11 @@ async fn download(path: &Path, base: Option<&str>, version: &str, platform: &str
     let _unpack = TempDir(unpack.clone());
     let not_published = || (upgrade::NOT_PUBLISHED, upgrade::not_published(version, platform));
     let sums = unpack.join(upgrade::CHECKSUMS);
-    fetch(&sums_url, &sums, https).await?.ok_or_else(not_published)?;
+    fetch(&sums_url, &sums, https, MAX_BINARY).await?.ok_or_else(not_published)?;
     let sums = std::fs::read_to_string(&sums).map_err(|e| ("internal", e.to_string()))?;
     let expected = upgrade::checksum(&sums, &asset).ok_or_else(not_published)?.to_ascii_lowercase();
     let archive = unpack.join(&asset);
-    fetch(&asset_url, &archive, https).await?.ok_or_else(not_published)?;
+    fetch(&asset_url, &archive, https, MAX_BINARY).await?.ok_or_else(not_published)?;
     let actual = sha256_file(&archive).map_err(|e| ("internal", e.to_string()))?;
     if actual != expected {
         return Err(("checksum", format!("{asset} does not match the release's {}", upgrade::CHECKSUMS)));
@@ -275,38 +274,6 @@ async fn download(path: &Path, base: Option<&str>, version: &str, platform: &str
     }
     std::fs::rename(&member, path).map_err(|e| ("internal", e.to_string()))?;
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).map_err(|e| ("internal", e.to_string()))
-}
-
-/// Download `url` to `dest` (at most [`MAX_BINARY`] bytes; over https only
-/// when `https`, redirects included); `None` when the server has no such
-/// file.
-async fn fetch(url: &str, dest: &Path, https: bool) -> Result<Option<()>, Refusal> {
-    tracing::info!(url, "upgrade: downloading");
-    let mut curl = tokio::process::Command::new("curl");
-    curl.args(["-fsSL", "--retry", "3", "--max-filesize", &MAX_BINARY.to_string()]);
-    if https {
-        curl.args(["--proto", "=https", "--proto-redir", "=https"]);
-    }
-    let run = curl.arg("-o").arg(dest).arg(url).stdin(std::process::Stdio::null()).kill_on_drop(true).output();
-    let out = match tokio::time::timeout(DOWNLOAD_TIMEOUT, run).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(("download", "the host needs curl to download releases".into())),
-        Ok(Err(e)) => return Err(("download", format!("run curl: {e}"))),
-        Err(_) => return Err(("download", format!("downloading {url} timed out"))),
-    };
-    match out.status.code() {
-        Some(0) => Ok(Some(())),
-        // HTTP error (404 for a missing asset or release).
-        Some(22) => Ok(None),
-        Some(63) => Err(("too_large", format!("{url} is larger than {MAX_BINARY} bytes"))),
-        _ => Err(("download", format!("download {url}: {}", String::from_utf8_lossy(&out.stderr).trim()))),
-    }
-}
-
-fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut hash = Sha256::new();
-    std::io::copy(&mut std::fs::File::open(path)?, &mut hash)?;
-    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Removes a directory tree on drop.

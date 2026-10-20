@@ -275,6 +275,9 @@ pub struct SettingsSnapshot {
     pub material_unavailable: Option<&'static str>,
     pub tint_with_app: bool,
     pub translucent_apps: bool,
+    /// This build updates itself (a release Silo.app in Applications).
+    pub updates: bool,
+    pub check_updates: bool,
     pub ui_font: UiFontSettings,
     pub terminal: TerminalSettings,
     pub hosts: Vec<SettingsHost>,
@@ -298,6 +301,8 @@ impl Default for SettingsSnapshot {
             material_unavailable: None,
             tint_with_app: true,
             translucent_apps: false,
+            updates: true,
+            check_updates: true,
             ui_font: UiFontSettings::default(),
             terminal: TerminalSettings::from_prefs(&TerminalPrefs::default(), terminal_prefs::DEFAULT_FONT.into()),
             hosts: Vec::new(),
@@ -328,6 +333,7 @@ pub enum SettingsEvent {
     SetMaterial(crate::material::Material),
     SetTintWithApp(bool),
     SetTranslucentApps(bool),
+    SetCheckUpdates(bool),
     /// The UI font family; empty = Automatic (the system font).
     SetUiFontFamily(String),
     SetTheme(String),
@@ -1768,6 +1774,23 @@ impl SettingsPanel {
                         ),
                     ],
                 ));
+                if SettingId::CheckUpdates.visible(s) {
+                    out.push(self.group(
+                        Some("Updates"),
+                        vec![Self::row(
+                            SettingId::CheckUpdates.label(),
+                            None,
+                            Some(Self::switch(
+                                "settings-check-updates",
+                                "Check for updates automatically",
+                                s.check_updates,
+                                SettingsEvent::SetCheckUpdates,
+                                cx,
+                            )),
+                            false,
+                        )],
+                    ));
+                }
             }
         }
         out

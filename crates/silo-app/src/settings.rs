@@ -135,6 +135,8 @@ impl Workspace {
             material_unavailable: self.material().1.err().map(crate::material::Unavailable::reason),
             tint_with_app: self.tint_with_app(),
             translucent_apps: self.translucent_apps(),
+            updates: self.updater.read(cx).enabled(),
+            check_updates: self.check_updates(),
             ui_font,
             terminal,
             hosts,
@@ -404,6 +406,10 @@ impl Workspace {
             }
             SettingsEvent::SetTranslucentApps(on) => {
                 self.set_translucent_apps(*on, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetCheckUpdates(on) => {
+                self.set_check_updates(*on, cx);
                 Outcome::default()
             }
             SettingsEvent::SetUiFontFamily(family) => {

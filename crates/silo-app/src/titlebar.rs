@@ -1,6 +1,7 @@
 //! Titlebar: one inline row with the traffic-light gap, the session pill,
-//! compact window tabs and, at the far right, the appearance toggle and
-//! the "+" button, all on the terminal's own background. Tabs are small
+//! compact window tabs and, at the far right, the Update pill (once an
+//! update is ready), the appearance toggle and the "+" button, all on the
+//! terminal's own background. Tabs are small
 //! pills: inactive ones filled only on hover, the current one a subtle step
 //! brighter.
 //!
@@ -301,6 +302,7 @@ impl Workspace {
                 }));
             bar = bar
                 .child(drop_zone)
+                .children(self.render_update_pill(cx))
                 .child(
                     div()
                         .id("appearance")
@@ -619,6 +621,47 @@ impl Workspace {
                 }),
             )
             .into_any_element()
+    }
+
+    /// The Update pill: accent-filled once an update is staged (a click
+    /// installs it and restarts), outlined when this copy of Silo cannot
+    /// be replaced; nothing otherwise, downloads included.
+    fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::updater::State;
+        let (label, tooltip, ready) = match self.updater.read(cx).state() {
+            State::Ready { version, .. } => ("Update", Some(crate::updater::ready(version)), true),
+            State::Installing => ("Updating…", None, false),
+            State::Blocked { version, reason } => ("Can't Update", Some(format!("Silo {version} is available. {reason}.")), false),
+            State::Idle | State::Downloading(_) => return None,
+        };
+        let chrome = self.chrome;
+        let pill = div()
+            .id("update")
+            .flex()
+            .flex_none()
+            .items_center()
+            .ml(px(6.0))
+            .h(px(TAB_HEIGHT - 2.0))
+            .px(px(11.0))
+            .capsule()
+            .whitespace_nowrap()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .map(|el| {
+                if ready {
+                    el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).cursor_pointer().hover(|s| s.opacity(0.88))
+                } else {
+                    el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
+                }
+            })
+            .child(label)
+            .when_some(tooltip, |el, text| el.tooltip(crate::tooltip::Tooltip::text(text)))
+            .map(claim_press);
+        Some(if ready {
+            pill.on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |updater, cx| updater.restart(cx)))).into_any_element()
+        } else {
+            pill.into_any_element()
+        })
     }
 }
 

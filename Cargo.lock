@@ -6592,6 +6592,7 @@ dependencies = [
  "gpui_platform",
  "idna",
  "image",
+ "libc",
  "objc2 0.6.5",
  "qrcode",
  "raw-window-handle",
@@ -6689,6 +6690,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
