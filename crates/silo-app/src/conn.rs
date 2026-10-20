@@ -125,7 +125,7 @@ fn server_exe_path() -> PathBuf {
     PathBuf::from("silo")
 }
 
-pub(crate) const BUNDLE_ID: &str = "xyz.nitish.silo";
+const BUNDLE_ID: &str = silo_client::update::APP_ID;
 
 /// How this Mac's server runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,13 +211,6 @@ fn bundle_of(exe: &Path) -> Option<&Path> {
     app.extension().is_some_and(|e| e == "app").then_some(app)
 }
 
-/// The `<string>` after `<key>key</key>` in an XML plist.
-pub(crate) fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
-    let rest = &plist[plist.find(&format!("<key>{key}</key>"))?..];
-    let start = rest.find("<string>")? + "<string>".len();
-    Some(rest[start..start + rest[start..].find("</string>")?].trim())
-}
-
 /// This process's [`Origin`], given to `f`.
 fn with_origin<T>(server_exe: &Path, f: impl FnOnce(&Origin) -> T) -> T {
     let app_exe = std::env::current_exe().and_then(|e| e.canonicalize()).unwrap_or_default();
@@ -229,7 +222,7 @@ fn with_origin<T>(server_exe: &Path, f: impl FnOnce(&Origin) -> T) -> T {
         release: !cfg!(debug_assertions),
         app_exe: &app_exe,
         server_exe,
-        bundle_id: plist_string(&plist, "CFBundleIdentifier"),
+        bundle_id: silo_client::update::plist_string(&plist, "CFBundleIdentifier"),
         user_home: &user_home,
     })
 }
@@ -675,15 +668,6 @@ mod tests {
         assert_eq!(updatable(&Origin { bundle_id: Some("xyz.nitish.silo.dev"), ..base }, true), None);
         let dev = Path::new("/w/target/debug/SiloDev.app/Contents/MacOS/SiloDev");
         assert_eq!(updatable(&Origin { app_exe: dev, ..base }, true), None);
-    }
-
-    #[test]
-    fn reads_bundle_id() {
-        let plist =
-            "<dict>\n  <key>CFBundleName</key><string>Silo</string>\n  <key>CFBundleIdentifier</key><string>xyz.nitish.silo</string>\n</dict>";
-        assert_eq!(plist_string(plist, "CFBundleIdentifier"), Some("xyz.nitish.silo"));
-        assert_eq!(plist_string(plist, "CFBundleVersion"), None);
-        assert_eq!(plist_string("", "CFBundleIdentifier"), None);
     }
 
     fn plan(manager: Manager, home: &Path, runner: &Fake, server: service::Server) -> Vec<service::Action> {

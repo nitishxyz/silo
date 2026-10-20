@@ -1,4 +1,4 @@
-//! The process's updater (see `update.rs` for the steps): checks at
+//! The process's updater (see `silo_client::update` for the steps): checks at
 //! launch and every few hours when "Check for updates automatically" is
 //! on, or now for "Check for Updates"; downloads and stages a newer
 //! release in the background and, once it is ready, offers it as the
@@ -13,10 +13,9 @@ use std::{
 
 use gpui::{App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Task};
 
-use crate::{
-    hosts_state::HostsState,
-    update::{self, Failure, Feed},
-};
+use silo_client::update::{self, Failure, Feed};
+
+use crate::hosts_state::HostsState;
 
 /// First automatic check after launch.
 const FIRST_CHECK: Duration = Duration::from_secs(15);
@@ -92,7 +91,24 @@ impl Updater {
         if let Some(app) = app.clone() {
             rt.spawn_blocking(move || update::clean_stale(&app));
         }
+        // `silo update` replaced the app: restart into it.
+        let (relaunch_tx, mut relaunch) = tokio::sync::mpsc::unbounded_channel();
+        if app.is_some()
+            && let Err(error) = update::on_relaunch(move || {
+                let _ = relaunch_tx.send(());
+            })
+        {
+            tracing::warn!("update: {error}");
+        }
         let updater = cx.new(|cx| {
+            cx.spawn(async move |this, cx| {
+                while relaunch.recv().await.is_some() {
+                    if this.update(cx, |this: &mut Self, cx| this.relaunch_if_replaced(cx)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
             let tick = if app.is_some() {
                 cx.spawn(async move |this, cx| {
                     let mut wait = FIRST_CHECK;
@@ -243,6 +259,25 @@ impl Updater {
             });
         })
         .detach();
+    }
+
+    /// `silo update` replaced this app on disk: open the new one and quit.
+    /// Nothing happens unless the app there is another version, so the
+    /// notification (which any process may post) cannot restart Silo
+    /// otherwise.
+    pub fn relaunch_if_replaced(&mut self, cx: &mut Context<Self>) {
+        let Some(app) = self.app.clone() else { return };
+        let on_disk = update::app_version(&app);
+        if on_disk.as_deref().is_none_or(|v| v == VERSION) || self.state == State::Installing {
+            tracing::info!(?on_disk, "relaunch: not replaced; ignoring");
+            return;
+        }
+        tracing::info!(?on_disk, "relaunch: updated on disk; relaunching");
+        self.state = State::Installing;
+        match update::relaunch(&app) {
+            Ok(()) => cx.quit(),
+            Err(error) => tracing::warn!("relaunch: {error}"),
+        }
     }
 }
 

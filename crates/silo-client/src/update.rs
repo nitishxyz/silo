@@ -1,29 +1,33 @@
-//! Self-update of a release Silo.app, without the UI (that is
-//! `updater.rs`).
+//! Updating this machine's Silo to the latest release; shared by the
+//! app's updater and `silo update`.
 //!
 //! - Check: one request for the latest published release (GitHub's
 //!   `releases/latest`: neither draft nor pre-release); newer means a
-//!   higher `major.minor.patch` than this build's.
-//! - Download: the release's `SHA256SUMS` and `Silo-<version>.dmg` into a
-//!   staging directory next to the app (`.silo-update.<pid>`, so the final
-//!   rename stays on one volume), the image checked against the sums.
-//! - Verify: the image is mounted read-only and hidden, and its Silo.app
-//!   must pass `codesign --verify --deep --strict`, carry this release's
-//!   version and be signed like the running app ([`same_identity`]); it is
-//!   then copied into the staging directory and checked again.
-//! - Replace: the staged app and the running one swap names in one atomic
-//!   rename (`RENAME_SWAP`), so the destination always holds a whole app.
-//!   The old app is left in the staging directory, removed by the next
-//!   launch ([`clean_stale`]); a waiter opens the new app once this
-//!   process has exited. Its launch runs `silo up` as always, which takes
-//!   the local server over to the new build live.
+//!   higher `major.minor.patch` than what is installed. Never a downgrade.
+//! - Silo.app: the release's `SHA256SUMS` and `Silo-<version>.dmg` go into
+//!   a staging directory next to the app (`.silo-update.<pid>`, so the
+//!   final rename stays on one volume), the image checked against the
+//!   sums. It is mounted read-only and hidden; its Silo.app must pass
+//!   `codesign --verify --deep --strict`, carry the release's version and
+//!   be signed like the installed app ([`same_identity`]); it is copied
+//!   into the staging directory and checked again. [`install`] then swaps
+//!   it with the installed app in one atomic rename (`RENAME_SWAP`), so the
+//!   destination always holds a whole app; the old one is left in the
+//!   staging directory for [`clean_stale`] (a running app may still load
+//!   files from it). The new app's launch runs `silo up` as always, which
+//!   takes the local server over to the new build live.
+//! - A standalone `silo` (install.sh): the release's
+//!   `silo-<os>-<arch>.tar.gz`, checked against the sums and unpacked next
+//!   to the binary ([`silo_proto::release::download`]), must report the
+//!   release's version and, on macOS, be signed like the installed binary
+//!   ([`same_signer`]); it is renamed over the binary.
 //!
-//! The identity rule: a Developer ID app updates only to an app of the
-//! same team and signing certificate name, also checked as a code
-//! requirement anchored at Apple's CA; an ad-hoc signed app only to an
-//! ad-hoc signed one (a local build, for tests: no published release is
-//! ad hoc). Anything unsigned, of another team or of the other kind is
-//! refused, and both must be `xyz.nitish.silo`.
+//! The identity rule: a Developer ID build updates only to one of the same
+//! team and signing certificate name, also checked as a code requirement
+//! anchored at Apple's CA; an ad-hoc signed build only to an ad-hoc signed
+//! one (a local build, for tests: no published release is ad hoc).
+//! Anything unsigned, of another team or of the other kind is refused; an
+//! app must be `xyz.nitish.silo` on both sides.
 
 use std::{
     ffi::OsStr,
@@ -33,6 +37,12 @@ use std::{
 
 use silo_proto::{release, upgrade};
 
+/// Silo.app's bundle identifier.
+pub const APP_ID: &str = "xyz.nitish.silo";
+/// Posted (a Darwin notification) once [`install`] replaced Silo.app: a
+/// running app restarts into the new version.
+#[cfg(target_os = "macos")]
+const RELAUNCH: &std::ffi::CStr = c"xyz.nitish.silo.relaunch";
 /// Largest app image downloaded.
 const MAX_IMAGE: u64 = 1024 * 1024 * 1024;
 /// Largest latest-release description read.
@@ -41,6 +51,21 @@ const MAX_LATEST: u64 = 1024 * 1024;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Staging directories next to the app: `.silo-update.<pid>`.
 const STAGE_PREFIX: &str = ".silo-update.";
+
+/// The `<string>` after `<key>key</key>` in an XML plist.
+#[must_use]
+pub fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
+    let rest = &plist[plist.find(&format!("<key>{key}</key>"))?..];
+    let start = rest.find("<string>")? + "<string>".len();
+    Some(rest[start..start + rest[start..].find("</string>")?].trim())
+}
+
+/// The version of the Silo.app at `app`, if it is one.
+#[must_use]
+pub fn app_version(app: &Path) -> Option<String> {
+    let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).ok()?;
+    (plist_string(&plist, "CFBundleIdentifier") == Some(APP_ID)).then(|| plist_string(&plist, "CFBundleShortVersionString").map(str::to_owned))?
+}
 
 /// Where releases are looked up.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,9 +92,10 @@ impl Feed {
         local.then(|| Self { latest: format!("{base}/latest.json"), assets: Some(base.to_owned()), https: false })
     }
 
-    /// GitHub, or `SILO_UPDATE_FEED` (tests only: also lets a release app
-    /// outside (~)/Applications, with its own state directory, update).
-    /// `None` when that is set but not a local feed: no updates.
+    /// GitHub, or the test feed `SILO_UPDATE_FEED` and `true`: tests only,
+    /// it also lets builds update that otherwise never would (see the app's
+    /// updater and `silo update`). `None` when that is set but not a local
+    /// feed: no updates.
     #[must_use]
     pub fn from_env() -> Option<(Self, bool)> {
         match std::env::var("SILO_UPDATE_FEED").ok().filter(|v| !v.is_empty()) {
@@ -113,7 +139,29 @@ pub fn is_newer(running: &str, candidate: &str) -> bool {
     upgrade::compare_versions(running, candidate) == Some(std::cmp::Ordering::Less)
 }
 
-/// How an app is signed.
+/// The latest release's version on `feed` (`dir` holds the download).
+///
+/// # Errors
+/// The feed cannot be read or names no release.
+pub async fn latest(feed: &Feed, dir: &Path) -> Result<String, String> {
+    let file = dir.join(format!("silo-latest.{}.json", std::process::id()));
+    let fetched = release::fetch(&feed.latest, &file, feed.https, MAX_LATEST).await;
+    let body = std::fs::read(&file);
+    let _ = std::fs::remove_file(&file);
+    fetched.map_err(|(_, e)| e)?.ok_or("no published release")?;
+    latest_version(&body.map_err(|e| e.to_string())?).ok_or_else(|| "the latest release has no version".into())
+}
+
+/// The release newer than `running` published on `feed`, if any.
+///
+/// # Errors
+/// The feed cannot be read.
+pub async fn check_latest(feed: &Feed, running: &str, dir: &Path) -> Result<Option<String>, String> {
+    let version = latest(feed, dir).await?;
+    Ok(is_newer(running, &version).then_some(version))
+}
+
+/// How code is signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Identity {
     AdHoc,
@@ -125,10 +173,13 @@ pub enum Identity {
     },
 }
 
-/// Bundle identifier and identity from `codesign -dvv` output; `None`
+/// Code's signing identifier and identity.
+pub type Signature = (String, Identity);
+
+/// Signing identifier and identity from `codesign -dvv` output; `None`
 /// when unsigned or neither ad hoc nor of a team.
 #[must_use]
-pub fn parse_signature(text: &str) -> Option<(String, Identity)> {
+pub fn parse_signature(text: &str) -> Option<Signature> {
     let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::trim);
     let identifier = field("Identifier")?.to_owned();
     if field("Signature") == Some("adhoc") {
@@ -139,25 +190,33 @@ pub fn parse_signature(text: &str) -> Option<(String, Identity)> {
     Some((identifier, Identity::Team { team: team.to_owned(), authority: authority.to_owned() }))
 }
 
-/// Whether an app signed as `candidate` may replace one signed as
-/// `running` (the module's identity rule).
+/// Whether code signed as `candidate` may replace code signed as `running`
+/// (the module's identity rule, without identifiers: a binary's is its
+/// file name).
 ///
 /// # Errors
 /// Why not, for the log.
-pub fn same_identity(running: &(String, Identity), candidate: &(String, Identity)) -> Result<(), String> {
-    if running.0 != crate::conn::BUNDLE_ID || candidate.0 != crate::conn::BUNDLE_ID {
-        return Err(format!("bundle identifier {} replacing {}", candidate.0, running.0));
-    }
-    if running.1 != candidate.1 {
-        return Err(format!("signed as {:?}, not as the running app ({:?})", candidate.1, running.1));
-    }
-    Ok(())
+pub fn same_signer(running: &Identity, candidate: &Identity) -> Result<(), String> {
+    if running == candidate { Ok(()) } else { Err(format!("signed as {candidate:?}, not as the installed copy ({running:?})")) }
 }
 
-/// The code requirement a team's app must satisfy: Apple-issued, this
-/// bundle, that team.
-fn requirement(team: &str) -> String {
-    format!("anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{team}\"", crate::conn::BUNDLE_ID)
+/// Whether an app signed as `candidate` may replace one signed as
+/// `running`: [`same_signer`], and both Silo.app.
+///
+/// # Errors
+/// Why not, for the log.
+pub fn same_identity(running: &Signature, candidate: &Signature) -> Result<(), String> {
+    if running.0 != APP_ID || candidate.0 != APP_ID {
+        return Err(format!("bundle identifier {} replacing {}", candidate.0, running.0));
+    }
+    same_signer(&running.1, &candidate.1)
+}
+
+/// The code requirement a team's code must satisfy: Apple-issued, that
+/// team and, for an app, that identifier.
+fn requirement(team: &str, identifier: Option<&str>) -> String {
+    let identifier = identifier.map(|id| format!(" and identifier \"{id}\"")).unwrap_or_default();
+    format!("anchor apple generic{identifier} and certificate leaf[subject.OU] = \"{team}\"")
 }
 
 /// Run `program` (bounded by [`TOOL_TIMEOUT`]); its output.
@@ -180,58 +239,62 @@ async fn check(program: &str, args: &[&OsStr]) -> Result<std::process::Output, S
     }
 }
 
-/// How `app` is signed.
+/// How the app or binary at `path` is signed.
 ///
 /// # Errors
-/// `codesign` fails, or the app is unsigned.
-pub async fn signature(app: &Path) -> Result<(String, Identity), String> {
-    let out = check("codesign", &["-dvv".as_ref(), app.as_os_str()]).await?;
+/// `codesign` fails, or it is unsigned.
+pub async fn signature(path: &Path) -> Result<Signature, String> {
+    let out = check("codesign", &["-dvv".as_ref(), path.as_os_str()]).await?;
     // codesign describes the signature on stderr.
-    parse_signature(&String::from_utf8_lossy(&out.stderr)).ok_or_else(|| format!("{} is not signed", app.display()))
+    parse_signature(&String::from_utf8_lossy(&out.stderr)).ok_or_else(|| format!("{} is not signed", path.display()))
+}
+
+/// `codesign --verify --strict` `path` (`--deep` for an app), against the
+/// team's requirement when signed by one.
+async fn verify_code(path: &Path, identity: &Identity, app: bool) -> Result<(), String> {
+    let requirement = match identity {
+        Identity::Team { team, .. } => Some(requirement(team, app.then_some(APP_ID))),
+        Identity::AdHoc => None,
+    };
+    let mut args: Vec<&OsStr> = vec!["--verify".as_ref(), "--strict".as_ref()];
+    if app {
+        args.push("--deep".as_ref());
+    }
+    if let Some(requirement) = &requirement {
+        args.extend([OsStr::new("-R"), OsStr::new(requirement)]);
+    }
+    args.push(path.as_os_str());
+    check("codesign", &args).await.map(drop)
 }
 
 /// `app` is intact, signed like `running` and Silo `version`.
-async fn verify(app: &Path, version: &str, running: &(String, Identity)) -> Result<(), String> {
+async fn verify_app(app: &Path, version: &str, running: &Signature) -> Result<(), String> {
     let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).map_err(|e| format!("read Info.plist: {e}"))?;
-    let found = crate::conn::plist_string(&plist, "CFBundleShortVersionString");
+    let found = plist_string(&plist, "CFBundleShortVersionString");
     if found != Some(version) {
         return Err(format!("the image holds Silo {found:?}, not {version}"));
     }
     let candidate = signature(app).await?;
     same_identity(running, &candidate)?;
-    let requirement = match &candidate.1 {
-        Identity::Team { team, .. } => Some(requirement(team)),
-        Identity::AdHoc => None,
-    };
-    let mut args: Vec<&OsStr> = vec!["--verify".as_ref(), "--deep".as_ref(), "--strict".as_ref()];
-    if let Some(requirement) = &requirement {
-        args.extend([OsStr::new("-R"), OsStr::new(requirement)]);
-    }
-    args.push(app.as_os_str());
-    check("codesign", &args).await.map(drop)
-}
-
-/// The newer release than `running` published on `feed`, if any.
-///
-/// # Errors
-/// The feed cannot be read.
-pub async fn check_latest(feed: &Feed, running: &str, dir: &Path) -> Result<Option<String>, String> {
-    let file = dir.join(format!("silo-latest.{}.json", std::process::id()));
-    let fetched = release::fetch(&feed.latest, &file, feed.https, MAX_LATEST).await;
-    let body = std::fs::read(&file);
-    let _ = std::fs::remove_file(&file);
-    fetched.map_err(|(_, e)| e)?.ok_or("no published release")?;
-    let version = latest_version(&body.map_err(|e| e.to_string())?).ok_or("the latest release has no version")?;
-    Ok(is_newer(running, &version).then_some(version))
+    verify_code(app, &candidate.1, true).await
 }
 
 /// Why an update could not be prepared.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Try again at the next check.
+    /// Try again later.
     Retry(String),
     /// The app's folder is not writable: it cannot be replaced.
     Unwritable,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retry(error) => f.write_str(error),
+            Self::Unwritable => f.write_str("Silo.app's folder is not writable"),
+        }
+    }
 }
 
 /// `<app's folder>/.silo-update.<pid>`.
@@ -255,7 +318,7 @@ fn fresh_stage(app: &Path) -> Result<PathBuf, Failure> {
 ///
 /// # Errors
 /// Not published, not downloadable or not matching.
-pub async fn download(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf, String> {
+pub async fn download_image(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf, String> {
     let image = upgrade::app_image(version);
     let sums = dir.join(upgrade::CHECKSUMS);
     release::fetch(&feed.asset(version, upgrade::CHECKSUMS)?, &sums, feed.https, MAX_LATEST).await.map_err(|(_, e)| e)?.ok_or("no checksums")?;
@@ -274,14 +337,14 @@ pub async fn download(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf,
 }
 
 /// Mount `image`, check its Silo.app and copy it to `dest`.
-async fn unpack(image: &Path, version: &str, running: &(String, Identity), dest: &Path) -> Result<(), String> {
+async fn unpack(image: &Path, version: &str, running: &Signature, dest: &Path) -> Result<(), String> {
     let mount = std::env::temp_dir().join(format!("silo-update.{}.mnt", std::process::id()));
     let _ = std::fs::create_dir_all(&mount);
     let attach = ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"].map(OsStr::new);
     check("hdiutil", &[&attach[..], &[mount.as_os_str(), image.as_os_str()]].concat()).await?;
     let app = mount.join("Silo.app");
     let copied = async {
-        verify(&app, version, running).await?;
+        verify_app(&app, version, running).await?;
         check("ditto", &[app.as_os_str(), dest.as_os_str()]).await.map(drop)
     }
     .await;
@@ -292,21 +355,21 @@ async fn unpack(image: &Path, version: &str, running: &(String, Identity), dest:
     copied
 }
 
-/// Download, check and stage release `version` next to `app`; the
-/// staged app.
+/// Download, check and stage release `version` of the Silo.app at `app`
+/// (signed as `running`); the staged app.
 ///
 /// # Errors
 /// [`Failure`].
-pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &(String, Identity)) -> Result<PathBuf, Failure> {
+pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature) -> Result<PathBuf, Failure> {
     let stage = fresh_stage(app)?;
     let staged = stage.join("Silo.app");
     let result = async {
-        let image = download(feed, version, &stage).await?;
+        let image = download_image(feed, version, &stage).await?;
         let unpacked = unpack(&image, version, running, &staged).await;
         let _ = std::fs::remove_file(&image);
         let _ = std::fs::remove_file(stage.join(upgrade::CHECKSUMS));
         unpacked?;
-        verify(&staged, version, running).await
+        verify_app(&staged, version, running).await
     }
     .await;
     match result {
@@ -323,12 +386,19 @@ pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &(String, 
 ///
 /// # Errors
 /// The rename fails (the folder is not writable, `staged` is gone).
+#[cfg(target_os = "macos")]
 pub fn install(staged: &Path, app: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
     let (from, to) = (c(staged)?, c(app)?);
     // SAFETY: both are valid NUL-terminated paths.
     if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// The staging directory holding the app [`install`] replaced.
+#[must_use]
+pub fn replaced(staged: &Path) -> Option<&Path> {
+    staged.parent().filter(|d| d.file_name().and_then(OsStr::to_str).is_some_and(|n| n.starts_with(STAGE_PREFIX)))
 }
 
 /// Open `app` once this process has exited (it inherits the environment).
@@ -364,9 +434,160 @@ pub fn clean_stale(app: &Path) {
     }
 }
 
-fn alive(pid: i32) -> bool {
+/// Whether process `pid` exists.
+#[must_use]
+pub fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// Processes running the app at `app` (canonical).
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn running_apps(app: &Path) -> Vec<i32> {
+    use std::os::unix::ffi::OsStrExt;
+    let exe = app.join("Contents/MacOS/Silo");
+    let mut pids = vec![0i32; 8192];
+    let size = i32::try_from(pids.len() * std::mem::size_of::<i32>()).unwrap_or(i32::MAX);
+    // SAFETY: the buffer holds `size` bytes.
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    pids.truncate(usize::try_from(count).unwrap_or(0));
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    pids.into_iter()
+        .filter(|&pid| {
+            // SAFETY: the buffer holds `path.len()` bytes.
+            let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), u32::try_from(path.len()).unwrap_or(0)) };
+            usize::try_from(n).is_ok_and(|n| n > 0 && Path::new(OsStr::from_bytes(&path[..n])) == exe)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn notify_post(name: *const std::ffi::c_char) -> u32;
+    fn notify_register_file_descriptor(name: *const std::ffi::c_char, notify_fd: *mut i32, flags: i32, out_token: *mut i32) -> u32;
+}
+
+/// Tell running apps that Silo.app was replaced on disk. Any process may
+/// post this, so an app acts on it only when its bundle on disk is another
+/// version.
+#[cfg(target_os = "macos")]
+pub fn post_relaunch() {
+    // SAFETY: a valid NUL-terminated name.
+    let status = unsafe { notify_post(RELAUNCH.as_ptr()) };
+    if status != 0 {
+        tracing::warn!(status, "update: notify_post failed");
+    }
+}
+
+/// Call `f` (on a thread of its own) whenever [`post_relaunch`] posts.
+///
+/// # Errors
+/// The notification cannot be registered for.
+#[cfg(target_os = "macos")]
+pub fn on_relaunch(f: impl Fn() + Send + 'static) -> std::io::Result<()> {
+    use std::{io::Read as _, os::fd::FromRawFd as _};
+    let (mut fd, mut token) = (-1, 0);
+    // SAFETY: valid name and out pointers; flags 0 creates a new descriptor.
+    let status = unsafe { notify_register_file_descriptor(RELAUNCH.as_ptr(), &raw mut fd, 0, &raw mut token) };
+    if status != 0 || fd < 0 {
+        return Err(std::io::Error::other(format!("notify_register_file_descriptor: {status}")));
+    }
+    // SAFETY: the descriptor was just created for us and is owned here.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    std::thread::Builder::new().name("silo-relaunch".into()).spawn(move || {
+        // Each post writes the 4-byte token.
+        let mut token = [0u8; 4];
+        while file.read_exact(&mut token).is_ok() {
+            f();
+        }
+    })?;
+    Ok(())
+}
+
+/// How the running `silo` is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// It comes with Silo.app: the bundle's own server (that bundle), or a
+    /// runtime copy under `<SILO_HOME>/runtime` (which bundle is unknown).
+    App(Option<PathBuf>),
+    /// A binary of its own (install.sh).
+    Standalone(PathBuf),
+    /// A debug build, or anything in a cargo target directory.
+    Dev,
+}
+
+/// How `exe` (canonical) is installed, for state directory `home`
+/// (canonical); `release` is false for debug builds.
+#[must_use]
+pub fn origin(exe: &Path, home: &Path, release: bool) -> Origin {
+    // Cargo marks its target directories with CACHEDIR.TAG.
+    if !release || exe.ancestors().skip(1).any(|dir| dir.join("CACHEDIR.TAG").is_file()) {
+        return Origin::Dev;
+    }
+    let dir = exe.parent();
+    if exe.file_name() == Some(OsStr::new("silo")) && dir.and_then(Path::parent) == Some(&crate::runtime::root(home)) {
+        return Origin::App(None);
+    }
+    let bundle =
+        dir.filter(|d| exe.file_name() == Some(OsStr::new("silo-server")) && d.ends_with("Contents/MacOS")).and_then(|d| d.parent()?.parent());
+    match bundle.filter(|b| b.extension() == Some(OsStr::new("app"))) {
+        Some(app) => Origin::App(Some(app.to_owned())),
+        None => Origin::Standalone(exe.to_owned()),
+    }
+}
+
+/// Folders Silo.app is installed in: /Applications and ~/Applications
+/// (only the latter with the test feed, so tests never see a real app).
+#[must_use]
+pub fn app_roots(user_home: &Path, test: bool) -> Vec<PathBuf> {
+    let user = user_home.join("Applications");
+    if test { vec![user] } else { vec![PathBuf::from("/Applications"), user] }
+}
+
+/// The installed Silo.app (canonical) in the first of `roots` holding one.
+#[must_use]
+pub fn find_app(roots: &[PathBuf]) -> Option<PathBuf> {
+    roots.iter().map(|root| root.join("Silo.app")).find(|app| app_version(app).is_some()).and_then(|app| app.canonicalize().ok())
+}
+
+/// Download release `version` of `silo` for this platform next to `exe`
+/// (the installed standalone binary) and check it; the staged binary, to
+/// be renamed over `exe`.
+///
+/// # Errors
+/// Not published, not downloadable, not matching, not that version, or
+/// (macOS) not signed like `exe`.
+pub async fn prepare_binary(feed: &Feed, version: &str, exe: &Path) -> Result<PathBuf, String> {
+    let dir = exe.parent().ok_or("the binary has no folder")?;
+    let staged = dir.join(format!(".silo.new.{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    let platform = upgrade::platform();
+    let result = async {
+        release::download(&staged, feed.assets.as_deref(), version, &platform).await.map_err(|(code, error)| match code {
+            upgrade::NOT_PUBLISHED => format!("silo {version} isn't published for {platform}"),
+            _ if error.contains("ermission denied") => format!("can't write to {}", dir.display()),
+            _ => error,
+        })?;
+        let (found, _) = release::version_of(&staged).await.map_err(|(_, e)| e)?;
+        if found != version {
+            return Err(format!("the release's silo reports {found}, not {version}"));
+        }
+        if cfg!(target_os = "macos") {
+            let (running, candidate) = (signature(exe).await?, signature(&staged).await?);
+            same_signer(&running.1, &candidate.1)?;
+            verify_code(&staged, &candidate.1, false).await?;
+        }
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(staged),
+        Err(error) => {
+            let _ = std::fs::remove_file(&staged);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -452,10 +673,24 @@ mod tests {
         let other_app = id(&DEVELOPER.replace("Identifier=xyz.nitish.silo", "Identifier=xyz.nitish.silo.dev"));
         assert!(same_identity(&developer, &other_app).is_err());
         assert!(same_identity(&other_app, &other_app).is_err(), "only Silo.app");
+        // A binary's identifier is its file name: only the signer counts.
+        let binary = id(&DEVELOPER.replace("Identifier=xyz.nitish.silo", "Identifier=silo"));
+        assert!(same_signer(&developer.1, &binary.1).is_ok());
+        assert!(same_signer(&adhoc.1, &binary.1).is_err());
         assert_eq!(
-            requirement("FRUHQC68JC"),
+            requirement("FRUHQC68JC", Some(APP_ID)),
             r#"anchor apple generic and identifier "xyz.nitish.silo" and certificate leaf[subject.OU] = "FRUHQC68JC""#
         );
+        assert_eq!(requirement("FRUHQC68JC", None), r#"anchor apple generic and certificate leaf[subject.OU] = "FRUHQC68JC""#);
+    }
+
+    #[test]
+    fn reads_plists() {
+        let plist =
+            "<dict>\n  <key>CFBundleName</key><string>Silo</string>\n  <key>CFBundleIdentifier</key><string>xyz.nitish.silo</string>\n</dict>";
+        assert_eq!(plist_string(plist, "CFBundleIdentifier"), Some("xyz.nitish.silo"));
+        assert_eq!(plist_string(plist, "CFBundleVersion"), None);
+        assert_eq!(plist_string("", "CFBundleIdentifier"), None);
     }
 
     /// A minimal bundle at `path` with `version` in its Info.plist.
@@ -471,10 +706,41 @@ mod tests {
     }
 
     fn version_of(app: &Path) -> String {
-        let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
-        crate::conn::plist_string(&plist, "CFBundleShortVersionString").unwrap().to_owned()
+        app_version(app).unwrap()
     }
 
+    #[test]
+    fn install_origins() {
+        let dir = temp("origin");
+        let home = dir.join("state");
+        let runtime = home.join("runtime/0123456789abcdef/silo");
+        assert_eq!(origin(&runtime, &home, true), Origin::App(None), "the app's runtime copy");
+        let bundled = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        assert_eq!(origin(bundled, &home, true), Origin::App(Some("/Applications/Silo.app".into())));
+        let standalone = dir.join(".local/bin/silo");
+        assert_eq!(origin(&standalone, &home, true), Origin::Standalone(standalone.clone()));
+        assert_eq!(origin(Path::new("/usr/local/bin/silo"), &home, true), Origin::Standalone("/usr/local/bin/silo".into()));
+        assert_eq!(origin(&standalone, &home, false), Origin::Dev, "a debug build");
+        // Anything in a cargo target directory, bundles included.
+        std::fs::create_dir_all(dir.join("w/target/release")).unwrap();
+        std::fs::write(dir.join("w/target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
+        assert_eq!(origin(&dir.join("w/target/release/silo"), &home, true), Origin::Dev);
+        assert_eq!(origin(&dir.join("w/target/Silo.app/Contents/MacOS/silo-server"), &home, true), Origin::Dev);
+        // Another home's runtime copy, or a `silo` elsewhere in a bundle, is standalone.
+        assert_eq!(origin(&dir.join("other/runtime/x/silo"), &home, true), Origin::Standalone(dir.join("other/runtime/x/silo")));
+        // Apps are looked for where installed; with the test feed only in the home's.
+        assert_eq!(app_roots(Path::new("/Users/bat"), false), [PathBuf::from("/Applications"), "/Users/bat/Applications".into()]);
+        assert_eq!(app_roots(Path::new("/Users/bat"), true), [PathBuf::from("/Users/bat/Applications")]);
+        let roots = app_roots(&dir, true);
+        assert_eq!(find_app(&roots), None);
+        std::fs::create_dir_all(dir.join("Applications/Silo.app/Contents")).unwrap();
+        assert_eq!(find_app(&roots), None, "not an app without its Info.plist");
+        bundle(&dir.join("Applications/Silo.app"), "0.1.1");
+        assert_eq!(find_app(&roots), Some(dir.join("Applications/Silo.app")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn replaces_the_bundle_atomically() {
         let dir = temp("replace");
@@ -487,6 +753,9 @@ mod tests {
         install(&staged, &app).unwrap();
         assert_eq!(version_of(&app), "0.1.2", "the new app is in place");
         assert_eq!(version_of(&staged), "0.1.1", "the old one waits in the staging folder");
+        assert_eq!(replaced(&staged), Some(stage.as_path()));
+        assert_eq!(replaced(&app), None);
+        assert!(running_apps(&app).is_empty());
         // Ours is kept; a gone process's is removed with the app it replaced.
         let gone = dir.join(format!(".silo-update.{}", i32::MAX));
         bundle(&gone.join("Silo.app"), "0.1.0");
@@ -524,11 +793,8 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        let path = temp("sha").join("bytes");
-        std::fs::write(&path, bytes).unwrap();
-        let sha = release::sha256_file(&path).unwrap();
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-        sha
+        use sha2::Digest as _;
+        sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[tokio::test]
@@ -539,20 +805,70 @@ mod tests {
             feed(&dir, &[("SHA256SUMS", sums.as_bytes()), ("Silo-0.1.2.dmg", b"image"), ("Silo-0.1.3.dmg", b"tampered"), ("Silo-0.1.4.dmg", b"x")]);
         let out = dir.join("out");
         std::fs::create_dir(&out).unwrap();
-        let image = download(&feed, "0.1.2", &out).await.unwrap();
+        let image = download_image(&feed, "0.1.2", &out).await.unwrap();
         assert_eq!(std::fs::read(&image).unwrap(), b"image");
-        assert!(download(&feed, "0.1.3", &out).await.unwrap_err().contains("does not match"));
+        assert!(download_image(&feed, "0.1.3", &out).await.unwrap_err().contains("does not match"));
         assert!(!out.join("Silo-0.1.3.dmg").exists(), "a mismatch is not kept");
-        assert!(download(&feed, "0.1.4", &out).await.unwrap_err().contains("not in the checksums"));
+        assert!(download_image(&feed, "0.1.4", &out).await.unwrap_err().contains("not in the checksums"));
         std::fs::write(dir.join("feed/latest.json"), br#"{"tag_name":"v0.1.2"}"#).unwrap();
         assert_eq!(check_latest(&feed, "0.1.1", &out).await.unwrap().as_deref(), Some("0.1.2"));
         assert_eq!(check_latest(&feed, "0.1.2", &out).await.unwrap(), None);
+        assert_eq!(latest(&feed, &out).await.unwrap(), "0.1.2");
         std::fs::remove_file(dir.join("feed/latest.json")).unwrap();
         assert!(check_latest(&feed, "0.1.1", &out).await.is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// The whole path on a real disk image of ad-hoc signed bundles.
+    /// A `silo` script reporting `version`, packed as this platform's
+    /// release asset.
+    fn tarball(dir: &Path, version: &str) -> Vec<u8> {
+        let pack = dir.join(format!("pack-{version}"));
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("silo"), format!("#!/bin/sh\necho 'silo {version} (b{version})'\n")).unwrap();
+        std::fs::set_permissions(pack.join("silo"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let archive = dir.join(format!("{version}.tar.gz"));
+        let ok = std::process::Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&pack).arg("silo").status().unwrap();
+        assert!(ok.success());
+        std::fs::read(archive).unwrap()
+    }
+
+    /// The standalone binary path up to the signature check, which needs
+    /// Mach-O binaries (the CLI's integration test covers it).
+    #[tokio::test]
+    async fn stages_a_checked_binary() {
+        let dir = temp("binary");
+        let asset = upgrade::asset(&upgrade::platform());
+        let (good, mislabelled) = (tarball(&dir, "0.1.2"), tarball(&dir, "0.1.1"));
+        let sums = format!("{}  {asset}\n", sha(&good));
+        let feed = feed(&dir, &[("SHA256SUMS", sums.as_bytes()), (&asset, &good)]);
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let exe = bin.join("silo");
+        std::fs::write(&exe, "installed").unwrap();
+        let staged = prepare_binary(&feed, "0.1.2", &exe).await;
+        if cfg!(target_os = "macos") {
+            // A script carries no signature.
+            assert!(staged.unwrap_err().contains("not signed"));
+        } else {
+            let staged = staged.unwrap();
+            assert_eq!(staged, bin.join(format!(".silo.new.{}", std::process::id())));
+            assert_eq!(release::version_of(&staged).await.unwrap().0, "0.1.2");
+            std::fs::remove_file(staged).unwrap();
+        }
+        // A tarball whose binary is another version, or not published.
+        let sums = format!("{}  {asset}\n", sha(&mislabelled));
+        let feed = self::feed(&dir, &[("SHA256SUMS", sums.as_bytes()), (&asset, &mislabelled)]);
+        assert!(prepare_binary(&feed, "0.1.2", &exe).await.unwrap_err().contains("reports 0.1.1, not 0.1.2"));
+        let feed = self::feed(&dir, &[("SHA256SUMS", b"")]);
+        assert!(prepare_binary(&feed, "0.1.2", &exe).await.unwrap_err().contains("isn't published"));
+        let left: Vec<_> = std::fs::read_dir(&bin).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, ["silo"], "nothing staged is left behind");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "installed");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The whole app path on a real disk image of ad-hoc signed bundles.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn stages_a_verified_app_from_an_image() {
         let dir = temp("prepare");
@@ -593,12 +909,9 @@ mod tests {
         assert!(matches!(&error, Failure::Retry(e) if e.contains("not 0.1.3")), "{error:?}");
         assert!(!stage_dir(&app).exists());
         // A team-signed app never takes the ad-hoc one.
-        let team = (
-            crate::conn::BUNDLE_ID.to_owned(),
-            Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() },
-        );
+        let team = (APP_ID.to_owned(), Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() });
         let error = prepare(&feed, "0.1.2", &app, &team).await.unwrap_err();
-        assert!(matches!(&error, Failure::Retry(e) if e.contains("not as the running app")), "{error:?}");
+        assert!(matches!(&error, Failure::Retry(e) if e.contains("not as the installed copy")), "{error:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

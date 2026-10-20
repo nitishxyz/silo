@@ -12,6 +12,7 @@ pub mod runtime;
 pub mod service;
 mod spawn;
 pub mod tunnel;
+pub mod update;
 pub mod upgrade;
 mod upload;
 

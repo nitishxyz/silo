@@ -11,10 +11,11 @@ serde_json.workspace = true
 data-encoding.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 tracing.workspace = true
+rustix.workspace = true
 sha2 = "0.10"
 
 [build-dependencies]
 sha2 = "0.10"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "net"] }

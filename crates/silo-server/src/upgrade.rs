@@ -19,21 +19,17 @@ use std::{
 use sha2::{Digest, Sha256};
 use silo_proto::{
     BUILD, Frame, kind,
-    release::{fetch, sha256_file},
+    release::{download, version_of},
     spawn_reader,
     upgrade::{self, Decision, HostBuild, MAX_BINARY, UpgradeBinary, UpgradeRejected, UpgradeStarted},
     write_frame,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{Server, auth::Peer};
 
 /// Longest wait for the next frame of a binary.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest `<new binary> --version`.
-const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
-/// Most `--version` output read.
-const VERSION_MAX: u64 = 4096;
 /// Prefix of staged binaries and kept previous executables:
 /// `.silo.upgrade.<pid>.<suffix>` next to the executable.
 const PREFIX: &str = ".silo.upgrade.";
@@ -225,104 +221,6 @@ async fn receive(path: &Path, binary: &UpgradeBinary, frames: &mut tokio::sync::
     Ok(())
 }
 
-/// Fetch release `version` for `platform` into `path` (mode 0755): its
-/// asset, checked against the release's checksums, unpacked. Uses `curl`
-/// and `tar` like install.sh; `base` (`SILO_DOWNLOAD_BASE`) overrides the
-/// location.
-async fn download(path: &Path, base: Option<&str>, version: &str, platform: &str) -> Result<(), Refusal> {
-    let url = |file: &str| upgrade::release_url(base, version, file).ok_or_else(|| ("bad_request", format!("{version:?} is not a release version")));
-    let (sums_url, asset) = (url(upgrade::CHECKSUMS)?, upgrade::asset(platform));
-    let asset_url = url(&asset)?;
-    // Only the default (GitHub) location must be https; an override may be
-    // a mirror or a test server.
-    let https = base.is_none_or(str::is_empty);
-    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| ("internal", "bad staging path".to_owned()))?;
-    let unpack = path.with_file_name(format!("{name}.d"));
-    std::fs::create_dir(&unpack).map_err(|e| ("internal", e.to_string()))?;
-    let _unpack = TempDir(unpack.clone());
-    let not_published = || (upgrade::NOT_PUBLISHED, upgrade::not_published(version, platform));
-    let sums = unpack.join(upgrade::CHECKSUMS);
-    fetch(&sums_url, &sums, https, MAX_BINARY).await?.ok_or_else(not_published)?;
-    let sums = std::fs::read_to_string(&sums).map_err(|e| ("internal", e.to_string()))?;
-    let expected = upgrade::checksum(&sums, &asset).ok_or_else(not_published)?.to_ascii_lowercase();
-    let archive = unpack.join(&asset);
-    fetch(&asset_url, &archive, https, MAX_BINARY).await?.ok_or_else(not_published)?;
-    let actual = sha256_file(&archive).map_err(|e| ("internal", e.to_string()))?;
-    if actual != expected {
-        return Err(("checksum", format!("{asset} does not match the release's {}", upgrade::CHECKSUMS)));
-    }
-    let tar = tokio::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&unpack)
-        .arg("silo")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| ("download", format!("run tar: {e}")))?;
-    if !tar.status.success() {
-        return Err(("download", format!("unpack {asset}: {}", String::from_utf8_lossy(&tar.stderr).trim())));
-    }
-    let member = unpack.join("silo");
-    // A plain file of its own: a symlink or hard link member could point
-    // anywhere (set_permissions and rename would act on its target).
-    let plain = std::fs::symlink_metadata(&member).is_ok_and(|m| m.file_type().is_file() && std::os::unix::fs::MetadataExt::nlink(&m) == 1);
-    if !plain {
-        return Err(("invalid", format!("{asset} does not hold a plain `silo` file")));
-    }
-    std::fs::rename(&member, path).map_err(|e| ("internal", e.to_string()))?;
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).map_err(|e| ("internal", e.to_string()))
-}
-
-/// Removes a directory tree on drop.
-struct TempDir(PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Version and build reported by `path --version`: proves it runs here.
-/// Runs in its own process group, killed whole if it overstays; at most
-/// [`VERSION_MAX`] bytes of output are read.
-async fn version_of(path: &Path) -> Result<(String, String), Refusal> {
-    let not_silo = || ("invalid", "the binary is not a silo for this host's platform".to_owned());
-    let mut child = tokio::process::Command::new(path)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| not_silo())?;
-    let group = child.id().and_then(|id| rustix::process::Pid::from_raw(id.cast_signed()));
-    let stdout = child.stdout.take().expect("piped");
-    let run = async {
-        let mut out = Vec::new();
-        stdout.take(VERSION_MAX).read_to_end(&mut out).await?;
-        std::io::Result::Ok((child.wait().await?, out))
-    };
-    let (status, out) = match tokio::time::timeout(VERSION_TIMEOUT, run).await {
-        Ok(Ok(done)) => done,
-        Ok(Err(_)) => return Err(not_silo()),
-        Err(_) => {
-            if let Some(group) = group {
-                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-            }
-            return Err(("invalid", "the binary's `--version` did not finish".into()));
-        }
-    };
-    match upgrade::parse_version(&String::from_utf8_lossy(&out)) {
-        Some((version, Some(build))) if status.success() => Ok((version, build)),
-        Some((_, None)) => Err(("invalid", "the binary predates remote upgrade (it reports no build)".into())),
-        _ => Err(not_silo()),
-    }
-}
-
 /// Run `exe up --no-offer`: it takes over from this server live (and
 /// updates its service) like a local `silo up`, and wait for it.
 /// In its own process group so a service manager stopping this server's
@@ -389,109 +287,6 @@ mod tests {
         clean_stale(&dir);
         assert!(ours.exists());
         assert!(!gone.exists());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn version_probe() {
-        let dir = std::env::temp_dir().join(format!("silo-upgrade-probe-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = |name: &str, body: &str| {
-            let path = dir.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-            path
-        };
-        let ok = script("ok", "echo 'silo 1.2.3 (abc)'");
-        assert_eq!(version_of(&ok).await.unwrap(), ("1.2.3".into(), "abc".into()));
-        let old = script("old", "echo 'silo 1.2.3'");
-        assert!(version_of(&old).await.unwrap_err().1.contains("predates"));
-        let failing = script("failing", "echo 'silo 1.2.3 (abc)'; exit 1");
-        assert_eq!(version_of(&failing).await.unwrap_err().0, "invalid");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A minimal HTTP/1.0 server for `files`; anything else is a 404.
-    async fn serve_files(files: std::collections::HashMap<String, Vec<u8>>) -> String {
-        use tokio::io::AsyncReadExt as _;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let files = files.clone();
-                tokio::spawn(async move {
-                    let mut request = Vec::new();
-                    let mut buf = [0u8; 1024];
-                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        match socket.read(&mut buf).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => request.extend_from_slice(&buf[..n]),
-                        }
-                    }
-                    let path = String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap_or("").to_owned();
-                    let reply = match files.get(path.trim_start_matches("/r/")) {
-                        Some(body) => [format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes(), body.clone()].concat(),
-                        None => b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
-                    };
-                    let _ = socket.write_all(&reply).await;
-                });
-            }
-        });
-        format!("http://{addr}/r")
-    }
-
-    #[tokio::test]
-    async fn downloads_a_checked_release() {
-        let dir = std::env::temp_dir().join(format!("silo-upgrade-download-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("pack")).unwrap();
-        std::fs::write(dir.join("pack/silo"), "#!/bin/sh\necho 'silo 9.9.9 (rel)'\n").unwrap();
-        let archive = dir.join("a.tar.gz");
-        let packed = std::process::Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(dir.join("pack")).arg("silo").status().unwrap();
-        assert!(packed.success());
-        let tarball = std::fs::read(&archive).unwrap();
-        let sha = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() };
-        // `silo` as a symlink to a file outside the unpack directory.
-        std::fs::create_dir_all(dir.join("evil")).unwrap();
-        std::os::unix::fs::symlink(dir.join("pack/silo"), dir.join("evil/silo")).unwrap();
-        let evil_archive = dir.join("evil.tar.gz");
-        let packed = std::process::Command::new("tar").arg("-czf").arg(&evil_archive).arg("-C").arg(dir.join("evil")).arg("silo").status().unwrap();
-        assert!(packed.success());
-        let evil = std::fs::read(&evil_archive).unwrap();
-        let asset = upgrade::asset("linux-x86_64");
-        let sums = format!("{}  {asset}\n{}  silo-macos-aarch64.tar.gz\n{}  silo-linux-riscv64.tar.gz\n", sha(&tarball), "0".repeat(64), sha(&evil));
-        let files = std::collections::HashMap::from([
-            (upgrade::CHECKSUMS.to_owned(), sums.into_bytes()),
-            (asset.clone(), tarball),
-            ("silo-macos-aarch64.tar.gz".to_owned(), b"corrupt".to_vec()),
-            ("silo-linux-riscv64.tar.gz".to_owned(), evil),
-        ]);
-        let base = serve_files(files).await;
-        let path = dir.join(format!("{PREFIX}1.aa"));
-        download(&path, Some(&base), "9.9.9", "linux-x86_64").await.unwrap();
-        assert_eq!(version_of(&path).await.unwrap(), ("9.9.9".into(), "rel".into()));
-        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o755);
-        std::fs::remove_file(&path).unwrap();
-        // Not in the checksums: not published.
-        let error = download(&path, Some(&base), "9.9.9", "linux-aarch64").await.unwrap_err();
-        assert_eq!(error, (upgrade::NOT_PUBLISHED, "silo 9.9.9 isn't published for linux-aarch64; use --local or --binary".into()));
-        // A missing release (404 for SHA256SUMS): not published either.
-        let error = download(&path, Some(&format!("{base}/nope")), "9.9.9", "linux-x86_64").await.unwrap_err();
-        assert_eq!(error.0, upgrade::NOT_PUBLISHED);
-        let error = download(&path, Some(&base), "9.9.9", "macos-aarch64").await.unwrap_err();
-        assert_eq!(error.0, "checksum");
-        // A symlink member is refused and its target left alone.
-        let mode = |p: &Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o777;
-        let before = mode(&dir.join("pack/silo"));
-        let error = download(&path, Some(&base), "9.9.9", "linux-riscv64").await.unwrap_err();
-        assert_eq!(error.0, "invalid", "{error:?}");
-        assert_eq!(mode(&dir.join("pack/silo")), before);
-        // A version that is no release version never reaches a URL.
-        let error = download(&path, None, "0.1.0/../../../../x/y/releases/download/v1", "linux-x86_64").await.unwrap_err();
-        assert_eq!(error.0, "bad_request");
-        assert!(!path.exists());
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(left.len(), 4, "only the fixtures remain: {left:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

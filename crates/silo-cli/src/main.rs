@@ -79,6 +79,14 @@ enum Command {
         #[command(subcommand)]
         command: RemoteCommand,
     },
+    /// Update this machine's Silo (the app, this CLI, or both) to the
+    /// latest release; a running server is upgraded live.
+    #[command(visible_alias = "upgrade")]
+    Update {
+        /// Only report whether an update is available.
+        #[arg(long)]
+        check: bool,
+    },
     /// Stop the server service and remove it; ends every session.
     Down {
         /// Do not ask before ending sessions.
@@ -407,6 +415,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Up { .. }
                 | Command::Join { .. }
                 | Command::Remote { .. }
+                | Command::Update { .. }
                 | Command::Down { .. }
                 | Command::Status
                 | Command::KillServer
@@ -561,6 +570,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             Ok(0)
         }
         Command::Join { ticket } => join(&ticket).await,
+        Command::Update { check } => silo_cli::update::run(check).await,
         Command::Remote { command: RemoteCommand::Install { target, local, binary } } => {
             remote_install(&target, &silo_cli::upgrade::Source::new(local, binary)).await
         }
@@ -1148,6 +1158,8 @@ mod tests {
     #[test]
     fn service_and_link_commands() {
         assert!(matches!(Cli::parse_from(["silo", "up"]).command, Some(Command::Up { no_offer: false })));
+        assert!(matches!(Cli::parse_from(["silo", "update"]).command, Some(Command::Update { check: false })));
+        assert!(matches!(Cli::parse_from(["silo", "upgrade", "--check"]).command, Some(Command::Update { check: true })));
         assert!(matches!(Cli::parse_from(["silo", "up", "--no-offer"]).command, Some(Command::Up { no_offer: true })));
         assert!(matches!(Cli::parse_from(["silo", "down"]).command, Some(Command::Down { yes: false })));
         assert!(matches!(Cli::parse_from(["silo", "down", "--yes"]).command, Some(Command::Down { yes: true })));

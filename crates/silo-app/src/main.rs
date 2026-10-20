@@ -43,7 +43,6 @@ mod text_field;
 mod theme;
 mod titlebar;
 mod tooltip;
-mod update;
 mod updater;
 mod web;
 mod window_picker;

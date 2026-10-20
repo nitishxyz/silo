@@ -3,6 +3,7 @@
 pub mod clipboard;
 pub mod hosts;
 pub mod link;
+pub mod update;
 pub mod upgrade;
 
 use std::{path::Path, time::Duration};
