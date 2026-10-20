@@ -484,9 +484,13 @@ async fn owner_terminal_config_body() {
 
     // A config change while the program is mid-escape waits for the ground
     // state, so the mirror switches between the same bytes the server did.
-    stream_a.send(&ClientData::Input(b"printf '\\033[3'; sleep 0.15; printf '1mX\\033[0m\\n'\n".to_vec()));
+    // The escape stays open until the test answers `read`, sent after the
+    // config on the same (ordered) stream: ground follows well within the
+    // server's bounded wait, however slow the host is to start processes.
+    stream_a.send(&ClientData::Input(b"stty -echo; printf '\\033[3'; read -r _; printf '1mX\\033[0m\\n'; stty echo\n".to_vec()));
     pump_until(&mut stream_a, &mut a, |m| !m.terminal().unwrap().at_ground().unwrap()).await;
     stream_a.send(&ClientData::Config(blue));
+    stream_a.send(&ClientData::Input(b"\n".to_vec()));
     tokio::time::timeout(TIMEOUT, async {
         loop {
             let data = stream_a.rx.recv().await.expect("stream closed");
