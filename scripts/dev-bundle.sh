@@ -31,9 +31,22 @@ plist() { # exe id [helper]
 PLIST
 }
 
+# Copy to a fresh inode: macOS caches a Mach-O's signature per vnode, so
+# overwriting an already-run binary in place gets it SIGKILLed at launch
+# ("Code Signature Invalid").
+install_bin() { # src dst
+  cp -f "$1" "$2.tmp.$$"
+  mv -f "$2.tmp.$$" "$2"
+}
+# Ad-hoc sign a bundle so Info.plist is bound (linker signatures aren't).
+sign() {
+  local log
+  log=$(codesign --force --sign - --timestamp=none "$1" 2>&1) || { echo "$log" >&2; return 1; }
+}
+
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
 plist SiloDev xyz.nitish.silo.dev > "$app/Contents/Info.plist"
-cp -f "$out/silo-app" "$app/Contents/MacOS/SiloDev"
+install_bin "$out/silo-app" "$app/Contents/MacOS/SiloDev"
 for bin in silo silo-menubar; do
   [[ -f "$out/$bin" ]] && ln -sf "$out/$bin" "$app/Contents/MacOS/$bin"
 done
@@ -43,7 +56,9 @@ for suffix in "" " (GPU)" " (Renderer)" " (Plugin)"; do
   mkdir -p "$dir/MacOS"
   id="xyz.nitish.silo.dev.helper$(echo "$suffix" | tr -d ' ()' | tr 'A-Z' 'a-z')"
   plist "$name" "$id" 1 > "$dir/Info.plist"
-  cp -f "$out/silo-app" "$dir/MacOS/$name"
+  install_bin "$out/silo-app" "$dir/MacOS/$name"
+  sign "$app/Contents/Frameworks/$name.app"
 done
 ln -sfn "$cef/$framework" "$app/Contents/Frameworks/$framework"
+sign "$app"
 echo "$app/Contents/MacOS/SiloDev"
