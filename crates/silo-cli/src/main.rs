@@ -1,6 +1,7 @@
 //! `silo`: the server daemon and command-line client in one binary.
 
 mod attach;
+mod generated;
 
 use std::{
     io::{IsTerminal, Write},
@@ -215,6 +216,15 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Call a control method, its params as flags (`silo do <method> --help`).
+    #[command(disable_help_flag = true)]
+    Do {
+        #[arg(allow_hyphen_values = true)]
+        method: String,
+        /// `--param value`…, required params by position, `--json PARAMS`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -358,6 +368,7 @@ fn main() {
     // An agent token limits this process to its grant (unix socket only).
     silo_client::set_token(std::env::var("SILO_TOKEN").ok().filter(|t| !t.trim().is_empty()));
     let command = cli.command.unwrap_or(Command::Attach { target: None, watch: false });
+    let server = matches!(command, Command::Server { .. });
     let status = match &command {
         Command::Server { daemon: true, takeover, .. } => daemonize(*takeover),
         _ => None,
@@ -371,7 +382,23 @@ fn main() {
         }
     };
     runtime.shutdown_timeout(Duration::from_millis(100));
+    if server && code == 0 && silo_server::layout_cmds::restart_requested() {
+        restart();
+    }
     std::process::exit(code);
+}
+
+/// `server.restart`: run this binary again as the same server (fresh, not
+/// taking over: the old one is gone).
+fn restart() -> ! {
+    use std::os::unix::process::CommandExt;
+    let args = std::env::args_os().skip(1).filter(|a| a != "--takeover");
+    let error = match std::env::current_exe() {
+        Ok(exe) => std::process::Command::new(exe).args(args).exec(),
+        Err(error) => error,
+    };
+    eprintln!("silo: restart failed: {error}");
+    std::process::exit(1);
 }
 
 /// Detach from the caller: double fork with `setsid`, so the server
@@ -662,6 +689,30 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                     silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
                 }
             };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(0)
+        }
+        Command::Do { method, .. } if method == "--help" || method == "-h" => {
+            println!(
+                "Usage: silo do <method> [--param value]… [--json PARAMS]\n\nMethods: silo api list. A method's params: silo do <method> --help."
+            );
+            Ok(0)
+        }
+        Command::Do { method, args } => {
+            let (control, _, _net) = connect(host).await?;
+            let described = control.call::<silo_proto::control::MethodDescription>(Method::ApiDescribe { method: method.clone() }).await;
+            let described = match described {
+                Err(error) if error.downcast_ref::<silo_proto::control::RpcError>().is_some_and(|e| e.code == "not_found") => {
+                    bail!("unknown method {method}; see `silo api list`")
+                }
+                other => other?,
+            };
+            if args.iter().any(|a| a == "--help" || a == "-h") {
+                print!("{}", generated::usage(&method, &described.description, &described.params_schema));
+                return Ok(0);
+            }
+            let params = generated::build(&described.params_schema, &args)?;
+            let value = silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?;
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(0)
         }
@@ -1234,6 +1285,19 @@ mod tests {
         assert_eq!(silo_proto::model::short_client_name(&named), "silo cli · claude-code");
         assert_eq!(silo_proto::model::short_client_name(&agent_client_name(None)), "silo cli");
         assert_eq!(silo_proto::model::short_client_name(&agent_client_name(Some(" \u{202e} "))), "silo cli");
+    }
+
+    #[test]
+    fn do_takes_the_method_s_flags_as_given() {
+        let cli = Cli::parse_from(["silo", "do", "window.step", "--session-id", "s1", "--delta", "-1"]);
+        let Some(Command::Do { method, args }) = cli.command else { panic!() };
+        assert_eq!((method.as_str(), args), ("window.step", vec!["--session-id".to_owned(), "s1".into(), "--delta".into(), "-1".into()]));
+        let Some(Command::Do { args, .. }) = Cli::parse_from(["silo", "do", "app.full_screen", "--help"]).command else { panic!() };
+        assert_eq!(args, ["--help"]);
+        let cli = Cli::parse_from(["silo", "do", "app.full_screen", "--host", "mini"]);
+        assert_eq!(cli.host.as_deref(), Some("mini"));
+        let Some(Command::Do { args, .. }) = cli.command else { panic!() };
+        assert!(args.is_empty(), "--host stays global");
     }
 
     #[test]
