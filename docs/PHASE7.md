@@ -460,8 +460,9 @@ elvish login`, compared after stripping a leading `-`. A shell at its prompt has
 is wrong for someone (an `ssh` session, a pager over a long query), and confirming costs one keystroke. There is no
 user-editable list in Phase 7; the deferred Lua hooks can add one later.
 
-**`process`:** the foreground process's name. When the foreground is the shell (rule 1 with a builtin), it is the
-first word of the command line, falling back to `"a command"`.
+**`process`:** the foreground process's name. When the foreground is the shell (rule 1 with a builtin), or its name
+can't be read (a setuid program like `top`), it is the first word of the command line, falling back to
+`"a command"`.
 
 **Freshness:**
 - Marks update `busy` at once.

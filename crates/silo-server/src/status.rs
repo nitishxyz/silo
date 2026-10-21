@@ -289,7 +289,10 @@ pub struct BusyInputs {
 #[must_use]
 pub fn busy(inputs: &BusyInputs) -> Option<(String, Option<String>)> {
     let command = inputs.marks.clone().filter(|c| !c.is_empty());
-    let named = |name: &Option<String>| name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| "a command".to_owned());
+    // A process whose name can't be read (setuid, like `top`) goes by the
+    // command line's first word.
+    let first = inputs.marks.as_deref().and_then(|m| m.split_whitespace().next()).map(str::to_owned);
+    let named = |name: &Option<String>| name.clone().filter(|n| !n.is_empty()).or_else(|| first.clone()).unwrap_or_else(|| "a command".to_owned());
     // 3. A command block runs while its program (or what it runs in the
     //    foreground) isn't a shell.
     if inputs.command_block {
@@ -309,9 +312,8 @@ pub fn busy(inputs: &BusyInputs) -> Option<(String, Option<String>)> {
         return Some((named(&inputs.foreground_name), command));
     }
     // 1. The shell said a command runs (a builtin keeps the foreground).
-    let marks = inputs.marks.as_ref()?;
-    let first = marks.split_whitespace().next().map(str::to_owned);
-    Some((named(&first), command))
+    inputs.marks.as_ref()?;
+    Some((named(&None), command))
 }
 
 /// [`busy`] as published: `since` carries on while a busy period lasts.
@@ -517,6 +519,8 @@ mod tests {
         assert_eq!(busy(&unnamed), Some(("a command".into(), None)));
         let ssh = BusyInputs { foreground: Some(12), foreground_name: Some("ssh".into()), marks: None, ..inputs() };
         assert_eq!(busy(&ssh), Some(("ssh".into(), None)), "a remote prompt's marks don't hide a running ssh");
+        let setuid = BusyInputs { foreground: Some(13), foreground_name: None, marks: Some("top -o cpu".into()), ..inputs() };
+        assert_eq!(busy(&setuid), Some(("top".into(), Some("top -o cpu".into()))), "an unreadable name goes by the command line");
         let command = BusyInputs { command_block: true, pid_name: Some("sleep".into()), foreground_name: Some("sleep".into()), ..inputs() };
         assert_eq!(busy(&command), Some(("sleep".into(), None)));
         let shell_command = BusyInputs { command_block: true, pid_name: Some("zsh".into()), foreground_name: Some("zsh".into()), ..inputs() };
