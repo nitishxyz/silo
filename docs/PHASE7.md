@@ -380,7 +380,7 @@ pub struct AttentionCounts { pub working: u32, pub blocked: u32, pub done: u32, 
     `session.changed`.
   - `block.attention {block_id, session_id, session_name, block_title, reason, title, body, at}`, where `reason` is
     `blocked|done|error|notification`. Raised when a record enters blocked/done/error and on OSC 9/777;
-    notifications are capped at 1/s per block (burst 5).
+    capped at 1/s per block (burst 5). State changes are paced too (burst 8, then 4/s); see §11 P7-3 "As built".
 - **Views:** `SessionView` gains `#[serde(default)] status: Vec<BlockStatus>` (non-empty blocks only).
   `SessionSummary` (`model.rs:519`) gains `#[serde(default)] attention: AttentionCounts`. `sessions.changed` is
   re-emitted only when counts change, never on progress.
@@ -823,6 +823,18 @@ has merged.
     two. So bash 3.2 gets no command records. fish's `exit` sends C then D, a real record.
   - "Progress-only" means the records' `(id, state, kind)` and `busy` are unchanged; those changes are coalesced to
     4/s. A 7501 attention's `title` is the record title (else its app), `body` its message.
+  - **Flood bounds (review):** state changes (records' `(id, state, kind)` or `busy`) go out at once up to a token
+    bucket of 8, refilled at 4/s, per block; over it they wait and `tick_status` publishes the latest, so the final
+    state always arrives. `block.attention` shares one bucket per block (burst 5, 1/s) for 7501 transitions and
+    OSC 9/777: an over-pace notification is dropped; an over-pace transition is held (the newest replaces it) and
+    sent once the pace allows, only if its record is still in that state.
+  - **Lost hook events (review):** when the vt queue overflowed (`lost`), the dropped oldest events may have been a
+    CLEAR, a prompt start or a C/D. The block then starts its status over: records, progress, a held attention,
+    the open C mark and the running command (with its anchor) are cleared, the surviving events are applied, and
+    `busy` is re-derived from the foreground. Finished command records and their anchors were complete and stay.
+  - **`terminal.command_output` (review):** the text is at most `MAX_COMMAND_OUTPUT` (1 MiB), its end, starting at a
+    line; `CommandOutput.truncated` (additive, `#[serde(default)]`) says so. When the C row was pruned from the
+    scrollback the text is what is left, from the top of the screen to the D cell, also `truncated`.
   - `compat::FEATURES` now lists `status` (this server emits the events; this build's clients advertise it).
     `block.view` returns the block's status.
   - `blocks.busy` stays with P7-9 (§11); `BlockMsg::Busy` re-probes and answers for it.
@@ -849,6 +861,9 @@ has merged.
   - B is re-appended at each prompt (zsh: last `precmd` hook, bash: end of `PROMPT_COMMAND`), so prompt frameworks
     that rebuild `PS1` keep it. fish sends no B (fish 4.3+ sends its own).
   - fish runs `fish_postexec` for `exit` too, so a shell exit ends with D (the previous status).
+  - fish 4.3+ prints nothing because of the snippet (asserted). Its own first-run migration of an older fish's
+    universal variables prints a notice and starts a `sleep 7` job, which makes the first `exit` refuse; the test
+    gives each fish build its own sandbox (and a pre-made completions cache) so that never happens there.
   - Tested: zsh 5.9, bash 3.2.57 and 5.3.20, fish 3.7.1 and 4.9.3 (native and with `no-mark-prompt`), each on a
     real PTY. Extra shell builds are found through `SILO_TEST_SHELL_DIRS` (colon-separated, test only).
 
