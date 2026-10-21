@@ -280,6 +280,11 @@ pub struct BusyInputs {
     /// The PTY's foreground process group and its leader's name.
     pub foreground: Option<i32>,
     pub foreground_name: Option<String>,
+    /// Names of the other processes in the program's own group, read only
+    /// for a command block whose program is a shell holding the
+    /// foreground: a non-interactive shell (`sh -c 'a; b'`, dash even for
+    /// one command) runs its commands there, not in a group of their own.
+    pub group: Vec<String>,
     /// OSC 133: the last step was C (no D, A or RIS since), with its
     /// command line (empty when the shell sent none).
     pub marks: Option<String>,
@@ -294,14 +299,18 @@ pub fn busy(inputs: &BusyInputs) -> Option<(String, Option<String>)> {
     let first = inputs.marks.as_deref().and_then(|m| m.split_whitespace().next()).map(str::to_owned);
     let named = |name: &Option<String>| name.clone().filter(|n| !n.is_empty()).or_else(|| first.clone()).unwrap_or_else(|| "a command".to_owned());
     // 3. A command block runs while its program (or what it runs in the
-    //    foreground) isn't a shell.
+    //    foreground) isn't a shell, or while its shell runs something in
+    //    its own group.
     if inputs.command_block {
-        let name = match inputs.foreground {
-            Some(fg) if fg != inputs.pid => &inputs.foreground_name,
-            _ => &inputs.pid_name,
+        let (name, own) = match inputs.foreground {
+            Some(fg) if fg != inputs.pid => (&inputs.foreground_name, false),
+            _ => (&inputs.pid_name, true),
         };
         if !name.as_deref().is_some_and(harmless) {
             return Some((named(name), command));
+        }
+        if own && let Some(child) = inputs.group.iter().find(|n| !harmless(n)).or(inputs.group.first()) {
+            return Some((named(&Some(child.clone())), command));
         }
     }
     // 2. Something other than the shell holds the foreground.
@@ -525,6 +534,12 @@ mod tests {
         assert_eq!(busy(&command), Some(("sleep".into(), None)));
         let shell_command = BusyInputs { command_block: true, pid_name: Some("zsh".into()), foreground_name: Some("zsh".into()), ..inputs() };
         assert_eq!(busy(&shell_command), None);
+        let script = BusyInputs { group: vec!["sh".into(), "sleep".into()], ..shell_command.clone() };
+        assert_eq!(busy(&script), Some(("sleep".into(), None)), "sh -c runs its commands in its own group");
+        let subshell = BusyInputs { group: vec!["sh".into()], ..shell_command.clone() };
+        assert_eq!(busy(&subshell), Some(("sh".into(), None)));
+        let elsewhere = BusyInputs { foreground: Some(11), foreground_name: Some("bash".into()), ..script };
+        assert_eq!(busy(&elsewhere), None, "the group counts only while the program holds the foreground");
         let previous = busy_status(Some(("vim".into(), None)), None, 5).unwrap();
         assert_eq!(busy_status(Some(("git".into(), None)), Some(&previous), 9).unwrap().since, 5, "one busy period");
     }

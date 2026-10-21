@@ -1732,12 +1732,19 @@ impl Actor {
                     Some(_) => None,
                     None => silo_pty::process_name(pid),
                 };
+                // The program leads its own group (it is the session leader).
+                let group = if self.command && foreground.is_none_or(|fg| fg == pid) && pid_name.as_deref().is_some_and(status::harmless) {
+                    silo_pty::process_group(pid).into_iter().filter(|&p| p != pid).filter_map(silo_pty::process_name).collect()
+                } else {
+                    Vec::new()
+                };
                 status::busy(&BusyInputs {
                     command_block: self.command,
                     pid,
                     pid_name,
                     foreground,
                     foreground_name,
+                    group,
                     marks: self.status.marks.clone(),
                 })
             }

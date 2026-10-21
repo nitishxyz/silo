@@ -217,6 +217,13 @@ async fn command_blocks_are_busy_unless_they_run_a_shell() {
     sleeping.until("sleep busy", |s| busy_process(s) == Some("sleep")).await;
     assert_eq!(sleeping.busy().await.map(|b| b.process), Some("sleep".to_owned()));
 
+    // A script's shell keeps the foreground and runs `sleep` in its own
+    // group (dash does even for `sh -c 'sleep 30'`).
+    let mut script = Block::sh("b-script", "sleep 30; true");
+    assert!(script.handle.command);
+    script.until("script busy", |s| busy_process(s) == Some("sleep")).await;
+    assert_eq!(script.busy().await.map(|b| b.process), Some("sleep".to_owned()));
+
     let shell = if std::path::Path::new("/bin/zsh").exists() { "/bin/zsh" } else { "bash" };
     let (program, args) = if shell == "/bin/zsh" { (shell, ["-f", "-i"]) } else { (shell, ["--norc", "-i"]) };
     let interactive = Block::spawn("b-zsh", 80, &[program, args[0], args[1]]);

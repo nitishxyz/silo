@@ -581,6 +581,45 @@ pub fn process_name(pid: i32) -> Option<String> {
     }
 }
 
+/// The processes in process group `pgid` (its leader included).
+#[must_use]
+pub fn process_group(pgid: i32) -> Vec<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut pids = vec![0 as libc::pid_t; 64];
+        loop {
+            let size = i32::try_from(pids.len() * std::mem::size_of::<libc::pid_t>()).unwrap_or(i32::MAX);
+            // SAFETY: proc_listpgrppids writes at most `size` bytes of pids
+            // and returns how many it wrote.
+            let n = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), size) };
+            let Ok(count) = usize::try_from(n) else {
+                return Vec::new();
+            };
+            if count < pids.len() {
+                pids.truncate(count);
+                pids.retain(|&p| p > 0);
+                return pids;
+            }
+            pids.resize(pids.len() * 2, 0);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|pid| {
+                // `pid (comm) state ppid pgrp ...`; comm may hold anything.
+                std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| stat.rsplit_once(')')?.1.split_whitespace().nth(2)?.parse::<i32>().ok())
+                    == Some(pgid)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
