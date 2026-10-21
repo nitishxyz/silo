@@ -6648,6 +6648,7 @@ dependencies = [
  "silo-vt",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

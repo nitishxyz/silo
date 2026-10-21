@@ -2,33 +2,202 @@
 //! ownership and exit over the unix socket.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use serde::de::DeserializeOwned;
 use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
     control::{Capture, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
-    data::{ClientData, StartMode},
+    data::{ClientData, Resume, StartMode},
     model::{Axis, BlockKind, Lifecycle, SessionView, TermSize, TerminalConfig},
     paths,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait for one connect, call or attach: a hang fails fast,
+/// naming the step.
+const STEP_LIMIT: Duration = Duration::from_secs(15);
 /// Hard limit per test; aborts the whole process even if the runtime is
 /// wedged, so a hang never blocks `cargo test` forever.
 const TEST_LIMIT: Duration = Duration::from_secs(90);
+/// Longest wait for each query of a failure report.
+const REPORT_LIMIT: Duration = Duration::from_secs(3);
+
+/// Where a test is, for its failure report.
+struct Probe {
+    name: &'static str,
+    home: Mutex<Option<PathBuf>>,
+    block: Mutex<Option<String>>,
+    step: Mutex<String>,
+}
+
+tokio::task_local! {
+    static PROBE: Arc<Probe>;
+}
+
+fn probe() -> Option<Arc<Probe>> {
+    PROBE.try_with(Arc::clone).ok()
+}
 
 async fn guarded(name: &'static str, body: impl Future<Output = ()>) {
+    capture_logs();
+    let probe = Arc::new(Probe { name, home: Mutex::default(), block: Mutex::default(), step: Mutex::new("start".into()) });
+    let watched = probe.clone();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = done_rx.recv_timeout(TEST_LIMIT) {
-            eprintln!("test {name} exceeded {TEST_LIMIT:?}; aborting");
+            // The test's runtime may be wedged: query from a runtime of our own.
+            let report = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_or_else(|e| format!("no runtime for a report: {e}"), |rt| rt.block_on(report(&watched)));
+            eprintln!("test {name} exceeded {TEST_LIMIT:?}; aborting\n{report}");
             std::process::exit(101);
         }
     });
-    tokio::time::timeout(TEST_LIMIT, body).await.unwrap_or_else(|_| panic!("test {name} timed out"));
+    PROBE
+        .scope(probe.clone(), async {
+            if tokio::time::timeout(TEST_LIMIT, body).await.is_err() {
+                panic!("test {name} timed out\n{}", report(&probe).await);
+            }
+        })
+        .await;
     let _ = done_tx.send(());
+}
+
+/// Run one step of a test, failing after [`STEP_LIMIT`] with a report.
+async fn step<T>(what: impl Into<String>, fut: impl Future<Output = T>) -> T {
+    let what = what.into();
+    if let Some(probe) = probe() {
+        what.clone_into(&mut probe.step.lock().unwrap());
+    }
+    match tokio::time::timeout(STEP_LIMIT, fut).await {
+        Ok(value) => value,
+        Err(_) => fail(&format!("stuck {STEP_LIMIT:?} at {what}")).await,
+    }
+}
+
+/// The step a test is at, the server log tail and the attached block's
+/// state, queried over a fresh connection.
+async fn report(probe: &Probe) -> String {
+    use std::fmt::Write;
+    let mut out = format!("--- {} report; last step: {}\n", probe.name, probe.step.lock().unwrap());
+    let home = probe.home.lock().unwrap().clone();
+    let block = probe.block.lock().unwrap().clone();
+    if let (Some(home), Some(block)) = (home, block) {
+        let _ = writeln!(out, "block {block}:");
+        match tokio::time::timeout(REPORT_LIMIT, Control::connect(&paths::socket(&home), "e2e-report")).await {
+            Ok(Ok((control, _))) => {
+                let queries = [
+                    Method::BlockView { block_id: block.clone() },
+                    Method::TerminalSize { block_id: block.clone() },
+                    Method::TerminalCapture { block_id: block.clone(), history: false },
+                ];
+                for query in queries {
+                    let name = method_name(&query);
+                    let result = match tokio::time::timeout(REPORT_LIMIT, control.call_value(query)).await {
+                        Ok(Ok(value)) => value.to_string(),
+                        Ok(Err(e)) => format!("error: {e:#}"),
+                        Err(_) => format!("no answer in {REPORT_LIMIT:?} (block actor stuck?)"),
+                    };
+                    let _ = writeln!(out, "  {name}: {result}");
+                }
+            }
+            Ok(Err(e)) => _ = writeln!(out, "  connect: {e:#}"),
+            Err(_) => _ = writeln!(out, "  connect: no answer in {REPORT_LIMIT:?} (server stuck?)"),
+        }
+    }
+    let _ = writeln!(out, "server log tail (every test in this process):");
+    for line in log_tail(80) {
+        let _ = writeln!(out, "  {line}");
+    }
+    out
+}
+
+/// Server and client logs of this process, newest last.
+static LOGS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const LOG_LINES: usize = 2000;
+
+struct LogWriter;
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut logs = LOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for line in String::from_utf8_lossy(buf).lines().filter(|l| !l.is_empty()) {
+            if logs.len() == LOG_LINES {
+                logs.pop_front();
+            }
+            logs.push_back(line.to_owned());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_logs() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::new("warn,silo_server=debug,silo_client=debug,silo_pty=debug");
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(|| LogWriter).try_init();
+    });
+}
+
+fn log_tail(lines: usize) -> Vec<String> {
+    let logs = LOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    logs.iter().skip(logs.len().saturating_sub(lines)).cloned().collect()
+}
+
+fn method_name(method: &Method) -> String {
+    format!("{method:?}").split([' ', '{', '(']).next().unwrap_or_default().to_owned()
+}
+
+async fn call<T: DeserializeOwned>(control: &Control, method: Method) -> T {
+    let what = format!("call {}", method_name(&method));
+    match step(&what, control.call(method)).await {
+        Ok(value) => value,
+        Err(e) => fail(&format!("{what}: {e:#}")).await,
+    }
+}
+
+async fn call_value(control: &Control, method: Method) -> serde_json::Value {
+    let what = format!("call {}", method_name(&method));
+    match step(&what, control.call_value(method)).await {
+        Ok(value) => value,
+        Err(e) => fail(&format!("{what}: {e:#}")).await,
+    }
+}
+
+async fn fail(message: &str) -> ! {
+    let report = match probe() {
+        Some(probe) => report(&probe).await,
+        None => String::new(),
+    };
+    panic!("{message}\n{report}");
+}
+
+/// A call expected to fail.
+async fn call_err(control: &Control, method: Method) -> anyhow::Error {
+    let what = format!("call {}", method_name(&method));
+    step(&what, control.call_value(method)).await.expect_err(&what)
+}
+
+/// Open a data stream on `block`.
+async fn open(control: &Control, block: &str, resume: Option<Resume>) -> DataStream {
+    if let Some(probe) = probe() {
+        *probe.block.lock().unwrap() = Some(block.to_owned());
+    }
+    let what = format!("open data stream on {block}");
+    match step(&what, DataStream::open(control, block, resume)).await {
+        Ok(stream) => stream,
+        Err(e) => fail(&format!("{what}: {e:#}")).await,
+    }
 }
 
 fn temp_home(name: &str) -> PathBuf {
@@ -38,6 +207,9 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start_server(home: &Path) {
+    if let Some(probe) = probe() {
+        *probe.home.lock().unwrap() = Some(home.to_owned());
+    }
     let config =
         silo_server::Config { home: home.to_owned(), idle_exit: None, relay: silo_server::RelayConfig::Disabled, mdns: false, ..Default::default() };
     tokio::spawn(async move {
@@ -53,7 +225,7 @@ async fn start_server(home: &Path) {
 }
 
 async fn connect(home: &Path, name: &str) -> (Control, Events) {
-    Control::connect(&paths::socket(home), name).await.unwrap()
+    step(format!("connect {name}"), Control::connect(&paths::socket(home), name)).await.unwrap()
 }
 
 const CHILD_HOME: &str = "SILO_TEST_CHILD_HOME";
@@ -93,7 +265,10 @@ impl ServerProcess {
 
 /// Apply frames until `predicate` holds for the mirror.
 async fn pump_until(stream: &mut DataStream, mirror: &mut Mirror, mut predicate: impl FnMut(&mut Mirror) -> bool) {
-    tokio::time::timeout(TIMEOUT, async {
+    if let Some(probe) = probe() {
+        "pump_until".clone_into(&mut probe.step.lock().unwrap());
+    }
+    let pumped = tokio::time::timeout(TIMEOUT, async {
         loop {
             if predicate(mirror) {
                 return;
@@ -102,12 +277,14 @@ async fn pump_until(stream: &mut DataStream, mirror: &mut Mirror, mut predicate:
             mirror.apply(data).unwrap();
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("timed out; screen:\n{}", mirror.screen_text()));
+    .await;
+    if pumped.is_err() {
+        fail(&format!("timed out; screen:\n{}", mirror.screen_text())).await;
+    }
 }
 
 async fn attach(control: &Control, block: &str, mirror: &mut Mirror) -> DataStream {
-    let stream = DataStream::open(control, block, mirror.resume()).await.unwrap();
+    let stream = open(control, block, mirror.resume()).await;
     mirror.begin(&stream.welcome).unwrap();
     stream
 }
@@ -132,9 +309,9 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     let home = temp_home("e2e");
     start_server(&home).await;
     let (control, events) = connect(&home, "test-a").await;
-    control.subscribe().await.unwrap();
+    step("subscribe", control.subscribe()).await.unwrap();
     let created: Created =
-        control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+        call(&control, Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let block = created.block_id.clone();
 
     // Live attach + input + output.
@@ -161,15 +338,15 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     let scroll_b = b.terminal().unwrap().scroll_state().unwrap();
     assert_eq!(scroll_a.total, scroll_b.total, "history rows match");
     assert!(scroll_b.total > 3000);
-    let capture: Capture = control.call(Method::TerminalCapture { block_id: block.clone(), history: false }).await.unwrap();
+    let capture: Capture = call(&control, Method::TerminalCapture { block_id: block.clone(), history: false }).await;
     assert_eq!(capture.text, a.screen_text());
 
     // Resume after disconnect: no snapshot, missed output replayed.
     drop(stream_b);
     let resume = b.resume().unwrap();
-    control.call_value(Method::TerminalSend { block_id: block.clone(), text: "echo while-away\n".into() }).await.unwrap();
+    call_value(&control, Method::TerminalSend { block_id: block.clone(), text: "echo while-away\n".into() }).await;
     pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\nwhile-away\n$")).await;
-    let mut stream_b = DataStream::open(&control, &block, Some(resume)).await.unwrap();
+    let mut stream_b = open(&control, &block, Some(resume)).await;
     assert_eq!(stream_b.welcome.mode, StartMode::Resume);
     b.begin(&stream_b.welcome).unwrap();
     pump_until(&mut stream_b, &mut b, |m| m.screen_text().contains("\nwhile-away\n$")).await;
@@ -177,16 +354,16 @@ async fn attach_snapshot_resume_ownership_exit_body() {
 
     // Ownership: owner's size applies; others are remembered.
     let (control2, _events2) = connect(&home, "test-b").await;
-    control.call_value(Method::TerminalResize { block_id: block.clone(), size: TermSize::new(100, 30) }).await.unwrap();
-    control.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    call_value(&control, Method::TerminalResize { block_id: block.clone(), size: TermSize::new(100, 30) }).await;
+    call_value(&control, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await;
     pump_until(&mut stream_a, &mut a, |m| m.size().columns == 100).await;
-    control2.call_value(Method::TerminalResize { block_id: block.clone(), size: TermSize::new(60, 20) }).await.unwrap();
-    control2.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await.unwrap();
-    let info: SizeInfo = control.call(Method::TerminalSize { block_id: block.clone() }).await.unwrap();
+    call_value(&control2, Method::TerminalResize { block_id: block.clone(), size: TermSize::new(60, 20) }).await;
+    call_value(&control2, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await;
+    let info: SizeInfo = call(&control, Method::TerminalSize { block_id: block.clone() }).await;
     assert_eq!((info.size.columns, info.size.rows), (100, 30));
     assert_eq!(info.owner, Some(control.client_id()));
     assert_eq!(info.desired.len(), 2);
-    control2.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    call_value(&control2, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await;
     pump_until(&mut stream_a, &mut a, |m| m.size().columns == 60).await;
     stream_a.send(&ClientData::Input(b"stty size\n".to_vec()));
     pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\n20 60\n$")).await;
@@ -198,14 +375,13 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(a.screen_text(), b.screen_text());
 
     // Splits and windows.
-    let split: Created = control
-        .call(Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
-        .await
-        .unwrap();
-    let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+    let split: Created =
+        call(&control, Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+            .await;
+    let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
     assert_eq!(view.session.windows[0].layout.blocks(), [block.clone(), split.block_id.clone()]);
     assert_eq!(view.blocks.len(), 2);
-    control.call_value(Method::BlockClose { block_id: split.block_id.clone() }).await.unwrap();
+    call_value(&control, Method::BlockClose { block_id: split.block_id.clone() }).await;
 
     // Exit: stream reports it; the block stays readable in its layout.
     stream_a.send(&ClientData::Input(b"exit 7\n".to_vec()));
@@ -226,7 +402,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(code, Some(7));
     let info = tokio::time::timeout(TIMEOUT, async {
         loop {
-            let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+            let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
             let info = view.blocks.into_iter().find(|b| b.id == block).expect("exited block stays in the session");
             if info.lifecycle == Lifecycle::Exited {
                 return info;
@@ -237,7 +413,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     .await
     .unwrap();
     assert_eq!(info.exited, Some(7));
-    let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
+    let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
     assert_eq!(view.session.windows[0].layout.blocks(), std::slice::from_ref(&block));
     // Still attachable: snapshot, then the exit status.
     let mut c = Mirror::new();
@@ -246,7 +422,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     pump_until(&mut stream_c, &mut c, |m| m.exited().is_some() && m.screen_text().contains("exit 7")).await;
     assert_eq!(c.exited(), Some(Some(7)));
     drop(events);
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -275,26 +451,26 @@ async fn block_swap_and_window_move_body() {
     start_server(&home).await;
     let (control, _) = connect(&home, "test-a").await;
     let (observer, mut events) = connect(&home, "test-b").await;
-    observer.subscribe().await.unwrap();
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    step("subscribe", observer.subscribe()).await.unwrap();
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let sid = created.session_id.clone();
     let a = created.block_id.clone();
-    let b: Created = control
-        .call(Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
-        .await
-        .unwrap();
-    let c: Created = control
-        .call(Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
-        .await
-        .unwrap();
+    let b: Created =
+        call(&control, Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+            .await;
+    let c: Created = call(
+        &control,
+        Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None },
+    )
+    .await;
     let (b, c) = (b.block_id, c.block_id);
-    control.call_value(Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await.unwrap();
-    control.call_value(Method::BlockFocus { block_id: a.clone() }).await.unwrap();
-    let before: SessionView = control.call(Method::SessionView { session_id: sid.clone() }).await.unwrap();
+    call_value(&control, Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await;
+    call_value(&control, Method::BlockFocus { block_id: a.clone() }).await;
+    let before: SessionView = call(&control, Method::SessionView { session_id: sid.clone() }).await;
     while next_view(&mut events, &sid).await.session.revision < before.session.revision {}
 
     // Swap: leaves exchange, ratios and focus stay, revision bumps, event.
-    control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: c.clone() }).await.unwrap();
+    call_value(&control, Method::BlockSwap { block_id: a.clone(), other_block_id: c.clone() }).await;
     let view = next_view(&mut events, &sid).await;
     assert_eq!(view.session.revision, before.session.revision + 1);
     let layout = &view.session.windows[0].layout;
@@ -302,34 +478,32 @@ async fn block_swap_and_window_move_body() {
     assert!(matches!(layout, silo_proto::model::Layout::Split { ratio, .. } if (*ratio - 0.3).abs() < 1e-6));
     assert_eq!(view.session.windows[0].focused, a);
     // The shells keep running.
-    let capture: Capture = control.call(Method::TerminalCapture { block_id: a.clone(), history: false }).await.unwrap();
+    let capture: Capture = call(&control, Method::TerminalCapture { block_id: a.clone(), history: false }).await;
     assert!(capture.size.columns > 0);
     assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
 
     // Cross-window swaps are rejected and change nothing.
-    let other: Created =
-        control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let other: Created = call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let after_create = next_view(&mut events, &sid).await;
-    let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await.unwrap_err();
+    let err = call_err(&control, Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await;
     assert!(err.to_string().contains("different windows"), "{err}");
-    let err = control.call_value(Method::BlockSwap { block_id: a.clone(), other_block_id: "bmissing".into() }).await.unwrap_err();
+    let err = call_err(&control, Method::BlockSwap { block_id: a.clone(), other_block_id: "bmissing".into() }).await;
     assert!(err.to_string().contains("not_found"), "{err}");
-    let unchanged: SessionView = control.call(Method::SessionView { session_id: sid.clone() }).await.unwrap();
+    let unchanged: SessionView = call(&control, Method::SessionView { session_id: sid.clone() }).await;
     assert_eq!(unchanged.session.revision, after_create.session.revision);
 
     // window.move: order changes for every client.
-    let third: Created =
-        control.call(Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let third: Created = call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     next_view(&mut events, &sid).await;
-    control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await.unwrap();
+    call_value(&control, Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await;
     let view = next_view(&mut events, &sid).await;
     let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
     assert_eq!(order, [third.window_id.clone(), created.window_id.clone(), other.window_id.clone()]);
-    control.call_value(Method::WindowMove { window_id: third.window_id.clone(), index: 99 }).await.unwrap();
+    call_value(&control, Method::WindowMove { window_id: third.window_id.clone(), index: 99 }).await;
     let view = next_view(&mut events, &sid).await;
     let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
     assert_eq!(order, [created.window_id.clone(), other.window_id.clone(), third.window_id.clone()]);
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,7 +521,7 @@ async fn snapshot_mid_escape_and_alt_screen_body() {
         cwd: None,
         size: Some(TermSize::new(40, 10)),
     };
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await;
     let mut a = Mirror::new();
     let mut stream = attach(&control, &created.block_id, &mut a).await;
     pump_until(&mut stream, &mut a, |m| m.screen_text().contains("alt-screen")).await;
@@ -358,8 +532,8 @@ async fn snapshot_mid_escape_and_alt_screen_body() {
     pump_until(&mut stream_b, &mut b, |m| m.screen_text().contains("alt-screen")).await;
     assert_eq!(a.screen_text(), b.screen_text());
     assert!(!b.screen_text().contains("base"));
-    control.call_value(Method::SessionClose { session_id: created.session_id }).await.unwrap();
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::SessionClose { session_id: created.session_id }).await;
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -371,9 +545,9 @@ async fn clear_and_reset_body() {
     let home = temp_home("clear");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     // Generated default names are two lowercase words.
-    let sessions: Vec<silo_proto::model::SessionSummary> = control.call(Method::SessionList {}).await.unwrap();
+    let sessions: Vec<silo_proto::model::SessionSummary> = call(&control, Method::SessionList {}).await;
     assert!(sessions[0].name.split('-').count() == 2, "{}", sessions[0].name);
     let block = created.block_id.clone();
     let mut a = Mirror::new();
@@ -381,17 +555,17 @@ async fn clear_and_reset_body() {
     stream.send(&ClientData::Input(b"PS1='$ '; i=0; while [ $i -lt 100 ]; do i=$((i+1)); echo old-$i; done; echo end-old\n".to_vec()));
     pump_until(&mut stream, &mut a, |m| m.screen_text().contains("\nend-old\n$")).await;
     assert!(a.terminal().unwrap().scroll_state().unwrap().total > 50);
-    control.call_value(Method::TerminalClear { block_id: block.clone() }).await.unwrap();
+    call_value(&control, Method::TerminalClear { block_id: block.clone() }).await;
     pump_until(&mut stream, &mut a, |m| !m.screen_text().contains("old-")).await;
     pump_until(&mut stream, &mut a, |m| m.terminal().unwrap().scroll_state().unwrap().total < 30).await;
-    let capture: Capture = control.call(Method::TerminalCapture { block_id: block.clone(), history: true }).await.unwrap();
+    let capture: Capture = call(&control, Method::TerminalCapture { block_id: block.clone(), history: true }).await;
     assert!(!capture.text.contains("old-"), "{}", capture.text);
     // Reset: alt screen is left and the screen cleared for everyone. Reset
     // only at the prompt: earlier, the rest of the command's output (echo's
     // newline, the prompt) lands after the reset.
     stream.send(&ClientData::Input(b"printf '\\033[?1049hALT'; echo\n".to_vec()));
     pump_until(&mut stream, &mut a, |m| m.screen_text().contains("ALT\n$")).await;
-    control.call_value(Method::TerminalReset { block_id: block.clone() }).await.unwrap();
+    call_value(&control, Method::TerminalReset { block_id: block.clone() }).await;
     // The shell redraws its prompt alone on the cleared screen (^L).
     pump_until(&mut stream, &mut a, |m| m.screen_text() == "$").await;
     // A snapshot client shows the same screen at the same offset.
@@ -403,7 +577,7 @@ async fn clear_and_reset_body() {
     pump_until(&mut stream, &mut a, |m| m.resume().is_some_and(|r| r.offset >= b_offset)).await;
     assert_eq!(a.resume(), b.resume());
     assert_eq!(a.screen_text(), b.screen_text());
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -442,7 +616,7 @@ async fn owner_terminal_config_body() {
     let home = temp_home("config");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test-a").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let block = created.block_id.clone();
     let red = config(0x0010_2030);
     let blue = config(0x0000_0040);
@@ -453,7 +627,7 @@ async fn owner_terminal_config_body() {
     let mut stream_a = attach(&control, &block, &mut a).await;
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(TerminalConfig::default())).await;
     stream_a.send(&ClientData::Config(red));
-    control.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    call_value(&control, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await;
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
     assert_eq!(background(&mut a), red.background);
     stream_a.send(&ClientData::Input(b"PS1='$ '\n".to_vec()));
@@ -465,7 +639,7 @@ async fn owner_terminal_config_body() {
     let mut b = Mirror::new();
     let mut stream_b = attach(&control_b, &block, &mut b).await;
     stream_b.send(&ClientData::Config(blue));
-    control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await.unwrap();
+    call_value(&control_b, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Request }).await;
     pump_until(&mut stream_b, &mut b, |m| m.config() == Some(red) && m.terminal().is_some()).await;
     assert_eq!(background(&mut b), red.background);
     b.set_local_config(blue);
@@ -474,7 +648,7 @@ async fn owner_terminal_config_body() {
 
     // B takes over: the server (and A, rendering the server's) switches to
     // B's config.
-    control_b.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    call_value(&control_b, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await;
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(blue)).await;
     pump_until(&mut stream_b, &mut b, |m| m.config() == Some(blue)).await;
     assert_eq!(background(&mut a), blue.background);
@@ -523,7 +697,7 @@ async fn owner_terminal_config_body() {
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
     assert_eq!(background(&mut a), 0x0012_3456);
     query_background(&mut stream_a, &mut a, "1212/3434/5656").await;
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -535,7 +709,7 @@ async fn resume_across_config_change_body() {
     let home = temp_home("config-resume");
     start_server(&home).await;
     let (control, _events) = connect(&home, "test-a").await;
-    let created: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let block = created.block_id.clone();
     let red = config(0x0010_2030);
     let blue = config(0x0000_0040);
@@ -543,7 +717,7 @@ async fn resume_across_config_change_body() {
     let mut a = Mirror::new();
     let mut stream_a = attach(&control, &block, &mut a).await;
     stream_a.send(&ClientData::Config(red));
-    control.call_value(Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await.unwrap();
+    call_value(&control, Method::OwnBlock { block_ids: vec![block.clone()], mode: OwnMode::Take }).await;
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
     stream_a.send(&ClientData::Input(b"PS1='$ '; echo ready-$((0+1))\n".to_vec()));
     pump_until(&mut stream_a, &mut a, |m| m.screen_text().contains("\nready-1\n$")).await;
@@ -568,7 +742,7 @@ async fn resume_across_config_change_body() {
 
     // Resume replays the old config first, then switches exactly where the
     // live stream did: after the earlier output, outside the escape.
-    let mut stream_b = DataStream::open(&control_b, &block, Some(resume)).await.unwrap();
+    let mut stream_b = open(&control_b, &block, Some(resume)).await;
     assert_eq!(stream_b.welcome.mode, StartMode::Resume);
     b.begin(&stream_b.welcome).unwrap();
     let mut configs = Vec::new();
@@ -593,7 +767,7 @@ async fn resume_across_config_change_body() {
     assert_eq!(b.config(), Some(blue));
     assert_eq!(background(&mut b), 0x0012_3456, "program override survives");
     assert_eq!(a.screen_text(), b.screen_text());
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    call_value(&control, Method::ServerShutdown {}).await;
 }
 
 #[tokio::test]
@@ -624,11 +798,11 @@ async fn heartbeat_body() {
     let limit = 2 * control.ping_timeout() + silo_client::PING_EVERY + Duration::from_secs(1);
     tokio::time::timeout(limit, heartbeat).await.expect("heartbeat did not fire").unwrap();
     tokio::time::timeout(TIMEOUT, control.closed()).await.expect("not closed");
-    assert!(control.call_value(Method::Ping {}).await.unwrap_err().is::<silo_client::Closed>());
+    assert!(call_err(&control, Method::Ping {}).await.is::<silo_client::Closed>());
 
     server.signal("-CONT");
     let (again, _events) = connect(&home, "heartbeat").await;
-    again.call_value(Method::Ping {}).await.unwrap();
+    call_value(&again, Method::Ping {}).await;
     drop(server);
     let _ = std::fs::remove_dir_all(&home);
 }
