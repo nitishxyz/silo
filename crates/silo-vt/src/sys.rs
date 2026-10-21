@@ -1314,7 +1314,7 @@ mod tests {
         vt.write_output(out.as_bytes()).unwrap();
         let rows: Vec<_> =
             vt.take_events().unwrap().vt.into_iter().filter_map(|e| if let VtEvent::Prompt { row, .. } = e { row } else { None }).collect();
-        let [_, _, start, end] = <[_; 4]>::try_from(rows).ok().expect("C and D rows");
+        let Ok([_, _, start, end]) = <[_; 4]>::try_from(rows) else { panic!("C and D rows") };
         assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "hi\nthere");
         let mut mirror = TerminalCore::new(GridSize::new(20, 30).unwrap()).unwrap();
         mirror.write_output(out.as_bytes()).unwrap();
