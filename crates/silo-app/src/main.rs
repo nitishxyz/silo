@@ -41,6 +41,7 @@ mod remote;
 mod settings;
 mod settings_panel;
 mod settings_table;
+mod share;
 mod status;
 mod switcher;
 mod terminal_prefs;

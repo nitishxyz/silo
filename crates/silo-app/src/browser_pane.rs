@@ -1488,6 +1488,10 @@ impl crate::workspace::Workspace {
         let route = match &host.transport {
             crate::hosts::Transport::Local { .. } => Route::Local,
             crate::hosts::Transport::Iroh { home, addr } => Route::Remote { host_id: addr.id.to_string(), home: home.clone(), addr: addr.clone() },
+            // Tunnels need control of the server: a link's browser never loads.
+            crate::hosts::Transport::Shared { home, ticket } => {
+                Route::Remote { host_id: ticket.addr.id.to_string(), home: home.clone(), addr: ticket.addr.clone() }
+            }
         };
         let (id, rt, control, home) = (block.to_owned(), self.rt.clone(), self.control(), self.home.clone());
         let pane = cx.new(|cx| BrowserPane::new(id, rt, control, route, home, window, cx));

@@ -561,7 +561,7 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                                 }
                                 "connection failed".into()
                             }
-                            Transport::Iroh { .. } => "connection failed".into(),
+                            Transport::Iroh { .. } | Transport::Shared { .. } => "connection failed".into(),
                         };
                         // The full error (paths and all) stays in the log.
                         if tx.send(ConnEvent::Disconnected(reason)).is_err() {
@@ -585,7 +585,7 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
 fn quit_requested(transport: &Transport, pid: u32) -> bool {
     match transport {
         Transport::Local { home, .. } => silo_proto::paths::quit_marked(home, pid),
-        Transport::Iroh { .. } => false,
+        Transport::Iroh { .. } | Transport::Shared { .. } => false,
     }
 }
 

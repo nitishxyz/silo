@@ -264,6 +264,12 @@ impl Workspace {
                     self.flash(Status::info("No remote hosts to remove"), cx);
                 }
             }
+            Command::ShareSession => self.open_share_sheet(false, window, cx),
+            Command::SharePane => self.open_share_sheet(true, window, cx),
+            Command::OpenSharedLink => {
+                self.close_palette(window, cx);
+                self.open_add_host(None, None, window, cx);
+            }
             Command::RenameHost => {
                 if self.available(Command::RenameHost, cx) {
                     self.open_rename_host(self.active_host, window, cx);
@@ -395,6 +401,7 @@ impl Workspace {
             | Command::ZoomPane => panes > 1,
             Command::RemoveHost => self.hosts.iter().any(|h| !h.info.local && !h.removed),
             Command::RenameHost => host.is_some_and(|h| !h.info.local && !h.removed),
+            Command::ShareSession | Command::SharePane => connected && self.view.is_some() && !host.is_some_and(|h| h.info.transport.is_shared()),
             // On the server's focused block: tiled with a sibling, or floating.
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),

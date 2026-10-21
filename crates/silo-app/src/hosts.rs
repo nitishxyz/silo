@@ -113,6 +113,9 @@ pub enum Transport {
     Local { home: PathBuf, service: Result<silo_client::service::Service, String> },
     /// A paired remote server over iroh; never spawned or upgraded.
     Iroh { home: PathBuf, addr: EndpointAddr },
+    /// A session or block someone shared with a link (`silos1…`): only
+    /// what the link's grant covers (see `share.rs`).
+    Shared { home: PathBuf, ticket: silo_client::transport::ShareTicket },
 }
 
 impl Transport {
@@ -139,19 +142,31 @@ impl Transport {
                 control.subscribe().await?;
                 Ok((control, events))
             }
+            Self::Shared { home, ticket } => {
+                let net = crate::remote::net(home).await?;
+                let (control, events) = Control::connect_shared(net, ticket, None, client_name).await?;
+                control.subscribe().await?;
+                Ok((control, events))
+            }
         }
     }
 
     #[must_use]
     pub fn is_remote(&self) -> bool {
-        matches!(self, Self::Iroh { .. })
+        matches!(self, Self::Iroh { .. } | Self::Shared { .. })
     }
 
-    /// The remote server's EndpointId.
+    #[must_use]
+    pub fn is_shared(&self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
+
+    /// The paired remote server's EndpointId (not a shared link's: those
+    /// are no paired hosts, and are kept outside hosts.json).
     #[must_use]
     pub fn remote_id(&self) -> Option<String> {
         match self {
-            Self::Local { .. } => None,
+            Self::Local { .. } | Self::Shared { .. } => None,
             Self::Iroh { addr, .. } => Some(addr.id.to_string()),
         }
     }
@@ -163,6 +178,7 @@ impl Transport {
         match self {
             Self::Local { home, .. } => silo_proto::paths::socket(home).to_string_lossy().into_owned(),
             Self::Iroh { addr, .. } => format!("iroh:{}", addr.id),
+            Self::Shared { ticket, .. } => crate::share::key(ticket),
         }
     }
 }
@@ -198,11 +214,20 @@ impl HostInfo {
         Self { name: host.name.clone(), local: false, transport: Transport::Iroh { home, addr: host.addr.clone() } }
     }
 
-    /// Stable across launches and routes: `local`, or the remote server's
-    /// EndpointId. Names the host in notification settings and payloads.
+    #[must_use]
+    pub fn shared(home: PathBuf, name: String, ticket: silo_client::transport::ShareTicket) -> Self {
+        Self { name, local: false, transport: Transport::Shared { home, ticket } }
+    }
+
+    /// Stable across launches and routes: `local`, the remote server's
+    /// EndpointId, or `share:<link>`. Names the host in notification
+    /// settings and payloads.
     #[must_use]
     pub fn key(&self) -> String {
-        self.transport.remote_id().unwrap_or_else(|| LOCAL_KEY.to_owned())
+        match &self.transport {
+            Transport::Shared { ticket, .. } => crate::share::key(ticket),
+            transport => transport.remote_id().unwrap_or_else(|| LOCAL_KEY.to_owned()),
+        }
     }
 }
 

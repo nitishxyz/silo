@@ -302,6 +302,7 @@ impl Workspace {
                 }));
             bar = bar
                 .child(drop_zone)
+                .children(self.render_watchers())
                 .children(self.render_update_pill(cx))
                 .child(
                     div()
@@ -612,7 +613,7 @@ impl Workspace {
                     .text_ellipsis()
                     .text_size(px(11.0))
                     .text_color(rgb(chrome.muted))
-                    .child(host.info.name.clone()),
+                    .child(if host.info.transport.is_shared() { format!("{} · shared", host.info.name) } else { host.info.name.clone() }),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
             .map(claim_press)
@@ -625,6 +626,42 @@ impl Workspace {
                 }),
             )
             .into_any_element()
+    }
+
+    /// Who else watches this session (other devices, tokens and links,
+    /// never the owner's own apps): an eye and their names, all of them in
+    /// the tooltip.
+    fn render_watchers(&self) -> Option<AnyElement> {
+        let view = self.view.as_ref()?;
+        let me = self.control().map(|c| c.client_id());
+        let labels = watcher_labels(&view.watchers, me);
+        let text = match labels.as_slice() {
+            [] => return None,
+            [one] => one.clone(),
+            [first, rest @ ..] => format!("{first} +{}", rest.len()),
+        };
+        let chrome = self.chrome;
+        Some(
+            div()
+                .id("watchers")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(5.0))
+                .ml(px(6.0))
+                .h(px(TAB_HEIGHT - 2.0))
+                .max_w(px(200.0))
+                .px(px(9.0))
+                .capsule()
+                .whitespace_nowrap()
+                .text_size(px(11.5))
+                .text_color(rgb(chrome.secondary))
+                .child(icon("eye", 13.0, chrome.icon))
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().child(text))
+                .tooltip(crate::tooltip::Tooltip::below(format!("Watching: {}", labels.join(", ")), TITLEBAR_HEIGHT))
+                .map(claim_press)
+                .into_any_element(),
+        )
     }
 
     /// The Update pill: accent-filled once an update is staged (a click
@@ -667,6 +704,24 @@ impl Workspace {
             pill.into_any_element()
         })
     }
+}
+
+/// Names of the session's watchers other than the owner's clients and
+/// `me`, once each: a link's or token's marked with its rights.
+#[must_use]
+pub fn watcher_labels(watchers: &[silo_proto::model::Watcher], me: Option<u64>) -> Vec<String> {
+    use silo_proto::{access::Rights, model::WatcherKind};
+    let mut labels: Vec<String> = Vec::new();
+    for w in watchers.iter().filter(|w| w.principal != WatcherKind::Owner && Some(w.client_id) != me) {
+        let label = match (w.principal, w.rights) {
+            (WatcherKind::Link | WatcherKind::Token, Rights::View) => format!("{} (view)", w.label),
+            _ => w.label.clone(),
+        };
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels
 }
 
 /// A closed tab collapsing in width and fading at its old position. Visual
@@ -723,6 +778,25 @@ mod tests {
         assert!((reveal_offset(0.0, 300.0, 250.0, 100.0, 28.0, 0.0) - 0.0).abs() < f32::EPSILON);
         // Wider than the viewport: its start is shown.
         assert!((reveal_offset(0.0, 100.0, 200.0, 190.0, 28.0, 500.0) - -200.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn watchers_leave_out_the_owner_and_this_app() {
+        use silo_proto::{
+            access::Rights,
+            model::{Watcher, WatcherKind},
+        };
+        let w = |client_id, label: &str, principal, rights| Watcher { client_id, label: label.into(), principal, rights, blocks: Vec::new() };
+        let watchers = [
+            w(1, "Silo", WatcherKind::Owner, Rights::Owner),
+            w(2, "Silo · laptop", WatcherKind::Device, Rights::Control),
+            w(3, "Silo · Ana", WatcherKind::Link, Rights::View),
+            w(4, "Silo · Ana", WatcherKind::Link, Rights::View),
+            w(5, "Silo · Ben", WatcherKind::Link, Rights::Interact),
+        ];
+        assert_eq!(watcher_labels(&watchers, Some(2)), ["Silo · Ana (view)", "Silo · Ben"]);
+        assert_eq!(watcher_labels(&watchers, None)[0], "Silo · laptop");
+        assert!(watcher_labels(&watchers[..1], None).is_empty());
     }
 
     #[test]

@@ -155,6 +155,9 @@ impl HostsState {
             for remote in hosts::load(&home) {
                 this.add(HostInfo::remote(home.clone(), &remote), cx);
             }
+            for (name, ticket) in crate::share::load(&home) {
+                this.add(HostInfo::shared(home.clone(), name, ticket), cx);
+            }
             this._watch = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(HOSTS_POLL).await;
@@ -327,12 +330,28 @@ impl HostsState {
         Ok((self.add(HostInfo::remote(self.home.clone(), &host), cx), host.name))
     }
 
+    /// Keep a shared link (`shares.json`) and connect to it; its index. A
+    /// link already open is shown again, not added twice.
+    pub fn save_share(&mut self, name: String, ticket: silo_client::transport::ShareTicket, cx: &mut Context<Self>) -> Result<usize, String> {
+        let info = HostInfo::shared(self.home.clone(), name, ticket.clone());
+        if let Some(index) = self.entries.iter().position(|h| !h.removed && h.info.key() == info.key()) {
+            return Ok(index);
+        }
+        crate::share::save(&self.home, &info.name, &ticket).map_err(|e| format!("Could not save: {e:#}"))?;
+        Ok(self.add(info, cx))
+    }
+
     pub fn rename(&mut self, host: usize, name: String, cx: &mut Context<Self>) {
         self.entries[host].info.name = name;
         cx.notify();
     }
 
     fn conn_event(&mut self, host: usize, mut event: ConnEvent, cx: &mut Context<Self>) {
+        // A shared link refused is revoked or expired, for good (the
+        // connection loop has stopped).
+        if matches!(event, ConnEvent::NotPaired) && self.entries[host].info.transport.is_shared() {
+            event = ConnEvent::Disconnected(crate::share::ENDED.into());
+        }
         let entry = &mut self.entries[host];
         match &mut event {
             ConnEvent::Connected(control) => {

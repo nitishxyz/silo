@@ -108,6 +108,10 @@ commands! {
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];
     RemoveHost => "Remove Host…", "Hosts", [];
+    // Sharing
+    ShareSession => "Share Session…", "Sharing", [], "A link to watch or type in this session";
+    SharePane => "Share Pane…", "Sharing", [], "A link to watch or type in this pane";
+    OpenSharedLink => "Open Shared Link…", "Sharing", [];
     // Edit & terminal
     Copy => "Copy", "Edit", ["cmd-c"];
     Paste => "Paste", "Edit", ["cmd-v"];
@@ -177,6 +181,8 @@ impl Command {
             Self::AddHost => Method("app.hosts_add"),
             Self::RenameHost => Method("app.hosts_rename"),
             Self::RemoveHost => Method("app.hosts_remove"),
+            Self::ShareSession | Self::SharePane => Method("grant.create"),
+            Self::OpenSharedLink => Method("app.open_share"),
             Self::Copy => Method("app.copy"),
             Self::Paste => Method("app.paste"),
             Self::SelectAll => Method("app.select_all"),

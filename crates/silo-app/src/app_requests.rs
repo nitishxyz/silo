@@ -212,7 +212,11 @@ impl Workspace {
                 }
             }
             Method::AppPalette { query, .. } => self.open_palette_with(query.unwrap_or_default(), window, cx),
-            Method::AppJumpPrompt { .. } | Method::AppSelectOutput { .. } | Method::AppCopyOutput { .. } | Method::AppOpenShare { .. } => {
+            Method::AppOpenShare { link, .. } => {
+                let ticket = silo_client::transport::ShareTicket::parse(&link).map_err(|_| RpcError::bad_request("not a share link"))?;
+                self.open_share(ticket, window, cx);
+            }
+            Method::AppJumpPrompt { .. } | Method::AppSelectOutput { .. } | Method::AppCopyOutput { .. } => {
                 return Err(unsupported(&name));
             }
             _ => return Err(RpcError::bad_request(format!("{name} is not an app method"))),
@@ -241,6 +245,7 @@ impl Workspace {
 fn host_id(h: &crate::hosts_state::HostEntry) -> String {
     match &h.info.transport {
         crate::hosts::Transport::Iroh { addr, .. } => addr.id.to_string(),
+        crate::hosts::Transport::Shared { ticket, .. } => crate::share::key(ticket),
         crate::hosts::Transport::Local { .. } => "local".into(),
     }
 }

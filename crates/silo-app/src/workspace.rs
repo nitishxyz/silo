@@ -83,6 +83,7 @@ pub struct Workspace {
     pub(crate) focus: FocusHandle,
     pub(crate) switcher: Option<Switcher>,
     pub(crate) add_host: Option<AddHostSheet>,
+    pub(crate) share: Option<crate::share::ShareSheet>,
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) picker: Option<crate::window_picker::WindowPicker>,
     pub(crate) motion: Motion,
@@ -243,6 +244,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             switcher: None,
             add_host: None,
+            share: None,
             palette: None,
             picker: None,
             motion: Motion::default(),
@@ -570,6 +572,11 @@ impl Workspace {
                 cx.activate(true);
                 self.open_session(host, session_id.clone(), window, cx);
             }
+            ConnEvent::Event(Event::SessionWatchers { session_id, watchers }) => {
+                if let Some(view) = self.view.as_mut().filter(|v| v.session.id == *session_id) {
+                    view.watchers.clone_from(watchers);
+                }
+            }
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some((pane, _)) = self.browsers.get(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
@@ -595,8 +602,7 @@ impl Workspace {
                 | Event::ApprovalRequested { .. }
                 | Event::ApprovalResolved { .. }
                 | Event::BlockAttention { .. }
-                | Event::CommandFinished { .. }
-                | Event::SessionWatchers { .. },
+                | Event::CommandFinished { .. },
             ) => {}
         }
         cx.notify();
@@ -749,6 +755,9 @@ impl Workspace {
             return;
         };
         let task = self.rt.spawn(async move {
+            if let Some(block) = crate::share::shared_block(&control) {
+                return crate::share::block_view(&control, block).await;
+            }
             let sessions: Vec<SessionSummary> = control.call(Method::SessionList {}).await?;
             let pick = preferred
                 .and_then(|p| sessions.iter().find(|s| s.id == p || s.name == p))
@@ -756,6 +765,8 @@ impl Workspace {
                 .map(|s| s.id.clone());
             let id = match pick {
                 Some(id) => id,
+                // A link's session is gone with its link.
+                None if control.hello().granted.is_some() => anyhow::bail!("nothing is shared"),
                 None => {
                     let spawn = SpawnSpec { cwd: None, command: Vec::new(), size: None };
                     let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await?;
@@ -1453,6 +1464,7 @@ impl Render for Workspace {
             && self.picker.is_none()
             && self.settings.is_none()
             && self.add_host.is_none()
+            && self.share.is_none()
             && !self.appearance_menu.open
             && !self.new_tab_menu.is_open()
         {
@@ -1463,6 +1475,7 @@ impl Render for Workspace {
                     && this.palette.is_none()
                     && this.picker.is_none()
                     && this.add_host.is_none()
+                    && this.share.is_none()
                     && this.settings.is_none()
                     && !this.appearance_menu.open
                     && !this.new_tab_menu.is_open()
@@ -1509,6 +1522,7 @@ impl Render for Workspace {
         let titlebar = self.render_titlebar(window, cx);
         let switcher = self.render_switcher(window, cx);
         let sheet = self.render_add_host(cx);
+        let share = self.render_share(cx);
         let offers = self.render_offers(window, cx);
         let approvals = self.render_approvals(window, cx);
         let palette = self.render_palette(window, cx);
@@ -1545,6 +1559,7 @@ impl Render for Workspace {
             .children(offers)
             .children(approvals)
             .children(sheet)
+            .children(share)
             .children(palette)
             .children(picker)
     }

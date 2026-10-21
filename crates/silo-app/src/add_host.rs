@@ -59,7 +59,7 @@ impl AddHostSheet {
         if let Some(name) = name {
             name_field.update(cx, |f, cx| f.set_text(name, cx));
         }
-        let ticket = cx.new(|cx| TextField::new("silo1…", cx));
+        let ticket = cx.new(|cx| TextField::new("silo1… or a shared link", cx));
         let subs = vec![
             cx.subscribe_in(&ticket, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(0, event, window, cx)),
             cx.subscribe_in(&name_field, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(1, event, window, cx)),
@@ -275,7 +275,15 @@ impl Workspace {
         }
         let typed = sheet.name.read(cx).text.clone();
         let replace = sheet.replace;
-        let Ok(ticket) = PairTicket::decode(&sheet.ticket.read(cx).text) else {
+        let text = sheet.ticket.read(cx).text.clone();
+        // A shared link (`silos1…`) opens what was shared; it pairs nothing.
+        if replace.is_none()
+            && let Ok(share) = silo_client::transport::ShareTicket::parse(&text)
+        {
+            self.close_add_host(window, cx);
+            return self.open_share(share, window, cx);
+        }
+        let Ok(ticket) = PairTicket::decode(&text) else {
             return self.sheet_error("Invalid ticket.", cx);
         };
         let id = ticket.addr.id.to_string();
@@ -311,6 +319,12 @@ impl Workspace {
     /// Forget a remote host (hosts.json and the switcher).
     pub(crate) fn remove_host(&mut self, index: usize, cx: &mut Context<Self>) -> Result<String, String> {
         let entry = self.hosts.get(index).ok_or("No such host.")?;
+        if entry.info.transport.is_shared() {
+            crate::share::remove(&self.home, &entry.info.key()).map_err(|e| format!("Could not save: {e:#}"))?;
+            self.shared.update(cx, |shared, cx| shared.forget(index, cx));
+            self.sync_hosts(cx);
+            return Ok(self.hosts[index].info.name.clone());
+        }
         let Some(id) = entry.info.transport.remote_id() else { return Err("This Mac cannot be removed.".into()) };
         hosts::update(&self.home, |saved| saved.retain(|h| h.id != id)).map_err(|e| format!("Could not save: {e:#}"))?;
         self.shared.update(cx, |shared, cx| shared.forget(index, cx));
@@ -325,6 +339,12 @@ impl Workspace {
             return Err("Enter a name.".into());
         }
         let entry = self.hosts.get(index).ok_or("No such host.")?;
+        if let hosts::Transport::Shared { ticket, .. } = &entry.info.transport {
+            crate::share::save(&self.home, &name, ticket).map_err(|e| format!("Could not save: {e:#}"))?;
+            self.shared.update(cx, |shared, cx| shared.rename(index, name, cx));
+            self.sync_hosts(cx);
+            return Ok(());
+        }
         let Some(id) = entry.info.transport.remote_id() else { return Err("This Mac cannot be renamed.".into()) };
         hosts::update(&self.home, |saved| saved.iter_mut().filter(|h| h.id == id).for_each(|h| h.name.clone_from(&name)))
             .map_err(|e| format!("Could not save: {e:#}"))?;
