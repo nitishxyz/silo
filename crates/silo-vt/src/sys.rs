@@ -5,8 +5,9 @@ use std::{
 };
 
 use crate::model::{
-    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link, MouseAction, MouseButton, MouseEvent, ScrollState,
-    SearchState, SearchStatus, Span, TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
+    Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link, MouseAction, MouseButton, MouseEvent,
+    ProgressReportState, PromptKind, PromptStep, ReportKind, ReportState, ScrollState, SearchState, SearchStatus, Span, TerminalColors,
+    TerminalDefaults, TerminalError, TerminalEvents, VtEvent,
 };
 
 #[repr(C)]
@@ -127,6 +128,130 @@ unsafe extern "C" {
     fn silo_vt_set_colors(vt: *mut c_void, colors: *const u32, dark: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_set_defaults(vt: *mut c_void, cursor_style: i32, cursor_blink: i32, scrollback_bytes: u64, scrollback_lines: u64) -> i32;
     fn silo_vt_focus(vt: *mut c_void, focused: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
+    fn silo_vt_hook(vt: *mut c_void) -> i32;
+    fn silo_vt_take_events(vt: *mut c_void, out: *mut u8, cap: usize, lost: *mut bool) -> usize;
+    fn silo_tracked_free(row: *mut c_void);
+    fn silo_vt_row_from_bottom(vt: *mut c_void, row: *mut c_void, out: *mut u32) -> i32;
+    fn silo_vt_track_row(vt: *mut c_void, from_bottom: u32, x: u16, out: *mut *mut c_void) -> i32;
+    fn silo_vt_tracked_column(row: *mut c_void, x: *mut u16) -> i32;
+    fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, out: *mut *mut u8, len: *mut usize) -> i32;
+}
+
+/// A cell of a server terminal's screen that moves with its content
+/// (scrolling, pruning, reflow): an OSC 133 mark's position. Use it only
+/// with the terminal that made it.
+#[derive(Debug)]
+pub struct TrackedRow(NonNull<c_void>);
+
+// SAFETY: an owned handle into its terminal's page list, used only together
+// with that terminal (which is `Send` and confined by `&mut`).
+unsafe impl Send for TrackedRow {}
+
+impl Drop for TrackedRow {
+    fn drop(&mut self) {
+        // SAFETY: owned handle, freed exactly once; valid even after its
+        // terminal was freed.
+        unsafe { silo_tracked_free(self.0.as_ptr()) };
+    }
+}
+
+impl TrackedRow {
+    /// Column of the tracked cell, if it still exists.
+    #[must_use]
+    pub fn column(&self) -> Option<u16> {
+        let mut x = 0;
+        // SAFETY: owned live handle; scalar out.
+        (unsafe { silo_vt_tracked_column(self.0.as_ptr(), &raw mut x) } == 0).then_some(x)
+    }
+}
+
+/// Parse the hook event records of `silo_vt_take_events`.
+fn parse_events(mut bytes: &[u8]) -> Vec<VtEvent> {
+    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, rest) = bytes.split_at_checked(n)?;
+        *bytes = rest;
+        Some(head)
+    }
+    fn u8_(bytes: &mut &[u8]) -> Option<u8> {
+        take(bytes, 1).map(|b| b[0])
+    }
+    fn u32_(bytes: &mut &[u8]) -> Option<u32> {
+        take(bytes, 4).and_then(|b| b.try_into().ok()).map(u32::from_ne_bytes)
+    }
+    fn string(bytes: &mut &[u8]) -> Option<String> {
+        let len = usize::try_from(u32_(bytes)?).ok()?;
+        take(bytes, len).map(|b| String::from_utf8_lossy(b).into_owned())
+    }
+    fn event(record: &mut &[u8]) -> Option<VtEvent> {
+        Some(match u8_(record)? {
+            1 => {
+                let state = match u8_(record)? {
+                    0 => ReportState::Idle,
+                    1 => ReportState::Working,
+                    2 => ReportState::Done,
+                    3 => ReportState::Blocked,
+                    4 => ReportState::Error,
+                    5 => ReportState::Clear,
+                    _ => ReportState::Unknown,
+                };
+                let kind = match u8_(record)? {
+                    0 => ReportKind::None,
+                    1 => ReportKind::Permission,
+                    2 => ReportKind::Question,
+                    3 => ReportKind::Auth,
+                    _ => ReportKind::Unknown,
+                };
+                let progress = u8_(record)?.cast_signed();
+                VtEvent::Status { state, kind, progress, id: string(record)?, app: string(record)?, title: string(record)?, message: string(record)? }
+            }
+            2 => {
+                let state = match u8_(record)? {
+                    0 => ProgressReportState::Remove,
+                    1 => ProgressReportState::Set,
+                    2 => ProgressReportState::Error,
+                    3 => ProgressReportState::Indeterminate,
+                    4 => ProgressReportState::Pause,
+                    _ => ProgressReportState::Unknown,
+                };
+                VtEvent::Progress { state, percent: u8_(record)?.cast_signed() }
+            }
+            3 => VtEvent::Notify { title: string(record)?, body: string(record)? },
+            4 => {
+                let ptr = usize::from_ne_bytes(take(record, size_of::<usize>())?.try_into().ok()?);
+                // SAFETY: the record owned this handle (or null); ownership
+                // moves to the `TrackedRow`, freed exactly once.
+                let row = NonNull::new(ptr as *mut c_void).map(TrackedRow);
+                let step = match u8_(record)? {
+                    1 => PromptStep::PromptStart,
+                    2 => PromptStep::InputStart,
+                    3 => PromptStep::OutputStart,
+                    4 => PromptStep::CommandEnd,
+                    _ => PromptStep::Unknown,
+                };
+                let prompt_kind = match u8_(record)? {
+                    0 => PromptKind::Primary,
+                    1 => PromptKind::Right,
+                    2 => PromptKind::Continuation,
+                    3 => PromptKind::Secondary,
+                    _ => PromptKind::Unknown,
+                };
+                let has_exit = u8_(record)? != 0;
+                let exit = take(record, 4)?.try_into().ok().map(i32::from_ne_bytes)?;
+                VtEvent::Prompt { step, prompt_kind, exit: has_exit.then_some(exit), command: string(record)?, error: string(record)?, row }
+            }
+            5 => VtEvent::Reset,
+            _ => return None,
+        })
+    }
+    let mut events = Vec::new();
+    while let Some(len) = u32_(&mut &*bytes) {
+        let Some(mut record) = usize::try_from(len).ok().and_then(|len| take(&mut bytes, len)) else { break };
+        record = &record[4..];
+        if let Some(event) = event(&mut record) {
+            events.push(event);
+        }
+    }
+    events
 }
 
 fn check(result: i32) -> Result<(), TerminalError> {
@@ -292,6 +417,72 @@ impl TerminalCore {
     /// Rejects invalid dimensions or an upstream allocation failure.
     pub fn new(size: GridSize) -> Result<Self, TerminalError> {
         Self::with_continuation(size, DEFAULT_CONTINUATION_MAX)
+    }
+
+    /// A server terminal: [`Self::new`] plus the status hooks (see
+    /// [`Self::hook`]).
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn server(size: GridSize) -> Result<Self, TerminalError> {
+        let mut core = Self::new(size)?;
+        core.hook()?;
+        Ok(core)
+    }
+
+    /// Report OSC 7501 / 9;4 / 9 / 777 / 133 and RIS as ordered
+    /// [`VtEvent`]s in [`Self::take_events`] and answer the OSC 7501
+    /// support query. Only the terminal that owns the program does this, so
+    /// the query is answered once.
+    ///
+    /// # Errors
+    /// Returns the upstream error if a callback is rejected.
+    pub fn hook(&mut self) -> Result<(), TerminalError> {
+        // SAFETY: exclusive live handle; installs static callbacks whose
+        // userdata is the handle itself.
+        check(unsafe { silo_vt_hook(self.handle.as_ptr()) })
+    }
+
+    /// How many rows lie below `row`'s row on the primary screen; `None`
+    /// when the row is gone or the alternate screen is active.
+    pub fn rows_from_bottom(&mut self, row: &TrackedRow) -> Option<u32> {
+        let mut out = 0;
+        // SAFETY: exclusive handle; `row` is a live handle of this terminal.
+        (unsafe { silo_vt_row_from_bottom(self.handle.as_ptr(), row.0.as_ptr(), &raw mut out) } == 0).then_some(out)
+    }
+
+    /// Track column `column` of the primary screen's row `rows_from_bottom`
+    /// rows above its last; `None` when there is no such row or the
+    /// alternate screen is active.
+    pub fn track_row(&mut self, rows_from_bottom: u32, column: u16) -> Option<TrackedRow> {
+        let mut out = std::ptr::null_mut();
+        // SAFETY: exclusive handle; the shim returns an owned handle or null.
+        let result = unsafe { silo_vt_track_row(self.handle.as_ptr(), rows_from_bottom, column, &raw mut out) };
+        if result != 0 {
+            return None;
+        }
+        NonNull::new(out).map(TrackedRow)
+    }
+
+    /// The plain text of the command output (OSC 133 C..D) containing
+    /// `row`'s cell; empty when that cell is not command output.
+    ///
+    /// # Errors
+    /// Upstream selection or formatting failures.
+    pub fn output_text(&mut self, row: &TrackedRow) -> Result<String, TerminalError> {
+        let mut ptr = std::ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: exclusive handle; `row` belongs to this terminal; on
+        // success the shim returns an allocation of `len` bytes (or null).
+        check(unsafe { silo_vt_output_text(self.handle.as_ptr(), row.0.as_ptr(), &raw mut ptr, &raw mut len) })?;
+        if ptr.is_null() {
+            return Ok(String::new());
+        }
+        // SAFETY: ptr/len describe the initialized allocation returned above.
+        let text = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }).into_owned();
+        // SAFETY: released exactly once with its length.
+        unsafe { silo_bytes_free(ptr, len) };
+        Ok(text)
     }
 
     /// # Errors
@@ -587,7 +778,20 @@ impl TerminalCore {
         unsafe {
             silo_vt_events(self.handle.as_ptr(), &raw mut raw);
         }
-        let mut events = TerminalEvents { bells: raw.bells, title: None, pwd: None, clipboard: Vec::new() };
+        let mut events = TerminalEvents { bells: raw.bells, ..TerminalEvents::default() };
+        let mut lost = false;
+        // SAFETY: exclusive handle; a zero capacity only reports the length.
+        let len = unsafe { silo_vt_take_events(self.handle.as_ptr(), std::ptr::null_mut(), 0, &raw mut lost) };
+        events.lost = lost;
+        if len > 0 {
+            let mut bytes = vec![0; len];
+            // SAFETY: exclusive handle; `bytes` holds exactly the queued
+            // length, so the shim copies and clears the queue.
+            let copied = unsafe { silo_vt_take_events(self.handle.as_ptr(), bytes.as_mut_ptr(), bytes.len(), &raw mut lost) };
+            bytes.truncate(copied);
+            events.vt = parse_events(&bytes);
+            events.lost = lost;
+        }
         for (slot, location) in [(0, ClipboardLocation::Standard), (1, ClipboardLocation::Primary)] {
             if raw.reserved & (1 << slot) == 0 {
                 continue;
@@ -915,6 +1119,74 @@ mod tests {
         assert!(!vt.frame().unwrap().synchronized);
         vt.resize(GridSize::new(40, 8).unwrap()).unwrap();
         assert_eq!(vt.frame().unwrap().cells.len(), 320);
+    }
+
+    #[test]
+    fn server_hooks_report_in_order_and_answer_the_support_query() {
+        use crate::{PromptStep, ReportState, VtEvent};
+        let mut plain = TerminalCore::new(GridSize::new(40, 6).unwrap()).unwrap();
+        assert!(plain.write_output(b"\x1b]7501;?\x1b\\").unwrap().is_empty(), "mirrors never answer");
+        let mut vt = TerminalCore::server(GridSize::new(40, 6).unwrap()).unwrap();
+        let reply = vt.write_output(b"\x1b]7501;?\x1b\\").unwrap();
+        assert_eq!(reply, b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\");
+        vt.write_output(b"\x1b]7501;state=working:app=cargo\x1b\\\x1b]9;4;1;40\x07\x1b]9;hello\x07").unwrap();
+        vt.write_output(b"$ \x1b]133;C;cmdline_url=read%20x\x07out\r\n\x1b]133;D;3\x07\x1b]133;A\x07\x1bc").unwrap();
+        let events = vt.take_events().unwrap();
+        assert!(!events.lost);
+        let names: Vec<String> = events
+            .vt
+            .iter()
+            .map(|e| match e {
+                VtEvent::Status { state, app, .. } => format!("status:{state:?}:{app}"),
+                VtEvent::Progress { percent, .. } => format!("progress:{percent}"),
+                VtEvent::Notify { body, .. } => format!("notify:{body}"),
+                VtEvent::Prompt { step, exit, command, row, .. } => format!("prompt:{step:?}:{exit:?}:{command}:{}", row.is_some()),
+                VtEvent::Reset => "reset".into(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "status:Working:cargo",
+                "progress:40",
+                "notify:hello",
+                "prompt:OutputStart:None:read x:true",
+                "prompt:CommandEnd:Some(3)::true",
+                "prompt:PromptStart:None::false",
+                "progress:-1",
+                "status:Clear:",
+                "reset",
+            ]
+        );
+        assert!(matches!(events.vt[0], VtEvent::Status { state: ReportState::Working, .. }));
+        assert!(matches!(events.vt[3], VtEvent::Prompt { step: PromptStep::OutputStart, .. }));
+        assert!(vt.take_events().unwrap().vt.is_empty(), "taken once");
+        let flood: String = (0..1100).map(|i| format!("\x1b]9;n{i}\x07")).collect();
+        vt.write_output(flood.as_bytes()).unwrap();
+        let events = vt.take_events().unwrap();
+        assert!(events.lost);
+        assert_eq!(events.vt.len(), 1024);
+        assert!(matches!(events.vt.last(), Some(VtEvent::Notify { body, .. }) if body == "n1099"), "keeps the newest");
+        assert!(!vt.take_events().unwrap().lost);
+    }
+
+    #[test]
+    fn tracked_rows_follow_scrolling_and_select_command_output() {
+        use crate::VtEvent;
+        let mut vt = TerminalCore::server(GridSize::new(20, 4).unwrap()).unwrap();
+        vt.write_output(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ").unwrap();
+        let mut rows: Vec<_> =
+            vt.take_events().unwrap().vt.into_iter().filter_map(|e| if let VtEvent::Prompt { row, .. } = e { row } else { None }).collect();
+        assert_eq!(rows.len(), 2);
+        let end = rows.pop().unwrap();
+        let start = rows.pop().unwrap();
+        assert_eq!(vt.rows_from_bottom(&end), Some(0));
+        assert_eq!(vt.output_text(&start).unwrap(), "one\ntwo");
+        vt.write_output(b"\r\n\r\n\r\n").unwrap();
+        assert_eq!(vt.rows_from_bottom(&end), Some(3), "moves with its content");
+        let again = vt.track_row(3, 0).expect("re-pin");
+        assert_eq!(vt.rows_from_bottom(&again), Some(3));
+        assert_eq!(vt.output_text(&start).unwrap(), "one\ntwo");
     }
 
     #[test]

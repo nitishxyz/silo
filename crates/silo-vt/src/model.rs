@@ -79,8 +79,82 @@ pub struct SearchState {
     pub viewport: Vec<Span>,
 }
 
+/// OSC 7501 state, as reported (`Clear` removes records).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    Clear,
+    Unknown,
+}
+
+/// OSC 7501 kind of a blocked report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportKind {
+    None,
+    Permission,
+    Question,
+    Auth,
+    Unknown,
+}
+
+/// OSC 9;4 progress state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressReportState {
+    Remove,
+    Set,
+    Error,
+    Indeterminate,
+    Pause,
+    Unknown,
+}
+
+/// OSC 133 step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptStep {
+    /// A (or P/N): a prompt starts.
+    PromptStart,
+    /// B: input starts.
+    InputStart,
+    /// C: the command runs; output follows.
+    OutputStart,
+    /// D: the command ended.
+    CommandEnd,
+    Unknown,
+}
+
+/// Which prompt a [`PromptStep::PromptStart`] starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptKind {
+    Primary,
+    Right,
+    Continuation,
+    Secondary,
+    Unknown,
+}
+
+/// One server-terminal hook event, in the order the program sent them.
+/// Strings are raw program text (bounded to 16 KiB): sanitize before
+/// showing.
+#[derive(Debug)]
+pub enum VtEvent {
+    /// OSC 7501; `progress` is -1 when none.
+    Status { state: ReportState, kind: ReportKind, progress: i8, id: String, app: String, title: String, message: String },
+    /// OSC 9;4; `percent` is -1 when none.
+    Progress { state: ProgressReportState, percent: i8 },
+    /// OSC 9 / 777.
+    Notify { title: String, body: String },
+    /// OSC 133. `row` tracks the cursor cell for C and D.
+    Prompt { step: PromptStep, prompt_kind: PromptKind, exit: Option<i32>, command: String, error: String, row: Option<crate::TrackedRow> },
+    /// RIS (after its `Status { Clear, id: "" }` and progress removal).
+    Reset,
+}
+
 /// Effects reported by upstream callbacks since the previous collection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct TerminalEvents {
     pub bells: u32,
     /// New title after OSC 0/2 (`Some("")` when cleared).
@@ -90,6 +164,10 @@ pub struct TerminalEvents {
     pub pwd: Option<String>,
     /// Program-requested clipboard write (standard or primary selection).
     pub clipboard: Vec<(ClipboardLocation, String)>,
+    /// Hook events of a server terminal ([`crate::TerminalCore::server`]).
+    pub vt: Vec<VtEvent>,
+    /// Hook events were dropped (more than 1024 or 256 KiB queued).
+    pub lost: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +179,7 @@ pub enum ClipboardLocation {
 impl TerminalEvents {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bells == 0 && self.title.is_none() && self.pwd.is_none() && self.clipboard.is_empty()
+        self.bells == 0 && self.title.is_none() && self.pwd.is_none() && self.clipboard.is_empty() && self.vt.is_empty() && !self.lost
     }
 }
 

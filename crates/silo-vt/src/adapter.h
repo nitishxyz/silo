@@ -62,6 +62,18 @@ int silo_vt_resize(SiloVt *vt, uint16_t columns, uint16_t rows, uint16_t width, 
 int silo_vt_frame(SiloVt *vt, SiloFrame *out, SiloCell *cells, size_t capacity,
                       uint16_t columns, bool full, uint64_t *dirty_rows,
                       SiloLink *links, size_t link_cap, size_t *link_count);
+/* Install the status hooks (OSC 7501, 9;4, 9/777, 133, RIS) of a server
+ * terminal; with them, `OSC 7501 ; ?` is answered through the replies. */
+int silo_vt_hook(SiloVt *vt);
+/* Copies and clears the queued hook events when `cap` suffices; returns
+ * their length either way. `lost`: older events were dropped. Prompt
+ * records carry tracked refs the caller now owns. */
+size_t silo_vt_take_events(SiloVt *vt, unsigned char *out, size_t cap, bool *lost);
+void silo_tracked_free(void *ref);
+int silo_vt_row_from_bottom(SiloVt *vt, void *ref, uint32_t *out);
+int silo_vt_track_row(SiloVt *vt, uint32_t from_bottom, uint16_t x, void **out);
+int silo_vt_tracked_column(void *ref, uint16_t *x);
+int silo_vt_output_text(SiloVt *vt, void *ref, uint8_t **out, size_t *len);
 /* Returns and clears accumulated bell/title/pwd effects. */
 void silo_vt_events(SiloVt *vt, SiloEvents *out);
 /* Copies and clears the last program clipboard write; returns required length if cap is short. */

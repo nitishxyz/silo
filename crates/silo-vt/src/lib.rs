@@ -5,9 +5,10 @@ mod sys;
 
 pub use model::{
     Cell, ClipboardLocation, ColorScheme, Cursor, CursorShape, Frame, GridSize, KeyEvent, Link, Modifiers, MouseAction, MouseButton, MouseEvent,
-    ScrollState, SearchState, SearchStatus, Span, TerminalColors, TerminalDefaults, TerminalError, TerminalEvents,
+    ProgressReportState, PromptKind, PromptStep, ReportKind, ReportState, ScrollState, SearchState, SearchStatus, Span, TerminalColors,
+    TerminalDefaults, TerminalError, TerminalEvents, VtEvent,
 };
-pub use sys::{RestoreOptions, RestoreProgress, TerminalCore};
+pub use sys::{RestoreOptions, RestoreProgress, TerminalCore, TrackedRow};
 
 /// Ghostty revision this crate is compiled against. Snapshots are only
 /// exchanged natively between peers with the same revision.

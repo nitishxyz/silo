@@ -5,6 +5,8 @@
 #include <string.h>
 #include "adapter.h"
 
+#define CHECK(call) do { int r = (call); if (r != GHOSTTY_SUCCESS) return r; } while (0)
+
 /* All upstream layouts and enum values are compiled against pinned headers. */
 struct SiloVt {
     GhosttyTerminal terminal;
@@ -32,6 +34,12 @@ struct SiloVt {
     unsigned char replies[65536];
     size_t replies_len;
     bool overflow;
+    /* Ordered hook events (server terminals, see silo_vt_hook): records of
+     * `u32 len | u8 type | payload`, oldest first. */
+    unsigned char *events;
+    size_t events_len, events_cap;
+    uint32_t events_count;
+    bool events_lost;
     /* Incremental snapshot restore in progress; borrows `terminal`. */
     GhosttySnapshotDecoder decoder;
     unsigned char *restore_buf;
@@ -112,8 +120,259 @@ static void pwd_changed(GhosttyTerminal terminal, void *userdata) {
     ((SiloVt *)userdata)->pwd_changed = true;
 }
 
+/* Event queue bounds; on overflow the oldest events go and `lost` is set. */
+#define EVENTS_MAX_COUNT 1024
+#define EVENTS_MAX_BYTES (256 * 1024)
+/* Longest string copied into an event; the embedder truncates further. */
+#define EVENT_STRING_MAX 16384
+
+enum { EV_STATUS = 1, EV_PROGRESS = 2, EV_NOTIFY = 3, EV_PROMPT = 4, EV_RESET = 5 };
+
+typedef struct {
+    unsigned char *ptr;
+    size_t len, cap;
+    bool failed;
+} Record;
+
+static void put(Record *r, const void *data, size_t len) {
+    if (r->failed) return;
+    if (r->len + len > r->cap) {
+        size_t cap = r->cap ? r->cap : 256;
+        while (cap < r->len + len) cap *= 2;
+        unsigned char *grown = realloc(r->ptr, cap);
+        if (!grown) {
+            r->failed = true;
+            return;
+        }
+        r->ptr = grown;
+        r->cap = cap;
+    }
+    if (len) memcpy(r->ptr + r->len, data, len);
+    r->len += len;
+}
+
+static void put_u8(Record *r, uint8_t v) { put(r, &v, 1); }
+
+static void put_string(Record *r, GhosttyString s) {
+    uint32_t len = (uint32_t)(s.ptr ? (s.len < EVENT_STRING_MAX ? s.len : EVENT_STRING_MAX) : 0);
+    put(r, &len, 4);
+    put(r, s.ptr, len);
+}
+
+static Record record(uint8_t type) {
+    Record r = {0};
+    uint32_t len = 0;
+    put(&r, &len, 4);
+    put_u8(&r, type);
+    return r;
+}
+
+/* A prompt record owns the tracked ref stored right after its type. */
+static void release_record(const unsigned char *rec) {
+    if (rec[4] != EV_PROMPT) return;
+    GhosttyTrackedGridRef ref;
+    memcpy(&ref, rec + 5, sizeof(ref));
+    ghostty_tracked_grid_ref_free(ref);
+}
+
+static void drop_oldest(SiloVt *vt) {
+    uint32_t len;
+    memcpy(&len, vt->events, 4);
+    release_record(vt->events);
+    memmove(vt->events, vt->events + len, vt->events_len - len);
+    vt->events_len -= len;
+    vt->events_count--;
+    vt->events_lost = true;
+}
+
+static void push(SiloVt *vt, Record *r) {
+    if (!r->failed && r->len <= EVENTS_MAX_BYTES) {
+        uint32_t len = (uint32_t)r->len;
+        memcpy(r->ptr, &len, 4);
+        while (vt->events_count && (vt->events_count >= EVENTS_MAX_COUNT || vt->events_len + r->len > EVENTS_MAX_BYTES))
+            drop_oldest(vt);
+        if (vt->events_len + r->len > vt->events_cap) {
+            size_t cap = vt->events_cap ? vt->events_cap : 4096;
+            while (cap < vt->events_len + r->len) cap *= 2;
+            unsigned char *grown = realloc(vt->events, cap);
+            if (grown) {
+                vt->events = grown;
+                vt->events_cap = cap;
+            } else {
+                r->failed = true;
+            }
+        }
+    } else {
+        r->failed = true;
+    }
+    if (r->failed) {
+        if (r->ptr && r->len >= 5 + sizeof(GhosttyTrackedGridRef)) release_record(r->ptr);
+        vt->events_lost = true;
+    } else {
+        memcpy(vt->events + vt->events_len, r->ptr, r->len);
+        vt->events_len += r->len;
+        vt->events_count++;
+    }
+    free(r->ptr);
+}
+
+static void program_status(GhosttyTerminal terminal, void *userdata, const GhosttyTerminalProgramStatus *report) {
+    (void)terminal;
+    Record r = record(EV_STATUS);
+    put_u8(&r, (uint8_t)report->state);
+    put_u8(&r, (uint8_t)report->kind);
+    put(&r, &report->progress, 1);
+    put_string(&r, report->id);
+    put_string(&r, report->app);
+    put_string(&r, report->title);
+    put_string(&r, report->message);
+    push(userdata, &r);
+}
+
+static void progress_report(GhosttyTerminal terminal, void *userdata, const GhosttyTerminalProgressReport *report) {
+    (void)terminal;
+    Record r = record(EV_PROGRESS);
+    put_u8(&r, (uint8_t)report->state);
+    put(&r, &report->progress, 1);
+    push(userdata, &r);
+}
+
+static void desktop_notification(GhosttyTerminal terminal, void *userdata, const GhosttyTerminalDesktopNotification *n) {
+    (void)terminal;
+    Record r = record(EV_NOTIFY);
+    put_string(&r, n->title);
+    put_string(&r, n->body);
+    push(userdata, &r);
+}
+
+/* Tracks the cursor's cell: the terminal has already applied the mark. */
+static GhosttyTrackedGridRef track_cursor(GhosttyTerminal terminal) {
+    uint16_t x = 0, y = 0;
+    if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &x) != GHOSTTY_SUCCESS) return NULL;
+    if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &y) != GHOSTTY_SUCCESS) return NULL;
+    GhosttyPoint at = { .tag = GHOSTTY_POINT_TAG_ACTIVE, .value.coordinate = { .x = x, .y = y } };
+    GhosttyTrackedGridRef ref = NULL;
+    if (ghostty_terminal_grid_ref_track(terminal, at, &ref) != GHOSTTY_SUCCESS) return NULL;
+    return ref;
+}
+
+static void semantic_prompt(GhosttyTerminal terminal, void *userdata, const GhosttyTerminalSemanticPrompt *event) {
+    Record r = record(EV_PROMPT);
+    GhosttyTrackedGridRef ref = NULL;
+    if (event->kind == GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START || event->kind == GHOSTTY_SEMANTIC_PROMPT_COMMAND_END)
+        ref = track_cursor(terminal);
+    put(&r, &ref, sizeof(ref));
+    if (r.failed) ghostty_tracked_grid_ref_free(ref);
+    put_u8(&r, (uint8_t)event->kind);
+    put_u8(&r, (uint8_t)event->prompt_kind);
+    put_u8(&r, event->has_exit_code ? 1 : 0);
+    put(&r, &event->exit_code, 4);
+    put_string(&r, event->command);
+    put_string(&r, event->error);
+    push(userdata, &r);
+}
+
+static void reset(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    Record r = record(EV_RESET);
+    push(userdata, &r);
+}
+
+int silo_vt_hook(SiloVt *vt) {
+    CHECK(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS, program_status));
+    CHECK(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, progress_report));
+    CHECK(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, desktop_notification));
+    CHECK(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, semantic_prompt));
+    CHECK(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_RESET, reset));
+    return 0;
+}
+
+size_t silo_vt_take_events(SiloVt *vt, unsigned char *out, size_t cap, bool *lost) {
+    size_t len = vt->events_len;
+    *lost = vt->events_lost;
+    if (len > cap) return len;
+    if (len) memcpy(out, vt->events, len);
+    vt->events_len = 0;
+    vt->events_count = 0;
+    vt->events_lost = false;
+    return len;
+}
+
+void silo_tracked_free(void *ref) {
+    ghostty_tracked_grid_ref_free(ref);
+}
+
+/* Rows below `ref`'s row in its screen (primary only: an anchor on the
+ * primary screen can't be placed while the alternate one is active). */
+int silo_vt_row_from_bottom(SiloVt *vt, void *ref, uint32_t *out) {
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return GHOSTTY_NO_VALUE;
+    GhosttyPointCoordinate at;
+    CHECK(ghostty_tracked_grid_ref_point(ref, GHOSTTY_POINT_TAG_SCREEN, &at));
+    size_t total = 0;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, &total));
+    if (at.y >= total) return GHOSTTY_NO_VALUE;
+    *out = (uint32_t)(total - 1 - at.y);
+    return 0;
+}
+
+/* Tracks column `x` of the row `from_bottom` rows above the primary
+ * screen's last row. */
+int silo_vt_track_row(SiloVt *vt, uint32_t from_bottom, uint16_t x, void **out) {
+    *out = NULL;
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return GHOSTTY_NO_VALUE;
+    size_t total = 0;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, &total));
+    if (from_bottom >= total) return GHOSTTY_NO_VALUE;
+    GhosttyPoint at = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = x, .y = (uint32_t)(total - 1 - from_bottom) } };
+    GhosttyTrackedGridRef ref = NULL;
+    CHECK(ghostty_terminal_grid_ref_track(vt->terminal, at, &ref));
+    *out = ref;
+    return 0;
+}
+
+/* Column of `ref` (to re-pin it after a restore). */
+int silo_vt_tracked_column(void *ref, uint16_t *x) {
+    GhosttyPointCoordinate at;
+    CHECK(ghostty_tracked_grid_ref_point(ref, GHOSTTY_POINT_TAG_SCREEN, &at));
+    *x = at.x;
+    return 0;
+}
+
+/* Plain text of the command output containing `ref`; empty when the cell
+ * is not command output. Allocated with ghostty's allocator. */
+int silo_vt_output_text(SiloVt *vt, void *ref, uint8_t **out, size_t *len) {
+    *out = NULL;
+    *len = 0;
+    GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    int res = ghostty_tracked_grid_ref_snapshot(ref, &at);
+    if (res == GHOSTTY_NO_VALUE) return 0;
+    CHECK(res);
+    GhosttySelection output = GHOSTTY_INIT_SIZED(GhosttySelection);
+    res = ghostty_terminal_select_output(vt->terminal, at, &output);
+    if (res == GHOSTTY_NO_VALUE) return 0;
+    CHECK(res);
+    GhosttyTerminalSelectionFormatOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+    options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+    options.unwrap = true;
+    options.trim = true;
+    options.selection = &output;
+    res = ghostty_terminal_selection_format_alloc(vt->terminal, NULL, options, out, len);
+    return res == GHOSTTY_NO_VALUE ? 0 : res;
+}
+
 void silo_vt_free(SiloVt *vt) {
     if (!vt) return;
+    for (size_t at = 0; at < vt->events_len;) {
+        uint32_t len;
+        memcpy(&len, vt->events + at, 4);
+        release_record(vt->events + at);
+        at += len;
+    }
+    free(vt->events);
     /* The decoder borrows the terminal; release it first. */
     ghostty_snapshot_decoder_free(vt->decoder);
     free(vt->restore_buf);
@@ -131,7 +390,6 @@ void silo_vt_free(SiloVt *vt) {
     free(vt);
 }
 
-#define CHECK(call) do { int r = (call); if (r != GHOSTTY_SUCCESS) return r; } while (0)
 
 /* Wires render state, encoders and callbacks around vt->terminal. Options
  * that a snapshot carries (scrollback limits, modes, colors) are left alone. */
