@@ -880,6 +880,26 @@ has merged.
   - a notification click focuses the block;
   - per-host off suppresses notifications;
   - `silo pair` from a pane shows the approval card, and Allow returns the ticket.
+- **As built** (where it differs from the plan above):
+  - Status logic is in `silo-app/src/block_status.rs` (new): marks, the header mark and OSC 9;4 bar, tab marks,
+    switcher badges. The app cleans program text again with `untrusted` and shows it only under
+    `host · session · block` (header hover, notification title).
+  - Seen: a block's done/error records showing when it got focus in the key window are sent as
+    `block.status_seen {ids}` after 1 s; a record that changes meanwhile restarts the second.
+  - Notifications have one identifier per block and reason (`host/block/reason`), not per record:
+    `block.attention` names no record. A later `block.status` without a record of that state removes it.
+    Hosts are keyed `local` or the remote EndpointId (`app.json` `notifications`, `quiet_hosts`).
+  - Debug builds only: `SILO_TEST_NOTIFICATION_CLICK=<file>` turns a line `host session block` written there into a
+    click, through the same routing as a real one (UI tests where a bundle has no notification permission).
+  - Approval skipping and approvers: `app_bridge::owner_app` (role app, unix socket, owner principal, **not in a
+    pane**) decides whether a call skips approval (`approval::gate`; `access::check` no longer looks at the role)
+    and who gets `app.request`. Approvers are app clients with `approvals`, not in a pane, and local only as the
+    owner (no token). So a Silo app started from inside one of this server's panes is asked like any program.
+  - "In a pane" (§10): the parent chain reaches a block's process, **or** the caller or any process on that chain
+    has a block's terminal as its controlling terminal (the block process's `e_tdev` / `tty_nr`). A double fork
+    keeps the terminal; `setsid` drops it, leaving no terminal to confirm on. Still not seen (decision 8): a
+    program that detaches and confirms on a terminal of its own it opened outside the pane's session.
+  - Approval cards show in the key window of every app; a notification is added only when no Silo window is key.
 
 **P7-6: prompt UI.** After P7-3, P7-4 and P7-5.
 - **Files:** `silo-client/src/mirror.rs` (frames → tracked refs), `silo-render/src/surface.rs` (gutter mark),
