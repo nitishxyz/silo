@@ -9,7 +9,10 @@
 //! subtitle and body, cleaned. A click opens that host, session and block;
 //! a notification whose record was seen anywhere is removed.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use silo_proto::{
     control::AttentionReason,
@@ -140,13 +143,24 @@ pub fn attention_note(
 /// Delivered notifications of `host`'s block `status` whose record is gone
 /// (seen on any device, or replaced): to remove.
 #[must_use]
-pub fn stale(delivered: &HashSet<String>, host: &str, status: &BlockStatus) -> Vec<String> {
+pub fn stale(delivered: &HashMap<String, Instant>, host: &str, status: &BlockStatus) -> Vec<String> {
     [AttentionReason::Blocked, AttentionReason::Done, AttentionReason::Error]
         .into_iter()
         .filter(|reason| state_of(*reason).is_some_and(|state| !block_status::has(status, state)))
         .map(|reason| identifier(host, &status.block_id, reason))
-        .filter(|id| delivered.contains(id))
+        .filter(|id| delivered.contains_key(id))
         .collect()
+}
+
+/// How long a block's notification for one reason stands for any repeat.
+pub const REPEAT_AFTER: Duration = Duration::from_secs(10);
+
+/// Whether notification `id` is still showing from less than
+/// [`REPEAT_AFTER`] ago: a program that keeps raising attention (up to
+/// once a second, the server's pace) does not alert again each time.
+#[must_use]
+pub fn repeat(delivered: &HashMap<String, Instant>, id: &str, now: Instant) -> bool {
+    delivered.get(id).is_some_and(|at| now.saturating_duration_since(*at) < REPEAT_AFTER)
 }
 
 /// Where a clicked notification's `userInfo` leads.
@@ -418,7 +432,8 @@ mod tests {
 
     #[test]
     fn seen_records_take_their_notifications_away() {
-        let delivered: HashSet<String> = ["local/b1/done", "local/b1/blocked", "local/b2/error"].map(str::to_owned).into();
+        let now = Instant::now();
+        let delivered: HashMap<String, Instant> = ["local/b1/done", "local/b1/blocked", "local/b2/error"].map(|id| (id.to_owned(), now)).into();
         let record = |state| ProgramStatus {
             id: String::new(),
             state,
@@ -436,6 +451,16 @@ mod tests {
         gone.sort();
         assert_eq!(gone, ["local/b1/blocked", "local/b1/done"]);
         assert!(stale(&delivered, "e1", &empty).is_empty(), "another host's");
+    }
+
+    #[test]
+    fn a_showing_notification_is_not_repeated_for_a_while() {
+        let at = Instant::now();
+        let delivered: HashMap<String, Instant> = [("local/b1/notification".to_owned(), at)].into();
+        assert!(repeat(&delivered, "local/b1/notification", at + Duration::from_secs(1)));
+        assert!(!repeat(&delivered, "local/b1/notification", at + REPEAT_AFTER), "once it has stood a while");
+        assert!(!repeat(&delivered, "local/b1/done", at), "another reason");
+        assert!(!repeat(&HashMap::new(), "local/b1/notification", at), "taken away (seen): shown again");
     }
 
     #[test]

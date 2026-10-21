@@ -1,4 +1,4 @@
-//! What a block's pograms report (OSC 7501 records, OSC 9;4 progress),
+//! What a block's programs report (OSC 7501 records, OSC 9;4 progress),
 //! reduced to the marks the pane header, tabs and switcher show. Program
 //! text is untrusted: it is cleaned again here (an older or hostile server
 //! may not have) and always shown under a trusted label.

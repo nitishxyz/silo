@@ -901,6 +901,14 @@ has merged.
     keeps the terminal; `setsid` drops it, leaving no terminal to confirm on. Still not seen (decision 8): a
     program that detaches and confirms on a terminal of its own it opened outside the pane's session.
   - Approval cards show in the key window of every app; a notification is added only when no Silo window is key.
+    The caller's name is its own claim, so the card quotes it (`“silo cli · claude” wants to`).
+  - Only running blocks' pids count as panes (an exited block's pid may have been reused).
+  - The CLI says `waiting for approval in Silo…` after 1 s of a gated call; `silo api call` / `silo do` take the
+    confirm path only for methods whose `access.approval` is set.
+  - The menu-bar agent's Quit is the user's: it stops the server over its own unsubscribed `app` connection
+    (never an approver, never sent `app.request`), so Quit works with the app closed and raises no card.
+  - App side: a block's notification for one reason is not re-alerted within 10 s while still delivered; a
+    notification click for a host that is not connected yet focuses the block once it connects.
 
 **P7-6: prompt UI.** After P7-3, P7-4 and P7-5.
 - **Files:** `silo-client/src/mirror.rs` (frames → tracked refs), `silo-render/src/surface.rs` (gutter mark),

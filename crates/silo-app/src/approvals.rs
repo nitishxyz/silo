@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::{AnyElement, Context, FontWeight, IntoElement, Window, div, prelude::*, px, rgb};
 use silo_proto::{
     control::{Caller, Method},
-    text::{MAX_MESSAGE, MAX_TITLE, untrusted},
+    text::{MAX_APP, MAX_MESSAGE, MAX_TITLE, untrusted},
 };
 
 use crate::theme::Continuous as _;
@@ -22,7 +22,7 @@ use crate::{
 pub struct Approval {
     pub host: usize,
     pub id: String,
-    /// Who asks (the client's label), cleaned.
+    /// Who asks (the client's label), cleaned; the client chose it.
     pub caller: String,
     /// The caller's pane, `session › block`, if it runs in one.
     pub from: Option<String>,
@@ -43,15 +43,26 @@ fn plain(text: &str, max: usize) -> String {
     untrusted(text, max).split(' ').filter(|w| !w.contains('/') && !w.contains('\\')).collect::<Vec<_>>().join(" ")
 }
 
+impl Approval {
+    /// The card's first line. The name is the caller's own claim (anything
+    /// may call itself "Silo"; the Silo app's own calls are never asked
+    /// for), so it is quoted.
+    pub fn asks(&self) -> String {
+        if self.caller == UNNAMED { format!("{UNNAMED} wants to") } else { format!("\u{201c}{}\u{201d} wants to", self.caller) }
+    }
+}
+
+const UNNAMED: &str = "A program";
+
 impl Approvals {
     /// `approval.requested` from `host`. A repeated id replaces its card.
     pub fn requested(&mut self, host: usize, id: &str, summary: &str, caller: &Caller, expires_in_ms: u64, now: Instant) {
         self.cards.retain(|c| !(c.host == host && c.id == id));
-        let label = plain(&caller.label, MAX_TITLE);
+        let label = plain(&caller.label, MAX_APP);
         self.cards.push(Approval {
             host,
             id: id.to_owned(),
-            caller: if label.is_empty() { "A program".to_owned() } else { label },
+            caller: if label.is_empty() { UNNAMED.to_owned() } else { label },
             from: caller.from.as_deref().map(|f| plain(f, MAX_TITLE)).filter(|f| !f.is_empty()),
             summary: plain(summary, MAX_MESSAGE),
             expires: now + Duration::from_millis(expires_in_ms),
@@ -156,7 +167,7 @@ impl Workspace {
                 .border_color(rgb(theme::border()))
                 .shadow_xl()
                 .text_size(px(13.0))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} wants to", card.caller)))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(card.asks()))
                 .child(div().child(card.summary.clone()))
                 .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(place))
                 .child(
@@ -227,9 +238,10 @@ mod tests {
         approvals.requested(0, "a", "Remove the host /tmp/x mini", &who, 1, Instant::now());
         let card = &approvals.cards[0];
         assert_eq!(card.caller, "agent");
+        assert_eq!(card.asks(), "\u{201c}agent\u{201d} wants to", "a name the caller chose is quoted");
         assert_eq!(card.from.as_deref(), Some("work › build"));
         assert_eq!(card.summary, "Remove the host mini");
         approvals.requested(0, "b", "x", &caller("/bin/sh", None), 1, Instant::now());
-        assert_eq!(approvals.cards[1].caller, "A program");
+        assert_eq!(approvals.cards[1].asks(), "A program wants to");
     }
 }

@@ -70,6 +70,8 @@ pub struct Workspace {
     pub(crate) divider_drag: Option<crate::layout::DividerDrag>,
     /// Session to show once the host connects (restored or requested).
     pub(crate) wanted_session: Option<String>,
+    /// Block to focus once the host connects (a clicked notification).
+    wanted_block: Option<String>,
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
     /// Browser blocks' panes (terminal blocks are in `panes`).
     pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
@@ -233,6 +235,7 @@ impl Workspace {
             ratio_flush: None,
             divider_drag: None,
             wanted_session,
+            wanted_block: None,
             panes: HashMap::new(),
             browsers: HashMap::new(),
             server_focus: None,
@@ -421,6 +424,11 @@ impl Workspace {
         };
         match &mut self.seen {
             Some(watch) if watch.block == block => {
+                // Marked seen: what shows next (newer records) starts over.
+                if watch.sent && records != watch.records {
+                    *watch = SeenWatch { block, since: now, records, sent: false };
+                    return;
+                }
                 if watch.sent || now - watch.since < SEEN_AFTER {
                     return;
                 }
@@ -450,11 +458,16 @@ impl Workspace {
             None => self.switch_host(host, window, cx),
         }
         if let Some(block) = block {
-            // The server makes it its tab's focused block and that tab the
-            // session's; the view that follows focuses it here.
-            self.server_focus = None;
-            self.call(Method::BlockFocus { block_id: block.clone() });
-            self.focus_block(&block, window, cx);
+            if self.control().is_none() {
+                // Not connected: focused once it is (`connected`).
+                self.wanted_block = Some(block);
+            } else {
+                // The server makes it its tab's focused block and that tab
+                // the session's; the view that follows focuses it here.
+                self.server_focus = None;
+                self.call(Method::BlockFocus { block_id: block.clone() });
+                self.focus_block(&block, window, cx);
+            }
         }
         cx.notify();
     }
@@ -613,11 +626,16 @@ impl Workspace {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
+        if let Some(block) = self.wanted_block.take() {
+            self.server_focus = None;
+            self.call(Method::BlockFocus { block_id: block });
+        }
         self.choose_session(preferred, window, cx);
     }
 
     /// Show `session_id` on `host`, detaching the current session's blocks.
     pub(crate) fn open_session(&mut self, host: usize, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.wanted_block = None;
         if host == self.active_host && self.view.as_ref().is_some_and(|v| v.session.id == session_id) {
             return;
         }
@@ -643,6 +661,7 @@ impl Workspace {
     /// Show `host` (its cached tree until it connects, then its last or
     /// newest session).
     pub(crate) fn switch_host(&mut self, host: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.wanted_block = None;
         if host == self.active_host {
             return;
         }

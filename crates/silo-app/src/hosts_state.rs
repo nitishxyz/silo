@@ -4,7 +4,7 @@
 //! `Workspace`, which keeps a snapshot of `entries` (see `sync_hosts`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -50,8 +50,6 @@ struct Owned {
     /// Mirrors waiting for their pane: from the cache, or kept in memory
     /// when a window switches away.
     restored: HashMap<String, silo_client::Mirror>,
-    /// The last `block.status` of every block that reported one.
-    statuses: HashMap<String, BlockStatus>,
 }
 
 /// A connection event of `host`, already applied to `HostsState`.
@@ -96,8 +94,8 @@ pub struct HostsState {
     pub(crate) offers: crate::offers::Offers,
     /// Owner actions waiting for the user (see `approvals.rs`).
     pub(crate) approvals: crate::approvals::Approvals,
-    /// Notifications shown and not yet taken away.
-    delivered: HashSet<String>,
+    /// Notifications shown and not yet taken away, and when.
+    delivered: HashMap<String, std::time::Instant>,
     /// Routes clicked notifications.
     _clicks: Option<Task<()>>,
     /// hosts.json's last seen (mtime, length); see `watch_hosts`.
@@ -147,7 +145,7 @@ impl HostsState {
                 state,
                 offers,
                 approvals: crate::approvals::Approvals::default(),
-                delivered: HashSet::new(),
+                delivered: HashMap::new(),
                 _clicks: Some(clicks),
                 hosts_stamp: hosts::stamp(&home),
                 _watch: None,
@@ -294,7 +292,7 @@ impl HostsState {
         let sessions = tree.as_ref().map(|t: &CachedTree| t.sessions.clone()).unwrap_or_default();
         let state = HostState::Connecting;
         self.entries.push(HostEntry { info, state, control: None, sessions, paused, incompatible: None, removed: false });
-        self.owned.push(Owned { conn: Some(conn), cache, tree, restored, statuses: HashMap::new() });
+        self.owned.push(Owned { conn: Some(conn), cache, tree, restored });
         cx.notify();
         index
     }
@@ -387,8 +385,13 @@ impl HostsState {
                 tracing::debug!(host = name, block = block_id, ?reason, ?seen, host_on, notify, "attention");
                 if notify {
                     let note = notifications::attention_note(&name, &key, session_id, session_name, block_id, block_title, *reason, title, body);
-                    self.delivered.insert(note.id.clone());
-                    notifications::deliver(note);
+                    let now = std::time::Instant::now();
+                    if notifications::repeat(&self.delivered, &note.id, now) {
+                        tracing::debug!(id = note.id, "attention: its notification is still showing");
+                    } else {
+                        self.delivered.insert(note.id.clone(), now);
+                        notifications::deliver(note);
+                    }
                 }
             }
             ConnEvent::Event(Event::ApprovalRequested { id, summary, caller, expires_in_ms, .. }) => {
@@ -401,18 +404,18 @@ impl HostsState {
                     let note = notifications::Note {
                         id: notifications::approval_identifier(&key, id),
                         title: format!("{} · approval", info.name),
-                        subtitle: format!("{} wants to", card.caller),
+                        subtitle: card.asks(),
                         body: card.summary.clone(),
                         target: notifications::Target { host: key, session_id: None, block_id: None },
                     };
-                    self.delivered.insert(note.id.clone());
+                    self.delivered.insert(note.id.clone(), std::time::Instant::now());
                     notifications::deliver(note);
                 }
             }
             ConnEvent::Event(Event::ApprovalResolved { id, .. }) => {
                 self.approvals.resolved(host, id);
                 let note = notifications::approval_identifier(&self.entries[host].info.key(), id);
-                if self.delivered.remove(&note) {
+                if self.delivered.remove(&note).is_some() {
                     notifications::remove(vec![note]);
                 }
             }
@@ -423,14 +426,13 @@ impl HostsState {
     }
 
     /// `host` is gone (disconnected, removed): its waiting approvals failed
-    /// with it and its statuses are unknown until it is back.
+    /// with it.
     fn host_down(&mut self, host: usize) {
         self.approvals.host_gone(host);
-        self.owned[host].statuses.clear();
     }
 
-    /// A block's new status: kept, and notifications of records gone from
-    /// it (seen on any device) taken away.
+    /// A block's new status: notifications of records gone from it (seen
+    /// on any device) are taken away.
     fn block_status(&mut self, host: usize, status: &BlockStatus) {
         let key = self.entries[host].info.key();
         let stale = notifications::stale(&self.delivered, &key, status);
@@ -438,12 +440,6 @@ impl HostsState {
             self.delivered.remove(id);
         }
         notifications::remove(stale);
-        let statuses = &mut self.owned[host].statuses;
-        if status.records.is_empty() && status.progress.is_none() && status.busy.is_none() {
-            statuses.remove(&status.block_id);
-        } else {
-            statuses.insert(status.block_id.clone(), status.clone());
-        }
     }
 
     /// Blocked + error records across every connected host, on the Dock.
