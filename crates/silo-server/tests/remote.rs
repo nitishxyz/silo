@@ -745,6 +745,12 @@ async fn remote_pastes_reach_the_host_clipboard_and_host_copies_come_back() {
     assert_eq!(fake.content(), Some(pasted));
     // Our own push is not copied back.
     assert_eq!(remote_clip_write(&mut data, Duration::from_millis(1200)).await, None);
+    // Nor is it when it comes back as a new host copy (Universal Clipboard).
+    fake.set_by_host("pasted");
+    assert_eq!(remote_clip_write(&mut data, Duration::from_millis(1200)).await, None);
+    // A later copy of the same text on the host is a real copy.
+    fake.set_by_host("pasted");
+    assert_eq!(remote_clip_write(&mut data, T).await.as_deref(), Some("pasted"));
 
     // Local clients share the host's clipboard: their pushes are ignored,
     // and host changes go to remote streams only.
@@ -769,9 +775,3 @@ async fn remote_pastes_reach_the_host_clipboard_and_host_copies_come_back() {
     net.close().await.unwrap();
     shutdown(control, task).await;
 }
-    // Nor is it when it comes back as a new host copy (Universal Clipboard).
-    fake.set_by_host("pasted");
-    assert_eq!(remote_clip_write(&mut data, Duration::from_millis(1200)).await, None);
-    // A later copy of the same text on the host is a real copy.
-    fake.set_by_host("pasted");
-    assert_eq!(remote_clip_write(&mut data, T).await.as_deref(), Some("pasted"));
