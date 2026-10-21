@@ -120,7 +120,14 @@ pub fn server_lock_held(home: &Path) -> bool {
     let Ok(file) = std::fs::OpenOptions::new().write(true).open(paths::server_lock(home)) else {
         return false;
     };
-    rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err()
+    if rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        return true;
+    }
+    // Unlock, not only close: a child forked meanwhile by another thread
+    // shares this open file description until it execs, and would hold
+    // the lock that long (a server starting then finds it taken).
+    let _ = rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::Unlock);
+    false
 }
 
 /// Stop the different-build server: best-effort `server.shutdown`, else

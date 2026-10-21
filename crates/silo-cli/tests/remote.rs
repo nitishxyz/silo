@@ -246,7 +246,13 @@ async fn upgrade_reaches_a_moved_host() {
     use silo_cli::upgrade::{Candidate, Source, paired};
     let server_home = temp_home("upgrade-server");
     let client_home = temp_home("upgrade-client");
-    let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+    // The server binds the port on 0.0.0.0 and [::]: a dual-stack socket on
+    // [::] holds both for it whenever it is down, so no other endpoint (a
+    // parallel test, the dialing client) can take the port meanwhile.
+    let reserve = |port| std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, port)).unwrap();
+    let reserved = reserve(0);
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
     let task = start_on(&server_home, Some(port)).await;
     let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
     let options = NetOptions { relay: RelayConfig::Disabled, mdns: false };
@@ -274,12 +280,14 @@ async fn upgrade_reaches_a_moved_host() {
     owner.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
+    let reserved = reserve(port);
     let host = store(EndpointAddr::new(host.addr.id).with_ip_addr(here(port)));
     let upgrade = tokio::spawn({
         let (client_home, options) = (client_home.clone(), options.clone());
         async move { paired(&client_home, &host, &candidate, false, &options).await }
     });
     tokio::time::sleep(Duration::from_secs(12)).await;
+    drop(reserved);
     let task = start_on(&server_home, Some(port)).await;
     assert_eq!(timeout(Duration::from_secs(30), upgrade).await.unwrap().unwrap().unwrap(), up_to_date);
 

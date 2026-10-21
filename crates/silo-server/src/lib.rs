@@ -277,11 +277,43 @@ fn prepare_home(home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn lock(home: &Path) -> anyhow::Result<std::fs::File> {
+/// The server lock (`flock` on `<home>/server.lock`). Dropping it unlocks,
+/// not only closes: a child forked meanwhile by another thread (another
+/// in-process server spawning its PTY host) shares the open file
+/// description until it execs, and would hold the lock that long.
+pub(crate) struct ServerLock(Option<std::fs::File>);
+
+impl ServerLock {
+    /// A lock taken over from the previous server, live.
+    pub(crate) fn adopt(file: std::fs::File) -> Self {
+        Self(Some(file))
+    }
+
+    /// Close our copy only: a successor holds the same lock now.
+    fn hand_over(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl AsFd for ServerLock {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.0.as_ref().expect("held until dropped").as_fd()
+    }
+}
+
+impl Drop for ServerLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.0.take() {
+            let _ = rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::Unlock);
+        }
+    }
+}
+
+pub(crate) fn lock(home: &Path) -> anyhow::Result<ServerLock> {
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home))?;
     rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| anyhow::anyhow!("another silo server is running for {}", home.display()))?;
-    Ok(lock)
+    Ok(ServerLock(Some(lock)))
 }
 
 fn bind(home: &Path) -> anyhow::Result<UnixListener> {
@@ -338,7 +370,7 @@ pub async fn takeover(config: Config, fail_before_ready: bool) -> anyhow::Result
     // programs we now hold must not end here.
     let net = Net::bind_with(&identity, config.net_options()).await.map_err(|error| format!("{error:#}"));
     let remote = Remote { identity, auth, net };
-    let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions, blocks, remote };
+    let start = Start { lock: ServerLock::adopt(lock), listener, notes_tx, notes_rx, persist, sessions, blocks, remote };
     serve(config, start).await
 }
 
@@ -350,7 +382,7 @@ struct Remote {
 }
 
 struct Start {
-    lock: std::fs::File,
+    lock: ServerLock,
     listener: UnixListener,
     notes_tx: tokio::sync::mpsc::UnboundedSender<block::Note>,
     notes_rx: tokio::sync::mpsc::UnboundedReceiver<block::Note>,
@@ -553,9 +585,6 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(paths::runtime(&home));
     // Give block actors a moment to hang up their children.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Unlock rather than only close: a child forked meanwhile (by another
-    // server in this process) shares the lock until it execs.
-    let _ = rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::Unlock);
     drop(lock);
     Ok(())
 }
@@ -563,7 +592,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
 /// The successor is ready and holds the lock and listening socket: close
 /// our copies and connections and tell it so. The socket path stays bound
 /// (it is the same socket); the successor rewrites the runtime file.
-async fn commit(server: &Server, listener: UnixListener, lock: std::fs::File, mut sock: std::os::unix::net::UnixStream) -> anyhow::Result<()> {
+async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, mut sock: std::os::unix::net::UnixStream) -> anyhow::Result<()> {
     drop(listener);
     // Remote clients reconnect to the successor, which binds the same
     // identity once this endpoint is gone.
@@ -581,7 +610,7 @@ async fn commit(server: &Server, listener: UnixListener, lock: std::fs::File, mu
         }
         reg.sessions.clear();
     }
-    drop(lock);
+    lock.hand_over();
     tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await??;
     tracing::info!("upgrade committed; exiting");
     Ok(())
