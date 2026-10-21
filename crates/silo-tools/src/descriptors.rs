@@ -140,7 +140,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ("browser_find", "Find accessibility nodes and their paths; provide exactly one of text or regex.", "block_id text regex", "", true),
         (
             "browser_click",
-            "Click a snapshot ref (e12) or CSS selector. include_snapshot returns the new tree.",
+            "Click a snapshot ref (e12) or CSS selector. The result describes the page the click led to; navigating_to means a navigation is still loading (wait_for or snapshot next). include_snapshot returns the new tree.",
             "block_id target double button include_snapshot",
             "target",
             false,
@@ -156,12 +156,18 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ("browser_fill_form", "Fill several fields by ref or CSS selector.", "block_id fields include_snapshot", "fields", false),
         (
             "browser_type",
-            "Type into the focused element; optional submit is a key such as Enter.",
+            "Type into the focused element; optional submit is a key such as Enter. With submit the result describes the page it led to (navigating_to: still loading).",
             "block_id text submit include_snapshot",
             "text",
             false,
         ),
-        ("browser_press", "Press a key or chord such as Enter, Control+A or Meta+Shift+R.", "block_id key include_snapshot", "key", false),
+        (
+            "browser_press",
+            "Press a key or chord such as Enter, Control+A or Meta+Shift+R. The result describes the page it led to (navigating_to: still loading).",
+            "block_id key include_snapshot",
+            "key",
+            false,
+        ),
         ("browser_scroll", "Scroll by dx/dy, or scroll target ref/selector into view.", "block_id target dx dy include_snapshot", "", false),
         ("browser_wait_for", "Wait for page text strings (or their disappearance with gone:true).", "block_id text gone timeout_ms", "", true),
         (

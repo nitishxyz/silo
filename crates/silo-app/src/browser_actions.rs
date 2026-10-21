@@ -17,6 +17,11 @@ use silo_web::{
 };
 use tokio::sync::Mutex;
 
+/// How long after input a main-frame navigation may take to start.
+const NAVIGATION_START: Duration = Duration::from_millis(300);
+/// How long after input a started navigation may take to commit and parse.
+const NAVIGATION_SETTLE: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Default, Deserialize)]
 struct Action {
     #[serde(default)]
@@ -165,6 +170,7 @@ struct State {
     refs: Refs,
     generation: u64,
     dialog: Option<Value>,
+    main_frame: Option<String>,
     console: VecDeque<Value>,
     network: VecDeque<(String, Value)>,
     console_id: u64,
@@ -202,6 +208,7 @@ impl State {
                 self.snapshot = Snapshot::default();
                 self.refs = Refs::default();
                 self.dialog = None;
+                self.main_frame = p["frame"]["id"].as_str().map(str::to_owned);
             }
             "Page.javascriptDialogOpening" => self.dialog = Some(json!({"kind": p["type"], "message": p["message"]})),
             "Page.javascriptDialogClosed" => self.dialog = None,
@@ -263,6 +270,49 @@ fn remote_text(value: &Value) -> String {
     }
 }
 
+/// A main-frame navigation an action may have started, followed through its events.
+#[derive(Default)]
+struct Navigation {
+    started: bool,
+    committed: bool,
+    url: Option<String>,
+}
+
+impl Navigation {
+    /// Feeds an event; true once the result can be reported.
+    fn feed(&mut self, event: &DevToolsEvent, main: &str) -> bool {
+        let p = &event.params;
+        let main_frame = p["frameId"].as_str() == Some(main);
+        let start = match event.method.as_str() {
+            "Page.javascriptDialogOpening" => return true,
+            "Page.navigatedWithinDocument" if main_frame => return true,
+            "Page.frameNavigated" if p["frame"].get("parentId").is_none() => {
+                self.started = true;
+                self.committed = true;
+                return false;
+            }
+            "Page.domContentEventFired" => return self.committed,
+            "Page.frameStoppedLoading" if main_frame => return self.started,
+            "Page.frameRequestedNavigation" => main_frame && p["disposition"].as_str().is_none_or(|d| d == "currentTab"),
+            "Page.frameStartedNavigating" => main_frame && !matches!(p["navigationType"].as_str(), Some("sameDocument" | "historySameDocument")),
+            "Page.frameScheduledNavigation" | "Page.frameStartedLoading" => main_frame,
+            _ => false,
+        };
+        if start {
+            self.started = true;
+            if self.url.is_none() {
+                self.url = p["url"].as_str().map(str::to_owned);
+            }
+        }
+        false
+    }
+
+    /// The requested URL of a navigation that has not committed.
+    fn pending(&self) -> Option<String> {
+        (self.started && !self.committed).then(|| self.url.clone()).flatten()
+    }
+}
+
 pub(crate) struct Executor {
     page: Rc<Browser>,
     state: Rc<RefCell<State>>,
@@ -321,6 +371,8 @@ impl Executor {
                 for domain in ["Page", "Runtime", "DOM", "Accessibility", "Log", "Network"] {
                     self.cdp(&format!("{domain}.enable"), json!({})).await?;
                 }
+                let tree = self.cdp("Page.getFrameTree", json!({})).await?;
+                self.state.borrow_mut().main_frame = tree["frameTree"]["frame"]["id"].as_str().map(str::to_owned);
                 *enabled = true;
             }
         }
@@ -337,18 +389,19 @@ impl Executor {
         };
         if !bypass && self.state.borrow().dialog.is_some() {
             return match action {
-                Some(action) => self.action(action).await,
+                Some(action) => self.action(action, None).await,
                 None => Err(PendingDialog.into()),
             };
         }
         let result = self.execute(request).await;
         if result.as_ref().is_err_and(|error| error.is::<PendingDialog>()) {
             return match action {
-                Some(action) => self.action(action).await,
+                Some(action) => self.action(action, None).await,
                 None => result,
             };
         }
-        if !bypass {
+        // A pending navigation holds renderer commands until it commits, and takes the objects with the old document.
+        if !bypass && !result.as_ref().is_ok_and(|result| result.get("navigating_to").is_some()) {
             let _ = self.cdp("Runtime.releaseObjectGroup", json!({"objectGroup":"silo-agent"})).await;
         }
         result
@@ -442,14 +495,45 @@ impl Executor {
         Ok(state.snapshot.text())
     }
 
-    async fn action(&self, action: Action) -> Result<Value> {
+    /// Follows a main-frame navigation the input started; returns its URL if it has not committed by the deadline.
+    async fn settle(&self, mut events: tokio::sync::broadcast::Receiver<DevToolsEvent>) -> Option<String> {
+        let main = self.state.borrow().main_frame.clone()?;
+        let begun = Instant::now();
+        let mut navigation = Navigation::default();
+        loop {
+            let deadline = begun + if navigation.started { NAVIGATION_SETTLE } else { NAVIGATION_START };
+            let timer = self.background.timer(deadline.saturating_duration_since(Instant::now()));
+            let event = tokio::select! {
+                event = events.recv() => event,
+                () = timer => return navigation.pending(),
+            };
+            let Ok(event) = event else { return navigation.pending() };
+            let done = navigation.feed(&event, &main);
+            if event.method == "Page.javascriptDialogOpening" {
+                self.state.borrow_mut().event(event);
+            }
+            if done {
+                return None;
+            }
+        }
+    }
+
+    async fn action(&self, action: Action, navigating_to: Option<String>) -> Result<Value> {
         let mut result = self.metadata().await?;
+        if let Some(url) = navigating_to {
+            result["navigating_to"] = url.into();
+        }
         let dialog = self.state.borrow().dialog.clone();
         if let Some(dialog) = dialog {
             result["dialog"] = dialog;
         }
-        if action.include_snapshot && result.get("dialog").is_none() {
-            result["snapshot"] = self.snapshot(None, None, false).await?.into();
+        if action.include_snapshot && result.get("dialog").is_none() && result.get("navigating_to").is_none() {
+            let generation = self.page.document_generation();
+            let snapshot = match self.snapshot(None, None, false).await {
+                Err(_) if self.page.document_generation() != generation => self.snapshot(None, None, false).await?,
+                snapshot => snapshot?,
+            };
+            result["snapshot"] = snapshot.into();
         }
         Ok(result)
     }
@@ -485,6 +569,10 @@ impl Executor {
     }
 
     async fn execute(&self, request: Request) -> Result<Value> {
+        // Subscribed before input so a navigation it starts is not missed.
+        let events =
+            matches!(request, Request::Click { .. } | Request::Press { .. } | Request::Type { submit: Some(_), .. } | Request::Dialog { .. })
+                .then(|| self.page.subscribe_cdp());
         let action = match request {
             Request::Snapshot { within, depth, boxes } => {
                 let snapshot = self.snapshot(within.as_deref(), depth, boxes).await?;
@@ -616,7 +704,11 @@ impl Executor {
                 return self.screenshot(target.as_deref(), full_page, format.unwrap_or(Format::Png), quality).await;
             }
         };
-        self.action(action).await
+        let navigating_to = match events {
+            Some(events) => self.settle(events).await,
+            None => None,
+        };
+        self.action(action, navigating_to).await
     }
 
     async fn screenshot(&self, target: Option<&str>, full_page: bool, mut format: Format, quality: Option<u32>) -> Result<Value> {
@@ -830,6 +922,49 @@ mod tests {
         assert!(state.snapshot.refs.is_empty());
         assert!(state.dialog.is_none());
         assert_eq!(state.console.len(), 1);
+    }
+
+    fn navigation(events: &[(&str, Value)]) -> (Navigation, Option<usize>) {
+        let mut navigation = Navigation::default();
+        let done =
+            events.iter().position(|(method, params)| navigation.feed(&DevToolsEvent { method: (*method).into(), params: params.clone() }, "main"));
+        (navigation, done)
+    }
+
+    #[test]
+    fn navigation_settles_on_main_frame_events() {
+        let (iframe, done) = navigation(&[
+            ("Page.frameRequestedNavigation", json!({"frameId":"child","url":"https://ad.example","disposition":"currentTab"})),
+            ("Page.frameStartedLoading", json!({"frameId":"child"})),
+            ("Page.navigatedWithinDocument", json!({"frameId":"child","url":"https://ad.example#x"})),
+            ("Page.frameNavigated", json!({"frame":{"id":"child","parentId":"main"}})),
+            ("Page.domContentEventFired", json!({})),
+        ]);
+        assert!(!iframe.started && done.is_none() && iframe.pending().is_none());
+        let (_, done) = navigation(&[("Page.navigatedWithinDocument", json!({"frameId":"main","url":"https://a.example#b"}))]);
+        assert_eq!(done, Some(0));
+        let (requested, done) = navigation(&[
+            ("Page.frameRequestedNavigation", json!({"frameId":"main","url":"https://b.example/","disposition":"currentTab"})),
+            ("Page.frameStartedLoading", json!({"frameId":"main"})),
+            ("Page.domContentEventFired", json!({})),
+        ]);
+        assert!(done.is_none());
+        assert_eq!(requested.pending().as_deref(), Some("https://b.example/"));
+        let (committed, done) = navigation(&[
+            ("Page.frameRequestedNavigation", json!({"frameId":"main","url":"https://b.example/","disposition":"currentTab"})),
+            ("Page.frameNavigated", json!({"frame":{"id":"main","url":"https://b.example/"}})),
+            ("Page.domContentEventFired", json!({})),
+        ]);
+        assert_eq!(done, Some(2));
+        assert!(committed.pending().is_none());
+        let (new_tab, _) =
+            navigation(&[("Page.frameRequestedNavigation", json!({"frameId":"main","url":"https://c.example/","disposition":"newTab"}))]);
+        assert!(!new_tab.started);
+        let (_, done) = navigation(&[
+            ("Page.frameRequestedNavigation", json!({"frameId":"main","url":"https://b.example/"})),
+            ("Page.javascriptDialogOpening", json!({"type":"confirm","message":"Leave?"})),
+        ]);
+        assert_eq!(done, Some(1));
     }
 
     #[test]
