@@ -124,6 +124,7 @@ unsafe extern "C" {
     fn silo_vt_paste(vt: *mut c_void, text: *mut u8, len: usize, line_breaks: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_scroll(vt: *mut c_void, delta: i32);
     fn silo_vt_scroll_to_row(vt: *mut c_void, row: u64);
+    fn silo_vt_scroll_prompt(vt: *mut c_void, delta: i32);
     fn silo_vt_scrollbar(vt: *mut c_void, out: *mut u64) -> i32;
     fn silo_vt_set_colors(vt: *mut c_void, colors: *const u32, dark: bool, out: *mut u8, cap: usize, written: *mut usize) -> i32;
     fn silo_vt_set_defaults(vt: *mut c_void, cursor_style: i32, cursor_blink: i32, scrollback_bytes: u64, scrollback_lines: u64) -> i32;
@@ -135,6 +136,8 @@ unsafe extern "C" {
     fn silo_vt_track_row(vt: *mut c_void, from_bottom: u32, x: u16, out: *mut *mut c_void) -> i32;
     fn silo_vt_tracked_column(row: *mut c_void, x: *mut u16) -> i32;
     fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, end: *mut c_void, out: *mut *mut u8, len: *mut usize, cut: *mut bool) -> i32;
+    fn silo_vt_tracked_viewport_row(vt: *mut c_void, row: *mut c_void, y: *mut u16) -> i32;
+    fn silo_vt_select_output_before(vt: *mut c_void, row: *mut c_void, start_y: *mut u32) -> i32;
 }
 
 /// A cell of a server terminal's screen that moves with its content
@@ -154,6 +157,19 @@ pub struct OutputText {
 // SAFETY: an owned handle into its terminal's page list, used only together
 // with that terminal (which is `Send` and confined by `&mut`).
 unsafe impl Send for TrackedRow {}
+
+/// Where a [`TrackedRow`] is relative to the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// On this viewport row.
+    Visible(u16),
+    Below,
+    Above,
+    /// The alternate screen is active.
+    Hidden,
+    /// Its content is gone (reset, cleared or pruned).
+    Gone,
+}
 
 impl Drop for TrackedRow {
     fn drop(&mut self) {
@@ -496,6 +512,37 @@ impl TerminalCore {
         // SAFETY: released exactly once with its length.
         unsafe { silo_bytes_free(ptr, len) };
         Ok(OutputText { text, cut })
+    }
+
+    /// Where `row` is relative to the viewport (primary screen rows only).
+    pub fn placement(&mut self, row: &TrackedRow) -> Placement {
+        let mut y = 0;
+        // SAFETY: exclusive handle; `row` is a live handle of this terminal.
+        match unsafe { silo_vt_tracked_viewport_row(self.handle.as_ptr(), row.0.as_ptr(), &raw mut y) } {
+            0 => Placement::Visible(y),
+            1 => Placement::Below,
+            2 => Placement::Above,
+            3 => Placement::Hidden,
+            _ => Placement::Gone,
+        }
+    }
+
+    /// Select the command output that ends just above `end` (the row of
+    /// its OSC 133 D mark), scrolling its start into view. Returns whether
+    /// there was output to select.
+    pub fn select_output_before(&mut self, end: &TrackedRow) -> bool {
+        let mut start = 0;
+        // SAFETY: exclusive handle; `end` is a live handle of this terminal.
+        if unsafe { silo_vt_select_output_before(self.handle.as_ptr(), end.0.as_ptr(), &raw mut start) } != 0 {
+            return false;
+        }
+        if let Ok(scroll) = self.scroll_state() {
+            let start = u64::from(start);
+            if start < scroll.offset || start >= scroll.offset + scroll.len {
+                self.scroll_to_row(start);
+            }
+        }
+        true
     }
 
     /// # Errors
@@ -978,6 +1025,15 @@ impl TerminalCore {
         }
     }
 
+    /// Move the viewport `delta` shell prompts (OSC 133 A marks) up
+    /// (negative) or down; the bottom-most prompt pins the active area.
+    pub fn scroll_prompt(&mut self, delta: i32) {
+        // SAFETY: exclusive live handle, scalar argument.
+        unsafe {
+            silo_vt_scroll_prompt(self.handle.as_ptr(), delta);
+        }
+    }
+
     /// Current scrollbar state without producing a frame.
     ///
     /// # Errors
@@ -1209,6 +1265,36 @@ mod tests {
         vt.write_output(b"\x1b[?1049l").unwrap();
         assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "one\ntwo");
         assert!(!vt.output_text(&start, Some(&end)).unwrap().cut);
+    }
+
+    #[test]
+    fn mirror_rows_place_select_output_and_jump_prompts() {
+        use crate::Placement;
+        // A client mirror: no hooks, rows pinned from `rows_from_bottom`.
+        let mut vt = TerminalCore::new(GridSize::new(20, 4).unwrap()).unwrap();
+        vt.set_defaults(&crate::TerminalDefaults { scrollback_lines: 1000, ..crate::TerminalDefaults::default() }).unwrap();
+        vt.write_output(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ ").unwrap();
+        let end = vt.track_row(0, 0).expect("the D row");
+        assert_eq!(vt.placement(&end), Placement::Visible(3));
+        assert!(vt.select_output_before(&end));
+        assert_eq!(vt.copy_selection().unwrap(), "one\ntwo");
+        vt.clear_selection();
+        // An empty command: nothing between its prompt and the next.
+        vt.write_output(b"\x1b]133;B\x07true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ").unwrap();
+        let empty = vt.track_row(0, 0).unwrap();
+        if vt.select_output_before(&empty) {
+            assert_eq!(vt.copy_selection().unwrap().trim(), "");
+        }
+        vt.write_output(b"\r\n\r\n\r\n\r\n\r\n").unwrap();
+        assert_eq!(vt.placement(&end), Placement::Above);
+        vt.scroll_prompt(-1);
+        assert!(!vt.scroll_state().unwrap().at_bottom(), "jumped up to a prompt");
+        vt.scroll_prompt(10);
+        assert!(vt.scroll_state().unwrap().at_bottom());
+        vt.write_output(b"\x1b[?1049h").unwrap();
+        assert_eq!(vt.placement(&end), Placement::Hidden);
+        vt.write_output(b"\x1b[?1049l\x1bc").unwrap();
+        assert_eq!(vt.placement(&end), Placement::Gone, "RIS drops it");
     }
 
     #[test]

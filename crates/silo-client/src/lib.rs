@@ -22,7 +22,7 @@ pub use control::{
     Upgrading, advertise, set_role, set_token,
 };
 pub use data::{DataSender, DataStream};
-pub use mirror::{Applied, Mirror, engine_config};
+pub use mirror::{Applied, MAX_COMMAND_ROWS, Mirror, engine_config};
 pub use mismatch::IncompatibleServer;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
 pub use remote::{client_identity, device_proof, offer_host, pair};

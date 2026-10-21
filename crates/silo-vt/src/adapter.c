@@ -405,6 +405,49 @@ int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t 
     return res == GHOSTTY_NO_VALUE ? 0 : res;
 }
 
+int silo_vt_tracked_viewport_row(SiloVt *vt, void *ref, uint16_t *y) {
+    if (!ghostty_tracked_grid_ref_has_value(ref)) return GHOSTTY_NO_VALUE;
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return 3;
+    GhosttyPointCoordinate at;
+    /* No viewport point for a row above the viewport. */
+    if (ghostty_tracked_grid_ref_point(ref, GHOSTTY_POINT_TAG_VIEWPORT, &at) != GHOSTTY_SUCCESS) return 2;
+    uint16_t rows = 0;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows));
+    if (at.y >= rows) return 1;
+    *y = (uint16_t)at.y;
+    return 0;
+}
+
+/* Ghostty's output selection grows from any output cell to the whole
+ * output after its prompt, ending before the next prompt row (the D row,
+ * where the next prompt starts), so the last cell above D finds it. */
+int silo_vt_select_output_before(SiloVt *vt, void *ref, uint32_t *start_y) {
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return GHOSTTY_NO_VALUE;
+    GhosttyPointCoordinate end;
+    int res = ghostty_tracked_grid_ref_point(ref, GHOSTTY_POINT_TAG_SCREEN, &end);
+    if (res != GHOSTTY_SUCCESS) return res;
+    if (end.y == 0) return GHOSTTY_NO_VALUE;
+    uint16_t cols = 0;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols));
+    GhosttyPoint above = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = cols ? cols - 1 : 0, .y = end.y - 1 } };
+    GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    CHECK(ghostty_terminal_grid_ref(vt->terminal, above, &at));
+    GhosttySelection output = GHOSTTY_INIT_SIZED(GhosttySelection);
+    res = ghostty_terminal_select_output(vt->terminal, at, &output);
+    if (res != GHOSTTY_SUCCESS) return res;
+    GhosttyPointCoordinate start;
+    CHECK(ghostty_terminal_point_from_grid_ref(vt->terminal, &output.start, GHOSTTY_POINT_TAG_SCREEN, &start));
+    *start_y = start.y;
+    vt->selecting = false;
+    vt->extending = false;
+    ghostty_selection_gesture_reset(vt->selection, vt->terminal);
+    return ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &output);
+}
+
 void silo_vt_free(SiloVt *vt) {
     if (!vt) return;
     for (size_t at = 0; at < vt->events_len;) {
@@ -1186,5 +1229,10 @@ void silo_vt_scroll(SiloVt *vt, int32_t delta) {
 
 void silo_vt_scroll_to_row(SiloVt *vt, uint64_t row) {
     GhosttyTerminalScrollViewport scroll = { .tag = GHOSTTY_SCROLL_VIEWPORT_ROW, .value.row = (size_t)row };
+    ghostty_terminal_scroll_viewport(vt->terminal, scroll);
+}
+
+void silo_vt_scroll_prompt(SiloVt *vt, int32_t delta) {
+    GhosttyTerminalScrollViewport scroll = { .tag = GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT, .value.delta_prompt = delta };
     ghostty_terminal_scroll_viewport(vt->terminal, scroll);
 }

@@ -8,7 +8,7 @@ pub use model::{
     ProgressReportState, PromptKind, PromptStep, ReportKind, ReportState, ScrollState, SearchState, SearchStatus, Span, TerminalColors,
     TerminalDefaults, TerminalError, TerminalEvents, VtEvent,
 };
-pub use sys::{OutputText, RestoreOptions, RestoreProgress, TerminalCore, TrackedRow};
+pub use sys::{OutputText, Placement, RestoreOptions, RestoreProgress, TerminalCore, TrackedRow};
 
 /// Ghostty revision this crate is compiled against. Snapshots are only
 /// exchanged natively between peers with the same revision.

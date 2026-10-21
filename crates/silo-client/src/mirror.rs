@@ -2,14 +2,17 @@
 //! the same raw output bytes, so rendering, scrolling, selection and input
 //! encoding are local.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, bail};
 use silo_proto::{
-    data::{Resume, ServerData, StartMode, Welcome},
+    data::{CommandAnchor, Resume, ServerData, StartMode, Welcome},
     model::{CursorShape, TermSize, TerminalConfig},
 };
-use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
+use silo_vt::{ColorScheme, GridSize, Placement, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults, TrackedRow};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Applied {
@@ -26,6 +29,72 @@ pub enum Applied {
 pub const ACK_BYTES: u64 = 64 * 1024;
 /// ...or after this long with unacknowledged output.
 pub const ACK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Most command rows a mirror tracks (the server keeps as many records).
+pub const MAX_COMMAND_ROWS: usize = 1000;
+
+/// The D rows of finished commands (`docs/PHASE7.md` §7.3), by record
+/// index, pinned in the mirror's own terminal so they move with scrolling,
+/// pruning and reflow.
+#[derive(Default)]
+struct CommandRows {
+    rows: BTreeMap<u64, TrackedRow>,
+    /// Anchors above the rows a snapshot head restored: `(record, rows
+    /// above top)`, pinned as history pages arrive.
+    pending: Vec<(u64, u32)>,
+    /// The head's top row when `pending` was made.
+    top: Option<TrackedRow>,
+}
+
+impl CommandRows {
+    fn insert(&mut self, record: u64, row: TrackedRow) {
+        self.rows.insert(record, row);
+        while self.rows.len() > MAX_COMMAND_ROWS {
+            self.rows.pop_first();
+        }
+    }
+
+    /// Pin `anchors`, which address rows of `vt` as it is now.
+    fn pin(&mut self, vt: &mut TerminalCore, anchors: &[CommandAnchor]) {
+        let total = vt.scroll_state().map_or(0, |s| s.total);
+        let top_from_bottom = u32::try_from(total.saturating_sub(1)).unwrap_or(u32::MAX);
+        for anchor in anchors {
+            match vt.track_row(anchor.rows_from_bottom, 0) {
+                Some(row) => self.insert(anchor.record, row),
+                None if anchor.rows_from_bottom > top_from_bottom && total > 0 => {
+                    self.pending.push((anchor.record, anchor.rows_from_bottom - top_from_bottom));
+                }
+                None => {}
+            }
+        }
+        if !self.pending.is_empty() && self.top.is_none() {
+            self.top = vt.track_row(top_from_bottom, 0);
+        }
+    }
+
+    /// After history was prepended: pin the pending rows that now exist.
+    fn pin_pending(&mut self, vt: &mut TerminalCore) {
+        let Some(top) = self.top.as_ref().and_then(|top| vt.rows_from_bottom(top)) else {
+            self.pending.clear();
+            self.top = None;
+            return;
+        };
+        for (record, above) in std::mem::take(&mut self.pending) {
+            match vt.track_row(top.saturating_add(above), 0) {
+                Some(row) => self.insert(record, row),
+                None => self.pending.push((record, above)),
+            }
+        }
+        if self.pending.is_empty() {
+            self.top = None;
+        }
+    }
+
+    fn settle(&mut self) {
+        self.pending.clear();
+        self.top = None;
+    }
+}
 
 pub struct Mirror {
     vt: Option<TerminalCore>,
@@ -52,6 +121,7 @@ pub struct Mirror {
     /// This client's own configuration: when set, the mirror renders with
     /// it (re-installed into every restored terminal) instead of `config`.
     local: Option<TerminalConfig>,
+    commands: CommandRows,
 }
 
 impl Default for Mirror {
@@ -77,6 +147,7 @@ impl Mirror {
             acked_at: Instant::now(),
             config: None,
             local: None,
+            commands: CommandRows::default(),
         }
     }
 
@@ -195,6 +266,8 @@ impl Mirror {
                 let size = vt.size();
                 self.size = TermSize { columns: size.columns, rows: size.rows, ..self.size };
                 vt.resize(self.grid(self.size)).map_err(|e| anyhow!("{e}"))?;
+                // Rows of the previous terminal mean nothing in this one.
+                self.commands = CommandRows::default();
                 self.install(vt);
                 self.awaiting_head = false;
                 Ok(Applied::Redraw)
@@ -205,12 +278,16 @@ impl Mirror {
                 }
                 let vt = self.vt.as_mut().ok_or_else(|| anyhow!("history before snapshot head"))?;
                 let progress = vt.restore_history(&bytes).map_err(|e| anyhow!("{e}"))?;
+                if progress.rows > 0 && !self.commands.pending.is_empty() {
+                    self.commands.pin_pending(vt);
+                }
                 Ok(if progress.rows > 0 { Applied::Redraw } else { Applied::None })
             }
             ServerData::SnapshotDone => {
                 if self.awaiting_head || self.vt.is_none() {
                     bail!("snapshot done before head");
                 }
+                self.commands.settle();
                 self.complete = true;
                 Ok(Applied::None)
             }
@@ -252,6 +329,21 @@ impl Mirror {
                 }
                 Ok(Applied::Redraw)
             }
+            ServerData::CommandEnd(end) => {
+                // Its row is counted right after the output up to `offset`.
+                let row = self.vt.as_mut().filter(|_| end.offset == self.next_offset).and_then(|vt| vt.track_row(end.rows_from_bottom, 0));
+                let Some(row) = row else { return Ok(Applied::None) };
+                self.commands.insert(end.record, row);
+                Ok(Applied::Redraw)
+            }
+            ServerData::Commands(anchors) => {
+                if self.awaiting_head || self.complete {
+                    bail!("unexpected command rows");
+                }
+                let vt = self.vt.as_mut().ok_or_else(|| anyhow!("command rows before snapshot head"))?;
+                self.commands.pin(vt, &anchors);
+                Ok(Applied::None)
+            }
             // Prediction metadata: the caller hands these to its
             // `Predictor::server`; they never move `next_offset` or acks.
             // A newer server's frames are skipped.
@@ -260,8 +352,6 @@ impl Mirror {
             | ServerData::ClipboardWrite { .. }
             | ServerData::ClipboardRead { .. }
             | ServerData::ClipboardReadUnknown { .. }
-            | ServerData::CommandEnd(_)
-            | ServerData::Commands(_)
             | ServerData::Unknown(_) => Ok(Applied::None),
         }
     }
@@ -328,6 +418,51 @@ impl Mirror {
         self.exited
     }
 
+    /// Finished commands' rows on screen: `(record, viewport row)` of each
+    /// D mark the viewport shows. Rows whose content is gone are dropped.
+    pub fn command_marks(&mut self) -> Vec<(u64, u16)> {
+        let Some(vt) = self.vt.as_mut() else { return Vec::new() };
+        let mut marks = Vec::new();
+        self.commands.rows.retain(|&record, row| match vt.placement(row) {
+            Placement::Gone => false,
+            Placement::Visible(y) => {
+                marks.push((record, y));
+                true
+            }
+            Placement::Above | Placement::Below | Placement::Hidden => true,
+        });
+        marks
+    }
+
+    /// The newest command whose row the mirror holds.
+    #[must_use]
+    pub fn last_command(&self) -> Option<u64> {
+        self.commands.rows.last_key_value().map(|(&record, _)| record)
+    }
+
+    /// Select command `record`'s output (scrolled into view); whether it
+    /// had any.
+    pub fn select_command_output(&mut self, record: u64) -> bool {
+        let (Some(vt), Some(row)) = (self.vt.as_mut(), self.commands.rows.get(&record)) else { return false };
+        vt.select_output_before(row)
+    }
+
+    /// Anchors of the tracked command rows, for a checkpoint.
+    #[must_use]
+    pub fn command_anchors(&mut self) -> Vec<CommandAnchor> {
+        let Some(vt) = self.vt.as_mut() else { return Vec::new() };
+        self.commands.rows.iter().filter_map(|(&record, row)| Some(CommandAnchor { record, rows_from_bottom: vt.rows_from_bottom(row)? })).collect()
+    }
+
+    /// Re-pin anchors taken with [`command_anchors`](Self::command_anchors)
+    /// on the same content.
+    pub fn restore_command_anchors(&mut self, anchors: &[CommandAnchor]) {
+        if let Some(vt) = self.vt.as_mut() {
+            self.commands.pin(vt, anchors);
+            self.commands.settle();
+        }
+    }
+
     /// Visible screen as plain text lines (trailing blanks trimmed).
     #[must_use]
     pub fn screen_text(&mut self) -> String {
@@ -380,4 +515,86 @@ fn install_config(vt: &mut TerminalCore, config: &TerminalConfig) {
     // Scheme reports are the server's to send; the mirror's are dropped.
     let _ = vt.set_colors(&colors);
     let _ = vt.set_defaults(&defaults);
+}
+
+#[cfg(test)]
+mod tests {
+    use silo_proto::data::CommandEnd;
+    use silo_vt::VtEvent;
+
+    use super::*;
+    use crate::cache::MirrorCheckpoint;
+
+    const FAILED: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ ";
+
+    /// A server terminal that ran a failed command and then enough output
+    /// to push its D row into the scrollback, with that row's anchor.
+    fn server() -> (TerminalCore, Vec<CommandAnchor>) {
+        let mut vt = TerminalCore::server(GridSize::new(20, 4).unwrap()).unwrap();
+        vt.set_defaults(&TerminalDefaults { scrollback_lines: 1000, ..TerminalDefaults::default() }).unwrap();
+        vt.write_output(FAILED).unwrap();
+        let mut rows: Vec<TrackedRow> =
+            vt.take_events().unwrap().vt.into_iter().filter_map(|e| if let VtEvent::Prompt { row, .. } = e { row } else { None }).collect();
+        let end = rows.pop().expect("D row");
+        let mut more = b"\x1b]133;B\x07seq\r\n\x1b]133;C\x07".to_vec();
+        for i in 0..40 {
+            more.extend_from_slice(format!("line{i}\r\n").as_bytes());
+        }
+        vt.write_output(&more).unwrap();
+        let anchors = vec![CommandAnchor { record: 0, rows_from_bottom: vt.rows_from_bottom(&end).unwrap() }];
+        assert!(anchors[0].rows_from_bottom > 4, "in the scrollback");
+        (vt, anchors)
+    }
+
+    /// Attach `mirror` to `vt` with a fresh snapshot, as a server does.
+    fn attach(mirror: &mut Mirror, vt: &mut TerminalCore, anchors: Vec<CommandAnchor>) {
+        let mut head = vt.snapshot().unwrap();
+        let history = head.split_off(silo_vt::snapshot::head_len(&head).unwrap());
+        mirror.begin(&Welcome { epoch: 1, mode: StartMode::Snapshot, offset: 0, size: TermSize::new(20, 4) }).unwrap();
+        mirror.apply(ServerData::Configured(TerminalConfig::default())).unwrap();
+        mirror.apply(ServerData::SnapshotHead(head)).unwrap();
+        mirror.apply(ServerData::Commands(anchors)).unwrap();
+        for chunk in history.chunks(512) {
+            mirror.apply(ServerData::SnapshotHistory(chunk.to_vec())).unwrap();
+        }
+        mirror.apply(ServerData::SnapshotDone).unwrap();
+    }
+
+    #[test]
+    fn command_rows_survive_a_snapshot_attach_and_a_checkpoint() {
+        let (mut vt, anchors) = server();
+        let mut mirror = Mirror::new();
+        attach(&mut mirror, &mut vt, anchors);
+        assert_eq!(mirror.last_command(), Some(0), "pinned once its history page arrived");
+        assert!(mirror.command_marks().is_empty(), "scrolled out of view");
+        assert!(mirror.select_command_output(0));
+        assert_eq!(mirror.terminal().unwrap().copy_selection().unwrap(), "one\ntwo");
+        mirror.terminal().unwrap().clear_selection();
+
+        let checkpoint = MirrorCheckpoint::capture(&mut mirror).unwrap().expect("coherent");
+        assert_eq!(checkpoint.commands.len(), 1);
+        let mut restored = checkpoint.restore().unwrap();
+        assert_eq!(restored.last_command(), Some(0));
+        assert!(restored.select_command_output(0));
+        assert_eq!(restored.terminal().unwrap().copy_selection().unwrap(), "one\ntwo");
+    }
+
+    #[test]
+    fn a_live_command_end_pins_its_row() {
+        let (mut vt, anchors) = server();
+        let mut mirror = Mirror::new();
+        attach(&mut mirror, &mut vt, anchors);
+        let bytes = b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1b]133;A\x07$ ".to_vec();
+        let end = bytes.len() as u64;
+        mirror.apply(ServerData::Output { offset: 0, bytes }).unwrap();
+        // A frame for another offset addresses another line: skipped.
+        assert_eq!(mirror.apply(ServerData::CommandEnd(CommandEnd { offset: 1, record: 1, rows_from_bottom: 0 })).unwrap(), Applied::None);
+        assert_eq!(mirror.apply(ServerData::CommandEnd(CommandEnd { offset: end, record: 2, rows_from_bottom: 0 })).unwrap(), Applied::Redraw);
+        assert_eq!(mirror.last_command(), Some(2));
+        assert_eq!(mirror.command_marks(), vec![(2, 3)]);
+        assert!(!mirror.select_command_output(2), "false printed nothing");
+        mirror.apply(ServerData::Output { offset: end, bytes: b"\x1bc".to_vec() }).unwrap();
+        assert!(mirror.command_marks().is_empty());
+        assert_eq!(mirror.last_command(), None, "RIS dropped every row");
+    }
 }

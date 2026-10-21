@@ -2,6 +2,7 @@
 
 mod attach;
 mod generated;
+mod run;
 
 use std::{
     io::{IsTerminal, Write},
@@ -190,6 +191,16 @@ enum Command {
         /// Append a newline (Enter).
         #[arg(short, long)]
         enter: bool,
+    },
+    /// Run a command in a block's shell, print its output and exit with
+    /// its code.
+    Run {
+        target: String,
+        /// Give up after this long (`30s`, `10m`).
+        #[arg(long, value_parser = parse_duration)]
+        timeout: Option<Duration>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
     /// Print a block's text.
     Capture {
@@ -636,6 +647,11 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             }
             control.call_value(Method::TerminalSend { block_id: block, text }).await?;
             Ok(0)
+        }
+        Command::Run { target, timeout, command } => {
+            let (control, mut events, _net) = connect(host).await?;
+            let block = resolve_block(&control, Some(&target)).await?;
+            run::run(&control, &mut events, block, &command, timeout).await
         }
         Command::Capture { target, history } => {
             let (control, _, _net) = connect(host).await?;

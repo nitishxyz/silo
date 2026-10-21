@@ -27,6 +27,10 @@ pub struct Overlay {
     pub predicted_foreground: Rgba,
     /// The 1 px underline under predicted cells (`theme::muted()`).
     pub predicted_underline: Rgba,
+    /// Viewport rows of failed commands' D marks: a tick in the gutter
+    /// left of the grid (`docs/PHASE7.md` §7.4).
+    pub failed: Vec<u16>,
+    pub failed_color: Rgba,
 }
 
 /// One predicted cell in viewport coordinates; empty `text` is a blank.
@@ -62,7 +66,24 @@ impl Overlay {
             })
             .collect()
     }
+
+    /// The gutter ticks: 2 px wide, [`TICK_GAP`] left of the grid, one row
+    /// tall; rows outside the grid are skipped.
+    fn tick_quads(&self, bounds: Bounds<Pixels>, rows: u16, metrics: CellMetrics) -> Vec<Bounds<Pixels>> {
+        self.failed
+            .iter()
+            .filter(|&&row| row < rows)
+            .map(|&row| {
+                let top = bounds.top() + px(f32::from(row) * metrics.height);
+                Bounds::new(point(bounds.left() - px(TICK_GAP), top), size(px(2.0), px(metrics.height)))
+            })
+            .collect()
+    }
 }
+
+/// How far left of the grid a failed command's tick is painted, in the
+/// pane's padding.
+pub const TICK_GAP: f32 = 4.0;
 
 /// Prepared geometry is pane-relative; paint places it at the pane's origin.
 fn shift(bounds: Bounds<Pixels>, origin: Point<Pixels>) -> Bounds<Pixels> {
@@ -248,6 +269,9 @@ pub fn terminal_canvas(
             let started = profile::start();
             paint(&prepared, &overlay, bounds, metrics, selection, window);
             paint_predicted(&prepared, &overlay, bounds, window, cx);
+            for tick in overlay.tick_quads(bounds, prepared.frame.size.rows, prepared.metrics) {
+                window.paint_quad(fill(tick, overlay.failed_color));
+            }
             let (quads, glyphs) = if profile::enabled() { prepared.primitives() } else { (0, 0) };
             profile::record_painted(started, quads, glyphs);
             let mut caret = prepared.frame.cursor;
@@ -272,6 +296,18 @@ pub fn terminal_canvas(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ticks_sit_in_the_gutter_on_their_rows() {
+        let metrics = CellMetrics { width: 8.0, height: 20.0, font_size: 14.0, scale: 2.0, font: 0 };
+        let bounds = Bounds::new(point(px(100.0), px(50.0)), size(px(800.0), px(480.0)));
+        let overlay = Overlay { failed: vec![0, 3, 24], ..Overlay::default() };
+        let ticks = overlay.tick_quads(bounds, 24, metrics);
+        assert_eq!(
+            ticks,
+            vec![Bounds::new(point(px(96.0), px(50.0)), size(px(2.0), px(20.0))), Bounds::new(point(px(96.0), px(110.0)), size(px(2.0), px(20.0))),]
+        );
+    }
 
     #[test]
     fn underline_only_under_predicted_cells() {

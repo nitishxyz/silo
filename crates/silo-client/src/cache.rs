@@ -16,7 +16,7 @@ use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use silo_proto::{
-    data::{Resume, ServerData, StartMode, Welcome},
+    data::{CommandAnchor, Resume, ServerData, StartMode, Welcome},
     model::{TermSize, TerminalConfig},
 };
 use silo_store::{HostKey, Store};
@@ -33,6 +33,8 @@ pub struct MirrorCheckpoint {
     pub resume: Resume,
     pub size: TermSize,
     pub config: TerminalConfig,
+    /// The finished commands' rows the mirror tracked.
+    pub commands: Vec<CommandAnchor>,
 }
 
 impl MirrorCheckpoint {
@@ -45,9 +47,10 @@ impl MirrorCheckpoint {
             return Ok(None);
         };
         let size = mirror.size();
+        let commands = mirror.command_anchors();
         let vt = mirror.terminal().ok_or_else(|| anyhow!("coherent mirror without terminal"))?;
         let snapshot = vt.snapshot().map_err(|e| anyhow!("{e}"))?;
-        Ok(Some(Self { snapshot, resume, size, config }))
+        Ok(Some(Self { snapshot, resume, size, config, commands }))
     }
 
     /// Rebuild a coherent mirror (screen, history and configuration) that
@@ -62,6 +65,7 @@ impl MirrorCheckpoint {
         mirror.apply(ServerData::Configured(self.config))?;
         mirror.apply(ServerData::SnapshotHead(self.snapshot.clone()))?;
         mirror.apply(ServerData::SnapshotDone)?;
+        mirror.restore_command_anchors(&self.commands);
         if mirror.checkpointable() != Some(self.resume) {
             anyhow::bail!("restored mirror is not coherent at {:?}", self.resume);
         }
@@ -69,12 +73,14 @@ impl MirrorCheckpoint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BlockMeta {
     generation: u64,
     resume: Resume,
     size: TermSize,
     config: TerminalConfig,
+    #[serde(default)]
+    commands: Vec<CommandAnchor>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -168,7 +174,13 @@ impl Cache {
     /// Write failure.
     pub fn save_checkpoint(&mut self, id: &str, checkpoint: &MirrorCheckpoint) -> anyhow::Result<()> {
         let generation = self.manifest.blocks.get(id).map_or(1, |m| m.generation + 1);
-        let meta = BlockMeta { generation, resume: checkpoint.resume, size: checkpoint.size, config: checkpoint.config };
+        let meta = BlockMeta {
+            generation,
+            resume: checkpoint.resume,
+            size: checkpoint.size,
+            config: checkpoint.config,
+            commands: checkpoint.commands.clone(),
+        };
         let previous = self.manifest.blocks.insert(id.to_owned(), meta);
         self.commit(&[(id, generation, &checkpoint.snapshot)]).inspect_err(|_| self.restore_meta(id, previous))?;
         self.collect()
@@ -195,7 +207,7 @@ impl Cache {
         let stale: Vec<String> = self.manifest.blocks.keys().filter(|id| !live.contains(id.as_str())).cloned().collect();
         if !stale.is_empty() {
             let previous = std::mem::take(&mut self.manifest.blocks);
-            self.manifest.blocks = previous.iter().filter(|(id, _)| live.contains(id.as_str())).map(|(id, m)| (id.clone(), *m)).collect();
+            self.manifest.blocks = previous.iter().filter(|(id, _)| live.contains(id.as_str())).map(|(id, m)| (id.clone(), m.clone())).collect();
             self.commit(&[]).inspect_err(|_| self.manifest.blocks = previous)?;
         }
         self.collect()
@@ -219,7 +231,13 @@ impl Cache {
         for snap in report.snapshots {
             match manifest.blocks.get(&snap.id) {
                 Some(meta) if meta.generation == snap.generation => blocks.push(CachedBlock {
-                    checkpoint: MirrorCheckpoint { snapshot: snap.bytes, resume: meta.resume, size: meta.size, config: meta.config },
+                    checkpoint: MirrorCheckpoint {
+                        snapshot: snap.bytes,
+                        resume: meta.resume,
+                        size: meta.size,
+                        config: meta.config,
+                        commands: meta.commands.clone(),
+                    },
                     id: snap.id,
                 }),
                 _ => errors.push(BlockError { error: anyhow!("checkpoint {} gen {} has no metadata", snap.id, snap.generation), id: snap.id }),

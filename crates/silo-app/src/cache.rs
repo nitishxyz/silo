@@ -236,6 +236,7 @@ mod tests {
             resume: silo_proto::data::Resume { epoch: 1, offset: 0 },
             size: silo_proto::model::TermSize::new(20, 5),
             config: silo_proto::model::TerminalConfig::default(),
+            commands: Vec::new(),
         }
     }
 

@@ -76,6 +76,14 @@ int silo_vt_tracked_column(void *ref, uint16_t *x);
 /* `*cut` is set when `ref` scrolled out of the scrollback: the text then
  * starts at the top of what is left (empty if `end` went too). */
 int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len, bool *cut);
+/* Where `ref`'s row is in the viewport: 0 visible (row in *y), 1 below it,
+ * 2 above it, 3 hidden (the alternate screen is active), GHOSTTY_NO_VALUE
+ * gone (reset, cleared or pruned). */
+int silo_vt_tracked_viewport_row(SiloVt *vt, void *ref, uint16_t *y);
+/* Select the command output that ends on the row above `ref` (a command's
+ * D mark); `*start_y` is the selection's first screen row. GHOSTTY_NO_VALUE
+ * when there is no output there. */
+int silo_vt_select_output_before(SiloVt *vt, void *ref, uint32_t *start_y);
 /* Returns and clears accumulated bell/title/pwd effects. */
 void silo_vt_events(SiloVt *vt, SiloEvents *out);
 /* Copies and clears the last program clipboard write; returns required length if cap is short. */
@@ -101,6 +109,8 @@ int silo_vt_key(SiloVt *vt, const char *key, const char *text, size_t len,
 int silo_vt_paste(SiloVt *vt, char *data, size_t len, bool line_breaks, char *out, size_t cap, size_t *written);
 void silo_vt_scroll(SiloVt *vt, int32_t delta);
 void silo_vt_scroll_to_row(SiloVt *vt, uint64_t row);
+/* Move the viewport `delta` prompts (OSC 133 A marks); negative is up. */
+void silo_vt_scroll_prompt(SiloVt *vt, int32_t delta);
 int silo_vt_scrollbar(SiloVt *vt, uint64_t *out);
 int silo_vt_focus(SiloVt *vt, bool focused, char *out, size_t cap, size_t *written);
 int silo_vt_mouse(SiloVt *vt, const uint32_t *fields, uint64_t timestamp, char *out, size_t cap, size_t *written);
