@@ -196,7 +196,9 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
             }
         }
     }
-    Ok(Gate { approval: approval && role != ClientRole::App })
+    // Whether the caller is the user's own app (whose calls are the
+    // user's) is decided with its connection: `approval::gate`.
+    Ok(Gate { approval })
 }
 
 #[cfg(test)]
@@ -308,9 +310,10 @@ mod tests {
                 assert_eq!(got, want, "{row} as {who}");
             }
         }
-        // An app's own owner calls need no approval; app.reply is the app's.
+        // Claiming to be an app skips nothing here (`approval::gate` knows
+        // the connection); app.reply is the app's.
         let create = Method::PairCreate { ttl_secs: 60, purpose: InvitePurpose::Device };
-        assert_eq!(check(&Principal::Owner, ClientRole::App, &create, &reg), Ok(Gate { approval: false }));
+        assert_eq!(check(&Principal::Owner, ClientRole::App, &create, &reg), Ok(Gate { approval: true }));
         assert!(check(&Principal::Owner, ClientRole::App, &rows[2].1, &reg).is_ok());
         // A join invite may offer and nothing else.
         let offer = Principal::Offer { invite_id: "i".into() };

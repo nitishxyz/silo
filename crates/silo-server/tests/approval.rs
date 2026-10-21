@@ -9,7 +9,7 @@ use std::{
 
 use silo_client::{Control, DataStream, Events};
 use silo_proto::{
-    control::{ClientRole, Created, Event, InvitePurpose, Method, PairInvite, Pasted, RpcError},
+    control::{Capture, ClientRole, Created, Event, InvitePurpose, Method, PairInvite, Pasted, RpcError, SpawnSpec},
     data::ClipKind,
     paths,
 };
@@ -84,6 +84,21 @@ fn code(error: anyhow::Error) -> RpcError {
     error.downcast::<RpcError>().unwrap()
 }
 
+/// Run as a block's program (`SILO_APPROVAL_HELPER` = the socket): a
+/// process in a pane that says it is the Silo app asks for an invite and
+/// prints the outcome. Does nothing in a normal test run.
+#[tokio::test(flavor = "multi_thread")]
+async fn pane_helper() {
+    let Ok(socket) = std::env::var("SILO_APPROVAL_HELPER") else { return };
+    silo_client::set_role(ClientRole::App);
+    let (control, _) = Control::connect(Path::new(&socket), "pane-app").await.unwrap();
+    let outcome = match control.call_value(pair()).await {
+        Ok(_) => "allowed".to_owned(),
+        Err(error) => code(error).code,
+    };
+    println!("helper:{outcome}:");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_actions_from_non_app_clients_wait_for_an_app() {
     let home = temp_home("flow");
@@ -145,6 +160,31 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
     let denied = code(timeout(T, call).await.unwrap().unwrap().unwrap_err());
     assert_eq!((denied.code.as_str(), denied.message.as_str()), (RpcError::FORBIDDEN, "Denied in Silo"));
     assert_eq!(resolved(&mut app_events).await, (id, false));
+
+    // A program in a pane saying it is the app is asked like any other
+    // (and is no approver of its own call).
+    let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+    let socket = paths::socket(&home).to_string_lossy().into_owned();
+    let command =
+        ["/usr/bin/env".to_owned(), format!("SILO_APPROVAL_HELPER={socket}"), exe, "--exact".into(), "pane_helper".into(), "--nocapture".into()];
+    let spawn = SpawnSpec { command: command.into(), ..Default::default() };
+    let pane: Created = app.call(Method::SessionCreate { name: None, spawn, kind: Default::default(), url: None }).await.unwrap();
+    let (id, action, _) = requested(&mut app_events).await;
+    assert_eq!(action, "pair.create");
+    app.call_value(Method::ApprovalAnswer { id: id.clone(), allow: false }).await.unwrap();
+    assert_eq!(resolved(&mut app_events).await, (id, false));
+    let printed = timeout(T, async {
+        loop {
+            let capture: Capture = app.call(Method::TerminalCapture { block_id: pane.block_id.clone(), history: true }).await.unwrap();
+            if let Some(rest) = capture.text.split("helper:").nth(1) {
+                return rest.split(':').next().unwrap_or_default().to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the helper's outcome");
+    assert_eq!(printed, RpcError::FORBIDDEN);
 
     // The app's own calls need nobody.
     app.call::<PairInvite>(pair()).await.unwrap();

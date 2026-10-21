@@ -30,10 +30,13 @@ pub mod feature {
     pub const STATUS: &str = "status";
     /// The client handles `busy` refusals of closes (and sends `force`).
     pub const CLOSE_GUARD: &str = "close_guard";
+    /// The app shows approval cards (`approval.requested`) and answers
+    /// them: only such apps are asked to approve.
+    pub const APPROVALS: &str = "approvals";
 }
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS];
+pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS];
 
 /// [`FEATURES`] as sent in a hello.
 #[must_use]

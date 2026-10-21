@@ -172,6 +172,11 @@ pub async fn gate(server: &Server, client: ClientId, method: &Method, rights: Ri
     let summary = summary(method, &server.auth().devices());
     let (approvers, caller, alone) = {
         let reg = server.registry.lock().unwrap();
+        // The Silo app's own calls are the user's; anything else that says
+        // it is an app (a token, a remote, a process in a pane) is asked.
+        if reg.clients.get(&client).is_some_and(crate::app_bridge::owner_app) {
+            return Ok(());
+        }
         let approvers = reg.approvers(rights);
         let entry = reg.clients.get(&client);
         let alone = entry.is_some_and(|c| c.pane.is_none() && c.tty && c.origin.is_none());
@@ -251,29 +256,57 @@ pub async fn gate_upgrade(server: &Server, grant: Option<&Grant>) -> Result<(), 
     ask(server, approvers, "upgrade", "Install another build of the server".into(), caller).await
 }
 
-/// Where a local client's process runs: the pane holding it (its parent
-/// chain reaches a block's process) and whether it has a controlling
-/// terminal.
+/// Where a local client's process runs: the pane holding it, and whether
+/// it has a controlling terminal of its own (not one of this server's).
+///
+/// A process is in a pane when its parent chain reaches a block's process,
+/// or when it or any process on that chain has a block's terminal as its
+/// controlling terminal. The terminal survives a double fork (reparenting
+/// to init ends the chain, not the terminal); `setsid` drops it, which
+/// leaves no terminal to confirm on. A program that opens a terminal of
+/// its own and detaches from the pane's is not seen (a guardrail, not a
+/// boundary).
 pub fn origin(pid: Option<i32>, reg: &Registry) -> (Option<BlockId>, bool) {
     let Some(pid) = pid else { return (None, false) };
     let panes: HashMap<i32, BlockId> = reg.blocks.iter().filter_map(|(id, b)| Some((b.info()?.pid?, id.clone()))).collect();
-    let tty = process(pid).is_some_and(|p| p.tty);
+    // Each block's terminal: its process's controlling terminal.
+    let ttys: HashMap<u64, BlockId> = panes.iter().filter_map(|(pid, id)| Some((process(*pid)?.tty?, id.clone()))).collect();
+    origin_in(pid, &panes, &ttys, process)
+}
+
+/// [`origin`] over a process table.
+fn origin_in(
+    pid: i32,
+    panes: &HashMap<i32, BlockId>,
+    ttys: &HashMap<u64, BlockId>,
+    process: impl Fn(i32) -> Option<ProcessInfo>,
+) -> (Option<BlockId>, bool) {
+    let own = process(pid).and_then(|p| p.tty);
+    if let Some(pane) = own.and_then(|t| ttys.get(&t)) {
+        return (Some(pane.clone()), false);
+    }
     let mut current = pid;
     for _ in 0..64 {
         if let Some(pane) = panes.get(&current) {
-            return (Some(pane.clone()), tty);
+            return (Some(pane.clone()), false);
         }
-        match process(current) {
-            Some(info) if info.ppid > 1 && info.ppid != current => current = info.ppid,
-            _ => break,
+        let Some(info) = process(current) else { break };
+        if let Some(pane) = info.tty.and_then(|t| ttys.get(&t)) {
+            return (Some(pane.clone()), false);
         }
+        if info.ppid <= 1 || info.ppid == current {
+            break;
+        }
+        current = info.ppid;
     }
-    (None, tty)
+    (None, own.is_some())
 }
 
+#[derive(Clone, Copy, Debug)]
 struct ProcessInfo {
     ppid: i32,
-    tty: bool,
+    /// The controlling terminal's device, if any.
+    tty: Option<u64>,
 }
 
 #[cfg(target_os = "macos")]
@@ -283,7 +316,8 @@ fn process(pid: i32) -> Option<ProcessInfo> {
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     // SAFETY: the buffer is a `proc_bsdinfo` of `size` bytes.
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    (n == size).then_some(ProcessInfo { ppid: info.pbi_ppid as i32, tty: info.e_tdev != 0 && info.e_tdev != u32::MAX })
+    let tty = (info.e_tdev != 0 && info.e_tdev != u32::MAX).then_some(u64::from(info.e_tdev));
+    (n == size).then_some(ProcessInfo { ppid: info.pbi_ppid as i32, tty })
 }
 
 #[cfg(target_os = "linux")]
@@ -291,7 +325,8 @@ fn process(pid: i32) -> Option<ProcessInfo> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // `pid (comm) state ppid pgrp session tty_nr …`; comm may hold spaces.
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    Some(ProcessInfo { ppid: fields.get(1)?.parse().ok()?, tty: fields.get(4)?.parse::<i64>().ok()? != 0 })
+    let tty = fields.get(4)?.parse::<u64>().ok().filter(|t| *t != 0);
+    Some(ProcessInfo { ppid: fields.get(1)?.parse().ok()?, tty })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -307,6 +342,83 @@ mod tests {
     fn this_process_has_a_parent() {
         let me = process(std::process::id() as i32).expect("own process info");
         assert!(me.ppid > 0);
+    }
+
+    /// pid → (ppid, tty). Block `b` runs shell 100 on terminal 7.
+    fn table(rows: &[(i32, i32, Option<u64>)]) -> impl Fn(i32) -> Option<ProcessInfo> + '_ {
+        move |pid| rows.iter().find(|r| r.0 == pid).map(|r| ProcessInfo { ppid: r.1, tty: r.2 })
+    }
+
+    #[test]
+    fn a_pane_is_found_through_forks_but_not_a_terminal_of_its_own() {
+        let panes: HashMap<i32, BlockId> = [(100, "b".to_owned())].into();
+        let ttys: HashMap<u64, BlockId> = [(7, "b".to_owned())].into();
+        let rows = [
+            (1, 0, None),
+            (50, 1, Some(3)),    // Terminal.app's shell on another terminal
+            (51, 50, Some(3)),   // `silo pair` there
+            (100, 1, Some(7)),   // the pane's shell
+            (101, 100, Some(7)), // `silo pair` in the pane
+            (102, 1, Some(7)),   // double-forked: reparented to init, same terminal
+            (103, 1, None),      // setsid: no terminal at all
+            (104, 102, Some(9)), // `script`: a fresh terminal, run by the double-forked process
+            (105, 104, Some(9)), // `silo pair` on it
+            (106, 999, Some(9)), // parent gone
+        ];
+        let process = table(&rows);
+        let at = |pid| origin_in(pid, &panes, &ttys, &process);
+        assert_eq!(at(51), (None, true), "outside every pane, with a terminal: may confirm");
+        assert_eq!(at(101), (Some("b".into()), false));
+        assert_eq!(at(102), (Some("b".into()), false), "a double fork keeps the pane's terminal");
+        assert_eq!(at(103), (None, false), "no terminal: nothing to confirm on");
+        assert_eq!(at(105), (Some("b".into()), false), "a terminal of its own, opened from the pane's");
+        assert_eq!(at(106), (None, true), "not seen: a guardrail");
+    }
+
+    /// A real double fork in a real terminal: the orphan's parent chain no
+    /// longer reaches the pane, its terminal still does.
+    #[test]
+    fn a_double_forked_process_is_still_in_its_pane() {
+        use std::io::Read as _;
+        let config =
+            silo_pty::SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "(sleep 30 & echo pid:$!:) ; read x".into()], ..Default::default() };
+        let size = silo_pty::PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let pty = silo_pty::Pty::spawn(&config, size, |_| {}).unwrap();
+        let mut reader = pty.reader().unwrap();
+        let (mut out, mut buf) = (String::new(), [0u8; 256]);
+        let orphan = loop {
+            if let Some(pid) = out.split("pid:").nth(1).and_then(|s| s.split(':').next()).and_then(|s| s.trim().parse::<i32>().ok()) {
+                break pid;
+            }
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => panic!("no pid in {out:?}"),
+                Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        };
+        let shell = pty.pid();
+        let (shell_info, orphan_info) = (process(shell).unwrap(), process(orphan).unwrap());
+        let panes: HashMap<i32, BlockId> = [(shell, "b".to_owned())].into();
+        let ttys: HashMap<u64, BlockId> = [(shell_info.tty.expect("the pane's terminal"), "b".to_owned())].into();
+        let reaches = |mut pid: i32| {
+            for _ in 0..64 {
+                if pid == shell {
+                    return true;
+                }
+                match process(pid) {
+                    Some(p) if p.ppid > 1 => pid = p.ppid,
+                    _ => return false,
+                }
+            }
+            false
+        };
+        assert!(!reaches(orphan), "reparented away from the shell");
+        assert_eq!(orphan_info.tty, shell_info.tty);
+        assert_eq!(origin_in(orphan, &panes, &ttys, process), (Some("b".into()), false));
+        // SAFETY: signalling the test's own children.
+        unsafe {
+            libc::kill(orphan, libc::SIGTERM);
+        }
+        pty.signal(libc::SIGTERM);
     }
 
     #[test]

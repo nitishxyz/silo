@@ -537,13 +537,16 @@ impl Registry {
         }
     }
 
-    /// Subscribed app clients holding `rights` server-wide that speak the
-    /// approval events.
+    /// Subscribed app clients holding `rights` server-wide that show
+    /// approval cards (`approvals`). Never a program in one of this
+    /// server's panes, nor a local token, claiming to be an app: either
+    /// could approve its own call.
     pub fn approvers(&self, rights: Rights) -> Vec<ClientId> {
         let mut ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::ACCESS)))
+            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::APPROVALS)))
+            .filter(|(_, c)| c.pane.is_none() && (c.origin.is_some() || c.principal == Principal::Owner))
             .filter(|(_, c)| rights_on(&c.principal, On::Server).is_some_and(|r| r >= rights))
             .map(|(id, _)| *id)
             .collect();

@@ -42,16 +42,20 @@ pub fn active(reg: &mut Registry, client: ClientId) {
     }
 }
 
-/// Whether `client` can run forwarded requests: a subscribed app on this
-/// server's unix socket, as the user (no token), that speaks them. A
-/// remote server never drives the user's local app, and a token's holder
-/// never sees other callers' requests by claiming to be an app.
+/// Whether `client` is the user's own Silo app: it says `role: app`, on
+/// this server's unix socket, as the user (no token), and not from inside
+/// one of this server's panes. Its calls need no approval, and only it is
+/// sent forwarded requests: a remote server never drives the user's local
+/// app, and a token's holder or a program in a pane never sees other
+/// callers' requests (or approves its own) by claiming to be an app.
+pub fn owner_app(client: &ClientEntry) -> bool {
+    client.role == ClientRole::App && client.origin.is_none() && client.principal == Principal::Owner && client.pane.is_none()
+}
+
+/// Whether `client` can run forwarded requests: the [`owner_app`],
+/// subscribed, speaking them.
 fn eligible(client: &ClientEntry) -> bool {
-    client.role == ClientRole::App
-        && client.origin.is_none()
-        && client.principal == Principal::Owner
-        && client.events.is_some()
-        && client.supports(Some(feature::APP_REQUESTS))
+    owner_app(client) && client.events.is_some() && client.supports(Some(feature::APP_REQUESTS))
 }
 
 /// The app a request goes to: `explicit` if given (it must be eligible),
@@ -160,6 +164,13 @@ mod tests {
         active(&mut reg, token);
         assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
         assert_eq!(target(&reg, Some(token)).unwrap_err().code, "not_found");
+
+        // Nor a program in a pane that says it is an app.
+        let pane = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
+        reg.clients.get_mut(&pane).unwrap().pane = Some("b1".into());
+        active(&mut reg, pane);
+        assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
+        assert!(!owner_app(&reg.clients[&pane]));
 
         let first = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
         let second = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
