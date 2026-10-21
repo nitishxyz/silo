@@ -633,8 +633,9 @@ impl Workspace {
     /// the tooltip.
     fn render_watchers(&self) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
-        let me = self.control().map(|c| c.client_id());
-        let labels = watcher_labels(&view.watchers, me);
+        // Offline, the last list is stale.
+        let me = self.control()?.client_id();
+        let labels = watcher_labels(&view.watchers, Some(me));
         let text = match labels.as_slice() {
             [] => return None,
             [one] => one.clone(),

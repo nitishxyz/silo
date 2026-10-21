@@ -549,6 +549,9 @@ impl Workspace {
                 .items_start()
                 .justify_center()
                 .pt(px(70.0))
+                .pb(px(24.0))
+                // The link, its QR code and the links list outgrow a small window.
+                .overflow_y_scroll()
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.close_share_sheet(window, cx)))
                 .child(card)
                 .into_any_element(),

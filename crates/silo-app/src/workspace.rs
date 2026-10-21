@@ -513,6 +513,8 @@ impl Workspace {
                     self.motion.reset();
                     self.status = Some(if self.hosts[host].paused.load(std::sync::atomic::Ordering::Acquire) {
                         Status::warning(SERVER_STOPPED)
+                    } else if reason == crate::share::ENDED {
+                        Status::warning(crate::share::ENDED)
                     } else if self.view.is_some() {
                         Status::warning(OFFLINE)
                     } else {
