@@ -125,6 +125,9 @@ pub struct Server {
 pub struct HostClipboard {
     pub system: Option<Arc<dyn sysclip::SystemClipboard>>,
     /// The change count right after our last push, so it is not copied back.
+    /// The text of our last push, until a host change brings it back once
+    /// (Universal Clipboard echoing it from the client's Mac).
+    pushed_text: Mutex<Option<String>>,
     pushed: Mutex<Option<i64>>,
     /// Open remote data streams; changes are watched only while any is.
     pub remote_streams: std::sync::atomic::AtomicUsize,
@@ -143,13 +146,30 @@ impl HostClipboard {
         if content.size() > silo_proto::data::MAX_CLIP_BYTES {
             tracing::debug!(len = content.size(), "clipboard push too large; ignored");
             return;
+        let text = match &content {
+            silo_proto::data::Clip::Text(text) => Some(text.clone()),
+            _ => None,
+        };
         }
         let written = tokio::task::spawn_blocking(move || system.write(&content).map(|()| system.change_count())).await;
         match written {
-            Ok(Ok(count)) => *self.pushed.lock().unwrap() = count,
+            Ok(Ok(count)) => {
+                *self.pushed.lock().unwrap() = count;
+                *self.pushed_text.lock().unwrap() = text;
+            }
             Ok(Err(error)) => tracing::debug!("clipboard push: {error}"),
             Err(error) => tracing::warn!("clipboard push: {error}"),
         }
+
+    /// Whether a host change to `text` is our last push coming back.
+    fn echo(&self, text: &str) -> bool {
+        let mut pushed = self.pushed_text.lock().unwrap();
+        let echo = pushed.as_deref() == Some(text);
+        if echo {
+            *pushed = None;
+        }
+        echo
+    }
     }
 }
 
@@ -173,6 +193,9 @@ pub async fn watch_clipboard(server: Arc<Server>) {
             continue;
         }
         let read = system.clone();
+        if server.clipboard.echo(&text) {
+            continue;
+        }
         let Ok(Some(text)) = tokio::task::spawn_blocking(move || read.read_text()).await else { continue };
         let Some(block_id) = server.clipboard.last_input.lock().unwrap().clone() else { continue };
         if let Ok(block) = server.registry.lock().unwrap().block(&block_id) {

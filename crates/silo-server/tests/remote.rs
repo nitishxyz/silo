@@ -769,3 +769,9 @@ async fn remote_pastes_reach_the_host_clipboard_and_host_copies_come_back() {
     net.close().await.unwrap();
     shutdown(control, task).await;
 }
+    // Nor is it when it comes back as a new host copy (Universal Clipboard).
+    fake.set_by_host("pasted");
+    assert_eq!(remote_clip_write(&mut data, Duration::from_millis(1200)).await, None);
+    // A later copy of the same text on the host is a real copy.
+    fake.set_by_host("pasted");
+    assert_eq!(remote_clip_write(&mut data, T).await.as_deref(), Some("pasted"));

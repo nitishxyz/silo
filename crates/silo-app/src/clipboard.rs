@@ -198,6 +198,16 @@ pub fn copied_label(remote_host: Option<&str>) -> String {
     remote_host.map_or_else(|| "Copied".into(), |host| format!("Copied from {host}"))
 }
 
+/// Whether a block's clipboard write changes anything here. A remote host
+/// often reports this Mac's own copy back (Universal Clipboard syncs it to
+/// a Mac host, whose server sees a new host copy), so a remote write of
+/// what the clipboard already holds is no copy at all. A local write always
+/// lands: the user copied in the block and expects to be told.
+#[must_use]
+pub fn lands(text: &str, remote: bool, current: Option<&str>) -> bool {
+    !remote || current != Some(text)
+}
+
 #[must_use]
 pub fn upload_label(files: usize, sent: u64, total: u64) -> String {
     let percent = sent.min(total).saturating_mul(100).checked_div(total).unwrap_or(100);
@@ -221,15 +231,28 @@ pub fn upload_error(error: &anyhow::Error) -> String {
 
 /// Clipboard writes from blocks. Every window showing a block receives its
 /// writes: one applies it, and a remote write that no window may apply yet
-/// waits until the block is focused.
+/// waits until the block is focused, unless the clipboard changed meanwhile
+/// (the user copied something newer) or it waited too long.
 #[derive(Default)]
 pub struct Writes {
-    pending: HashMap<String, String>,
+    pending: HashMap<String, Held>,
     applied: Option<(String, String, Instant)>,
+}
+
+/// A held write and the pasteboard change count when it was held.
+struct Held {
+    text: String,
+    change: isize,
+    at: Instant,
 }
 
 /// A write repeated within this long is the same write seen by another window.
 const SAME_WRITE: Duration = Duration::from_secs(2);
+
+/// How long a held write may wait for its block's focus. Later, the user
+/// has likely forgotten the background copy and means to paste what they
+/// had before it.
+const HELD_FOR: Duration = Duration::from_secs(10 * 60);
 
 impl Writes {
     fn seen(&self, block: &str, text: &str, now: Instant) -> bool {
@@ -246,19 +269,45 @@ impl Writes {
         true
     }
 
-    /// Hold `text` as the block's latest write until it is focused.
-    pub fn defer(&mut self, block: &str, text: String, now: Instant) {
+    /// Hold `text` as the block's latest write until it is focused;
+    /// `change` is the pasteboard change count now.
+    pub fn defer(&mut self, block: &str, text: String, change: isize, now: Instant) {
         if !self.seen(block, &text, now) {
-            self.pending.insert(block.to_owned(), text);
+            self.pending.insert(block.to_owned(), Held { text, change, at: now });
         }
     }
 
-    /// The write held for a block just focused, to apply now.
-    pub fn take(&mut self, block: &str, now: Instant) -> Option<String> {
-        let text = self.pending.remove(block)?;
+    /// The write held for a block just focused, to apply now: none if the
+    /// clipboard changed since it was held (`change` is the pasteboard
+    /// change count now) or it is older than `HELD_FOR`.
+    pub fn take(&mut self, block: &str, change: isize, now: Instant) -> Option<String> {
+        let Held { text, change: held, at } = self.pending.remove(block)?;
+        if held != change || now.saturating_duration_since(at) > HELD_FOR {
+            return None;
+        }
         self.applied = Some((block.to_owned(), text.clone(), now));
         Some(text)
     }
+}
+
+/// `NSPasteboard.generalPasteboard.changeCount`: bumped by every write to
+/// the clipboard, by any app.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn change_count() -> isize {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    // SAFETY: the general pasteboard is a process-wide singleton and
+    // `changeCount` a read-only NSInteger property.
+    unsafe {
+        let pasteboard: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        msg_send![pasteboard, changeCount]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn change_count() -> isize {
+    0
 }
 
 pub fn writes<R>(f: impl FnOnce(&mut Writes) -> R) -> R {
@@ -427,8 +476,8 @@ mod tests {
         let mut w = Writes::default();
         assert!(w.apply("a", "x", now));
         assert!(!w.apply("a", "x", now), "a second window");
-        w.defer("a", "x".into(), now);
-        assert_eq!(w.take("a", now), None, "already applied");
+        w.defer("a", "x".into(), 1, now);
+        assert_eq!(w.take("a", 1, now), None, "already applied");
         assert!(w.apply("b", "x", now));
         assert!(w.apply("a", "x", now + SAME_WRITE), "copied again later");
     }
@@ -437,15 +486,60 @@ mod tests {
     fn deferred_writes_wait_for_focus() {
         let now = Instant::now();
         let mut w = Writes::default();
-        w.defer("a", "old".into(), now);
-        w.defer("a", "new".into(), now);
-        assert_eq!(w.take("b", now), None);
-        assert_eq!(w.take("a", now).as_deref(), Some("new"));
-        assert_eq!(w.take("a", now), None);
-        w.defer("a", "new".into(), now);
-        assert_eq!(w.take("a", now), None, "a deferral from another window after it was applied");
-        w.defer("a", "z".into(), now);
+        w.defer("a", "old".into(), 1, now);
+        w.defer("a", "new".into(), 1, now);
+        assert_eq!(w.take("b", 1, now), None);
+        assert_eq!(w.take("a", 1, now).as_deref(), Some("new"), "the clipboard is unchanged");
+        assert_eq!(w.take("a", 2, now), None);
+        w.defer("a", "new".into(), 2, now);
+        assert_eq!(w.take("a", 2, now), None, "a deferral from another window after it was applied");
+        w.defer("a", "z".into(), 2, now);
         assert!(w.apply("a", "y", now), "a visible window applies a newer write");
-        assert_eq!(w.take("a", now), None);
+        assert_eq!(w.take("a", 3, now), None);
+    }
+
+    #[test]
+    fn deferred_writes_never_replace_a_newer_copy() {
+        let now = Instant::now();
+        let mut w = Writes::default();
+        w.defer("a", "remote".into(), 5, now);
+        assert_eq!(w.take("a", 6, now), None, "the user copied something since");
+        assert_eq!(w.take("a", 5, now), None, "dropped, not kept");
+        w.defer("a", "remote".into(), 6, now);
+        w.defer("a", "newer".into(), 7, now);
+        assert_eq!(w.take("a", 7, now).as_deref(), Some("newer"), "held again after the user's copy");
+    }
+
+    #[test]
+    fn deferred_writes_expire() {
+        let now = Instant::now();
+        let mut w = Writes::default();
+        w.defer("a", "x".into(), 1, now);
+        assert_eq!(w.take("a", 1, now + HELD_FOR + Duration::from_secs(1)), None);
+        w.defer("a", "y".into(), 1, now);
+        assert_eq!(w.take("a", 1, now + HELD_FOR).as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn remote_echoes_of_the_clipboard_do_not_land() {
+        assert!(!lands("safari", true, Some("safari")), "this Mac's copy reported back");
+        assert!(lands("mini", true, Some("safari")));
+        assert!(lands("mini", true, None));
+        assert!(lands("safari", false, Some("safari")), "a local copy is always confirmed");
+
+        // The report: copy in Safari, mini echoes it while its block is
+        // hidden, then the block is focused. The count is unchanged, so the
+        // write is taken, and dropped as an echo.
+        let now = Instant::now();
+        let mut w = Writes::default();
+        w.defer("mini", "safari".into(), 9, now);
+        let taken = w.take("mini", 9, now).unwrap();
+        assert!(!lands(&taken, true, Some("safari")));
+        // A newer echo supersedes an older held write rather than leaving it to land.
+        let later = now + SAME_WRITE;
+        w.defer("mini", "old".into(), 9, later);
+        assert!(w.apply("mini", "safari", later));
+        assert!(!lands("safari", true, Some("safari")));
+        assert_eq!(w.take("mini", 9, later), None);
     }
 }

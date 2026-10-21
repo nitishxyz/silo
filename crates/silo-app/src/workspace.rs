@@ -247,7 +247,8 @@ impl Workspace {
                 cx.observe_window_activation(window, |this, window, cx| {
                     let Some(pane) = this.focused_pane(window, cx).filter(|_| window.is_window_active()) else { return };
                     let (block, host) = (pane.read(cx).block_id.clone(), pane.read(cx).host.clone());
-                    if let Some(text) = crate::clipboard::writes(|w| w.take(&block, Instant::now())) {
+                    let change = crate::clipboard::change_count();
+                    if let Some(text) = crate::clipboard::writes(|w| w.take(&block, change, Instant::now())) {
                         this.copied(text, host, cx);
                     }
                 }),
@@ -700,7 +701,8 @@ impl Workspace {
                     let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, window, cx| match event {
                         PaneEvent::Activated => {
                             let block = pane.read(cx).block_id.clone();
-                            if let Some(text) = crate::clipboard::writes(|w| w.take(&block, Instant::now())) {
+                            let change = crate::clipboard::change_count();
+                            if let Some(text) = crate::clipboard::writes(|w| w.take(&block, change, Instant::now())) {
                                 this.copied(text, pane.read(cx).host.clone(), cx);
                             }
                             this.pane_activated(block);
@@ -721,7 +723,8 @@ impl Workspace {
                                     this.copied(text.clone(), host, cx);
                                 }
                             } else {
-                                crate::clipboard::writes(|w| w.defer(&block, text.clone(), now));
+                                let change = crate::clipboard::change_count();
+                                crate::clipboard::writes(|w| w.defer(&block, text.clone(), change, now));
                             }
                         }
                         PaneEvent::Notice(message) => {
@@ -870,6 +873,10 @@ impl Workspace {
     }
 
     fn copied(&mut self, text: String, host: Option<String>, cx: &mut Context<Self>) {
+        let current = if host.is_some() { cx.read_from_clipboard().and_then(|item| item.text()) } else { None };
+        if !crate::clipboard::lands(&text, host.is_some(), current.as_deref()) {
+            return;
+        }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         self.flash(Status::success(crate::clipboard::copied_label(host.as_deref())), cx);
         cx.notify();
