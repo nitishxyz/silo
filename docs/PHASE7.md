@@ -994,8 +994,11 @@ has merged.
     stores the rows as `rows_from_bottom` and re-pins them after restore, because a resumed stream sends no
     `COMMANDS`. **Survives hot upgrade:** a resume keeps the mirror's rows, and a snapshot attach gets
     `COMMANDS` from the server's restored anchors. While the alternate screen is up a checkpoint has no rows.
-  - Select output: Ghostty's OUTPUT selection from the last cell of the row above the D row. That is the
-    command's whole output, up to the next prompt row. It needs no C row on the client. The selection's start is
+  - Select output: the rows above the D row up to the nearest row with prompt cells (the command's input line),
+    trailing blanks trimmed. It needs no C row on the client. Not Ghostty's OUTPUT selection: that starts at the
+    first output cell after the prompt above, and a prompt that cleared rows holds blank output cells (zsh
+    echoing typeahead after A, then `\e[J`, as with back-to-back `silo run`s). For the same reason
+    `terminal.command_output` takes the text between the server's C and D marks directly. The selection's start is
     scrolled into view. "Last" is the newest of the server's last finished record and the mirror's newest row. If
     that row is gone (alternate screen, pruned), nothing is selected and the status bar says "No command output
     to select". The app method then returns `not_found`.

@@ -1298,6 +1298,32 @@ mod tests {
     }
 
     #[test]
+    fn output_after_a_prompt_that_cleared_rows() {
+        use crate::VtEvent;
+        // zsh, as `silo run` drives it: the next command is typed as soon as
+        // D arrives, so the tty echoes it after A; zsh then clears below
+        // (`\e[J`) and draws its prompt. The cleared cells read as output.
+        let prompt = |typed: &str| format!("\x1b]133;A\x07{typed}\r\n\r\x1b[J\r\n~\r\n > \x1b]133;B\x07\x1b[K\x1b[?2004h");
+        let sp = format!("%{}\r \r", " ".repeat(19));
+        let mut out = prompt("");
+        out += &format!("false\x1b[?2004l\r\r\n\x1b]133;C\x07{sp}\x1b]133;D;1\x07");
+        out += &prompt("echo hi");
+        out += &format!("echo hi\x1b[?2004l\r\r\n\x1b]133;C\x07hi\r\nthere\r\n{sp}\x1b]133;D;0\x07");
+        out += &prompt("");
+        let mut vt = TerminalCore::server(GridSize::new(20, 30).unwrap()).unwrap();
+        vt.write_output(out.as_bytes()).unwrap();
+        let rows: Vec<_> =
+            vt.take_events().unwrap().vt.into_iter().filter_map(|e| if let VtEvent::Prompt { row, .. } = e { row } else { None }).collect();
+        let [_, _, start, end] = <[_; 4]>::try_from(rows).ok().expect("C and D rows");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "hi\nthere");
+        let mut mirror = TerminalCore::new(GridSize::new(20, 30).unwrap()).unwrap();
+        mirror.write_output(out.as_bytes()).unwrap();
+        let row = mirror.track_row(vt.rows_from_bottom(&end).unwrap(), 0).unwrap();
+        assert!(mirror.select_output_before(&row));
+        assert_eq!(mirror.copy_selection().unwrap(), "hi\nthere");
+    }
+
+    #[test]
     fn output_whose_start_left_the_scrollback_keeps_its_end() {
         use crate::VtEvent;
         let mut vt = TerminalCore::server(GridSize::new(80, 10).unwrap()).unwrap();

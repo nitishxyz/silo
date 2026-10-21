@@ -346,9 +346,13 @@ int silo_vt_tracked_column(void *ref, uint16_t *x) {
     return 0;
 }
 
-/* Plain text of the command output containing `ref`, cut before `end`
- * (the command's D mark) when given; empty when the cell is not command
- * output. Allocated with ghostty's allocator. */
+/* Plain text of the command output starting at `ref` (its C mark), cut
+ * before `end` (its D mark) when given; without `end`, the output
+ * containing `ref`'s cell, empty when that cell is not command output.
+ * Allocated with ghostty's allocator. With `end` the marks bound the
+ * output directly: ghostty's output selection starts at the first output
+ * cell after the prompt above, which a prompt that cleared rows (typeahead
+ * echoed after A, then the shell's `\e[J`) holds blank output cells of. */
 int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len, bool *cut) {
     *out = NULL;
     *len = 0;
@@ -368,6 +372,10 @@ int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t 
         if (!end || !ghostty_tracked_grid_ref_has_value(end)) return 0;
         GhosttyPoint top = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = 0, .y = 0 } };
         CHECK(ghostty_terminal_grid_ref(vt->terminal, top, &output.start));
+        CHECK(ghostty_tracked_grid_ref_snapshot(end, &output.end));
+    } else if (end && ghostty_tracked_grid_ref_has_value(end)) {
+        CHECK(res);
+        output.start = at;
         CHECK(ghostty_tracked_grid_ref_snapshot(end, &output.end));
     } else {
         CHECK(res);
@@ -420,9 +428,22 @@ int silo_vt_tracked_viewport_row(SiloVt *vt, void *ref, uint16_t *y) {
     return 0;
 }
 
-/* Ghostty's output selection grows from any output cell to the whole
- * output after its prompt, ending before the next prompt row (the D row,
- * where the next prompt starts), so the last cell above D finds it. */
+/* The row's OSC 133 prompt state (none: an output row). */
+static int row_semantic(SiloVt *vt, uint32_t y, GhosttyRowSemanticPrompt *out) {
+    GhosttyPoint point = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = 0, .y = y } };
+    GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    CHECK(ghostty_terminal_grid_ref(vt->terminal, point, &at));
+    GhosttyRow row;
+    CHECK(ghostty_grid_ref_row(&at, &row));
+    return ghostty_row_get(row, GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, out);
+}
+
+/* Select the output above the D row `ref`: the rows above it up to the
+ * command's input line (the nearest row with prompt cells), trailing
+ * blanks trimmed. Not ghostty's output selection: it starts at the first
+ * output cell after the prompt above, which a prompt that cleared rows
+ * (typeahead echoed after A, then the shell's `\e[J`) holds blank output
+ * cells of. */
 int silo_vt_select_output_before(SiloVt *vt, void *ref, uint32_t *start_y) {
     GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
@@ -431,17 +452,38 @@ int silo_vt_select_output_before(SiloVt *vt, void *ref, uint32_t *start_y) {
     int res = ghostty_tracked_grid_ref_point(ref, GHOSTTY_POINT_TAG_SCREEN, &end);
     if (res != GHOSTTY_SUCCESS) return res;
     if (end.y == 0) return GHOSTTY_NO_VALUE;
+    uint32_t top = end.y;
+    for (;;) {
+        GhosttyRowSemanticPrompt prompt = GHOSTTY_ROW_SEMANTIC_NONE;
+        if (top == 0) break;
+        CHECK(row_semantic(vt, top - 1, &prompt));
+        if (prompt != GHOSTTY_ROW_SEMANTIC_NONE) break;
+        top--;
+    }
+    if (top == end.y) return GHOSTTY_NO_VALUE;
     uint16_t cols = 0;
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols));
-    GhosttyPoint above = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = cols ? cols - 1 : 0, .y = end.y - 1 } };
-    GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
-    CHECK(ghostty_terminal_grid_ref(vt->terminal, above, &at));
     GhosttySelection output = GHOSTTY_INIT_SIZED(GhosttySelection);
-    res = ghostty_terminal_select_output(vt->terminal, at, &output);
-    if (res != GHOSTTY_SUCCESS) return res;
-    GhosttyPointCoordinate start;
-    CHECK(ghostty_terminal_point_from_grid_ref(vt->terminal, &output.start, GHOSTTY_POINT_TAG_SCREEN, &start));
-    *start_y = start.y;
+    /* The last cell with text, scanning back from the row above D. */
+    bool found = false;
+    for (uint32_t y = end.y; y > top && !found; y--) {
+        for (uint16_t x = cols; x > 0; x--) {
+            GhosttyPoint point = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = (uint16_t)(x - 1), .y = y - 1 } };
+            CHECK(ghostty_terminal_grid_ref(vt->terminal, point, &output.end));
+            GhosttyCell cell;
+            CHECK(ghostty_grid_ref_cell(&output.end, &cell));
+            bool text = false;
+            CHECK(ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_TEXT, &text));
+            if (text) {
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) return GHOSTTY_NO_VALUE;
+    GhosttyPoint first = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = 0, .y = top } };
+    CHECK(ghostty_terminal_grid_ref(vt->terminal, first, &output.start));
+    *start_y = top;
     vt->selecting = false;
     vt->extending = false;
     ghostty_selection_gesture_reset(vt->selection, vt->terminal);
