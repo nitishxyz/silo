@@ -281,30 +281,37 @@ fn prepare_home(home: &Path) -> anyhow::Result<()> {
 /// not only closes: a child forked meanwhile by another thread (another
 /// in-process server spawning its PTY host) shares the open file
 /// description until it execs, and would hold the lock that long.
-pub(crate) struct ServerLock(Option<std::fs::File>);
+///
+/// Once [`Self::share`]d with a successor (the same open file description,
+/// so an unlock would release its lock too) dropping only closes, however
+/// the upgrade or this server ends, until [`Self::keep`] (the upgrade aborted).
+pub(crate) struct ServerLock {
+    file: std::fs::File,
+    shared: bool,
+}
 
 impl ServerLock {
     /// A lock taken over from the previous server, live.
     pub(crate) fn adopt(file: std::fs::File) -> Self {
-        Self(Some(file))
+        Self { file, shared: false }
     }
 
-    /// Close our copy only: a successor holds the same lock now.
-    fn hand_over(mut self) {
-        drop(self.0.take());
+    /// A copy for a successor.
+    fn share(&mut self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.shared = true;
+        self.file.as_fd().try_clone_to_owned()
     }
-}
 
-impl AsFd for ServerLock {
-    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.0.as_ref().expect("held until dropped").as_fd()
+    /// The upgrade aborted: the lock is ours alone again.
+    fn keep(&mut self) {
+        self.shared = false;
     }
 }
 
 impl Drop for ServerLock {
     fn drop(&mut self) {
-        if let Some(file) = self.0.take() {
-            let _ = rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::Unlock);
+        if !self.shared {
+            let _ = rustix::fs::flock(self.file.as_fd(), rustix::fs::FlockOperation::Unlock);
         }
     }
 }
@@ -313,7 +320,7 @@ pub(crate) fn lock(home: &Path) -> anyhow::Result<ServerLock> {
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home))?;
     rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| anyhow::anyhow!("another silo server is running for {}", home.display()))?;
-    Ok(ServerLock(Some(lock)))
+    Ok(ServerLock::adopt(lock))
 }
 
 fn bind(home: &Path) -> anyhow::Result<UnixListener> {
@@ -393,7 +400,7 @@ struct Start {
 }
 
 async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
-    let Start { lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks, remote } = start;
+    let Start { mut lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks, remote } = start;
     let Remote { identity, auth, net } = remote;
     let (net, incoming, remote_error) = match net.and_then(|mut net| net.serve(16).map(|incoming| (net, incoming)).map_err(|e| format!("{e:#}"))) {
         Ok((net, incoming)) => (Some(net), Some(incoming), None),
@@ -512,10 +519,11 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                 tokio::spawn(conn::accept(server.clone(), stream, upgrade_tx.clone()));
             }
             Some(sock) = upgrade_rx.recv(), if worker.is_some() => {
-                let own = match (lock.as_fd().try_clone_to_owned(), listener.as_fd().try_clone_to_owned()) {
+                let own = match (lock.share(), listener.as_fd().try_clone_to_owned()) {
                     (Ok(lock), Ok(listener)) => [lock, listener],
                     (Err(error), _) | (_, Err(error)) => {
                         tracing::warn!("upgrade refused: {error}");
+                        lock.keep();
                         continue;
                     }
                 };
@@ -530,6 +538,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                     // Keep serving (unpersisted) rather than end the programs.
                     tracing::error!("persistence worker failed; upgrade refused");
                     server.upgrading.store(false, Ordering::SeqCst);
+                    lock.keep();
                     continue;
                 };
                 let server_id = persist.server_id().to_owned();
@@ -561,6 +570,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                         }
                         worker = Some(persist::Worker::spawn(persist, server.clone(), kick.clone(), interval));
                         server.upgrading.store(false, Ordering::SeqCst);
+                        lock.keep();
                     }
                 }
             }
@@ -610,7 +620,8 @@ async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, mut s
         }
         reg.sessions.clear();
     }
-    lock.hand_over();
+    // Shared: closes our copy only.
+    drop(lock);
     tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await??;
     tracing::info!("upgrade committed; exiting");
     Ok(())

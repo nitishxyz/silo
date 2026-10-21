@@ -292,6 +292,7 @@ async fn aborted_takeover_keeps_old_server_serving() {
     assert!(format!("{error:#}").contains("test hook"), "{error:#}");
     assert!(!pump(&mut stream, &mut tail, |_| false).await, "released stream ends");
     drop(stream);
+    assert!(silo_client::mismatch::server_lock_held(&home), "the successor's copy of the lock went without unlocking it");
 
     // Same server, same programs, still accepting mutations.
     let deadline = tokio::time::Instant::now() + TIMEOUT;
