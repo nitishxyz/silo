@@ -51,19 +51,19 @@ impl CommandLog {
         self.running.take().map(|r| r.index)
     }
 
-    /// D: the running command finished (or, without a C, one with no start
-    /// or duration). Returns it and the indexes evicted to make room.
-    pub fn end(&mut self, exit: Option<i32>, now_ms: u64) -> (CommandRecord, Vec<u64>) {
-        let record = match self.running.take() {
-            Some(running) => CommandRecord { exit, duration_ms: running.started_at.map(|start| now_ms.saturating_sub(start)), ..running },
-            None => CommandRecord { index: self.index(), command: None, exit, started_at: None, duration_ms: None },
-        };
+    /// D: the running command finished. Returns it and the indexes evicted
+    /// to make room. A D with no C since the last D or A is ignored: bash
+    /// 3.2 sends one for an empty line, fish after `exit`, and doubled
+    /// integrations send two, none of them a command.
+    pub fn end(&mut self, exit: Option<i32>, now_ms: u64) -> Option<(CommandRecord, Vec<u64>)> {
+        let running = self.running.take()?;
+        let record = CommandRecord { exit, duration_ms: running.started_at.map(|start| now_ms.saturating_sub(start)), ..running };
         self.records.push_back(record.clone());
         let mut evicted = Vec::new();
         while self.records.len() > MAX_COMMANDS {
             evicted.extend(self.records.pop_front().map(|r| r.index));
         }
-        (record, evicted)
+        Some((record, evicted))
     }
 
     /// The running command's index.
@@ -124,19 +124,30 @@ mod tests {
         let mut log = CommandLog::default();
         let index = log.start("cargo\u{202e} build", 1000);
         assert_eq!(log.records(None).last().map(|r| (r.index, r.exit)), Some((index, None)), "running shows last");
-        let (record, evicted) = log.end(Some(1), 3500);
+        let (record, evicted) = log.end(Some(1), 3500).expect("C then D");
         assert!(evicted.is_empty());
         assert_eq!(
             record,
             CommandRecord { index, command: Some("cargo build".into()), exit: Some(1), started_at: Some(1000), duration_ms: Some(2500) }
         );
-        let (bare, _) = log.end(Some(0), 4000);
-        assert_eq!((bare.index, bare.started_at, bare.duration_ms, bare.command), (index + 1, None, None, None), "D without C");
-        assert_eq!(log.finished(None).map(|r| r.index), Some(index + 1));
+        assert_eq!(log.finished(None).map(|r| r.index), Some(index));
         assert_eq!(log.finished(Some(index)).and_then(|r| r.exit), Some(1));
         log.start("vim", 5000);
-        assert_eq!(log.abandon(), Some(index + 2));
+        assert_eq!(log.abandon(), Some(index + 1));
         assert_eq!(log.records(Some(1)).len(), 1);
+    }
+
+    #[test]
+    fn a_d_without_a_c_since_the_last_d_or_a_is_ignored() {
+        let mut log = CommandLog::default();
+        assert_eq!(log.end(Some(0), 1), None, "D first");
+        let index = log.start("ls", 2);
+        assert!(log.end(Some(0), 3).is_some());
+        assert_eq!(log.end(Some(0), 4), None, "a doubled D");
+        log.start("vim", 5);
+        log.abandon();
+        assert_eq!(log.end(Some(0), 6), None, "D after A with no C");
+        assert_eq!(log.records(None).iter().map(|r| r.index).collect::<Vec<_>>(), [index], "one record, nothing bogus");
     }
 
     #[test]
@@ -145,7 +156,7 @@ mod tests {
         let mut evicted = Vec::new();
         for i in 0..MAX_COMMANDS as u64 + 3 {
             log.start("true", i);
-            evicted.extend(log.end(Some(0), i).1);
+            evicted.extend(log.end(Some(0), i).unwrap().1);
         }
         assert_eq!(evicted, [0, 1, 2]);
         let records = log.records(None);

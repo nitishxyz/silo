@@ -1746,7 +1746,8 @@ impl Actor {
                     marks = true;
                 }
                 VtEvent::Prompt { step: PromptStep::CommandEnd, exit, row, .. } => {
-                    let (record, evicted) = self.status.commands.end(exit, now_ms());
+                    // No command behind it (see `CommandLog::end`): no record, and busy stays.
+                    let Some((record, evicted)) = self.status.commands.end(exit, now_ms()) else { continue };
                     for index in evicted {
                         self.status.anchors.remove(&index);
                     }

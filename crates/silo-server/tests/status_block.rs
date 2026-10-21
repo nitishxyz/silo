@@ -47,8 +47,13 @@ struct Block {
 
 impl Block {
     fn spawn(id: &str, columns: u16, command: &[&str]) -> Self {
+        let command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
+        Self::spawn_env(id, columns, command, Vec::new())
+    }
+
+    fn spawn_env(id: &str, columns: u16, command: Vec<std::ffi::OsString>, env: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Self {
         let (notes, rx) = unbounded_channel();
-        let config = SpawnConfig { command: command.iter().map(Into::into).collect(), cwd: Some(std::env::temp_dir()), env: Vec::new() };
+        let config = SpawnConfig { command, cwd: Some(std::env::temp_dir()), env };
         Self { handle: block::spawn(info(id, columns), &config, notes).expect("spawn"), notes: rx }
     }
 
@@ -381,6 +386,135 @@ async fn commands_rows_after_a_snapshot_attach_point_at_the_d_lines() {
         assert_eq!(anchor.record, records[i].index);
         assert_eq!(anchor.rows_from_bottom as usize, lines.len() - 1 - row, "record {i}");
     }
+}
+
+/// The marks of a D with no command behind it, as shells send them.
+#[tokio::test]
+async fn a_d_without_a_c_makes_no_record_and_never_flips_busy() {
+    let cases = [
+        // bash 3.2 (no PS0): every prompt after the first ends with D, an
+        // empty line included.
+        ("b-d-bash32", "A\\007$ \\033]133;B\\007\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;B\\007\\r\\n\\033]133;D;0", 0),
+        // fish runs fish_postexec for `exit`: a trailing D after the last A.
+        ("b-d-fish", "A\\007$ \\033]133;C;cmdline_url=ls\\007out\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ exit\\r\\n\\033]133;D;0", 1),
+        // A user integration hooked in after the check: every D twice.
+        ("b-d-double", "A\\007$ \\033]133;C;cmdline_url=ls\\007out\\r\\n\\033]133;D;0\\007\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;D;0", 1),
+    ];
+    for (id, marks, expected) in cases {
+        let block = Block::sh(id, &format!("printf '\\033]133;{marks}\\007DONE'; read l"));
+        let (tx, mut live) = unbounded_channel();
+        block.handle.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink: Sink::new(tx), remote: false })));
+        block.wait_for("DONE").await;
+        let records = block.commands().await;
+        assert_eq!(records.len(), expected, "{id}: {records:?}");
+        assert!(records.iter().all(|r| r.command.as_deref() == Some("ls") && r.started_at.is_some()), "{id}: nothing bogus: {records:?}");
+        let mut ends = 0;
+        while let Ok(frame) = live.try_recv() {
+            ends += usize::from(matches!(ServerData::from_frame(frame), Ok(ServerData::CommandEnd(_))));
+        }
+        assert_eq!(ends, expected, "{id}: one COMMAND_END per record");
+        assert_eq!(block.status().busy, None, "{id}");
+        assert_eq!(block.busy().await, None, "{id}");
+    }
+}
+
+/// Silo's own wrapper around a real shell, in a sandboxed HOME.
+fn hooked(id: &str, program: &std::path::Path) -> (Block, PathBuf) {
+    let dir = PathBuf::from(format!("/tmp/silo-dmark-{id}-{}", std::process::id()));
+    let (home, user) = (dir.join("silo"), dir.join("user"));
+    std::fs::create_dir_all(&user).unwrap();
+    silo_server::shell::install(&home, &[]).unwrap();
+    let (args, mut env) = silo_server::shell::hook(silo_server::shell::Shell::of(program).unwrap(), &home);
+    for (key, value) in [
+        ("HOME", user.clone()),
+        ("PATH", "/usr/bin:/bin".into()),
+        ("XDG_CONFIG_HOME", user.join(".config")),
+        ("XDG_DATA_HOME", user.join(".local/share")),
+        ("XDG_CACHE_HOME", user.join(".cache")),
+        ("SILO_ZDOTDIR", PathBuf::new()),
+        ("PROMPT_COMMAND", PathBuf::new()),
+        ("BASH_SILENCE_DEPRECATION_WARNING", "1".into()),
+    ] {
+        env.push((key.into(), value.into_os_string()));
+    }
+    let command = std::iter::once(program.as_os_str().to_owned()).chain(args).collect();
+    (Block::spawn_env(id, 120, command, env), dir)
+}
+
+/// `program`'s builds: `SILO_TEST_SHELL_DIRS` first, then the usual dirs.
+fn shells(program: &str) -> Vec<PathBuf> {
+    let extra = std::env::var_os("SILO_TEST_SHELL_DIRS").unwrap_or_default();
+    let dirs = std::env::split_paths(&extra).filter(|d| !d.as_os_str().is_empty());
+    let (mut seen, mut found) = (Vec::new(), Vec::new());
+    for path in dirs.chain(["/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)).map(|d| d.join(program)) {
+        if let Ok(real) = std::fs::canonicalize(&path)
+            && !seen.contains(&real)
+        {
+            seen.push(real);
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn version_of(program: &std::path::Path) -> String {
+    let out = std::process::Command::new(program).arg("--version").output().map(|o| o.stdout).unwrap_or_default();
+    String::from_utf8_lossy(&out).lines().next().unwrap_or_default().to_owned()
+}
+
+#[tokio::test]
+async fn bash_3_2_empty_lines_make_no_records() {
+    let old: Vec<PathBuf> = shells("bash").into_iter().filter(|p| version_of(p).contains("version 3.")).collect();
+    if old.is_empty() {
+        eprintln!("skipped: no bash 3.2");
+    }
+    for program in old {
+        let (block, dir) = hooked("b-bash32", &program);
+        block.input("PS1='P$ '\n");
+        block.wait_for("P$").await;
+        for _ in 0..3 {
+            block.input("\n");
+        }
+        block.input("echo E''ND\n");
+        block.wait_for("END").await;
+        block.wait_for("END\nP$").await;
+        // bash 3.2 sends no C, so even `echo` is a D with nothing behind it.
+        assert_eq!(block.commands().await, [], "{}: no records from bare Ds", program.display());
+        assert_eq!(block.busy().await, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn fish_exit_makes_no_bogus_record() {
+    let found = shells("fish");
+    if found.is_empty() {
+        eprintln!("skipped: no fish (set SILO_TEST_SHELL_DIRS)");
+    }
+    for program in found {
+        let (block, dir) = hooked("b-fish", &program);
+        block.input("function fish_prompt; printf 'F> '; end\n");
+        block.wait_for("F>").await;
+        block.input("echo E''ND\n");
+        block.wait_for("END").await;
+        block.input("exit\n");
+        let deadline = Instant::now() + T;
+        while !block_exited(&block) {
+            assert!(Instant::now() < deadline, "{}: fish never exited", program.display());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let records = block.commands().await;
+        assert!(records.iter().all(|r| r.command.is_some() && r.started_at.is_some()), "{}: {records:?}", program.display());
+        // fish sends C for `exit` too, so its D ends a real record: once.
+        let ran: Vec<&str> = records.iter().filter_map(|r| r.command.as_deref()).collect();
+        assert_eq!(ran, ["function fish_prompt; printf 'F> '; end", "echo E''ND", "exit"], "{}", program.display());
+        assert_eq!(block.status().busy, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+fn block_exited(block: &Block) -> bool {
+    block.handle.info.lock().unwrap().lifecycle == Lifecycle::Exited
 }
 
 #[tokio::test]

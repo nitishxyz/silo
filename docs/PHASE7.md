@@ -818,6 +818,9 @@ has merged.
     `COMMANDS` is sent only when non-empty.
   - `terminal.command_output` is Ghostty's OUTPUT selection from the C cell, cut before the D cell (Ghostty keeps
     output semantics until the next A). An A without D drops the running record; a second C replaces it.
+  - A D with no C since the last D or A is ignored (no record, no `COMMAND_END`, `busy` untouched), not a record
+    without a duration: bash 3.2 sends one for every prompt including empty lines, and doubled integrations send
+    two. So bash 3.2 gets no command records. fish's `exit` sends C then D, a real record.
   - "Progress-only" means the records' `(id, state, kind)` and `busy` are unchanged; those changes are coalesced to
     4/s. A 7501 attention's `title` is the record title (else its app), `body` its message.
   - `compat::FEATURES` now lists `status` (this server emits the events; this build's clients advertise it).
