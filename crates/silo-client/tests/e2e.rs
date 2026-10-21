@@ -420,11 +420,14 @@ fn background(m: &mut Mirror) -> u32 {
 }
 
 /// Ask the server terminal for its background (OSC 11) and wait for the
-/// reply, echoed by `cat -v`, to show `rgb`. `cat` ends on a read timeout
-/// rather than `^C`, whose input flush (Linux) would drop the next command.
+/// reply, echoed by `cat -v`, to show `rgb`. `read` ends at the reply's
+/// BEL, however late it comes (a read timeout let a slow reply reach the
+/// shell's line editor instead), and not on `^C`, whose input flush
+/// (Linux) would drop the next command.
 async fn query_background(stream: &mut DataStream, m: &mut Mirror, rgb: &str) {
     stream.send(&ClientData::Input(
-        b"clear; stty -echo -icanon min 0 time 5; printf '\\033]11;?\\007'; cat -v; stty sane; echo; echo query-done\n".to_vec(),
+        b"clear; stty -echo -icanon min 1 time 0; printf '\\033]11;?\\007'; IFS= read -r -d $'\\a' reply; stty sane; printf '%s\\n' \"$reply\" | cat -v; echo query-done\n"
+            .to_vec(),
     ));
     let want = format!("11;rgb:{rgb}");
     pump_until(stream, m, |m| {
