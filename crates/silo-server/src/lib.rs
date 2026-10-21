@@ -125,9 +125,9 @@ pub struct HostClipboard {
     pub system: Option<Arc<dyn sysclip::SystemClipboard>>,
     /// The change count right after our last push, so it is not copied back.
     pushed: Mutex<Option<i64>>,
-    /// The text of our last push, until a host change brings it back once
-    /// (Universal Clipboard echoing it from the client's Mac).
-    pushed_text: Mutex<Option<String>>,
+    /// The text of our last push and when it landed, until the next host
+    /// change (Universal Clipboard echoing it from the client's Mac).
+    pushed_text: Mutex<Option<(String, Instant)>>,
     /// Open remote data streams; changes are watched only while any is.
     pub remote_streams: std::sync::atomic::AtomicUsize,
     /// The block that last got input from a remote stream.
@@ -136,6 +136,8 @@ pub struct HostClipboard {
 
 /// How often [`watch_clipboard`] looks for host clipboard changes.
 pub const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
+/// How long after a push a host change to the same text reads as its echo.
+const ECHO_WINDOW: Duration = Duration::from_secs(10);
 
 impl HostClipboard {
     /// Put `content` (text or image within [`silo_proto::data::MAX_CLIP_BYTES`])
@@ -154,21 +156,19 @@ impl HostClipboard {
         match written {
             Ok(Ok(count)) => {
                 *self.pushed.lock().unwrap() = count;
-                *self.pushed_text.lock().unwrap() = text;
+                *self.pushed_text.lock().unwrap() = text.map(|text| (text, Instant::now()));
             }
             Ok(Err(error)) => tracing::debug!("clipboard push: {error}"),
             Err(error) => tracing::warn!("clipboard push: {error}"),
         }
     }
 
-    /// Whether a host change to `text` is our last push coming back.
-    fn echo(&self, text: &str) -> bool {
-        let mut pushed = self.pushed_text.lock().unwrap();
-        let echo = pushed.as_deref() == Some(text);
-        if echo {
-            *pushed = None;
-        }
-        echo
+    /// Whether a host change to `text` at `now` is our last push coming
+    /// back. Only the first host change after a push, and only soon after
+    /// it, can be: a later copy of the same text is a real copy.
+    fn echo(&self, text: &str, now: Instant) -> bool {
+        let pushed = self.pushed_text.lock().unwrap().take();
+        pushed.is_some_and(|(pushed, at)| pushed == text && now.saturating_duration_since(at) < ECHO_WINDOW)
     }
 }
 
@@ -193,7 +193,7 @@ pub async fn watch_clipboard(server: Arc<Server>) {
         }
         let read = system.clone();
         let Ok(Some(text)) = tokio::task::spawn_blocking(move || read.read_text()).await else { continue };
-        if server.clipboard.echo(&text) {
+        if server.clipboard.echo(&text, Instant::now()) {
             continue;
         }
         let Some(block_id) = server.clipboard.last_input.lock().unwrap().clone() else { continue };
@@ -617,5 +617,25 @@ fn unsafe_ignore_signals() {
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_next_host_change_soon_after_a_push_is_its_echo() {
+        let clipboard = HostClipboard::default();
+        let at = Instant::now();
+        let push = |text: &str| *clipboard.pushed_text.lock().unwrap() = Some((text.to_owned(), at));
+        push("pasted");
+        assert!(clipboard.echo("pasted", at + Duration::from_secs(1)));
+        assert!(!clipboard.echo("pasted", at + Duration::from_secs(2)), "a second copy is real");
+        push("pasted");
+        assert!(!clipboard.echo("other", at), "a real copy");
+        assert!(!clipboard.echo("pasted", at), "after another copy, the same text is real too");
+        push("pasted");
+        assert!(!clipboard.echo("pasted", at + ECHO_WINDOW), "long after the push");
     }
 }
