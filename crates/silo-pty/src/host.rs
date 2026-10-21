@@ -157,18 +157,21 @@ fn errno() -> c_int {
     io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)
 }
 
-/// Close every descriptor from 3 up except `keep`.
-unsafe fn close_inherited(keep: c_int) {
+/// Close every descriptor from 3 up except the two in `keep` (which may be
+/// the same).
+unsafe fn close_inherited(keep: [c_int; 2]) {
     // SAFETY: only closes descriptors of this single-threaded process.
     unsafe {
         #[cfg(target_os = "linux")]
         {
-            let close_range = |first: c_int, last: c_int| libc::syscall(libc::SYS_close_range, first as libc::c_uint, last as libc::c_uint, 0) == 0;
-            if (keep <= 3 || close_range(3, keep - 1)) && close_range(keep + 1, c_int::MAX) {
+            let close_range =
+                |first: c_int, last: c_int| first > last || libc::syscall(libc::SYS_close_range, first as libc::c_uint, last as libc::c_uint, 0) == 0;
+            let (low, high) = (keep[0].min(keep[1]).max(2), keep[0].max(keep[1]).max(2));
+            if close_range(3, low - 1) && close_range(low + 1, high - 1) && close_range(high + 1, c_int::MAX) {
                 return;
             }
             for fd in 3..libc::getdtablesize() {
-                if fd != keep {
+                if !keep.contains(&fd) {
                     libc::close(fd);
                 }
             }
@@ -182,7 +185,7 @@ unsafe fn close_inherited(keep: c_int) {
                 let count = usize::try_from(n).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
                 let mut closed = false;
                 for info in &fds[..count] {
-                    if info.proc_fd >= 3 && info.proc_fd != keep {
+                    if info.proc_fd >= 3 && !keep.contains(&info.proc_fd) {
                         libc::close(info.proc_fd);
                         closed = true;
                     }
@@ -194,7 +197,6 @@ unsafe fn close_inherited(keep: c_int) {
         }
     }
 }
-
 fn report(fd: c_int, record: Record) {
     let bytes = record.encode();
     // SAFETY: writes from a stack buffer; RECORD_LEN < PIPE_BUF is atomic.
@@ -209,6 +211,11 @@ unsafe fn run(argv: *const *const c_char) -> c_int {
     // and is NULL-terminated like ours.
     unsafe {
         let (Some(status), Some(slave)) = (fd_arg(*argv.add(2)), fd_arg(*argv.add(3))) else { return 2 };
+        // Anything else inherited (a descriptor another thread of the
+        // spawning process had not marked close-on-exec yet) must not live
+        // as long as the program: a socket held here would outlive its
+        // owner's close.
+        close_inherited([status, slave]);
         for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
             libc::signal(signal, libc::SIG_IGN);
         }
@@ -237,7 +244,7 @@ unsafe fn run(argv: *const *const c_char) -> c_int {
                 if slave > 2 {
                     libc::close(slave);
                 }
-                close_inherited(exec_err[1]);
+                close_inherited([exec_err[1]; 2]);
                 libc::execvp(*argv.add(4), argv.add(5));
             }
             let e = errno();

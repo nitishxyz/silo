@@ -76,14 +76,54 @@ pub fn recv_fds(sock: &UnixStream, max_fds: usize, max_payload: usize) -> io::Re
     if max_fds > MAX_FDS || max_payload == 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid limits"));
     }
+    #[cfg(target_os = "linux")]
+    {
+        recv_once(sock, max_fds, max_payload, libc::MSG_CMSG_CLOEXEC)
+    }
+    // Without MSG_CMSG_CLOEXEC the descriptors arrive inheritable: receive
+    // and mark them under the fork lock, waiting for the message outside it.
+    #[cfg(not(target_os = "linux"))]
+    loop {
+        wait_readable(sock)?;
+        let _creating = crate::cloexec::creating();
+        match recv_once(sock, max_fds, max_payload, libc::MSG_DONTWAIT) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Ok((payload, fds)) => {
+                for fd in &fds {
+                    rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
+                }
+                return Ok((payload, fds));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Wait until `sock` has a message (or its end), within its read timeout.
+#[cfg(not(target_os = "linux"))]
+fn wait_readable(sock: &UnixStream) -> io::Result<()> {
+    let timeout = sock.read_timeout()?.map_or(-1, |t| t.as_millis().clamp(1, i32::MAX as u128) as i32);
+    let mut pfd = libc::pollfd { fd: sock.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    loop {
+        // SAFETY: poll reads and writes one pollfd.
+        match unsafe { libc::poll(&raw mut pfd, 1, timeout) } {
+            0 => return Err(io::Error::new(io::ErrorKind::WouldBlock, "timed out waiting for descriptors")),
+            n if n > 0 => return Ok(()),
+            _ => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+fn recv_once(sock: &UnixStream, max_fds: usize, max_payload: usize, flags: i32) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
     let mut payload = vec![0u8; max_payload];
     let space = cmsg_space(max_fds.max(1));
     let mut control = vec![0u64; space.div_ceil(8)];
     let mut iov = libc::iovec { iov_base: payload.as_mut_ptr().cast(), iov_len: payload.len() };
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let flags = libc::MSG_CMSG_CLOEXEC;
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let flags = 0;
     let mut fds = Vec::new();
     // SAFETY: as in send_fds; descriptors read from SCM_RIGHTS are new and
     // owned by us, so wrapping them in OwnedFd is sound.
@@ -133,9 +173,6 @@ pub fn recv_fds(sock: &UnixStream, max_fds: usize, max_payload: usize) -> io::Re
     }
     if n == 0 && fds.is_empty() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
-    }
-    for fd in &fds {
-        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
     }
     payload.truncate(n);
     Ok((payload, fds))

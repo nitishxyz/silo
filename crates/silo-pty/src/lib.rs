@@ -1,5 +1,6 @@
 //! PTY allocation and child supervision (macOS and Linux).
 
+mod cloexec;
 pub mod handoff;
 mod host;
 mod threads;
@@ -12,7 +13,7 @@ use std::{
     fs::File,
     io,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, OwnedFd},
         unix::process::{CommandExt, ExitStatusExt},
     },
     path::PathBuf,
@@ -31,7 +32,7 @@ const HOST_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 
 use rustix::{
     fs::{Mode, OFlags, open},
-    pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
+    pty::{grantpt, ptsname, unlockpt},
     termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize},
 };
 
@@ -126,22 +127,6 @@ fn watch_status(
     })
 }
 
-/// A close-on-exec pipe: `(read, write)`.
-fn status_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    // SAFETY: pipe fills two new descriptors that we then own.
-    let (read, write) = unsafe {
-        if libc::pipe(fds.as_mut_ptr()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
-    };
-    for fd in [&read, &write] {
-        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
-    }
-    Ok((read, write))
-}
-
 /// A PTY and its process. Dropping it hangs up the process group; use
 /// [`Pty::detach`] to hand the process to another owner instead.
 pub struct Pty {
@@ -200,15 +185,14 @@ impl Pty {
     pub fn spawn(config: &SpawnConfig, size: PtySize, on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static) -> io::Result<Self> {
         // Keeps the host constructor linked into every binary that spawns.
         std::hint::black_box(&host::INIT);
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
-        // macOS posix_openpt has no O_CLOEXEC; set it before spawning anything.
-        rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
-        grantpt(&master)?;
-        unlockpt(&master)?;
-        let name = ptsname(&master, Vec::new())?;
-        let slave = File::from(open(name.as_c_str(), OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())?);
-        set_size(&master, size)?;
-        let (status, status_write) = status_pipe()?;
+        let master = open_master()?;
+        grantpt(&master).map_err(step("grantpt"))?;
+        unlockpt(&master).map_err(step("unlockpt"))?;
+        let name = ptsname(&master, Vec::new()).map_err(step("ptsname"))?;
+        let slave = open(name.as_c_str(), OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty());
+        let slave = File::from(slave.map_err(step("open the PTY slave"))?);
+        set_size(&master, size).map_err(step("set the PTY size"))?;
+        let (status, status_write) = cloexec::pipe().map_err(step("status pipe"))?;
 
         let (program, args, login) = if config.command.is_empty() {
             (user_shell().into_os_string(), Vec::new(), true)
@@ -262,8 +246,12 @@ impl Pty {
                 Ok(())
             });
         }
-        let mut host = command.spawn()?;
+        let spawned = {
+            let _forking = cloexec::forking();
+            command.spawn()
+        };
         drop((slave, status_write));
+        let mut host = spawned.map_err(step("start the PTY host"))?;
         let pid = match host::read_within(&status, HOST_START_TIMEOUT) {
             Ok(Some(host::Record::Started(pid))) => pid,
             other => {
@@ -272,7 +260,7 @@ impl Pty {
                 }
                 let _ = host.wait();
                 return Err(match other {
-                    Ok(Some(host::Record::Failed(errno))) => io::Error::from_raw_os_error(errno),
+                    Ok(Some(host::Record::Failed(errno))) => step("start the program")(io::Error::from_raw_os_error(errno)),
                     Err(error) => error,
                     _ => io::Error::other("pty host failed to start the program"),
                 });
@@ -505,6 +493,39 @@ impl Drop for Pty {
     }
 }
 
+/// Name the step of [`Pty::spawn`] that failed.
+fn step<E: Into<io::Error>>(what: &'static str) -> impl FnOnce(E) -> io::Error {
+    move |error| {
+        let error = error.into();
+        io::Error::new(error.kind(), format!("{what}: {error}"))
+    }
+}
+
+/// `EREDRIVEOPEN`: xnu's "redrive the open" (`bsd/sys/errno.h`), which
+/// escapes to userspace when two opens of `/dev/ptmx` pick the same free
+/// minor number at once.
+#[cfg(target_os = "macos")]
+const EREDRIVEOPEN: i32 = -6;
+
+/// A new PTY master, close-on-exec from the start. `posix_openpt` is
+/// `open("/dev/ptmx")` on macOS and Linux, but macOS's takes no `O_CLOEXEC`.
+///
+/// Opens are serialized: on macOS concurrent opens race for the next minor
+/// number and the loser fails with [`EREDRIVEOPEN`]. Another process can
+/// still race us; that is reported by name, not as an unknown error.
+fn open_master() -> io::Result<OwnedFd> {
+    static OPENING: Mutex<()> = Mutex::new(());
+    let _opening = OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match open(c"/dev/ptmx", OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty()) {
+        Ok(master) => Ok(master),
+        #[cfg(target_os = "macos")]
+        Err(e) if e.raw_os_error() == EREDRIVEOPEN => {
+            Err(io::Error::new(io::ErrorKind::ResourceBusy, "open /dev/ptmx: raced another process for a new PTY (EREDRIVEOPEN)"))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn set_size(fd: impl std::os::fd::AsFd, size: PtySize) -> io::Result<()> {
     tcsetwinsize(
         fd,
@@ -563,7 +584,10 @@ pub fn process_name(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::{
+        io::{Read, Write},
+        os::fd::FromRawFd,
+    };
 
     #[test]
     fn spawns_echoes_resizes_and_reports_exit() {
@@ -611,6 +635,31 @@ mod tests {
             }
         }
         assert!(String::from_utf8_lossy(&output).contains("fd:clean"), "{}", String::from_utf8_lossy(&output));
+    }
+
+    /// The PTY host keeps only its status pipe: a descriptor it inherited
+    /// (one another thread had not marked close-on-exec yet) would outlive
+    /// its owner's close for as long as the program runs.
+    #[test]
+    fn host_keeps_no_inherited_descriptor() {
+        // SAFETY: dup returns a new descriptor without CLOEXEC, owned here.
+        let leak = unsafe { OwnedFd::from_raw_fd(libc::dup(2)) };
+        let config = SpawnConfig { command: vec!["/bin/sleep".into(), "5".into()], ..Default::default() };
+        let pty = Pty::spawn(&config, PtySize { columns: 80, rows: 24, cell_width: 8, cell_height: 16 }, |_| {}).unwrap();
+        let out = Command::new("/bin/ps").args(["-o", "ppid=", "-p", &pty.pid().to_string()]).output().unwrap();
+        let host = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        assert!(host.parse::<i32>().is_ok_and(|h| h > 1), "host pid {host:?}");
+        #[cfg(target_os = "linux")]
+        let fds: Vec<i32> =
+            std::fs::read_dir(format!("/proc/{host}/fd")).unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect();
+        #[cfg(target_os = "macos")]
+        let fds: Vec<i32> = {
+            let out = Command::new("/usr/sbin/lsof").args(["-a", "-p", &host, "-d", "0-1024", "-F", "f"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix('f')?.parse().ok()).collect()
+        };
+        assert!(!fds.contains(&leak.as_raw_fd()), "host holds {} in {fds:?}", leak.as_raw_fd());
+        assert_eq!(fds.iter().filter(|&&fd| fd > 2).count(), 1, "only the status pipe: {fds:?}");
+        pty.signal(libc::SIGKILL);
     }
 
     #[test]

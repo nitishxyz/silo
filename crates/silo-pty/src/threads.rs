@@ -66,9 +66,7 @@ fn wait(fd: BorrowedFd<'_>, flags: PollFlags, cancel: BorrowedFd<'_>) -> io::Res
 
 impl IoThreads {
     pub(crate) fn start(master: Arc<OwnedFd>, name: &str, mut on_event: impl FnMut(PtyEvent) + Send + 'static) -> io::Result<(Self, PtyInput)> {
-        let (cancel_rx, cancel_tx) = rustix::pipe::pipe()?;
-        rustix::io::fcntl_setfd(&cancel_rx, rustix::io::FdFlags::CLOEXEC)?;
-        rustix::io::fcntl_setfd(&cancel_tx, rustix::io::FdFlags::CLOEXEC)?;
+        let (cancel_rx, cancel_tx) = crate::cloexec::pipe()?;
         let flags = fcntl_getfl(&*master)?;
         fcntl_setfl(&*master, flags | OFlags::NONBLOCK)?;
         let (input, input_rx) = mpsc::channel();
