@@ -275,7 +275,7 @@ mod tests {
             ("control server", Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None }),
             ("owner", Method::PairList {}),
             ("owner approval", Method::PairCreate { ttl_secs: 60, purpose: InvitePurpose::Device }),
-            ("owner approval clipboard", Method::ClipboardRead { block_id: b(), kind: ClipKind::Text }),
+            ("interact block clipboard", Method::ClipboardRead { block_id: b(), kind: ClipKind::Text }),
             ("other session", Method::TerminalCapture { block_id: "c".into(), history: false }),
         ];
         const OK: &str = "ok";
@@ -295,7 +295,7 @@ mod tests {
             [OK, OK, F, F, F, F],
             [OK, F, F, F, F, F],
             [APPROVE, F, F, F, F, F],
-            [APPROVE, F, F, F, F, F],
+            [OK, OK, F, OK, F, OK],
             [OK, OK, N, N, N, N],
         ];
         for ((row, method), expected) in rows.iter().zip(expected) {

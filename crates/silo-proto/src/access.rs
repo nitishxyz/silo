@@ -224,6 +224,7 @@ pub fn need(method: &Method) -> Need {
 
         M::TerminalSend { .. }
         | M::TerminalResize { .. }
+        | M::ClipboardRead { .. }
         | M::ClipboardWrite { .. }
         | M::BrowserNavigate { .. }
         | M::BrowserBack { .. }
@@ -289,7 +290,6 @@ pub fn need(method: &Method) -> Need {
         | M::PairRevoke { .. }
         | M::GrantCreate { .. }
         | M::GrantRevoke { .. }
-        | M::ClipboardRead { .. }
         | M::AppHostsAdd { .. }
         | M::AppHostsRemove { .. } => approved(Owner),
     }

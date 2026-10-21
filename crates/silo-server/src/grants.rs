@@ -58,23 +58,25 @@ fn device_grant(device: PairedDevice) -> Grant {
 }
 
 impl Grants {
-    /// Load the grants in the state directory `dir`, converting
-    /// `devices.sealed` if there are none yet.
+    /// Load the grants in the state directory `dir`, converting the devices
+    /// of a `devices.sealed` (written by a build before grants, e.g. one
+    /// that kept serving after an aborted upgrade) that have no grant yet.
     pub fn open(dir: &Path, key: HostKey) -> anyhow::Result<Self> {
         let path = dir.join(GRANTS_FILE);
-        if let Some(bytes) = read(&path, &key, GRANTS_AAD)? {
-            let grants = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-            return Ok(Self { key, path, grants, seen_dirty: false });
-        }
-        let devices_path = dir.join(DEVICES_FILE);
-        let devices: Vec<PairedDevice> = match read(&devices_path, &key, DEVICES_AAD)? {
-            Some(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parse {}", devices_path.display()))?,
-            None => return Ok(Self { key, path, grants: Vec::new(), seen_dirty: false }),
+        let grants = match read(&path, &key, GRANTS_AAD)? {
+            Some(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?,
+            None => Vec::new(),
         };
-        let mut grants = Self { key, path, grants: devices.into_iter().map(device_grant).collect(), seen_dirty: false };
+        let mut grants = Self { key, path, grants, seen_dirty: false };
+        let devices_path = dir.join(DEVICES_FILE);
+        let Some(bytes) = read(&devices_path, &grants.key, DEVICES_AAD)? else { return Ok(grants) };
+        let devices: Vec<PairedDevice> = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", devices_path.display()))?;
+        let new: Vec<Grant> = devices.into_iter().filter(|d| grants.device(&d.id).is_none()).map(device_grant).collect();
+        let count = new.len();
+        grants.grants.extend(new);
         grants.save().map_err(|e| anyhow::anyhow!("{e}"))?;
         std::fs::remove_file(&devices_path).with_context(|| format!("remove {}", devices_path.display()))?;
-        tracing::info!(devices = grants.grants.len(), "paired devices converted to grants");
+        tracing::info!(devices = count, "paired devices converted to grants");
         Ok(grants)
     }
 
@@ -186,6 +188,15 @@ mod tests {
         let again = Grants::open(&dir, key()).unwrap();
         assert_eq!(again.devices(), devices);
         assert_eq!(again.all(), grants.all());
+        // An older build kept serving and paired another device: only that
+        // one is added.
+        let tablet = PairedDevice { id: "cc".into(), name: "tablet".into(), paired_at: 50, last_seen: 60 };
+        let rewritten = [devices.clone(), vec![tablet]].concat();
+        silo_store::write_sealed(dir.join(DEVICES_FILE), &key(), DEVICES_AAD, &serde_json::to_vec(&rewritten).unwrap()).unwrap();
+        let merged = Grants::open(&dir, key()).unwrap();
+        assert_eq!(merged.devices(), rewritten);
+        assert_eq!(merged.all()[..2], *grants.all());
+        assert!(!dir.join(DEVICES_FILE).exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 }

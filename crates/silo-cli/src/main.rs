@@ -491,7 +491,6 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 mdns: !no_mdns,
                 port,
                 system_clipboard: silo_server::sysclip::native(),
-                require_approval: true,
                 ..Default::default()
             };
             if takeover {

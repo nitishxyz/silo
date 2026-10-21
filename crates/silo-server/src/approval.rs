@@ -92,7 +92,7 @@ impl Approvals {
 }
 
 /// An approval shown to its approvers.
-pub struct Asked {
+struct Asked {
     id: String,
     approvers: Vec<ClientId>,
     answer: oneshot::Receiver<bool>,
@@ -100,7 +100,7 @@ pub struct Asked {
 }
 
 /// Show `approvers` the request to allow `action` for `caller`.
-pub fn start(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Asked {
+fn start(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Asked {
     let id = new_id();
     let (reply, answer) = oneshot::channel();
     server.approvals.pending.lock().unwrap().insert(id.clone(), Pending { approvers: approvers.clone(), reply });
@@ -111,7 +111,7 @@ pub fn start(server: &Server, approvers: Vec<ClientId>, action: &str, summary: S
 }
 
 /// Close `asked` as answered `allowed` and dismiss its cards.
-pub fn settle(server: &Server, asked: &Asked, allowed: bool) {
+fn settle(server: &Server, asked: &Asked, allowed: bool) {
     server.approvals.pending.lock().unwrap().remove(&asked.id);
     server.registry.lock().unwrap().emit_clients(Event::ApprovalResolved { id: asked.id.clone(), allowed }, asked.approvers.clone());
 }
@@ -120,7 +120,7 @@ pub fn settle(server: &Server, asked: &Asked, allowed: bool) {
 ///
 /// # Errors
 /// `forbidden` "Denied in Silo" or `timeout`.
-pub async fn finish(server: &Server, mut asked: Asked) -> Result<(), RpcError> {
+async fn finish(server: &Server, mut asked: Asked) -> Result<(), RpcError> {
     let wait = asked.deadline.saturating_duration_since(Instant::now());
     let answer = tokio::time::timeout(wait, &mut asked.answer).await;
     let allowed = matches!(answer, Ok(Ok(true)));
@@ -136,13 +136,13 @@ pub async fn finish(server: &Server, mut asked: Asked) -> Result<(), RpcError> {
 ///
 /// # Errors
 /// See [`finish`].
-pub async fn ask(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Result<(), RpcError> {
+async fn ask(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Result<(), RpcError> {
     let asked = start(server, approvers, action, summary, caller);
     finish(server, asked).await
 }
 
 /// Who `client` is, for an approval card.
-pub fn caller(reg: &Registry, client: ClientId) -> Caller {
+fn caller(reg: &Registry, client: ClientId) -> Caller {
     let entry = reg.clients.get(&client);
     let from = entry.and_then(|c| c.pane.as_deref()).and_then(|pane| pane_label(reg, pane));
     Caller { client_id: client, label: entry.map(|c| c.label.clone()).unwrap_or_default(), from }
@@ -172,10 +172,7 @@ pub async fn gate(server: &Server, client: ClientId, method: &Method, rights: Ri
     let summary = summary(method, &server.auth().devices());
     let (approvers, caller, alone) = {
         let reg = server.registry.lock().unwrap();
-        let approvers = match method {
-            Method::ClipboardRead { block_id, .. } => reg.block_approvers(block_id),
-            _ => reg.approvers(rights),
-        };
+        let approvers = reg.approvers(rights);
         let entry = reg.clients.get(&client);
         let alone = entry.is_some_and(|c| c.pane.is_none() && c.tty && c.origin.is_none());
         (approvers, caller(&reg, client), alone)
@@ -209,7 +206,7 @@ fn scope_text(scope: &Scope) -> String {
 }
 
 /// What allowing `method` does, in words.
-pub fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> String {
+fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> String {
     match method {
         Method::ServerShutdown {} => "Stop the server and end every session".into(),
         Method::ServerRestart { .. } => "Restart the server and end every session".into(),
@@ -229,7 +226,6 @@ pub fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -
             format!("Create {kind} with {rights} access to {}", scope_text(scope))
         }
         Method::GrantRevoke { id } => format!("Revoke grant {id}"),
-        Method::ClipboardRead { .. } => "Read the clipboard".into(),
         Method::AppHostsAdd { .. } => "Add a host to Silo".into(),
         Method::AppHostsRemove { host, .. } => format!("Remove the host {host} from Silo"),
         other => format!("Run {}", silo_proto::api::method_name(other)),

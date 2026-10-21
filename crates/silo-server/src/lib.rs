@@ -66,8 +66,7 @@ pub struct Config {
     /// it can be watched, copied back from; `None` (the default) for none.
     pub system_clipboard: Option<Arc<dyn sysclip::SystemClipboard>>,
     /// Owner actions from clients that are not a Silo app wait for a human
-    /// (Phase 7 §9). Off by default for embedded servers; `silo server`
-    /// turns it on.
+    /// (Phase 7 §9). Off until the app can show approvals (P7-5).
     pub require_approval: bool,
     /// How often expired grants are removed and their connections closed.
     pub grant_sweep: Duration,

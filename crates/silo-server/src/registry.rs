@@ -539,20 +539,6 @@ impl Registry {
         ids
     }
 
-    /// Subscribed app clients with a data stream on `block` that speak the
-    /// approval events.
-    pub fn block_approvers(&self, block: &str) -> Vec<ClientId> {
-        let mut ids: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::ACCESS)))
-            .filter(|(_, c)| c.streams.values().any(|(b, _, _)| b == block))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
     /// A data stream of `client` opened on `block`.
     pub fn add_stream(&mut self, client: ClientId, stream: u64, block: &str, rights: Rights, end: tokio::sync::oneshot::Sender<()>) {
         if let Some(entry) = self.clients.get_mut(&client) {

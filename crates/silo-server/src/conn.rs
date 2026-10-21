@@ -12,7 +12,7 @@ use silo_proto::{
         ApiMethod, BlockView, BrowserCommand, ClientHello, ClientRole, Empty, Event, GrantCreated, GrantKind, Grants, METHODS, Method, OfferSource,
         PairInvite, PairedDevices, Pasted, Request, RpcError, ServerHello, ServerMessage,
     },
-    data::{ClientData, ClipKind, DataHello, MAX_CLIP_TEXT, Reject},
+    data::{ClientData, DataHello, MAX_CLIP_TEXT, Reject},
     kind,
     model::short_client_name,
     read_frame, spawn_reader,
@@ -398,9 +398,6 @@ async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Resu
     if server.upgrading.load(Ordering::SeqCst) && !read_only(&method) {
         return Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"));
     }
-    if let Method::ClipboardRead { block_id, kind } = method {
-        return clipboard_read(server, ctx, &block_id, kind, approval).await;
-    }
     if approval {
         approval::gate(server, ctx.id, &method, Rights::Owner).await?;
     }
@@ -415,32 +412,6 @@ async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Resu
         crate::close_guard::check(server, ctx.id, &method)?;
     }
     handle(server, ctx, method).await
-}
-
-/// Ask the block's attached clients for the clipboard. A read that needs
-/// approval shows the card to the attached apps; an app answering at once
-/// (right after a paste gesture) is that approval.
-async fn clipboard_read(server: &Server, ctx: &Ctx, block_id: &str, kind: ClipKind, approval: bool) -> Result<Value, RpcError> {
-    let read = || async {
-        let (reply, rx) = tokio::sync::oneshot::channel();
-        server.registry.lock().unwrap().block(block_id)?.send(BlockMsg::ClipboardRead { kind, reply });
-        Ok::<_, RpcError>(tokio::time::timeout(CLIPBOARD_READ_TIMEOUT, rx).await.ok().and_then(Result::ok).flatten())
-    };
-    let approvers = if approval && server.require_approval { server.registry.lock().unwrap().block_approvers(block_id) } else { Vec::new() };
-    if approvers.is_empty() {
-        return to_value(Pasted { content: read().await? });
-    }
-    let (caller, summary) = {
-        let reg = server.registry.lock().unwrap();
-        (approval::caller(&reg, ctx.id), approval::summary(&Method::ClipboardRead { block_id: block_id.to_owned(), kind }, &[]))
-    };
-    let pending = approval::start(server, approvers, "clipboard.read", summary, caller);
-    if let Some(content) = read().await? {
-        approval::settle(server, &pending, true);
-        return to_value(Pasted { content: Some(content) });
-    }
-    approval::finish(server, pending).await?;
-    to_value(Pasted { content: read().await? })
 }
 
 fn grant_create(
@@ -607,7 +578,14 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::SizeInfo { reply });
             to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
         }
-        Method::ClipboardRead { block_id, kind } => clipboard_read(server, ctx, &block_id, kind, false).await,
+        // The attached apps answer only right after a paste into the block:
+        // the user's paste is the consent, so no approval is asked.
+        Method::ClipboardRead { block_id, kind } => {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::ClipboardRead { kind, reply });
+            let content = tokio::time::timeout(CLIPBOARD_READ_TIMEOUT, rx).await.ok().and_then(Result::ok).flatten();
+            to_value(Pasted { content })
+        }
         Method::ClipboardWrite { block_id, location: _, text } => {
             if text.len() > MAX_CLIP_TEXT {
                 let (len, max) = (silo_proto::drops::human_size(text.len() as u64), silo_proto::drops::human_size(MAX_CLIP_TEXT as u64));

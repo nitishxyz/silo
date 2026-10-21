@@ -7,9 +7,10 @@ use std::{
     time::Duration,
 };
 
-use silo_client::{Control, Events};
+use silo_client::{Control, DataStream, Events};
 use silo_proto::{
-    control::{ClientRole, Event, InvitePurpose, Method, PairInvite, RpcError},
+    control::{ClientRole, Created, Event, InvitePurpose, Method, PairInvite, Pasted, RpcError},
+    data::ClipKind,
     paths,
 };
 use silo_transport::RelayConfig;
@@ -87,10 +88,35 @@ fn code(error: anyhow::Error) -> RpcError {
 async fn owner_actions_from_non_app_clients_wait_for_an_app() {
     let home = temp_home("flow");
     let task = start(&home).await;
-    let (app, mut app_events) = connect(&home, ClientRole::App).await;
-    app.subscribe().await.unwrap();
     let (cli, _) = connect(&home, ClientRole::Cli).await;
     let (other, _) = connect(&home, ClientRole::Cli).await;
+
+    // No app: a caller outside every pane may confirm on its terminal, if
+    // it has one; else the call fails.
+    let error = code(cli.call_value(pair()).await.unwrap_err());
+    if std::fs::File::open("/dev/tty").is_ok() {
+        assert_eq!(error.code, RpcError::CONFIRM, "{error}");
+        let id = error.data.as_ref().and_then(|d| d["approval"].as_str()).unwrap().to_owned();
+        assert_eq!(code(other.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err()).code, "not_found");
+        cli.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap();
+        assert_eq!(code(cli.call_value(Method::ServerShutdown {}).await.unwrap_err()).code, RpcError::CONFIRM, "confirmed for pair.create only");
+        cli.call::<PairInvite>(pair()).await.unwrap();
+        assert_eq!(code(cli.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap_err()).code, "not_found", "single-use");
+        assert_eq!(code(cli.call_value(pair()).await.unwrap_err()).code, RpcError::CONFIRM, "single-use");
+    } else {
+        assert_eq!((error.code.as_str(), error.message.as_str()), (RpcError::FORBIDDEN, "Approve in Silo: no Silo app is connected"));
+    }
+
+    let (app, mut app_events) = connect(&home, ClientRole::App).await;
+    app.subscribe().await.unwrap();
+
+    // A clipboard read asks nobody, even with an app on the block: the
+    // app answers only right after a paste, and that paste is the consent.
+    let created: Created =
+        app.call(Method::SessionCreate { name: None, spawn: Default::default(), kind: Default::default(), url: None }).await.unwrap();
+    let _stream = DataStream::open(&app, &created.block_id, None).await.unwrap();
+    let read = cli.call::<Pasted>(Method::ClipboardRead { block_id: created.block_id.clone(), kind: ClipKind::Image });
+    assert_eq!(timeout(T, read).await.expect("no approval wait").unwrap().content, None);
 
     // Allowed in the app: the call goes through.
     let call = tokio::spawn({
@@ -122,25 +148,6 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
 
     // The app's own calls need nobody.
     app.call::<PairInvite>(pair()).await.unwrap();
-
-    // No app: a caller outside every pane may confirm on its terminal, if
-    // it has one; else the call fails.
-    drop(app_events);
-    drop(app);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let error = code(cli.call_value(pair()).await.unwrap_err());
-    if std::fs::File::open("/dev/tty").is_ok() {
-        assert_eq!(error.code, RpcError::CONFIRM, "{error}");
-        let id = error.data.as_ref().and_then(|d| d["approval"].as_str()).unwrap().to_owned();
-        assert_eq!(code(other.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err()).code, "not_found");
-        cli.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
-        cli.call::<PairInvite>(pair()).await.unwrap();
-        assert_eq!(code(cli.call_value(Method::ServerShutdown {}).await.unwrap_err()).code, RpcError::CONFIRM, "a confirmation is single-use");
-    } else {
-        assert_eq!((error.code.as_str(), error.message.as_str()), (RpcError::FORBIDDEN, "Approve in Silo: no Silo app is connected"));
-    }
-
-    let (app, _) = connect(&home, ClientRole::App).await;
     app.call_value(Method::ServerShutdown {}).await.unwrap();
     drop((app, cli, other));
     timeout(T, task).await.unwrap().unwrap();

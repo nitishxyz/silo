@@ -161,12 +161,12 @@ pub fn need(method: &Method) -> Need   // exhaustive match: a new Method without
 | AppReply | `app.reply` |
 | view · block | `block.view`, `terminal.capture`, `terminal.size`, `data.connect`, `block.commands`, `terminal.command_output` |
 | view · session | `session.view` |
-| interact · block | `terminal.send`, `terminal.resize`, `session.own_block`, `session.disown_block`, `clipboard.write`, `browser.*` (`browser.report` keeps its owner-client check), `block.focus`, `block.focus_step`, `block.focus_dir`, `block.status_seen` |
+| interact · block | `terminal.send`, `terminal.resize`, `session.own_block`, `session.disown_block`, `clipboard.read` (gesture-gated, §9), `clipboard.write`, `browser.*` (`browser.report` keeps its owner-client check), `block.focus`, `block.focus_step`, `block.focus_dir`, `block.status_seen` |
 | interact · session | `window.select`, `window.step`, `ui.open_session` |
 | control · session | `session.rename`, `session.close`, `window.create/close/rename/move`, `block.split/close/zoom/swap/float/move`, `layout.ratio/grow/edge/equalize`, `terminal.clear`, `terminal.reset` |
 | control · server | `session.create`, every forwarded `app.*` except below |
 | owner · server | `server.log`, `pair.list`, `grant.list` |
-| owner · server + approval | `server.shutdown`, `server.restart`, `pair.create`, `pair.revoke`, `grant.create`, `grant.revoke`, `clipboard.read`, `app.hosts_add`, `app.hosts_remove` |
+| owner · server + approval | `server.shutdown`, `server.restart`, `pair.create`, `pair.revoke`, `grant.create`, `grant.revoke`, `app.hosts_add`, `app.hosts_remove` |
 
 Multi-block methods (`session.own_block {block_ids}`) need the right on every id. Paired devices keep exactly what
 they have today (control at server scope: everything except owner methods), so nothing regresses.
@@ -203,8 +203,9 @@ events. That avoids per-principal pruned layouts.
 
 ### 3.6 Storage, expiry, revocation
 
-- `state/grants.sealed` (same `HostKey`/AAD scheme as `auth.rs:20`) holds `Vec<Grant>`. On first open, an existing
-  `devices.sealed` is converted to device grants (label = device name, `rights: control`) and deleted. One-way;
+- `state/grants.sealed` (same `HostKey`/AAD scheme as `auth.rs:20`) holds `Vec<Grant>`. On open, an existing
+  `devices.sealed` is converted to device grants (label = device name, `rights: control`) and deleted; devices that
+  already have a grant are skipped, so one an older server wrote after an aborted upgrade still merges. One-way;
   a downgraded server sees no devices.
 - Secrets are 32 random bytes and are shown once. Only `sha256` is stored.
 - `Auth.live` (`auth.rs:68`) maps `conn_id → (grant_id, RemoteConn)`. Local token clients are tracked by grant id
@@ -648,10 +649,12 @@ away.
   2. An approver answers with `approval.answer {id, allow}`. `approval.resolved {id, allowed}` dismisses the card in
      other apps.
   3. The call fails with `forbidden` "Denied in Silo", or `timeout` after 120 s.
-  - **Approvers:** app clients whose principal holds the method's rights at server scope. For `clipboard.read`, the
-    approvers are the app clients attached to the block, whose clipboard it is.
-  - **The paste gesture stays the approval for `clipboard.read`** (`pane.rs:978`): a read right after a paste is
-    answered silently, and any other read shows the approval card instead of silently answering nothing.
+  - **Approvers:** app clients whose principal holds the method's rights at server scope and that advertise
+    `compat::feature::APPROVALS = "approvals"` (P7-5): an app that shows no cards is never asked, so no call waits
+    120 s for an answer that cannot come.
+  - **`clipboard.read` asks nobody: the paste gesture is the approval** (`pane.rs:978`). The attached apps answer a
+    read only right after the user pasted into that block, else nothing within 3 s, exactly as before Phase 7. It
+    needs interact on the block, so a scoped agent token can still read the images pasted into its pane.
 - **UI:** a card in the focused window ("claude-code wants to create a pairing invite · from work › api"), with
   Allow and Deny. If Silo isn't frontmost, a notification is shown too.
 - **Scoped tokens:**
@@ -688,7 +691,9 @@ away.
    **Chosen: B, restricted.** Allow the tty confirmation only when the calling process is **not** inside
    any pane of this server (the §9 peer-pid ancestry check finds no block) and has a controlling tty. Otherwise A.
    That keeps SSH setup working and closes the in-pane agent case. Residual risk: an agent that SSHes to another
-   host and runs `silo` there answers that host's prompt itself.
+   host and runs `silo` there answers that host's prompt itself. So does one that double-forks a `silo` call so it
+   is reparented to init: the ancestry walk then finds no pane, while the pane's terminal is still its controlling
+   tty (a guardrail, decision 8).
 2. **`SHARE_ORIGIN`:** which domain hosts the web client (and so the share links). The format is fixed regardless.
 3. **iroh 1.3.0 in the browser:** P7-8 must confirm `wasm32-unknown-unknown` + relay-only dialing of a native
    endpoint with ALPN `silo/ctl/1` and extra bi streams before the ticket format is frozen in `protocol.json`.
@@ -731,7 +736,10 @@ has merged.
   - The view-only rule is enforced where data frames are read (`conn.rs`); `Attach` is unchanged.
   - Upgrade approval is asked once `UPGRADE_BINARY` arrives (a build check asks nothing), and an upgrade goes ahead
     as before when no app can approve: headless hosts keep `silo remote upgrade`.
-  - Approvals are on in `silo server` (`Config::require_approval`), off for embedded servers (tests).
+  - Approvals are built and tested (`Config::require_approval`) but stay off in `silo server` until P7-5: today's
+    app shows no cards, so an approval-gated call from a pane (`silo pair`, `silo down`, `silo remote install`)
+    could only wait or fail. P7-5 turns them on with the cards.
+  - `clipboard.read` is interact · block with no approval card (§9): the paste gesture is the approval.
   - `grant.create {kind: link}` returns `ticket: null` until P7-7 adds `ShareTicket`; the secret is returned.
   - Block-scoped principals list no sessions in `session.list`.
 
@@ -786,6 +794,9 @@ has merged.
 **P7-5: status, notification and approval UI.** After P7-2 and P7-3.
 - **Files:** `silo-app/src/{pane.rs, titlebar.rs, switcher.rs, workspace.rs, notifications.rs (new), approvals.rs
   (new), settings_table.rs, settings_panel.rs, hosts.rs}`.
+- **Turning approvals on** (P7-1 left them off, §11 P7-1 "As built"): `compat::feature::APPROVALS` in
+  `silo-proto/src/compat.rs` and `FEATURES`, `Registry::approvers` requiring it (`silo-server/src/registry.rs`),
+  and `require_approval: true` for `silo server` in `silo-cli/src/main.rs` once P7-9 has merged that file.
 - **Acceptance:**
   - UI driver (`scripts/ui-driver.swift`): `printf` a blocked 7501 report → the header dot, tab mark, switcher count
     and dock badge appear;
