@@ -436,6 +436,46 @@ async fn grants_survive_restart() {
     shutdown(control, task).await;
 }
 
+/// A child forked while the server runs (here, or by another server in
+/// this process) shares its lock until it execs: a restart meanwhile must
+/// not read that as another server.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_while_a_forked_child_shares_the_lock() {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsRawFd, unix::process::CommandExt},
+    };
+    let home = temp_home("forked");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let (forked_tx, mut forked_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (mut release_tx, release_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+    let ours = release_tx.as_raw_fd();
+    let child = std::thread::spawn(move || {
+        let (forked, release) = (forked_tx.as_raw_fd(), release_rx.as_raw_fd());
+        let mut command = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the child only closes, writes and reads before exec. It
+        // drops its copy of our end, so it execs once we write or exit.
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(ours);
+                let mut byte = 0u8;
+                libc::write(forked, (&raw const byte).cast(), 1);
+                libc::read(release, (&raw mut byte).cast(), 1);
+                Ok(())
+            });
+        }
+        command.status().unwrap()
+    });
+    tokio::task::spawn_blocking(move || forked_rx.read_exact(&mut [0])).await.unwrap().unwrap();
+    shutdown(control, task).await;
+
+    let task = start(&home).await;
+    release_tx.write_all(&[1]).unwrap();
+    assert!(child.join().unwrap().success());
+    shutdown(owner(&home).await, task).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn grants_and_identity_survive_takeover() {
     let home = temp_home("takeover");

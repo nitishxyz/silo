@@ -552,6 +552,9 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(paths::runtime(&home));
     // Give block actors a moment to hang up their children.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    // Unlock rather than only close: a child forked meanwhile (by another
+    // server in this process) shares the lock until it execs.
+    let _ = rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::Unlock);
     drop(lock);
     Ok(())
 }
