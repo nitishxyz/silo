@@ -1114,6 +1114,27 @@ has merged.
   - closing from a second connected app (remote host) shows the dialog there and nothing on the first;
   - the race path: the server's `busy` answer to a `force: false` close reopens the dialog;
   - Quit and closing the last window never ask, and the processes are still running after relaunch.
+- **As built** (where it differs from the plan above):
+  - The app calls `silo_client::advertise(CLOSE_GUARD)` at start (`main.rs`); the menu-bar agent does not, so it
+    closes as before. Every close the app makes goes through `close_confirm.rs` (`CloseTarget`): ⌘W, ⇧⌘W, the pane
+    header's ✕ (`layout.rs`) and the tab's ✕ (`titlebar.rs`), Close Session, Stop Server and Restart Server (the
+    app's Restart is `server.shutdown`, the service starts it again). `new_shell` still sends `force: false`: it
+    closes a block without a process, which is never busy.
+  - **The setting** is in Settings › Terminal › Closing, not General: there is no General page (Settings opens on
+    Appearance). It is `AppState.confirm_close` (`app.json`, default on), finder/API key `confirm_close`.
+  - A failed `blocks.busy` (an older server, a dropped connection) counts as nothing busy; the `force: false` close
+    that follows is still checked by a server that has the guard.
+  - **Stop Server** now runs its local stop (launchd disable + bootout, detach, "Server stopped") only once the
+    server agreed, or the call failed with anything but `busy`: a bootout after a refusal would end what the user
+    just kept. `paused` is set in the reply's task, before the connection drops, so the loop does not start the
+    server again. Meanwhile the status says "Stopping server…".
+  - Stop/Restart from Settings › Server keep the panel's own confirmation, so a busy server shows the dialog after
+    it (from the refusal), above the panel. The palette's Stop/Restart/Close Session ask first and never show two.
+  - The dialog: first line `vim is running in 'api'` (several: `3 programs are running`), then for several one row
+    each (`process in 'title'`, plus `session › tab` when the list spans sessions, the tab when it spans tabs, at
+    most 8, then `and N more`), then what closing does (`Closing the tab ends them.`). Cancel is the default
+    (Return, Escape, a click outside, ⌘W); ⌘⌫ or Close confirms (the button says Stop/Restart for the server).
+    It belongs to the window that asked and sends to the host it was opened on.
 
 Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → (P7-5 ∥ P7-9) → P7-6 and P7-7 → P7-10.
 **Verifiable headless:** P7-1, P7-3, P7-4, P7-9, and P7-2's server side. P7-5, P7-6 and P7-10 need the GUI.
