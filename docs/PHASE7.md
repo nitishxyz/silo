@@ -760,6 +760,23 @@ has merged.
   - `silo do app.full_screen` toggles the app;
   - with no app connected → exit 1 with `no_app`;
   - a remote app client is never targeted.
+- **As built** (where it differs from the plan above):
+  - `block.split`'s `axis` stays required: New Pane picks the longer side in the app, from laid-out pixels the server
+    does not have. Optional `axis` is additive whenever it lands.
+  - `block.focus_dir` lays the window out as a square with hairline dividers (`layout_ops::neighbour_in`). It gives
+    the app's neighbours for grids and uneven splits, but not for very wide or very tall windows.
+  - `server.restart` stops the server like `server.shutdown`. Then the `silo server` process starts its own binary
+    again with the same args, minus `--takeover`. `force` waits for P7-9. The app's Restart Server still sends
+    `server.shutdown`, so it works with older servers.
+  - Activity for targeting is `block.focus`, `own_block take` and data-stream input (marked at most once a second).
+  - The app runs a request in its frontmost window, or the frontmost window showing the named `block_id`. It only
+    runs requests from the local host's connection.
+  - `app.settings_get/set` ids are the snake-case `SettingId` names (`font_size`, `color_foreground`). Toggles take
+    booleans, numbers take numbers, choices take their label. `app.settings_open {section}` takes a setting id or a
+    section label.
+  - `app.jump_prompt`, `app.select_output`, `app.copy_output` and `app.open_share` answer `method_not_found` until
+    P7-6/P7-7.
+  - `silo do --help` lists nothing. `silo do <method> --help` prints that method's flags.
 
 **P7-3: server terminal hooks (status, notifications, command records).** After P7-1.
 - **Files:** `silo-vt/src/{adapter.c, adapter.h, sys.rs, model.rs, lib.rs}`, `silo-server/src/{status.rs,
