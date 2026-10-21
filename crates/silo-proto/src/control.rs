@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    access::{Grant, Rights, Scope},
+    access::{Grant, Granted, Rights, Scope},
     data::{Clip, ClipKind, ClipboardLocation},
     model::{
         Axis, BlockId, BlockInfo, BlockKind, BlockStatus, Busy, ClientId, CommandRecord, FloatRect, HistoryEntry, SessionId, SessionSummary,
@@ -109,6 +109,10 @@ pub struct ServerHello {
     pub features: Vec<String>,
     pub client_id: ClientId,
     pub server: ServerInfo,
+    /// What a connection admitted by a grant (a share link, an agent
+    /// token) may do; `None` for the owner and paired devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<Granted>,
 }
 
 impl ServerHello {
@@ -122,6 +126,7 @@ impl ServerHello {
             features: crate::compat::server_features(),
             client_id,
             server,
+            granted: None,
         }
     }
 }

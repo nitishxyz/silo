@@ -107,6 +107,24 @@ impl Grant {
     }
 }
 
+/// What a connection admitted by a grant may do: its hello says so, so a
+/// shared link's client knows what it sees (a block share lists no
+/// sessions) and whether it may type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Granted {
+    pub scope: Scope,
+    pub rights: Rights,
+    /// Unix seconds; `None` until revoked.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+
+impl From<&Grant> for Granted {
+    fn from(grant: &Grant) -> Self {
+        Self { scope: grant.scope.clone(), rights: grant.rights, expires_at: grant.expires_at }
+    }
+}
+
 /// Longest grant lifetime `grant.create` accepts.
 pub const MAX_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// A link's lifetime when `grant.create` names none.

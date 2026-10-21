@@ -222,7 +222,11 @@ where
         }
         id
     };
-    let reply = ServerHello::ours(client_id, server.info_now().await);
+    let granted = match &principal {
+        Principal::Grant(grant) if matches!(grant.who, Who::Secret { .. }) => Some(silo_proto::access::Granted::from(grant.as_ref())),
+        _ => None,
+    };
+    let reply = ServerHello { granted, ..ServerHello::ours(client_id, server.info_now().await) };
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
     // Join connections get no data streams.
@@ -417,7 +421,18 @@ async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Resu
     handle(server, ctx, method).await
 }
 
-fn grant_create(
+/// The server's address for a share ticket, its home relay once known
+/// (the ticket keeps only relay URLs).
+async fn share_addr(server: &Server) -> Result<silo_transport::EndpointAddr, RpcError> {
+    let net = server.net.lock().await;
+    let net = net.as_ref().ok_or_else(|| RpcError::internal("remote access is not running"))?;
+    if server.relays {
+        let _ = tokio::time::timeout(ONLINE_TIMEOUT, net.online()).await;
+    }
+    Ok(net.addr())
+}
+
+async fn grant_create(
     server: &Server,
     ctx: &Ctx,
     scope: Scope,
@@ -434,6 +449,10 @@ fn grant_create(
     if rights == Rights::Owner {
         return Err(RpcError::bad_request("tokens and links cannot hold owner rights"));
     }
+    let addr = match kind {
+        SecretKind::Link => Some(share_addr(server).await?),
+        _ => None,
+    };
     let (scope, created_by) = {
         let reg = server.registry.lock().unwrap();
         let scope = match scope {
@@ -472,7 +491,8 @@ fn grant_create(
     };
     server.registry.lock().unwrap().emit_owner(Event::GrantsChanged { grants });
     tracing::info!(grant = grant.id, ?kind, "grant created");
-    to_value(GrantCreated { grant, secret: encode_secret(kind, &secret), ticket: None })
+    let ticket = addr.map(|addr| silo_transport::ShareTicket::new(&addr, secret, silo_proto::VT).encode());
+    to_value(GrantCreated { grant, secret: encode_secret(kind, &secret), ticket })
 }
 
 async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, RpcError> {
@@ -684,7 +704,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         }
         // Only join connections, answered in the control loop.
         Method::HostOffer { .. } => Err(RpcError::forbidden("host.offer")),
-        Method::GrantCreate { scope, rights, kind, ttl_secs, label } => grant_create(server, ctx, scope, rights, kind, ttl_secs, label),
+        Method::GrantCreate { scope, rights, kind, ttl_secs, label } => grant_create(server, ctx, scope, rights, kind, ttl_secs, label).await,
         Method::GrantList {} => to_value(Grants { grants: server.auth().grants() }),
         Method::GrantRevoke { id } => {
             let gone = server.auth().remove_where(|g| g.id == id)?;

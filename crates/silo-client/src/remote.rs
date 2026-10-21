@@ -5,12 +5,13 @@ use std::path::Path;
 use anyhow::Context;
 use silo_proto::{
     BUILD,
+    access::{SecretKind, encode_secret},
     control::{Empty, Method},
     device::DeviceProof,
 };
-use silo_transport::{Conn, EndpointAddr, EndpointId, Identity, Net, PairTicket, RemoteConn};
+use silo_transport::{Conn, EndpointAddr, EndpointId, Identity, Net, PairTicket, RemoteConn, ShareTicket};
 
-use crate::{Control, Events};
+use crate::{Control, Events, control::Credential};
 
 /// Load or create the client's device identity in `dir` (the caller's
 /// state dir, e.g. `$SILO_HOME/client`).
@@ -52,8 +53,22 @@ impl Control {
     /// # Errors
     /// See [`Control::connect_remote`].
     pub async fn over_remote(rc: RemoteConn, client_name: &str, passive: bool, invite: Option<&PairTicket>) -> anyhow::Result<(Self, Events)> {
-        let invite = invite.map(PairTicket::encode);
-        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, invite, None).await
+        let credential = invite.map_or(Credential::None, |invite| Credential::Invite(invite.encode()));
+        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, credential).await
+    }
+
+    /// Dial a share link's server and hello with its secret: the
+    /// connection gets exactly the link's access
+    /// ([`ServerHello::granted`](silo_proto::control::ServerHello)).
+    /// `addr` overrides the ticket's (which holds relay URLs only).
+    ///
+    /// # Errors
+    /// See [`Control::connect_remote`]; a revoked or expired link is
+    /// [`Unauthorized`](crate::Unauthorized).
+    pub async fn connect_shared(net: &Net, ticket: &ShareTicket, addr: Option<EndpointAddr>, client_name: &str) -> anyhow::Result<(Self, Events)> {
+        let rc = net.dial(addr.unwrap_or_else(|| ticket.addr.clone())).await.context("dial server")?;
+        let secret = encode_secret(SecretKind::Link, &ticket.secret);
+        Self::handshake(Conn::Iroh(rc), client_name, false, BUILD, Credential::Grant(secret)).await
     }
 
     /// [`Control::over_remote`] as the paired device `proof` is from (see
@@ -63,7 +78,7 @@ impl Control {
     /// # Errors
     /// See [`Control::connect_remote`].
     pub async fn over_remote_as(rc: RemoteConn, client_name: &str, passive: bool, proof: DeviceProof) -> anyhow::Result<(Self, Events)> {
-        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, None, Some(proof)).await
+        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, Credential::Device(proof)).await
     }
 }
 

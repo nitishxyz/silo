@@ -344,7 +344,15 @@ mod tests {
                     endpoint_addr: None,
                     idle_exit_secs: 0,
                 };
-                let hello = ServerHello { protocol: 0, vt: String::new(), features: Vec::new(), build: OTHER.into(), client_id: 1, server: info };
+                let hello = ServerHello {
+                    protocol: 0,
+                    vt: String::new(),
+                    features: Vec::new(),
+                    build: OTHER.into(),
+                    client_id: 1,
+                    server: info,
+                    granted: None,
+                };
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
                 while let Ok(Some(frame)) = read_frame(&mut r).await {
                     let request: Request = frame.parse().unwrap();

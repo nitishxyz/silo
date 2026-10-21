@@ -59,6 +59,19 @@ pub fn advertise(feature: &str) {
     }
 }
 
+/// What a hello proves beyond the connection itself.
+pub(crate) enum Credential {
+    /// The unix socket's uid (with this process's agent token, if set), or
+    /// a paired endpoint.
+    None,
+    /// A pairing or join invite (`silo1…`).
+    Invite(String),
+    /// A paired device this endpoint speaks for.
+    Device(DeviceProof),
+    /// A share link's secret.
+    Grant(String),
+}
+
 /// A [`Control::call_timeout`] got no reply in time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimedOut;
@@ -225,7 +238,7 @@ impl Control {
     /// Connection or handshake failure; a build rejection is a
     /// [`IncompatibleProtocol`], a refused device [`Unauthorized`].
     pub async fn connect_build(conn: Conn, client_name: &str, passive: bool, build: &str) -> anyhow::Result<(Self, Events)> {
-        Self::handshake(conn, client_name, passive, build, None, None).await
+        Self::handshake(conn, client_name, passive, build, Credential::None).await
     }
 
     /// Hello over a fresh stream on `conn`, then start the reader/writer.
@@ -234,13 +247,18 @@ impl Control {
         client_name: &str,
         passive: bool,
         build: &str,
-        invite: Option<String>,
-        device: Option<DeviceProof>,
+        credential: Credential,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let (role, grant, extra) = {
+        let (role, token, extra) = {
             let extras = HELLO_AS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))), extras.features.clone())
+        };
+        let (invite, device, grant) = match credential {
+            Credential::None => (None, None, token),
+            Credential::Invite(invite) => (Some(invite), None, None),
+            Credential::Device(proof) => (None, Some(proof), None),
+            Credential::Grant(secret) => (None, None, Some(secret)),
         };
         let mut hello = ClientHello { build: build.to_owned(), device, role, grant, ..ClientHello::ours(client_name, passive, invite) };
         hello.features.extend(extra);

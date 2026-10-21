@@ -6687,11 +6687,13 @@ name = "silo-proto"
 version = "0.1.4"
 dependencies = [
  "data-encoding",
+ "iroh",
  "rustix 1.1.5",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "silo-transport",
  "tokio",
  "tracing",
 ]

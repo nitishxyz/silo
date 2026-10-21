@@ -111,6 +111,22 @@ fn data_frames() -> Map<String, Value> {
     server.into_iter().chain(commands).chain(client).map(|(name, frame)| (name, show(frame))).collect()
 }
 
+/// A fixed share ticket (`docs/PHASE7.md` §8): its postcard bytes in hex
+/// and its text. Read by web clients without this crate, so pinned too.
+fn share_ticket() -> Value {
+    let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+    let addr = iroh::EndpointAddr::new(id).with_relay_url("https://relay.example.org".parse().unwrap()).with_ip_addr(([10, 0, 0, 1], 4433).into());
+    let secret: [u8; 32] = std::array::from_fn(|i| u8::try_from(i).unwrap());
+    let ticket = silo_transport::ShareTicket::new(&addr, secret, "vt");
+    let text = ticket.encode();
+    let bytes = data_encoding::BASE32_NOPAD_NOCASE.decode(&text.as_bytes()[silo_transport::SHARE_PREFIX.len()..]).unwrap();
+    json!({
+        "prefix": silo_transport::SHARE_PREFIX,
+        "bytes": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        "text": text,
+    })
+}
+
 fn schema() -> Value {
     let methods: Map<String, Value> = METHODS
         .iter()
@@ -136,6 +152,7 @@ fn schema() -> Value {
         "methods": methods,
         "frame_kinds": frame_kinds(),
         "data_frames": data_frames(),
+        "share_ticket": share_ticket(),
     }))
 }
 

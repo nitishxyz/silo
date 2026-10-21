@@ -1933,6 +1933,110 @@
     },
     "ServerHello": {
       "$defs": {
+        "Granted": {
+          "properties": {
+            "expires_at": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rights": {
+              "$ref": "#/$defs/Rights"
+            },
+            "scope": {
+              "$ref": "#/$defs/Scope"
+            }
+          },
+          "required": [
+            "scope",
+            "rights"
+          ],
+          "type": "object"
+        },
+        "Rights": {
+          "oneOf": [
+            {
+              "const": "view",
+              "type": "string"
+            },
+            {
+              "const": "interact",
+              "type": "string"
+            },
+            {
+              "const": "control",
+              "type": "string"
+            },
+            {
+              "const": "owner",
+              "type": "string"
+            }
+          ]
+        },
+        "Scope": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "server",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "session",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "session_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "block_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "block",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "block_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "ServerInfo": {
           "properties": {
             "endpoint_addr": {
@@ -2001,6 +2105,16 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "granted": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Granted"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "protocol": {
           "default": 0,
@@ -36877,6 +36991,11 @@
     }
   },
   "protocol": 1,
+  "share_ticket": {
+    "bytes": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c01001a68747470733a2f2f72656c61792e6578616d706c652e6f72672f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f027674",
+    "prefix": "silos1",
+    "text": "silos15jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwacaa2nb2hi4dthixs64tfnrqxsltfpbqw24dmmuxg64thf4aacaqdaqcqmbyibefawdanbyhraeiscmkbkfqxdamrugy4dupb6atwoq"
+  },
   "terminal_config": {
     "$defs": {
       "CursorShape": {
