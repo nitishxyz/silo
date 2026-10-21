@@ -342,9 +342,10 @@ int silo_vt_tracked_column(void *ref, uint16_t *x) {
     return 0;
 }
 
-/* Plain text of the command output containing `ref`; empty when the cell
- * is not command output. Allocated with ghostty's allocator. */
-int silo_vt_output_text(SiloVt *vt, void *ref, uint8_t **out, size_t *len) {
+/* Plain text of the command output containing `ref`, cut before `end`
+ * (the command's D mark) when given; empty when the cell is not command
+ * output. Allocated with ghostty's allocator. */
+int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len) {
     *out = NULL;
     *len = 0;
     GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
@@ -355,6 +356,27 @@ int silo_vt_output_text(SiloVt *vt, void *ref, uint8_t **out, size_t *len) {
     res = ghostty_terminal_select_output(vt->terminal, at, &output);
     if (res == GHOSTTY_NO_VALUE) return 0;
     CHECK(res);
+    GhosttyPointCoordinate stop, start, last;
+    if (end && ghostty_tracked_grid_ref_point(end, GHOSTTY_POINT_TAG_SCREEN, &stop) == GHOSTTY_SUCCESS &&
+        ghostty_terminal_point_from_grid_ref(vt->terminal, &output.start, GHOSTTY_POINT_TAG_SCREEN, &start) == GHOSTTY_SUCCESS &&
+        ghostty_terminal_point_from_grid_ref(vt->terminal, &output.end, GHOSTTY_POINT_TAG_SCREEN, &last) == GHOSTTY_SUCCESS &&
+        (last.y > stop.y || (last.y == stop.y && last.x >= stop.x))) {
+        /* The output ends at the cell before D. */
+        GhosttyPointCoordinate cut = stop;
+        if (cut.x > 0) {
+            cut.x--;
+        } else if (cut.y > 0) {
+            uint16_t cols = 0;
+            CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols));
+            cut.y--;
+            cut.x = cols ? cols - 1 : 0;
+        } else {
+            return 0;
+        }
+        if (cut.y < start.y || (cut.y == start.y && cut.x < start.x)) return 0;
+        GhosttyPoint point = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = cut };
+        CHECK(ghostty_terminal_grid_ref(vt->terminal, point, &output.end));
+    }
     GhosttyTerminalSelectionFormatOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
     options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
     options.unwrap = true;

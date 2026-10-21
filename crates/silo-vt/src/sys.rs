@@ -134,7 +134,7 @@ unsafe extern "C" {
     fn silo_vt_row_from_bottom(vt: *mut c_void, row: *mut c_void, out: *mut u32) -> i32;
     fn silo_vt_track_row(vt: *mut c_void, from_bottom: u32, x: u16, out: *mut *mut c_void) -> i32;
     fn silo_vt_tracked_column(row: *mut c_void, x: *mut u16) -> i32;
-    fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, out: *mut *mut u8, len: *mut usize) -> i32;
+    fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, end: *mut c_void, out: *mut *mut u8, len: *mut usize) -> i32;
 }
 
 /// A cell of a server terminal's screen that moves with its content
@@ -465,16 +465,18 @@ impl TerminalCore {
     }
 
     /// The plain text of the command output (OSC 133 C..D) containing
-    /// `row`'s cell; empty when that cell is not command output.
+    /// `row`'s cell, cut before `end` (the command's D mark) when given;
+    /// empty when that cell is not command output.
     ///
     /// # Errors
     /// Upstream selection or formatting failures.
-    pub fn output_text(&mut self, row: &TrackedRow) -> Result<String, TerminalError> {
+    pub fn output_text(&mut self, row: &TrackedRow, end: Option<&TrackedRow>) -> Result<String, TerminalError> {
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
-        // SAFETY: exclusive handle; `row` belongs to this terminal; on
-        // success the shim returns an allocation of `len` bytes (or null).
-        check(unsafe { silo_vt_output_text(self.handle.as_ptr(), row.0.as_ptr(), &raw mut ptr, &raw mut len) })?;
+        let end = end.map_or(std::ptr::null_mut(), |end| end.0.as_ptr());
+        // SAFETY: exclusive handle; `row` and `end` belong to this terminal;
+        // on success the shim returns an allocation of `len` bytes (or null).
+        check(unsafe { silo_vt_output_text(self.handle.as_ptr(), row.0.as_ptr(), end, &raw mut ptr, &raw mut len) })?;
         if ptr.is_null() {
             return Ok(String::new());
         }
@@ -1181,12 +1183,12 @@ mod tests {
         let end = rows.pop().unwrap();
         let start = rows.pop().unwrap();
         assert_eq!(vt.rows_from_bottom(&end), Some(0));
-        assert_eq!(vt.output_text(&start).unwrap(), "one\ntwo");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "one\ntwo");
         vt.write_output(b"\r\n\r\n\r\n").unwrap();
         assert_eq!(vt.rows_from_bottom(&end), Some(3), "moves with its content");
         let again = vt.track_row(3, 0).expect("re-pin");
         assert_eq!(vt.rows_from_bottom(&again), Some(3));
-        assert_eq!(vt.output_text(&start).unwrap(), "one\ntwo");
+        assert_eq!(vt.output_text(&start, None).unwrap(), "one\ntwo");
     }
 
     #[test]
