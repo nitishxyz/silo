@@ -557,3 +557,22 @@ async fn a_status_flood_is_paced_and_its_last_state_still_arrives() {
     assert!(f64::from(statuses) <= 9.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
     assert!(attentions.len() as f64 <= 6.0 + secs, "{} block.attention in {secs:.1} s: {attentions:?}", attentions.len());
 }
+
+#[tokio::test]
+async fn lost_hook_events_start_the_status_over_from_what_is_left() {
+    let mut block = Block::sh("b-lost", "printf ready; read l");
+    block.wait_for("ready").await;
+    block.handle.send(BlockMsg::Output(b"\x1b]7501;state=done:id=old\x1b\\\x1b]133;C;cmdline_url=read\x07".to_vec()));
+    block.until("old record, command running", |s| states(s) == [("old".to_owned(), StatusState::Done)] && s.busy.is_some()).await;
+    // More events in one chunk than the queue keeps (1024): the oldest go.
+    let mut flood = b"\x1b]7501;state=working:id=gone\x1b\\".to_vec();
+    for _ in 0..1100 {
+        flood.extend_from_slice(b"\x1b]9;4;1;50\x07");
+    }
+    flood.extend_from_slice(b"\x1b]7501;state=working:id=new\x1b\\");
+    block.handle.send(BlockMsg::Output(flood));
+    let status = block.until("only what was left", |s| states(s) == [("new".to_owned(), StatusState::Working)]).await;
+    assert_eq!(status.progress.and_then(|p| p.percent), Some(50), "the surviving progress");
+    assert_eq!(status.busy, None, "the open command went with the lost events");
+    assert!(block.commands().await.is_empty(), "no half-seen command was recorded");
+}

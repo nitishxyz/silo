@@ -1753,12 +1753,25 @@ impl Actor {
     /// Apply the server terminal's hook events in order. Returns the
     /// commands that ended (D) in this chunk.
     fn status_events(&mut self, events: Vec<VtEvent>, lost: bool) -> Vec<u64> {
-        if lost {
-            tracing::debug!(block = %self.id, "status events were dropped");
-        }
         let mut ended = Vec::new();
         let mut changed = false;
         let mut marks = false;
+        if lost {
+            // The queue overflowed and its oldest events are gone (a CLEAR,
+            // a prompt start, a C or D): records, progress and the open
+            // command may be stale. Start them over from the events that
+            // are left; busy is re-derived from the foreground below.
+            // Finished commands and their anchors were complete and stay.
+            tracing::warn!(block = %self.id, "status events were dropped; status starts over");
+            changed |= self.status.records.clear("");
+            changed |= self.status.progress.take().is_some();
+            self.status.held = None;
+            if let Some(index) = self.status.commands.abandon() {
+                self.status.anchors.remove(&index);
+            }
+            self.status.marks = None;
+            marks = true;
+        }
         for event in events {
             match event {
                 VtEvent::Status { state: ReportState::Clear, id, .. } => changed |= self.status.records.clear(&id),
