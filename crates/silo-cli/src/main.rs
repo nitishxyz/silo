@@ -705,7 +705,12 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                         None => serde_json::json!({}),
                     };
                     // Sent as given: the server knows its methods.
-                    silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
+                    let described = control.call::<silo_proto::control::MethodDescription>(Method::ApiDescribe { method: method.clone() }).await;
+                    if described.ok().and_then(|d| d.access).is_some_and(|a| a.approval) {
+                        silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
+                    } else {
+                        control.call_raw(&method, params).await?
+                    }
                 }
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
@@ -731,7 +736,11 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 return Ok(0);
             }
             let params = generated::build(&described.params_schema, &args)?;
-            let value = silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?;
+            let value = if described.access.is_some_and(|a| a.approval) {
+                silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
+            } else {
+                control.call_raw(&method, params).await?
+            };
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(0)
         }

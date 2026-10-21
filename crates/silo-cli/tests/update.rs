@@ -38,8 +38,22 @@ impl Env {
 }
 
 impl Drop for Env {
+    /// Stop the server with SIGTERM (`silo kill-server` needs an approval
+    /// this test has nobody to give), wait for it to exit, then clean up.
     fn drop(&mut self) {
-        let _ = Command::new(&self.bin).arg("kill-server").env("SILO_HOME", self.root.join("h")).stdin(Stdio::null()).output();
+        let runtime = std::fs::read(silo_proto::paths::runtime(&self.root.join("h")));
+        let pid = runtime.ok().and_then(|bytes| serde_json::from_slice::<silo_proto::paths::Runtime>(&bytes).ok()).map(|r| r.pid as i32);
+        if let Some(pid) = pid {
+            // SAFETY: signalling the server this test started.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            for _ in 0..250 {
+                // SAFETY: signal 0 only checks for existence.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }

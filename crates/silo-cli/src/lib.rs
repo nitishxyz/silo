@@ -276,9 +276,13 @@ pub async fn create_invite(control: &Control, ttl: Duration) -> anyhow::Result<P
     confirmed(control, || control.call(method())).await.map_err(explain)
 }
 
-/// Run `call`. When no Silo app can approve it and the server lets this
-/// terminal confirm instead (`confirm`), ask on the terminal, answer, and
-/// run it once more.
+/// How long an approval-gated call runs before the CLI says it is waiting.
+const APPROVAL_NOTICE: Duration = Duration::from_secs(1);
+
+/// Run `call`, a method that needs an approval. While a Silo app is asked
+/// (up to two minutes), say so. When no Silo app can approve it and the
+/// server lets this terminal confirm instead (`confirm`), ask on the
+/// terminal, answer, and run it once more.
 ///
 /// # Errors
 /// The call's error, or a declined confirmation.
@@ -287,7 +291,16 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    let error = match call().await {
+    let first = call();
+    tokio::pin!(first);
+    let result = tokio::select! {
+        result = &mut first => result,
+        () = tokio::time::sleep(APPROVAL_NOTICE) => {
+            eprintln!("silo: waiting for approval in Silo…");
+            first.await
+        }
+    };
+    let error = match result {
         Err(error) => error,
         ok => return ok,
     };

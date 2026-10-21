@@ -13,7 +13,7 @@ use std::{
 
 use silo_client::{Control, Events, IncompatibleServer, PING_TIMEOUT_LOCAL, mismatch};
 use silo_proto::{
-    control::{Event, Method, ServerInfo},
+    control::{ClientRole, Event, Method, ServerInfo},
     model::SessionSummary,
     paths,
 };
@@ -198,6 +198,19 @@ async fn list(control: &Control) -> Vec<SessionSummary> {
     control.call(Method::SessionList {}).await.unwrap_or_default()
 }
 
+/// Stop the server: the menu's Quit is the user's, like the Silo app's
+/// own calls, so it goes over an `app` connection that needs no approval.
+/// That connection never subscribes: this agent shows no approval cards
+/// and runs no forwarded requests.
+async fn shutdown(config: &Config) -> anyhow::Result<()> {
+    silo_client::set_role(ClientRole::App);
+    let connected = Control::connect_local(&paths::socket(&config.home), NAME, true).await;
+    silo_client::set_role(ClientRole::Cli);
+    let (control, _events) = connected?;
+    control.call_value(Method::ServerShutdown {}).await?;
+    Ok(())
+}
+
 async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cmd: Cmd) {
     tracing::info!(?cmd, "menu command");
     let result: anyhow::Result<()> = async {
@@ -209,7 +222,7 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
                     // The app reads this marker when its connection drops
                     // and quits instead of reconnecting.
                     paths::mark_quit(&config.home, control.hello().server.pid)?;
-                    control.call_value(Method::ServerShutdown {}).await.inspect_err(|_| paths::clear_quit(&config.home, None))?;
+                    shutdown(config).await.inspect_err(|_| paths::clear_quit(&config.home, None))?;
                     let _ = tokio::time::timeout(Duration::from_secs(5), control.closed()).await;
                 } else if let Some(server) = incompatible {
                     shared.update(|s| s.busy = Some("Quitting…"));

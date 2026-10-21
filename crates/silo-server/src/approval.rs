@@ -16,7 +16,7 @@ use std::{
 use silo_proto::{
     access::{Grant, Rights, Scope},
     control::{Caller, Event, GrantKind, InvitePurpose, Method, RpcError},
-    model::{BlockId, ClientId},
+    model::{BlockId, ClientId, Lifecycle},
 };
 use tokio::sync::oneshot;
 
@@ -268,7 +268,15 @@ pub async fn gate_upgrade(server: &Server, grant: Option<&Grant>) -> Result<(), 
 /// boundary).
 pub fn origin(pid: Option<i32>, reg: &Registry) -> (Option<BlockId>, bool) {
     let Some(pid) = pid else { return (None, false) };
-    let panes: HashMap<i32, BlockId> = reg.blocks.iter().filter_map(|(id, b)| Some((b.info()?.pid?, id.clone()))).collect();
+    // Running blocks only: an exited block's pid may belong to anyone now.
+    let panes: HashMap<i32, BlockId> = reg
+        .blocks
+        .iter()
+        .filter_map(|(id, b)| {
+            let info = b.terminal()?.info.lock().ok()?;
+            Some((info.pid.filter(|_| info.lifecycle == Lifecycle::Running)?, id.clone()))
+        })
+        .collect();
     // Each block's terminal: its process's controlling terminal.
     let ttys: HashMap<u64, BlockId> = panes.iter().filter_map(|(pid, id)| Some((process(*pid)?.tty?, id.clone()))).collect();
     origin_in(pid, &panes, &ttys, process)
