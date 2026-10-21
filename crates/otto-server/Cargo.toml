@@ -1,0 +1,23 @@
+[package]
+name = "otto-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-proto = { workspace = true, features = ["io"] }
+otto-core.workspace = true
+otto-store.workspace = true
+otto-llm.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+otto-client.workspace = true
+tempfile.workspace = true
+async-trait.workspace = true
+futures.workspace = true

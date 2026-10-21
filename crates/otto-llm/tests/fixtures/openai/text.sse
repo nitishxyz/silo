@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_text","model":"gpt-5.2","status":"in_progress"}}
+
+data: {"type":"response.output_text.delta","delta":"Hello"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello","annotations":[]}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_text","status":"completed","usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}
+

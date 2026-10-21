@@ -1,0 +1,4 @@
+data: {"type":"response.created","response":{"id":"resp_short","model":"gpt-5.2"}}
+
+data: {"type":"response.incomplete","response":{"id":"resp_short","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":8,"output_tokens":10}}}
+

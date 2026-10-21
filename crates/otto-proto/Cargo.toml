@@ -1,0 +1,18 @@
+[package]
+name = "otto-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+io = ["dep:tokio"]
+
+[dependencies]
+otto-llm = { workspace = true, default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+# Deliberately do not inherit the workspace's native networking features.
+tokio = { version = "1", default-features = false, features = ["io-util", "rt", "sync", "macros"], optional = true }

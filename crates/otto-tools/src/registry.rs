@@ -1,0 +1,53 @@
+use crate::{Tool, ToolError, ToolSource, ToolSpec, builtin::*};
+use std::{collections::BTreeMap, sync::Arc};
+#[derive(Default)]
+pub struct Registry {
+    tools: BTreeMap<String, Arc<dyn Tool>>,
+    sources: Vec<Arc<dyn ToolSource>>,
+}
+impl Registry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn add(&mut self, tool: Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
+        self.tools.insert(tool.spec().name.clone(), tool)
+    }
+    pub fn lookup(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+    pub fn list_specs(&self) -> Vec<ToolSpec> {
+        self.tools.values().map(|t| t.spec().clone()).collect()
+    }
+    pub async fn add_source(&mut self, source: Arc<dyn ToolSource>) -> Result<(), ToolError> {
+        for tool in source.list().await? {
+            self.add(tool);
+        }
+        self.sources.push(source);
+        Ok(())
+    }
+    pub fn sources(&self) -> &[Arc<dyn ToolSource>] {
+        &self.sources
+    }
+}
+pub fn tools_for_family(family: &str) -> Vec<Arc<dyn Tool>> {
+    let jobs = Arc::new(shell::Jobs::default());
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(read::Read::default()),
+        Arc::new(write::Write::default()),
+        Arc::new(ls::Ls::default()),
+        Arc::new(tree::Tree::default()),
+        Arc::new(glob::Glob::default()),
+        Arc::new(search::Search::default()),
+        Arc::new(shell::Shell::new(jobs.clone())),
+        Arc::new(shell::Job::new(jobs)),
+        Arc::new(web_fetch::WebFetch::default()),
+        Arc::new(ask_user::AskUser::default()),
+    ];
+    if family.eq_ignore_ascii_case("openai") {
+        tools.push(Arc::new(apply_patch::ApplyPatch::default()));
+    } else {
+        tools.push(Arc::new(edit::Edit::default()));
+        tools.push(Arc::new(multiedit::Multiedit::default()));
+    }
+    tools
+}

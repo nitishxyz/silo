@@ -1,0 +1,24 @@
+[package]
+name = "otto-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-llm = { workspace = true, features = ["client"] }
+otto-tools.workspace = true
+otto-store.workspace = true
+otto-proto.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+jsonschema = { version = "0.59", default-features = false }
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true

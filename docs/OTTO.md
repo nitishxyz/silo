@@ -1,6 +1,32 @@
 # Otto: an agent harness for silo (research + plan)
 
-Status: direction decided (§11.1). Still open: the shell runner details (§6.2, §11.2).
+Status: direction decided (§11.1). **O0–O2 implemented on branch `otto`, verified offline** (§0). Still open: the
+shell runner details (§6.2, §11.2), cross-machine conflicts (§12).
+
+## 0. Implementation status
+
+| Phase | State | Where |
+|---|---|---|
+| O0 providers | Anthropic Messages + OpenAI Responses (SSE), each with API key and subscription sign-in (Claude Pro/Max code paste; ChatGPT/Codex browser loopback + device code). Recorded-fixture tests. models.dev catalog with per-model auth availability | `otto-llm` |
+| O1 loop + tools | Turn engine (one actor per session), approvals (default `auto`, per-session modes), `Policy::prepare` path binding, tool journal + crash recovery, compaction, subagents, agents/skills/hooks/commands, built-in tools | `otto-core`, `otto-tools`, `otto-store` |
+| O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
+| O3–O8 | Not started | – |
+
+**Verified:** workspace fmt, clippy `-D warnings`, all tests (no network), `otto-proto` on wasm32, the silo protocol pin.
+Daemon integration tests cover a tool turn followed by a second client, kill -9 mid-tool → "outcome unknown", Ctrl-C,
+SIGTERM and approval denial without a tty.
+
+**Not yet verified live:** real provider calls, both subscription sign-ins and refresh, the catalog refresh from
+models.dev. Run the ignored live tests with `OTTO_LIVE=1` and real credentials.
+
+**Known gaps:**
+- Hooks are a command-only subset of Claude Code's format.
+- Path guards are revalidation, not a sandbox (§5.2 "later").
+- Global index event seqs reset when the daemon restarts.
+- A child's completion reaches its parent only while the parent's actor is open.
+- Gemini and xAI are catalog-only.
+
+Each crate's `README.md` lists its own limitations.
 
 Sources: this workspace at release 0.1.4 plus the uncommitted Phase 7 work; the TypeScript otto at
 `~/dev/nitishxyz/otto` (read for lessons, not ported); provider docs as of October 2026 (Anthropic Messages,
@@ -273,8 +299,8 @@ pub struct ToolSpec {
 
 ### 5.2 Policy
 
-- Approval modes: `auto`, `ask-on-effects` (default: write/process/external need approval unless a rule allows it),
-  `ask-all`, `plan` (read-only).
+- Approval modes: `auto` (**default**, "yolo": nothing prompts; deny rules still apply), `ask-on-effects`
+  (write/process/external need approval unless a rule allows it), `ask-all`, `plan` (read-only). Decision 7.
 - Rules: `{tool, arg pattern, decision}`, e.g. `shell: "cargo test*" → allow`, stored per project and per user.
   "Always allow" answers write rules.
 - Canonical path resolution (symlinks, `~`, project/reference/outside) runs before guards and before the approval
@@ -506,8 +532,13 @@ image result.
 
 **O7: GPUI agent block.** Separate design.
 
-**Later:** sandboxing, ACP agent mode (Zed/JetBrains), memory, goals/orchestrator, remote otto over iroh, batch
-jobs.
+**O8: agents across machines and harnesses (§12).** Remote delegate otto ↔ otto first, then handover, then
+harness adapters (terminal driver, ACP, Claude Code and Codex structured modes).
+*Exit:* an agent on machine A delegates a task on its repo to machine B, B works on a handoff branch in a worktree
+inside a visible agent block, A gets the result and the branch back; the same task runs with Claude Code on B as
+the harness; A survives a restart mid-task and resubscribes.
+
+**Later:** sandboxing, ACP agent mode (Zed/JetBrains), memory, goals/orchestrator, batch jobs.
 
 ---
 
@@ -523,6 +554,7 @@ jobs.
 | 4 | First providers | Anthropic and OpenAI (API key and subscription each); others in O3 |
 | 5 | Naming | `otto-silo` binary and state dir for this version, crates `otto-*` in this workspace; rename to `otto` later (§3.1) |
 | 6 | History ownership | Our log is the truth (`store=false` by default); provider-side state is only a cache (§7.3) |
+| 7 | Default approval mode | `auto` ("yolo"). The other modes stay one flag or config value away; plan agents are always read-only (§5.2) |
 
 ### 11.2 Open
 
@@ -533,3 +565,89 @@ jobs.
    hidden silo session per otto session?
 3. **Retention.** How many exited command blocks to keep per agent session, and whether they survive a silo
    restart (silo's snapshots already make that possible).
+4. **Cross-machine conflicts (§12).** When A and B both edit after a handover: does A become read-only for that
+   branch (proposed), or do both keep working with a merge at the end?
+
+---
+
+## 12. Agents across machines and harnesses (proposal)
+
+**Idea:** an agent with silo access can get work done on another paired machine. It can start an agent there for
+a task, hand its whole session over, or message one that is already running. Both sides keep talking over silo,
+with callbacks. The agent on the other side can be otto or another harness: Claude Code, Codex, opencode, the TS
+otto.
+
+### 12.1 What silo already gives
+
+- Paired hosts over iroh with owner trust (pairing is shell access, PHASE7 §3.4).
+- Service tunnels to otto's unix socket (§9): two otto daemons speak otto-proto unchanged, and
+  `otto_client::SessionFollower` already follows a session gap-free over any stream.
+- Upload streams (`UPLOAD_HELLO`) to move files to the other machine.
+- Blocks for visibility: `BlockKind::Agent` (§9) and terminal/command blocks, so the work on B is always a pane the
+  user can watch and take over.
+- Scoped grants (`grant.create`), so a remote child gets less than the full pairing.
+
+### 12.2 Three verbs
+
+| Verb | What happens | Session lives on |
+|---|---|---|
+| `delegate` | A starts a child session on B; B's result lands in A's outbox (§7.4) | B; A follows it |
+| `handover` | Transcript and code move to B; B continues; A becomes a read-only follower | B |
+| `message` / `ask` | Input into a running agent on B, optionally waiting for its reply | unchanged |
+
+For the model this is the existing `subagent` tool with a `host` field (`delegate {host?, harness?, cwd?, task,
+code: auto|none}`), plus `hosts.list` and `handover {host}`. A remote child is a subagent whose daemon is elsewhere,
+so the async semantics, limits and outbox stay the same. Handover needs no provider state: our log is the truth
+(decision 6), and B uses its own sign-in; tokens never travel.
+
+### 12.3 Getting the code there
+
+Picked automatically, in this order:
+
+1. B already has the repo (same remote URL or root commit): fetch.
+2. Shared remote: commit A's work, dirty tree included, to `otto/handoff/<session>` through a temporary index (the
+   user's branch and index are untouched), push, and B fetches it.
+3. No shared remote: `git bundle` of the commits B lacks, sent over a silo upload stream.
+4. Not a git repo: a tarball over upload, size-capped and approved.
+
+B always works in a git worktree under its own projects dir, so it never clobbers a checkout the user has there.
+Results come back the same way (a branch or a bundle), and A shows the diff or merges it.
+
+### 12.4 Communication and callbacks
+
+- **otto ↔ otto:** A's daemon opens a service tunnel to B's daemon, calls `session.create {parent: {host,
+  session}}`, and subscribes. Completion, questions and approvals arrive as events. A stores `(host endpoint,
+  remote session, last_seq)` so it resubscribes after a restart, with the same durable outbox rules as local
+  subagents.
+- **Approvals** a remote child raises appear on both machines; the first answer wins (approval ids are per session).
+- **Callbacks from other harnesses:** they get silo's toolset through `silo mcp` (§6), including `agent.message
+  {to}` and `agent.reply`. A Claude Code on B can report back to the otto on A that started it, or ask it questions.
+
+### 12.5 Other harnesses
+
+An adapter in otto-core: `HarnessAdapter { start(task, cwd), send(input), events() -> status and canonical items,
+stop }`. Interfaces to verify when building:
+
+| Harness | Structured interface | Fallback |
+|---|---|---|
+| otto | otto-proto over a service tunnel | – |
+| ACP agents (opencode, Gemini CLI; Claude Code and Codex through Zed's adapters) | Agent Client Protocol over stdio | terminal |
+| Claude Code | `claude -p --input-format stream-json --output-format stream-json` | terminal |
+| Codex | `codex app-server` (JSON-RPC) or `codex exec --json` | terminal |
+| TS otto | its HTTP/SSE server | terminal |
+
+The **terminal driver** works with anything. It runs the CLI in a silo terminal block, types with `terminal.send`,
+detects completion with OSC 133 and busy detection, and reads output with `terminal.capture`. Every adapted run
+lives in a silo block, so it is visible and can be taken over on either machine.
+
+### 12.6 Trust
+
+- A paired host already has owner trust, so spawning there adds no capability. Each remote child still gets a
+  session-scoped grant instead of the full pairing.
+- The child runs under B's approval mode (default `auto`); B's user can set a stricter mode for incoming work per
+  host.
+- Every cross-machine action is an event on both sides, attributed to the device and agent (`TunnelPeer`).
+
+### 12.7 Dependencies
+
+O5 (service tunnel target, `silo mcp`, scoped grants) and §7.4 subagents. Phase O8 (§10).

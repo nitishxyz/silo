@@ -42,6 +42,25 @@ core-video = { version = "0.5.2", default-features = false, features = ["link"] 
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDate", "NSRunLoop"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+# otto
+otto-llm = { path = "crates/otto-llm" }
+otto-tools = { path = "crates/otto-tools" }
+otto-core = { path = "crates/otto-core" }
+otto-store = { path = "crates/otto-store" }
+otto-proto = { path = "crates/otto-proto" }
+otto-server = { path = "crates/otto-server" }
+otto-client = { path = "crates/otto-client" }
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+thiserror = "2"
+tokio-util = { version = "0.7", features = ["rt"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+base64 = "0.22"
+sha2 = "0.10"
+url = "2"
+tempfile = "3"
 
 [profile.dev.package."*"]
 opt-level = 2

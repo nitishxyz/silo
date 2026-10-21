@@ -1,0 +1,12 @@
+data: {"type":"response.created","response":{"id":"resp_web","model":"gpt-5.2"}}
+
+data: {"type":"response.web_search_call.searching","item_id":"ws_1","output_index":0}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"rust"}}}
+
+data: {"type":"response.output_text.delta","delta":"Rust"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_web","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[{"type":"url_citation","start_index":0,"end_index":4,"url":"https://rust-lang.org","title":"Rust"}]}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_web","status":"completed"}}
+

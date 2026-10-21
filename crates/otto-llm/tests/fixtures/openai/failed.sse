@@ -1,0 +1,4 @@
+data: {"type":"response.created","response":{"id":"resp_failed","model":"gpt-5.2"}}
+
+data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"server_error","message":"The server failed."}}}
+

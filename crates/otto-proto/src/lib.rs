@@ -1,0 +1,34 @@
+//! Shared, wasm-safe contract for the otto server and its clients.
+//!
+//! Streams carry `u32 len (LE, kind + payload) | u8 kind | payload`.
+//! A HELLO frame establishes identity, then CONTROL frames carry JSON.
+//! Async framing is available through the non-default `io` feature.
+
+pub mod api;
+pub mod control;
+pub mod frame;
+pub mod model;
+pub mod paths;
+
+pub use control::*;
+pub use frame::Frame;
+#[cfg(feature = "io")]
+pub use frame::{read_frame, spawn_reader, write_frame};
+pub use model::*;
+pub use otto_llm::{Item, ModelInfo, Part, StreamEvent, Usage};
+
+/// Bump for incompatible wire changes; additive changes update `protocol.json`.
+pub const PROTOCOL: u32 = 1;
+/// Maximum frame length, including the kind byte.
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+pub const BINARY: &str = "otto-silo";
+pub const ENV_PREFIX: &str = "OTTO_SILO";
+pub const PROJECT_STATE_DIR: &str = ".otto-silo";
+pub const PROJECT_SHARED_DIR: &str = ".otto";
+
+pub mod kind {
+    /// JSON client or server hello.
+    pub const HELLO: u8 = 0x01;
+    /// JSON request, response or event.
+    pub const CONTROL: u8 = 0x02;
+}

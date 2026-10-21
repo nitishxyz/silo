@@ -1,0 +1,17 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_reason","model":"gpt-5.2","status":"in_progress"}}
+
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Think"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Think"}],"encrypted_content":"encrypted=="}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{}"}
+
+data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{}"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{}"}}
+
+data: {"type":"response.completed","response":{"id":"resp_reason","status":"completed","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":15}}}}
+

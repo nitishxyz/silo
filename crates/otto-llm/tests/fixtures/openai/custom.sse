@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"resp_custom","model":"gpt-5.3-codex"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ct_1","call_id":"patch_1","name":"apply_patch","input":""}}
+
+data: {"type":"response.custom_tool_call_input.delta","item_id":"ct_1","delta":"*** Begin Patch\n*** End Patch"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ct_1","call_id":"patch_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}}
+
+data: {"type":"response.completed","response":{"id":"resp_custom","status":"completed"}}
+

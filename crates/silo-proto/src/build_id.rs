@@ -8,7 +8,8 @@
 //!   `*.toml`, `*.c` and `*.h` under its `src/`.
 //!
 //! [`EXCLUDED`] are front ends and dev tools nothing on the wire depends
-//! on. Everything the server, CLI and client library are built from is
+//! on, and the `otto-*` crates (the agent harness: its own daemon and wire,
+//! docs/OTTO.md). Everything the server, CLI and client library are built from is
 //! included, so the app (which embeds silo-client and silo-proto) and the
 //! server agree whenever they could disagree on the wire. A new crate is
 //! included by default.
@@ -26,6 +27,9 @@ use sha2::{Digest, Sha256};
 /// Members that do not affect the protocol or the server.
 pub const EXCLUDED: &[&str] = &["silo-app", "silo-menubar", "silo-render", "silo-latency", "silo-web"];
 
+/// Members named `otto-…`: the harness, which silo's wire never depends on.
+pub const OTTO_PREFIX: &str = "otto-";
+
 const SOURCE_EXTENSIONS: &[&str] = &["rs", "toml", "c", "h"];
 
 /// Hashed files and the directories whose new files would join them.
@@ -40,7 +44,7 @@ pub fn sources(root: &Path) -> std::io::Result<Sources> {
     let mut dirs = vec![root.join("crates")];
     for krate in sorted(&root.join("crates"))? {
         let name = krate.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if !krate.join("Cargo.toml").is_file() || EXCLUDED.contains(&name) {
+        if !krate.join("Cargo.toml").is_file() || EXCLUDED.contains(&name) || name.starts_with(OTTO_PREFIX) {
             continue;
         }
         files.push(krate.join("Cargo.toml"));
@@ -136,6 +140,8 @@ mod tests {
         write(&root, "crates/x/src/a/.DS_Store", "junk");
         write(&root, "crates/x/tests/t.rs", "#[test] fn t() {}");
         write(&root, "crates/silo-app/src/more.rs", "pub fn g() {}");
+        write(&root, "crates/otto-llm/Cargo.toml", "[package]");
+        write(&root, "crates/otto-llm/src/lib.rs", "pub fn h() {}");
         write(&root, "crates/wip/src/lib.rs", "no manifest, not a member");
         assert_eq!(id(&root), base);
 
