@@ -497,7 +497,8 @@ impl Workspace {
                     this.close_share_sheet(window, cx);
                 }
             }))
-            .occlude()
+            // The backdrop scrolls the card.
+            .block_mouse_except_scroll()
             .w(px(460.0))
             .flex()
             .flex_col()

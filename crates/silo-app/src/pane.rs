@@ -1573,6 +1573,9 @@ impl Render for Pane {
         let status = self.status_text();
         let lifecycle = self.lifecycle_text();
         let sized_elsewhere = self.sized_elsewhere();
+        // A view link never owns the size.
+        let can_size =
+            self.control.as_ref().and_then(|c| c.hello().granted.as_ref()).is_none_or(|g| g.rights >= silo_proto::access::Rights::Interact);
         // Another client's smaller grid: rule off and fill what is not ours.
         let applied = self.mirror.size();
         let edge_x = self.grid.filter(|g| sized_elsewhere && applied.columns < g.columns).map(|_| px(f32::from(applied.columns) * metrics.width));
@@ -1792,19 +1795,20 @@ impl Render for Pane {
                             .text_color(rgb(theme::muted()))
                             .text_size(px(11.0))
                             .child(format!("sized by {owner}"))
-                            .child("·")
-                            .child(
-                                div()
-                                    .id("take-size")
-                                    .text_color(rgb(theme::foreground()))
-                                    .cursor_pointer()
-                                    .child("Take size")
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        this.own_requested = None;
-                                        this.own(OwnMode::Take);
-                                    })),
-                            ),
+                            .when(can_size, |el| {
+                                el.child("·").child(
+                                    div()
+                                        .id("take-size")
+                                        .text_color(rgb(theme::foreground()))
+                                        .cursor_pointer()
+                                        .child("Take size")
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.own_requested = None;
+                                            this.own(OwnMode::Take);
+                                        })),
+                                )
+                            }),
                     )
                 })
                 .children(self.paste_card(cx))
