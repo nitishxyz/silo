@@ -35,7 +35,12 @@ fn config(home: &Path) -> silo_server::Config {
 }
 
 async fn start(home: &Path) -> JoinHandle<anyhow::Result<()>> {
-    let config = config(home);
+    start_with(config(home)).await
+}
+
+async fn start_with(config: silo_server::Config) -> JoinHandle<anyhow::Result<()>> {
+    let home = config.home.clone();
+    let home = home.as_path();
     let task = tokio::spawn(silo_server::run(config));
     for _ in 0..300 {
         if silo_client::server_running(home).await {
@@ -249,6 +254,46 @@ async fn lost_commit_after_ready_keeps_programs() {
     drop((stream, control));
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The old server cannot read the successor's READY (`fault`): it may have
+/// been written, so the old server exits instead of re-adopting, and the
+/// successor alone serves the same programs and sessions.
+async fn lost_ready_leaves_one_server(name: &str, fault: silo_server::handoff::ReadyFault) {
+    let home = temp_home(name);
+    let old = start_with(silo_server::Config { ready_fault: Some(fault), ..config(&home) }).await;
+    let control = connect(&home).await;
+    let (created, before, mut stream, mut tail) = populate(&control).await;
+
+    let new = tokio::spawn(silo_server::takeover(config(&home), false));
+    tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().expect("old server exits");
+    assert!(!pump(&mut stream, &mut tail, |_| false).await, "old stream ends");
+    drop((stream, control));
+    assert!(!new.is_finished(), "the successor serves");
+    assert!(silo_client::mismatch::server_lock_held(&home), "the lock stays held");
+
+    // The listening socket is the successor's alone now: any connection is
+    // to it, queued until it accepts.
+    let control = connect(&home).await;
+    assert_same(&before, &view(&control, &created.session_id).await);
+    resume(&control, &created.block_id, &mut tail).await;
+    control.call_value(Method::SessionRename { session_id: created.session_id.clone(), name: "renamed".into() }).await.unwrap();
+    assert_eq!(view(&control, &created.session_id).await.session.name, "renamed");
+
+    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(control);
+    tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_ready_read_leaves_only_the_successor() {
+    lost_ready_leaves_one_server("ready-error", silo_server::handoff::ReadyFault::Error).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_ready_leaves_only_the_successor() {
+    lost_ready_leaves_one_server("ready-corrupt", silo_server::handoff::ReadyFault::Corrupt).await;
 }
 
 /// Clients starting up during the upgrade never find the home without a

@@ -33,7 +33,7 @@ pub const TAB_KINDS: [TabKind; 2] = [
 /// The terminal row: ⌘T's kind when nothing (or no known kind) is focused.
 const TERMINAL: usize = 0;
 
-/// The row ⌘T opens: the kind of `focused` (any block of the window,
+/// The row ⌘T opens: the kind of `focused` (any block of the session,
 /// floats included), else a terminal.
 fn same_kind(focused: Option<&str>, blocks: &[BlockInfo]) -> usize {
     let kind = focused.and_then(|id| blocks.iter().find(|b| b.id == id)).map(|b| b.kind);
@@ -94,10 +94,11 @@ impl Workspace {
         same_kind(focused.as_deref(), self.view.as_ref().map_or(&[], |v| v.blocks.as_slice()))
     }
 
-    /// ⌘T: a tab with the focused block's kind.
+    /// ⌘T: a tab with the focused block's kind, gated like the row's own
+    /// command.
     pub(crate) fn new_tab_like_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let row = self.same_kind_row(window, cx);
-        self.execute(TAB_KINDS[row].command, window, cx);
+        self.run(TAB_KINDS[row].command, window, cx);
     }
 
     fn close_new_tab_menu(&mut self, cx: &mut Context<Self>) {
@@ -115,6 +116,8 @@ impl Workspace {
             menu.same = same;
             menu.selected = same;
             let focus = menu.focus.clone();
+            // One overlay at a time: ⌃⌘T over the switcher replaces it.
+            self.close_switcher(window, cx);
             focus.focus(window, cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
         } else {
@@ -221,7 +224,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use silo_proto::model::{Float, FloatRect, Layout, Lifecycle, TermSize, WindowInfo};
+    use silo_proto::model::{Lifecycle, TermSize};
 
     use super::*;
 
@@ -261,17 +264,6 @@ mod tests {
         assert_eq!(row(None, &blocks), Command::NewTerminalTab, "nothing focused");
         assert_eq!(row(Some("t"), &[]), Command::NewTerminalTab, "no window");
         assert_eq!(row(Some("u"), &blocks), Command::NewTerminalTab, "a kind no tab starts with");
-        // A focused float is the window's focused block like a tiled one.
-        let w = WindowInfo {
-            id: "w".into(),
-            name: None,
-            layout: Layout::Block { id: "t".into() },
-            focused: "b".into(),
-            zoomed: false,
-            floats: vec![Float { id: "b".into(), rect: FloatRect { x: 0.1, y: 0.1, w: 0.5, h: 0.5 } }],
-        };
-        assert!(crate::floats::is_float(&w, &w.focused));
-        assert_eq!(row(Some(&w.focused), &blocks), Command::NewBrowserTab);
     }
 
     #[test]

@@ -25,14 +25,30 @@
 //! 5. old -> successor: [`COMMIT`]; the old server closes its copies and
 //!    connections and exits without hanging up anything.
 //!
-//! Anything going wrong before `READY` (including the successor closing)
-//! aborts: the successor drops its copies, the old server re-adopts its
-//! blocks and keeps serving. A master it cannot re-adopt is parked open in
-//! the registry (the block shows its restored screen) and travels with the
-//! next upgrade. The old server waits for `READY` without a timeout (the
-//! successor's steps are bounded), so both never run the same programs.
-//! After writing `READY` the successor keeps everything, even without a
-//! `COMMIT`.
+//! Exactly one server owns the blocks at any time:
+//!
+//! - The successor keeps everything once it has tried to write `READY`,
+//!   whether or not the write succeeded and whether or not a `COMMIT`
+//!   follows. Failing before that, it drops its copies and closes the
+//!   socket without writing anything.
+//! - The old server, once its last descriptor message is sent, resumes
+//!   only on proof that the successor gave up: end of stream (or a reset)
+//!   with no byte read. A stream socket delivers every byte written before
+//!   its close, so then no `READY` was written. Anything else (`READY`, a
+//!   read error, partial or different bytes) means `READY` may have been
+//!   written: it exits as on `COMMIT`, never re-adopting.
+//! - A failed `READY` write that is not the old server's close could leave
+//!   it still reading; the successor then holds the socket open until the
+//!   old server ends, so that it never reads an end of stream.
+//!
+//! The old server waits for `READY` without a timeout (the successor's
+//! steps are bounded). Before its last descriptor message any failure
+//! aborts: the successor cannot have received everything, the old server
+//! re-adopts its blocks and keeps serving. A master it cannot re-adopt is
+//! parked open in the registry (the block shows its restored screen) and
+//! travels with the next upgrade. The one case without a server: the old
+//! server cannot read the outcome and exits, and the successor then fails
+//! before `READY`; programs are hung up, never run by two servers.
 //!
 //! Remote access is not transferred: the old server closes its iroh
 //! endpoint (and every remote connection) before `COMMIT`, and the
@@ -218,14 +234,69 @@ enum Slot {
     Kept(BlockHandle),
 }
 
+/// A fault injected into the old server's read of [`READY`] (a test hook).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyFault {
+    /// The read fails without consuming anything.
+    Error,
+    /// The bytes read differ from `READY`.
+    Corrupt,
+}
+
+/// How a handoff the successor may have committed to ended on the old side.
+pub(crate) enum Given {
+    /// `READY` was read.
+    Committed(UnixStream),
+    /// `READY` may have been written but was not read: the successor may
+    /// serve, so this server must exit as if committed.
+    Unknown(UnixStream, io::Error),
+}
+
+/// What the old server learned waiting for [`READY`].
+enum Outcome {
+    Ready,
+    /// The successor closed without writing a byte: it never wrote READY.
+    Gone,
+    Unknown(io::Error),
+}
+
+fn read_ready(sock: &mut UnixStream, fault: Option<ReadyFault>) -> Outcome {
+    if fault == Some(ReadyFault::Error) {
+        return Outcome::Unknown(io::Error::other("injected READY read error"));
+    }
+    let mut got = vec![0u8; READY.len()];
+    let mut n = 0;
+    while n < got.len() {
+        match sock.read(&mut got[n..]) {
+            Ok(0) if n == 0 => return Outcome::Gone,
+            Ok(0) => return Outcome::Unknown(io::Error::new(io::ErrorKind::UnexpectedEof, "partial READY")),
+            Ok(read) => n += read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset && n == 0 => return Outcome::Gone,
+            Err(e) => return Outcome::Unknown(e),
+        }
+    }
+    if fault == Some(ReadyFault::Corrupt) {
+        got[0] ^= 0xff;
+    }
+    if got == READY { Outcome::Ready } else { Outcome::Unknown(invalid("unexpected upgrade message")) }
+}
+
 /// Old side, after [`MAGIC`] was read: release every block, transfer them
-/// and wait for [`READY`]. On success the caller must commit (release the
-/// lock, then write [`COMMIT`] to the returned stream); on failure every
-/// block runs here again.
+/// and wait for [`READY`]. Unless it fails, the caller must exit without
+/// serving again (release the lock, then write [`COMMIT`] to the returned
+/// stream); on failure every block runs here again.
 ///
 /// # Errors
-/// Releasing, transferring, or the successor not getting ready.
-pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, own: [OwnedFd; 2]) -> anyhow::Result<UnixStream> {
+/// Releasing or transferring, or the successor closing before `READY`.
+pub(crate) async fn give(
+    server: &Server,
+    sock: UnixStream,
+    server_id: String,
+    own: [OwnedFd; 2],
+    fault: Option<ReadyFault>,
+) -> anyhow::Result<Given> {
     let (handles, browsers, sessions, mut parked) = {
         let mut reg = server.registry.lock().unwrap();
         // Browsers stay registered: mutations are refused while upgrading.
@@ -257,7 +328,7 @@ pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, o
     server.registry.lock().unwrap().parked.extend(parked);
     let result = match failed {
         Some(error) => Err(error),
-        None => transfer(sock, Transfer { server_id, sessions, blocks: Vec::new(), browsers }, &slots, own).await,
+        None => transfer(sock, Transfer { server_id, sessions, blocks: Vec::new(), browsers }, &slots, own, fault).await,
     };
     if result.is_err() {
         readopt(&server.registry, slots);
@@ -266,7 +337,13 @@ pub(crate) async fn give(server: &Server, sock: UnixStream, server_id: String, o
 }
 
 /// Send `transfer` with the released `slots` as its blocks.
-async fn transfer(mut sock: UnixStream, mut transfer: Transfer, slots: &[(BlockId, Slot)], own: [OwnedFd; 2]) -> anyhow::Result<UnixStream> {
+async fn transfer(
+    mut sock: UnixStream,
+    mut transfer: Transfer,
+    slots: &[(BlockId, Slot)],
+    own: [OwnedFd; 2],
+    fault: Option<ReadyFault>,
+) -> anyhow::Result<Given> {
     let mut checkpoints = Vec::with_capacity(slots.len());
     let mut fds = Vec::new();
     for (_, slot) in slots {
@@ -291,23 +368,27 @@ async fn transfer(mut sock: UnixStream, mut transfer: Transfer, slots: &[(BlockI
         transfer.blocks.push(Record { info: (**info).clone(), pty });
         checkpoints.push(persist::encode(released.checkpoint.clone())?);
     }
-    let sock = tokio::task::spawn_blocking(move || -> io::Result<UnixStream> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Given> {
         sock.set_nonblocking(false)?;
         sock.set_write_timeout(Some(STEP_TIMEOUT))?;
         sock.set_read_timeout(Some(STEP_TIMEOUT))?;
         expect(&mut sock, MAGIC)?;
-        let [lock, listener] = &own;
-        send(&mut sock, &transfer, &checkpoints, &fds, ServerFds { lock: lock.as_fd(), listener: listener.as_fd() })?;
-        drop((fds, own));
         // READY is the commit point, so wait for it or the successor's end
         // (its own steps are bounded), never time out: a READY racing a
         // timeout would leave both servers running the same programs.
         sock.set_read_timeout(None)?;
-        expect(&mut sock, READY)?;
-        Ok(sock)
+        let [lock, listener] = &own;
+        send(&mut sock, &transfer, &checkpoints, &fds, ServerFds { lock: lock.as_fd(), listener: listener.as_fd() })?;
+        drop((fds, own));
+        // From here the successor may hold everything: nothing but its
+        // close without a byte gives the blocks back.
+        match read_ready(&mut sock, fault) {
+            Outcome::Ready => Ok(Given::Committed(sock)),
+            Outcome::Gone => anyhow::bail!("the successor closed before READY"),
+            Outcome::Unknown(error) => Ok(Given::Unknown(sock, error)),
+        }
     })
-    .await??;
-    Ok(sock)
+    .await?
 }
 
 /// Run every released block here again (an aborted upgrade).
@@ -368,10 +449,6 @@ pub struct Taken {
 /// No server is running, it refuses, or the transfer fails.
 pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready: bool) -> anyhow::Result<Taken> {
     let socket = silo_proto::paths::socket(home);
-    let old_pid = std::fs::read(silo_proto::paths::runtime(home))
-        .ok()
-        .and_then(|j| serde_json::from_slice::<silo_proto::paths::Runtime>(&j).ok())
-        .map(|r| r.pid);
     let (sock, transfer, checkpoints, fds, [lock, listener]) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let mut sock = UnixStream::connect(&socket).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => io::Error::new(e.kind(), "no running server to take over"),
@@ -396,39 +473,43 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
     let browsers = transfer.browsers.into_iter().map(|info| Ok((info.id.clone(), Block::Browser(Box::new(BrowserBlock::restore(info)?)))));
     let browsers = browsers.collect::<anyhow::Result<Vec<_>>>()?;
     let blocks = adopt(transfer.blocks, checkpoints, fds, notes).await?;
-    let blocks = commit(sock, blocks, old_pid).await?;
+    let blocks = commit(sock, blocks).await;
     let blocks = blocks.into_iter().map(|(id, h)| (id, Block::Terminal(h))).chain(browsers).collect();
     Ok(Taken { server_id: transfer.server_id, sessions: transfer.sessions, blocks, lock, listener, persist })
 }
 
-/// Write [`READY`] and wait for [`COMMIT`]. A READY that cannot be written
-/// never reached the old server, which keeps its blocks: ours are released.
-/// Once written, the blocks are ours whatever follows; a missing COMMIT
+/// Write [`READY`] and wait for [`COMMIT`]. From the attempt on, the blocks
+/// are ours whatever follows: the old server resumes only after reading an
+/// end of stream with no byte, which this never gives it. A missing COMMIT
 /// (the old server died committing) is only logged, never a hangup.
+///
+/// A READY that cannot be written means the old server closed (it exits
+/// without serving again) or, in principle, a write error with it still
+/// reading: a thread then holds the socket open until the old server ends,
+/// so it never mistakes our silence for an abort.
 ///
 /// Under systemd this process becomes the unit's main PID before READY:
 /// the old server cannot exit before reading READY, so systemd never sees
-/// the unit lose its main process. A failed READY hands it back.
-async fn commit(mut sock: UnixStream, blocks: HashMap<BlockId, BlockHandle>, old_pid: Option<u32>) -> anyhow::Result<HashMap<BlockId, BlockHandle>> {
+/// the unit lose its main process.
+async fn commit(mut sock: UnixStream, blocks: HashMap<BlockId, BlockHandle>) -> HashMap<BlockId, BlockHandle> {
     crate::notify::notify(&format!("MAINPID={}", std::process::id()));
-    let (sock, ready) = tokio::task::spawn_blocking(move || {
-        let ready = sock.write_all(READY);
-        (sock, ready)
-    })
-    .await?;
-    if let Err(error) = ready {
-        if let Some(pid) = old_pid {
-            crate::notify::notify(&format!("MAINPID={pid}"));
+    // Six bytes into the old server's empty receive buffer: no wait.
+    match sock.write_all(READY) {
+        Ok(()) => {
+            let answer = tokio::task::spawn_blocking(move || expect(&mut sock, COMMIT)).await;
+            if !matches!(answer, Ok(Ok(()))) {
+                tracing::warn!("no COMMIT from the old server; serving its blocks anyway");
+            }
         }
-        release(blocks.into_values()).await;
-        return Err(anyhow::Error::from(error).context("send READY"));
+        Err(error) => {
+            tracing::warn!("send READY: {error}; serving the blocks (the old server exits without reading it)");
+            std::thread::spawn(move || {
+                let _ = sock.set_read_timeout(None);
+                let _ = io::copy(&mut sock, &mut io::sink());
+            });
+        }
     }
-    let mut sock = sock;
-    let answer = tokio::task::spawn_blocking(move || expect(&mut sock, COMMIT)).await;
-    if !matches!(answer, Ok(Ok(()))) {
-        tracing::warn!("no COMMIT from the old server; serving its blocks anyway");
-    }
-    Ok(blocks)
+    blocks
 }
 
 async fn adopt(
@@ -540,6 +621,24 @@ mod tests {
         b.read_exact(&mut first).unwrap();
         assert_eq!(first, bytes, "peeking consumes nothing");
         found
+    }
+
+    /// Only a close with no byte proves the successor never wrote READY.
+    #[test]
+    fn ready_outcomes() {
+        let outcome = |bytes: &[u8], fault| {
+            let (mut a, mut b) = UnixStream::pair().unwrap();
+            a.write_all(bytes).unwrap();
+            drop(a);
+            read_ready(&mut b, fault)
+        };
+        assert!(matches!(outcome(READY, None), Outcome::Ready));
+        assert!(matches!(outcome(b"READY\nmore", None), Outcome::Ready));
+        assert!(matches!(outcome(b"", None), Outcome::Gone));
+        assert!(matches!(outcome(b"REA", None), Outcome::Unknown(_)), "partial");
+        assert!(matches!(outcome(b"RESET\n", None), Outcome::Unknown(_)), "different");
+        assert!(matches!(outcome(READY, Some(ReadyFault::Corrupt)), Outcome::Unknown(_)));
+        assert!(matches!(outcome(b"", Some(ReadyFault::Error)), Outcome::Unknown(_)), "even with nothing written");
     }
 
     #[tokio::test]

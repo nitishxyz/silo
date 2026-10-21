@@ -249,7 +249,9 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
   The old server freezes every block, checkpoints it at an exact byte boundary, and passes the tree, checkpoints,
   PTY masters, lock and listener over `SCM_RIGHTS`. The successor adopts them (same PIDs, same epochs and offsets,
   so clients resume without a gap) and replies `READY`. Before `READY` any failure aborts and the old server
-  re-adopts everything; shells are never hung up.
+  re-adopts everything; shells are never hung up. Once it tries `READY` the successor keeps everything; the old
+  server resumes only if the successor closed without writing a byte, and otherwise (`READY`, or a read it cannot
+  trust) exits, so two servers never run the same programs.
 - Packaging, signing and notarization reuse Ohara's xtask. Linux uses systemd units plus deb/rpm/tarball.
 - **Install and service (done):** the release workflow publishes `silo-<os>-<arch>.tar.gz`; `install.sh` installs it
   to `~/.local/bin` and runs `silo up`. `silo up`/`down`/`status` manage the server as a user service (systemd user

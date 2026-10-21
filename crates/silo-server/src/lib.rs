@@ -74,6 +74,9 @@ pub struct Config {
     /// grants: a test hook to expire a grant once its connections exist.
     #[doc(hidden)]
     pub grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
+    /// A fault in reading a successor's `READY` (a test hook).
+    #[doc(hidden)]
+    pub ready_fault: Option<handoff::ReadyFault>,
 }
 
 impl Default for Config {
@@ -91,6 +94,7 @@ impl Default for Config {
             require_approval: false,
             grant_sweep: GRANT_SWEEP,
             grant_sweep_ahead: Arc::default(),
+            ready_fault: None,
         }
     }
 }
@@ -553,7 +557,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                 // SIGTERM during a handoff comes from a service manager
                 // restarting the job after a takeover: honour it only if the
                 // handoff commits (we exit then anyway).
-                let give = handoff::give(&server, sock, server_id, own);
+                let give = handoff::give(&server, sock, server_id, own, config.ready_fault);
                 tokio::pin!(give);
                 let mut deferred = false;
                 let given = loop {
@@ -567,8 +571,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                     }
                 };
                 match given {
-                    Ok(sock) => {
-                        committed = Some(sock);
+                    Ok(given) => {
+                        committed = Some(given);
                         break;
                     }
                     Err(error) => {
@@ -587,8 +591,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
             _ = terminate.recv() => break,
         }
     }
-    if let Some(sock) = committed {
-        return commit(&server, listener, lock, sock).await;
+    if let Some(given) = committed {
+        return commit(&server, listener, lock, given).await;
     }
     tracing::info!("shutting down");
     // Commit the final state before teardown empties the tree.
@@ -607,10 +611,18 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The successor is ready and holds the lock and listening socket: close
-/// our copies and connections and tell it so. The socket path stays bound
-/// (it is the same socket); the successor rewrites the runtime file.
-async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, mut sock: std::os::unix::net::UnixStream) -> anyhow::Result<()> {
+/// The successor is ready (or may be: [`handoff::Given::Unknown`]) and holds
+/// the lock and listening socket: close our copies and connections and
+/// tell it so. The socket path stays bound (it is the same socket); the
+/// successor rewrites the runtime file.
+async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, given: handoff::Given) -> anyhow::Result<()> {
+    let (mut sock, unknown) = match given {
+        handoff::Given::Committed(sock) => (sock, false),
+        handoff::Given::Unknown(sock, error) => {
+            tracing::error!("upgrade outcome unknown ({error}): the successor may serve; exiting without serving again");
+            (sock, true)
+        }
+    };
     drop(listener);
     // Remote clients reconnect to the successor, which binds the same
     // identity once this endpoint is gone.
@@ -630,7 +642,16 @@ async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, mut s
     }
     // Shared: closes our copy only.
     drop(lock);
-    tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await??;
+    let written = tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await?;
+    if unknown {
+        // The successor may have given up already; nothing else to do.
+        if let Err(error) = written {
+            tracing::warn!("send COMMIT: {error}");
+        }
+        tracing::info!("upgrade outcome unknown; exiting");
+        return Ok(());
+    }
+    written?;
     tracing::info!("upgrade committed; exiting");
     Ok(())
 }
