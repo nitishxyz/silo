@@ -8,6 +8,7 @@ use std::time::Instant;
 use gpui::{AnyElement, Context, IntoElement, Window, canvas, div, prelude::*, px, relative, rgb};
 use silo_proto::{
     control::Method,
+    layout_ops::{self, MIN_RATIO},
     model::{Axis, BlockInfo, Layout, WindowInfo},
 };
 
@@ -242,7 +243,7 @@ impl Workspace {
                                 let Some(w) = this.active_window() else { return };
                                 let window_id = w.id.clone();
                                 if e.click_count == 2 {
-                                    let change = even_split(&w.layout, &split);
+                                    let change = layout_ops::even_split(&w.layout, &split);
                                     this.divider_drag = None;
                                     this.set_ratios(&window_id, change.into_iter().collect(), cx);
                                 } else {
@@ -261,8 +262,8 @@ impl Workspace {
                         let extent = f32::from(if horizontal { e.bounds.size.width } else { e.bounds.size.height });
                         let new = dragged_ratio(d.start_ratio, along(e.event.position) - d.start, extent, size);
                         let window_id = d.window_id.clone();
-                        let old = this.active_window().filter(|w| w.id == window_id).and_then(|w| split_ratio(&w.layout, &split));
-                        if let Some(c) = old.and_then(|(_, old)| change(&split, old, new)) {
+                        let old = this.active_window().filter(|w| w.id == window_id).and_then(|w| layout_ops::split_ratio(&w.layout, &split));
+                        if let Some(c) = old.and_then(|(_, old)| layout_ops::change(&split, old, new)) {
                             this.set_ratios(&window_id, vec![c], cx);
                         }
                     },
@@ -780,10 +781,7 @@ impl Workspace {
     }
 }
 
-/// Smallest share either side of a split keeps (as `Layout::set_ratio`).
-const MIN_RATIO: f32 = 0.05;
-/// How far one resize step moves a divider.
-pub(crate) const RESIZE_STEP: f32 = 0.05;
+/// Smallest size
 /// Smallest size (pt) either side of a split keeps while its divider is dragged.
 const MIN_PANE: f32 = 60.0;
 
@@ -822,112 +820,6 @@ pub(crate) fn dragged_ratio(start: f32, delta: f32, extent: f32, divider: f32) -
     (start + delta / extent).clamp(lo, hi)
 }
 
-/// A split's new ratio, by its path from the root (0 = first child).
-pub(crate) type RatioChange = (Vec<usize>, f32);
-
-/// The path from the root to leaf `id`.
-fn leaf_path(layout: &Layout, id: &str) -> Option<Vec<usize>> {
-    match layout {
-        Layout::Block { id: b } => (b == id).then(Vec::new),
-        Layout::Unknown => None,
-        Layout::Split { first, second, .. } => [first, second].into_iter().enumerate().find_map(|(i, child)| {
-            let mut path = leaf_path(child, id)?;
-            path.insert(0, i);
-            Some(path)
-        }),
-    }
-}
-
-fn node_at<'a>(layout: &'a Layout, path: &[usize]) -> Option<&'a Layout> {
-    match (layout, path.split_first()) {
-        (_, None) => Some(layout),
-        (Layout::Split { first, .. }, Some((0, rest))) => node_at(first, rest),
-        (Layout::Split { second, .. }, Some((_, rest))) => node_at(second, rest),
-        (Layout::Block { .. } | Layout::Unknown, Some(_)) => None,
-    }
-}
-
-fn split_ratio(layout: &Layout, path: &[usize]) -> Option<(Axis, f32)> {
-    match node_at(layout, path)? {
-        Layout::Split { axis, ratio, .. } => Some((*axis, *ratio)),
-        Layout::Block { .. } | Layout::Unknown => None,
-    }
-}
-
-fn change(path: &[usize], old: f32, new: f32) -> Option<RatioChange> {
-    let new = new.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
-    ((new - old).abs() > 1e-4).then(|| (path.to_vec(), new))
-}
-
-/// Same tree of splits and blocks, ratios aside.
-pub(crate) fn same_shape(a: &Layout, b: &Layout) -> bool {
-    match (a, b) {
-        (Layout::Block { id: x }, Layout::Block { id: y }) => x == y,
-        (Layout::Unknown, Layout::Unknown) => true,
-        (Layout::Split { axis: ax, first: a1, second: a2, .. }, Layout::Split { axis: bx, first: b1, second: b2, .. }) => {
-            ax == bx && same_shape(a1, b1) && same_shape(a2, b2)
-        }
-        _ => false,
-    }
-}
-
-/// Grow (`delta > 0`) or shrink pane `id`'s share of its own split.
-pub(crate) fn resize_share(layout: &Layout, id: &str, delta: f32) -> Option<RatioChange> {
-    let path = leaf_path(layout, id)?;
-    let (&side, parent) = path.split_last()?;
-    let (_, ratio) = split_ratio(layout, parent)?;
-    change(parent, ratio, if side == 0 { ratio + delta } else { ratio - delta })
-}
-
-/// Move pane `id`'s edge on the `direction` side one step that way: the
-/// nearest enclosing split along that axis whose divider is that edge.
-pub(crate) fn move_edge(layout: &Layout, id: &str, direction: crate::focus::Direction) -> Option<RatioChange> {
-    use crate::focus::Direction;
-    let (axis, side, delta) = match direction {
-        Direction::Left => (Axis::Horizontal, 1, -RESIZE_STEP),
-        Direction::Right => (Axis::Horizontal, 0, RESIZE_STEP),
-        Direction::Up => (Axis::Vertical, 1, -RESIZE_STEP),
-        Direction::Down => (Axis::Vertical, 0, RESIZE_STEP),
-    };
-    let path = leaf_path(layout, id)?;
-    let depth = (0..path.len()).rev().find(|&d| path[d] == side && split_ratio(layout, &path[..d]).is_some_and(|(a, _)| a == axis))?;
-    let (_, ratio) = split_ratio(layout, &path[..depth])?;
-    change(&path[..depth], ratio, ratio + delta)
-}
-
-/// Panes a subtree lines up along `axis`.
-fn weight(layout: &Layout, axis: Axis) -> u32 {
-    match layout {
-        Layout::Split { axis: a, first, second, .. } if *a == axis => weight(first, axis) + weight(second, axis),
-        _ => 1,
-    }
-}
-
-/// The ratio giving every pane along the split at `path` an even share.
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn even_split(layout: &Layout, path: &[usize]) -> Option<RatioChange> {
-    let Layout::Split { axis, ratio, first, second } = node_at(layout, path)? else { return None };
-    let (a, b) = (weight(first, *axis), weight(second, *axis));
-    change(path, *ratio, a as f32 / (a + b) as f32)
-}
-
-/// Every split of `layout` evened out.
-pub(crate) fn equalize(layout: &Layout) -> Vec<RatioChange> {
-    fn walk(root: &Layout, node: &Layout, path: &mut Vec<usize>, out: &mut Vec<RatioChange>) {
-        if let Layout::Split { first, second, .. } = node {
-            out.extend(even_split(root, path));
-            for (i, child) in [first, second].into_iter().enumerate() {
-                path.push(i);
-                walk(root, child, path, out);
-                path.pop();
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(layout, layout, &mut Vec::new(), &mut out);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,16 +852,6 @@ mod tests {
         assert_eq!(parent_axis(&block("a"), "a"), None);
     }
 
-    fn ratio(axis: Axis, ratio: f32, first: Layout, second: Layout) -> Layout {
-        Layout::Split { axis, ratio, first: Box::new(first), second: Box::new(second) }
-    }
-
-    fn close(change: Option<RatioChange>, path: &[usize], expected: f32) {
-        let (p, r) = change.expect("a change");
-        assert_eq!(p, path);
-        assert!((r - expected).abs() < 1e-5, "{r} != {expected}");
-    }
-
     #[test]
     fn automatic_splits_follow_the_longer_side() {
         let rect = |w: f32, h: f32| Some(gpui::Bounds::new(gpui::point(px(10.0), px(20.0)), gpui::size(px(w), px(h))));
@@ -994,69 +876,6 @@ mod tests {
         // Too small for both minimums, or unmeasured: unchanged.
         assert!(near(dragged_ratio(0.4, 30.0, 100.0, 6.0), 0.4));
         assert!(near(dragged_ratio(0.4, 30.0, 0.0, 6.0), 0.4));
-    }
-
-    #[test]
-    fn grow_and_shrink_change_the_focused_share_of_its_split() {
-        // a | (b / c)
-        let layout = split(Axis::Horizontal, block("a"), split(Axis::Vertical, block("b"), block("c")));
-        close(resize_share(&layout, "a", RESIZE_STEP), &[], 0.55);
-        close(resize_share(&layout, "a", -RESIZE_STEP), &[], 0.45);
-        close(resize_share(&layout, "b", RESIZE_STEP), &[1], 0.55);
-        close(resize_share(&layout, "c", RESIZE_STEP), &[1], 0.45);
-        assert_eq!(resize_share(&block("a"), "a", RESIZE_STEP), None);
-        // Clamped to the minimum pane size; no change at the limit.
-        let tight = ratio(Axis::Horizontal, 0.92, block("a"), block("b"));
-        close(resize_share(&tight, "a", RESIZE_STEP), &[], 0.95);
-        let full = ratio(Axis::Horizontal, 0.95, block("a"), block("b"));
-        assert_eq!(resize_share(&full, "a", RESIZE_STEP), None);
-        close(resize_share(&full, "b", RESIZE_STEP), &[], 0.9);
-    }
-
-    #[test]
-    fn edges_move_on_the_nearest_split_bounding_that_side() {
-        use crate::focus::Direction::*;
-        // (a | b) | c, with b split vertically into b / d.
-        let layout = split(Axis::Horizontal, split(Axis::Horizontal, block("a"), split(Axis::Vertical, block("b"), block("d"))), block("c"));
-        close(move_edge(&layout, "b", Right), &[], 0.55);
-        close(move_edge(&layout, "b", Left), &[0], 0.45);
-        close(move_edge(&layout, "b", Down), &[0, 1], 0.55);
-        assert_eq!(move_edge(&layout, "b", Up), None);
-        close(move_edge(&layout, "d", Up), &[0, 1], 0.45);
-        assert_eq!(move_edge(&layout, "a", Left), None);
-        close(move_edge(&layout, "a", Right), &[0], 0.55);
-        close(move_edge(&layout, "c", Left), &[], 0.45);
-        assert_eq!(move_edge(&layout, "c", Right), None);
-        let edge = ratio(Axis::Horizontal, 0.05, block("a"), block("b"));
-        assert_eq!(move_edge(&edge, "b", Left), None, "clamped");
-    }
-
-    #[test]
-    fn equalize_gives_every_pane_along_an_axis_an_even_share() {
-        // a | (b | c) | ... with an unrelated vertical split in c.
-        let layout =
-            ratio(Axis::Horizontal, 0.7, block("a"), ratio(Axis::Horizontal, 0.2, block("b"), ratio(Axis::Vertical, 0.9, block("c"), block("d"))));
-        let changes = equalize(&layout);
-        assert_eq!(changes.len(), 3);
-        close(changes.first().cloned(), &[], 1.0 / 3.0);
-        close(changes.get(1).cloned(), &[1], 0.5);
-        close(changes.get(2).cloned(), &[1, 1], 0.5);
-        let mut even = layout.clone();
-        for (path, r) in &changes {
-            even.set_ratio(path, *r);
-        }
-        assert!(equalize(&even).is_empty());
-        close(even_split(&layout, &[1, 1]), &[1, 1], 0.5);
-        assert_eq!(even_split(&layout, &[0]), None);
-    }
-
-    #[test]
-    fn shape_ignores_ratios_but_not_splits() {
-        let a = ratio(Axis::Horizontal, 0.3, block("a"), block("b"));
-        assert!(same_shape(&a, &ratio(Axis::Horizontal, 0.6, block("a"), block("b"))));
-        assert!(!same_shape(&a, &ratio(Axis::Vertical, 0.3, block("a"), block("b"))));
-        assert!(!same_shape(&a, &ratio(Axis::Horizontal, 0.3, block("a"), ratio(Axis::Vertical, 0.5, block("b"), block("c")))));
-        assert!(!same_shape(&a, &block("a")));
     }
 
     #[test]

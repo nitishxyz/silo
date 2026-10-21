@@ -6,7 +6,11 @@ use std::sync::atomic::Ordering;
 use gpui::{
     AnyElement, Context, Entity, FontWeight, HighlightStyle, IntoElement, ScrollHandle, StyledText, Subscription, Window, div, prelude::*, px, rgb,
 };
-use silo_proto::{control::Method, model::Axis};
+use silo_proto::{
+    control::{Direction, Method},
+    layout_ops,
+    model::Axis,
+};
 
 use crate::{status::Status, theme::Continuous as _};
 
@@ -24,13 +28,12 @@ pub(crate) struct PendingRatio {
 
 impl PendingRatio {
     fn fits(&self, windows: &[silo_proto::model::WindowInfo]) -> bool {
-        windows.iter().any(|w| w.id == self.window_id && crate::layout::same_shape(&w.layout, &self.shape))
+        windows.iter().any(|w| w.id == self.window_id && layout_ops::same_shape(&w.layout, &self.shape))
     }
 }
 use crate::{
     commands::{Command, fuzzy},
     finder::{self, Preview, Right, Target},
-    focus::Direction,
     settings_panel::{SettingsEvent, SettingsSnapshot},
     settings_table::{Choice, Kind, SettingId},
     terminal_prefs::TerminalPrefs,
@@ -218,24 +221,20 @@ impl Workspace {
             Command::FocusNextPane => self.cycle_focus(1, window, cx),
             Command::FocusPreviousPane => self.cycle_focus(-1, window, cx),
             Command::GrowPane | Command::ShrinkPane => {
-                let delta = if command == Command::GrowPane { crate::layout::RESIZE_STEP } else { -crate::layout::RESIZE_STEP };
-                self.resize_focused(|layout, id| crate::layout::resize_share(layout, id, delta).into_iter().collect(), window, cx);
+                let delta = if command == Command::GrowPane { layout_ops::RESIZE_STEP } else { -layout_ops::RESIZE_STEP };
+                self.resize_focused(|layout, id| layout_ops::resize_share(layout, id, delta).into_iter().collect(), window, cx);
             }
-            Command::MovePaneEdgeLeft => {
-                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Left).into_iter().collect(), window, cx)
-            }
+            Command::MovePaneEdgeLeft => self.resize_focused(|l, id| layout_ops::move_edge(l, id, Direction::Left).into_iter().collect(), window, cx),
             Command::MovePaneEdgeRight => {
-                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Right).into_iter().collect(), window, cx)
+                self.resize_focused(|l, id| layout_ops::move_edge(l, id, Direction::Right).into_iter().collect(), window, cx)
             }
-            Command::MovePaneEdgeUp => self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Up).into_iter().collect(), window, cx),
-            Command::MovePaneEdgeDown => {
-                self.resize_focused(|l, id| crate::layout::move_edge(l, id, Direction::Down).into_iter().collect(), window, cx)
-            }
-            Command::EqualizePanes => self.resize_focused(|l, _| crate::layout::equalize(l), window, cx),
-            Command::FocusPaneLeft => self.focus_direction(crate::focus::Direction::Left, window, cx),
-            Command::FocusPaneRight => self.focus_direction(crate::focus::Direction::Right, window, cx),
-            Command::FocusPaneUp => self.focus_direction(crate::focus::Direction::Up, window, cx),
-            Command::FocusPaneDown => self.focus_direction(crate::focus::Direction::Down, window, cx),
+            Command::MovePaneEdgeUp => self.resize_focused(|l, id| layout_ops::move_edge(l, id, Direction::Up).into_iter().collect(), window, cx),
+            Command::MovePaneEdgeDown => self.resize_focused(|l, id| layout_ops::move_edge(l, id, Direction::Down).into_iter().collect(), window, cx),
+            Command::EqualizePanes => self.resize_focused(|l, _| layout_ops::equalize(l), window, cx),
+            Command::FocusPaneLeft => self.focus_direction(Direction::Left, window, cx),
+            Command::FocusPaneRight => self.focus_direction(Direction::Right, window, cx),
+            Command::FocusPaneUp => self.focus_direction(Direction::Up, window, cx),
+            Command::FocusPaneDown => self.focus_direction(Direction::Down, window, cx),
             Command::ZoomPane => self.toggle_zoom(window, cx),
             Command::FloatPane => self.float_block(window, cx),
             Command::DockPane => self.dock_block(window, cx),
@@ -482,7 +481,7 @@ impl Workspace {
 
     /// Focus the geometric neighbour of the focused pane (⌃⌘H/J/K/L, ⌥⌘arrows).
     /// No neighbour, or an open overlay, is a no-op.
-    fn focus_direction(&mut self, direction: crate::focus::Direction, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_direction(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() || self.palette.is_some() || self.add_host.is_some() || self.picker.is_some() {
             return;
         }
@@ -501,7 +500,7 @@ impl Workspace {
                 rects.push(rect(r));
             }
         }
-        if let Some(index) = crate::focus::neighbour(from, &rects, direction) {
+        if let Some(index) = layout_ops::neighbour(from, &rects, direction) {
             let id = ids[index].clone();
             self.focus_block(&id, window, cx);
         }
@@ -510,7 +509,7 @@ impl Workspace {
     /// Resize splits of the active, unzoomed window around the focused pane.
     fn resize_focused(
         &mut self,
-        changes: impl FnOnce(&silo_proto::model::Layout, &str) -> Vec<crate::layout::RatioChange>,
+        changes: impl FnOnce(&silo_proto::model::Layout, &str) -> Vec<layout_ops::RatioChange>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -523,7 +522,7 @@ impl Workspace {
 
     /// Apply split ratios locally at once; the server gets them once
     /// resizing pauses, so held keys resize the PTYs only at the end.
-    pub(crate) fn set_ratios(&mut self, window_id: &str, changes: Vec<crate::layout::RatioChange>, cx: &mut Context<Self>) {
+    pub(crate) fn set_ratios(&mut self, window_id: &str, changes: Vec<layout_ops::RatioChange>, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else { return };
         let Some(w) = view.session.windows.iter_mut().find(|w| w.id == window_id) else { return };
         for (path, ratio) in changes {

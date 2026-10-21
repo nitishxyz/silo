@@ -18,7 +18,6 @@ mod conn;
 mod controls;
 mod finder;
 mod floats;
-mod focus;
 mod fonts;
 mod hosts;
 mod hosts_state;

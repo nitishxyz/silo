@@ -135,7 +135,70 @@ commands! {
     Quit => "Quit Silo", "App", ["cmd-q"];
 }
 
+/// How automation runs a command (`docs/PHASE7.md` §4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Api {
+    /// A control method (`app.*` ones run in a connected app).
+    Method(&'static str),
+    /// A CLI subcommand: there is no server to call.
+    Cli(&'static str),
+}
+
 impl Command {
+    /// The control method (or CLI subcommand) doing what this command does.
+    #[must_use]
+    pub fn api(self) -> Api {
+        use Api::{Cli, Method};
+        match self {
+            Self::NewSession => Method("session.create"),
+            Self::NewWindow => Method("app.window_new"),
+            Self::RenameSession => Method("session.rename"),
+            Self::CloseSession => Method("session.close"),
+            Self::SwitchSession => Method("app.switcher"),
+            Self::NextSession | Self::PreviousSession => Method("app.session_step"),
+            Self::NewTab | Self::NewBrowserTab => Method("window.create"),
+            Self::CloseTab => Method("window.close"),
+            Self::RenameTab => Method("window.rename"),
+            Self::NextTab | Self::PreviousTab => Method("window.step"),
+            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewBrowser => Method("block.split"),
+            Self::ClosePane => Method("block.close"),
+            Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
+            Self::FocusPaneLeft | Self::FocusPaneRight | Self::FocusPaneUp | Self::FocusPaneDown => Method("block.focus_dir"),
+            Self::GrowPane | Self::ShrinkPane => Method("layout.grow"),
+            Self::MovePaneEdgeLeft | Self::MovePaneEdgeRight | Self::MovePaneEdgeUp | Self::MovePaneEdgeDown => Method("layout.edge"),
+            Self::EqualizePanes => Method("layout.equalize"),
+            Self::ZoomPane => Method("block.zoom"),
+            Self::FloatPane => Method("block.float"),
+            Self::DockPane => Method("block.move"),
+            Self::OpenUrl => Method("browser.navigate"),
+            Self::AddHost => Method("app.hosts_add"),
+            Self::RenameHost => Method("app.hosts_rename"),
+            Self::RemoveHost => Method("app.hosts_remove"),
+            Self::Copy => Method("app.copy"),
+            Self::Paste => Method("app.paste"),
+            Self::SelectAll => Method("app.select_all"),
+            Self::ClearScrollback => Method("terminal.clear"),
+            Self::ResetTerminal => Method("terminal.reset"),
+            Self::RestartServer => Method("server.restart"),
+            Self::StopServer => Method("server.shutdown"),
+            Self::StartServer => Cli("up"),
+            Self::ShowServerLog => Method("server.log"),
+            Self::AppearanceComfortable | Self::AppearanceCompact => Method("app.appearance"),
+            Self::ShowPaneHeaders | Self::HidePaneHeaders => Method("app.pane_headers"),
+            Self::ToggleFullScreen => Method("app.full_screen"),
+            Self::CycleWindows => Method("app.window_cycle"),
+            Self::OpenSettings => Method("app.settings_open"),
+            Self::ReloadTerminalSettings => Method("app.settings_reload"),
+            Self::OpenTerminalSettingsFile => Method("app.settings_open_file"),
+            Self::CheckForUpdates => Method("app.update_check"),
+            Self::CommandPalette => Method("app.palette"),
+            Self::HideSilo => Method("app.hide"),
+            Self::HideOthers => Method("app.hide_others"),
+            Self::ShowAll => Method("app.show_all"),
+            Self::Quit => Method("app.quit"),
+        }
+    }
+
     /// The host feature (`silo_proto::compat::feature`) the command needs;
     /// none yet, every protocol-1 host has what these use.
     #[must_use]
@@ -285,6 +348,17 @@ mod tests {
         assert_eq!(Command::MovePaneEdgeLeft.hint().as_deref(), Some("⌃⌘←"));
         assert_eq!(Command::EqualizePanes.hint().as_deref(), Some("⌃⌘="));
         assert_eq!(Command::NewPane.hint().as_deref(), Some("⌘↩"));
+    }
+
+    #[test]
+    fn every_command_has_an_api_method() {
+        let methods: Vec<&str> = silo_proto::control::METHODS.iter().map(|(name, _)| *name).collect();
+        for command in Command::ALL {
+            match command.api() {
+                Api::Method(name) => assert!(methods.contains(&name), "{command:?}: {name} is not a method"),
+                Api::Cli(name) => assert_eq!((*command, name), (Command::StartServer, "up"), "only Start Server has no method"),
+            }
+        }
     }
 
     #[test]

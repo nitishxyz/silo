@@ -15,6 +15,7 @@ pub mod data;
 pub mod device;
 pub mod drops;
 pub mod frame;
+pub mod layout_ops;
 pub mod model;
 pub mod offer;
 pub mod paths;
