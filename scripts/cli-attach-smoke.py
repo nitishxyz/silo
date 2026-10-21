@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive `silo attach` through a real PTY: type, detach (Ctrl-\\), reattach,
 check the screen was restored and the shell is the same."""
-import os, pty, select, sys, time, subprocess, shutil
+import json, os, pty, select, signal, sys, time, subprocess, shutil
 
 SILO = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "target/debug/silo")
 HOME = "/tmp/silo-attach-smoke"
@@ -38,6 +38,32 @@ def run_pty(args, steps):
     return out.decode(errors="replace"), status
 
 
+def stop_server():
+    """SIGTERM this home's server (`silo kill-server` is an owner action that
+    would ask for approval) and wait for it and its pty-hosts to exit."""
+    try:
+        with open(os.path.join(HOME, "runtime.json")) as f:
+            pid = int(json.load(f)["pid"])
+    except (OSError, ValueError, KeyError):
+        return
+    children = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
+    hosts = [int(c) for c in children
+             if "pty-host" in subprocess.run(["ps", "-o", "command=", "-p", c], capture_output=True, text=True).stdout]
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for p in [pid] + hosts:
+        for _ in range(250):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            print(f"cli attach smoke: pid {p} still running", file=sys.stderr)
+
+
 try:
     out1, st1 = run_pty(["new", "-s", "smoke", "--", "/bin/sh"], [
         (b"echo first-$((6*7)); echo $$ > " + HOME.encode() + b"/pid\r", 1.0),
@@ -57,4 +83,4 @@ try:
     assert "[exited 3]" in out2, out2
     print("cli attach smoke: ok")
 finally:
-    subprocess.run([SILO, "kill-server"], env=env)
+    stop_server()

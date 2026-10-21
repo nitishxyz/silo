@@ -107,13 +107,31 @@ _home_stop() {
 }
 menubar_pids() { home_pids 'silo-menubar'; }
 menubar_stop() { _home_stop 'silo-menubar'; }
+# Wait (without signalling) for this home's processes matching PATTERN to exit.
+_home_wait() {
+    for _ in $(seq 250); do [[ -z "$(home_pids "$1")" ]] && return 0; sleep 0.02; done
+    echo "ui-env: still running for $SILO_HOME: $(home_pids "$1" | tr '\n' ' ')" >&2
+}
+# The server pid recorded in this home's runtime.json, if it runs with this home.
+_server_pid() {
+    local p
+    p=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SILO_HOME/runtime.json" 2>/dev/null | head -1)
+    [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && _in_home "$p" && echo "$p"
+}
 # Stop everything this SILO_HOME started (never the real ~/Library one): the
-# app, its server (by socket, else by signal if the home was wiped under it)
-# and the menu-bar agent.
+# app, its server and the menu-bar agent. The server gets SIGTERM (its pid
+# from runtime.json, else matched by home if the home was wiped under it):
+# `silo kill-server` is an owner action that would ask for approval. Its
+# pty-hosts exit once their programs are hung up; they are waited for.
 ui_cleanup() {
     app_stop
-    target/debug/silo kill-server >/dev/null 2>&1
+    local p; p=$(_server_pid)
+    if [[ -n "$p" ]]; then
+        kill "$p" 2>/dev/null
+        for _ in $(seq 250); do kill -0 "$p" 2>/dev/null || break; sleep 0.02; done
+    fi
     _home_stop 'silo server'
+    _home_wait 'pty-host'
     menubar_stop
     return 0
 }
