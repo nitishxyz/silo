@@ -298,6 +298,33 @@ async fn a_hot_upgrade_keeps_working_records_and_a_crash_restore_only_done_and_e
     resumed.send(BlockMsg::Shutdown);
 }
 
+#[tokio::test]
+async fn a_checkpoint_from_before_status_still_restores() {
+    let mut block = Block::sh("b-old", RECORDS);
+    block.until("four records", |s| s.records.len() == 4).await;
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    block.handle.send(BlockMsg::Checkpoint { reply });
+    let checkpoint = rx.await.expect("checkpoint").expect("captured");
+    let mut json = serde_json::to_value(&checkpoint).unwrap();
+    assert!(json.as_object_mut().unwrap().remove("status").is_some());
+    let old: block::Checkpoint = serde_json::from_value(json).expect("an old checkpoint parses");
+    assert_eq!(old.status, None);
+    let (notes, _rx) = unbounded_channel();
+    let restored = block::spawn_restored(info("b-old", 120), old, notes).expect("restore");
+    assert!(restored.status.lock().unwrap().records.is_empty());
+    restored.send(BlockMsg::Shutdown);
+}
+
+#[tokio::test]
+async fn a_final_state_right_after_progress_is_never_coalesced_away() {
+    // Progress ticks, then working -> done well inside one 250 ms window.
+    let script = "printf '\\033]7501;state=working:id=w\\033\\\\'; printf '\\033]9;4;1;10\\007'; printf '\\033]9;4;1;20\\007'; \
+                  printf '\\033]7501;state=working:id=w:progress=50\\033\\\\'; printf '\\033]7501;state=done:id=w\\033\\\\'; read l";
+    let mut block = Block::sh("b-final", script);
+    let done = block.until("done", |s| states(s) == [("w".to_owned(), StatusState::Done)]).await;
+    assert_eq!(done.progress.and_then(|p| p.percent), Some(20), "the last progress goes out with it");
+}
+
 const COMMANDS: &str = "i=0; while [ $i -lt 3 ]; do \
     printf '\\033]133;A\\007$ \\033]133;B\\007cmd%s\\r\\n\\033]133;C\\007out%s\\r\\n\\033]133;D;%s\\007MARK-D%s\\r\\n' $i $i $i $i; \
     j=0; while [ $j -lt 4 ]; do echo filler$i.$j; j=$((j+1)); done; i=$((i+1)); done; printf TAIL; read l";

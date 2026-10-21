@@ -245,8 +245,12 @@ static void desktop_notification(GhosttyTerminal terminal, void *userdata, const
     push(userdata, &r);
 }
 
-/* Tracks the cursor's cell: the terminal has already applied the mark. */
+/* Tracks the cursor's cell: the terminal has already applied the mark.
+ * Primary screen only: anchors are counted on it (silo_vt_row_from_bottom). */
 static GhosttyTrackedGridRef track_cursor(GhosttyTerminal terminal) {
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) != GHOSTTY_SUCCESS) return NULL;
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return NULL;
     uint16_t x = 0, y = 0;
     if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &x) != GHOSTTY_SUCCESS) return NULL;
     if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &y) != GHOSTTY_SUCCESS) return NULL;
@@ -348,6 +352,11 @@ int silo_vt_tracked_column(void *ref, uint16_t *x) {
 int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len) {
     *out = NULL;
     *len = 0;
+    /* Refs live on the primary screen; selection and formatting use the
+     * active one, so they must be the same page list. */
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+    if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return 0;
     GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
     int res = ghostty_tracked_grid_ref_snapshot(ref, &at);
     if (res == GHOSTTY_NO_VALUE) return 0;

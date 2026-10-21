@@ -498,6 +498,10 @@ impl Registry {
             Event::SessionsChanged { sessions } => Some(sessions.clone()),
             _ => None,
         };
+        if let Some(sessions) = &summaries {
+            // What clients were last told, whichever change sent it.
+            self.attention = sessions.iter().map(|s| (s.id.clone(), s.attention)).collect();
+        }
         let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
         let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
             return;

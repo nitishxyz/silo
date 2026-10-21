@@ -1189,6 +1189,14 @@ mod tests {
         let again = vt.track_row(3, 0).expect("re-pin");
         assert_eq!(vt.rows_from_bottom(&again), Some(3));
         assert_eq!(vt.output_text(&start, None).unwrap(), "one\ntwo");
+        // Anchors live on the primary screen only.
+        vt.write_output(b"\x1b[?1049h\x1b]133;C\x07alt\r\n\x1b]133;D;0\x07").unwrap();
+        let alt = vt.take_events().unwrap().vt;
+        assert!(alt.iter().all(|e| matches!(e, VtEvent::Prompt { row: None, .. })), "no rows on the alternate screen");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "", "no primary refs against the alternate screen");
+        assert_eq!(vt.rows_from_bottom(&end), None);
+        vt.write_output(b"\x1b[?1049l").unwrap();
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "one\ntwo");
     }
 
     #[test]

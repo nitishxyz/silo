@@ -1644,16 +1644,29 @@ impl Actor {
 
     /// Re-read the foreground and publish a change in `busy` (§5.7).
     fn refresh_busy(&mut self) {
+        let foreground = self.pty.as_ref().and_then(Pty::foreground_pid);
+        self.update_busy(foreground, foreground.and_then(silo_pty::process_name));
+    }
+
+    /// [`Self::refresh_busy`] with the foreground already read (by `probe`).
+    fn update_busy(&mut self, foreground: Option<i32>, foreground_name: Option<String>) {
         let found = match self.pty.as_ref().filter(|_| self.lifecycle.is_running() && !self.child_exited) {
             Some(pty) => {
                 let pid = pty.pid();
-                let foreground = pty.foreground_pid();
+                // Only a command block whose program holds the foreground
+                // (or none does) needs the program's own name.
+                let pid_name = match foreground {
+                    _ if !self.command => None,
+                    Some(fg) if fg == pid => foreground_name.clone(),
+                    Some(_) => None,
+                    None => silo_pty::process_name(pid),
+                };
                 status::busy(&BusyInputs {
                     command_block: self.command,
                     pid,
-                    pid_name: silo_pty::process_name(pid),
+                    pid_name,
                     foreground,
-                    foreground_name: foreground.and_then(silo_pty::process_name),
+                    foreground_name,
                     marks: self.status.marks.clone(),
                 })
             }
@@ -2256,17 +2269,15 @@ impl Actor {
     fn probe(&mut self) {
         self.last_probe = Instant::now();
         // A dead child has no foreground process to inspect.
-        self.refresh_busy();
         let Some(pty) = self.pty.as_ref().filter(|_| !self.child_exited) else {
+            self.update_busy(None, None);
             return;
         };
         let foreground = pty.foreground_pid();
         let pid = pty.pid();
-        let title = if self.osc_title.is_empty() {
-            foreground.and_then(silo_pty::process_name).unwrap_or_else(|| "shell".to_owned())
-        } else {
-            self.osc_title.clone()
-        };
+        let foreground_name = foreground.and_then(silo_pty::process_name);
+        self.update_busy(foreground, foreground_name.clone());
+        let title = if self.osc_title.is_empty() { foreground_name.unwrap_or_else(|| "shell".to_owned()) } else { self.osc_title.clone() };
         let cwd = self
             .osc_pwd
             .as_deref()
