@@ -227,6 +227,20 @@ pub fn need(method: &Method) -> Need {
     const SESSION: &str = "session_id";
     const WINDOW: &str = "window_id";
     match method {
+        M::BrowserSnapshot(_) | M::BrowserFind(_) | M::BrowserWaitFor(_) | M::BrowserConsole(_) | M::BrowserNetwork(_) | M::BrowserScreenshot(_) => {
+            rights(Block(BLOCK), View)
+        }
+        M::BlockReport(_)
+        | M::BlockNotify(_)
+        | M::BrowserClick(_)
+        | M::BrowserHover(_)
+        | M::BrowserFill(_)
+        | M::BrowserFillForm(_)
+        | M::BrowserType(_)
+        | M::BrowserPress(_)
+        | M::BrowserScroll(_)
+        | M::BrowserDialog(_) => rights(Block(BLOCK), Interact),
+        M::BrowserEval(_) => rights(Block(BLOCK), Control),
         M::ServerInfo {}
         | M::ApiList {}
         | M::ApiDescribe { .. }

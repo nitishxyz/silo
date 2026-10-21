@@ -284,9 +284,10 @@ pub struct ToolSpec {
 - **Sources**: `ToolSource` trait (`list`, `call`, change notifications). Builtin, silo (§6), MCP via the official
   Rust SDK (`rmcp`, verify version: stdio + streamable HTTP + OAuth), and extensions (subprocess JSON protocol like
   the TS native host; WASM later).
-- **Deferred tools**: on Anthropic and OpenAI use native tool search with `defer_loading`; elsewhere a `load_tools`
-  meta-tool plus Anthropic-style inline additions where the provider supports them. Adding a tool never rewrites
-  the cached prefix.
+- **Deferred tools**: portable `load_tools` accepts names or a case-insensitive name/description query. Only granted,
+  not-yet-loaded tools appear in its compact index; schemas enter the next model request. Loaded names persist in
+  session metadata (`loaded_tools`), independently for each child. Direct calls to granted unloaded tools still run,
+  and `tools.list` includes deferred tools. Native Anthropic/OpenAI tool search with `defer_loading` is future work.
 - **Async tools**: native `async: true` on OpenAI. Elsewhere the call returns a job handle; the result is injected
   later as a system item, plus a `wait` tool.
 
@@ -310,6 +311,9 @@ pub struct ToolSpec {
 ---
 
 ## 6. Silo toolset (for any harness)
+
+> **Superseded by `docs/AGENTS.md`**: client-side `silo-tools` crate (no `tools.call`), ordinary blocks (no parked
+> blocks), CDP accessibility snapshots for browsers. Kept below for history.
 
 **Idea:** silo publishes a curated, agent-shaped tool registry next to its control API. It does not expose all of
 `api.describe`: layout ratios aren't agent tools. Otto consumes it natively; other harnesses get it over MCP.
@@ -571,6 +575,10 @@ the harness; A survives a restart mid-task and resubscribes.
 ---
 
 ## 12. Agents across machines and harnesses (proposal)
+
+> **Superseded by `docs/AGENTS.md` §1, §5.4**: other harnesses are programs in terminal blocks that the main agent
+> drives (send, wait on their status hook, read); cross-machine is the same over `--host`. No agent block type or
+> `agent.*` protocol in v1. Kept below for history.
 
 **Idea:** an agent with silo access can get work done on another paired machine. It can start an agent there for
 a task, hand its whole session over, or message one that is already running. Both sides keep talking over silo,

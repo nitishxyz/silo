@@ -18,6 +18,9 @@ qrcode = { version = "0.14", default-features = false }
 silo-proto.workspace = true
 silo-server.workspace = true
 silo-client.workspace = true
+silo-tools.workspace = true
+tokio-util.workspace = true
+toml_edit = "0.25"
 silo-vt.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

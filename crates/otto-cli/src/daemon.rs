@@ -55,6 +55,7 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         })
         .await?,
     );
+    runtime.add_tools(otto_silo_tools::tools(otto_silo_tools::Config::default()));
     let server = otto_server::Server::start(otto_server::ServerConfig {
         home: home.clone(),
         runtime,

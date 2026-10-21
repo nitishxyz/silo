@@ -336,6 +336,55 @@ pub fn busy_status(found: Option<(String, Option<String>)>, previous: Option<&Bu
 
 pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<Value, RpcError> {
     match method {
+        Method::BlockReport(params) => {
+            if !params.id.is_empty()
+                && (params.id.len() > 128
+                    || params.id.split('/').count() > 8
+                    || params
+                        .id
+                        .split('/')
+                        .any(|part| part.is_empty() || part.len() > 32 || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))))
+            {
+                return Err(RpcError::bad_request("invalid status id"));
+            }
+            if params.progress.is_some_and(|p| p > 100) || params.state == StatusState::Unknown || params.kind == Some(StatusKind::Unknown) {
+                return Err(RpcError::bad_request("invalid status, kind or progress"));
+            }
+            let report = Report {
+                id: params.id,
+                state: Some(params.state),
+                kind: params.kind,
+                progress: params.progress.map_or(-1, |p| p as i8),
+                app: params.app.unwrap_or_default(),
+                title: params.title.unwrap_or_default(),
+                message: params.message.unwrap_or_default(),
+            };
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().block(&params.block_id)?.send(BlockMsg::Report { report, reply });
+            rx.await.map_err(|_| RpcError::not_found(format!("block {}", params.block_id)))?;
+            serde_json::to_value(Empty {}).map_err(RpcError::internal)
+        }
+        Method::BlockNotify(params) => {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            {
+                let mut reg = server.registry.lock().unwrap();
+                if let Some(crate::browser::Block::Browser(browser)) = reg.blocks.get_mut(&params.block_id) {
+                    if browser.notifications.allow(Instant::now()) {
+                        reg.handle_note(crate::block::Note::Attention {
+                            block_id: params.block_id,
+                            reason: AttentionReason::Notification,
+                            title: untrusted(&params.title.unwrap_or_default(), MAX_TITLE),
+                            body: untrusted(&params.body, silo_proto::text::MAX_BODY),
+                            at: crate::block::now_ms(),
+                        });
+                    }
+                    return serde_json::to_value(Empty {}).map_err(RpcError::internal);
+                }
+                reg.block(&params.block_id)?.send(BlockMsg::Notify { title: params.title.unwrap_or_default(), body: params.body, reply });
+            }
+            rx.await.map_err(|_| RpcError::not_found(format!("block {}", params.block_id)))?;
+            serde_json::to_value(Empty {}).map_err(RpcError::internal)
+        }
         Method::BlockStatusSeen { block_id, ids } => {
             let (reply, rx) = tokio::sync::oneshot::channel();
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::StatusSeen { ids, reply });

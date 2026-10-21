@@ -11,6 +11,7 @@ mod daemon;
 mod script;
 mod services;
 mod sessions;
+mod silo_status;
 
 #[derive(Parser)]
 #[command(name = "otto-silo", version, about = "Otto agent harness: daemon, sessions, models and sign-in")]

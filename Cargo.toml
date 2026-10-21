@@ -14,6 +14,7 @@ silo-pty = { path = "crates/silo-pty" }
 silo-proto = { path = "crates/silo-proto" }
 silo-server = { path = "crates/silo-server" }
 silo-client = { path = "crates/silo-client" }
+silo-tools = { path = "crates/silo-tools" }
 silo-render = { path = "crates/silo-render" }
 silo-store = { path = "crates/silo-store" }
 silo-transport = { path = "crates/silo-transport" }
@@ -50,6 +51,7 @@ otto-store = { path = "crates/otto-store" }
 otto-proto = { path = "crates/otto-proto" }
 otto-server = { path = "crates/otto-server" }
 otto-client = { path = "crates/otto-client" }
+otto-silo-tools = { path = "crates/otto-silo-tools" }
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"

@@ -8,6 +8,7 @@
 //! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket.
 
 pub mod access;
+pub mod agent;
 pub mod api;
 pub mod compat;
 pub mod control;

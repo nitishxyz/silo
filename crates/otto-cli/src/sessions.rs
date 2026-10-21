@@ -203,8 +203,12 @@ async fn watch(
 ) -> Result<()> {
     let mut changes = follower.changes();
     let mut answered = HashSet::new();
+    let mut status = crate::silo_status::Reporter::default();
     loop {
         let state = changes.borrow_and_update().clone();
+        if options.interactive {
+            status.report(&state.mirror);
+        }
         if !options.json {
             renderer.render(&state.mirror, options.reasoning)?;
         }

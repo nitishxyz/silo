@@ -5,6 +5,7 @@ use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
 use crate::access::{Rights, Scope};
+use crate::agent::*;
 use crate::control::{
     ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
     GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted,
@@ -49,22 +50,73 @@ fn tag(variant: &Value) -> Option<&str> {
     method.get("const").or_else(|| method.get("enum")?.get(0))?.as_str()
 }
 
-/// The `params` subschema of variant `name`, with the shared `$defs`.
+/// The `params` subschema of variant `name`, with the `$defs` it reaches.
 fn params_schema(name: &str) -> Option<Value> {
     let root = schema_for!(Method).to_value();
     let variant = variants(&root).find(|v| tag(v) == Some(name))?;
     let mut params = variant.get("properties")?.get("params").cloned().unwrap_or_else(|| json!({"type": "object"}));
-    if let (Some(defs), Some(object)) = (root.get("$defs"), params.as_object_mut()) {
-        object.insert("$defs".into(), defs.clone());
+    if let Some(reference) = params.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix('#')) {
+        params = root.pointer(reference)?.clone();
+    }
+    if let Some(defs) = root.get("$defs").and_then(Value::as_object) {
+        let reached = reachable(&params, defs);
+        if !reached.is_empty() {
+            params.as_object_mut()?.insert("$defs".into(), Value::Object(reached));
+        }
     }
     params.as_object_mut()?.insert("$schema".into(), root["$schema"].clone());
     Some(params)
+}
+
+/// The definitions `schema` refers to (`#/$defs/…`), transitively.
+fn reachable(schema: &Value, defs: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    fn refs<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(name) = map.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")) {
+                    out.push(name);
+                }
+                map.values().for_each(|v| refs(v, out));
+            }
+            Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+            _ => {}
+        }
+    }
+    let mut reached = serde_json::Map::new();
+    let mut todo = Vec::new();
+    refs(schema, &mut todo);
+    while let Some(name) = todo.pop() {
+        if reached.contains_key(name) {
+            continue;
+        }
+        if let Some(def) = defs.get(name) {
+            refs(def, &mut todo);
+            reached.insert(name.to_owned(), def.clone());
+        }
+    }
+    reached
 }
 
 /// The schema of `method`'s result.
 fn result_schema(method: &Method) -> Schema {
     use Method as M;
     match method {
+        M::BlockReport(_) | M::BlockNotify(_) => schema_for!(Empty),
+        M::BrowserSnapshot(_) => schema_for!(BrowserSnapshotResult),
+        M::BrowserFind(_) => schema_for!(BrowserFindResult),
+        M::BrowserWaitFor(_) => schema_for!(BrowserWaitForResult),
+        M::BrowserEval(_) => schema_for!(BrowserEvalResult),
+        M::BrowserConsole(_) => schema_for!(BrowserConsoleResult),
+        M::BrowserNetwork(_) => schema_for!(BrowserNetworkResult),
+        M::BrowserScreenshot(_) => schema_for!(BrowserScreenshotResult),
+        M::BrowserClick(_)
+        | M::BrowserHover(_)
+        | M::BrowserFill(_)
+        | M::BrowserFillForm(_)
+        | M::BrowserType(_)
+        | M::BrowserPress(_)
+        | M::BrowserScroll(_)
+        | M::BrowserDialog(_) => schema_for!(BrowserAction),
         M::ServerInfo {} => schema_for!(ServerInfo),
         M::ApiList {} => schema_for!(Vec<ApiMethod>),
         M::ApiDescribe { .. } => schema_for!(MethodDescription),
@@ -157,6 +209,42 @@ pub fn examples() -> Vec<Method> {
     let (s, w, b) = (|| "s1a2b3c4d".to_owned(), || "w1a2b3c4d".to_owned(), || "b1a2b3c4d".to_owned());
     let shell = || SpawnSpec { cwd: Some("~/src".into()), command: Vec::new(), size: Some(TermSize::new(120, 40)) };
     vec![
+        M::BlockReport(BlockReportParams {
+            block_id: b(),
+            id: String::new(),
+            state: crate::model::StatusState::Working,
+            kind: None,
+            progress: Some(50),
+            app: Some("agent".into()),
+            title: None,
+            message: None,
+        }),
+        M::BlockNotify(BlockNotifyParams { block_id: b(), title: None, body: "Finished".into() }),
+        M::BrowserSnapshot(BrowserSnapshotParams { block_id: b(), within: None, depth: None, boxes: None }),
+        M::BrowserFind(BrowserFindParams { block_id: b(), text: Some("Submit".into()), regex: None }),
+        M::BrowserClick(BrowserClickParams { block_id: b(), target: "e12".into(), double: None, button: None, include_snapshot: false }),
+        M::BrowserHover(BrowserHoverParams { block_id: b(), target: "e12".into(), include_snapshot: false }),
+        M::BrowserFill(BrowserFillParams { block_id: b(), target: "e5".into(), value: "hello".into(), include_snapshot: false }),
+        M::BrowserFillForm(BrowserFillFormParams {
+            block_id: b(),
+            fields: vec![BrowserField { target: "e5".into(), value: "hello".into() }],
+            include_snapshot: false,
+        }),
+        M::BrowserType(BrowserTypeParams { block_id: b(), text: "hello".into(), submit: Some("Enter".into()), include_snapshot: false }),
+        M::BrowserPress(BrowserPressParams { block_id: b(), key: "Enter".into(), include_snapshot: false }),
+        M::BrowserScroll(BrowserScrollParams { block_id: b(), target: None, dx: None, dy: Some(500.0), include_snapshot: false }),
+        M::BrowserWaitFor(BrowserWaitForParams { block_id: b(), text: Some(vec!["Ready".into()]), gone: None, timeout_ms: Some(1000) }),
+        M::BrowserDialog(BrowserDialogParams { block_id: b(), accept: true, prompt_text: None, include_snapshot: false }),
+        M::BrowserEval(BrowserEvalParams { block_id: b(), function: "() => document.title".into(), args: None }),
+        M::BrowserConsole(BrowserConsoleParams { block_id: b(), since: None, level: None, limit: Some(100) }),
+        M::BrowserNetwork(BrowserNetworkParams { block_id: b(), since: None, limit: Some(100), failed_only: None }),
+        M::BrowserScreenshot(BrowserScreenshotParams {
+            block_id: b(),
+            target: None,
+            full_page: None,
+            format: Some(ScreenshotFormat::Png),
+            quality: None,
+        }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

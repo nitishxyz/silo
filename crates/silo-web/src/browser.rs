@@ -43,6 +43,7 @@ pub enum Edit {
 impl Runtime {
     pub fn create_browser(&self, options: BrowserOptions) -> Result<Browser> {
         let shared = Arc::new(Shared {
+            devtools: Arc::default(),
             view: Mutex::new(options.size),
             frame: Mutex::new(None),
             browser: Mutex::new(None),
@@ -73,6 +74,27 @@ impl Runtime {
 }
 
 impl Browser {
+    /// In-process CDP; poll this future on the main thread.
+    pub async fn cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let host = self.host().ok_or_else(|| anyhow::anyhow!("browser is not ready or has closed"))?;
+        self.shared.devtools.call(host, method, params).await
+    }
+
+    pub fn subscribe_cdp(&self) -> tokio::sync::broadcast::Receiver<crate::DevToolsEvent> {
+        self.shared.devtools.subscribe()
+    }
+
+    /// Answer the page's pending JavaScript dialog (held while CDP's `Page`
+    /// domain is on, since a windowless engine shows none); false if none.
+    pub fn answer_dialog(&self, accept: bool, prompt: Option<&str>) -> bool {
+        self.shared.devtools.answer_dialog(accept, prompt)
+    }
+
+    /// Changes whenever the main frame navigates or its DevTools agent closes.
+    pub fn document_generation(&self) -> u64 {
+        self.shared.devtools.generation.load(Ordering::Relaxed)
+    }
+
     /// `None` until CEF has created the page (`on_after_created`) and after it closed.
     fn page(&self) -> Option<cef::Browser> {
         lock(&self.shared.browser).clone()

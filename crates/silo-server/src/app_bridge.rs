@@ -23,6 +23,9 @@ use crate::{
 /// How long a forwarded request waits for the app's reply.
 pub const APP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A browser action with no engine: no app shows the block's session.
+pub const NO_BROWSER_APP: &str = "No Silo app is showing this browser block: its page runs only while the block's session is open in a Silo app (open one next to your own block instead)";
+
 struct Pending {
     /// The app the request went to: only it may reply.
     client: ClientId,
@@ -78,6 +81,11 @@ pub fn target(reg: &Registry, explicit: Option<ClientId>) -> Result<ClientId, Rp
 }
 
 pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value, RpcError> {
+    if let Method::BrowserFind(p) = &method
+        && p.text.is_some() == p.regex.is_some()
+    {
+        return Err(RpcError::bad_request("exactly one of text or regex is required"));
+    }
     if let Method::AppReply { request_id, result, error } = method {
         let pending = {
             let mut pending = server.app_requests.pending.lock().unwrap();
@@ -94,23 +102,50 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
     let mut params = serde_json::to_value(&method).map_err(RpcError::internal)?.get_mut("params").map(Value::take).unwrap_or_else(|| json!({}));
     // `client_id` only routes the request.
     let explicit = params.as_object_mut().and_then(|p| p.remove("client_id")).and_then(|v| v.as_u64());
+    let browser = name.starts_with("browser.");
+    let timeout = if browser {
+        params.get("timeout_ms").and_then(Value::as_u64).map_or(APP_TIMEOUT, |ms| Duration::from_millis(ms.saturating_add(5000).min(120_000)))
+    } else {
+        APP_TIMEOUT
+    };
     let request_id = new_id();
     let (reply, answer) = oneshot::channel();
     {
         let mut reg = server.registry.lock().unwrap();
-        let app = target(&reg, explicit)?;
+        let app = if browser {
+            let block_id = params["block_id"].as_str().ok_or_else(|| RpcError::bad_request("block_id is required"))?;
+            browser_target(&reg, block_id)?
+        } else {
+            target(&reg, explicit)?
+        };
         server.app_requests.pending.lock().unwrap().insert(request_id.clone(), Pending { client: app, reply });
         let caller = crate::approval::caller(&reg, client_id);
         let request = AppCall { method: name.clone(), params };
         reg.emit_clients(Event::AppRequest { request_id: request_id.clone(), request, caller }, vec![app]);
         tracing::debug!(method = name, app, "forwarded to an app");
     }
-    let answered = tokio::time::timeout(APP_TIMEOUT, answer).await;
+    let answered = tokio::time::timeout(timeout, answer).await;
     server.app_requests.pending.lock().unwrap().remove(&request_id);
     match answered {
         Ok(Ok(result)) => result,
         Ok(Err(_)) | Err(_) => Err(RpcError::new(RpcError::TIMEOUT, "The Silo app did not answer")),
     }
+}
+
+/// The subscribed owner executing a browser block's actions, local or remote.
+pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcError> {
+    let block = match reg.blocks.get(block_id) {
+        Some(crate::browser::Block::Browser(block)) => block,
+        Some(crate::browser::Block::Terminal(_)) => return Err(RpcError::bad_request(format!("block {block_id} is a terminal"))),
+        None => return Err(RpcError::not_found(format!("block {block_id}"))),
+    };
+    block
+        .info()
+        .owner
+        .filter(|id| {
+            reg.clients.get(id).is_some_and(|c| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::BROWSER_ACTIONS)))
+        })
+        .ok_or_else(|| RpcError::new(RpcError::NO_APP, NO_BROWSER_APP))
 }
 
 #[cfg(test)]
@@ -130,6 +165,21 @@ mod tests {
         std::mem::forget(rx);
         entry.events = Some(Sink::new(tx));
         id
+    }
+
+    #[test]
+    fn browser_owner_may_be_remote_without_app_requests() {
+        use silo_proto::{control::SpawnSpec, model::BlockKind};
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let spawn = SpawnSpec::default();
+        let created = reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Browser, url: None }).unwrap();
+        let remote = client(&mut reg, ClientRole::App, true, &[feature::BROWSER_ACTIONS]);
+        reg.own(remote, std::slice::from_ref(&created.block_id), Some(silo_proto::control::OwnMode::Take)).unwrap();
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap(), remote);
+        assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
+        reg.clients.get_mut(&remote).unwrap().features.clear();
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP);
     }
 
     #[test]

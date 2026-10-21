@@ -286,6 +286,16 @@ pub enum BlockMsg {
         bytes: Vec<u8>,
         input: Vec<u8>,
     },
+    /// Report status through the same path as OSC 7501.
+    Report {
+        report: Report,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
+    Notify {
+        title: String,
+        body: String,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
     /// Mark `done`/`error` records seen (`ids` omitted: all).
     StatusSeen {
         ids: Option<Vec<String>>,
@@ -1488,6 +1498,15 @@ impl Actor {
                 }
                 let _ = reply.send(());
             }
+            BlockMsg::Report { report, reply } => {
+                self.report(report);
+                self.publish_status();
+                let _ = reply.send(());
+            }
+            BlockMsg::Notify { title, body, reply } => {
+                self.attention(AttentionReason::Notification, untrusted(&title, MAX_TITLE), untrusted(&body, MAX_BODY), None);
+                let _ = reply.send(());
+            }
             BlockMsg::Commands { limit, reply } => {
                 let _ = reply.send(self.status.commands.records(limit));
             }
@@ -1812,13 +1831,7 @@ impl Actor {
                         ReportKind::Auth => Some(StatusKind::Auth),
                         ReportKind::Unknown => Some(StatusKind::Unknown),
                     };
-                    let heading = untrusted(if title.trim().is_empty() { &app } else { &title }, MAX_TITLE);
-                    let body = untrusted(&message, silo_proto::text::MAX_MESSAGE);
-                    let record = (id.clone(), state);
-                    let report = Report { id, state: Some(state), kind, progress, app, title, message };
-                    if let Some(reason) = self.status.records.report(report, now_ms()) {
-                        self.attention(reason, heading, body, Some(record));
-                    }
+                    self.report(Report { id, state: Some(state), kind, progress, app, title, message });
                     changed = true;
                 }
                 VtEvent::Progress { state, percent } => {
@@ -1881,6 +1894,15 @@ impl Actor {
             self.publish_status();
         }
         ended
+    }
+
+    fn report(&mut self, report: Report) {
+        let heading = untrusted(if report.title.trim().is_empty() { &report.app } else { &report.title }, MAX_TITLE);
+        let body = untrusted(&report.message, silo_proto::text::MAX_MESSAGE);
+        let record = report.state.map(|state| (report.id.clone(), state));
+        if let Some(reason) = self.status.records.report(report, now_ms()) {
+            self.attention(reason, heading, body, record);
+        }
     }
 
     fn command_output(&mut self, index: Option<u64>) -> Result<CommandOutput, RpcError> {

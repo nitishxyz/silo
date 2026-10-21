@@ -86,6 +86,7 @@ pub struct ViewSize {
 pub(crate) type Notify = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) struct Shared {
+    pub(crate) devtools: Arc<crate::devtools::Channel>,
     pub(crate) view: Mutex<ViewSize>,
     pub(crate) frame: Mutex<Option<Frame>>,
     /// Set by `on_after_created`, cleared by `on_before_close`.

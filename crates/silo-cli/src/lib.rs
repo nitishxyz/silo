@@ -1,7 +1,9 @@
 //! Command logic of the `silo` CLI, callable from tests.
 
 pub mod clipboard;
+pub mod hooks;
 pub mod link;
+pub mod mcp;
 pub mod update;
 pub mod upgrade;
 

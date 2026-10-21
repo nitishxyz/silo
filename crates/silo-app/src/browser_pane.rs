@@ -247,6 +247,7 @@ pub struct BrowserPane {
     /// The engine's state as this client sees it (reported when owner).
     state: Option<BrowserState>,
     page: Option<std::rc::Rc<silo_web::Browser>>,
+    actions: Option<std::rc::Rc<crate::browser_actions::Executor>>,
     starting: bool,
     pub focus: gpui::FocusHandle,
     pub address: gpui::Entity<crate::text_field::TextField>,
@@ -324,7 +325,7 @@ impl BrowserPane {
             this.editing = true;
             this.security_open = false;
             this.address.update(cx, |field, cx| field.select_all(cx));
-            this.own();
+            this.own(silo_proto::control::OwnMode::Take);
             cx.emit(BrowserPaneEvent::Activated);
         }));
         subs.push(cx.observe(&crate::hosts_state::HostsState::global(cx), |this, _, cx| {
@@ -341,6 +342,7 @@ impl BrowserPane {
             info: None,
             state: None,
             page: None,
+            actions: None,
             starting: false,
             focus,
             address,
@@ -418,19 +420,34 @@ impl BrowserPane {
         cx.notify();
     }
 
-    fn is_owner(&self) -> bool {
+    pub(crate) fn is_owner(&self) -> bool {
         let me = self.control.as_ref().map(silo_client::Control::client_id);
         self.info.as_ref().is_some_and(|i| i.owner.is_some() && i.owner == me)
     }
 
-    fn own(&self) {
+    pub(crate) fn agent_executor(&mut self, cx: &mut gpui::Context<Self>) -> anyhow::Result<std::rc::Rc<crate::browser_actions::Executor>> {
+        if !self.is_owner() {
+            anyhow::bail!("this app does not own the browser block");
+        }
+        if let Some(actions) = &self.actions {
+            return Ok(actions.clone());
+        }
+        let page = self.page.clone().ok_or_else(|| anyhow::anyhow!("browser is not ready"))?;
+        let actions = crate::browser_actions::Executor::new(page, cx);
+        self.actions = Some(actions.clone());
+        Ok(actions)
+    }
+
+    /// Take the engine state (`Take`), or claim it only if nobody holds it
+    /// (`Request`): a page this app runs serves agents' browser actions even
+    /// before the user focuses it.
+    fn own(&self, mode: silo_proto::control::OwnMode) {
         if self.is_owner() {
             return;
         }
         let Some(control) = self.control.clone() else { return };
         let block = self.block_id.clone();
         self.rt.spawn(async move {
-            let mode = silo_proto::control::OwnMode::Take;
             let _ = control.call_value(Method::OwnBlock { block_ids: vec![block], mode }).await;
         });
     }
@@ -440,7 +457,7 @@ impl BrowserPane {
             page.set_focus(focused);
         }
         if focused {
-            self.own();
+            self.own(silo_proto::control::OwnMode::Take);
             cx.emit(BrowserPaneEvent::Activated);
         }
         cx.notify();
@@ -612,6 +629,7 @@ impl BrowserPane {
                 self.engine_url = state.url.clone();
                 self.error = None;
                 tracing::info!(block = %self.block_id, url = %state.url, "browser opened");
+                self.own(silo_proto::control::OwnMode::Request);
             }
             Err(error) => self.failed(format!("{error:#}"), cx),
         }
@@ -682,6 +700,7 @@ impl BrowserPane {
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
                 silo_web::Event::Closed => {
                     self.page = None;
+                    self.actions = None;
                     self.theme_color = None;
                 }
             }

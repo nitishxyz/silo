@@ -10,6 +10,7 @@ mod approvals;
 mod assets;
 mod blink;
 mod block_status;
+mod browser_actions;
 mod browser_home;
 mod browser_pane;
 mod cache;
@@ -71,6 +72,7 @@ fn main() {
     silo_client::set_role(silo_proto::control::ClientRole::App);
     // Closes that would end running programs are asked about here.
     silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
+    silo_client::advertise(silo_proto::compat::feature::BROWSER_ACTIONS);
     let home = silo_proto::paths::home();
     let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
     {

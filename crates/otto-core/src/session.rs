@@ -225,7 +225,7 @@ async fn actor(
                 if wake_pending { wake_pending=false;let id=cx.row.id.clone();if cx.runtime.db(move|s|Ok(!s.outbox_pending(&id)?.is_empty())).await.unwrap_or(false){queue.push_back(QueuedInput{id:crate::id(),input:vec![],delivery:Delivery::Queue});} }
             }
             command=rx.recv()=>{let Some(command)=command else {cancel.cancel();break};match command {
-                Command::Tools(reply)=>{let _=reply.send(crate::tools::infos(cx.clone()));}
+                Command::Tools(reply)=>{let _=reply.send(crate::tools::infos(cx.clone()).await);}
                 Command::SetMode(mode,reply)=>{
                     if cx.row.agent=="plan"&&mode!=ApprovalMode::Plan{let _=reply.send(Err(Error::Invalid("plan agents cannot leave plan mode".into())));continue;}
                     let id=cx.row.id.clone();

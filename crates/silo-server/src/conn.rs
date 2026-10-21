@@ -271,7 +271,14 @@ where
                     }
                 };
                 let id = request.id;
-                let gate = crate::access::check(&ctx.principal, ctx.role, &request.method, &server.registry.lock().unwrap());
+                let gate = {
+                    let reg = server.registry.lock().unwrap();
+                    if matches!(&request.method, Method::BlockReport(p) if reg.clients.get(&ctx.id).is_some_and(|c| c.pane.as_deref() == Some(&p.block_id))) {
+                        Ok(crate::access::Gate { approval: false })
+                    } else {
+                        crate::access::check(&ctx.principal, ctx.role, &request.method, &reg)
+                    }
+                };
                 let gate = match gate {
                     Ok(gate) => gate,
                     Err(error) => {
@@ -723,7 +730,22 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         Method::BlocksBusy { session_id, window_id, block_ids } => {
             to_value(crate::close_guard::busy_blocks(server, &ctx.principal, session_id, window_id, block_ids).await?)
         }
-        Method::BlockStatusSeen { .. } => crate::status::handle(server, client_id, method).await,
+        Method::BlockStatusSeen { .. } | Method::BlockReport(_) | Method::BlockNotify(_) => crate::status::handle(server, client_id, method).await,
+        Method::BrowserSnapshot(_)
+        | Method::BrowserFind(_)
+        | Method::BrowserClick(_)
+        | Method::BrowserHover(_)
+        | Method::BrowserFill(_)
+        | Method::BrowserFillForm(_)
+        | Method::BrowserType(_)
+        | Method::BrowserPress(_)
+        | Method::BrowserScroll(_)
+        | Method::BrowserWaitFor(_)
+        | Method::BrowserDialog(_)
+        | Method::BrowserEval(_)
+        | Method::BrowserConsole(_)
+        | Method::BrowserNetwork(_)
+        | Method::BrowserScreenshot(_) => crate::app_bridge::handle(server, client_id, method).await,
         Method::BlockCommands { .. } | Method::TerminalCommandOutput { .. } => crate::prompts::handle(server, client_id, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }

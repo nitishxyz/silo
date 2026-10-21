@@ -33,6 +33,10 @@ impl Workspace {
     /// A forwarded request from host `host`: run here if this window is
     /// the one it is for, and reply.
     pub(crate) fn app_request(&mut self, host: usize, request_id: &str, call: &AppCall, window: &mut Window, cx: &mut Context<Self>) {
+        if call.method.starts_with("browser.") {
+            self.browser_request(host, request_id, call, window, cx);
+            return;
+        }
         // Only this Mac's server forwards requests to its app.
         let Some(control) = self.hosts.get(host).filter(|h| h.info.local).and_then(|h| h.control.clone()) else { return };
         if !self.runs_requests(call, window, cx) {
@@ -61,6 +65,50 @@ impl Workspace {
             .detach();
         }
         cx.notify();
+    }
+
+    fn browser_request(&mut self, host: usize, request_id: &str, call: &AppCall, window: &Window, cx: &mut Context<Self>) {
+        let Some(block) = call.params.get("block_id").and_then(Value::as_str) else { return };
+        let owns =
+            |workspace: &Workspace| workspace.active_host == host && workspace.browsers.get(block).is_some_and(|(pane, _)| pane.read(cx).is_owner());
+        if !owns(self) {
+            return;
+        }
+        let me = window.window_handle().window_id();
+        let windows = cx.window_stack().unwrap_or_else(|| cx.windows());
+        let target = windows.iter().find(|handle| {
+            if handle.window_id() == me {
+                return true;
+            }
+            handle.downcast::<Workspace>().and_then(|w| w.read(cx).ok()).is_some_and(owns)
+        });
+        if target.is_some_and(|handle| handle.window_id() != me) {
+            return;
+        }
+        let Some(control) = self.hosts.get(host).and_then(|host| host.control.clone()) else { return };
+        let Some((pane, _)) = self.browsers.get(block) else { return };
+        let executor = pane.update(cx, |pane, cx| pane.agent_executor(cx));
+        let request_id = request_id.to_owned();
+        let method = call.method.clone();
+        let params = call.params.clone();
+        let timeout = params.get("timeout_ms").and_then(Value::as_u64).map_or(30_000, |ms| ms.saturating_add(5_000)).min(120_000);
+        let rt = self.rt.clone();
+        cx.spawn(async move |_, cx| {
+            let result = match executor {
+                Ok(executor) => {
+                    tokio::select! {
+                        result = executor.run(&method, params) => result,
+                        () = cx.background_executor().timer(std::time::Duration::from_millis(timeout)) => Err(anyhow::anyhow!("browser request timed out")),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            let (result, error) = match result {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(RpcError::bad_request(error.to_string()))),
+            };
+            rt.spawn(async move { let _ = control.call_value(Method::AppReply { request_id, result, error }).await; });
+        }).detach();
     }
 
     /// Whether this window runs `call`: the frontmost window showing its

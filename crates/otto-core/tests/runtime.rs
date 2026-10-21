@@ -7,6 +7,137 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+struct DeferredTool(otto_tools::ToolSpec);
+#[async_trait::async_trait]
+impl otto_tools::Tool for DeferredTool {
+    fn spec(&self) -> &otto_tools::ToolSpec {
+        &self.0
+    }
+    async fn call(&self, _: serde_json::Value, _: otto_tools::ToolCx) -> std::result::Result<otto_tools::ToolOutput, otto_tools::ToolError> {
+        Ok(otto_tools::ToolOutput::text("deferred executed"))
+    }
+}
+fn deferred_tool() -> Arc<dyn otto_tools::Tool> {
+    Arc::new(DeferredTool(
+        serde_json::from_value(serde_json::json!({
+            "name":"browser_test", "description":"Inspect a page. More detail not in the index.",
+            "input_schema":{"type":"object"}, "loading":"deferred", "effects":{"read":true}
+        }))
+        .unwrap(),
+    ))
+}
+
+#[tokio::test]
+async fn legacy_deferred_grant_gets_loader_without_expanding_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let project = store.create_project(dir.path().to_str().unwrap()).unwrap();
+    let row = store
+        .create_session(otto_store::NewSession {
+            project_id: project.id,
+            parent_id: None,
+            agent: "build".into(),
+            model: "test".into(),
+            provider: "test".into(),
+            title: String::new(),
+            cwd: dir.path().to_string_lossy().into(),
+            meta: serde_json::json!({"tools":["browser_test"]}),
+        })
+        .unwrap();
+    let model = ScriptedModel::new(vec![vec![call("load", "load_tools", serde_json::json!({"query":"BROWSER"}))], text("done")]);
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(store)),
+        models: Arc::new(Resolver(model.clone())),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    r.add_tools(vec![deferred_tool()]);
+    let s = r.session(&row.id).await.unwrap();
+    assert!(r.tools(&s.id).await.unwrap().iter().any(|t| t.name == "load_tools"));
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    {
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests[0].tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["load_tools"]);
+        assert_eq!(requests[1].tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["browser_test"]);
+    }
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_tools_load_next_step_and_survive_resume() {
+    for input in [serde_json::json!({"names":["browser_test", "missing"]}), serde_json::json!({"query":"PAGE"})] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let model = ScriptedModel::new(vec![vec![call("load", "load_tools", input.clone())], text("done")]);
+        let config = |model: Arc<ScriptedModel>| RuntimeConfig {
+            store: Arc::new(Mutex::new(Store::open(&path).unwrap())),
+            models: Arc::new(Resolver(model)),
+            state_dir: dir.path().join("state"),
+            user_config_dir: dir.path().join("user"),
+        };
+        let r = Runtime::new(config(model.clone())).await.unwrap();
+        r.add_tools(vec![deferred_tool()]);
+        let project = r.open_project(dir.path()).await.unwrap();
+        let s = r.create_session(CreateSession { project_id: project.id.clone(), cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+        assert!(r.tools(&s.id).await.unwrap().iter().any(|t| t.name == "browser_test"));
+        let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+        prompt(&s).await;
+        finish(&mut live).await;
+        {
+            let requests = model.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(!requests[0].tools.iter().any(|t| t.name == "browser_test"));
+            let loader = requests[0].tools.iter().find(|t| t.name == "load_tools").unwrap();
+            assert!(loader.description.contains("browser_test: Inspect a page."));
+            assert!(!loader.description.contains("More detail"));
+            assert!(requests[1].tools.iter().any(|t| t.name == "browser_test"));
+            assert!(!requests[1].tools.iter().any(|t| t.name == "load_tools"));
+        }
+        if input.get("names").is_some() {
+            let view = s.view().await.unwrap();
+            assert!(serde_json::to_string(&view.items).unwrap().contains("Unknown or ungranted deferred tools: missing"));
+            assert!(!view.items.iter().flat_map(|i| &i.parts).any(|p| matches!(p, Part::ToolResult { is_error: true, .. })));
+        }
+        let child = r
+            .create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), parent_id: Some(s.id.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(r.tools(&child.id).await.unwrap().iter().any(|t| t.name == "load_tools"));
+        r.shutdown().await.unwrap();
+        drop(r);
+        let resumed_model = ScriptedModel::new(vec![text("resumed")]);
+        let r = Runtime::new(config(resumed_model.clone())).await.unwrap();
+        r.add_tools(vec![deferred_tool()]);
+        let s = r.session(&s.id).await.unwrap();
+        let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+        prompt(&s).await;
+        finish(&mut live).await;
+        assert!(resumed_model.requests.lock().unwrap()[0].tools.iter().any(|t| t.name == "browser_test"));
+        assert!(!r.tools(&s.id).await.unwrap().iter().any(|t| t.name == "load_tools"));
+        r.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unloaded_deferred_tool_still_executes() {
+    let (dir, r, original, model) = setup(vec![vec![call("direct", "browser_test", serde_json::json!({}))], text("done")], "build").await;
+    r.add_tools(vec![deferred_tool()]);
+    let s = r
+        .create_session(CreateSession { project_id: original.view().await.unwrap().info.project_id, cwd: dir.path().into(), ..Default::default() })
+        .await
+        .unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    assert!(serde_json::to_string(&s.view().await.unwrap().items).unwrap().contains("deferred executed"));
+    assert!(model.requests.lock().unwrap().iter().all(|r| !r.tools.iter().any(|t| t.name == "browser_test")));
+    r.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn live_mode_change_applies_to_next_call_and_is_journaled() {
     let (dir, r, s, _) = setup(

@@ -395,6 +395,7 @@ wrap_life_span_handler! {
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            self.shared.devtools.close();
             lock(&self.shared.browser).take();
             self.shared.push(Event::Closed);
             crate::runtime::browser_closed();
@@ -498,6 +499,33 @@ wrap_task! {
     }
 }
 
+wrap_jsdialog_handler! {
+    struct AgentDialogs {
+        shared: Arc<Shared>,
+    }
+
+    impl JsdialogHandler {
+        fn on_jsdialog(
+            &self, _browser: Option<&mut Browser>, _origin_url: Option<&CefString>, _dialog_type: JsdialogType,
+            _message_text: Option<&CefString>, _default_prompt_text: Option<&CefString>,
+            callback: Option<&mut JsdialogCallback>, _suppress_message: Option<&mut c_int>,
+        ) -> c_int {
+            self.shared.devtools.hold_dialog(callback)
+        }
+
+        fn on_before_unload_dialog(
+            &self, _browser: Option<&mut Browser>, _message_text: Option<&CefString>, _is_reload: c_int,
+            callback: Option<&mut JsdialogCallback>,
+        ) -> c_int {
+            self.shared.devtools.hold_dialog(callback)
+        }
+
+        fn on_reset_dialog_state(&self, _browser: Option<&mut Browser>) {
+            self.shared.devtools.reset_dialog();
+        }
+    }
+}
+
 wrap_client! {
     pub(crate) struct PageClient {
         view: RenderHandler,
@@ -506,6 +534,7 @@ wrap_client! {
         life_span: LifeSpanHandler,
         request: RequestHandler,
         permission: PermissionHandler,
+        dialogs: JsdialogHandler,
     }
 
     impl Client {
@@ -532,6 +561,10 @@ wrap_client! {
         fn permission_handler(&self) -> Option<PermissionHandler> {
             Some(self.permission.clone())
         }
+
+        fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+            Some(self.dialogs.clone())
+        }
     }
 }
 
@@ -543,6 +576,7 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         PageLifeSpanHandler::new(Arc::clone(shared)),
         PageRequestHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PagePermissionHandler::new(Arc::clone(shared)),
+        AgentDialogs::new(Arc::clone(shared)),
     )
 }
 

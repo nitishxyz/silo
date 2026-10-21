@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use crate::agent::*;
+
 use crate::{
     access::{Grant, Granted, Rights, Scope},
     data::{Clip, ClipKind, ClipboardLocation},
@@ -180,6 +182,40 @@ pub struct SpawnSpec {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params")]
 pub enum Method {
+    #[serde(rename = "block.report")]
+    BlockReport(BlockReportParams),
+    #[serde(rename = "block.notify")]
+    BlockNotify(BlockNotifyParams),
+    #[serde(rename = "browser.snapshot")]
+    BrowserSnapshot(BrowserSnapshotParams),
+    #[serde(rename = "browser.find")]
+    BrowserFind(BrowserFindParams),
+    #[serde(rename = "browser.click")]
+    BrowserClick(BrowserClickParams),
+    #[serde(rename = "browser.hover")]
+    BrowserHover(BrowserHoverParams),
+    #[serde(rename = "browser.fill")]
+    BrowserFill(BrowserFillParams),
+    #[serde(rename = "browser.fill_form")]
+    BrowserFillForm(BrowserFillFormParams),
+    #[serde(rename = "browser.type")]
+    BrowserType(BrowserTypeParams),
+    #[serde(rename = "browser.press")]
+    BrowserPress(BrowserPressParams),
+    #[serde(rename = "browser.scroll")]
+    BrowserScroll(BrowserScrollParams),
+    #[serde(rename = "browser.wait_for")]
+    BrowserWaitFor(BrowserWaitForParams),
+    #[serde(rename = "browser.dialog")]
+    BrowserDialog(BrowserDialogParams),
+    #[serde(rename = "browser.eval")]
+    BrowserEval(BrowserEvalParams),
+    #[serde(rename = "browser.console")]
+    BrowserConsole(BrowserConsoleParams),
+    #[serde(rename = "browser.network")]
+    BrowserNetwork(BrowserNetworkParams),
+    #[serde(rename = "browser.screenshot")]
+    BrowserScreenshot(BrowserScreenshotParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -661,6 +697,23 @@ pub enum Method {
 
 /// Method names and one-line descriptions, for `api.list`.
 pub const METHODS: &[(&str, &str)] = &[
+    ("block.report", "Report a terminal program's status (as OSC 7501)."),
+    ("block.notify", "Raise a block notification (as OSC 9/777)."),
+    ("browser.snapshot", "Read an accessibility snapshot with element refs."),
+    ("browser.find", "Find nodes by text or regular expression."),
+    ("browser.click", "Click an element by ref or CSS selector."),
+    ("browser.hover", "Move the pointer over an element."),
+    ("browser.fill", "Set an input, textarea, select or checkbox value."),
+    ("browser.fill_form", "Fill a set of form fields."),
+    ("browser.type", "Type text into the focused element."),
+    ("browser.press", "Press a key or key chord."),
+    ("browser.scroll", "Scroll the page or an element into view."),
+    ("browser.wait_for", "Wait for text to appear or disappear."),
+    ("browser.dialog", "Accept or dismiss a page dialog."),
+    ("browser.eval", "Evaluate a JavaScript function with optional element refs."),
+    ("browser.console", "Read captured console messages."),
+    ("browser.network", "Read captured network requests."),
+    ("browser.screenshot", "Capture the page or an element as an image."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),

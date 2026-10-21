@@ -9,6 +9,7 @@
 mod browser;
 mod color;
 mod cr_app;
+mod devtools;
 mod frame;
 mod handlers;
 mod input;
@@ -17,8 +18,10 @@ pub mod layout;
 mod profile;
 mod runtime;
 mod shared;
+pub mod snapshot;
 
 pub use browser::{Browser, BrowserOptions, Edit};
+pub use devtools::DevToolsEvent;
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;

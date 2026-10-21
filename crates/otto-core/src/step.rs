@@ -85,34 +85,39 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         apply_hook(&cx, "SessionStart", "", serde_json::Value::Null, turn, 0).await?;
     }
     let family = serde_json::to_value(cx.model.info().caps.tool_family)?.as_str().unwrap_or("generic").to_owned();
-    let mut tools = otto_tools::registry::tools_for_family(&family);
-    tools.extend(crate::tools::tools(cx.clone()));
-    let mut defs = Vec::new();
-    let mut lookup = std::collections::HashMap::new();
-    for tool in tools {
-        let spec = tool.spec();
-        if cx.row.meta["tools"].as_array().is_some_and(|grant| !grant.iter().any(|v| v.as_str() == Some(&spec.name))) {
-            continue;
-        }
-        let presentation = spec.presentations.iter().find(|p| p.family == family);
-        let name = presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone());
-        defs.push(ToolDef {
-            name: name.clone(),
-            description: presentation.and_then(|p| p.description.clone()).unwrap_or_else(|| spec.description.clone()),
-            input_schema: presentation.and_then(|p| p.input_schema.clone()).unwrap_or_else(|| spec.input_schema.clone()),
-            kind: if let Some(format) = presentation.and_then(|p| p.freeform.clone()) {
-                ToolKind::Custom { format: Some(format) }
-            } else {
-                ToolKind::Function
-            },
-            defer_loading: false,
-        });
-        lookup.insert(name, tool);
-    }
     let limit = cx.row.meta["max_steps"].as_u64().filter(|n| *n > 0).unwrap_or(200) as i64;
     let mut continuations = 0;
     let mut overflow = false;
+    let mut base_tools = otto_tools::registry::tools_for_family(&family);
+    base_tools.extend(cx.runtime.extra_tools());
     'steps: for step in 1..=limit {
+        let loaded = crate::tools::loaded(&cx).await?;
+        let mut tools = base_tools.clone();
+        tools.extend(crate::tools::tools(cx.clone(), &loaded));
+        let mut defs = Vec::new();
+        let mut lookup = std::collections::HashMap::new();
+        for tool in tools {
+            let spec = tool.spec();
+            if !crate::tools::granted(&cx, spec) {
+                continue;
+            }
+            let presentation = spec.presentations.iter().find(|p| p.family == family);
+            let name = presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone());
+            if spec.loading != otto_tools::Loading::Deferred || loaded.contains(&spec.name) {
+                defs.push(ToolDef {
+                    name: name.clone(),
+                    description: presentation.and_then(|p| p.description.clone()).unwrap_or_else(|| spec.description.clone()),
+                    input_schema: presentation.and_then(|p| p.input_schema.clone()).unwrap_or_else(|| spec.input_schema.clone()),
+                    kind: if let Some(format) = presentation.and_then(|p| p.freeform.clone()) {
+                        ToolKind::Custom { format: Some(format) }
+                    } else {
+                        ToolKind::Function
+                    },
+                    defer_loading: false,
+                });
+            }
+            lookup.insert(name, tool);
+        }
         if cancel.is_cancelled() {
             return Ok(());
         }

@@ -37,6 +37,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve Silo tools over MCP stdio.
+    Mcp,
+    /// Report program status; hook failures never fail the harness.
+    Report {
+        state: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        codex_notify: bool,
+    },
+    /// Notify the user from this block.
+    Notify {
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
+    /// Install harness status hooks.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     /// Run the server.
     Server {
         /// Detach into the background and exit when idle (used by clients
@@ -512,6 +544,16 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).try_init();
 }
 
+#[derive(Subcommand)]
+enum HooksCommand {
+    Install {
+        #[arg(value_parser = ["claude", "codex", "opencode"])]
+        harness: String,
+        #[arg(long)]
+        print: bool,
+    },
+}
+
 async fn run(command: Command, host: Option<String>, status: Option<std::fs::File>) -> anyhow::Result<i32> {
     let host = host.as_deref();
     if host.is_some()
@@ -537,6 +579,57 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
         bail!("--host is not supported for this command");
     }
     match command {
+        Command::Mcp => {
+            let (control, events, _net) = connect(host).await?;
+            silo_cli::mcp::serve(silo_tools::Tools::new(control, events, silo_tools::Context::default())).await?;
+            Ok(0)
+        }
+        Command::Report { state, kind, app, title, message, id, block, codex_notify } => {
+            let Some(block) = block.or_else(|| std::env::var("SILO_BLOCK").ok()).filter(|s| !s.is_empty()) else {
+                return Ok(0);
+            };
+            let report = async {
+                let (state, app) = if codex_notify {
+                    let payload: serde_json::Value = serde_json::from_str(state.as_deref().context("missing Codex notify payload")?)?;
+                    if payload["type"] != "agent-turn-complete" {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    ("done".to_owned(), Some("codex".to_owned()))
+                } else {
+                    (state.context("state is required")?, app)
+                };
+                let (control, _events, _net) = connect(host).await?;
+                let mut params = serde_json::json!({"block_id":block, "state":state});
+                for (key, value) in [("kind", kind), ("app", app), ("title", title), ("message", message), ("id", id)] {
+                    if let Some(value) = value {
+                        params[key] = value.into();
+                    }
+                }
+                control.call_raw("block.report", params).await?;
+                Ok(())
+            };
+            match tokio::time::timeout(Duration::from_secs(5), report).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("silo report: {error:#}"),
+                Err(_) => eprintln!("silo report: timed out"),
+            }
+            Ok(0)
+        }
+        Command::Notify { title, body } => {
+            let block = std::env::var("SILO_BLOCK").context("notify requires SILO_BLOCK")?;
+            let (control, _events, _net) = connect(host).await?;
+            let mut params = serde_json::json!({"block_id":block,"body":body.join(" ")});
+            if let Some(title) = title {
+                params["title"] = title.into();
+            }
+            control.call_raw("block.notify", params).await?;
+            Ok(0)
+        }
+        Command::Hooks { command: HooksCommand::Install { harness, print } } => {
+            let home = std::env::var_os("HOME").context("HOME is not set")?;
+            silo_cli::hooks::install(&PathBuf::from(home), &harness, print)?;
+            Ok(0)
+        }
         Command::Server { daemon, idle_exit, takeover, adopt, relay, no_mdns, port } => {
             init_tracing();
             let home = paths::home();

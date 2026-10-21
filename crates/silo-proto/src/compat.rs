@@ -25,6 +25,8 @@ pub mod feature {
     pub const ACCESS: &str = "access";
     /// The app runs forwarded `app.*` requests (`app.request`).
     pub const APP_REQUESTS: &str = "app_requests";
+    /// The owner runs forwarded browser actions.
+    pub const BROWSER_ACTIONS: &str = "browser_actions";
     /// Block status events (`block.status`, `block.attention`,
     /// `block.command_finished`).
     pub const STATUS: &str = "status";
@@ -42,7 +44,7 @@ pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature:
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this
 /// build gets them by default.
-pub const OPT_IN: &[&str] = &[feature::CLOSE_GUARD];
+pub const OPT_IN: &[&str] = &[feature::CLOSE_GUARD, feature::BROWSER_ACTIONS];
 
 /// [`FEATURES`] as sent in a hello.
 #[must_use]

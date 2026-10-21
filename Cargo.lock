@@ -5481,10 +5481,11 @@ dependencies = [
 
 [[package]]
 name = "otto-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "futures",
  "otto-client",
@@ -5492,6 +5493,7 @@ dependencies = [
  "otto-llm",
  "otto-proto",
  "otto-server",
+ "otto-silo-tools",
  "otto-store",
  "otto-tools",
  "rustix 1.1.5",
@@ -5506,7 +5508,7 @@ dependencies = [
 
 [[package]]
 name = "otto-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "otto-proto",
  "serde",
@@ -5518,7 +5520,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -5538,7 +5540,7 @@ dependencies = [
 
 [[package]]
 name = "otto-llm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5561,7 +5563,7 @@ dependencies = [
 
 [[package]]
 name = "otto-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "otto-llm",
  "schemars",
@@ -5572,7 +5574,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -5590,8 +5592,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-silo-tools"
+version = "0.1.5"
+dependencies = [
+ "async-trait",
+ "otto-tools",
+ "serde_json",
+ "silo-client",
+ "silo-proto",
+ "silo-tools",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "otto-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "otto-llm",
  "rusqlite",
@@ -5603,7 +5620,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tools"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7190,8 +7207,11 @@ dependencies = [
  "silo-client",
  "silo-proto",
  "silo-server",
+ "silo-tools",
  "silo-vt",
  "tokio",
+ "tokio-util",
+ "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -7316,6 +7336,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "silo-tools"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "silo-client",
+ "silo-proto",
+ "silo-server",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "silo-transport"
 version = "0.1.5"
 dependencies = [
@@ -7350,7 +7387,11 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "regex",
+ "serde",
+ "serde_json",
  "sha1_smol",
+ "tokio",
  "tracing",
 ]
 
@@ -8226,6 +8267,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

@@ -219,6 +219,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::GrantsChanged { .. } | Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::SessionWatchers { .. } => {
             Some(feature::ACCESS)
         }
+        Event::AppRequest { request, .. } if request.method.starts_with("browser.") => Some(feature::BROWSER_ACTIONS),
         Event::AppRequest { .. } => Some(feature::APP_REQUESTS),
         Event::BlockStatus { .. } | Event::BlockAttention { .. } | Event::CommandFinished { .. } => Some(feature::STATUS),
         Event::SessionsChanged { .. }

@@ -69,6 +69,8 @@ pub(crate) struct Inner {
     pub global: broadcast::Sender<Event>,
     index: Mutex<(i64, broadcast::Sender<SequencedEvent>)>,
     defaults: Mutex<SessionDefaults>,
+    /// Tools beyond the built-ins (silo, MCP), offered to every session.
+    extra: Mutex<Vec<Arc<dyn otto_tools::Tool>>>,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -81,6 +83,7 @@ impl Runtime {
             global,
             index: Mutex::new((0, index)),
             defaults: Mutex::new(SessionDefaults::default()),
+            extra: Mutex::new(Vec::new()),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -119,6 +122,18 @@ impl Runtime {
         }
         *self.0.defaults.lock().map_err(|_| Error::Invalid("config mutex poisoned".into()))? = config;
         Ok(())
+    }
+    /// Offer `tools` to sessions created from now on (and to existing
+    /// sessions whose agent lists them); a name already present is replaced.
+    pub fn add_tools(&self, tools: Vec<Arc<dyn otto_tools::Tool>>) {
+        let mut extra = self.0.extra.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for tool in tools {
+            extra.retain(|t| t.spec().name != tool.spec().name);
+            extra.push(tool);
+        }
+    }
+    pub(crate) fn extra_tools(&self) -> Vec<Arc<dyn otto_tools::Tool>> {
+        self.0.extra.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         self.db(|s| Ok(s.list_projects()?.into_iter().map(|p| ProjectInfo { id: p.id, root: p.root, created_at: p.created_at }).collect())).await
@@ -176,6 +191,7 @@ impl Runtime {
                 .iter()
                 .map(|t| t.spec().name.clone())
                 .chain(["skill".into(), "todos".into(), "subagent".into()])
+                .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
                 .collect()
         } else {
             agent.tools
@@ -185,6 +201,14 @@ impl Runtime {
             if let Some(allowed) = parent_grant.as_array() {
                 grant.retain(|tool| allowed.iter().any(|v| v.as_str() == Some(tool)));
             }
+        }
+        if otto_tools::registry::tools_for_family(&family)
+            .into_iter()
+            .chain(self.extra_tools())
+            .any(|tool| tool.spec().loading == otto_tools::Loading::Deferred && grant.contains(&tool.spec().name))
+            && !grant.iter().any(|name| name == "load_tools")
+        {
+            grant.push("load_tools".into());
         }
         let effort = agent.effort;
         let row = self

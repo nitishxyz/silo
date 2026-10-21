@@ -55,6 +55,7 @@ pub struct BrowserBlock {
     /// Block metadata; `browser` is `None` here and filled from `state`.
     base: BlockInfo,
     state: BrowserState,
+    pub notifications: crate::status::Pacer,
 }
 
 impl BrowserBlock {
@@ -62,7 +63,7 @@ impl BrowserBlock {
     pub fn new(mut base: BlockInfo, state: BrowserState) -> Self {
         base.kind = BlockKind::Browser;
         base.browser = None;
-        Self { base, state }
+        Self { base, state, notifications: crate::status::Pacer::default() }
     }
 
     /// A browser block rebuilt from saved or transferred metadata; it has no
