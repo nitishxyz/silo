@@ -201,9 +201,18 @@ enum Command {
     /// Float a block (or a session's focused block) over its window.
     Float { target: String },
     /// Close a session and its processes.
-    Kill { target: String },
+    Kill {
+        target: String,
+        /// Close even when programs are running.
+        #[arg(long)]
+        force: bool,
+    },
     /// Stop the server and every process it runs.
-    KillServer,
+    KillServer {
+        /// Stop even when programs are running.
+        #[arg(long)]
+        force: bool,
+    },
     /// Print server events as JSON lines.
     Events,
     /// The clipboard of the Silo client showing this block (`SILO_BLOCK`).
@@ -367,6 +376,9 @@ fn main() {
     let cli = Cli::parse();
     // An agent token limits this process to its grant (unix socket only).
     silo_client::set_token(std::env::var("SILO_TOKEN").ok().filter(|t| !t.trim().is_empty()));
+    // Closes that would end running programs are refused unless forced
+    // (`silo_cli::guarded` asks or names `--force`).
+    silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     let command = cli.command.unwrap_or(Command::Attach { target: None, watch: false });
     let server = matches!(command, Command::Server { .. });
     let status = match &command {
@@ -434,7 +446,8 @@ fn daemonize(report: bool) -> Option<std::fs::File> {
     // SAFETY: single-threaded at this point (before the tokio runtime);
     // only pipe/fork/setsid/dup2/read/close/_exit/waitpid are used.
     unsafe {
-        if report && libc::pipe(pipe.as_mut_ptr()) != 0 {
+        // Close-on-exec, so no program the daemon starts holds it open.
+        if report && (libc::pipe(pipe.as_mut_ptr()) != 0 || libc::fcntl(pipe[1], libc::F_SETFD, libc::FD_CLOEXEC) != 0) {
             eprintln!("silo: pipe failed");
             std::process::exit(1);
         }
@@ -500,7 +513,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Update { .. }
                 | Command::Down { .. }
                 | Command::Status
-                | Command::KillServer
+                | Command::KillServer { .. }
                 | Command::Pair { .. }
                 | Command::Devices { .. }
                 | Command::Grant { .. }
@@ -638,10 +651,11 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             control.call_value(Method::BlockFloat { block_id: block, rect: None }).await?;
             Ok(0)
         }
-        Command::Kill { target } => {
+        Command::Kill { target, force } => {
             let (control, _, _net) = connect(host).await?;
             let session = resolve_session(&control, Some(&target)).await?;
-            control.call_value(Method::SessionClose { session_id: session.session.id, force: false }).await?;
+            let session_id = session.session.id;
+            silo_cli::guarded(force, |force| control.call_value(Method::SessionClose { session_id: session_id.clone(), force })).await?;
             Ok(0)
         }
         Command::Up { no_offer } => {
@@ -669,13 +683,13 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
         }
         Command::Down { yes } => down(yes).await,
         Command::Status => show_status().await,
-        Command::KillServer => {
+        Command::KillServer { force } => {
             let (control, _) = connect_existing().await?;
             let Some(control) = control else {
                 eprintln!("no server running");
                 return Ok(0);
             };
-            shutdown(control).await?;
+            shutdown(control, force).await?;
             Ok(0)
         }
         Command::Clipboard { command } => match command {
@@ -736,10 +750,26 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 return Ok(0);
             }
             let params = generated::build(&described.params_schema, &args)?;
-            let value = if described.access.is_some_and(|a| a.approval) {
-                silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
+            let approval = described.access.is_some_and(|a| a.approval);
+            let call = |params: serde_json::Value| async {
+                if approval {
+                    silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await
+                } else {
+                    control.call_raw(&method, params).await
+                }
+            };
+            let value = if silo_cli::CLOSES.contains(&method.as_str()) {
+                let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                silo_cli::guarded(force, |force| {
+                    let mut params = params.clone();
+                    if force {
+                        params["force"] = true.into();
+                    }
+                    call(params)
+                })
+                .await?
             } else {
-                control.call_raw(&method, params).await?
+                call(params).await?
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(0)
@@ -887,10 +917,12 @@ async fn local_server() -> anyhow::Result<Control> {
     }
 }
 
-/// Stop the server behind `control` and wait for it to exit.
-async fn shutdown(control: Control) -> anyhow::Result<()> {
+/// Stop the server behind `control` and wait for it to exit; `force`:
+/// even when programs are running (else [`silo_cli::guarded`] asks).
+async fn shutdown(control: Control, force: bool) -> anyhow::Result<()> {
     let pid = control.hello().server.pid;
-    silo_cli::confirmed(&control, || control.call_value(Method::ServerShutdown { force: false })).await?;
+    let ctl = &control;
+    silo_cli::guarded(force, |force| async move { silo_cli::confirmed(ctl, move || ctl.call_value(Method::ServerShutdown { force })).await }).await?;
     control.closed().await;
     // Wait for the process to release its lock.
     for _ in 0..100 {
@@ -1090,7 +1122,8 @@ async fn down(yes: bool) -> anyhow::Result<i32> {
     let state = svc.probe(&runner, server)?;
     svc.apply(&runner, &service::plan_down(&state))?;
     match probe_server().await {
-        (_, Some(control)) => shutdown(control).await?,
+        // Ending the sessions was confirmed above (or `--yes`).
+        (_, Some(control)) => shutdown(control, true).await?,
         (service::Server::Other | service::Server::Unresponsive, None) => {
             let home = paths::home();
             silo_client::mismatch::stop(&home, &silo_client::mismatch::inspect(&home).await).await?;

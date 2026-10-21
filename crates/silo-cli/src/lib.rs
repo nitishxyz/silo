@@ -14,7 +14,7 @@ use silo_client::{
 };
 use silo_proto::{
     access::{Grant, Rights, Scope, Who},
-    control::{GrantCreated, GrantKind, Grants, Method, PairInvite, PairedDevice, PairedDevices, RpcError, ServerInfo},
+    control::{BusyBlock, BusyBlocks, GrantCreated, GrantKind, Grants, Method, PairInvite, PairedDevice, PairedDevices, RpcError, ServerInfo},
     device::DeviceProof,
     model::{BlockKind, SessionSummary, SessionView},
 };
@@ -329,6 +329,66 @@ fn ask_terminal(prompt: &str) -> bool {
         return false;
     }
     matches!(answer.trim(), "y" | "Y" | "yes")
+}
+
+/// The methods that refuse to end running programs without `force`
+/// (Phase 7 §7.5).
+pub const CLOSES: [&str; 5] = ["block.close", "window.close", "session.close", "server.shutdown", "server.restart"];
+
+/// Run a close, `call(force)`. When it is refused as `busy`: with stdin a
+/// terminal, list what runs and ask whether to close anyway (default no),
+/// then run `call(true)`; otherwise fail naming `--force`.
+///
+/// # Errors
+/// The call's error, a `busy` refusal without a terminal, or a declined
+/// confirmation.
+pub async fn guarded<T, F, Fut>(force: bool, call: F) -> anyhow::Result<T>
+where
+    F: Fn(bool) -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    use std::io::IsTerminal;
+    let error = match call(force).await {
+        Err(error) => error,
+        ok => return ok,
+    };
+    let Some(refusal) = error.downcast_ref::<RpcError>().filter(|e| e.code == RpcError::BUSY) else { return Err(error) };
+    let busy: Vec<BusyBlock> = refusal.data.clone().and_then(|d| serde_json::from_value::<BusyBlocks>(d).ok()).map(|b| b.busy).unwrap_or_default();
+    let them = if busy.len() > 1 { "them" } else { "it" };
+    if !std::io::stdin().is_terminal() {
+        bail!("{}; pass --force to close {them} anyway", refusal.message);
+    }
+    eprint!("{}Close anyway? [y/N] ", busy_list(&refusal.message, &busy));
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        bail!("not closed");
+    }
+    call(true).await
+}
+
+/// The lines a `busy` refusal is shown as before asking.
+#[must_use]
+pub fn busy_list(message: &str, busy: &[BusyBlock]) -> String {
+    let mut out = format!("silo: {message}\n");
+    let sessions: std::collections::HashSet<&str> = busy.iter().map(|b| b.session_id.as_str()).collect();
+    // One block without a command line: the message says it all.
+    if let [only] = busy
+        && only.busy.command.is_none()
+    {
+        return out;
+    }
+    for b in busy {
+        out.push_str(&format!("  {} in '{}'", b.busy.process, b.block_title));
+        if sessions.len() > 1 {
+            out.push_str(&format!(" ({})", b.session_name));
+        }
+        if let Some(command) = &b.busy.command {
+            out.push_str(&format!(": {command}"));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// # Errors

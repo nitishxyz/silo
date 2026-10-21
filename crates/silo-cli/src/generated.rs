@@ -258,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn closes_take_force_from_the_schema() {
+        for method in silo_cli::CLOSES {
+            let usage = usage(method, "", &schema(method));
+            assert!(usage.contains("--force  Close even when programs are running"), "{method}: {usage}");
+        }
+        assert_eq!(build(&schema("block.close"), &args("b1 --force")).unwrap(), json!({"block_id": "b1", "force": true}));
+        assert_eq!(build(&schema("server.shutdown"), &[]).unwrap(), json!({}), "force defaults to false on the server");
+    }
+
+    #[test]
     fn every_method_s_example_round_trips_through_flags() {
         for (name, _) in silo_proto::control::METHODS {
             let d = silo_proto::api::describe(name).unwrap();

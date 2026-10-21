@@ -32,9 +32,11 @@ struct HelloAs {
     role: ClientRole,
     /// An agent token (`silot1…`), sent on the unix socket only.
     token: Option<String>,
+    /// Opt-in features (`silo_proto::compat::OPT_IN`) this process handles.
+    features: Vec<String>,
 }
 
-static HELLO_AS: std::sync::RwLock<HelloAs> = std::sync::RwLock::new(HelloAs { role: ClientRole::Cli, token: None });
+static HELLO_AS: std::sync::RwLock<HelloAs> = std::sync::RwLock::new(HelloAs { role: ClientRole::Cli, token: None, features: Vec::new() });
 
 /// Every later control hello of this process says it is a `role` client
 /// (the Silo app says [`ClientRole::App`]).
@@ -46,6 +48,15 @@ pub fn set_role(role: ClientRole) {
 /// connection gets that grant's access only.
 pub fn set_token(token: Option<String>) {
     HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner).token = token;
+}
+
+/// Every later control hello of this process also advertises `feature`,
+/// one of [`silo_proto::compat::OPT_IN`] it handles.
+pub fn advertise(feature: &str) {
+    let mut extras = HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !extras.features.iter().any(|f| f == feature) {
+        extras.features.push(feature.to_owned());
+    }
 }
 
 /// A [`Control::call_timeout`] got no reply in time.
@@ -227,11 +238,12 @@ impl Control {
         device: Option<DeviceProof>,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let (role, grant) = {
+        let (role, grant, extra) = {
             let extras = HELLO_AS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))))
+            (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))), extras.features.clone())
         };
-        let hello = ClientHello { build: build.to_owned(), device, role, grant, ..ClientHello::ours(client_name, passive, invite) };
+        let mut hello = ClientHello { build: build.to_owned(), device, role, grant, ..ClientHello::ours(client_name, passive, invite) };
+        hello.features.extend(extra);
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;
         let hello = match read_frame(&mut stream).await {
