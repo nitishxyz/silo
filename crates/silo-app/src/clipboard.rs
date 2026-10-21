@@ -204,6 +204,21 @@ pub fn upload_label(files: usize, sent: u64, total: u64) -> String {
     format!("Uploading {files} file{} · {percent}%", if files == 1 { "" } else { "s" })
 }
 
+/// What a failed upload tells the user: the limit it hit, or why a file
+/// couldn't be read, never a path.
+#[must_use]
+pub fn upload_error(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if ["Too large to upload", "Too many files to upload", "Not enough upload space"].iter().any(|p| message.starts_with(p)) {
+        return message;
+    }
+    match error.chain().find_map(|e| e.downcast_ref::<std::io::Error>()).map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::PermissionDenied) => "Silo can't read a dropped file".into(),
+        Some(std::io::ErrorKind::NotFound) => "A dropped file is gone".into(),
+        _ => "Upload failed".into(),
+    }
+}
+
 /// Clipboard writes from blocks. Every window showing a block receives its
 /// writes: one applies it, and a remote write that no window may apply yet
 /// waits until the block is focused.
@@ -373,6 +388,37 @@ mod tests {
         assert_eq!(copied_label(Some("studio")), "Copied from studio");
         assert_eq!(upload_label(3, 45, 100), "Uploading 3 files · 45%");
         assert_eq!(upload_label(1, 0, 0), "Uploading 1 file · 100%");
+    }
+
+    #[test]
+    fn upload_errors_name_the_problem_not_the_path() {
+        use anyhow::Context;
+        let dir = std::env::temp_dir().join(format!("silo-upload-error-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = |path: &Path| std::fs::File::open(path).with_context(|| format!("open {}", path.display())).unwrap_err();
+
+        let gone = dir.join("gone.png");
+        assert_eq!(upload_error(&open(&gone)), "A dropped file is gone");
+        let link = dir.join("dangling");
+        std::os::unix::fs::symlink(&gone, &link).unwrap();
+        assert_eq!(upload_error(&open(&link)), "A dropped file is gone");
+
+        let secret = dir.join("secret.txt");
+        std::fs::write(&secret, b"x").unwrap();
+        std::fs::set_permissions(&secret, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&secret).is_err() {
+            assert_eq!(upload_error(&open(&secret)), "Silo can't read a dropped file");
+        }
+
+        for limit in
+            ["Too large to upload (3.0 GB, max 2.0 GB)", "Too many files to upload (max 10000)", "Not enough upload space (5 GB of 5 GB used)"]
+        {
+            assert_eq!(upload_error(&anyhow::anyhow!("{limit}")), limit);
+        }
+        let shrank = anyhow::anyhow!("{} shrank during the upload", secret.display());
+        assert_eq!(upload_error(&shrank), "Upload failed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

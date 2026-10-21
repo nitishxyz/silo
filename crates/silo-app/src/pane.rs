@@ -957,7 +957,7 @@ impl Pane {
                     Ok(Ok(paths)) => pane.paste_paths(&paths, cx),
                     Ok(Err(error)) => {
                         tracing::warn!("upload: {error:#}");
-                        cx.emit(PaneEvent::Notice(crate::status::Status::error("Upload failed")));
+                        cx.emit(PaneEvent::Notice(crate::status::Status::error(clipboard::upload_error(&error))));
                     }
                     Err(_) => {}
                 }
