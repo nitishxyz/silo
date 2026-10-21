@@ -115,9 +115,34 @@ pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<
     }
 }
 
+/// The last `max` bytes of `text` at most, starting on a line when one
+/// begins within them (else on a char); whether anything went.
+#[must_use]
+pub fn keep_end(text: String, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut from = text.len() - max;
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    if let Some(newline) = text[from..].find('\n') {
+        from += newline + 1;
+    }
+    (text[from..].to_owned(), true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_output_keeps_its_end_from_a_line_start() {
+        assert_eq!(keep_end("short".into(), 10), ("short".into(), false));
+        assert_eq!(keep_end("one\ntwo\nthree".into(), 9), ("three".into(), true));
+        let (kept, cut) = keep_end("ééééé".into(), 5);
+        assert!(cut && kept.len() <= 5 && kept.chars().all(|c| c == 'é'), "{kept:?}");
+    }
 
     #[test]
     fn c_starts_and_d_finishes_a_record() {

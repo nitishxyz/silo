@@ -134,7 +134,7 @@ unsafe extern "C" {
     fn silo_vt_row_from_bottom(vt: *mut c_void, row: *mut c_void, out: *mut u32) -> i32;
     fn silo_vt_track_row(vt: *mut c_void, from_bottom: u32, x: u16, out: *mut *mut c_void) -> i32;
     fn silo_vt_tracked_column(row: *mut c_void, x: *mut u16) -> i32;
-    fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, end: *mut c_void, out: *mut *mut u8, len: *mut usize) -> i32;
+    fn silo_vt_output_text(vt: *mut c_void, row: *mut c_void, end: *mut c_void, out: *mut *mut u8, len: *mut usize, cut: *mut bool) -> i32;
 }
 
 /// A cell of a server terminal's screen that moves with its content
@@ -142,6 +142,14 @@ unsafe extern "C" {
 /// with the terminal that made it.
 #[derive(Debug)]
 pub struct TrackedRow(NonNull<c_void>);
+
+/// A command's output text ([`TerminalCore::output_text`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutputText {
+    pub text: String,
+    /// The start was pruned from the scrollback: only the end is here.
+    pub cut: bool,
+}
 
 // SAFETY: an owned handle into its terminal's page list, used only together
 // with that terminal (which is `Send` and confined by `&mut`).
@@ -466,25 +474,28 @@ impl TerminalCore {
 
     /// The plain text of the command output (OSC 133 C..D) containing
     /// `row`'s cell, cut before `end` (the command's D mark) when given;
-    /// empty when that cell is not command output.
+    /// empty when that cell is not command output. `cut` when `row` was
+    /// pruned from the scrollback: the text is then what is left of the
+    /// output, from the top (none if `end` went too).
     ///
     /// # Errors
     /// Upstream selection or formatting failures.
-    pub fn output_text(&mut self, row: &TrackedRow, end: Option<&TrackedRow>) -> Result<String, TerminalError> {
+    pub fn output_text(&mut self, row: &TrackedRow, end: Option<&TrackedRow>) -> Result<OutputText, TerminalError> {
         let mut ptr = std::ptr::null_mut();
         let mut len = 0;
+        let mut cut = false;
         let end = end.map_or(std::ptr::null_mut(), |end| end.0.as_ptr());
         // SAFETY: exclusive handle; `row` and `end` belong to this terminal;
         // on success the shim returns an allocation of `len` bytes (or null).
-        check(unsafe { silo_vt_output_text(self.handle.as_ptr(), row.0.as_ptr(), end, &raw mut ptr, &raw mut len) })?;
+        check(unsafe { silo_vt_output_text(self.handle.as_ptr(), row.0.as_ptr(), end, &raw mut ptr, &raw mut len, &raw mut cut) })?;
         if ptr.is_null() {
-            return Ok(String::new());
+            return Ok(OutputText { text: String::new(), cut });
         }
         // SAFETY: ptr/len describe the initialized allocation returned above.
         let text = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }).into_owned();
         // SAFETY: released exactly once with its length.
         unsafe { silo_bytes_free(ptr, len) };
-        Ok(text)
+        Ok(OutputText { text, cut })
     }
 
     /// # Errors
@@ -1183,20 +1194,45 @@ mod tests {
         let end = rows.pop().unwrap();
         let start = rows.pop().unwrap();
         assert_eq!(vt.rows_from_bottom(&end), Some(0));
-        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "one\ntwo");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "one\ntwo");
         vt.write_output(b"\r\n\r\n\r\n").unwrap();
         assert_eq!(vt.rows_from_bottom(&end), Some(3), "moves with its content");
         let again = vt.track_row(3, 0).expect("re-pin");
         assert_eq!(vt.rows_from_bottom(&again), Some(3));
-        assert_eq!(vt.output_text(&start, None).unwrap(), "one\ntwo");
+        assert_eq!(vt.output_text(&start, None).unwrap().text, "one\ntwo");
         // Anchors live on the primary screen only.
         vt.write_output(b"\x1b[?1049h\x1b]133;C\x07alt\r\n\x1b]133;D;0\x07").unwrap();
         let alt = vt.take_events().unwrap().vt;
         assert!(alt.iter().all(|e| matches!(e, VtEvent::Prompt { row: None, .. })), "no rows on the alternate screen");
-        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "", "no primary refs against the alternate screen");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "", "no primary refs against the alternate screen");
         assert_eq!(vt.rows_from_bottom(&end), None);
         vt.write_output(b"\x1b[?1049l").unwrap();
-        assert_eq!(vt.output_text(&start, Some(&end)).unwrap(), "one\ntwo");
+        assert_eq!(vt.output_text(&start, Some(&end)).unwrap().text, "one\ntwo");
+        assert!(!vt.output_text(&start, Some(&end)).unwrap().cut);
+    }
+
+    #[test]
+    fn output_whose_start_left_the_scrollback_keeps_its_end() {
+        use crate::VtEvent;
+        let mut vt = TerminalCore::server(GridSize::new(80, 10).unwrap()).unwrap();
+        vt.set_defaults(&crate::TerminalDefaults { scrollback_lines: 10_000, ..crate::TerminalDefaults::default() }).unwrap();
+        let mut out = b"\x1b]133;A\x07$ \x1b]133;B\x07seq\r\n\x1b]133;C\x07".to_vec();
+        for i in 0..15000 {
+            out.extend_from_slice(format!("line{i}\r\r\n").as_bytes());
+        }
+        out.extend_from_slice(b"\x1b]133;D;0\x07DONE");
+        let mut events = Vec::new();
+        for chunk in out.chunks(1024) {
+            vt.write_output(chunk).unwrap();
+            events.extend(vt.take_events().unwrap().vt);
+        }
+        let mut rows: Vec<_> = events.into_iter().filter_map(|e| if let VtEvent::Prompt { row, .. } = e { row } else { None }).collect();
+        let end = rows.pop().unwrap();
+        let start = rows.pop().unwrap();
+        let output = vt.output_text(&start, Some(&end)).unwrap();
+        assert!(output.cut, "the C row was pruned");
+        assert!(output.text.ends_with("line14998\nline14999"), "{} {:?}", output.text.len(), &output.text[..output.text.len().min(80)]);
+        assert!(!output.text.contains("line0\n"));
     }
 
     #[test]

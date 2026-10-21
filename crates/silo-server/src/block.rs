@@ -15,7 +15,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{AttentionReason, Capture, CommandOutput, DesiredSize, HostOffer, OfferSource, OwnMode, RpcError, SizeInfo},
+    control::{AttentionReason, Capture, CommandOutput, DesiredSize, HostOffer, MAX_COMMAND_OUTPUT, OfferSource, OwnMode, RpcError, SizeInfo},
     data::{
         Clip, ClipKind, ClipboardLocation, CommandAnchor, CommandEnd, MAX_CLIP_BYTES, MAX_CLIP_TEXT, Reject, Resume, ServerData, StartMode, Welcome,
     },
@@ -34,7 +34,7 @@ use silo_vt::{
 };
 
 use crate::{
-    prompts::CommandLog,
+    prompts::{CommandLog, keep_end},
     status::{self, BusyInputs, PROGRESS_INTERVAL, PROGRESS_TTL, Pacer, Records, Report},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -1864,11 +1864,12 @@ impl Actor {
 
     fn command_output(&mut self, index: Option<u64>) -> Result<CommandOutput, RpcError> {
         let record = self.status.commands.finished(index).cloned().ok_or_else(|| RpcError::not_found("no such finished command"))?;
-        let text = match self.status.anchors.get(&record.index) {
+        let output = match self.status.anchors.get(&record.index) {
             Some((Some(row), end)) => self.vt.output_text(row, end.as_ref()).map_err(|e| RpcError::internal(e.to_string()))?,
-            _ => String::new(),
+            _ => silo_vt::OutputText::default(),
         };
-        Ok(CommandOutput { text, record })
+        let (text, cut) = keep_end(output.text, MAX_COMMAND_OUTPUT);
+        Ok(CommandOutput { text, record, truncated: output.cut || cut })
     }
 
     /// Row anchors of finished commands still in the terminal.

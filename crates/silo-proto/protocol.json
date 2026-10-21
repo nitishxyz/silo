@@ -32905,6 +32905,10 @@
           },
           "text": {
             "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [

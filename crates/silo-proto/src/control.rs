@@ -1232,11 +1232,19 @@ pub struct CommandRecords {
     pub records: Vec<CommandRecord>,
 }
 
+/// Most `terminal.command_output` text, in bytes: longer output keeps its
+/// end.
+pub const MAX_COMMAND_OUTPUT: usize = 1 << 20;
+
 /// Result of `terminal.command_output`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CommandOutput {
     pub text: String,
     pub record: CommandRecord,
+    /// Only the output's end: it was longer than [`MAX_COMMAND_OUTPUT`],
+    /// or its start left the scrollback.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Result of `server.log`.

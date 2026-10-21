@@ -349,22 +349,32 @@ int silo_vt_tracked_column(void *ref, uint16_t *x) {
 /* Plain text of the command output containing `ref`, cut before `end`
  * (the command's D mark) when given; empty when the cell is not command
  * output. Allocated with ghostty's allocator. */
-int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len) {
+int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len, bool *cut) {
     *out = NULL;
     *len = 0;
+    *cut = false;
     /* Refs live on the primary screen; selection and formatting use the
      * active one, so they must be the same page list. */
     GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
     CHECK(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
     if (screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY) return 0;
     GhosttyGridRef at = GHOSTTY_INIT_SIZED(GhosttyGridRef);
-    int res = ghostty_tracked_grid_ref_snapshot(ref, &at);
-    if (res == GHOSTTY_NO_VALUE) return 0;
-    CHECK(res);
     GhosttySelection output = GHOSTTY_INIT_SIZED(GhosttySelection);
-    res = ghostty_terminal_select_output(vt->terminal, at, &output);
-    if (res == GHOSTTY_NO_VALUE) return 0;
-    CHECK(res);
+    int res = ghostty_tracked_grid_ref_snapshot(ref, &at);
+    if (res == GHOSTTY_NO_VALUE) {
+        /* The start was pruned from the scrollback. Everything left above
+         * the end is this command's output: from the top to the end. */
+        *cut = true;
+        if (!end || !ghostty_tracked_grid_ref_has_value(end)) return 0;
+        GhosttyPoint top = { .tag = GHOSTTY_POINT_TAG_SCREEN, .value.coordinate = { .x = 0, .y = 0 } };
+        CHECK(ghostty_terminal_grid_ref(vt->terminal, top, &output.start));
+        CHECK(ghostty_tracked_grid_ref_snapshot(end, &output.end));
+    } else {
+        CHECK(res);
+        res = ghostty_terminal_select_output(vt->terminal, at, &output);
+        if (res == GHOSTTY_NO_VALUE) return 0;
+        CHECK(res);
+    }
     GhosttyPointCoordinate stop, start, last;
     if (end && ghostty_tracked_grid_ref_point(end, GHOSTTY_POINT_TAG_SCREEN, &stop) == GHOSTTY_SUCCESS &&
         ghostty_terminal_point_from_grid_ref(vt->terminal, &output.start, GHOSTTY_POINT_TAG_SCREEN, &start) == GHOSTTY_SUCCESS &&

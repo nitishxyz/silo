@@ -553,8 +553,8 @@ async fn a_status_flood_is_paced_and_its_last_state_still_arrives() {
     block.wait_for("FLOODED").await;
     let secs = started.elapsed().as_secs_f64();
     assert!(secs > 1.0, "the flood took a while: {secs}");
-    // 8 at once then 4/s; 5 at once then 1/s (plus one for rounding).
-    assert!(f64::from(statuses) <= 9.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
+    // 8 at once then 4/s (and one for busy, one for rounding); 5 at once then 1/s (and one for rounding).
+    assert!(f64::from(statuses) <= 10.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
     assert!(attentions.len() as f64 <= 6.0 + secs, "{} block.attention in {secs:.1} s: {attentions:?}", attentions.len());
 }
 
@@ -575,4 +575,33 @@ async fn lost_hook_events_start_the_status_over_from_what_is_left() {
     assert_eq!(status.progress.and_then(|p| p.percent), Some(50), "the surviving progress");
     assert_eq!(status.busy, None, "the open command went with the lost events");
     assert!(block.commands().await.is_empty(), "no half-seen command was recorded");
+}
+
+#[tokio::test]
+async fn command_output_is_capped_to_its_end() {
+    // 800 lines of 1400 bytes: over 1 MiB, but well inside the scrollback.
+    let script = r#"$|=1; print "\e]133;A\a$ \e]133;B\abig\r\n\e]133;C;cmdline_url=big\a"; for my $i (0..799) { printf "%04d%s\r\n", $i, "x" x 1396 } print "\e]133;D;0\aDONE"; sleep 30"#;
+    let block = Block::spawn("b-big", 500, &["perl", "-e", script]);
+    block.wait_for("DONE").await;
+    let output = block.output(None).await;
+    assert!(output.truncated, "over the cap: {} bytes, starts {:?}", output.text.len(), &output.text[..output.text.len().min(60)]);
+    assert!(output.text.len() <= silo_proto::control::MAX_COMMAND_OUTPUT, "{}", output.text.len());
+    assert!(output.text.len() > silo_proto::control::MAX_COMMAND_OUTPUT - 1500, "{}", output.text.len());
+    assert!(output.text.ends_with(&format!("0799{}", "x".repeat(1396))), "the end is kept");
+    assert!(output.text.starts_with(|c: char| c.is_ascii_digit()), "from a line start");
+
+    // The start scrolled out of the scrollback (10000 lines): the end is left.
+    let script = r#"$|=1; print "\e]133;A\a$ \e]133;B\aseq\r\n\e]133;C;cmdline_url=seq\a"; print "line$_\r\n" for 0..14999; print "\e]133;D;0\aDONE"; sleep 30"#;
+    let block = Block::spawn("b-pruned", 80, &["perl", "-e", script]);
+    block.wait_for("DONE").await;
+    let output = block.output(None).await;
+    assert!(output.truncated, "its start was pruned: {:?}", (output.text.len(), &output.record));
+    assert!(output.text.ends_with("line14998\nline14999"), "{:?}", &output.text[output.text.len().saturating_sub(40)..]);
+    assert!(!output.text.contains("line0\n"));
+
+    let small =
+        Block::spawn("b-small", 80, &["perl", "-e", r#"$|=1; print "\e]133;A\a$ \e]133;B\aone\r\n\e]133;C\aone\r\n\e]133;D;0\aDONE"; sleep 30"#]);
+    small.wait_for("DONE").await;
+    let output = small.output(None).await;
+    assert_eq!((output.text.as_str(), output.truncated), ("one", false));
 }

@@ -73,7 +73,9 @@ void silo_tracked_free(void *ref);
 int silo_vt_row_from_bottom(SiloVt *vt, void *ref, uint32_t *out);
 int silo_vt_track_row(SiloVt *vt, uint32_t from_bottom, uint16_t x, void **out);
 int silo_vt_tracked_column(void *ref, uint16_t *x);
-int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len);
+/* `*cut` is set when `ref` scrolled out of the scrollback: the text then
+ * starts at the top of what is left (empty if `end` went too). */
+int silo_vt_output_text(SiloVt *vt, void *ref, void *end, uint8_t **out, size_t *len, bool *cut);
 /* Returns and clears accumulated bell/title/pwd effects. */
 void silo_vt_events(SiloVt *vt, SiloEvents *out);
 /* Copies and clears the last program clipboard write; returns required length if cap is short. */
