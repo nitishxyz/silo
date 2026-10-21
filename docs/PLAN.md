@@ -356,9 +356,16 @@ until all text, the terminal foreground included, reads at 4.5:1 over the theme 
 
 **Phase 6 — browser blocks** (CEF on macOS, server-held state, tunnels)
 
-**Phase 7 — platform**
-- Lua config/actions, OSC 7501 UI (already parsed by libghostty: `GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS`), agent
-  skill, login server, sharing, iOS.
+**Phase 7 — platform** (see `docs/PHASE7.md`)
+- In order:
+  - access rules: grants `{who, scope, rights}`, one need table, streams included;
+  - one API: every app command is a method, `app.*` forwarded to an app, `silo do` from `api.describe`;
+  - server-side block status (OSC 7501, 9;4, 9/777, 133, RIS);
+  - notifications on every device;
+  - OSC 133 prompt features;
+  - Silo-to-Silo sharing (`silos1` tickets in a URL fragment);
+  - agent safety (approvals, scoped tokens, attribution).
+- Deferred: agent skill, MCP server, Lua config/actions, web client, iOS client, login server.
 
 ---
 
