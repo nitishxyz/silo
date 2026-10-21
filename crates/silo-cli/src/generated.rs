@@ -186,7 +186,7 @@ pub fn build(schema: &Value, args: &[String]) -> anyhow::Result<Value> {
                 None => bail!("unknown flag --{name}; see --help"),
             },
         };
-        let next_is_value = args.get(i).is_some_and(|next| !next.starts_with("--"));
+        let next_is_value = args.get(i).is_some_and(|next| !next.starts_with("--") && (param.kind != Kind::Bool || value(param, next).is_ok()));
         let text = match inline {
             Some(text) => text,
             None if param.kind == Kind::Bool && !json && !next_is_value => "true".to_owned(),
@@ -236,6 +236,12 @@ mod tests {
         assert_eq!(build(&full, &[]).unwrap(), json!({}));
         assert_eq!(build(&full, &args("--on")).unwrap(), json!({"on": true}), "a bare boolean flag");
         assert_eq!(build(&full, &args("--on false --client-id 3")).unwrap(), json!({"on": false, "client_id": 3}));
+        let reload = schema("browser.reload");
+        assert_eq!(
+            build(&reload, &args("--ignore-cache b1")).unwrap(),
+            json!({"ignore_cache": true, "block_id": "b1"}),
+            "a bare flag, then a position"
+        );
 
         let dir = schema("block.focus_dir");
         assert_eq!(build(&dir, &args("b1 left")).unwrap(), json!({"block_id": "b1", "direction": "left"}));

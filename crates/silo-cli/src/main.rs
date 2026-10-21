@@ -388,17 +388,35 @@ fn main() {
     std::process::exit(code);
 }
 
-/// `server.restart`: run this binary again as the same server (fresh, not
-/// taking over: the old one is gone).
+/// `server.restart`: run this binary again as the same server, in this
+/// process (see [`restart_args`]).
 fn restart() -> ! {
     use std::os::unix::process::CommandExt;
-    let args = std::env::args_os().skip(1).filter(|a| a != "--takeover");
+    let args = restart_args(std::env::args_os().skip(1).collect());
     let error = match std::env::current_exe() {
         Ok(exe) => std::process::Command::new(exe).args(args).exec(),
         Err(error) => error,
     };
     eprintln!("silo: restart failed: {error}");
     std::process::exit(1);
+}
+
+/// The `silo server` args a restart runs with: the same server, keeping
+/// this pid (the one launchd or systemd watches). The old server is gone,
+/// so no `--takeover`; this process is already detached, so `--adopt`
+/// (which also takes over a server started meanwhile) instead of a
+/// `--daemon` that would fork it away, with the idle exit `--daemon` gave.
+fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let daemon = args.iter().any(|a| a == "--daemon");
+    let idle_exit = args.iter().any(|a| a == "--idle-exit" || a.to_string_lossy().starts_with("--idle-exit="));
+    let mut out: Vec<_> = args.into_iter().filter(|a| a != "--takeover" && a != "--daemon").collect();
+    if daemon && !out.iter().any(|a| a == "--adopt") {
+        out.push("--adopt".into());
+    }
+    if daemon && !idle_exit {
+        out.extend(["--idle-exit".into(), "10".into()]);
+    }
+    out
 }
 
 /// Detach from the caller: double fork with `setsid`, so the server
@@ -1285,6 +1303,21 @@ mod tests {
         assert_eq!(silo_proto::model::short_client_name(&named), "silo cli · claude-code");
         assert_eq!(silo_proto::model::short_client_name(&agent_client_name(None)), "silo cli");
         assert_eq!(silo_proto::model::short_client_name(&agent_client_name(Some(" \u{202e} "))), "silo cli");
+    }
+
+    #[test]
+    fn a_restart_keeps_its_process_and_server_args() {
+        let restart = |args: &str| {
+            let out = restart_args(args.split_whitespace().map(Into::into).collect());
+            out.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(restart("server --adopt"), "server --adopt", "launchd, systemd");
+        assert_eq!(restart("server --takeover --daemon --idle-exit 0"), "server --idle-exit 0 --adopt", "systemd after a reload");
+        assert_eq!(restart("server --daemon"), "server --adopt --idle-exit 10");
+        assert_eq!(restart("server --port 7000"), "server --port 7000");
+        for args in ["server --adopt", "server --idle-exit 0 --adopt", "server --adopt --idle-exit 10"] {
+            assert!(Cli::try_parse_from(std::iter::once("silo").chain(args.split_whitespace())).is_ok(), "{args}");
+        }
     }
 
     #[test]

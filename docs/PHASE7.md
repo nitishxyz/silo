@@ -763,11 +763,17 @@ has merged.
 - **As built** (where it differs from the plan above):
   - `block.split`'s `axis` stays required: New Pane picks the longer side in the app, from laid-out pixels the server
     does not have. Optional `axis` is additive whenever it lands.
-  - `block.focus_dir` lays the window out as a square with hairline dividers (`layout_ops::neighbour_in`). It gives
-    the app's neighbours for grids and uneven splits, but not for very wide or very tall windows.
-  - `server.restart` stops the server like `server.shutdown`. Then the `silo server` process starts its own binary
-    again with the same args, minus `--takeover`. `force` waits for P7-9. The app's Restart Server still sends
-    `server.shutdown`, so it works with older servers.
+  - `block.focus_dir` lays the window out as a square with hairline dividers (`layout_ops::neighbour_in`). Each
+    part of `neighbour`'s ranking measures one axis, so stretching the window keeps the order: the app's pixel
+    aspect is not needed. Only divider widths differ, by a few pixels.
+  - `server.restart` stops the server like `server.shutdown`, ending its sessions (a live restart is a takeover,
+    `silo up`). Then the `silo server` process execs its own binary again, keeping its pid, so launchd and systemd
+    see no exit and their restart policies never fire. The args are the same minus `--takeover`, and `--daemon`
+    becomes `--adopt` (with `--daemon`'s idle exit): forking again would end the pid systemd follows. A server
+    started in the gap is never doubled: the lock refuses the restarted one, or `--adopt` takes it over. `force`
+    waits for P7-9. The app's Restart Server still sends `server.shutdown`, so it works with older servers.
+  - Only an owner app client is a target: a local client with a token is not, even if it says `role: app`. It would
+    otherwise see other callers' requests (an `app.hosts_add` ticket) and answer them.
   - Activity for targeting is `block.focus`, `own_block take` and data-stream input (marked at most once a second).
   - The app runs a request in its frontmost window, or the frontmost window showing the named `block_id`. It only
     runs requests from the local host's connection.

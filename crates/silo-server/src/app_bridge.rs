@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Server,
+    access::Principal,
     grants::new_id,
     registry::{ClientEntry, Registry},
 };
@@ -42,10 +43,15 @@ pub fn active(reg: &mut Registry, client: ClientId) {
 }
 
 /// Whether `client` can run forwarded requests: a subscribed app on this
-/// server's unix socket that speaks them. A remote server never drives the
-/// user's local app.
+/// server's unix socket, as the user (no token), that speaks them. A
+/// remote server never drives the user's local app, and a token's holder
+/// never sees other callers' requests by claiming to be an app.
 fn eligible(client: &ClientEntry) -> bool {
-    client.role == ClientRole::App && client.origin.is_none() && client.events.is_some() && client.supports(Some(feature::APP_REQUESTS))
+    client.role == ClientRole::App
+        && client.origin.is_none()
+        && client.principal == Principal::Owner
+        && client.events.is_some()
+        && client.supports(Some(feature::APP_REQUESTS))
 }
 
 /// The app a request goes to: `explicit` if given (it must be eligible),
@@ -137,6 +143,23 @@ mod tests {
         active(&mut reg, remote);
         assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
         assert_eq!(target(&reg, Some(remote)).unwrap_err().code, "not_found");
+
+        // Nor is a local app speaking for a token.
+        let token = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
+        reg.clients.get_mut(&token).unwrap().principal = Principal::Grant(Box::new(silo_proto::access::Grant {
+            id: "g".into(),
+            who: silo_proto::access::Who::Secret { kind: silo_proto::access::SecretKind::Token, hash: "h".into() },
+            scope: silo_proto::access::Scope::Server,
+            rights: silo_proto::access::Rights::Control,
+            label: String::new(),
+            created_at: 0,
+            created_by: String::new(),
+            expires_at: None,
+            last_seen: 0,
+        }));
+        active(&mut reg, token);
+        assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
+        assert_eq!(target(&reg, Some(token)).unwrap_err().code, "not_found");
 
         let first = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
         let second = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS]);
