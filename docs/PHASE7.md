@@ -782,6 +782,26 @@ has merged.
   - a foreground child that prints `ESC]133;A` while running stays busy (the ssh case);
   - a command block running `sleep` is busy, and one running `zsh` is not;
   - busy changes emit `block.status` without changing `revision`.
+- **As built** (where it differs from the plan above):
+  - `TerminalCore::server(size)` = `new` + `hook()` (`silo_vt_hook`), not a `hooks` flag on `silo_vt_new`: restored
+    server terminals (`restore_vt`) are hooked the same way.
+  - `VtEvent::Prompt { step, prompt_kind, exit, command, error, row: Option<TrackedRow> }`: rows are tracked at the
+    cursor for C and D only. `TerminalEvents` lost `Clone`/`PartialEq` (it now owns tracked rows).
+  - `Checkpoint.status` is `Option<SavedStatus>` (records, progress, busy, open C mark, `CommandLog`, D and C
+    anchors as `rows_from_bottom` + column), not `Option<StatusState>`. `spawn_resumed` (restart with a fresh
+    shell) runs the exit rule like `spawn_restored`; `spawn_adopted` carries everything, `busy.since` included.
+  - `rows_from_bottom` counts from the primary screen's last row and exists only while the primary screen is
+    active: `COMMAND_END`, `COMMANDS` and checkpoints leave out anchors while the alternate screen is up.
+    `COMMANDS` is sent only when non-empty.
+  - `terminal.command_output` is Ghostty's OUTPUT selection from the C cell, cut before the D cell (Ghostty keeps
+    output semantics until the next A). An A without D drops the running record; a second C replaces it.
+  - "Progress-only" means the records' `(id, state, kind)` and `busy` are unchanged; those changes are coalesced to
+    4/s. A 7501 attention's `title` is the record title (else its app), `body` its message.
+  - `compat::FEATURES` now lists `status` (this server emits the events; this build's clients advertise it).
+    `block.view` returns the block's status.
+  - `blocks.busy` stays with P7-9 (§11); `BlockMsg::Busy` re-probes and answers for it.
+  - The "without marks" busy test runs bash through an rcfile laid out like Silo's hook (a login-shell block,
+    so rule 2 is exercised) rather than `bash --norc` (which would be a command block, rule 3).
 
 **P7-4: shell marks.** After P7-1, in parallel with P7-3.
 - **Files:** `silo-server/src/shell.rs`.

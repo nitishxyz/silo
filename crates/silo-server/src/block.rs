@@ -15,14 +15,28 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{Capture, DesiredSize, HostOffer, OfferSource, OwnMode, SizeInfo},
-    data::{Clip, ClipKind, ClipboardLocation, MAX_CLIP_BYTES, MAX_CLIP_TEXT, Reject, Resume, ServerData, StartMode, Welcome},
+    control::{AttentionReason, Capture, CommandOutput, DesiredSize, HostOffer, OfferSource, OwnMode, RpcError, SizeInfo},
+    data::{
+        Clip, ClipKind, ClipboardLocation, CommandAnchor, CommandEnd, MAX_CLIP_BYTES, MAX_CLIP_TEXT, Reject, Resume, ServerData, StartMode, Welcome,
+    },
     kind,
-    model::{BlockId, BlockInfo, ClientId, CursorShape, Lifecycle, TermSize, TerminalConfig},
+    model::{
+        BlockId, BlockInfo, BlockStatus, Busy, ClientId, CommandRecord, CursorShape, Lifecycle, Progress, StatusKind, StatusState, TermSize,
+        TerminalConfig,
+    },
     offer::{Offer, OfferScanner},
+    text::{MAX_BODY, MAX_TITLE, untrusted},
 };
 use silo_pty::{Pty, PtyEvent, PtyInput, PtySize, SpawnConfig};
-use silo_vt::{ColorScheme, GridSize, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults};
+use silo_vt::{
+    ColorScheme, GridSize, PromptKind, PromptStep, ReportKind, ReportState, RestoreOptions, TerminalColors, TerminalCore, TerminalDefaults,
+    TrackedRow, VtEvent,
+};
+
+use crate::{
+    prompts::CommandLog,
+    status::{self, BusyInputs, PROGRESS_INTERVAL, PROGRESS_TTL, Pacer, Records, Report},
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Raw output kept for resume after short disconnects.
@@ -272,6 +286,25 @@ pub enum BlockMsg {
         bytes: Vec<u8>,
         input: Vec<u8>,
     },
+    /// Mark `done`/`error` records seen (`ids` omitted: all).
+    StatusSeen {
+        ids: Option<Vec<String>>,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
+    /// The last `limit` command records.
+    Commands {
+        limit: Option<u32>,
+        reply: tokio::sync::oneshot::Sender<Vec<CommandRecord>>,
+    },
+    /// A finished command's output (`index` omitted: the last).
+    CommandOutput {
+        index: Option<u64>,
+        reply: tokio::sync::oneshot::Sender<Result<CommandOutput, RpcError>>,
+    },
+    /// Re-probe the foreground and answer whether the block is busy.
+    Busy {
+        reply: tokio::sync::oneshot::Sender<Option<Busy>>,
+    },
     /// Capture a [`Checkpoint`] between mutations.
     Checkpoint {
         reply: tokio::sync::oneshot::Sender<Result<Checkpoint, String>>,
@@ -311,6 +344,41 @@ pub struct Checkpoint {
     /// Started with an explicit command rather than the login shell.
     #[serde(default)]
     pub command: bool,
+    /// Block status and command records (Phase 7 §5.5).
+    #[serde(default)]
+    pub status: Option<SavedStatus>,
+}
+
+/// A command's row in a checkpoint's snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedAnchor {
+    pub record: u64,
+    pub rows_from_bottom: u32,
+    #[serde(default)]
+    pub column: u16,
+}
+
+/// What a [`Checkpoint`] carries of a block's status: everything on a hot
+/// upgrade (the program lives on); a restore without the program runs the
+/// exit rule on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedStatus {
+    #[serde(default)]
+    pub records: Records,
+    #[serde(default)]
+    pub progress: Option<Progress>,
+    #[serde(default)]
+    pub busy: Option<Busy>,
+    /// OSC 133: a command started (C) and has not ended.
+    #[serde(default)]
+    pub marks: Option<String>,
+    #[serde(default)]
+    pub commands: CommandLog,
+    /// Where commands ended (D) and where their output started (C).
+    #[serde(default)]
+    pub ends: Vec<SavedAnchor>,
+    #[serde(default)]
+    pub outputs: Vec<SavedAnchor>,
 }
 
 /// Notifications from block actors to the registry.
@@ -319,6 +387,21 @@ pub enum Note {
     Changed(BlockId),
     Exited(BlockId),
     Bell(BlockId),
+    /// The block's status (`BlockHandle::status`) changed.
+    Status(BlockId),
+    /// Something in the block wants attention; text is sanitized.
+    Attention {
+        block_id: BlockId,
+        reason: AttentionReason,
+        title: String,
+        body: String,
+        at: u64,
+    },
+    /// A command finished (OSC 133 D).
+    CommandFinished {
+        block_id: BlockId,
+        record: CommandRecord,
+    },
     /// A program printed a valid host offer.
     Offer(HostOffer),
     /// Terminal content or configuration changed for the first time since
@@ -329,6 +412,8 @@ pub enum Note {
 pub struct BlockHandle {
     pub tx: mpsc::Sender<BlockMsg>,
     pub info: Arc<Mutex<BlockInfo>>,
+    /// The status last published (never bumps the session revision).
+    pub status: Arc<Mutex<BlockStatus>>,
     /// Runs an explicit command rather than the login shell.
     pub command: bool,
 }
@@ -621,6 +706,60 @@ struct Actor {
     /// (with whether it is only for remote streams).
     clip_sent: Option<Instant>,
     clip_held: Option<(String, bool)>,
+    /// Block status and command records.
+    status: Status,
+    /// What `status` last published.
+    shared_status: Arc<Mutex<BlockStatus>>,
+}
+
+/// Block status and command records (Phase 7 §5, §7.3).
+#[derive(Default)]
+struct Status {
+    records: Records,
+    progress: Option<(Progress, Instant)>,
+    busy: Option<Busy>,
+    /// OSC 133: C without a D, A or RIS since, with its command line.
+    marks: Option<String>,
+    commands: CommandLog,
+    /// Per command index: where its output started (C) and where it ended (D).
+    anchors: HashMap<u64, (Option<TrackedRow>, Option<TrackedRow>)>,
+    pacer: Pacer,
+    /// When status last went out, and whether a progress-only change waits.
+    sent_at: Option<Instant>,
+    pending: bool,
+}
+
+impl Status {
+    /// The status a checkpoint carried, re-pinned on `vt`. Without the
+    /// program (`live` false) the exit rule runs: only done and error
+    /// records stay, and nothing is busy or in progress.
+    fn restore(vt: &mut TerminalCore, saved: Option<SavedStatus>, live: bool) -> Self {
+        let Some(saved) = saved else { return Self::default() };
+        let mut status = Self { records: saved.records, commands: saved.commands, ..Self::default() };
+        if live {
+            status.progress = saved.progress.map(|p| (p, Instant::now()));
+            status.busy = saved.busy;
+            status.marks = saved.marks;
+        } else {
+            status.records.settle();
+            status.commands.abandon();
+        }
+        let running = status.commands.running();
+        let keep = |record: u64| status.commands.indexes().any(|i| i == record) || running == Some(record);
+        let kept: Vec<(bool, SavedAnchor)> =
+            saved.ends.iter().map(|a| (true, *a)).chain(saved.outputs.iter().map(|a| (false, *a))).filter(|(_, a)| keep(a.record)).collect();
+        for (end, anchor) in kept {
+            if let Some(row) = vt.track_row(anchor.rows_from_bottom, anchor.column) {
+                let slot = status.anchors.entry(anchor.record).or_default();
+                if end {
+                    slot.1 = Some(row);
+                } else {
+                    slot.0 = Some(row);
+                }
+            }
+        }
+        status
+    }
 }
 
 struct ClipRead {
@@ -739,10 +878,10 @@ fn pty_size(size: TermSize) -> PtySize {
 /// Spawn a terminal block and its actor thread.
 pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let size = TermSize { columns: info.size.columns.clamp(1, 512), rows: info.size.rows.clamp(1, 256), ..info.size };
-    let mut vt = TerminalCore::new(grid(size)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut vt = TerminalCore::server(grid(size)).map_err(|e| anyhow::anyhow!("{e}"))?;
     let terminal = TerminalConfig::default();
     install_config(&mut vt, &terminal);
-    launch(BlockInfo { size, ..info }, vt, terminal, 0, String::new(), config, notes)
+    launch(BlockInfo { size, ..info }, vt, terminal, Carried::default(), config, notes)
 }
 
 /// Rebuild a block from a [`Checkpoint`] around a fresh program: the
@@ -753,14 +892,18 @@ pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>
 /// Fails if the snapshot cannot be restored or the program not spawned.
 pub fn spawn_resumed(info: BlockInfo, checkpoint: Checkpoint, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     let (mut vt, terminal) = restore_vt(&checkpoint)?;
+    // The old program is gone: the exit rule runs. Rows are re-pinned
+    // before the banner moves them.
+    let status = Status::restore(&mut vt, checkpoint.status, false);
     let banner = resume_banner(&mut vt)?;
     vt.write_output(banner.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    drop(vt.take_events());
     let mut info = info;
     info.size = checkpoint.size;
     info.owner = None;
     info.owner_name = None;
     info.exited = None;
-    launch(info, vt, terminal, checkpoint.offset, checkpoint.osc_title, config, notes)
+    launch(info, vt, terminal, Carried { offset: checkpoint.offset, osc_title: checkpoint.osc_title, status }, config, notes)
 }
 
 /// Leave whatever modes the old program set, then a dim separator line
@@ -787,14 +930,21 @@ fn local_time() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
 }
 
-/// Run `config`'s program in a PTY behind `vt`, whose stream starts at
-/// `offset`; `osc_title` is the title until the program sets one.
+/// What a launched block carries over from a checkpoint: where its stream
+/// starts, the title until the program sets one, and its status.
+#[derive(Default)]
+struct Carried {
+    offset: u64,
+    osc_title: String,
+    status: Status,
+}
+
+/// Run `config`'s program in a PTY behind `vt`, carrying `carried` over.
 fn launch(
     mut info: BlockInfo,
     vt: TerminalCore,
     terminal: TerminalConfig,
-    offset: u64,
-    osc_title: String,
+    carried: Carried,
     config: &SpawnConfig,
     notes: UnboundedSender<Note>,
 ) -> anyhow::Result<BlockHandle> {
@@ -809,9 +959,10 @@ fn launch(
     info.lifecycle = Lifecycle::Running;
     let mut actor = Actor::new(&info, vt, terminal, notes);
     actor.gate = gate;
-    actor.ring_start = offset;
-    actor.log.floor = offset;
-    actor.osc_title = osc_title;
+    actor.ring_start = carried.offset;
+    actor.log.floor = carried.offset;
+    actor.osc_title = carried.osc_title;
+    actor.status = carried.status;
     actor.command = !config.command.is_empty() && !crate::shell::is_hooked_login(&config.command);
     actor.pty = Some(pty);
     actor.input = Some(input);
@@ -827,7 +978,8 @@ fn launch(
 /// # Errors
 /// Fails if the snapshot cannot be restored.
 pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
-    let (vt, config) = restore_vt(&checkpoint)?;
+    let (mut vt, config) = restore_vt(&checkpoint)?;
+    let status = Status::restore(&mut vt, checkpoint.status.clone(), false);
     let exited = checkpoint.lifecycle == Lifecycle::Exited;
     let lifecycle = if exited { Lifecycle::Exited } else { Lifecycle::Restored };
     let exit_code = checkpoint.exit_code.filter(|_| exited);
@@ -841,6 +993,7 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
     info.exited = exit_code;
     restore_osc(&mut info, &checkpoint);
     let mut actor = Actor::new(&info, vt, config, notes);
+    actor.status = status;
     actor.lifecycle = lifecycle;
     actor.exit_code = exit_code;
     actor.command = checkpoint.command;
@@ -860,7 +1013,7 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
 /// # Errors
 /// Fails if the snapshot cannot be restored or the PTY not adopted.
 pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Detached, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
-    let (vt, config) = match restore_vt(&checkpoint) {
+    let (mut vt, config) = match restore_vt(&checkpoint) {
         Ok(restored) => restored,
         Err(error) => {
             return Err(AdoptFailed { error, detached: pty }.into());
@@ -869,6 +1022,8 @@ pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Det
     let (tx, rx) = mpsc::channel();
     let gate = Arc::new(ReadGate::default());
     let (pty, input) = adopt_pty(&info.id, pty, &tx, &gate).map_err(|e| AdoptFailed { error: e.error.into(), detached: e.detached })?;
+    // The program lives on: its status carries over as is.
+    let status = Status::restore(&mut vt, checkpoint.status.clone(), true);
     let mut info = info;
     info.size = checkpoint.size;
     info.pid = Some(pty.pid());
@@ -878,6 +1033,7 @@ pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Det
     info.exited = None;
     restore_osc(&mut info, &checkpoint);
     let mut actor = Actor::new(&info, vt, config, notes);
+    actor.status = status;
     actor.epoch = checkpoint.epoch;
     actor.command = checkpoint.command;
     actor.gate = gate;
@@ -937,6 +1093,7 @@ fn restore_vt(checkpoint: &Checkpoint) -> anyhow::Result<(TerminalCore, Terminal
     if vt.restoring() {
         anyhow::bail!("truncated snapshot");
     }
+    vt.hook().map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = checkpoint.config.sanitized();
     install_config(&mut vt, &config);
     if vt.resize(grid(checkpoint.size)).is_err() {
@@ -965,8 +1122,12 @@ fn feed(tx: &mpsc::Sender<BlockMsg>, gate: &ReadGate, event: PtyEvent) {
 fn start(mut actor: Actor, id: &str, tx: mpsc::Sender<BlockMsg>, rx: mpsc::Receiver<BlockMsg>) -> anyhow::Result<BlockHandle> {
     let shared = actor.info.clone();
     let command = actor.command;
+    if let Ok(mut status) = actor.shared_status.lock() {
+        *status = actor.status_now();
+    }
+    let status = actor.shared_status.clone();
     std::thread::Builder::new().name(format!("silo-block-{id}")).spawn(move || actor.run(&rx))?;
-    Ok(BlockHandle { tx, info: shared, command })
+    Ok(BlockHandle { tx, info: shared, status, command })
 }
 
 impl Drop for Actor {
@@ -1023,6 +1184,8 @@ impl Actor {
             next_clip_read: 1,
             clip_sent: None,
             clip_held: None,
+            status: Status::default(),
+            shared_status: Arc::new(Mutex::new(BlockStatus { block_id: info.id.clone(), records: Vec::new(), progress: None, busy: None })),
         }
     }
 
@@ -1080,6 +1243,7 @@ impl Actor {
             self.flush_injects();
             self.flush_input_acks();
             self.flush_clipboard();
+            self.tick_status();
             self.clip_reads.retain(|_, read| !read.reply.is_closed());
             if self.remote_attached() && self.last_mode_poll.elapsed() >= MODE_INTERVAL {
                 self.poll_mode();
@@ -1113,6 +1277,12 @@ impl Actor {
         }
         if let Some(since) = self.held_since {
             timeout = timeout.min(HOLD_LIMIT.saturating_sub(since.elapsed()));
+        }
+        if let (true, Some(sent)) = (self.status.pending, self.status.sent_at) {
+            timeout = timeout.min(PROGRESS_INTERVAL.saturating_sub(sent.elapsed()));
+        }
+        if let Some((_, at)) = self.status.progress {
+            timeout = timeout.min(PROGRESS_TTL.saturating_sub(at.elapsed()));
         }
         timeout
     }
@@ -1271,6 +1441,22 @@ impl Actor {
             BlockMsg::Checkpoint { reply } => {
                 let _ = reply.send(self.checkpoint());
             }
+            BlockMsg::StatusSeen { ids, reply } => {
+                if self.status.records.seen(ids.as_deref()) {
+                    self.publish_status();
+                }
+                let _ = reply.send(());
+            }
+            BlockMsg::Commands { limit, reply } => {
+                let _ = reply.send(self.status.commands.records(limit));
+            }
+            BlockMsg::CommandOutput { index, reply } => {
+                let _ = reply.send(self.command_output(index));
+            }
+            BlockMsg::Busy { reply } => {
+                self.refresh_busy();
+                let _ = reply.send(self.status.busy.clone());
+            }
             BlockMsg::Handoff { .. } | BlockMsg::Shutdown => {}
         }
         false
@@ -1382,7 +1568,229 @@ impl Actor {
             command: self.command,
             osc_title: self.osc_title.clone(),
             osc_pwd: self.osc_pwd.clone(),
+            status: Some(self.saved_status()),
         })
+    }
+
+    /// The status a checkpoint carries, anchors in its snapshot's rows.
+    fn saved_status(&mut self) -> SavedStatus {
+        let (mut ends, mut outputs) = (Vec::new(), Vec::new());
+        for (&record, (output, end)) in &self.status.anchors {
+            for (row, list) in [(output, &mut outputs), (end, &mut ends)] {
+                if let Some(row) = row
+                    && let Some(rows_from_bottom) = self.vt.rows_from_bottom(row)
+                {
+                    list.push(SavedAnchor { record, rows_from_bottom, column: row.column().unwrap_or(0) });
+                }
+            }
+        }
+        ends.sort_by_key(|a| a.record);
+        outputs.sort_by_key(|a| a.record);
+        SavedStatus {
+            records: self.status.records.clone(),
+            progress: self.status.progress.map(|(p, _)| p),
+            busy: self.status.busy.clone(),
+            marks: self.status.marks.clone(),
+            commands: self.status.commands.clone(),
+            ends,
+            outputs,
+        }
+    }
+
+    /// The status as published now.
+    fn status_now(&self) -> BlockStatus {
+        BlockStatus {
+            block_id: self.id.clone(),
+            records: self.status.records.published(),
+            progress: self.status.progress.map(|(p, _)| p),
+            busy: self.status.busy.clone(),
+        }
+    }
+
+    /// Publish the status if it changed: state changes at once,
+    /// progress-only changes at most every [`PROGRESS_INTERVAL`]. Never
+    /// touches the session revision.
+    fn publish_status(&mut self) {
+        let status = self.status_now();
+        let Ok(mut shared) = self.shared_status.lock() else { return };
+        if *shared == status {
+            self.status.pending = false;
+            return;
+        }
+        let states = |s: &BlockStatus| s.records.iter().map(|r| (r.id.clone(), r.state, r.kind)).collect::<Vec<_>>();
+        let urgent = states(&shared) != states(&status) || shared.busy != status.busy;
+        if !urgent && self.status.sent_at.is_some_and(|at| at.elapsed() < PROGRESS_INTERVAL) {
+            self.status.pending = true;
+            return;
+        }
+        *shared = status;
+        drop(shared);
+        self.status.sent_at = Some(Instant::now());
+        self.status.pending = false;
+        self.mark_dirty();
+        let _ = self.notes.send(Note::Status(self.id.clone()));
+    }
+
+    /// Send a coalesced progress change once due; drop stale progress.
+    fn tick_status(&mut self) {
+        if self.status.progress.is_some_and(|(_, at)| at.elapsed() >= PROGRESS_TTL) {
+            self.status.progress = None;
+            self.publish_status();
+        }
+        if self.status.pending && self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) {
+            self.publish_status();
+        }
+    }
+
+    /// Re-read the foreground and publish a change in `busy` (§5.7).
+    fn refresh_busy(&mut self) {
+        let found = match self.pty.as_ref().filter(|_| self.lifecycle.is_running() && !self.child_exited) {
+            Some(pty) => {
+                let pid = pty.pid();
+                let foreground = pty.foreground_pid();
+                status::busy(&BusyInputs {
+                    command_block: self.command,
+                    pid,
+                    pid_name: silo_pty::process_name(pid),
+                    foreground,
+                    foreground_name: foreground.and_then(silo_pty::process_name),
+                    marks: self.status.marks.clone(),
+                })
+            }
+            None => None,
+        };
+        let busy = status::busy_status(found, self.status.busy.as_ref(), now_ms());
+        if busy != self.status.busy {
+            self.status.busy = busy;
+            self.publish_status();
+        }
+    }
+
+    fn attention(&self, reason: AttentionReason, title: String, body: String) {
+        let _ = self.notes.send(Note::Attention { block_id: self.id.clone(), reason, title, body, at: now_ms() });
+    }
+
+    /// Apply the server terminal's hook events in order. Returns the
+    /// commands that ended (D) in this chunk.
+    fn status_events(&mut self, events: Vec<VtEvent>, lost: bool) -> Vec<u64> {
+        if lost {
+            tracing::debug!(block = %self.id, "status events were dropped");
+        }
+        let mut ended = Vec::new();
+        let mut changed = false;
+        let mut marks = false;
+        for event in events {
+            match event {
+                VtEvent::Status { state: ReportState::Clear, id, .. } => changed |= self.status.records.clear(&id),
+                VtEvent::Status { state, kind, progress, id, app, title, message } => {
+                    let state = match state {
+                        ReportState::Idle => StatusState::Idle,
+                        ReportState::Working => StatusState::Working,
+                        ReportState::Done => StatusState::Done,
+                        ReportState::Blocked => StatusState::Blocked,
+                        ReportState::Error => StatusState::Error,
+                        ReportState::Clear | ReportState::Unknown => StatusState::Unknown,
+                    };
+                    let kind = match kind {
+                        ReportKind::None => None,
+                        ReportKind::Permission => Some(StatusKind::Permission),
+                        ReportKind::Question => Some(StatusKind::Question),
+                        ReportKind::Auth => Some(StatusKind::Auth),
+                        ReportKind::Unknown => Some(StatusKind::Unknown),
+                    };
+                    let heading = untrusted(if title.trim().is_empty() { &app } else { &title }, MAX_TITLE);
+                    let body = untrusted(&message, silo_proto::text::MAX_MESSAGE);
+                    let report = Report { id, state: Some(state), kind, progress, app, title, message };
+                    if let Some(reason) = self.status.records.report(report, now_ms()) {
+                        self.attention(reason, heading, body);
+                    }
+                    changed = true;
+                }
+                VtEvent::Progress { state, percent } => {
+                    self.status.progress = status::progress(state, percent).map(|p| (p, Instant::now()));
+                    changed = true;
+                }
+                VtEvent::Notify { title, body } => {
+                    if self.status.pacer.allow(Instant::now()) {
+                        self.attention(AttentionReason::Notification, untrusted(&title, MAX_TITLE), untrusted(&body, MAX_BODY));
+                    }
+                }
+                VtEvent::Prompt { step: PromptStep::PromptStart, prompt_kind: PromptKind::Primary, .. } => {
+                    changed |= self.status.records.settle();
+                    changed |= self.status.progress.take().is_some();
+                    if let Some(index) = self.status.commands.abandon() {
+                        self.status.anchors.remove(&index);
+                    }
+                    marks |= self.status.marks.take().is_some();
+                }
+                VtEvent::Prompt { step: PromptStep::OutputStart, command, row, .. } => {
+                    if let Some(index) = self.status.commands.abandon() {
+                        self.status.anchors.remove(&index);
+                    }
+                    let index = self.status.commands.start(&command, now_ms());
+                    self.status.anchors.insert(index, (row, None));
+                    self.status.marks = Some(command);
+                    marks = true;
+                }
+                VtEvent::Prompt { step: PromptStep::CommandEnd, exit, row, .. } => {
+                    let (record, evicted) = self.status.commands.end(exit, now_ms());
+                    for index in evicted {
+                        self.status.anchors.remove(&index);
+                    }
+                    self.status.anchors.entry(record.index).or_default().1 = row;
+                    ended.push(record.index);
+                    let _ = self.notes.send(Note::CommandFinished { block_id: self.id.clone(), record });
+                    marks |= self.status.marks.take().is_some();
+                }
+                VtEvent::Prompt { .. } => {}
+                VtEvent::Reset => {
+                    // RIS also clears the title and cwd, which upstream does
+                    // not report through the change callbacks.
+                    self.status.records.clear("");
+                    self.status.progress = None;
+                    self.status.marks = None;
+                    self.status.commands.abandon();
+                    self.status.anchors.clear();
+                    ended.clear();
+                    self.osc_title.clear();
+                    self.osc_pwd = None;
+                    self.probe();
+                    changed = true;
+                    marks = true;
+                }
+            }
+        }
+        if marks {
+            self.refresh_busy();
+        }
+        if changed {
+            self.publish_status();
+        }
+        ended
+    }
+
+    fn command_output(&mut self, index: Option<u64>) -> Result<CommandOutput, RpcError> {
+        let record = self.status.commands.finished(index).cloned().ok_or_else(|| RpcError::not_found("no such finished command"))?;
+        let text = match self.status.anchors.get(&record.index) {
+            Some((Some(row), end)) => self.vt.output_text(row, end.as_ref()).map_err(|e| RpcError::internal(e.to_string()))?,
+            _ => String::new(),
+        };
+        Ok(CommandOutput { text, record })
+    }
+
+    /// Row anchors of finished commands still in the terminal.
+    fn command_anchors(&mut self) -> Vec<CommandAnchor> {
+        let mut anchors: Vec<CommandAnchor> = self
+            .status
+            .anchors
+            .iter()
+            .filter_map(|(&record, (_, end))| {
+                let rows_from_bottom = self.vt.rows_from_bottom(end.as_ref()?)?;
+                Some(CommandAnchor { record, rows_from_bottom })
+            })
+            .collect();
+        anchors.sort_by_key(|a| a.record);
+        anchors
     }
 
     /// Program output: host offers are taken out before it is applied.
@@ -1441,6 +1849,15 @@ impl Actor {
         if let Ok(events) = self.vt.take_events() {
             if events.bells > 0 {
                 let _ = self.notes.send(Note::Bell(self.id.clone()));
+            }
+            let ended = self.status_events(events.vt, events.lost);
+            // After the whole chunk: the same line in every mirror.
+            let end = self.ring_end();
+            for record in ended {
+                let row = self.status.anchors.get(&record).and_then(|(_, end)| end.as_ref());
+                if let Some(rows_from_bottom) = row.and_then(|row| self.vt.rows_from_bottom(row)) {
+                    self.broadcast(&ServerData::CommandEnd(CommandEnd { offset: end, record, rows_from_bottom }));
+                }
             }
             for (_, text) in events.clipboard {
                 self.clipboard_write(text);
@@ -1732,6 +2149,10 @@ impl Actor {
             // The snapshot already reflects the current configuration.
             sub.send(ServerData::Configured(self.config).to_frame());
             sub.send(ServerData::SnapshotHead(head).to_frame());
+            let anchors = self.command_anchors();
+            if !anchors.is_empty() {
+                sub.send(ServerData::Commands(anchors).to_frame());
+            }
             sub.send_bulk(Out::History { bytes: history, pos: 0 });
             sub.send(ServerData::SnapshotDone.to_frame());
         }
@@ -1835,6 +2256,7 @@ impl Actor {
     fn probe(&mut self) {
         self.last_probe = Instant::now();
         // A dead child has no foreground process to inspect.
+        self.refresh_busy();
         let Some(pty) = self.pty.as_ref().filter(|_| !self.child_exited) else {
             return;
         };
@@ -1889,6 +2311,15 @@ impl Actor {
             info.exited = code;
             info.lifecycle = Lifecycle::Exited;
         }
+        // The exit rule: running work is over, results stay until seen.
+        self.status.records.settle();
+        self.status.progress = None;
+        self.status.marks = None;
+        self.status.busy = None;
+        if let Some(index) = self.status.commands.abandon() {
+            self.status.anchors.remove(&index);
+        }
+        self.publish_status();
         let _ = self.notes.send(Note::Exited(self.id.clone()));
     }
 }

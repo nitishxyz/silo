@@ -629,8 +629,11 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             to_value(reg.issue_ticket(client_id, &block_id, rights)?)
         }
         Method::BlockView { block_id } => {
-            let block = server.registry.lock().unwrap().block_info(&block_id).ok_or_else(|| RpcError::not_found(format!("block {block_id}")))?;
-            to_value(BlockView { block, status: None })
+            let reg = server.registry.lock().unwrap();
+            let block = reg.block_info(&block_id).ok_or_else(|| RpcError::not_found(format!("block {block_id}")))?;
+            let status = reg.block_status(&block_id);
+            drop(reg);
+            to_value(BlockView { block, status })
         }
         Method::BrowserNavigate { block_id, url } => browser(server, &block_id, BrowserCommand::Navigate { url }),
         Method::BrowserBack { block_id } => browser(server, &block_id, BrowserCommand::Back),

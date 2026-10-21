@@ -15,9 +15,10 @@ use silo_proto::{
     data::ticket_hex,
     kind,
     model::{
-        Axis, BlockId, BlockInfo, BlockKind, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary,
-        SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
+        AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle, SessionId,
+        SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
     },
+    text::{MAX_TITLE, untrusted},
 };
 use silo_pty::SpawnConfig;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
@@ -289,6 +290,8 @@ pub struct Registry {
     /// Scopes of sessions and blocks closed since last taken: their grants
     /// go (see `Server::settle_grants`).
     pub gone: Vec<Scope>,
+    /// Attention counts per session as last sent in `sessions.changed`.
+    attention: HashMap<SessionId, AttentionCounts>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -319,6 +322,7 @@ impl Registry {
             parked: HashMap::new(),
             keep_session: false,
             gone: Vec::new(),
+            attention: HashMap::new(),
         }
     }
 
@@ -604,9 +608,38 @@ impl Registry {
                 blocks: s.blocks().len(),
                 attached_clients: 0,
                 created_at: s.created_at,
-                attention: Default::default(),
+                attention: self.attention_counts(s),
             })
             .collect()
+    }
+
+    /// Status records per state across `session`'s blocks.
+    fn attention_counts(&self, session: &Session) -> AttentionCounts {
+        let statuses: Vec<BlockStatus> = session.blocks().iter().filter_map(|b| self.block_status(b)).collect();
+        crate::status::counts(statuses.iter().flat_map(|s| &s.records))
+    }
+
+    /// A terminal block's status, when it has any.
+    pub fn block_status(&self, id: &str) -> Option<BlockStatus> {
+        let Some(Block::Terminal(handle)) = self.blocks.get(id) else { return None };
+        let status = handle.status.lock().ok()?.clone();
+        (!status.records.is_empty() || status.progress.is_some() || status.busy.is_some()).then_some(status)
+    }
+
+    /// A block published a new status: send it, and the session summaries
+    /// when its counts changed (never on progress alone; no revision bump).
+    fn status_changed(&mut self, id: &str) {
+        let Some(Block::Terminal(handle)) = self.blocks.get(id) else { return };
+        let Ok(status) = handle.status.lock().map(|s| s.clone()) else { return };
+        self.emit(Event::BlockStatus { status });
+        let Ok((si, _)) = self.locate(id) else { return };
+        let counts = self.attention_counts(&self.sessions[si]);
+        let session = self.sessions[si].id.clone();
+        if self.attention.get(&session).copied().unwrap_or_default() != counts {
+            self.attention.insert(session, counts);
+            let sessions = self.summaries();
+            self.emit(Event::SessionsChanged { sessions });
+        }
     }
 
     /// [`Self::summaries`] of the sessions `principal` sees.
@@ -625,7 +658,8 @@ impl Registry {
     pub fn view(&self, id: &str) -> Result<SessionView, RpcError> {
         let session = self.session(id)?;
         let blocks = session.blocks().iter().filter_map(|b| self.block_info(b)).collect();
-        Ok(SessionView { session: session.info(), blocks, status: Vec::new(), watchers: self.watchers(&session.id) })
+        let status = session.blocks().iter().filter_map(|b| self.block_status(b)).collect();
+        Ok(SessionView { session: session.info(), blocks, status, watchers: self.watchers(&session.id) })
     }
 
     pub fn block_info(&self, id: &str) -> Option<BlockInfo> {
@@ -1087,6 +1121,18 @@ impl Registry {
                 }
             }
             Note::Bell(id) => self.emit(Event::BlockBell { block_id: id }),
+            Note::Status(id) => self.status_changed(&id),
+            Note::Attention { block_id, reason, title, body, at } => {
+                let Some(session_id) = self.block_session(&block_id) else { return };
+                let session_name = self.session(&session_id).map(|s| s.name.clone()).unwrap_or_default();
+                let block_title = self.block_info(&block_id).map(|i| untrusted(&i.title, MAX_TITLE)).unwrap_or_default();
+                self.emit(Event::BlockAttention { block_id, session_id, session_name, block_title, reason, title, body, at });
+            }
+            Note::CommandFinished { block_id, record } => {
+                if let Some(session_id) = self.block_session(&block_id) {
+                    self.emit(Event::CommandFinished { block_id, session_id, record });
+                }
+            }
             Note::Offer(offer) => self.emit_owner(Event::HostOffered { offer }),
             Note::Dirty(id) => self.mark_block_dirty(&id),
             Note::Exited(id) if self.blocks.get(&id).is_some_and(exited_cleanly) => {
