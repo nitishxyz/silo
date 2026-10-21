@@ -221,6 +221,8 @@ impl Predictor {
             | ServerData::ClipboardWrite { .. }
             | ServerData::ClipboardRead { .. }
             | ServerData::ClipboardReadUnknown { .. }
+            | ServerData::CommandEnd(_)
+            | ServerData::Commands(_)
             | ServerData::Unknown(_) => {}
         }
     }

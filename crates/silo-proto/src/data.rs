@@ -210,6 +210,11 @@ pub enum ServerData {
         request: u64,
         kind: u8,
     },
+    /// A command ended (OSC 133 D) in the `Output` frame just before.
+    CommandEnd(CommandEnd),
+    /// Rows of the commands whose ends are still in the terminal, in the
+    /// coordinates of the snapshot just before.
+    Commands(Vec<CommandAnchor>),
     /// A frame of a newer server; skipped.
     Unknown(u8),
 }
@@ -360,6 +365,8 @@ impl ServerData {
                 Frame::new(kind::CLIPBOARD_READ, payload)
             }
             Self::ClipboardReadUnknown { request, kind: clip } => Frame::new(kind::CLIPBOARD_READ, [&request.to_le_bytes()[..], &[*clip]].concat()),
+            Self::CommandEnd(end) => Frame::json(kind::COMMAND_END, end).expect("command end serializes"),
+            Self::Commands(anchors) => Frame::json(kind::COMMANDS, anchors).expect("commands serialize"),
             Self::Unknown(kind) => Frame::new(*kind, Vec::new()),
         }
     }
@@ -406,6 +413,8 @@ impl ServerData {
                 };
                 Self::ClipboardRead { request, kind: clip }
             }
+            kind::COMMAND_END => Self::CommandEnd(serde_json::from_slice(&p).map_err(|e| invalid(&e.to_string()))?),
+            kind::COMMANDS => Self::Commands(serde_json::from_slice(&p).map_err(|e| invalid(&e.to_string()))?),
             other => Self::Unknown(other),
         })
     }
@@ -479,6 +488,9 @@ mod tests {
             ServerData::ClipboardRead { request: u64::MAX, kind: ClipKind::Image },
             ServerData::ClipboardRead { request: 1, kind: ClipKind::Types },
             ServerData::ClipboardReadUnknown { request: 9, kind: 0x7f },
+            ServerData::CommandEnd(CommandEnd { offset: 12, record: 3, rows_from_bottom: 1 }),
+            ServerData::Commands(vec![CommandAnchor { record: 0, rows_from_bottom: 40 }, CommandAnchor { record: 2, rows_from_bottom: 0 }]),
+            ServerData::Commands(Vec::new()),
         ] {
             assert_eq!(ServerData::from_frame(message.to_frame()).unwrap(), message);
         }

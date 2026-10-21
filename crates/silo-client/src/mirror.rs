@@ -260,6 +260,8 @@ impl Mirror {
             | ServerData::ClipboardWrite { .. }
             | ServerData::ClipboardRead { .. }
             | ServerData::ClipboardReadUnknown { .. }
+            | ServerData::CommandEnd(_)
+            | ServerData::Commands(_)
             | ServerData::Unknown(_) => Ok(Applied::None),
         }
     }
