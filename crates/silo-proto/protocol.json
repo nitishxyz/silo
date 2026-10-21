@@ -513,6 +513,13 @@
             "default": "",
             "type": "string"
           },
+          "created_by_grant": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "expires_at": {
             "default": null,
             "format": "uint64",
@@ -22893,6 +22900,13 @@
                 "default": "",
                 "type": "string"
               },
+              "created_by_grant": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "expires_at": {
                 "default": null,
                 "format": "uint64",
@@ -23465,6 +23479,13 @@
               "created_by": {
                 "default": "",
                 "type": "string"
+              },
+              "created_by_grant": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "expires_at": {
                 "default": null,

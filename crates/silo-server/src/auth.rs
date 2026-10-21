@@ -48,6 +48,9 @@ struct Invite {
     id: String,
     purpose: InvitePurpose,
     expires: Instant,
+    /// The grant of the principal that created it (`None`: the owner);
+    /// the device it pairs is that grant's.
+    created_by_grant: Option<String>,
 }
 
 /// What an authorized remote control hello may do.
@@ -108,9 +111,14 @@ impl Auth {
         self.grants.flush();
     }
 
-    /// A single-use invite valid for `ttl` (1 s ..= [`MAX_INVITE_TTL`]):
-    /// its secret and id.
-    pub fn create_invite(&mut self, ttl: Duration, purpose: InvitePurpose) -> Result<([u8; INVITE_SECRET_LEN], String), RpcError> {
+    /// A single-use invite valid for `ttl` (1 s ..= [`MAX_INVITE_TTL`]),
+    /// created by grant `creator` (`None`: the owner): its secret and id.
+    pub fn create_invite(
+        &mut self,
+        ttl: Duration,
+        purpose: InvitePurpose,
+        creator: Option<&str>,
+    ) -> Result<([u8; INVITE_SECRET_LEN], String), RpcError> {
         if ttl.is_zero() || ttl > MAX_INVITE_TTL {
             return Err(RpcError::bad_request(format!("ttl_secs must be between 1 and {}", MAX_INVITE_TTL.as_secs())));
         }
@@ -119,7 +127,7 @@ impl Auth {
         self.invites.retain(|_, invite| invite.expires > now);
         let secret = rand::random::<[u8; INVITE_SECRET_LEN]>();
         let id = new_id();
-        self.invites.insert(secret, Invite { id: id.clone(), purpose, expires });
+        self.invites.insert(secret, Invite { id: id.clone(), purpose, expires, created_by_grant: creator.map(str::to_owned) });
         Ok((secret, id))
     }
 
@@ -134,11 +142,15 @@ impl Auth {
         let ticket = PairTicket::decode(invite).map_err(|e| RpcError::unauthorized(format!("{e:#}")))?;
         let invite = self.invites.remove(&ticket.secret).filter(|i| i.expires > Instant::now());
         let invite = invite.ok_or_else(|| RpcError::unauthorized("invalid, expired or already used invite"))?;
+        // An invite of a device removed or expired since pairs nothing.
+        let now = unix_secs();
+        if invite.created_by_grant.as_deref().is_some_and(|c| self.grants.get(c).is_none_or(|g| g.expired(now))) {
+            return Err(RpcError::unauthorized("invalid, expired or already used invite"));
+        }
         if invite.purpose == InvitePurpose::Join {
             tracing::info!(peer = endpoint_id, name, "redeemed a join invite");
             return Ok(Admission::Join { invite_id: invite.id });
         }
-        let now = unix_secs();
         let grant = Grant {
             id: new_id(),
             who: Who::Device { id: endpoint_id.to_owned() },
@@ -147,6 +159,7 @@ impl Auth {
             label: name.to_owned(),
             created_at: now,
             created_by: String::new(),
+            created_by_grant: invite.created_by_grant.clone(),
             expires_at: None,
             last_seen: now,
         };
@@ -255,9 +268,9 @@ mod tests {
         let home = PathBuf::from(format!("/tmp/silo-auth-debounce-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut auth = Auth::open(&home).unwrap();
-        assert!(auth.create_invite(Duration::ZERO, InvitePurpose::Device).is_err());
-        assert!(auth.create_invite(MAX_INVITE_TTL + Duration::from_secs(1), InvitePurpose::Device).is_err());
-        let (secret, _) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Device).unwrap();
+        assert!(auth.create_invite(Duration::ZERO, InvitePurpose::Device, None).is_err());
+        assert!(auth.create_invite(MAX_INVITE_TTL + Duration::from_secs(1), InvitePurpose::Device, None).is_err());
+        let (secret, _) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Device, None).unwrap();
         let id = silo_transport::Identity::load_or_create(home.join("peer")).unwrap().id();
         let invite = PairTicket { addr: silo_transport::EndpointAddr::new(id), secret }.encode();
         auth.authorize("dev", "Dev", Some(&invite)).unwrap();
@@ -280,7 +293,7 @@ mod tests {
         let home = PathBuf::from(format!("/tmp/silo-auth-join-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut auth = Auth::open(&home).unwrap();
-        let (secret, id) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Join).unwrap();
+        let (secret, id) = auth.create_invite(Duration::from_secs(60), InvitePurpose::Join, None).unwrap();
         let peer = silo_transport::Identity::load_or_create(home.join("peer")).unwrap().id();
         let invite = PairTicket { addr: silo_transport::EndpointAddr::new(peer), secret }.encode();
         assert_eq!(auth.authorize("dev", "Dev", Some(&invite)).unwrap(), Admission::Join { invite_id: id });
@@ -304,6 +317,7 @@ mod tests {
             label: String::new(),
             created_at: 0,
             created_by: String::new(),
+            created_by_grant: None,
             expires_at: None,
             last_seen: 0,
         };

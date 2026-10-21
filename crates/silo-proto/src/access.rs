@@ -85,6 +85,12 @@ pub struct Grant {
     /// The creating client's label.
     #[serde(default)]
     pub created_by: String,
+    /// The grant whose principal created this one (a paired device that
+    /// minted a link or token, or whose invite paired this device):
+    /// removing or expiring that grant removes this one too. `None` for
+    /// the local owner's grants and for grants from before it was kept.
+    #[serde(default)]
+    pub created_by_grant: Option<String>,
     /// Unix seconds; `None` until revoked.
     #[serde(default)]
     pub expires_at: Option<u64>,

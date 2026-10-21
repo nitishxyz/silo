@@ -52,6 +52,7 @@ fn device_grant(device: PairedDevice) -> Grant {
         label: device.name,
         created_at: device.paired_at,
         created_by: String::new(),
+        created_by_grant: None,
         expires_at: None,
         last_seen: device.last_seen,
     }
@@ -138,10 +139,20 @@ impl Grants {
         Ok(())
     }
 
-    /// Remove the grants `remove` selects; the removed ones.
+    /// Remove the grants `remove` selects and, transitively, every grant
+    /// one of them created (`created_by_grant`); the removed ones.
     pub fn remove_where(&mut self, remove: impl Fn(&Grant) -> bool) -> Result<Vec<Grant>, RpcError> {
         let before = self.grants.clone();
-        let (gone, kept): (Vec<Grant>, Vec<Grant>) = std::mem::take(&mut self.grants).into_iter().partition(|g| remove(g));
+        let (mut gone, mut kept): (Vec<Grant>, Vec<Grant>) = std::mem::take(&mut self.grants).into_iter().partition(|g| remove(g));
+        let mut from = 0;
+        while from < gone.len() {
+            let ids: Vec<String> = gone[from..].iter().map(|g| g.id.clone()).collect();
+            from = gone.len();
+            let (created, rest): (Vec<Grant>, Vec<Grant>) =
+                kept.into_iter().partition(|g| g.created_by_grant.as_ref().is_some_and(|c| ids.contains(c)));
+            gone.extend(created);
+            kept = rest;
+        }
         self.grants = kept;
         if gone.is_empty() {
             return Ok(gone);
@@ -197,6 +208,38 @@ mod tests {
         assert_eq!(merged.devices(), rewritten);
         assert_eq!(merged.all()[..2], *grants.all());
         assert!(!dir.join(DEVICES_FILE).exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn removing_a_grant_removes_what_it_created_transitively() {
+        let home = PathBuf::from(format!("/tmp/silo-grants-cascade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("state");
+        let mut grants = Grants::open(&dir, HostKey::load_or_create(&dir).unwrap()).unwrap();
+        let grant = |id: &str, by: Option<&str>| Grant {
+            id: id.into(),
+            who: Who::Secret { kind: SecretKind::Link, hash: id.into() },
+            scope: Scope::Server,
+            rights: Rights::View,
+            label: String::new(),
+            created_at: 0,
+            created_by: String::new(),
+            created_by_grant: by.map(Into::into),
+            expires_at: None,
+            last_seen: 0,
+        };
+        // a ← b ← c (a created b, b created c); d is the owner's; e is from
+        // before creators were kept.
+        for g in [grant("a", None), grant("b", Some("a")), grant("c", Some("b")), grant("d", None), grant("e", None)] {
+            grants.add(g).unwrap();
+        }
+        let gone: Vec<String> = grants.remove_where(|g| g.id == "a").unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(gone, ["a", "b", "c"]);
+        let kept: Vec<&str> = grants.all().iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(kept, ["d", "e"]);
+        let reopened = Grants::open(&dir, HostKey::load_or_create(&dir).unwrap()).unwrap();
+        assert_eq!(reopened.all(), grants.all(), "saved");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -263,6 +263,7 @@ mod tests {
             label: String::new(),
             created_at: 0,
             created_by: String::new(),
+            created_by_grant: None,
             expires_at: None,
             last_seen: 0,
         }))

@@ -458,6 +458,7 @@ fn grant_create(
         label: label.map(|l| silo_proto::text::untrusted(&l, silo_proto::text::MAX_TITLE)).unwrap_or_default(),
         created_at: now,
         created_by,
+        created_by_grant: ctx.principal.grant_id().map(str::to_owned),
         expires_at: ttl.map(|t| now + t),
         last_seen: 0,
     };
@@ -668,7 +669,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             if addr.is_empty() {
                 return Err(RpcError::new("offline", "the server has no relay or direct address yet; retry"));
             }
-            let (secret, invite_id) = server.auth().create_invite(ttl, purpose)?;
+            let (secret, invite_id) = server.auth().create_invite(ttl, purpose, ctx.principal.grant_id())?;
             let ticket = silo_transport::PairTicket { addr, secret }.encode();
             to_value(PairInvite { invite_id, ticket, expires_in_secs: ttl_secs })
         }

@@ -11,13 +11,17 @@ use std::{
 
 use silo_client::{Control, DataStream, Events};
 use silo_proto::{
-    access::{Rights, Scope},
-    control::{Caller, Capture, ClientRole, Created, Event, GrantCreated, GrantKind, InvitePurpose, Method, PairInvite, Pasted, RpcError, SpawnSpec},
+    Frame,
+    access::{Grant, Rights, Scope, Who},
+    control::{
+        Caller, Capture, ClientHello, ClientRole, Created, Event, GrantCreated, GrantKind, Grants, InvitePurpose, Method, PairInvite, Pasted,
+        RpcError, ServerHello, SpawnSpec,
+    },
     data::ClipKind,
-    paths,
+    kind, paths, read_frame, write_frame,
 };
 use silo_transport::{Conn, EndpointAddr, Identity, Net, PairTicket, RelayConfig};
-use tokio::{task::JoinHandle, time::timeout};
+use tokio::{io::AsyncWriteExt, task::JoinHandle, time::timeout};
 
 const T: Duration = Duration::from_secs(10);
 
@@ -61,6 +65,16 @@ async fn as_role<T>(role: ClientRole, connect: impl std::future::Future<Output =
 /// A connection saying `role`.
 async fn connect(home: &Path, role: ClientRole) -> (Control, Events) {
     as_role(role, Control::connect(&paths::socket(home), "approval-test")).await.unwrap()
+}
+
+/// A local connection with agent token `token` (as process-wide as the
+/// role, so under the same lock).
+async fn connect_token(home: &Path, token: &str) -> Control {
+    let _one = ROLE.lock().await;
+    silo_client::set_token(Some(token.to_owned()));
+    let connected = Control::connect(&paths::socket(home), "approval-token").await;
+    silo_client::set_token(None);
+    connected.unwrap().0
 }
 
 fn pair() -> Method {
@@ -405,6 +419,72 @@ async fn a_device_s_calls_are_approved_at_that_device() {
 
     drop((cli, fake_app, other_app, mac_app, local));
     for net in [mac_net, other_net, cli_net, fake_net, up_net] {
+        net.close().await.unwrap();
+    }
+    host_app.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(host_app);
+    timeout(T, task).await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Removing a device removes what it created: the token and the link it
+/// minted, with their connections. Its token mints nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_device_takes_its_grants_with_it() {
+    let home = temp_home("cascade");
+    let task = start(&home).await;
+    // The owner's app, unsubscribed: the device's own app is the approver.
+    let (host_app, _) = connect(&home, ClientRole::App).await;
+    let mac = Identity::load_or_create(home.join("device-mac")).unwrap();
+    let (mac_net, mac_app, mut mac_events, addr) = device_app(&host_app, &mac, "Ana's Mac").await;
+    let (cli_net, cli, _) = speaking_for(&mac, &addr, ClientRole::Cli).await;
+    let list = || async { host_app.call::<Grants>(Method::GrantList {}).await.unwrap().grants };
+    let device: Grant = list().await.into_iter().find(|g| g.who == Who::Device { id: mac_net.id().to_string() }).unwrap();
+
+    let mut approved = async |method: Method| -> GrantCreated {
+        let call = tokio::spawn({
+            let cli = cli.clone();
+            async move { cli.call::<GrantCreated>(method).await }
+        });
+        let (id, ..) = requested_by(&mut mac_events).await;
+        mac_app.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
+        timeout(T, call).await.unwrap().unwrap().unwrap()
+    };
+    let grant = |kind, rights| Method::GrantCreate { scope: Scope::Server, rights, kind, ttl_secs: None, label: None };
+    let token = approved(grant(GrantKind::Token, Rights::Interact)).await;
+    let link = approved(grant(GrantKind::Link, Rights::View)).await;
+    for created in [&token, &link] {
+        assert_eq!(created.grant.created_by_grant.as_deref(), Some(device.id.as_str()), "the device is recorded as creator");
+    }
+    let owners: GrantCreated = host_app.call(grant(GrantKind::Token, Rights::View)).await.unwrap();
+    assert_eq!(owners.grant.created_by_grant, None, "the owner's grants have no creator");
+
+    // The token creates nothing.
+    let agent = connect_token(&home, &token.secret).await;
+    for method in [grant(GrantKind::Token, Rights::View), Method::PairCreate { ttl_secs: 60, purpose: InvitePurpose::Device }] {
+        assert_eq!(code(agent.call_value(method).await.unwrap_err()).code, RpcError::FORBIDDEN);
+    }
+    assert!(cards(&mut mac_events).await.is_empty(), "nobody is asked for a token");
+
+    // The link, used over iroh.
+    let viewer_net = Net::bind(&Identity::ephemeral(), RelayConfig::Disabled, false).await.unwrap();
+    let viewer = timeout(T, viewer_net.dial(addr.clone())).await.unwrap().unwrap();
+    let mut stream = viewer.open_stream().await.unwrap();
+    let hello = ClientHello { grant: Some(link.secret.clone()), ..ClientHello::ours("viewer", false, None) };
+    write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
+    stream.flush().await.unwrap();
+    let reply = timeout(T, read_frame(&mut stream)).await.unwrap().unwrap().expect("hello reply");
+    assert_eq!(reply.kind, kind::CONTROL_HELLO, "link admitted");
+    let _: ServerHello = reply.parse().unwrap();
+
+    host_app.call_value(Method::PairRevoke { id: mac_net.id().to_string() }).await.unwrap();
+    timeout(T, agent.closed()).await.expect("the device's token's connection closes");
+    timeout(T, viewer.closed()).await.expect("the device's link's connection closes");
+    let left: Vec<String> = list().await.into_iter().map(|g| g.id).collect();
+    assert_eq!(left, [owners.grant.id], "the device's grants are gone, the owner's stay");
+
+    drop((cli, mac_app, agent, stream));
+    for net in [mac_net, cli_net, viewer_net] {
         net.close().await.unwrap();
     }
     host_app.call_value(Method::ServerShutdown {}).await.unwrap();
