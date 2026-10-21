@@ -1112,7 +1112,17 @@ async fn down(yes: bool) -> anyhow::Result<i32> {
                 [only] => Some(control.call::<SessionView>(Method::SessionView { session_id: only.id.clone() }).await?),
                 _ => None,
             };
-            Some(silo_cli::sessions_to_end(&sessions, view.as_ref(), std::env::var("SHELL").ok().as_deref()))
+            let mut count = silo_cli::sessions_to_end(&sessions, view.as_ref(), std::env::var("SHELL").ok().as_deref());
+            // An idle-looking default session may still run a program;
+            // then the stop below (forced) must be confirmed too.
+            if count == 0 && control.peer_supports(silo_proto::compat::feature::CLOSE_GUARD) {
+                let busy: silo_proto::control::BusyBlocks =
+                    control.call(Method::BlocksBusy { session_id: None, window_id: None, block_ids: None }).await?;
+                if !busy.busy.is_empty() {
+                    count = sessions.len();
+                }
+            }
+            Some(count)
         }
         (None, service::Server::Other) => silo_client::mismatch::inspect(&paths::home()).await.sessions,
         (None, service::Server::Unresponsive) => None,

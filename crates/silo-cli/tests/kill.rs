@@ -4,9 +4,12 @@
 
 use std::{
     io::{Read, Write},
-    os::fd::{FromRawFd, OwnedFd},
+    os::{
+        fd::{FromRawFd, OwnedFd},
+        unix::process::CommandExt,
+    },
     path::{Path, PathBuf},
-    process::{Output, Stdio},
+    process::{Child, Output, Stdio},
     time::Duration,
 };
 
@@ -49,20 +52,67 @@ async fn silo(home: &Path, args: &[&str]) -> Output {
     .unwrap()
 }
 
-/// `silo args…` on a pseudo-terminal: once `prompt` is shown, type
-/// `answer`. Returns its exit code and everything it printed.
-async fn silo_on_a_pty(home: &Path, args: &[&str], prompt: &'static str, answer: &'static str) -> (i32, String) {
+/// A `silo server` process: `kill-server` waits for the server's exit.
+/// SIGTERMed on drop, should a test fail first.
+struct ServerProcess(Child);
+
+impl ServerProcess {
+    async fn start(home: &Path) -> Self {
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
+            .args(["server", "--idle-exit", "0"])
+            .env("SILO_HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let server = Self(child);
+        tokio::time::timeout(T, async {
+            while !silo_client::server_running(home).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("server did not start");
+        server
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            // SAFETY: signalling our own child.
+            unsafe { libc::kill(self.0.id() as i32, libc::SIGTERM) };
+            let _ = self.0.wait();
+        }
+    }
+}
+
+/// `silo args…` on a pseudo-terminal, its controlling terminal (stderr
+/// too, unless `quiet`: then to /dev/null): once `prompt` is shown, type
+/// `answer`. Returns its exit code and everything shown.
+async fn silo_on_a_pty(home: &Path, args: &[&str], quiet: bool, prompt: &'static str, answer: &'static str) -> (i32, String) {
     let (home, args) = (home.to_owned(), args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>());
     tokio::task::spawn_blocking(move || {
         let (mut master, slave) = openpty();
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
-            .args(&args)
-            .env("SILO_HOME", &home)
-            .stdin(slave.try_clone().unwrap())
-            .stdout(slave.try_clone().unwrap())
-            .stderr(slave)
-            .spawn()
-            .unwrap();
+        let stderr = if quiet { Stdio::null() } else { slave.try_clone().unwrap().into() };
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_silo"));
+        command.args(&args).env("SILO_HOME", &home).stdin(slave.try_clone().unwrap()).stdout(slave).stderr(stderr);
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                // A session of its own, with the pty (stdin) as its
+                // controlling terminal: what `/dev/tty` opens.
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        // Close our copies of the slave, so the master reads EOF once the
+        // child is gone.
+        drop(command);
         let mut seen = String::new();
         let mut buf = [0u8; 4096];
         while !seen.contains(prompt) {
@@ -72,15 +122,16 @@ async fn silo_on_a_pty(home: &Path, args: &[&str], prompt: &'static str, answer:
             }
         }
         master.write_all(answer.as_bytes()).unwrap();
-        let status = child.wait().unwrap();
-        // The child is gone: read what is left until the slave side closes.
+        // Read until the child closes the terminal (EOF, or EIO on
+        // macOS) before reaping it: a session leader's exit waits for its
+        // terminal's output to drain.
         while let Ok(n) = master.read(&mut buf) {
             if n == 0 {
                 break;
             }
             seen.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
-        (status.code().unwrap_or(-1), seen)
+        (child.wait().unwrap().code().unwrap_or(-1), seen)
     })
     .await
     .unwrap()
@@ -153,12 +204,13 @@ async fn kill_on_a_terminal_asks_and_keeps_the_session_by_default() {
     let (created, title) = busy_session(&control).await;
     const PROMPT: &str = "Close anyway? [y/N] ";
 
-    let (code, shown) = silo_on_a_pty(&home, &["kill", &created.session_id], PROMPT, "\n").await;
+    let (code, shown) = silo_on_a_pty(&home, &["kill", &created.session_id], false, PROMPT, "\n").await;
     assert_eq!(code, 1, "{shown}");
     assert!(shown.contains(&format!("silo: sleep is running in '{title}'")), "{shown}");
     assert!(exists(&control, &created.block_id).await, "Enter keeps it");
 
-    let (code, shown) = silo_on_a_pty(&home, &["kill", &created.session_id], PROMPT, "y\n").await;
+    // The question goes to the terminal even with stderr redirected.
+    let (code, shown) = silo_on_a_pty(&home, &["kill", &created.session_id], true, PROMPT, "y\n").await;
     assert_eq!(code, 0, "{shown}");
     assert!(!exists(&control, &created.block_id).await, "y closes it");
 
@@ -170,7 +222,7 @@ async fn kill_on_a_terminal_asks_and_keeps_the_session_by_default() {
 #[tokio::test(flavor = "multi_thread")]
 async fn generated_closes_and_kill_server_take_force() {
     let home = temp_home("server");
-    let task = start(&home).await;
+    let server = ServerProcess::start(&home).await;
     let (control, _events) = Control::connect(&paths::socket(&home), "test").await.unwrap();
     let (first, title) = busy_session(&control).await;
     let (second, _) = busy_session(&control).await;
@@ -186,21 +238,17 @@ async fn generated_closes_and_kill_server_take_force() {
     assert_eq!(refused.status.code(), Some(1));
     assert!(stderr(&refused).ends_with("; pass --force to close it anyway\n"), "{}", stderr(&refused));
     assert!(exists(&control, &second.block_id).await, "still running");
-    let mut forced = std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
-        .args(["kill-server", "--force"])
-        .env("SILO_HOME", &home)
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(T, task).await.expect("the server stopped").unwrap();
-    // The CLI then waits for its connection to close, which only the
-    // server process's exit does: this server is a task of the test's.
-    // SAFETY: signalling our own child.
-    unsafe { libc::kill(forced.id() as i32, libc::SIGTERM) };
-    let _ = forced.wait();
-    let mut text = String::new();
-    forced.stderr.take().unwrap().read_to_string(&mut text).unwrap();
-    assert!(!text.contains("pass --force"), "{text}");
+    // A `silo server` process asks for an approval: on a terminal of
+    // its own, the CLI confirms it there.
+    let (code, shown) = silo_on_a_pty(&home, &["kill-server", "--force"], false, "Allow? [y/N] ", "y\n").await;
+    assert_eq!(code, 0, "{shown}");
+    assert!(!shown.contains("Close anyway?"), "forced: {shown}");
+    let status = tokio::task::spawn_blocking(move || {
+        let mut server = server;
+        server.0.wait().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(status.success(), "the server exited: {status}");
     let _ = std::fs::remove_dir_all(home);
 }

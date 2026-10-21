@@ -1,6 +1,8 @@
 //! Confirm before closing busy blocks (Phase 7 §7.5): `blocks.busy` and
 //! the check run before every close.
 
+use std::time::Duration;
+
 use silo_proto::{
     compat::feature,
     control::{BusyBlock, BusyBlocks, Method, RpcError},
@@ -18,6 +20,10 @@ use crate::{
 
 /// Programs named in a refusal's message; the rest are counted.
 const NAMED: usize = 3;
+
+/// How long a close waits for the fresh probes. A block whose actor has
+/// not answered by then counts as its last published status says.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A block a close would end, located in the tree.
 struct Target {
@@ -136,6 +142,9 @@ fn tree(reg: &Registry) -> Vec<Target> {
 
 /// Ask each terminal target's actor, which re-probes its foreground
 /// first, whether it is busy. All are asked before any answer is awaited.
+/// An actor that does not answer within [`PROBE_TIMEOUT`] (all share the
+/// deadline) is taken at its last published status, so a stuck block
+/// cannot hang the close.
 async fn probe(server: &Server, targets: Vec<Target>) -> Vec<BusyBlock> {
     let asked: Vec<_> = {
         let reg = server.registry.lock().unwrap();
@@ -146,14 +155,19 @@ async fn probe(server: &Server, targets: Vec<Target>) -> Vec<BusyBlock> {
                 let title = handle.info.lock().unwrap().title.clone();
                 let (reply, rx) = tokio::sync::oneshot::channel();
                 handle.send(BlockMsg::Busy { reply });
-                Some((t, title, rx))
+                Some((t, title, handle.status.clone(), rx))
             })
             .collect()
     };
+    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
     let mut busy = Vec::new();
-    for (t, title, rx) in asked {
-        // An actor gone meanwhile ended its program.
-        if let Ok(Some(found)) = rx.await {
+    for (t, title, status, rx) in asked {
+        let found = match tokio::time::timeout_at(deadline, rx).await {
+            // An actor gone meanwhile ended its program.
+            Ok(answer) => answer.ok().flatten(),
+            Err(_) => status.lock().unwrap().busy.clone(),
+        };
+        if let Some(found) = found {
             busy.push(BusyBlock {
                 block_id: t.block_id,
                 session_id: t.session_id,

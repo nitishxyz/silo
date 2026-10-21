@@ -1025,8 +1025,10 @@ has merged.
     approval; that is rare and is the guard's purpose. The CLI's order matches: `guarded` (busy → y/N → `force`)
     wraps `confirmed` (approval), so the busy question comes first.
   - `close_guard::check` is async (it awaits the `BlockMsg::Busy` replies; every actor is asked before any answer is
-    awaited). Targets are the tree's blocks: the block, the window's tiled blocks and floats, the session's, or
-    every session's. An unknown id passes to the handler, which reports `not_found`.
+    awaited). The replies share a 2 s deadline: an actor that has not answered by then counts as its last published
+    status (the 400 ms probe's), so a stuck block cannot hang a close. Targets are the tree's blocks: the block, the
+    window's tiled blocks and floats, the session's, or every session's. An unknown id passes to the handler, which
+    reports `not_found`.
   - `blocks.busy` takes the union of the given `session_id`, `window_id` and `block_ids`. An unknown id is
     `not_found`; so is one the caller sees nothing of, unless it covers the server, so existence does not leak. A
     block-scoped principal naming its block's session gets its block. Tested with a block-scoped agent token (same
@@ -1034,14 +1036,18 @@ has merged.
   - `block_title` is the block's `BlockInfo.title`, through `untrusted`. The refusal message names that title. The
     CLI's non-TTY error says `close them anyway` when several are busy. On a TTY it prints the message, then, for
     several blocks or a command line, one line per block (`sleep in 'shell' (session)` when they span sessions,
-    `: <command>` when known), then `Close anyway? [y/N] `. A decline exits 1 (`silo: not closed`).
-  - `silo down` sends `force: true`: its own prompt (or `--yes`) already confirmed ending the sessions.
+    `: <command>` when known), then `Close anyway? [y/N] `. A decline exits 1 (`silo: not closed`). Whether to ask
+    is stdin's (a script's piped or closed stdin is refused); the question and answer go through `/dev/tty`, like
+    the approval prompt, so a redirected stderr never swallows it.
+  - `silo down` sends `force: true`: its own prompt (or `--yes`) already confirmed ending the sessions. An idle
+    default session (which `down` stops without asking) is asked about too when `blocks.busy` finds a program
+    running, so the forced stop is always confirmed.
     `mismatch::stop` (quitting another build's server) does too: it falls back to SIGTERM anyway. The menu-bar
     agent, the app and `silo-latency` send `force: false` and do not advertise, so they close as before.
   - `silo do` applies the y/N flow to the five close methods (`silo_cli::CLOSES`), retrying with `force: true`;
     `silo api call` stays raw and prints the `busy` error.
-  - The CLI test for `kill-server --force` checks the in-process server stops, then SIGTERMs the CLI: it waits for
-    its connection to close, which only a server process's exit does.
+  - The CLI test for `kill-server --force` runs a `silo server` process (it waits for the server's exit, which an
+    in-process server task never gives).
 
 **P7-10: close confirmation in the app.** After P7-6 and P7-9.
 - **Files:** `silo-app/src/{close_confirm.rs (new), palette.rs, workspace.rs, commands.rs, settings_table.rs,

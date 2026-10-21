@@ -367,3 +367,40 @@ async fn a_busy_refusal_comes_before_any_approval() {
     timeout(T, task).await.expect("the server stopped").unwrap();
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// And once more after it: a program started while the approval was
+/// pending is refused once it is granted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_started_during_the_approval_is_refused_after_it() {
+    let home = temp_home("approval-after");
+    let task = start_with(&home, true).await;
+    let (control, _events) = Control::connect(&paths::socket(&home), "owner").await.unwrap();
+    let mut app = Raw::connect(&home, &[], ClientRole::App, None).await;
+    app.call(Method::EventsSubscribe {}).await.unwrap();
+    let mut cli = Raw::guarded(&home).await;
+    let created = session(&control, &["/bin/sh", "-c", "read x; exec sleep 30"]).await;
+    until_busy(&mut cli, &created.session_id, &[]).await;
+    let view: BlockView = control.call(Method::BlockView { block_id: created.block_id.clone() }).await.unwrap();
+    let pid = view.block.pid.expect("a running block's pid");
+
+    let stop = tokio::spawn(async move { cli.call(Method::ServerShutdown { force: false }).await });
+    let id = loop {
+        if let Event::ApprovalRequested { id, .. } = app.next_event().await {
+            break id;
+        }
+    };
+    control.call_value(Method::TerminalSend { block_id: created.block_id.clone(), text: "go\n".into() }).await.unwrap();
+    let deadline = std::time::Instant::now() + T;
+    while !process_name(pid).ends_with("sleep") {
+        assert!(std::time::Instant::now() < deadline, "sleep never started: {}", process_name(pid));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    app.call(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
+    let busy = refused(stop.await.unwrap());
+    assert_eq!(busy.iter().map(|b| b.busy.process.as_str()).collect::<Vec<_>>(), ["sleep"]);
+    assert!(exists(&control, &created.block_id).await, "still running");
+
+    app.call(Method::ServerShutdown { force: false }).await.unwrap();
+    timeout(T, task).await.expect("the server stopped").unwrap();
+    let _ = std::fs::remove_dir_all(home);
+}

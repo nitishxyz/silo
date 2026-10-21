@@ -336,8 +336,9 @@ fn ask_terminal(prompt: &str) -> bool {
 pub const CLOSES: [&str; 5] = ["block.close", "window.close", "session.close", "server.shutdown", "server.restart"];
 
 /// Run a close, `call(force)`. When it is refused as `busy`: with stdin a
-/// terminal, list what runs and ask whether to close anyway (default no),
-/// then run `call(true)`; otherwise fail naming `--force`.
+/// terminal, list what runs and ask on the controlling terminal (never
+/// into redirected output) whether to close anyway (default no), then run
+/// `call(true)`; otherwise fail naming `--force`.
 ///
 /// # Errors
 /// The call's error, a `busy` refusal without a terminal, or a declined
@@ -358,19 +359,15 @@ where
     if !std::io::stdin().is_terminal() {
         bail!("{}; pass --force to close {them} anyway", refusal.message);
     }
-    eprint!("{}Close anyway? [y/N] ", busy_list(&refusal.message, &busy));
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+    if !ask_terminal(&format!("{}Close anyway? [y/N] ", busy_list(&refusal.message, &busy))) {
         bail!("not closed");
     }
     call(true).await
 }
 
 /// The lines a `busy` refusal is shown as before asking.
-#[must_use]
-pub fn busy_list(message: &str, busy: &[BusyBlock]) -> String {
-    let mut out = format!("silo: {message}\n");
+fn busy_list(message: &str, busy: &[BusyBlock]) -> String {
+    let mut out = format!("{message}\n");
     let sessions: std::collections::HashSet<&str> = busy.iter().map(|b| b.session_id.as_str()).collect();
     // One block without a command line: the message says it all.
     if let [only] = busy
