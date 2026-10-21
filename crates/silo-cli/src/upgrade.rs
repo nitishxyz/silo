@@ -164,7 +164,7 @@ pub async fn paired(home: &Path, host: &Host, candidate: &Candidate, force: bool
     let opening = async {
         let own = Endpoint::own(home, options).await?;
         anyhow::Ok(match open(home, &own, host).await {
-            Err(error) if error.downcast_ref::<Refused>().is_some_and(|r| r.code == "unauthorized") => {
+            Err(error) if crate::unknown_device(&error) => {
                 let device = own.refused(home, options).await?;
                 let opened = open(home, &device, host).await;
                 (device, opened)

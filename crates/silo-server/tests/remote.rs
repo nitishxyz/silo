@@ -210,6 +210,13 @@ async fn endpoints_speak_for_a_paired_device() {
         assert_eq!(code(connect_as(&own, &addr, refused.clone()).await.map(|_| ())), RpcError::UNAUTHORIZED, "{refused:?}");
         assert_eq!(upgrade_as(&own, &addr, refused).await, Err("unauthorized".into()));
     }
+    // Speaking for a device never redeems an invite: it neither pairs nor joins.
+    for purpose in [InvitePurpose::Device, InvitePurpose::Join] {
+        let (invite, _) = invite_for(&control, 60, purpose).await;
+        let rc = timeout(T, own.dial(addr.clone())).await.unwrap().unwrap();
+        let hello = ClientHello { device: proof(&stranger, addr.id, own.id()), ..ClientHello::ours("silo cli", false, Some(invite.ticket)) };
+        assert_eq!(code(send_hello(&rc, &hello).await.1), RpcError::UNAUTHORIZED, "{purpose:?}");
+    }
 
     // Two endpoints speaking for the device at once, beside the device itself.
     let mut cli = connect_as(&own, &addr, proof(&key, addr.id, own.id())).await.unwrap();

@@ -145,6 +145,17 @@ impl Endpoint {
     }
 }
 
+/// How hosts before device proofs refuse an endpoint they hold no grant
+/// for: the control hello's message, and the upgrade stream's reason.
+const UNKNOWN_DEVICE: &str = "unknown device; pair it with an invite";
+const NOT_PAIRED: &str = "this device is not paired with the host";
+
+/// Whether a hello `error` is that refusal (see [`Endpoint::refused`]).
+fn unknown_device(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Unauthorized>().is_some_and(|e| e.message == UNKNOWN_DEVICE)
+        || error.downcast_ref::<silo_client::upgrade::Refused>().is_some_and(|r| r.code == "unauthorized" && r.reason == NOT_PAIRED)
+}
+
 /// A clear message for the typed remote failures.
 #[must_use]
 pub fn explain(error: anyhow::Error) -> anyhow::Error {
@@ -203,7 +214,7 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
             };
             let own = Endpoint::own(home, options).await?;
             match hello(&own).await {
-                Err(error) if error.downcast_ref::<Unauthorized>().is_some() => {
+                Err(error) if unknown_device(&error) => {
                     let device = own.refused(home, options).await?;
                     let result = hello(&device).await;
                     (device, result)
@@ -344,6 +355,19 @@ mod tests {
     use silo_client::transport::{EndpointAddr, Identity};
 
     use super::*;
+
+    #[test]
+    fn only_an_unknown_device_is_retried_with_the_device_key() {
+        let unauthorized = |message: &str| anyhow::Error::from(Unauthorized { message: message.into() });
+        let refused = |code: &str, reason: &str| anyhow::Error::from(silo_client::upgrade::Refused { code: code.into(), reason: reason.into() });
+        assert!(unknown_device(&unauthorized(UNKNOWN_DEVICE).context("hello")));
+        assert!(unknown_device(&refused("unauthorized", NOT_PAIRED)));
+        assert!(!unknown_device(&unauthorized("the device proof does not verify")));
+        assert!(!unknown_device(&unauthorized("invalid, expired or already used invite")));
+        assert!(!unknown_device(&refused("unauthorized", "invalid signature length")));
+        assert!(!unknown_device(&refused("busy", NOT_PAIRED)));
+        assert!(!unknown_device(&anyhow::anyhow!(UNKNOWN_DEVICE)));
+    }
 
     #[test]
     fn idle_default_session_is_not_worth_asking() {

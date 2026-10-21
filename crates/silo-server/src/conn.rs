@@ -180,7 +180,10 @@ where
             Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
         } else {
             crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref()).and_then(|device| {
-                let admission = auth.authorize(&device, &hello.client_name, hello.invite.as_deref())?;
+                // Only an endpoint itself redeems invites: one speaking for
+                // a device never pairs it or joins.
+                let invite = hello.invite.as_deref().filter(|_| hello.device.is_none());
+                let admission = auth.authorize(&device, &hello.client_name, invite)?;
                 auth.speak_for(*conn_id, &device);
                 Ok(Some((admission, device)))
             })
