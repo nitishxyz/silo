@@ -111,10 +111,15 @@ fn incompatible_hello() -> anyhow::Error {
     IncompatibleProtocol { message: "the server did not complete this protocol's hello".into() }.into()
 }
 
+/// Hello rejection codes of servers from before protocol numbers: another
+/// build (`different_build`) or protocol version (`protocol`).
+const LEGACY_MISMATCHES: [&str; 2] = ["different_build", "protocol"];
+
 /// The hello reply of a compatible server ([`silo_proto::compat::check`]),
 /// or, when speaking as another `build` (best-effort inspection of an old
-/// server), of that build. Any other shape or an unknown rejection is
-/// [`IncompatibleProtocol`].
+/// server), of that build. Any other shape, or a rejection for another
+/// protocol or build, is [`IncompatibleProtocol`]; any other rejection is
+/// the server's error as it is (typed where a type exists).
 fn server_hello(reply: &Frame, build: &str) -> anyhow::Result<ServerHello> {
     if reply.kind == kind::CONTROL_HELLO {
         let hello = reply.parse::<ServerHello>().map_err(|_| incompatible_hello())?;
@@ -125,10 +130,8 @@ fn server_hello(reply: &Frame, build: &str) -> anyhow::Result<ServerHello> {
         return Ok(hello);
     }
     match reply.parse::<ServerMessage>() {
-        Ok(ServerMessage::Response { error: Some(error), .. }) => match typed(error) {
-            e if e.is::<RpcError>() => Err(incompatible_hello()),
-            e => Err(e),
-        },
+        Ok(ServerMessage::Response { error: Some(error), .. }) if LEGACY_MISMATCHES.contains(&error.code.as_str()) => Err(incompatible_hello()),
+        Ok(ServerMessage::Response { error: Some(error), .. }) => Err(typed(error)),
         _ => Err(incompatible_hello()),
     }
 }
@@ -499,6 +502,8 @@ mod tests {
         let rejected =
             |code: &str| Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(RpcError::new(code, "x")) }).unwrap();
         assert!(mismatch(rejected("protocol")));
+        assert!(mismatch(rejected("different_build")));
+        assert!(mismatch(rejected(RpcError::INCOMPATIBLE)));
         assert!(mismatch(Frame::json(kind::CONTROL_HELLO, &serde_json::json!({"protocol": 1, "client_id": 1})).unwrap()));
         let other_protocol = serde_json::json!({
             "protocol": silo_proto::PROTOCOL + 1, "vt": silo_proto::VT, "build": "b", "client_id": 1,
@@ -515,6 +520,22 @@ mod tests {
         assert!(mismatch(Frame::new(kind::CONTROL, b"garbage".to_vec())));
         assert!(server_hello(&rejected(RpcError::UNAUTHORIZED), BUILD).unwrap_err().is::<Unauthorized>());
         assert!(server_hello(&rejected("upgrading"), BUILD).unwrap_err().is::<Upgrading>());
+    }
+
+    /// A server failing to admit a compatible client is not another build:
+    /// its error is reported as it is.
+    #[test]
+    fn other_hello_rejections_are_the_server_s_errors() {
+        let rejected = |error: RpcError| {
+            server_hello(&Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) }).unwrap(), BUILD)
+                .unwrap_err()
+        };
+        let error = rejected(RpcError::internal("io error: No such file or directory (os error 2)"));
+        assert!(!error.is::<IncompatibleProtocol>(), "{error:#}");
+        assert_eq!(error.downcast_ref::<RpcError>().unwrap().code, "internal");
+        assert_eq!(format!("{error:#}"), "internal: io error: No such file or directory (os error 2)");
+        assert!(rejected(RpcError::new("something_new", "x")).is::<RpcError>());
+        assert!(rejected(RpcError::method_not_found("x")).is::<NotSupported>());
     }
 
     #[test]

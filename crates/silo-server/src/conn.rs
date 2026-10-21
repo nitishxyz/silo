@@ -201,6 +201,9 @@ where
         Ok(Some((Admission::Join { invite_id }, _))) => Some(invite_id),
         Ok(_) => None,
         Err(error) => {
+            if error.code == "internal" {
+                tracing::warn!(client = hello.client_name, "hello refused: {}", error.message);
+            }
             tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) })?);
             drop(tx);
             let _ = writer_task.await;

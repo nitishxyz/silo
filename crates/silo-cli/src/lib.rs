@@ -433,6 +433,16 @@ mod tests {
         EndpointAddr::new(Identity::load_or_create(dir).unwrap().id())
     }
 
+    /// Only another protocol or build reads as one; a server's own failure
+    /// is reported as it is.
+    #[test]
+    fn explained_errors() {
+        let mismatch = explain(IncompatibleProtocol { message: "protocol 2".into() }.into()).to_string();
+        assert!(mismatch.contains("different silo build"), "{mismatch}");
+        let internal = explain(silo_proto::control::RpcError::internal("io error: No such file or directory (os error 2)").into()).to_string();
+        assert_eq!(internal, "internal: io error: No such file or directory (os error 2)");
+    }
+
     #[test]
     fn qr_renders_a_ticket() {
         let dir = std::env::temp_dir().join(format!("silo-cli-qr-{}", std::process::id()));
