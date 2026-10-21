@@ -101,10 +101,13 @@ async fn running_block_hands_off_without_gap() {
     let checkpoint = handoff.checkpoint;
     assert_eq!(pty.pid, pid);
     assert_eq!(checkpoint.lifecycle, Lifecycle::Running);
-    assert!(sink1.is_cancelled(), "streams close on handoff");
+    assert!(!sink1.is_cancelled(), "streams are flushed on handoff, not cut off");
+    drop(sink1);
     assert!(old.checkpoint().await.is_err(), "old actor ended");
 
     let frames = drain(&mut rx1);
+    let released = rx1.try_recv();
+    assert!(matches!(released, Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)), "the old actor let go of the stream");
     let first = welcome(&frames[0]);
     let mut next = first.offset;
     let mut out = Vec::new();

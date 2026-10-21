@@ -125,8 +125,9 @@ pub async fn accept(server: Arc<Server>, stream: tokio::net::UnixStream, upgrade
 }
 
 /// Writer task draining a channel. Every frame must go through the returned
-/// [`Sink`] so the unsent-bytes counter stays balanced.
-fn spawn_writer<W>(mut writer: W) -> (Sink, tokio::task::JoinHandle<()>)
+/// [`Sink`] so the unsent-bytes counter stays balanced. `guard` is dropped
+/// when the task ends, however it ends.
+fn spawn_writer<W>(mut writer: W, guard: impl Send + 'static) -> (Sink, tokio::task::JoinHandle<()>)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -135,6 +136,7 @@ where
     let counter = sink.queued.clone();
     let cancelled = sink.cancelled();
     let task = tokio::spawn(async move {
+        let _guard = guard;
         let pump = async {
             while let Some(frame) = rx.recv().await {
                 let len = frame.payload.len() + 5;
@@ -176,7 +178,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let hello: ClientHello = hello.parse()?;
-    let (tx, writer_task) = spawn_writer(writer);
+    let (tx, writer_task) = spawn_writer(writer, ());
     // Compatibility is checked first: an incompatible peer never enrolls.
     let admitted = match compat::check(hello.protocol, &hello.vt) {
         Err(error) => Err(error),
@@ -748,7 +750,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let hello: DataHello = hello.parse()?;
-    let (tx, writer_task) = spawn_writer(writer);
+    let (tx, writer_task) = spawn_writer(writer, crate::DataWriter::new(&server));
     let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
     let reject = |code: &str, reason: &str| -> std::io::Result<()> {
         tx.send(Frame::json(kind::REJECT, &Reject { code: code.into(), reason: reason.into() })?);
@@ -771,6 +773,9 @@ where
             let (end, mut ended) = tokio::sync::oneshot::channel();
             server.registry.lock().unwrap().add_stream(client_id, sub_id, &block_id, rights, end);
             let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, sink: tx.clone(), remote })));
+            // A block handed to a successor drops its sink after queueing
+            // everything sent so far: the writer then flushes and ends.
+            let actor_sink = tx.tx.downgrade();
             drop(tx);
             let mut frames = spawn_reader(reader, 256);
             tokio::pin!(cancelled);
@@ -830,7 +835,9 @@ where
             }
             let _ = block.send(BlockMsg::Detach(sub_id));
             server.registry.lock().unwrap().remove_stream(client_id, sub_id);
-            writer_task.abort();
+            if actor_sink.strong_count() > 0 {
+                writer_task.abort();
+            }
             return Ok(());
         }
         reject("not_found", "block no longer exists")?;
@@ -849,7 +856,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let hello: UploadHello = hello.parse()?;
-    let (tx, writer_task) = spawn_writer(writer);
+    let (tx, writer_task) = spawn_writer(writer, ());
     let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
     let result = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
         Err((RpcError::INCOMPATIBLE, error.message))

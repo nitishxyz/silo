@@ -551,7 +551,16 @@ impl Subscriber {
     /// Feed pending frames to the writer while it has room; returns false
     /// if the stream is gone.
     fn pump(&mut self) -> bool {
-        while self.sink.backlog() < PUMP_WINDOW {
+        self.pump_within(PUMP_WINDOW)
+    }
+
+    /// Hand every pending frame to the writer (the stream ends after it).
+    fn flush(&mut self) {
+        self.pump_within(usize::MAX);
+    }
+
+    fn pump_within(&mut self, window: usize) -> bool {
+        while self.sink.backlog() < window {
             let Some(front) = self.pending.front_mut() else {
                 break;
             };
@@ -1514,8 +1523,11 @@ impl Actor {
         }
         match self.checkpoint() {
             Ok(checkpoint) => {
-                for (_, sub) in self.subscribers.drain() {
-                    sub.sink.cancel();
+                // Every stream gets all output up to the checkpoint, then
+                // ends as its writer drains (the sink dropped here is the
+                // last), so its client resumes on the next owner.
+                for (_, mut sub) in self.subscribers.drain() {
+                    sub.flush();
                 }
                 Ok(Handoff { checkpoint, pty: detached })
             }

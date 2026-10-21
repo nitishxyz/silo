@@ -129,7 +129,30 @@ pub struct Server {
     pub app_requests: app_bridge::Requests,
     /// See [`Config::grant_sweep_ahead`].
     grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
+    /// Data stream writers still running (see [`DataWriter`]).
+    data_writers: tokio::sync::watch::Sender<usize>,
 }
+
+/// Counts a data stream's writer task while it runs, so a server handing
+/// over can let streams flush what they were sent before it exits.
+pub(crate) struct DataWriter(Arc<Server>);
+
+impl DataWriter {
+    pub(crate) fn new(server: &Arc<Server>) -> Self {
+        server.data_writers.send_modify(|n| *n += 1);
+        Self(server.clone())
+    }
+}
+
+impl Drop for DataWriter {
+    fn drop(&mut self) {
+        self.0.data_writers.send_modify(|n| *n -= 1);
+    }
+}
+
+/// Longest wait, after a handover, for data streams to flush to clients
+/// (one that stopped reading would hold the old server forever).
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The host's system clipboard as remote clients see it.
 #[derive(Default)]
@@ -465,6 +488,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         approvals: approval::Approvals::default(),
         app_requests: app_bridge::Requests::default(),
         grant_sweep_ahead: config.grant_sweep_ahead.clone(),
+        data_writers: tokio::sync::watch::channel(0).0,
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
@@ -649,6 +673,12 @@ async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, given
     // Shared: closes our copy only.
     drop(lock);
     let written = tokio::task::spawn_blocking(move || std::io::Write::write_all(&mut sock, handoff::COMMIT)).await?;
+    // Released blocks queued all their output to the data streams; their
+    // clients resume on the successor once they have it.
+    let mut writers = server.data_writers.subscribe();
+    if tokio::time::timeout(FLUSH_TIMEOUT, writers.wait_for(|n| *n == 0)).await.is_err() {
+        tracing::warn!(streams = *writers.borrow(), "data streams still flushing; exiting without them");
+    }
     if unknown {
         // The successor may have given up already; nothing else to do.
         if let Err(error) = written {
