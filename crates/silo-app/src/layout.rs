@@ -470,7 +470,13 @@ impl Workspace {
         let split_right = on(|this, b, cx| this.split_block(b, Axis::Horizontal, cx));
         let split_down = on(|this, b, cx| this.split_block(b, Axis::Vertical, cx));
         let zoom = on(|this, b, _| this.zoom_block(b));
-        let close = on(|this, b, _| this.close_block_id(b));
+        let close = {
+            let block = block.clone();
+            cx.listener(move |this: &mut Workspace, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Workspace>| {
+                cx.stop_propagation();
+                this.close_block_id(block.clone(), window, cx);
+            })
+        };
         let focus_block = block.clone();
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         let status = self.render_status_mark(id, palette, cx);

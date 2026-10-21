@@ -126,6 +126,13 @@ enum Entry {
 impl Workspace {
     /// Run a command (key binding, menu or palette).
     pub(crate) fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        // The close dialog is modal; ⌘W cancels it.
+        if self.close_confirm.is_some() && !crate::window_picker::allowed_while_open(command) {
+            if matches!(command, Command::ClosePane | Command::CloseTab) {
+                self.dismiss_close_confirm(window, cx);
+            }
+            return;
+        }
         // The settings panel is modal: workspace shortcuts must not act on
         // the terminal behind it (⌘D splitting, ⌘W closing a pane, …).
         if self.settings.is_some() && !crate::settings::allowed_while_open(command) {
@@ -148,7 +155,14 @@ impl Workspace {
         // keeps sessions when it can and says so when it could not.
         let upgrade = matches!(command, Command::RestartServer) && self.incompatible().is_some();
         if command.destructive() && !upgrade {
-            self.open_palette_step(Step::Confirm(command), String::new(), window, cx);
+            // Something running: the close dialog is the confirmation.
+            let confirm = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                this.open_palette_step(Step::Confirm(command), String::new(), window, cx);
+            };
+            match self.close_target_of(command).filter(|_| self.confirm_close()) {
+                Some(target) => self.when_idle(target, window, cx, confirm),
+                None => confirm(self, window, cx),
+            }
             return;
         }
         self.execute(command, window, cx);
@@ -190,8 +204,8 @@ impl Workspace {
                 }
             }
             Command::CloseSession => {
-                if let Some(view) = &self.view {
-                    self.call(Method::SessionClose { session_id: view.session.id.clone(), force: false });
+                if let Some(target) = self.close_target_of(command) {
+                    self.send_close(self.active_host, target, !self.confirm_close(), window, cx);
                 }
             }
             Command::SwitchSession => self.toggle_switcher(window, cx),
@@ -203,7 +217,7 @@ impl Workspace {
             Command::NewTabChooser => self.toggle_new_tab_menu(window, cx),
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
-                    self.call(Method::WindowClose { window_id: w.id.clone(), force: false });
+                    self.close(crate::close_confirm::CloseTarget::Tab(w.id.clone()), window, cx);
                 }
             }
             Command::RenameTab => {
@@ -326,28 +340,12 @@ impl Workspace {
                 }
             }
             Command::RestartServer if self.incompatible().is_some() => self.upgrade_server(cx),
-            Command::RestartServer => {
-                self.status = Some(Status::progress("Restarting server…"));
-                self.call(Method::ServerShutdown { force: false });
-            }
-            Command::StopServer => {
-                if let Some(host) = self.hosts.get(self.active_host) {
-                    host.paused.store(true, Ordering::Release);
+            // Stop stays off, at login too, until Start Server or the next
+            // app launch (`server_stopped`).
+            Command::RestartServer | Command::StopServer => {
+                if let Some(target) = self.close_target_of(command) {
+                    self.send_close(self.active_host, target, !self.confirm_close(), window, cx);
                 }
-                self.call(Method::ServerShutdown { force: false });
-                // Stays off, at login too, until Start Server or the next app launch.
-                if let Some(service) = self.local_service().filter(|s| s.manager == silo_client::service::Manager::Launchd) {
-                    self.rt.spawn_blocking(move || {
-                        use silo_client::service::Action;
-                        let stopped = service.apply(&silo_client::service::System, &[Action::Disable, Action::Bootout]);
-                        if let Err(error) = stopped {
-                            tracing::warn!("stop service: {error:#}");
-                        }
-                    });
-                }
-                self.detach_view();
-                self.focus.focus(window, cx);
-                self.status = Some(Status::warning(crate::workspace::SERVER_STOPPED));
             }
             Command::StartServer => {
                 if let Some(host) = self.hosts.get(self.active_host) {

@@ -280,6 +280,8 @@ pub struct SettingsSnapshot {
     /// This build updates itself (a release Silo.app in Applications).
     pub updates: bool,
     pub check_updates: bool,
+    /// Ask before a close that would end running programs.
+    pub confirm_close: bool,
     pub notify: crate::hosts::NotifyPrefs,
     /// macOS refused Silo's notifications.
     pub notify_denied: bool,
@@ -308,6 +310,7 @@ impl Default for SettingsSnapshot {
             translucent_apps: false,
             updates: true,
             check_updates: true,
+            confirm_close: true,
             notify: crate::hosts::NotifyPrefs::default(),
             notify_denied: false,
             ui_font: UiFontSettings::default(),
@@ -341,6 +344,7 @@ pub enum SettingsEvent {
     SetTintWithApp(bool),
     SetTranslucentApps(bool),
     SetCheckUpdates(bool),
+    SetConfirmClose(bool),
     SetNotify(crate::hosts::NotifyField, bool),
     /// A host's notifications on this device (host id, on).
     SetHostNotify(String, bool),
@@ -1475,6 +1479,22 @@ impl SettingsPanel {
                     false,
                 ),
             ],
+        ));
+
+        out.push(self.group(
+            Some("Closing"),
+            vec![Self::row(
+                SettingId::ConfirmClose.label(),
+                Some("Closing a pane, tab or session asks first when a program is running".into()),
+                Some(Self::switch(
+                    "settings-confirm-close",
+                    "Confirm before closing running programs",
+                    self.snapshot.confirm_close,
+                    SettingsEvent::SetConfirmClose,
+                    cx,
+                )),
+                false,
+            )],
         ));
 
         out.push(self.group(

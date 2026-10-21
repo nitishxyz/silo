@@ -341,6 +341,9 @@ pub struct AppState {
     /// Look for a newer release at launch and every few hours.
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Ask before a close that would end running programs.
+    #[serde(default = "yes")]
+    pub confirm_close: bool,
     /// Pages visited in browser blocks, newest first, per host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_pages: Vec<crate::browser_home::RecentPage>,
@@ -363,6 +366,7 @@ impl Default for AppState {
             tint_with_app: true,
             translucent_apps: false,
             check_updates: true,
+            confirm_close: true,
             recent_pages: Vec::new(),
             notifications: NotifyPrefs::default(),
             quiet_hosts: Vec::new(),
@@ -493,6 +497,7 @@ pub(crate) mod tests {
         assert!(old.match_running_app);
         assert_eq!((old.material, old.tint_with_app, old.translucent_apps), (crate::material::Material::Solid, true, false));
         assert!(old.check_updates, "updates are checked unless turned off");
+        assert!(old.confirm_close, "closing running programs asks unless turned off");
         let dir = std::env::temp_dir().join(format!("silo-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let state = AppState {
@@ -505,6 +510,7 @@ pub(crate) mod tests {
             tint_with_app: false,
             translucent_apps: true,
             check_updates: false,
+            confirm_close: false,
             recent_pages: Vec::new(),
             notifications: NotifyPrefs { done: false, ..NotifyPrefs::default() },
             quiet_hosts: vec!["local".into()],
@@ -516,6 +522,7 @@ pub(crate) mod tests {
         assert_eq!((back.density, back.show_pane_headers, back.match_running_app), (Density::Compact, false, false));
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         assert!(!back.check_updates);
+        assert!(!back.confirm_close);
         assert_eq!((back.notifications.done, back.notifications.blocked), (false, true));
         assert_eq!(back.quiet_hosts, ["local"]);
         assert_eq!(old.notifications, NotifyPrefs::default(), "notifications are on unless turned off");

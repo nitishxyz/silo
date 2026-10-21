@@ -26,6 +26,7 @@ pub enum SettingId {
     CursorBlink,
     Scrollback,
     RestoreDefaults,
+    ConfirmClose,
     CheckUpdates,
     Notifications,
     NotifyOnlyHidden,
@@ -137,6 +138,15 @@ pub const SETTINGS: &[Setting] = &[
     setting!(SettingId::CursorShape, "Cursor shape", "Shape", Terminal, Some("Cursor"), Choice, "cursor shape block bar underline"),
     setting!(SettingId::CursorBlink, "Cursor blinking", "Blinking", Terminal, Some("Cursor"), Toggle, "cursor blink blinking"),
     setting!(SettingId::Scrollback, "Scrollback", "History", Terminal, Some("Scrollback"), Number, "scrollback history lines buffer"),
+    setting!(
+        SettingId::ConfirmClose,
+        "Confirm before closing running programs",
+        "Confirm before closing running programs",
+        Terminal,
+        Some("Closing"),
+        Toggle,
+        "confirm close closing quit running programs processes busy ask warn"
+    ),
     setting!(
         SettingId::RestoreDefaults,
         "Restore terminal defaults",
@@ -295,6 +305,7 @@ impl SettingId {
             Self::TintWithApp => s.tint_with_app,
             Self::TranslucentApps => s.translucent_apps,
             Self::CursorBlink => s.terminal.cursor_blink,
+            Self::ConfirmClose => s.confirm_close,
             Self::CheckUpdates => s.check_updates,
             _ => return None,
         })
@@ -312,6 +323,7 @@ impl SettingId {
             Self::TintWithApp => SettingsEvent::SetTintWithApp(on),
             Self::TranslucentApps => SettingsEvent::SetTranslucentApps(on),
             Self::CursorBlink => SettingsEvent::SetCursorBlink(on),
+            Self::ConfirmClose => SettingsEvent::SetConfirmClose(on),
             Self::CheckUpdates => SettingsEvent::SetCheckUpdates(on),
             _ => return None,
         })
@@ -328,6 +340,7 @@ impl SettingId {
             Self::TintWithApp => s.tint_with_app = on,
             Self::TranslucentApps => s.translucent_apps = on,
             Self::CursorBlink => s.terminal.cursor_blink = on,
+            Self::ConfirmClose => s.confirm_close = on,
             Self::CheckUpdates => s.check_updates = on,
             _ => {}
         }

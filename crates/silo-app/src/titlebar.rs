@@ -456,9 +456,9 @@ impl Workspace {
                             .capsule()
                             .hover(|s| s.bg(hover))
                             .child(icon("close", 12.0, chrome.icon))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.call(Method::WindowClose { window_id: window_id.clone(), force: false });
+                                this.close(crate::close_confirm::CloseTarget::Tab(window_id.clone()), window, cx);
                             })),
                     ),
                 )

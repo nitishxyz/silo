@@ -15,6 +15,7 @@ mod browser_pane;
 mod cache;
 mod cli_link;
 mod clipboard;
+mod close_confirm;
 mod commands;
 mod composition;
 mod conn;
@@ -68,6 +69,8 @@ fn main() {
     }
     // The app's calls are the user's own: they need no approval.
     silo_client::set_role(silo_proto::control::ClientRole::App);
+    // Closes that would end running programs are asked about here.
+    silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     let home = silo_proto::paths::home();
     let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
     {

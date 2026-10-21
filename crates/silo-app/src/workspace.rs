@@ -86,6 +86,8 @@ pub struct Workspace {
     pub(crate) share: Option<crate::share::ShareSheet>,
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) picker: Option<crate::window_picker::WindowPicker>,
+    /// Asking before a close that would end running programs.
+    pub(crate) close_confirm: Option<crate::close_confirm::CloseConfirm>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
     pub(crate) new_tab_menu: crate::new_tab_menu::NewTabMenu,
@@ -117,7 +119,7 @@ pub struct Workspace {
     /// The window background appearance last applied (blurred or not).
     blurred: Option<bool>,
     /// This window's snapshot of the app preferences (see `sync_hosts`).
-    state: AppState,
+    pub(crate) state: AppState,
     _checkpoints: Task<()>,
     /// When each block was last checkpointed.
     checkpointed: HashMap<String, Instant>,
@@ -247,6 +249,7 @@ impl Workspace {
             share: None,
             palette: None,
             picker: None,
+            close_confirm: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
             new_tab_menu: crate::new_tab_menu::NewTabMenu::default(),
@@ -1134,13 +1137,13 @@ impl Workspace {
 
     pub(crate) fn close_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(block) = self.focused_block(window, cx) {
-            self.close_block_id(block);
+            self.close_block_id(block, window, cx);
         }
     }
 
-    pub(crate) fn close_block_id(&mut self, block: String) {
+    pub(crate) fn close_block_id(&mut self, block: String, window: &mut Window, cx: &mut Context<Self>) {
         tracing::debug!(%block, "close block");
-        self.call(Method::BlockClose { block_id: block, force: false });
+        self.close(crate::close_confirm::CloseTarget::Pane(block), window, cx);
     }
 
     /// Replace a block without a process by a fresh shell in its slot:
@@ -1468,6 +1471,7 @@ impl Render for Workspace {
             && self.settings.is_none()
             && self.add_host.is_none()
             && self.share.is_none()
+            && self.close_confirm.is_none()
             && !self.appearance_menu.open
             && !self.new_tab_menu.is_open()
         {
@@ -1480,6 +1484,7 @@ impl Render for Workspace {
                     && this.add_host.is_none()
                     && this.share.is_none()
                     && this.settings.is_none()
+                    && this.close_confirm.is_none()
                     && !this.appearance_menu.open
                     && !this.new_tab_menu.is_open()
                 {
@@ -1530,6 +1535,7 @@ impl Render for Workspace {
         let approvals = self.render_approvals(window, cx);
         let palette = self.render_palette(window, cx);
         let picker = self.render_picker(window, cx);
+        let close_confirm = self.render_close_confirm(cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1565,6 +1571,7 @@ impl Render for Workspace {
             .children(share)
             .children(palette)
             .children(picker)
+            .children(close_confirm)
     }
 }
 

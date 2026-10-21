@@ -138,6 +138,7 @@ impl Workspace {
             translucent_apps: self.translucent_apps(),
             updates: self.updater.read(cx).enabled(),
             check_updates: self.check_updates(),
+            confirm_close: self.confirm_close(),
             notify: self.notify_prefs(),
             notify_denied: crate::notifications::denied(),
             ui_font,
@@ -415,6 +416,10 @@ impl Workspace {
             }
             SettingsEvent::SetCheckUpdates(on) => {
                 self.set_check_updates(*on, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetConfirmClose(on) => {
+                self.set_confirm_close(*on, cx);
                 Outcome::default()
             }
             SettingsEvent::SetNotify(field, on) => {
