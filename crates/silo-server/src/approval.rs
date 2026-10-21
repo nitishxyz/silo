@@ -15,7 +15,7 @@ use std::{
 };
 
 use silo_proto::{
-    access::{Grant, Rights, Scope, Who},
+    access::{Grant, Rights, Scope, SecretKind, Who},
     control::{Caller, ClientRole, Event, GrantKind, InvitePurpose, Method, RpcError},
     model::{BlockId, ClientId, Lifecycle},
 };
@@ -141,12 +141,41 @@ fn approvers(server: &Server, device: Option<&Grant>) -> Approvers {
     Approvers { local, device }
 }
 
-/// How a card on the calling device's own app names that device; the app
-/// says it in its own words ("this Mac").
-pub const THIS_DEVICE: &str = "this device";
+/// How a card on the calling device's own app names that device for an
+/// app that does not read [`Caller::this_device`].
+const THIS_DEVICE: &str = "this device";
+
+/// Whether `method` from the paired device `device` reaches past what the
+/// device itself holds or acts on another principal, so only the host's
+/// owner may approve it (never the device's own app): revoking anything
+/// but the device itself or a share link (another device, an agent
+/// token), creating a grant beyond the device's own rights or scope, and
+/// changing the host owner's app (`app.hosts_*`).
+fn host_owner_only(method: &Method, device: &Grant, auth: &crate::auth::Auth) -> bool {
+    let own_key = match &device.who {
+        Who::Device { id } => id.as_str(),
+        _ => return true,
+    };
+    match method {
+        Method::PairRevoke { id } => id != own_key,
+        Method::GrantRevoke { id } => id != &device.id && auth.get(id).is_none_or(|g| !matches!(g.who, Who::Secret { kind: SecretKind::Link, .. })),
+        Method::GrantCreate { scope, rights, .. } => *rights > device.rights || (device.scope != Scope::Server && *scope != device.scope),
+        Method::AppHostsAdd { .. } | Method::AppHostsRemove { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether the paired device's grant `grant` still stands after a wait.
+fn still_paired(server: &Server, grant: &Grant) -> Result<(), RpcError> {
+    match server.auth().get(&grant.id) {
+        Some(g) if !g.expired(crate::grants::unix_secs()) => Ok(()),
+        _ => Err(RpcError::denied("this device was removed from the host")),
+    }
+}
 
 /// Show `approvers` the request to allow `action` for `caller`: the
-/// calling device's own apps see the call as from [`THIS_DEVICE`].
+/// calling device's own apps see the call as from [`THIS_DEVICE`], marked
+/// [`Caller::this_device`].
 fn start(server: &Server, approvers: Approvers, action: &str, summary: String, caller: Caller, kind: Option<&str>) -> Asked {
     let id = new_id();
     let (reply, answer) = oneshot::channel();
@@ -159,7 +188,7 @@ fn start(server: &Server, approvers: Approvers, action: &str, summary: String, c
         caller,
         expires_in_ms: APPROVAL_TIMEOUT.as_millis() as u64,
     };
-    let own = Caller { from: Some(device_from(THIS_DEVICE, kind)), ..caller.clone() };
+    let own = Caller { from: Some(device_from(THIS_DEVICE, kind)), this_device: true, ..caller.clone() };
     let mut reg = server.registry.lock().unwrap();
     if !approvers.local.is_empty() {
         reg.emit_clients(requested(caller), approvers.local);
@@ -234,7 +263,7 @@ pub(crate) fn caller(reg: &Registry, client: ClientId) -> Caller {
         Some((grant, role)) => Some(device_from(&device_name(grant), Some(client_kind(role)))),
         None => entry.and_then(|c| c.pane.as_deref()).and_then(|pane| pane_label(reg, pane)),
     };
-    Caller { client_id: client, label: entry.map(|c| c.label.clone()).unwrap_or_default(), from }
+    Caller { client_id: client, label: entry.map(|c| c.label.clone()).unwrap_or_default(), from, this_device: false }
 }
 
 /// `session › block title` of block `pane`.
@@ -249,7 +278,9 @@ fn pane_label(reg: &Registry, pane: &str) -> Option<String> {
 ///
 /// `rights` is what the call needs. A paired device holding less (control)
 /// passed `access::check` only to be approved here: by the owner's apps on
-/// this host or by that device's own app, never without approval.
+/// this host or by that device's own app, never without approval. What
+/// [`host_owner_only`] names is asked of the owner's apps alone, and an
+/// approved device call fails if the device was removed meanwhile.
 ///
 /// # Errors
 /// Denied, timed out, `confirm` (the caller may confirm on its terminal
@@ -278,10 +309,20 @@ pub async fn gate(server: &Server, client: ClientId, method: &Method, rights: Ri
     if server.approvals.take_confirmed(client, &action) {
         return Ok(());
     }
-    let summary = summary(method, &server.auth().devices());
-    let approvers = approvers(server, device.as_ref());
+    let (summary, host_only) = {
+        let auth = server.auth();
+        (summary(method, &auth.devices()), device.as_ref().is_some_and(|g| host_owner_only(method, g, &auth)))
+    };
+    let mut approvers = approvers(server, device.as_ref());
+    if host_only {
+        approvers.device.clear();
+        if approvers.is_empty() {
+            return Err(RpcError::denied("Approve in Silo on the host: only its owner may allow this"));
+        }
+    }
     if !approvers.is_empty() {
-        return ask(server, approvers, &action, summary, caller, Some(client_kind(role))).await;
+        ask(server, approvers, &action, summary, caller, Some(client_kind(role))).await?;
+        return device.as_ref().map_or(Ok(()), |g| still_paired(server, g));
     }
     if alone {
         let id = server.approvals.confirm(client, &action);
@@ -352,12 +393,15 @@ pub async fn gate_upgrade(server: &Server, grant: Option<&Grant>) -> Result<(), 
         return Ok(());
     }
     let caller = match grant {
-        None => Caller { client_id: 0, label: "silo".into(), from: None },
-        Some(g) if device.is_some() => Caller { client_id: 0, label: "silo cli".into(), from: Some(device_from(&device_name(g), Some("CLI"))) },
-        Some(g) => Caller { client_id: 0, label: g.label.clone(), from: None },
+        None => Caller { client_id: 0, label: "silo".into(), from: None, this_device: false },
+        Some(g) if device.is_some() => {
+            Caller { client_id: 0, label: "silo cli".into(), from: Some(device_from(&device_name(g), Some("CLI"))), this_device: false }
+        }
+        Some(g) => Caller { client_id: 0, label: g.label.clone(), from: None, this_device: false },
     };
     let kind = device.map(|_| "CLI");
-    ask(server, approvers, "upgrade", "Install another build of the server".into(), caller, kind).await
+    ask(server, approvers, "upgrade", "Install another build of the server".into(), caller, kind).await?;
+    device.map_or(Ok(()), |g| still_paired(server, g))
 }
 
 /// Where a local client's process runs: the pane holding it, and whether

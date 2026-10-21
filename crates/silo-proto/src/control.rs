@@ -979,6 +979,11 @@ pub struct Caller {
     pub label: String,
     #[serde(default)]
     pub from: Option<String>,
+    /// The call comes from the device this card is shown on (a paired
+    /// device's own app asked about that device's call); `from` then
+    /// reads "this device (CLI)" for apps that do not know this field.
+    #[serde(default)]
+    pub this_device: bool,
 }
 
 /// A forwarded request.

@@ -402,6 +402,10 @@
           },
           "label": {
             "type": "string"
+          },
+          "this_device": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [

@@ -11,7 +11,8 @@ use std::{
 
 use silo_client::{Control, DataStream, Events};
 use silo_proto::{
-    control::{Caller, Capture, ClientRole, Created, Event, InvitePurpose, Method, PairInvite, Pasted, RpcError, SpawnSpec},
+    access::{Rights, Scope},
+    control::{Caller, Capture, ClientRole, Created, Event, GrantCreated, GrantKind, InvitePurpose, Method, PairInvite, Pasted, RpcError, SpawnSpec},
     data::ClipKind,
     paths,
 };
@@ -278,6 +279,16 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     let (fake_net, fake_app, mut fake_events) = speaking_for(&mac, &addr, ClientRole::App).await;
     fake_app.subscribe().await.unwrap();
 
+    // Removing another device is the host owner's to approve: with only
+    // the device's own app connected, nobody may.
+    let revoke_other = || Method::PairRevoke { id: other_net.id().to_string() };
+    let refused = code(timeout(T, cli.call_value(revoke_other())).await.unwrap().unwrap_err());
+    assert_eq!(
+        (refused.code.as_str(), refused.message.as_str()),
+        (RpcError::FORBIDDEN, "Approve in Silo on the host: only its owner may allow this")
+    );
+    assert!(cards(&mut mac_events).await.is_empty());
+
     // A call the device holds too few rights for, approved at the device.
     let mut call = tokio::spawn({
         let cli = cli.clone();
@@ -290,6 +301,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     assert_eq!((action.as_str(), summary.as_str()), ("pair.create", "Create a device invite valid for 10 min"));
     assert_eq!(caller.label, "silo cli · Ana's Mac");
     assert_eq!(caller.from.as_deref(), Some("this device (CLI)"), "the device's own card names no other machine's panes");
+    assert!(caller.this_device);
     for answering in [&other_app, &fake_app] {
         let refused = code(answering.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err());
         assert_eq!(refused.code, "not_found", "only the device's own app answers");
@@ -308,7 +320,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     });
     let (id, action, _, caller) = requested_by(&mut host_events).await;
     assert_eq!(action, "server.shutdown");
-    assert_eq!(caller.from.as_deref(), Some("Ana's Mac (CLI)"), "the host's card names the device");
+    assert_eq!((caller.from.as_deref(), caller.this_device), (Some("Ana's Mac (CLI)"), false), "the host's card names the device");
     assert_eq!(requested_by(&mut mac_events).await.0, id);
     host_app.call_value(Method::ApprovalAnswer { id: id.clone(), allow: false }).await.unwrap();
     let late = code(mac_app.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err());
@@ -350,6 +362,46 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     assert_eq!(refused.code, "denied");
     assert!(cards(&mut other_events).await.is_empty());
     rc.close(b"done");
+
+    // Past the device itself (another device, an agent token): the host
+    // owner's card alone. A share link the device may remove itself.
+    let grant = |kind, rights| Method::GrantCreate { scope: Scope::Server, rights, kind, ttl_secs: None, label: None };
+    let token: GrantCreated = host_app.call(grant(GrantKind::Token, Rights::Interact)).await.unwrap();
+    for method in [revoke_other(), Method::GrantRevoke { id: token.grant.id.clone() }] {
+        let call = tokio::spawn({
+            let cli = cli.clone();
+            async move { cli.call_value(method).await }
+        });
+        let (id, ..) = requested_by(&mut host_events).await;
+        let refused = code(mac_app.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err());
+        assert_eq!(refused.code, "not_found", "the device's app does not approve this");
+        host_app.call_value(Method::ApprovalAnswer { id, allow: false }).await.unwrap();
+        assert_eq!(code(timeout(T, call).await.unwrap().unwrap().unwrap_err()).message, "Denied in Silo");
+    }
+    assert!(cards(&mut mac_events).await.is_empty());
+    let link: GrantCreated = host_app.call(grant(GrantKind::Link, Rights::View)).await.unwrap();
+    let call = tokio::spawn({
+        let cli = cli.clone();
+        async move { cli.call_value(Method::GrantRevoke { id: link.grant.id }).await }
+    });
+    let (id, action, ..) = requested_by(&mut mac_events).await;
+    assert_eq!(action, "grant.revoke");
+    assert_eq!(requested_by(&mut host_events).await.0, id, "the host's owner is asked too");
+    mac_app.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
+    timeout(T, call).await.unwrap().unwrap().unwrap();
+
+    // Removed while it waits: an allowed call of the device goes nowhere.
+    let call = tokio::spawn({
+        let cli = cli.clone();
+        async move { cli.call_value(Method::ServerShutdown {}).await }
+    });
+    let (id, ..) = requested_by(&mut host_events).await;
+    host_app.call_value(Method::PairRevoke { id: mac_net.id().to_string() }).await.unwrap();
+    host_app.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
+    assert!(timeout(T, call).await.unwrap().unwrap().is_err());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    host_app.call_value(Method::Ping {}).await.unwrap();
+    assert!(!task.is_finished(), "the server still runs");
 
     drop((cli, fake_app, other_app, mac_app, local));
     for net in [mac_net, other_net, cli_net, fake_net, up_net] {

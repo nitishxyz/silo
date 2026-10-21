@@ -664,13 +664,25 @@ away.
     marked `approval` (they need owner), always approved, never skipped: with approvals off
     (`require_approval: false`) or no app to ask, it gets `forbidden` as before. Its other owner methods
     (`pair.list`, `grant.list`, `server.log`) stay forbidden.
+    - **What the device's own app may approve** is what stays within the device's own rights and touches no other
+      principal: device and join invites, share links and tokens up to the device's rights and scope (never
+      owner: `grant.create` refuses it for anyone), removing itself (`pair.revoke` of its own key, `grant.revoke`
+      of its own grant) or a share link, `server.shutdown` / `server.restart` (it can close every session
+      anyway), and upgrades. **Only the host's owner** (its local apps) approves the rest from a device:
+      removing another device or an agent token, a grant beyond the device's rights or scope, and
+      `app.hosts_add/remove` (they change the host owner's app). With no owner app connected those fail with
+      `forbidden` "Approve in Silo on the host: only its owner may allow this". The owner's own local access is
+      no grant and cannot be revoked by anyone.
+    - **Removed while waiting:** an approved device call (or upgrade) runs only if the device's grant still
+      stands once the answer arrives; else `forbidden`.
   - **`clipboard.read` asks nobody: the paste gesture is the approval** (`pane.rs:978`). The attached apps answer a
     read only right after the user pasted into that block, else nothing within 3 s, exactly as before Phase 7. It
     needs interact on the block, so a scoped agent token can still read the images pasted into its pane.
 - **UI:** a card in the focused window ("claude-code wants to create a pairing invite · from work › api"), with
   Allow and Deny. If Silo isn't frontmost, a notification is shown too. A paired device's call shows where it
   comes from as that device, never another machine's panes: `from: "<device name> (CLI)"` on the host's apps, and
-  `"this device (CLI)"` on the device's own, which the app shows as "From this Mac (CLI) on mini".
+  on the device's own `caller.this_device: true` (additive, default `false`), which the app shows as "From this Mac
+  on mini"; `from` there reads `"this device (CLI)"` for apps without the field.
 - **Scoped tokens:**
   - `silo grant --session X --interact [--ttl 8h] [--label claude-code]` → `grant.create {kind: token}` prints
     `SILO_TOKEN=silot1…`.
@@ -921,10 +933,15 @@ has merged.
     server scope through to `approved(Owner)` methods (`approves_up`), and `approval::gate` then requires an
     approval: `forbidden` with approvals off or no app to ask. Upgrades ask the same approvers and go ahead
     only when there are none. Cards name a remote caller by device: `Caller.from` is `"<device> (CLI)"` (or
-    `(Silo app)`) on the host's apps and `approval::THIS_DEVICE` (`"this device (CLI)"`) on the device's own,
-    shown by the app as "From this Mac (CLI) on <host>" on a remote host's cards only. Residual risk (a
-    guardrail, decision 8): a program on the device can bind the device key itself, say it is the app, and
-    answer its own device's cards; the host cannot see that device's panes.
+    `(Silo app)`) on the host's apps; on the device's own, `Caller.this_device` (additive, `#[serde(default)]`,
+    PROTOCOL 1) is set and `from` is `"this device (CLI)"` for older apps; the app shows "From this Mac on
+    <host>" from the field, never from the text. `approval::host_owner_only` keeps the device's own app off
+    what reaches past the device (§9: another device, a token, a broader grant, `app.hosts_*`), and
+    `still_paired` re-checks the device's grant after the answer (a revocation closes the caller's connection,
+    but its call is already waiting in `gate`). Residual risk (a guardrail, decision 8): a program on the device
+    can bind the device key itself, say it is the app, and answer its own device's cards; the host cannot see
+    that device's panes. A device holding control can already type into every shell, so these rules bound
+    what the approval flow itself grants, not the device.
   - "In a pane" (§10): the parent chain reaches a block's process, **or** the caller or any process on that chain
     has a block's terminal as its controlling terminal (the block process's `e_tdev` / `tty_nr`). A double fork
     keeps the terminal; `setsid` drops it, leaving no terminal to confirm on. Still not seen (decision 8): a
