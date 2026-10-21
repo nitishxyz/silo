@@ -473,23 +473,36 @@ mod tests {
             assert_eq!(out, "printf \"\\e]133;A\\a\"\n", "{}: the user's own marks", bash.display());
             eprintln!("marks: {} (PS0: {ps0}) ok", bash.display());
         }
-        for fish in programs("fish") {
-            let out = run(&fish, &[], &home, &user, "functions -q __silo_marks; or echo none");
+        for (n, fish) in programs("fish").into_iter().enumerate() {
+            // Each build gets its own data: fish 4.3+ migrates the universal
+            // variables an older fish left (printing a notice and starting a
+            // `sleep 7` job that makes the first `exit` refuse). The cache
+            // stops the detached man-page completion run on first start.
+            let (user, own) = (root.join(format!("fish{n}/user")), root.join(format!("fish{n}/own")));
+            for (from, to) in [(&root.join("user"), &user), (&root.join("own"), &own)] {
+                std::fs::create_dir_all(to.join(".config/fish")).unwrap();
+                std::fs::create_dir_all(to.join(".cache/fish/generated_completions")).unwrap();
+                std::fs::copy(from.join(".config/fish/config.fish"), to.join(".config/fish/config.fish")).unwrap();
+            }
+            let (user, own) = (&user, &own);
+            let out = run(&fish, &[], &home, user, "functions -q __silo_marks; or echo none");
             assert_eq!(out, "none\n", "{}: non-interactive", fish.display());
-            let native = run(&fish, &[], &home, &user, "string match -qr '^[0-3]\\.' -- $version; or echo native") == "native\n";
+            let native = run(&fish, &[], &home, user, "string match -qr '^[0-3]\\.' -- $version; or echo native") == "native\n";
             // fish runs `fish_postexec` for `exit` too, with the last status.
             let ours = [expected(false, true, false), vec!["D;3".to_owned()]].concat();
-            let out = session(&fish, &["--features", "no-mark-prompt"], &home, &user, LINES);
+            let out = session(&fish, &["--features", "no-mark-prompt"], &home, user, LINES);
             assert_eq!(marks(&out), ours, "{}: {out:?}", fish.display());
             assert!(user_hooks_ran(&out), "{}: {out:?}", fish.display());
-            let out = session(&fish, &[], &home, &user, LINES);
+            assert!(!out.contains("fish:"), "{}: nothing from fish about our snippet: {out:?}", fish.display());
+            let out = session(&fish, &[], &home, user, LINES);
             if native {
                 let ends = marks(&out).iter().filter(|m| m.starts_with(['C', 'D'])).map(|m| &m[..1]).collect::<String>();
                 assert_eq!(ends, "CDCDCDCDCD", "{}: one C/D per command: {out:?}", fish.display());
             } else {
                 assert_eq!(marks(&out), ours, "{}: {out:?}", fish.display());
             }
-            let out = session(&fish, &["--features", "no-mark-prompt"], &home, &own, &["exit"]);
+            assert!(!out.contains("fish:"), "{}: nothing from fish about our snippet: {out:?}", fish.display());
+            let out = session(&fish, &["--features", "no-mark-prompt"], &home, own, &["exit"]);
             assert_eq!(marks(&out), ["A"], "{}: the user's own marks", fish.display());
             eprintln!("marks: {} (native: {native}) ok", fish.display());
         }
