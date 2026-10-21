@@ -126,7 +126,11 @@ pub fn keep_end(text: String, max: usize) -> (String, bool) {
     while !text.is_char_boundary(from) {
         from += 1;
     }
-    if let Some(newline) = text[from..].find('\n') {
+    // `from > 0`: something is cut. A line starting at the very end is
+    // empty, so a last line longer than `max` keeps its end instead.
+    if text.as_bytes()[from - 1] != b'\n'
+        && let Some(newline) = text[from..].find('\n').filter(|n| from + n + 1 < text.len())
+    {
         from += newline + 1;
     }
     (text[from..].to_owned(), true)
@@ -139,7 +143,9 @@ mod tests {
     #[test]
     fn long_output_keeps_its_end_from_a_line_start() {
         assert_eq!(keep_end("short".into(), 10), ("short".into(), false));
-        assert_eq!(keep_end("one\ntwo\nthree".into(), 9), ("three".into(), true));
+        assert_eq!(keep_end("one\ntwo\nthree".into(), 9), ("two\nthree".into(), true));
+        assert_eq!(keep_end("one\ntwo\nthree".into(), 8), ("three".into(), true));
+        assert_eq!(keep_end("one\nlong line\n".into(), 6), (" line\n".into(), true));
         let (kept, cut) = keep_end("ééééé".into(), 5);
         assert!(cut && kept.len() <= 5 && kept.chars().all(|c| c == 'é'), "{kept:?}");
     }
