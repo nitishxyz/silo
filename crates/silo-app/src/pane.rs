@@ -870,7 +870,6 @@ impl Pane {
         let Some(item) = item else { return };
         match clipboard::choose(Contents::of(&item), self.remote()) {
             Some(Paste::Text(text)) => self.paste_text(text, cx),
-            Some(Paste::Paths(paths)) => self.paste_paths(&paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), cx),
             Some(Paste::SaveImage(png)) => match clipboard::save_png(&silo_proto::paths::home(), &png) {
                 Ok(path) => self.paste_paths(&[path.to_string_lossy().into_owned()], cx),
                 Err(error) => {
@@ -884,13 +883,10 @@ impl Pane {
         self.flush_push();
     }
 
-    /// Files dropped from Finder: their paths, uploaded first on a remote host.
+    /// Files dropped from Finder: uploaded to the block's host, then their
+    /// paths there pasted (see [`clipboard`]).
     fn drop_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if self.remote() {
-            self.upload(paths.into_iter().map(Source::Path).collect(), cx);
-        } else {
-            self.paste_paths(&paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), cx);
-        }
+        self.upload(clipboard::files(paths), cx);
     }
 
     fn paste_paths<S: AsRef<str>>(&mut self, paths: &[S], cx: &mut Context<Self>) {

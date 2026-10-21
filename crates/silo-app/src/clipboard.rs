@@ -1,6 +1,9 @@
 //! Silo's own clipboard: programs in a block read and write the user's
 //! clipboard through the server, and files or images reach a block by
-//! drop or ⌘V (pasted as paths, uploaded first on a remote host).
+//! drop or ⌘V. Files are uploaded to the block's host, on this Mac too:
+//! a drag lends access to this app alone, and programs in a block (run by
+//! the server, a separate process for macOS privacy) often can't read the
+//! originals, so they get a copy in a drop directory.
 
 use std::{
     collections::HashMap,
@@ -78,7 +81,7 @@ impl Contents {
     }
 }
 
-/// Something to put on a remote host before pasting its path.
+/// Something to put on the block's host before pasting its path.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Source {
     Path(PathBuf),
@@ -89,11 +92,15 @@ pub enum Source {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Paste {
     Text(String),
-    /// Paste these local paths.
-    Paths(Vec<PathBuf>),
     /// Save the image (PNG) locally, then paste its path.
     SaveImage(Vec<u8>),
     Upload(Vec<Source>),
+}
+
+/// Files dropped or pasted into a block: uploaded wherever it runs.
+#[must_use]
+pub fn files(paths: Vec<PathBuf>) -> Vec<Source> {
+    paths.into_iter().map(Source::Path).collect()
 }
 
 /// What ⌘V does with `contents`: files beat text (Finder also puts their
@@ -101,7 +108,7 @@ pub enum Paste {
 #[must_use]
 pub fn choose(contents: Contents, remote: bool) -> Option<Paste> {
     if !contents.paths.is_empty() {
-        return Some(if remote { Paste::Upload(contents.paths.into_iter().map(Source::Path).collect()) } else { Paste::Paths(contents.paths) });
+        return Some(Paste::Upload(files(contents.paths)));
     }
     if let Some(text) = contents.text {
         return Some(Paste::Text(text));
@@ -293,14 +300,19 @@ mod tests {
     #[test]
     fn choose_for_clipboard() {
         let files = || contents(&["/x/a.txt"], Some("a.txt"), false);
-        assert_eq!(choose(files(), false), Some(Paste::Paths(vec!["/x/a.txt".into()])));
-        assert_eq!(choose(files(), true), Some(Paste::Upload(vec![Source::Path("/x/a.txt".into())])));
         for remote in [false, true] {
+            assert_eq!(choose(files(), remote), Some(Paste::Upload(vec![Source::Path("/x/a.txt".into())])), "remote: {remote}");
             assert_eq!(choose(contents(&[], Some("hi"), true), remote), Some(Paste::Text("hi".into())));
             assert_eq!(choose(contents(&[], None, false), remote), None);
         }
         assert_eq!(choose(contents(&[], None, true), false), Some(Paste::SaveImage(vec![1, 2, 3])));
         assert_eq!(choose(contents(&[], None, true), true), Some(Paste::Upload(vec![Source::Png(vec![1, 2, 3])])));
+    }
+
+    #[test]
+    fn dropped_files_are_uploaded() {
+        let shot = PathBuf::from("/var/folders/x/T/TemporaryItems/NSIRD_screencaptureui_1/Shot 1.png");
+        assert_eq!(files(vec![shot.clone(), "/x/dir".into()]), vec![Source::Path(shot), Source::Path("/x/dir".into())]);
     }
 
     #[test]
