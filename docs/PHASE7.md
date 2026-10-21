@@ -853,3 +853,100 @@ Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → (P7-5 ∥ P7-9) → P7-6 a
 - **bash 3.2** gives no duration and no command line.
 - **iroh WASM** may not support 1.3.0 relay-only dialing yet. Sharing between Silo apps doesn't depend on it; only
   the web client does.
+
+## 13. Spike result
+
+P7-8 (`spikes/iroh-wasm`, how to rerun in its README). **Everything works with iroh 1.3.0 as pinned, including
+the libghostty-vt decode. No blockers.** One change to the link format is recommended (below).
+
+**Setup:**
+- Browser: headless Chrome 155 on macOS. Server: `target/debug/silo server --relay default` (0.1.4 + this tree,
+  build `2182b42c`) in a temp `SILO_HOME` on the same Mac. Home relay `aps1-1.relay.n0.iroh.link`.
+- Client: `iroh = "=1.3.0"` with `default-features = false, features = ["tls-ring"]` (no portmapper, metrics or
+  fast-apple-datapath). Resolved: noq 1.3.0, iroh-relay 1.3.0, ring 0.17.14, wasm-bindgen 0.2.129. Built with
+  rustc 1.99.0 (rustup) for `wasm32-unknown-unknown`, `Endpoint::builder(presets::N0)` unchanged.
+- The secret used is a **device invite** (`silo pair` → `silo1…` in `ClientHello.invite`). Link grants don't exist
+  until P7-1.
+
+**What works (every step, every run):**
+1. iroh builds for `wasm32-unknown-unknown` without patches. `ring`'s C code needs LLVM clang + `llvm-ar`
+   (Homebrew `llvm`); with Apple clang/ar the link fails on undefined `ring_core_0_17_14_*` symbols.
+2. The page dials the server's `EndpointAddr` with ALPN `silo/ctl/1`. The path is always
+   `relay(aps1-1…)`. Dialing the ticket's full address (IPs included) works too: the browser just ignores
+   the IPs.
+3. `ClientHello` (`protocol: 1`, exact `vt`, invite) → `ServerHello` with the client id.
+4. `session.list`, `session.view` and `data.connect` on the control stream.
+5. A second bi stream: `DataHello` with the ticket → `Welcome{mode: snapshot}` → `SNAPSHOT_HEAD`
+   (1,835 B, `GHOSTSNP`) + one `SNAPSHOT_HISTORY` (26 B) → `SNAPSHOT_DONE`. The data ticket is bound to the
+   issuing connection (`registry.rs:838`). That holds here because both streams share one iroh connection.
+6. **Stretch, done:** ghostty at the pinned revision builds libghostty-vt for wasm upstream
+   (`zig build -Demit-lib-vt=true -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall
+   -Dvt-features=-kitty-graphics`, zig 0.16.0). The module has no imports and exports the full C API plus
+   `ghostty_wasm_*` helpers and `ghostty_type_json`.
+   - The page decodes the received snapshot with `ghostty_snapshot_decoder_new_buf` + `_decode`, then formats it
+     as plain text with `ghostty_formatter_*`. The text matches the server's screen and scrollback.
+   - Decode takes 1.6–3.5 ms. Struct options are passed by pointer (wasm32 C ABI), using the offsets from
+     `ghostty_type_json`.
+
+**Bundle size** (no `wasm-opt`):
+
+| Artifact | Raw | gzip -9 | brotli 11 |
+|---|---|---|---|
+| iroh client (`opt-level="z"`, LTO, 1 CGU, `strip`) | 2,820,318 | 1,036,356 | 807,359 |
+| same without `strip` | 5,707,463 | 1,417,529 | 985,379 |
+| wasm-bindgen JS glue | 46,843 | | |
+| `ghostty-vt.wasm` (ReleaseSmall) | 854,193 | 289,168 | 228,630 |
+
+About 1.04 MB brotli for both. Instantiating takes 12–19 ms.
+
+**Connect time over relay** (relay RTT 165–310 ms on this network, 9 browser runs: 4 waiting, 5 not):
+
+| Phase | Waiting for `online()` first | Dialing at once |
+|---|---|---|
+| own home relay (`online()`) | 1.73–1.99 s | — |
+| `connect` (QUIC handshake via relay) | 175–201 ms | 507–544 ms |
+| `ClientHello` → `ServerHello` | 198–267 ms | 255–360 ms |
+| `session.list` | 162–278 ms | 162–171 ms |
+| `DataHello` → `SNAPSHOT_DONE` | 177–194 ms | 165–189 ms |
+| **link to first snapshot** | **2.86–3.13 s** | **1.47–1.61 s** |
+
+- A web client should **not await `online()`**: the dial only needs the server's relay.
+- After the handshake, each request costs one relay RTT.
+- For comparison, the native build of the same code connects in 169 ms over the same relay-only address and
+  then iroh moves it to a direct path (RTT 0.4 ms). The browser always stays on the relay.
+
+**Link format:**
+- **`silo1` invites decode in WASM unchanged** (postcard `EndpointAddr` from iroh-base 1.3.0, about 330 chars).
+- **`silos1` + `ShareTicket {addr, secret, vt}` works as designed.**
+  - Encoded and decoded in WASM: 360 chars. A link `https://silo.example/#silos1…` is 382 chars, fine for URLs
+    and QR codes.
+  - `vt` is needed. The page must send the exact `vt` in both hellos and load the matching `ghostty-vt.wasm`
+    before connecting, so the web host should serve one module per VT (e.g. `/vt/<vt>/ghostty-vt.wasm`).
+- **The `#` fragment works:** the static server's log shows only `GET /?vt=…`; the ticket never reached it.
+- **Change: put only the relay URL in a share ticket's `addr`.** Today `EndpointAddr` carries every direct
+  address: LAN, Tailscale and public IPv4/IPv6.
+  - A browser can't use them, and a shared link would leak them.
+  - Silo apps lose nothing: a relay-only dial was promoted to a direct path in the native run.
+  - A ticket without a relay URL is unusable on the web; this matches §8's "Relays" rule.
+  - Not tested: the N0 preset's HTTPS pkarr lookup for a server whose home relay changed after the link was made.
+- **Device invites can't stand in for links.**
+  - Each page load is a new endpoint, so every run paired a new permanent device: 16 "silo web spike" entries in
+    `silo devices` after the spike.
+  - The reusable bearer link grant from §8 / P7-1 is required.
+  - `REMOTE_HELLO_MAX` (8 KiB) is ample for a hello carrying a link secret.
+- **`silo-proto` doesn't build for wasm32:** `rustix` → `errno`, and the workspace `tokio` features `net`/`process`
+  → `mio`. The spike mirrors the frames and JSON by hand.
+  - A web client needs the wire types in a crate (or behind a feature) without tokio I/O and rustix.
+  - `silo-transport` doesn't build either, for the same tokio reason.
+
+**Newer iroh:** not needed. crates.io has 1.4.0, which wasn't tried.
+
+**Recommendation:**
+- Freeze the §8 format, with `ShareTicket.addr` limited to the server's relay URL (no IPs), and record that in
+  `protocol.json` with P7-7.
+- Keep iroh 1.3.0 for the web client.
+- Build plan for the deferred web client:
+  - LLVM clang for `ring`, and `strip` in the release profile;
+  - dial without waiting for `online()`;
+  - wasm-safe wire types split from `silo-proto`;
+  - libghostty-vt's upstream wasm build, served per `vt`.
