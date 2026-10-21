@@ -129,6 +129,13 @@ fn expiry_text(left: Duration) -> Option<String> {
     }
 }
 
+impl AddHostSheet {
+    /// Fill in the ticket field (a forwarded `app.hosts_add`).
+    pub(crate) fn fill_ticket(&self, ticket: &str, cx: &mut gpui::App) {
+        self.ticket.update(cx, |field, cx| field.set_text(ticket, cx));
+    }
+}
+
 impl Workspace {
     fn sheet_event(&mut self, field: usize, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sheet) = &self.add_host else { return };

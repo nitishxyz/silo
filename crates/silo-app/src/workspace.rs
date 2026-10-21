@@ -413,6 +413,7 @@ impl Workspace {
                 self.choose_session(shown, window, cx);
             }
             ConnEvent::Resync => {}
+            ConnEvent::Event(Event::AppRequest { request_id, request, .. }) => self.app_request(host, request_id, request, window, cx),
             ConnEvent::Event(_) if !active => {}
             ConnEvent::Event(Event::SessionChanged { view }) => {
                 let stale = self.ahead_of.is_some_and(|base| view.session.revision <= base);
@@ -464,7 +465,6 @@ impl Workspace {
                 | Event::GrantsChanged { .. }
                 | Event::ApprovalRequested { .. }
                 | Event::ApprovalResolved { .. }
-                | Event::AppRequest { .. }
                 | Event::BlockStatus { .. }
                 | Event::BlockAttention { .. }
                 | Event::CommandFinished { .. }

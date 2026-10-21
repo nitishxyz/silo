@@ -4,6 +4,7 @@ mod adaptive;
 mod add_host;
 mod address;
 mod app_log;
+mod app_requests;
 mod appearance;
 mod assets;
 mod blink;

@@ -466,7 +466,7 @@ impl Workspace {
         self.select_window(next);
     }
 
-    fn step_session(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_session(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.active_host;
         let sessions = &self.hosts[host].sessions;
         if sessions.len() < 2 {
@@ -560,6 +560,11 @@ impl Workspace {
     }
 
     // ---- palette UI ----
+
+    /// Open the palette searching for `query`.
+    pub(crate) fn open_palette_with(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette_step(Step::Search, query, window, cx);
+    }
 
     pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
