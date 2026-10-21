@@ -32,6 +32,14 @@ impl Principal {
         }
     }
 
+    /// The paired device this principal is, with its grant.
+    pub fn device(&self) -> Option<&Grant> {
+        match self {
+            Self::Grant(grant) if matches!(grant.who, Who::Device { .. }) => Some(grant),
+            _ => None,
+        }
+    }
+
     /// How a watcher with this principal is shown.
     pub fn watcher_kind(&self) -> WatcherKind {
         match self {
@@ -76,6 +84,18 @@ pub fn rights_on(principal: &Principal, on: On<'_>) -> Option<Rights> {
         _ => false,
     };
     covered.then_some(grant.rights)
+}
+
+/// The grant id of a paired device's principal.
+pub fn device_grant(principal: &Principal) -> Option<&str> {
+    principal.device().map(|g| g.id.as_str())
+}
+
+/// Whether `principal` may make a call marked for approval that needs
+/// more than it holds: a paired device holding control at server scope.
+/// The human at that device approves it (see [`crate::approval::gate`]).
+fn approves_up(principal: &Principal) -> bool {
+    principal.device().is_some_and(|g| g.scope == Scope::Server && g.rights >= Rights::Control && !g.expired(unix_secs()))
 }
 
 /// Whether `principal` sees a session's tree and events.
@@ -186,6 +206,7 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
     for target in ons {
         match rights_on(principal, target) {
             Some(held) if held >= wanted => {}
+            Some(_) if approval && matches!(target, On::Server) && approves_up(principal) => {}
             Some(_) => return Err(RpcError::forbidden(&name())),
             None => {
                 return Err(match target {
@@ -296,7 +317,7 @@ mod tests {
             [OK, OK, F, F, N, OK],
             [OK, OK, F, F, F, F],
             [OK, F, F, F, F, F],
-            [APPROVE, F, F, F, F, F],
+            [APPROVE, APPROVE, F, F, F, F],
             [OK, OK, F, OK, F, OK],
             [OK, OK, N, N, N, N],
         ];

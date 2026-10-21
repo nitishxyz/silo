@@ -24,7 +24,7 @@ use silo_pty::SpawnConfig;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use crate::{
-    access::{On, Principal, rights_on, sees_block, sees_session},
+    access::{On, Principal, device_grant, rights_on, sees_block, sees_session},
     block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms},
     browser::{Block, BrowserBlock, Report},
 };
@@ -537,21 +537,29 @@ impl Registry {
         }
     }
 
-    /// Subscribed app clients holding `rights` server-wide that show
-    /// approval cards (`approvals`). Never a program in one of this
-    /// server's panes, nor a local token, claiming to be an app: either
-    /// could approve its own call.
-    pub fn approvers(&self, rights: Rights) -> Vec<ClientId> {
-        let mut ids: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::APPROVALS)))
-            .filter(|(_, c)| c.pane.is_none() && (c.origin.is_some() || c.principal == Principal::Owner))
-            .filter(|(_, c)| rights_on(&c.principal, On::Server).is_some_and(|r| r >= rights))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.sort_unstable();
-        ids
+    /// Who may answer an approval: subscribed app clients that show
+    /// approval cards (`approvals`). `local`: the owner's apps on the unix
+    /// socket, outside every pane (never a program in a pane, nor a local
+    /// token, claiming to be an app: either could approve its own call).
+    /// `device`: when the caller is the paired device whose grant is
+    /// `device`, that device's remote app connections, with the remote
+    /// connection each runs on (`approval` keeps the ones binding the
+    /// device key itself). No other remote client approves anything.
+    pub fn approvers(&self, device: Option<&str>) -> (Vec<ClientId>, Vec<(ClientId, u64)>) {
+        let apps = || self.clients.iter().filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::APPROVALS)));
+        let mut local: Vec<ClientId> =
+            apps().filter(|(_, c)| c.origin.is_none() && c.pane.is_none() && c.principal == Principal::Owner).map(|(id, _)| *id).collect();
+        local.sort_unstable();
+        let mut remote: Vec<(ClientId, u64)> = device
+            .map(|device| {
+                apps()
+                    .filter(|(_, c)| device_grant(&c.principal) == Some(device) && rights_on(&c.principal, On::Server).is_some())
+                    .filter_map(|(id, c)| Some((*id, c.origin?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        remote.sort_unstable();
+        (local, remote)
     }
 
     /// A data stream of `client` opened on `block`.

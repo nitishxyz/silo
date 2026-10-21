@@ -1,6 +1,7 @@
 //! Approvals (Phase 7 §9): owner actions marked `approval` in the need
 //! table, and upgrade streams, wait for a human when the caller is not a
-//! Silo app. Approvers are the app clients holding the rights; with none
+//! Silo app. Approvers are the owner's apps on this host and, for a call
+//! from a paired device, that device's own app connected here; with none
 //! connected, a caller outside every pane of this server that has a
 //! terminal may confirm on it instead (`confirm`), else the call fails.
 //!
@@ -14,13 +15,18 @@ use std::{
 };
 
 use silo_proto::{
-    access::{Grant, Rights, Scope},
-    control::{Caller, Event, GrantKind, InvitePurpose, Method, RpcError},
+    access::{Grant, Rights, Scope, Who},
+    control::{Caller, ClientRole, Event, GrantKind, InvitePurpose, Method, RpcError},
     model::{BlockId, ClientId, Lifecycle},
 };
 use tokio::sync::oneshot;
 
-use crate::{Server, grants::new_id, registry::Registry};
+use crate::{
+    Server,
+    access::{On, rights_on},
+    grants::new_id,
+    registry::Registry,
+};
 
 /// How long a call waits for an approver.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -99,15 +105,70 @@ struct Asked {
     deadline: Instant,
 }
 
-/// Show `approvers` the request to allow `action` for `caller`.
-fn start(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Asked {
+/// Who answers an approval (see [`Registry::approvers`]).
+#[derive(Default)]
+struct Approvers {
+    /// The owner's apps on this host: every card.
+    local: Vec<ClientId>,
+    /// The calling device's own apps, connected with the device key:
+    /// only that device's cards.
+    device: Vec<ClientId>,
+}
+
+impl Approvers {
+    fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.device.is_empty()
+    }
+}
+
+/// The approvers of a call from the paired device `device` (`None`: not a
+/// device). A device's remote app counts only on a connection bound with
+/// the device key itself: an endpoint merely speaking for it (each CLI
+/// run) never approves.
+fn approvers(server: &Server, device: Option<&Grant>) -> Approvers {
+    let (local, remote) = server.registry.lock().unwrap().approvers(device.map(|g| g.id.as_str()));
+    let key = device.and_then(|g| match &g.who {
+        Who::Device { id } => Some(id.as_str()),
+        _ => None,
+    });
+    let device = match key {
+        Some(key) => {
+            let auth = server.auth();
+            remote.into_iter().filter(|(_, conn)| auth.endpoint(*conn) == Some(key)).map(|(id, _)| id).collect()
+        }
+        None => Vec::new(),
+    };
+    Approvers { local, device }
+}
+
+/// How a card on the calling device's own app names that device; the app
+/// says it in its own words ("this Mac").
+pub const THIS_DEVICE: &str = "this device";
+
+/// Show `approvers` the request to allow `action` for `caller`: the
+/// calling device's own apps see the call as from [`THIS_DEVICE`].
+fn start(server: &Server, approvers: Approvers, action: &str, summary: String, caller: Caller, kind: Option<&str>) -> Asked {
     let id = new_id();
     let (reply, answer) = oneshot::channel();
-    server.approvals.pending.lock().unwrap().insert(id.clone(), Pending { approvers: approvers.clone(), reply });
-    let requested =
-        Event::ApprovalRequested { id: id.clone(), action: action.to_owned(), summary, caller, expires_in_ms: APPROVAL_TIMEOUT.as_millis() as u64 };
-    server.registry.lock().unwrap().emit_clients(requested, approvers.clone());
-    Asked { id, approvers, answer, deadline: Instant::now() + APPROVAL_TIMEOUT }
+    let all: Vec<ClientId> = approvers.local.iter().chain(&approvers.device).copied().collect();
+    server.approvals.pending.lock().unwrap().insert(id.clone(), Pending { approvers: all.clone(), reply });
+    let requested = |caller: Caller| Event::ApprovalRequested {
+        id: id.clone(),
+        action: action.to_owned(),
+        summary: summary.clone(),
+        caller,
+        expires_in_ms: APPROVAL_TIMEOUT.as_millis() as u64,
+    };
+    let own = Caller { from: Some(device_from(THIS_DEVICE, kind)), ..caller.clone() };
+    let mut reg = server.registry.lock().unwrap();
+    if !approvers.local.is_empty() {
+        reg.emit_clients(requested(caller), approvers.local);
+    }
+    if !approvers.device.is_empty() {
+        reg.emit_clients(requested(own), approvers.device);
+    }
+    drop(reg);
+    Asked { id, approvers: all, answer, deadline: Instant::now() + APPROVAL_TIMEOUT }
 }
 
 /// Close `asked` as answered `allowed` and dismiss its cards.
@@ -136,15 +197,43 @@ async fn finish(server: &Server, mut asked: Asked) -> Result<(), RpcError> {
 ///
 /// # Errors
 /// See [`finish`].
-async fn ask(server: &Server, approvers: Vec<ClientId>, action: &str, summary: String, caller: Caller) -> Result<(), RpcError> {
-    let asked = start(server, approvers, action, summary, caller);
+async fn ask(server: &Server, approvers: Approvers, action: &str, summary: String, caller: Caller, kind: Option<&str>) -> Result<(), RpcError> {
+    let asked = start(server, approvers, action, summary, caller, kind);
     finish(server, asked).await
 }
 
-/// Who `client` is, for an approval card.
+/// What kind of client a remote caller is, for "from <device> (<kind>)".
+fn client_kind(role: ClientRole) -> &'static str {
+    match role {
+        ClientRole::App => "Silo app",
+        _ => "CLI",
+    }
+}
+
+/// "<device> (<kind>)": where a paired device's call comes from.
+fn device_from(device: &str, kind: Option<&str>) -> String {
+    match kind {
+        Some(kind) => format!("{device} ({kind})"),
+        None => device.to_owned(),
+    }
+}
+
+/// A paired device's name, as written on a card.
+fn device_name(grant: &Grant) -> String {
+    let name = silo_proto::text::untrusted(&grant.label, silo_proto::text::MAX_TITLE);
+    if name.trim().is_empty() { "a paired device".to_owned() } else { name }
+}
+
+/// Who `client` is, for an approval card: from its pane on this host, or
+/// from the paired device it calls from ("mac (CLI)"), never another
+/// machine's panes.
 pub(crate) fn caller(reg: &Registry, client: ClientId) -> Caller {
     let entry = reg.clients.get(&client);
-    let from = entry.and_then(|c| c.pane.as_deref()).and_then(|pane| pane_label(reg, pane));
+    let device = entry.filter(|c| c.origin.is_some()).and_then(|c| Some((c.principal.device()?, c.role)));
+    let from = match device {
+        Some((grant, role)) => Some(device_from(&device_name(grant), Some(client_kind(role)))),
+        None => entry.and_then(|c| c.pane.as_deref()).and_then(|pane| pane_label(reg, pane)),
+    };
     Caller { client_id: client, label: entry.map(|c| c.label.clone()).unwrap_or_default(), from }
 }
 
@@ -158,32 +247,41 @@ fn pane_label(reg: &Registry, pane: &str) -> Option<String> {
 
 /// Gate an owner call marked for approval by `client`.
 ///
+/// `rights` is what the call needs. A paired device holding less (control)
+/// passed `access::check` only to be approved here: by the owner's apps on
+/// this host or by that device's own app, never without approval.
+///
 /// # Errors
 /// Denied, timed out, `confirm` (the caller may confirm on its terminal
 /// and repeat the call) or `forbidden` with no Silo app to approve.
 pub async fn gate(server: &Server, client: ClientId, method: &Method, rights: Rights) -> Result<(), RpcError> {
-    if !server.require_approval {
-        return Ok(());
-    }
     let action = silo_proto::api::method_name(method);
+    let (device, role, caller, alone, short) = {
+        let reg = server.registry.lock().unwrap();
+        let Some(entry) = reg.clients.get(&client) else { return Err(RpcError::forbidden(&action)) };
+        let short = rights_on(&entry.principal, On::Server).is_none_or(|held| held < rights);
+        if !server.require_approval {
+            return if short { Err(RpcError::forbidden(&action)) } else { Ok(()) };
+        }
+        // The Silo app's own calls are the user's; anything else that says
+        // it is an app (a token, a remote, a process in a pane) is asked.
+        if crate::app_bridge::owner_app(entry) {
+            return Ok(());
+        }
+        let device = entry.origin.and(entry.principal.device().cloned());
+        let alone = entry.pane.is_none() && entry.tty && entry.origin.is_none();
+        (device, entry.role, caller(&reg, client), alone, short)
+    };
+    if short && device.is_none() {
+        return Err(RpcError::forbidden(&action));
+    }
     if server.approvals.take_confirmed(client, &action) {
         return Ok(());
     }
     let summary = summary(method, &server.auth().devices());
-    let (approvers, caller, alone) = {
-        let reg = server.registry.lock().unwrap();
-        // The Silo app's own calls are the user's; anything else that says
-        // it is an app (a token, a remote, a process in a pane) is asked.
-        if reg.clients.get(&client).is_some_and(crate::app_bridge::owner_app) {
-            return Ok(());
-        }
-        let approvers = reg.approvers(rights);
-        let entry = reg.clients.get(&client);
-        let alone = entry.is_some_and(|c| c.pane.is_none() && c.tty && c.origin.is_none());
-        (approvers, caller(&reg, client), alone)
-    };
+    let approvers = approvers(server, device.as_ref());
     if !approvers.is_empty() {
-        return ask(server, approvers, &action, summary, caller).await;
+        return ask(server, approvers, &action, summary, caller, Some(client_kind(role))).await;
     }
     if alone {
         let id = server.approvals.confirm(client, &action);
@@ -238,8 +336,9 @@ fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> St
 }
 
 /// An upgrade stream of `grant` (`None`: the owner) asks to install
-/// another build. With no app able to approve, it goes ahead as before
-/// approvals.
+/// another build. The owner's apps on this host are asked and, for a
+/// paired device, that device's own app (`silo remote upgrade` beside
+/// it). With no app able to approve, it goes ahead as before approvals.
 ///
 /// # Errors
 /// Denied or timed out.
@@ -247,13 +346,18 @@ pub async fn gate_upgrade(server: &Server, grant: Option<&Grant>) -> Result<(), 
     if !server.require_approval {
         return Ok(());
     }
-    let approvers = server.registry.lock().unwrap().approvers(Rights::Control);
+    let device = grant.filter(|g| matches!(g.who, Who::Device { .. }));
+    let approvers = approvers(server, device);
     if approvers.is_empty() {
         return Ok(());
     }
-    let label = grant.map_or_else(|| "silo".to_owned(), |g| g.label.clone());
-    let caller = Caller { client_id: 0, label, from: None };
-    ask(server, approvers, "upgrade", "Install another build of the server".into(), caller).await
+    let caller = match grant {
+        None => Caller { client_id: 0, label: "silo".into(), from: None },
+        Some(g) if device.is_some() => Caller { client_id: 0, label: "silo cli".into(), from: Some(device_from(&device_name(g), Some("CLI"))) },
+        Some(g) => Caller { client_id: 0, label: g.label.clone(), from: None },
+    };
+    let kind = device.map(|_| "CLI");
+    ask(server, approvers, "upgrade", "Install another build of the server".into(), caller, kind).await
 }
 
 /// Where a local client's process runs: the pane holding it, and whether

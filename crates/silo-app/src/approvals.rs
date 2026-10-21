@@ -24,7 +24,8 @@ pub struct Approval {
     pub id: String,
     /// Who asks (the client's label), cleaned; the client chose it.
     pub caller: String,
-    /// The caller's pane, `session › block`, if it runs in one.
+    /// The caller's pane, `session › block`, if it runs in one; for a
+    /// paired device's call, that device (`<name> (CLI)`).
     pub from: Option<String>,
     /// What allowing does, written by the server.
     pub summary: String,
@@ -53,6 +54,20 @@ impl Approval {
 }
 
 const UNNAMED: &str = "A program";
+
+/// How a host names the calling device on that device's own cards (the
+/// server's `approval::THIS_DEVICE`). A remote host sends this app only
+/// cards from this device, so only those are reworded.
+const THIS_DEVICE: &str = "this device";
+
+/// The card's last line: where the call comes from, on which host.
+fn place(from: Option<&str>, host: &str, remote: bool) -> String {
+    match from {
+        Some(from) if remote && from.starts_with(THIS_DEVICE) => format!("From this Mac{} on {host}", &from[THIS_DEVICE.len()..]),
+        Some(from) => format!("From {from} on {host}"),
+        None => format!("On {host}"),
+    }
+}
 
 impl Approvals {
     /// `approval.requested` from `host`. A repeated id replaces its card.
@@ -147,11 +162,9 @@ impl Workspace {
                 .child(label)
         };
         let cards = cards.into_iter().enumerate().map(|(i, card)| {
-            let host = self.hosts.get(card.host).map(|h| h.info.name.clone()).unwrap_or_default();
-            let place = match &card.from {
-                Some(from) => format!("From {from} on {host}"),
-                None => format!("On {host}"),
-            };
+            let host = self.hosts.get(card.host);
+            let remote = host.is_some_and(|h| !h.info.local);
+            let place = place(card.from.as_deref(), &host.map(|h| h.info.name.clone()).unwrap_or_default(), remote);
             let (deny, allow) = ((card.host, card.id.clone()), (card.host, card.id.clone()));
             div()
                 .id(("approval", i))
@@ -243,5 +256,14 @@ mod tests {
         assert_eq!(card.summary, "Remove the host mini");
         approvals.requested(0, "b", "x", &caller("/bin/sh", None), 1, Instant::now());
         assert_eq!(approvals.cards[1].asks(), "A program wants to");
+    }
+
+    #[test]
+    fn a_call_from_this_device_says_so() {
+        assert_eq!(place(Some("this device (CLI)"), "mini", true), "From this Mac (CLI) on mini");
+        assert_eq!(place(Some("this device (CLI)"), "This Mac", false), "From this device (CLI) on This Mac", "only a remote host's cards");
+        assert_eq!(place(Some("Ana's Mac (CLI)"), "This Mac", false), "From Ana's Mac (CLI) on This Mac");
+        assert_eq!(place(Some("work › api"), "mini", true), "From work › api on mini");
+        assert_eq!(place(None, "mini", true), "On mini");
     }
 }

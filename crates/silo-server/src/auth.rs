@@ -223,6 +223,11 @@ impl Auth {
         }
     }
 
+    /// The endpoint on the other end of live connection `conn_id`.
+    pub fn endpoint(&self, conn_id: u64) -> Option<&str> {
+        self.live.get(&conn_id).map(|l| l.endpoint.as_str())
+    }
+
     pub fn remove_live(&mut self, conn_id: u64) {
         self.live.remove(&conn_id);
     }

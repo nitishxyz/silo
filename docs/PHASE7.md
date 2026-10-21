@@ -649,14 +649,28 @@ away.
   2. An approver answers with `approval.answer {id, allow}`. `approval.resolved {id, allowed}` dismisses the card in
      other apps.
   3. The call fails with `forbidden` "Denied in Silo", or `timeout` after 120 s.
-  - **Approvers:** app clients whose principal holds the method's rights at server scope and that advertise
-    `compat::feature::APPROVALS = "approvals"` (P7-5): an app that shows no cards is never asked, so no call waits
-    120 s for an answer that cannot come.
+  - **Approvers:** subscribed app clients that advertise `compat::feature::APPROVALS = "approvals"` (P7-5): an
+    app that shows no cards is never asked, so no call waits 120 s for an answer that cannot come. Two kinds:
+    - the owner's apps on this host (unix socket, no token, outside every pane) get every card;
+    - **the calling device's own app.** When the caller is a paired device (a remote connection with its device
+      grant: bound with the device key, or an endpoint speaking for it with a device proof, as each CLI run
+      does), that device's app connected here also gets the card and may answer it. Only on a connection bound
+      with the device key itself: an endpoint speaking for the device never approves. A remote app answers only
+      its own device's calls, never another device's, a local caller's or a token's; link and token principals
+      never approve. The person who started the action is at that device (`silo --host mini pair`,
+      `silo remote upgrade mini`), and the host's screen may be out of sight.
+    - The first answer wins; `approval.resolved` dismisses the card in every app asked.
+  - **A device asks for owner actions by approval:** a paired device holds control, yet may call the methods
+    marked `approval` (they need owner), always approved, never skipped: with approvals off
+    (`require_approval: false`) or no app to ask, it gets `forbidden` as before. Its other owner methods
+    (`pair.list`, `grant.list`, `server.log`) stay forbidden.
   - **`clipboard.read` asks nobody: the paste gesture is the approval** (`pane.rs:978`). The attached apps answer a
     read only right after the user pasted into that block, else nothing within 3 s, exactly as before Phase 7. It
     needs interact on the block, so a scoped agent token can still read the images pasted into its pane.
 - **UI:** a card in the focused window ("claude-code wants to create a pairing invite · from work › api"), with
-  Allow and Deny. If Silo isn't frontmost, a notification is shown too.
+  Allow and Deny. If Silo isn't frontmost, a notification is shown too. A paired device's call shows where it
+  comes from as that device, never another machine's panes: `from: "<device name> (CLI)"` on the host's apps, and
+  `"this device (CLI)"` on the device's own, which the app shows as "From this Mac (CLI) on mini".
 - **Scoped tokens:**
   - `silo grant --session X --interact [--ttl 8h] [--label claude-code]` → `grant.create {kind: token}` prints
     `SILO_TOKEN=silot1…`.
@@ -736,6 +750,7 @@ has merged.
   - The view-only rule is enforced where data frames are read (`conn.rs`); `Attach` is unchanged.
   - Upgrade approval is asked once `UPGRADE_BINARY` arrives (a build check asks nothing), and an upgrade goes ahead
     as before when no app can approve: headless hosts keep `silo remote upgrade`.
+    Since the P7-5 follow-up, "an app" is the host owner's or the calling device's own (§9 approvers).
   - Approvals are built and tested (`Config::require_approval`) but stay off in `silo server` until P7-5: today's
     app shows no cards, so an approval-gated call from a pane (`silo pair`, `silo down`, `silo remote install`)
     could only wait or fail. P7-5 turns them on with the cards.
@@ -896,6 +911,20 @@ has merged.
     pane**) decides whether a call skips approval (`approval::gate`; `access::check` no longer looks at the role)
     and who gets `app.request`. Approvers are app clients with `approvals`, not in a pane, and local only as the
     owner (no token). So a Silo app started from inside one of this server's panes is asked like any program.
+  - **Approvals at the calling device (follow-up):** before it, a remote app holding the rights approved any
+    caller's card (in practice only upgrades, needing control) and a paired device's CLI could never reach an
+    owner action, so `silo remote upgrade mini` showed its card on mini's screen only. Now
+    `Registry::approvers(device)` returns the owner's local apps (every card) and, for a caller that is a paired
+    device, that device's remote app connections; `approval::approvers` keeps those whose connection's endpoint is
+    the device key itself (`Auth::endpoint`), so an endpoint speaking for the device (any CLI run) never
+    approves. No other remote client approves anything. `access::check` lets a device grant with control at
+    server scope through to `approved(Owner)` methods (`approves_up`), and `approval::gate` then requires an
+    approval: `forbidden` with approvals off or no app to ask. Upgrades ask the same approvers and go ahead
+    only when there are none. Cards name a remote caller by device: `Caller.from` is `"<device> (CLI)"` (or
+    `(Silo app)`) on the host's apps and `approval::THIS_DEVICE` (`"this device (CLI)"`) on the device's own,
+    shown by the app as "From this Mac (CLI) on <host>" on a remote host's cards only. Residual risk (a
+    guardrail, decision 8): a program on the device can bind the device key itself, say it is the app, and
+    answer its own device's cards; the host cannot see that device's panes.
   - "In a pane" (§10): the parent chain reaches a block's process, **or** the caller or any process on that chain
     has a block's terminal as its controlling terminal (the block process's `e_tdev` / `tty_nr`). A double fork
     keeps the terminal; `setsid` drops it, leaving no terminal to confirm on. Still not seen (decision 8): a
