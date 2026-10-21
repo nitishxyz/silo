@@ -352,7 +352,7 @@ pub struct Ctx {
     pub role: ClientRole,
 }
 
-/// Who a hello is admitted as, and the paired device's name for its label.
+/// Who a hello is admitted as, and the paired device's (or link's) name for its label.
 /// Remote hellos carry exactly one of a paired endpoint (or device proof),
 /// an invite or a grant's secret; local ones may carry an agent token.
 fn admit(server: &Server, peer: &Peer, hello: &ClientHello) -> Result<(Principal, Option<String>), RpcError> {
@@ -377,7 +377,9 @@ fn admit(server: &Server, peer: &Peer, hello: &ClientHello) -> Result<(Principal
         }
         let grant = auth.redeem_secret(SecretKind::Link, secret)?;
         auth.bind(conn_id, &grant.id);
-        return Ok((Principal::Grant(Box::new(grant)), None));
+        // Watchers show who the link is for ("Silo · Ana").
+        let name = Some(grant.label.clone()).filter(|l| !l.is_empty());
+        return Ok((Principal::Grant(Box::new(grant)), name));
     }
     let device = crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref())?;
     // Only an endpoint itself redeems invites: one speaking for a device
