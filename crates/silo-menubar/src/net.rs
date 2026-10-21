@@ -207,7 +207,7 @@ async fn shutdown(config: &Config) -> anyhow::Result<()> {
     let connected = Control::connect_local(&paths::socket(&config.home), NAME, true).await;
     silo_client::set_role(ClientRole::Cli);
     let (control, _events) = connected?;
-    control.call_value(Method::ServerShutdown {}).await?;
+    control.call_value(Method::ServerShutdown { force: false }).await?;
     Ok(())
 }
 

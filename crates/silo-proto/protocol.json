@@ -14206,6 +14206,10 @@
         "properties": {
           "block_id": {
             "type": "string"
+          },
+          "force": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [
@@ -28607,6 +28611,12 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "force": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "result": {
@@ -28942,6 +28952,10 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
           "session_id": {
             "type": "string"
           }
@@ -35076,6 +35090,10 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
           "window_id": {
             "type": "string"
           }

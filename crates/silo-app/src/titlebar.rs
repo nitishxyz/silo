@@ -457,7 +457,7 @@ impl Workspace {
                             .child(icon("close", 12.0, chrome.icon))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.call(Method::WindowClose { window_id: window_id.clone() });
+                                this.call(Method::WindowClose { window_id: window_id.clone(), force: false });
                             })),
                     ),
                 )

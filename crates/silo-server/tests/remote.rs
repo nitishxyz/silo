@@ -62,7 +62,7 @@ async fn owner(home: &Path) -> Control {
 }
 
 async fn shutdown(control: Control, task: JoinHandle<()>) {
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     timeout(T, task).await.unwrap().unwrap();
 }
@@ -338,7 +338,7 @@ async fn paired_device_is_not_owner() {
     assert_eq!(code(ctl.call(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairList {}).await), RpcError::FORBIDDEN);
     assert_eq!(code(ctl.call(Method::PairRevoke { id: net.id().to_string() }).await), RpcError::FORBIDDEN);
-    assert_eq!(code(ctl.call(Method::ServerShutdown {}).await), RpcError::FORBIDDEN);
+    assert_eq!(code(ctl.call(Method::ServerShutdown { force: false }).await), RpcError::FORBIDDEN);
     // Still serving.
     ctl.call(Method::SessionList {}).await.unwrap();
     control.call_value(Method::SessionList {}).await.unwrap();
@@ -506,7 +506,7 @@ async fn grants_and_identity_survive_takeover() {
     ctl.call(Method::SessionList {}).await.unwrap();
     drop(ctl);
     net.close().await.unwrap();
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     timeout(T, successor).await.unwrap().unwrap().unwrap();
 }
 
@@ -636,7 +636,7 @@ async fn fixed_port_survives_takeover_and_bind_failure_is_reported() {
     let error = control.call_value(Method::PairCreate { ttl_secs: 60, purpose: silo_proto::control::InvitePurpose::Device }).await.unwrap_err();
     assert!(error.to_string().contains("remote access is not running"), "{error}");
     net.close().await.unwrap();
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     timeout(T, third).await.unwrap().unwrap().unwrap();
 }
 

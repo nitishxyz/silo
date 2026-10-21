@@ -236,7 +236,9 @@ async fn ask_shutdown(home: &Path, build: &str) -> bool {
     let Some(control) = connect(home, build).await else {
         return false;
     };
-    let asked = tokio::time::timeout(Duration::from_secs(2), control.call_value(Method::ServerShutdown {})).await;
+    // Stopping was decided already: without `force`, a server enforcing
+    // the close guard for this process would only be sent SIGTERM next.
+    let asked = tokio::time::timeout(Duration::from_secs(2), control.call_value(Method::ServerShutdown { force: true })).await;
     if !matches!(asked, Ok(Ok(_))) {
         return false;
     }
@@ -346,7 +348,7 @@ mod tests {
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
                 while let Ok(Some(frame)) = read_frame(&mut r).await {
                     let request: Request = frame.parse().unwrap();
-                    let shutdown = matches!(request.method, Method::ServerShutdown {});
+                    let shutdown = matches!(request.method, Method::ServerShutdown { .. });
                     let result = if shutdown { serde_json::json!({}) } else { serde_json::json!([{}, {}]) };
                     let reply = ServerMessage::Response { id: request.id, result: Some(result), error: None };
                     write_frame(&mut w, &Frame::json(kind::CONTROL, &reply).unwrap()).await.unwrap();
@@ -494,7 +496,7 @@ mod tests {
         let error = Control::connect_build(silo_transport::Conn::Unix(socket.clone()), "inspect", false, OTHER).await.err().expect("not that build");
         assert!(error.downcast_ref::<IncompatibleProtocol>().is_some(), "{error:#}");
 
-        control.call_value(Method::ServerShutdown {}).await.unwrap();
+        control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
         server.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&home);
     }

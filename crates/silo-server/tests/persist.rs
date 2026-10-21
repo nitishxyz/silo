@@ -49,7 +49,7 @@ async fn connect(home: &Path) -> Control {
 
 /// Clean shutdown: request it and wait for `run` to return.
 async fn shutdown(control: Control, task: JoinHandle<()>) {
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, task).await.unwrap().unwrap();
 }
@@ -298,7 +298,7 @@ async fn closed_block_snapshots_are_collected() {
     let dir = snapshot_dir(&home, &split.block_id);
     wait_for("split checkpoint", async || dir.is_dir()).await;
 
-    control.call_value(Method::BlockClose { block_id: split.block_id.clone() }).await.unwrap();
+    control.call_value(Method::BlockClose { block_id: split.block_id.clone(), force: false }).await.unwrap();
     // gc keeps the previous commit's generations: commit again via output.
     for n in 0..20 {
         if !dir.exists() {
@@ -359,7 +359,7 @@ async fn a_clean_exit_closes_the_block_and_its_session() {
     assert_eq!((kept.lifecycle, kept.exited), (Lifecycle::Exited, Some(0)), "an explicit command's output stays");
     send(&control, &main.block_id, "exit 0\n").await;
     wait_for("session closed", async || control.call::<Vec<serde_json::Value>>(Method::SessionList {}).await.unwrap().len() == 1).await;
-    control.call_value(Method::SessionClose { session_id: command.session_id.clone() }).await.unwrap();
+    control.call_value(Method::SessionClose { session_id: command.session_id.clone(), force: false }).await.unwrap();
     shutdown(control, task).await;
 
     let task = start(&home).await;

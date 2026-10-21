@@ -168,7 +168,7 @@ async fn takeover_keeps_programs_streams_and_layout() {
     assert_same(&before, &view(&control, &created.session_id).await);
     resume(&control, &created.block_id, &mut tail).await;
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -250,7 +250,7 @@ async fn lost_commit_after_ready_keeps_programs() {
     assert!(pump(&mut stream, &mut tail, |t| t.numbers().len() > 20).await, "the program keeps running");
     assert_consecutive(&tail.numbers());
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop((stream, control));
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -287,7 +287,7 @@ async fn lost_ready_leaves_one_server(name: &str, fault: silo_server::handoff::R
     control.call_value(Method::SessionRename { session_id: created.session_id.clone(), name: "renamed".into() }).await.unwrap();
     assert_eq!(view(&control, &created.session_id).await.session.name, "renamed");
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -327,7 +327,7 @@ async fn concurrent_connect_or_spawn_never_spawns() {
     }
     let control = reconnect(&home).await;
     assert_same(&before, &view(&control, &created.session_id).await);
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -356,7 +356,7 @@ async fn aborted_takeover_keeps_old_server_serving() {
     resume(&control, &created.block_id, &mut tail).await;
     control.call_value(Method::SessionRename { session_id: created.session_id.clone(), name: "renamed".into() }).await.unwrap();
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -397,7 +397,7 @@ async fn takeover_keeps_exit_status() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop((failed, clean, control));
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);

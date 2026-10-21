@@ -381,7 +381,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
     assert_eq!(view.session.windows[0].layout.blocks(), [block.clone(), split.block_id.clone()]);
     assert_eq!(view.blocks.len(), 2);
-    call_value(&control, Method::BlockClose { block_id: split.block_id.clone() }).await;
+    call_value(&control, Method::BlockClose { block_id: split.block_id.clone(), force: false }).await;
 
     // Exit: stream reports it; the block stays readable in its layout.
     stream_a.send(&ClientData::Input(b"exit 7\n".to_vec()));
@@ -422,7 +422,7 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     pump_until(&mut stream_c, &mut c, |m| m.exited().is_some() && m.screen_text().contains("exit 7")).await;
     assert_eq!(c.exited(), Some(Some(7)));
     drop(events);
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -503,7 +503,7 @@ async fn block_swap_and_window_move_body() {
     let view = next_view(&mut events, &sid).await;
     let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
     assert_eq!(order, [created.window_id.clone(), other.window_id.clone(), third.window_id.clone()]);
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -532,8 +532,8 @@ async fn snapshot_mid_escape_and_alt_screen_body() {
     pump_until(&mut stream_b, &mut b, |m| m.screen_text().contains("alt-screen")).await;
     assert_eq!(a.screen_text(), b.screen_text());
     assert!(!b.screen_text().contains("base"));
-    call_value(&control, Method::SessionClose { session_id: created.session_id }).await;
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::SessionClose { session_id: created.session_id, force: false }).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -577,7 +577,7 @@ async fn clear_and_reset_body() {
     pump_until(&mut stream, &mut a, |m| m.resume().is_some_and(|r| r.offset >= b_offset)).await;
     assert_eq!(a.resume(), b.resume());
     assert_eq!(a.screen_text(), b.screen_text());
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -697,7 +697,7 @@ async fn owner_terminal_config_body() {
     pump_until(&mut stream_a, &mut a, |m| m.config() == Some(red)).await;
     assert_eq!(background(&mut a), 0x0012_3456);
     query_background(&mut stream_a, &mut a, "1212/3434/5656").await;
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -767,7 +767,7 @@ async fn resume_across_config_change_body() {
     assert_eq!(b.config(), Some(blue));
     assert_eq!(background(&mut b), 0x0012_3456, "program override survives");
     assert_eq!(a.screen_text(), b.screen_text());
-    call_value(&control, Method::ServerShutdown {}).await;
+    call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 
 #[tokio::test]

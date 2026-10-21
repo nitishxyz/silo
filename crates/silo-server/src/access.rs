@@ -295,7 +295,7 @@ mod tests {
             ("view session", Method::SessionView { session_id: "s".into() }),
             ("interact block", Method::TerminalSend { block_id: b(), text: "x".into() }),
             ("interact session", Method::WindowSelect { session_id: "s".into(), window_id: "w".into() }),
-            ("control session", Method::BlockClose { block_id: b() }),
+            ("control session", Method::BlockClose { block_id: b(), force: false }),
             ("control server", Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None }),
             ("owner", Method::PairList {}),
             ("owner approval", Method::PairCreate { ttl_secs: 60, purpose: InvitePurpose::Device }),

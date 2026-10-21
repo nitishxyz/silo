@@ -104,7 +104,7 @@ pub struct ServerHello {
     pub vt: String,
     /// The server's [`crate::BUILD`] (its version is in `server`).
     pub build: String,
-    /// The server's [`crate::compat::FEATURES`].
+    /// The server's [`crate::compat::server_features`].
     #[serde(default)]
     pub features: Vec<String>,
     pub client_id: ClientId,
@@ -119,7 +119,7 @@ impl ServerHello {
             protocol: crate::PROTOCOL,
             vt: crate::VT.to_owned(),
             build: crate::BUILD.to_owned(),
-            features: crate::compat::features(),
+            features: crate::compat::server_features(),
             client_id,
             server,
         }
@@ -178,7 +178,11 @@ pub enum Method {
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
-    ServerShutdown {},
+    ServerShutdown {
+        /// Close even when programs are running (see `blocks.busy`).
+        #[serde(default)]
+        force: bool,
+    },
     /// Stop, then start this server's own binary again; ends every session.
     #[serde(rename = "server.restart")]
     ServerRestart {
@@ -222,7 +226,12 @@ pub enum Method {
     #[serde(rename = "session.rename")]
     SessionRename { session_id: SessionId, name: String },
     #[serde(rename = "session.close")]
-    SessionClose { session_id: SessionId },
+    SessionClose {
+        session_id: SessionId,
+        /// Close even when programs are running (see `blocks.busy`).
+        #[serde(default)]
+        force: bool,
+    },
 
     #[serde(rename = "window.create")]
     WindowCreate {
@@ -242,7 +251,12 @@ pub enum Method {
     #[serde(rename = "window.step")]
     WindowStep { session_id: SessionId, delta: i32 },
     #[serde(rename = "window.close")]
-    WindowClose { window_id: WindowId },
+    WindowClose {
+        window_id: WindowId,
+        /// Close even when programs are running (see `blocks.busy`).
+        #[serde(default)]
+        force: bool,
+    },
     #[serde(rename = "window.rename")]
     WindowRename { window_id: WindowId, name: Option<String> },
     #[serde(rename = "window.move")]
@@ -264,7 +278,12 @@ pub enum Method {
         url: Option<String>,
     },
     #[serde(rename = "block.close")]
-    BlockClose { block_id: BlockId },
+    BlockClose {
+        block_id: BlockId,
+        /// Close even when programs are running (see `blocks.busy`).
+        #[serde(default)]
+        force: bool,
+    },
     #[serde(rename = "block.focus")]
     BlockFocus { block_id: BlockId },
     /// Focus the block `delta` places after (negative: before) `block_id`

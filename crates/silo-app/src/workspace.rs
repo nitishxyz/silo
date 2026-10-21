@@ -1126,7 +1126,7 @@ impl Workspace {
 
     pub(crate) fn close_block_id(&mut self, block: String) {
         tracing::debug!(%block, "close block");
-        self.call(Method::BlockClose { block_id: block });
+        self.call(Method::BlockClose { block_id: block, force: false });
     }
 
     /// Replace a block without a process by a fresh shell in its slot:
@@ -1153,7 +1153,7 @@ impl Workspace {
             if let Some(rect) = float {
                 control.call_value(Method::BlockFloat { block_id: created.block_id, rect: Some(rect) }).await?;
             }
-            control.call_value(Method::BlockClose { block_id: block }).await?;
+            control.call_value(Method::BlockClose { block_id: block, force: false }).await?;
             anyhow::Ok(())
         });
         cx.spawn(async move |this, cx| {

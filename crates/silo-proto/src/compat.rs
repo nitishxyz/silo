@@ -29,6 +29,7 @@ pub mod feature {
     /// `block.command_finished`).
     pub const STATUS: &str = "status";
     /// The client handles `busy` refusals of closes (and sends `force`).
+    /// Opt-in ([`OPT_IN`]): only clients that do advertise it.
     pub const CLOSE_GUARD: &str = "close_guard";
     /// The app shows approval cards (`approval.requested`) and answers
     /// them: only such apps are asked to approve.
@@ -38,10 +39,21 @@ pub mod feature {
 /// Everything this build supports beyond protocol 1.
 pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS];
 
+/// Features this build's server supports that a client advertises only
+/// once it handles them (`silo_client::advertise`), so no client of this
+/// build gets them by default.
+pub const OPT_IN: &[&str] = &[feature::CLOSE_GUARD];
+
 /// [`FEATURES`] as sent in a hello.
 #[must_use]
 pub fn features() -> Vec<String> {
     FEATURES.iter().map(|&f| f.to_owned()).collect()
+}
+
+/// [`FEATURES`] and [`OPT_IN`], as a server's hello sends them.
+#[must_use]
+pub fn server_features() -> Vec<String> {
+    FEATURES.iter().chain(OPT_IN).map(|&f| f.to_owned()).collect()
 }
 
 /// Our features a peer advertising `peer` lacks.

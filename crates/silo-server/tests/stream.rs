@@ -488,7 +488,7 @@ mod control {
         drop(b);
         wait_owner(&a, &created, a.client_id(), "Silo").await;
         assert_eq!(info(&a, &created).await.size.columns, 70);
-        a.call_value(Method::ServerShutdown {}).await.unwrap();
+        a.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -501,7 +501,7 @@ mod control {
         assert!(d.params_schema["properties"]["block_id"].is_object(), "{}", d.params_schema);
         let err = control.call_value(Method::ApiDescribe { method: "nope".into() }).await.unwrap_err();
         assert!(err.to_string().contains("not_found"), "{err}");
-        control.call_value(Method::ServerShutdown {}).await.unwrap();
+        control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     }
 }
 

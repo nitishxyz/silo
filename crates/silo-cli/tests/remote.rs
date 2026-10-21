@@ -101,7 +101,7 @@ async fn join_offers_and_adds_host() {
         Ok(())
     })
     .unwrap();
-    b.call_value(Method::ServerShutdown {}).await.unwrap();
+    b.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(b);
     timeout(T, b_task).await.unwrap().unwrap();
     let b_task = start(&b_home).await;
@@ -115,7 +115,7 @@ async fn join_offers_and_adds_host() {
     assert_eq!(Hosts::load(&a_home).unwrap().hosts, [host]);
 
     for (control, task) in [(a, a_task), (b, b_task)] {
-        control.call_value(Method::ServerShutdown {}).await.unwrap();
+        control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
         drop(control);
         timeout(T, task).await.unwrap().unwrap();
     }
@@ -172,7 +172,7 @@ async fn pair_then_remote_ls() {
     drop(remote.control);
     remote.net.close().await.unwrap();
 
-    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    owner.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(server_home);
@@ -231,7 +231,7 @@ async fn app_and_cli_runs_connect_at_once_on_one_pairing() {
     drop((app, two.control));
     app_net.close().await.unwrap();
     two.net.close().await.unwrap();
-    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    owner.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(server_home);
@@ -277,7 +277,7 @@ async fn upgrade_reaches_a_moved_host() {
     assert_eq!(Some(stored), silo_cli::hosts::current_addr(&owner).await.unwrap());
 
     // The host answers only after 12 s.
-    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    owner.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
     let reserved = reserve(port);
@@ -292,7 +292,7 @@ async fn upgrade_reaches_a_moved_host() {
     assert_eq!(timeout(Duration::from_secs(30), upgrade).await.unwrap().unwrap().unwrap(), up_to_date);
 
     let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
-    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    owner.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(server_home);

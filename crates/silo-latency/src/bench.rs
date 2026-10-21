@@ -554,7 +554,7 @@ impl Flood {
     /// End the session.
     async fn stop(self, control: &Control) -> anyhow::Result<Flooded> {
         let cut = self.thread.is_finished();
-        control.call_value(Method::SessionClose { session_id: self.session_id }).await?;
+        control.call_value(Method::SessionClose { session_id: self.session_id, force: false }).await?;
         let secs = self.started.elapsed().as_secs_f64();
         let (bytes, delays) = tokio::task::spawn_blocking(move || self.thread.join()).await?.map_err(|_| anyhow::anyhow!("flood thread panicked"))?;
         Ok(Flooded { rate: bytes as f64 / secs, delays, cut })
@@ -603,7 +603,7 @@ async fn start(home: &Path) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
 
 async fn stop(home: &Path, task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
     let owner = Control::connect(&paths::socket(home), "bench").await?.0;
-    let _ = owner.call_value(Method::ServerShutdown {}).await;
+    let _ = owner.call_value(Method::ServerShutdown { force: false }).await;
     drop(owner);
     timeout(T, task).await.context("server shutdown timed out")??
 }

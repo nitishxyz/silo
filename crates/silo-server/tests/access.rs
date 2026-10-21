@@ -73,7 +73,7 @@ async fn connect(home: &Path, token: Option<&str>) -> Result<Control, anyhow::Er
 }
 
 async fn shutdown(control: Control, task: JoinHandle<()>) {
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     timeout(T, task).await.unwrap().unwrap();
 }
@@ -142,7 +142,7 @@ async fn scoped_tokens_see_and_do_only_what_they_cover() {
     watcher.call_value(Method::BlockView { block_id: mine.block_id.clone() }).await.unwrap();
     assert_eq!(code(viewer.call_value(Method::SessionView { session_id: other.session_id.clone() }).await), "not_found");
     assert_eq!(code(viewer.call_value(Method::TerminalSend { block_id: mine.block_id.clone(), text: "x".into() }).await), RpcError::FORBIDDEN);
-    assert_eq!(code(typist.call_value(Method::BlockClose { block_id: mine.block_id.clone() }).await), RpcError::FORBIDDEN);
+    assert_eq!(code(typist.call_value(Method::BlockClose { block_id: mine.block_id.clone(), force: false }).await), RpcError::FORBIDDEN);
     assert_eq!(code(typist.call_value(new()).await), RpcError::FORBIDDEN);
     assert_eq!(code(typist.call_value(Method::GrantList {}).await), RpcError::FORBIDDEN);
     let own = Method::OwnBlock { block_ids: vec![mine.block_id.clone()], mode: Default::default() };
@@ -169,7 +169,7 @@ async fn scoped_tokens_see_and_do_only_what_they_cover() {
     assert!(view_of.watchers.iter().all(|w| w.principal == silo_proto::model::WatcherKind::Token));
 
     // Closing the session removes the grants scoped to it.
-    owner.call_value(Method::SessionClose { session_id: mine.session_id.clone() }).await.unwrap();
+    owner.call_value(Method::SessionClose { session_id: mine.session_id.clone(), force: false }).await.unwrap();
     timeout(T, viewer.closed()).await.expect("a closed session's grant closes its connections");
     let grants: silo_proto::control::Grants = owner.call(Method::GrantList {}).await.unwrap();
     assert!(grants.grants.is_empty(), "{:?}", grants.grants);

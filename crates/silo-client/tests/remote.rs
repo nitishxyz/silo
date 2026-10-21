@@ -45,7 +45,7 @@ async fn owner(home: &Path) -> Control {
 }
 
 async fn shutdown(control: Control, task: JoinHandle<()>) {
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     timeout(T, task).await.unwrap().unwrap();
 }

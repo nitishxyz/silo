@@ -57,7 +57,7 @@ async fn connect(home: &Path) -> (Control, Events) {
 }
 
 async fn stop(control: Control, task: JoinHandle<anyhow::Result<()>>) {
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     tokio::time::timeout(TIMEOUT, task).await.unwrap().unwrap().unwrap();
 }

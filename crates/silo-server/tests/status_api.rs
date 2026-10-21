@@ -81,7 +81,7 @@ async fn status_and_commands_through_the_api() {
     let view: BlockView = control.call(Method::BlockView { block_id: created.block_id }).await.unwrap();
     assert_eq!(view.status, None);
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     let _ = timeout(T, task).await;
     let _ = std::fs::remove_dir_all(home);
 }

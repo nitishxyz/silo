@@ -87,7 +87,12 @@ fn result_schema(method: &Method) -> Schema {
         M::TerminalCommandOutput { .. } => schema_for!(CommandOutput),
         M::GrantCreate { .. } => schema_for!(GrantCreated),
         M::GrantList {} => schema_for!(Grants),
-        M::ServerShutdown {} | M::ServerRestart { .. } | M::Ping {} | M::EventsSubscribe {} | M::SessionRename { .. } | M::SessionClose { .. } => {
+        M::ServerShutdown { .. }
+        | M::ServerRestart { .. }
+        | M::Ping {}
+        | M::EventsSubscribe {}
+        | M::SessionRename { .. }
+        | M::SessionClose { .. } => {
             schema_for!(Empty)
         }
         M::WindowSelect { .. } | M::WindowStep { .. } | M::WindowClose { .. } | M::WindowRename { .. } | M::WindowMove { .. } => schema_for!(Empty),
@@ -153,7 +158,7 @@ pub fn examples() -> Vec<Method> {
     let shell = || SpawnSpec { cwd: Some("~/src".into()), command: Vec::new(), size: Some(TermSize::new(120, 40)) };
     vec![
         M::ServerInfo {},
-        M::ServerShutdown {},
+        M::ServerShutdown { force: false },
         M::ServerRestart { force: false },
         M::ServerLog { lines: Some(200) },
         M::ApiList {},
@@ -164,16 +169,16 @@ pub fn examples() -> Vec<Method> {
         M::SessionCreate { name: Some("work".into()), spawn: shell(), kind: BlockKind::Terminal, url: None },
         M::SessionView { session_id: s() },
         M::SessionRename { session_id: s(), name: "play".into() },
-        M::SessionClose { session_id: s() },
+        M::SessionClose { session_id: s(), force: false },
         M::WindowCreate { session_id: s(), spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some("localhost:3000".into()) },
         M::WindowSelect { session_id: s(), window_id: w() },
         M::WindowStep { session_id: s(), delta: 1 },
-        M::WindowClose { window_id: w() },
+        M::WindowClose { window_id: w(), force: false },
         M::WindowRename { window_id: w(), name: Some("logs".into()) },
         M::WindowMove { window_id: w(), index: 0 },
         M::BlockView { block_id: b() },
         M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None },
-        M::BlockClose { block_id: b() },
+        M::BlockClose { block_id: b(), force: false },
         M::BlockFocus { block_id: b() },
         M::BlockFocusStep { block_id: b(), delta: -1 },
         M::BlockFocusDir { block_id: b(), direction: Direction::Left },

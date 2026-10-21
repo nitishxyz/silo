@@ -288,7 +288,7 @@ where
                 if subscribe {
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
-                let shutdown = matches!(request.method, Method::ServerShutdown {} | Method::ServerRestart { .. });
+                let shutdown = matches!(request.method, Method::ServerShutdown { .. } | Method::ServerRestart { .. });
                 let result = run(&server, &ctx, gate.approval, request.method).await;
                 let done = result.is_ok();
                 respond(&tx, id, result);
@@ -392,24 +392,25 @@ fn read_only(method: &Method) -> bool {
     matches!(need(method), Need::Open | Need::Rights { rights: Rights::View, .. })
 }
 
-/// Run a checked call: refuse mutations while upgrading, wait for any
-/// approval, check closes, then handle it.
+/// Run a checked call: refuse mutations while upgrading, check closes,
+/// wait for any approval, then handle it.
+///
+/// A close is checked before its approval, so nobody is asked to approve
+/// what would then be refused as busy, and once more after the approval,
+/// whose wait may have been long, on a fresh probe.
 async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Result<Value, RpcError> {
     if server.upgrading.load(Ordering::SeqCst) && !read_only(&method) {
         return Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"));
     }
     if approval {
         approval::gate(server, ctx.id, &method, Rights::Owner).await?;
+    let close = crate::close_guard::is_close(&method);
+    if close {
+        crate::close_guard::check(server, ctx.id, &method).await?;
     }
-    if matches!(
-        method,
-        Method::BlockClose { .. }
-            | Method::WindowClose { .. }
-            | Method::SessionClose { .. }
-            | Method::ServerShutdown {}
-            | Method::ServerRestart { .. }
-    ) {
-        crate::close_guard::check(server, ctx.id, &method)?;
+        if close {
+            crate::close_guard::check(server, ctx.id, &method).await?;
+        }
     }
     handle(server, ctx, method).await
 }
@@ -476,7 +477,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
     let client_id = ctx.id;
     match method {
         Method::ServerInfo {} => to_value(server.info_now().await),
-        Method::ServerShutdown {} => Ok(json!({})),
+        Method::ServerShutdown { .. } => Ok(json!({})),
         Method::ApiList {} => to_value(
             METHODS.iter().map(|(name, description)| ApiMethod { name: (*name).into(), description: (*description).into() }).collect::<Vec<_>>(),
         ),
@@ -497,7 +498,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().rename_session(&session_id, name)?;
             Ok(json!({}))
         }
-        Method::SessionClose { session_id } => {
+        Method::SessionClose { session_id, force: _ } => {
             server.registry.lock().unwrap().close_session(&session_id)?;
             Ok(json!({}))
         }
@@ -509,7 +510,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().select_window(&session_id, &window_id)?;
             Ok(json!({}))
         }
-        Method::WindowClose { window_id } => {
+        Method::WindowClose { window_id, force: _ } => {
             server.registry.lock().unwrap().close_window(&window_id)?;
             Ok(json!({}))
         }
@@ -525,7 +526,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             let new = New { spawn: &spawn, kind, url: url.as_deref() };
             to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
         }
-        Method::BlockClose { block_id } => {
+        Method::BlockClose { block_id, force: _ } => {
             server.registry.lock().unwrap().close_block(&block_id)?;
             Ok(json!({}))
         }
@@ -695,7 +696,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.approvals.answer(client_id, &id, allow)?;
             to_value(Empty {})
         }
-        Method::BlocksBusy { .. } => crate::close_guard::handle(server, client_id, method).await,
+        Method::BlocksBusy { session_id, window_id, block_ids } => {
+            to_value(crate::close_guard::busy_blocks(server, &ctx.principal, session_id, window_id, block_ids).await?)
+        }
         Method::BlockStatusSeen { .. } => crate::status::handle(server, client_id, method).await,
         Method::BlockCommands { .. } | Method::TerminalCommandOutput { .. } => crate::prompts::handle(server, client_id, method).await,
         Method::ServerRestart { .. }

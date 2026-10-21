@@ -352,7 +352,7 @@ fn scope_text(scope: &Scope) -> String {
 /// What allowing `method` does, in words.
 fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> String {
     match method {
-        Method::ServerShutdown {} => "Stop the server and end every session".into(),
+        Method::ServerShutdown { .. } => "Stop the server and end every session".into(),
         Method::ServerRestart { .. } => "Restart the server and end every session".into(),
         Method::PairCreate { ttl_secs, purpose: InvitePurpose::Device } => format!("Create a device invite valid for {}", human(*ttl_secs)),
         Method::PairCreate { ttl_secs, purpose: InvitePurpose::Join } => format!("Create a join invite valid for {}", human(*ttl_secs)),

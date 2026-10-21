@@ -66,6 +66,6 @@ async fn do_calls_methods_with_generated_flags() {
     let out = run(&home, &["do", "window.step", &session]).await;
     assert!(String::from_utf8_lossy(&out.stderr).contains("missing --delta"));
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }

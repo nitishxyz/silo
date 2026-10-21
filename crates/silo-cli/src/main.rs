@@ -641,7 +641,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
         Command::Kill { target } => {
             let (control, _, _net) = connect(host).await?;
             let session = resolve_session(&control, Some(&target)).await?;
-            control.call_value(Method::SessionClose { session_id: session.session.id }).await?;
+            control.call_value(Method::SessionClose { session_id: session.session.id, force: false }).await?;
             Ok(0)
         }
         Command::Up { no_offer } => {
@@ -890,7 +890,7 @@ async fn local_server() -> anyhow::Result<Control> {
 /// Stop the server behind `control` and wait for it to exit.
 async fn shutdown(control: Control) -> anyhow::Result<()> {
     let pid = control.hello().server.pid;
-    silo_cli::confirmed(&control, || control.call_value(Method::ServerShutdown {})).await?;
+    silo_cli::confirmed(&control, || control.call_value(Method::ServerShutdown { force: false })).await?;
     control.closed().await;
     // Wait for the process to release its lock.
     for _ in 0..100 {

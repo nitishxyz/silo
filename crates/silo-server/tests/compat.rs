@@ -75,7 +75,7 @@ async fn older_and_newer_peers_work_together() {
     assert_eq!(reply.kind, kind::CONTROL_HELLO);
     let hello: ServerHello = reply.parse().unwrap();
     assert_eq!(hello.protocol, PROTOCOL);
-    assert_eq!(hello.features, silo_proto::compat::features());
+    assert_eq!(hello.features, silo_proto::compat::server_features());
 
     // A newer client: an unknown method gets a distinct error, an unknown
     // frame kind is skipped, extra params fields are ignored.
@@ -122,7 +122,7 @@ async fn older_and_newer_peers_work_together() {
     assert_eq!(reject.kind, kind::REJECT);
     assert!(String::from_utf8_lossy(&reject.payload).contains(RpcError::INCOMPATIBLE));
 
-    control.call_value(Method::ServerShutdown {}).await.unwrap();
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(control);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);

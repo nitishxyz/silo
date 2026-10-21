@@ -191,7 +191,7 @@ impl Workspace {
             }
             Command::CloseSession => {
                 if let Some(view) = &self.view {
-                    self.call(Method::SessionClose { session_id: view.session.id.clone() });
+                    self.call(Method::SessionClose { session_id: view.session.id.clone(), force: false });
                 }
             }
             Command::SwitchSession => self.toggle_switcher(window, cx),
@@ -203,7 +203,7 @@ impl Workspace {
             Command::NewTabChooser => self.toggle_new_tab_menu(window, cx),
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
-                    self.call(Method::WindowClose { window_id: w.id.clone() });
+                    self.call(Method::WindowClose { window_id: w.id.clone(), force: false });
                 }
             }
             Command::RenameTab => {
@@ -306,13 +306,13 @@ impl Workspace {
             Command::RestartServer if self.incompatible().is_some() => self.upgrade_server(cx),
             Command::RestartServer => {
                 self.status = Some(Status::progress("Restarting server…"));
-                self.call(Method::ServerShutdown {});
+                self.call(Method::ServerShutdown { force: false });
             }
             Command::StopServer => {
                 if let Some(host) = self.hosts.get(self.active_host) {
                     host.paused.store(true, Ordering::Release);
                 }
-                self.call(Method::ServerShutdown {});
+                self.call(Method::ServerShutdown { force: false });
                 // Stays off, at login too, until Start Server or the next app launch.
                 if let Some(service) = self.local_service().filter(|s| s.manager == silo_client::service::Manager::Launchd) {
                     self.rt.spawn_blocking(move || {
