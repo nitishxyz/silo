@@ -269,11 +269,15 @@ fn gc_removes_stale_temp_files() {
     }
     let unrelated = t.path().join("notes.txt");
     fs::write(&unrelated, b"keep").unwrap();
+    // Another writer's file in the shared root, mid `write_atomic`.
+    let foreign = t.path().join(".tmp-devices.sealed.123.0");
+    fs::write(&foreign, b"in flight").unwrap();
     assert_eq!(s.gc([]).unwrap(), 3);
     for p in &stale {
         assert!(!p.exists(), "{}", p.display());
     }
     assert!(unrelated.exists());
+    assert!(foreign.exists(), "only the store's own temp files are collected");
     assert!(s.snapshot_path("a", 1).unwrap().is_file());
     assert!(s.manifest_path().is_file());
     assert_eq!(s.load::<Tree>().unwrap().snapshots[0].bytes, b"A1");

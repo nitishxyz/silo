@@ -187,10 +187,12 @@ impl Store {
     }
 
     /// Remove snapshot files not in `referenced`, plus stale `write_atomic`
-    /// temp files (`.tmp-*`) in the store root, `snapshots/` and every
-    /// snapshot dir. The generations referenced by the current and previous
-    /// committed manifests are always kept. Must not run concurrently with
-    /// writes to this store. Returns the number of files removed.
+    /// temp files of the store's own: the manifest's in the store root
+    /// (which others share, e.g. the server's paired-device grants written
+    /// meanwhile) and any (`.tmp-*`) in `snapshots/` and every snapshot dir.
+    /// The generations referenced by the current and previous committed
+    /// manifests are always kept. Must not run concurrently with writes to
+    /// this store. Returns the number of files removed.
     pub fn gc<'a>(&self, referenced: impl IntoIterator<Item = (&'a str, u64)>) -> Result<usize> {
         let mut keep: BTreeSet<(String, u64)> = referenced.into_iter().map(|(i, g)| (i.to_string(), g)).collect();
         match self.read_manifest::<serde_json::Value>() {
@@ -200,9 +202,9 @@ impl Store {
             Err(e) => return Err(e),
         }
         let mut removed = 0;
-        removed += remove_tmp_files(&self.root)?;
+        removed += remove_tmp_files(&self.root, &format!("{TMP_PREFIX}{MANIFEST_FILE}."))?;
         let snaps = self.root.join(SNAPSHOTS_DIR);
-        removed += remove_tmp_files(&snaps)?;
+        removed += remove_tmp_files(&snaps, TMP_PREFIX)?;
         for entry in fs::read_dir(&snaps)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -236,11 +238,12 @@ impl Store {
     }
 }
 
-fn remove_tmp_files(dir: &Path) -> Result<usize> {
+/// Remove the files in `dir` named `prefix…`.
+fn remove_tmp_files(dir: &Path, prefix: &str) -> Result<usize> {
     let mut removed = 0;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(TMP_PREFIX) && entry.file_type()?.is_file() {
+        if entry.file_name().to_string_lossy().starts_with(prefix) && entry.file_type()?.is_file() {
             fs::remove_file(entry.path())?;
             removed += 1;
         }
