@@ -17,12 +17,13 @@ pub const SSH_OFFER_TTL: Duration = Duration::from_secs(120);
 /// How long `silo remote install`'s join invite stays valid.
 pub const INSTALL_JOIN_TTL: Duration = Duration::from_secs(1800);
 
-/// `pair.create` of `purpose`.
+/// `pair.create` of `purpose` (confirmed on the terminal when no Silo app
+/// can approve it).
 ///
 /// # Errors
 /// RPC failure; [`silo_client::Offline`] is explained.
 pub async fn invite(control: &Control, ttl: Duration, purpose: InvitePurpose) -> anyhow::Result<PairInvite> {
-    control.call(Method::PairCreate { ttl_secs: ttl.as_secs(), purpose }).await.map_err(explain)
+    crate::confirmed(control, || control.call(Method::PairCreate { ttl_secs: ttl.as_secs(), purpose })).await.map_err(explain)
 }
 
 /// Fail when `control`'s server cannot be reached remotely.

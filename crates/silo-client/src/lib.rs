@@ -19,7 +19,7 @@ mod upload;
 
 pub use control::{
     Closed, Control, Events, IncompatibleProtocol, NotSupported, Offline, PING_EVERY, PING_TIMEOUT_IROH, PING_TIMEOUT_LOCAL, TimedOut, Unauthorized,
-    Upgrading,
+    Upgrading, set_role, set_token,
 };
 pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};

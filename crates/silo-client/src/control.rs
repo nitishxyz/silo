@@ -9,7 +9,7 @@ use anyhow::Context;
 use serde::de::DeserializeOwned;
 use silo_proto::{
     BUILD, Frame,
-    control::{ClientHello, Event, Method, Request, RpcError, ServerHello, ServerMessage},
+    control::{ClientHello, ClientRole, Event, Method, Request, RpcError, ServerHello, ServerMessage},
     device::DeviceProof,
     kind, read_frame, spawn_reader, write_frame,
 };
@@ -26,6 +26,27 @@ pub const PING_EVERY: Duration = Duration::from_secs(5);
 pub const PING_TIMEOUT_LOCAL: Duration = Duration::from_secs(3);
 /// As [`PING_TIMEOUT_LOCAL`], over iroh.
 pub const PING_TIMEOUT_IROH: Duration = Duration::from_secs(10);
+
+/// What this process's control hellos say beyond the defaults.
+struct HelloAs {
+    role: ClientRole,
+    /// An agent token (`silot1…`), sent on the unix socket only.
+    token: Option<String>,
+}
+
+static HELLO_AS: std::sync::RwLock<HelloAs> = std::sync::RwLock::new(HelloAs { role: ClientRole::Cli, token: None });
+
+/// Every later control hello of this process says it is a `role` client
+/// (the Silo app says [`ClientRole::App`]).
+pub fn set_role(role: ClientRole) {
+    HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner).role = role;
+}
+
+/// Every later hello on a unix socket carries agent token `token`: the
+/// connection gets that grant's access only.
+pub fn set_token(token: Option<String>) {
+    HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner).token = token;
+}
 
 /// A [`Control::call_timeout`] got no reply in time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,7 +227,11 @@ impl Control {
         device: Option<DeviceProof>,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let hello = ClientHello { build: build.to_owned(), device, ..ClientHello::ours(client_name, passive, invite) };
+        let (role, grant) = {
+            let extras = HELLO_AS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))))
+        };
+        let hello = ClientHello { build: build.to_owned(), device, role, grant, ..ClientHello::ours(client_name, passive, invite) };
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;
         let hello = match read_frame(&mut stream).await {
@@ -396,6 +421,18 @@ impl Control {
         Self::reply(rx).await
     }
 
+    /// Call `method` by name with raw JSON `params`, which this build need
+    /// not know (a newer server's method).
+    ///
+    /// # Errors
+    /// Server error responses or a closed connection.
+    pub async fn call_raw(&self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let id = self.inner.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frame = Frame::json(kind::CONTROL, &serde_json::json!({ "id": id, "method": method, "params": params }))?;
+        let rx = self.queue(id, frame)?;
+        Self::reply(rx).await
+    }
+
     /// [`Control::call_value`] giving up after `timeout` with [`TimedOut`];
     /// the abandoned call is forgotten.
     ///
@@ -415,19 +452,24 @@ impl Control {
     /// Register a call and queue its request.
     fn send(&self, method: Method) -> anyhow::Result<(u64, oneshot::Receiver<Result<serde_json::Value, RpcError>>)> {
         let id = self.inner.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frame = Frame::json(kind::CONTROL, &Request { id, method })?;
+        Ok((id, self.queue(id, frame)?))
+    }
+
+    /// Register call `id` and queue its request `frame`.
+    fn queue(&self, id: u64, frame: Frame) -> anyhow::Result<oneshot::Receiver<Result<serde_json::Value, RpcError>>> {
         let (reply, rx) = oneshot::channel();
         match self.inner.pending.lock().unwrap().as_mut() {
             Some(pending) => pending.insert(id, reply),
             None => return Err(Closed.into()),
         };
-        let frame = Frame::json(kind::CONTROL, &Request { id, method })?;
         if self.inner.tx.send(frame).is_err() {
             if let Some(pending) = self.inner.pending.lock().unwrap().as_mut() {
                 pending.remove(&id);
             }
             return Err(Closed.into());
         }
-        Ok((id, rx))
+        Ok(rx)
     }
 
     async fn reply(rx: oneshot::Receiver<Result<serde_json::Value, RpcError>>) -> anyhow::Result<serde_json::Value> {

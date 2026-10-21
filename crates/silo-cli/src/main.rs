@@ -101,6 +101,35 @@ enum Command {
         #[arg(long, value_parser = parse_duration, default_value = "10m")]
         ttl: Duration,
     },
+    /// Create an agent token: `SILO_TOKEN` for a process limited to it.
+    Grant {
+        /// Limit it to a session (id or name).
+        #[arg(long, conflicts_with = "block")]
+        session: Option<String>,
+        /// Limit it to a block.
+        #[arg(long)]
+        block: Option<String>,
+        /// Watch only.
+        #[arg(long, conflicts_with_all = ["interact", "control"])]
+        view: bool,
+        /// Type and resize too (the default).
+        #[arg(long, conflicts_with = "control")]
+        interact: bool,
+        /// Create, close and rearrange too.
+        #[arg(long)]
+        control: bool,
+        /// How long it stays valid (`90s`, `10m`, `8h`, `1d`; default: until revoked).
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+        /// Shown with the grant, e.g. the agent's name.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List grants: paired devices, agent tokens and share links.
+    Grants {
+        #[command(subcommand)]
+        command: Option<GrantsCommand>,
+    },
     /// List paired devices.
     Devices {
         #[command(subcommand)]
@@ -186,6 +215,12 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum GrantsCommand {
+    /// Revoke a grant by id or id prefix; its connections close.
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -320,6 +355,8 @@ impl BrowserCmd {
 
 fn main() {
     let cli = Cli::parse();
+    // An agent token limits this process to its grant (unix socket only).
+    silo_client::set_token(std::env::var("SILO_TOKEN").ok().filter(|t| !t.trim().is_empty()));
     let command = cli.command.unwrap_or(Command::Attach { target: None, watch: false });
     let status = match &command {
         Command::Server { daemon: true, takeover, .. } => daemonize(*takeover),
@@ -421,6 +458,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::KillServer
                 | Command::Pair { .. }
                 | Command::Devices { .. }
+                | Command::Grant { .. }
+                | Command::Grants { .. }
                 | Command::Id
                 | Command::Hosts { .. }
                 | Command::Clipboard { .. }
@@ -452,6 +491,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 mdns: !no_mdns,
                 port,
                 system_clipboard: silo_server::sysclip::native(),
+                require_approval: true,
                 ..Default::default()
             };
             if takeover {
@@ -619,9 +659,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                         Some(text) => serde_json::from_str(&text).context("params must be JSON")?,
                         None => serde_json::json!({}),
                     };
-                    let method: Method = serde_json::from_value(serde_json::json!({ "method": method, "params": params }))
-                        .context("unknown method or invalid params")?;
-                    control.call_value(method).await?
+                    // Sent as given: the server knows its methods.
+                    silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await?
                 }
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
@@ -659,6 +698,42 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             }
             Ok(0)
         }
+        Command::Grant { session, block, view, interact: _, control: full, ttl, label } => {
+            let control = local_server().await?;
+            let scope = match (session, block) {
+                (Some(session), _) => silo_proto::access::Scope::Session { session_id: session },
+                (None, Some(block)) => silo_proto::access::Scope::Block { block_id: block },
+                (None, None) => silo_proto::access::Scope::Server,
+            };
+            let rights = match (view, full) {
+                (true, _) => silo_proto::access::Rights::View,
+                (_, true) => silo_proto::access::Rights::Control,
+                _ => silo_proto::access::Rights::Interact,
+            };
+            let created = silo_cli::create_token(&control, scope, rights, ttl, label).await?;
+            println!("SILO_TOKEN={}", created.secret);
+            if std::io::stdout().is_terminal() {
+                eprintln!("Shown once. Revoke it with `silo grants revoke {}`.", created.grant.id);
+            }
+            Ok(0)
+        }
+        Command::Grants { command } => {
+            let control = local_server().await?;
+            match command {
+                None => {
+                    let grants = silo_cli::grants(&control).await?;
+                    if grants.is_empty() {
+                        eprintln!("no grants");
+                    }
+                    print!("{}", silo_cli::format_grants(&grants));
+                }
+                Some(GrantsCommand::Revoke { id }) => {
+                    let grant = silo_cli::revoke_grant(&control, &id).await?;
+                    println!("revoked {}", grant.id);
+                }
+            }
+            Ok(0)
+        }
         Command::Id => {
             let control = local_server().await?;
             println!("{}", control.hello().server.endpoint_id);
@@ -688,7 +763,14 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
 }
 
 fn client_name() -> String {
-    format!("silo cli {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id())
+    agent_client_name(std::env::var("SILO_AGENT").ok().as_deref())
+}
+
+/// `silo cli`, with the agent `SILO_AGENT` names: `silo cli · claude-code`.
+fn agent_client_name(agent: Option<&str>) -> String {
+    let agent = agent.map(|a| silo_proto::text::untrusted(&a.replace('(', ""), 64)).filter(|a| !a.is_empty());
+    let name = agent.map_or_else(|| "silo cli".to_owned(), |agent| format!("silo cli · {agent}"));
+    format!("{name} {} (pid {})", env!("CARGO_PKG_VERSION"), std::process::id())
 }
 
 /// How this machine's server is named when offered to another.
@@ -730,7 +812,7 @@ async fn local_server() -> anyhow::Result<Control> {
 /// Stop the server behind `control` and wait for it to exit.
 async fn shutdown(control: Control) -> anyhow::Result<()> {
     let pid = control.hello().server.pid;
-    control.call_value(Method::ServerShutdown {}).await?;
+    silo_cli::confirmed(&control, || control.call_value(Method::ServerShutdown {})).await?;
     control.closed().await;
     // Wait for the process to release its lock.
     for _ in 0..100 {
@@ -1130,6 +1212,29 @@ mod tests {
             Cli::parse_from(["silo", "devices", "revoke", "ab12"]).command,
             Some(Command::Devices { command: Some(DevicesCommand::Revoke { .. }) })
         ));
+    }
+
+    #[test]
+    fn grant_commands_and_agent_names() {
+        let Some(Command::Grant { session, view, control, ttl, label, .. }) =
+            Cli::parse_from(["silo", "grant", "--session", "work", "--view", "--ttl", "8h", "--label", "claude-code"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (session.as_deref(), view, control, ttl, label.as_deref()),
+            (Some("work"), true, false, Some(Duration::from_secs(8 * 3600)), Some("claude-code"))
+        );
+        assert!(Cli::try_parse_from(["silo", "grant", "--view", "--control"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "grant", "--session", "a", "--block", "b"]).is_err());
+        assert!(matches!(
+            Cli::parse_from(["silo", "grants", "revoke", "ab"]).command,
+            Some(Command::Grants { command: Some(GrantsCommand::Revoke { .. }) })
+        ));
+        let named = agent_client_name(Some("claude-code"));
+        assert_eq!(silo_proto::model::short_client_name(&named), "silo cli · claude-code");
+        assert_eq!(silo_proto::model::short_client_name(&agent_client_name(None)), "silo cli");
+        assert_eq!(silo_proto::model::short_client_name(&agent_client_name(Some(" \u{202e} "))), "silo cli");
     }
 
     #[test]

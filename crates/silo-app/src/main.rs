@@ -62,6 +62,8 @@ fn main() {
     if std::env::args().any(|arg| arg.starts_with("--type=")) {
         std::process::exit(silo_web::run_helper());
     }
+    // The app's calls are the user's own: they need no approval.
+    silo_client::set_role(silo_proto::control::ClientRole::App);
     let home = silo_proto::paths::home();
     let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
     {
