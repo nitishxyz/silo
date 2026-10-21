@@ -4,6 +4,10 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -36,12 +40,18 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> JoinHandle<()> {
+    start_with(home, Arc::default()).await
+}
+
+/// [`start`], its grant sweep `ahead` seconds in the future.
+async fn start_with(home: &Path, ahead: Arc<AtomicU64>) -> JoinHandle<()> {
     let config = silo_server::Config {
         home: home.to_owned(),
         idle_exit: None,
         relay: RelayConfig::Disabled,
         mdns: false,
         grant_sweep: Duration::from_millis(200),
+        grant_sweep_ahead: ahead,
         ..Default::default()
     };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
@@ -171,7 +181,8 @@ async fn scoped_tokens_see_and_do_only_what_they_cover() {
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_and_expired_grants_close_control_and_data_connections() {
     let home = temp_home("revoke");
-    let task = start(&home).await;
+    let ahead = Arc::new(AtomicU64::new(0));
+    let task = start_with(&home, ahead.clone()).await;
     let owner = connect(&home, None).await.unwrap();
     let created: Created = owner.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
 
@@ -184,12 +195,18 @@ async fn revoked_and_expired_grants_close_control_and_data_connections() {
     ends(&mut stream).await;
     assert_eq!(code(connect(&home, Some(&revoked.secret)).await.map(|_| Value::Null)), RpcError::UNAUTHORIZED);
 
-    // Expiry: within one sweep (60 s in production, 200 ms here).
-    let expiring = token(&owner, Scope::Server, Rights::View, Some(1), GrantKind::Token).await;
+    // Expiry: within one sweep (60 s in production, 200 ms here). The sweep
+    // runs an hour ahead once both connections exist, however slow they
+    // were to open, and so finds the grant expired.
+    let expiring = token(&owner, Scope::Server, Rights::View, Some(3600), GrantKind::Token).await;
     let control = connect(&home, Some(&expiring.secret)).await.unwrap();
     let mut stream = DataStream::open(&control, &created.block_id, None).await.unwrap();
+    ahead.store(3600, Ordering::SeqCst);
     timeout(T, control.closed()).await.expect("an expired grant's control closes");
     ends(&mut stream).await;
+    let grants: silo_proto::control::Grants = owner.call(Method::GrantList {}).await.unwrap();
+    assert!(grants.grants.iter().all(|g| g.id != expiring.grant.id), "the expired grant is gone");
+    ahead.store(0, Ordering::SeqCst);
 
     // A share link over iroh: admitted by its secret, closed on revoke.
     let link = token(&owner, Scope::Session { session_id: created.session_id.clone() }, Rights::View, None, GrantKind::Link).await;

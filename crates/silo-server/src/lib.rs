@@ -70,6 +70,10 @@ pub struct Config {
     pub require_approval: bool,
     /// How often expired grants are removed and their connections closed.
     pub grant_sweep: Duration,
+    /// Seconds the sweep adds to the clock when it looks for expired
+    /// grants: a test hook to expire a grant once its connections exist.
+    #[doc(hidden)]
+    pub grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for Config {
@@ -86,6 +90,7 @@ impl Default for Config {
             system_clipboard: None,
             require_approval: false,
             grant_sweep: GRANT_SWEEP,
+            grant_sweep_ahead: Arc::default(),
         }
     }
 }
@@ -118,6 +123,8 @@ pub struct Server {
     pub require_approval: bool,
     pub approvals: approval::Approvals,
     pub app_requests: app_bridge::Requests,
+    /// See [`Config::grant_sweep_ahead`].
+    grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The host's system clipboard as remote clients see it.
@@ -240,7 +247,7 @@ impl Server {
     /// Remove the grants of closed sessions and blocks, and expired ones.
     pub fn settle_grants(&self) {
         let gone_scopes = std::mem::take(&mut self.registry.lock().unwrap().gone);
-        let now = grants::unix_secs();
+        let now = grants::unix_secs() + self.grant_sweep_ahead.load(Ordering::SeqCst);
         let removed = self.auth().remove_where(|g| g.expired(now) || gone_scopes.contains(&g.scope));
         match removed {
             Ok(gone) => self.revoked(&gone),
@@ -453,6 +460,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         require_approval: config.require_approval,
         approvals: approval::Approvals::default(),
         app_requests: app_bridge::Requests::default(),
+        grant_sweep_ahead: config.grant_sweep_ahead.clone(),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
