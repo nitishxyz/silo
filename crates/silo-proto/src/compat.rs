@@ -33,7 +33,7 @@ pub mod feature {
 }
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] = &[feature::ACCESS];
+pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS];
 
 /// [`FEATURES`] as sent in a hello.
 #[must_use]

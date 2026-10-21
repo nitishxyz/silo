@@ -288,7 +288,7 @@ where
                 if subscribe {
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
-                let shutdown = matches!(request.method, Method::ServerShutdown {});
+                let shutdown = matches!(request.method, Method::ServerShutdown {} | Method::ServerRestart { .. });
                 let result = run(&server, &ctx, gate.approval, request.method).await;
                 let done = result.is_ok();
                 respond(&tx, id, result);
@@ -529,7 +529,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             Ok(json!({}))
         }
         Method::BlockFocus { block_id } => {
-            server.registry.lock().unwrap().focus(&block_id)?;
+            let mut reg = server.registry.lock().unwrap();
+            reg.focus(&block_id)?;
+            crate::app_bridge::active(&mut reg, client_id);
             Ok(json!({}))
         }
         Method::BlockZoom { block_id, zoomed } => {
@@ -609,7 +611,11 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             Ok(json!({}))
         }
         Method::OwnBlock { block_ids, mode } => {
-            server.registry.lock().unwrap().own(client_id, &block_ids, Some(mode))?;
+            let mut reg = server.registry.lock().unwrap();
+            reg.own(client_id, &block_ids, Some(mode))?;
+            if mode == silo_proto::control::OwnMode::Take {
+                crate::app_bridge::active(&mut reg, client_id);
+            }
             Ok(json!({}))
         }
         Method::DisownBlock { block_ids } => {
@@ -764,6 +770,7 @@ where
             if remote {
                 server.clipboard.remote_streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            let mut marked: Option<std::time::Instant> = None;
             loop {
                 // A cut-off subscriber's stream ends now: dropping both
                 // halves closes the connection so the client reconnects.
@@ -786,6 +793,10 @@ where
                     ) if !interact => {}
                     Ok(ClientData::Input(bytes)) => {
                         tracing::trace!(target: "silo::latency", stage = "server_input");
+                        if marked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                            marked = Some(std::time::Instant::now());
+                            crate::app_bridge::active(&mut server.registry.lock().unwrap(), client_id);
+                        }
                         if remote {
                             *server.clipboard.last_input.lock().unwrap() = Some(block_id.clone());
                         }

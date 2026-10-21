@@ -117,6 +117,7 @@ pub struct Server {
     /// See [`Config::require_approval`].
     pub require_approval: bool,
     pub approvals: approval::Approvals,
+    pub app_requests: app_bridge::Requests,
 }
 
 /// The host's system clipboard as remote clients see it.
@@ -412,6 +413,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         clipboard: HostClipboard { system: config.system_clipboard.clone(), ..HostClipboard::default() },
         require_approval: config.require_approval,
         approvals: approval::Approvals::default(),
+        app_requests: app_bridge::Requests::default(),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();

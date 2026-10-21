@@ -142,7 +142,7 @@ async fn ask(server: &Server, approvers: Vec<ClientId>, action: &str, summary: S
 }
 
 /// Who `client` is, for an approval card.
-fn caller(reg: &Registry, client: ClientId) -> Caller {
+pub(crate) fn caller(reg: &Registry, client: ClientId) -> Caller {
     let entry = reg.clients.get(&client);
     let from = entry.and_then(|c| c.pane.as_deref()).and_then(|pane| pane_label(reg, pane));
     Caller { client_id: client, label: entry.map(|c| c.label.clone()).unwrap_or_default(), from }

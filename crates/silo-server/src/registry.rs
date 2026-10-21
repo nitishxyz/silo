@@ -166,6 +166,9 @@ pub struct ClientEntry {
     /// Its open data streams by stream id: block, rights, and what ends
     /// the stream.
     pub streams: HashMap<u64, (BlockId, Rights, Option<tokio::sync::oneshot::Sender<()>>)>,
+    /// The user's last input, ownership take or focus through it: forwarded
+    /// `app.*` requests go to the most recently active app.
+    pub active_at: Option<Instant>,
 }
 
 impl ClientEntry {
@@ -185,6 +188,7 @@ impl ClientEntry {
             pane: None,
             tty: false,
             streams: HashMap::new(),
+            active_at: None,
         }
     }
 
