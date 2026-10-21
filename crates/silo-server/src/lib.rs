@@ -523,8 +523,14 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                 let Ok((stream, _)) = accepted else { continue };
                 match stream.peer_cred() {
                     Ok(cred) if cred.uid() == uid.as_raw() => {}
-                    _ => {
-                        tracing::warn!("rejected connection from another user");
+                    Ok(cred) => {
+                        tracing::warn!(uid = cred.uid(), "rejected connection from another user");
+                        continue;
+                    }
+                    // A peer that already closed (`server_running` probes
+                    // connect and hang up) has no credentials left to read.
+                    Err(error) => {
+                        tracing::debug!("connection closed before its credentials were read: {error}");
                         continue;
                     }
                 }
