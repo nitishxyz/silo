@@ -810,6 +810,21 @@ has merged.
     the exit code and `cmdline_url`, for zsh, bash (≥ 4.4 and 3.2 where present) and fish;
   - no marks for non-interactive shells;
   - no double C/D on fish 4+.
+- **As built** (where it differs from §7.1):
+  - The wrappers add no marks when a user integration already emits them: zsh/bash check function bodies and
+    `PS1`/`PS0`/`PROMPT_COMMAND` for `133;` after the user's files ran; fish checks the `fish_prompt` function and
+    `fish_prompt`/`fish_preexec`/`fish_postexec` handlers. This also keeps a re-sourced wrapper from adding twice.
+  - fish decides at the first prompt (vendor snippets run before `config.fish`). fish 4+ is left alone unless
+    `mark-prompt` is off (`status test-feature`), in which case it gets the fish 3 marks.
+  - D is sent only after a C: zsh sets a flag in `preexec`, bash ≥ 4.4 in `PS0` (an array subscript assignment, no
+    fork). An empty line gives A/B and no D. bash 3.2 sends D at every prompt after the first, empty lines included.
+  - bash ≥ 4.4 takes `cmdline_url` from `history 1` only when the line entered history (`HISTCMD` grew); a line
+    left out (`ignorespace`, `ignoredups`, history off) gets C with no `cmdline_url`.
+  - B is re-appended at each prompt (zsh: last `precmd` hook, bash: end of `PROMPT_COMMAND`), so prompt frameworks
+    that rebuild `PS1` keep it. fish sends no B (fish 4.3+ sends its own).
+  - fish runs `fish_postexec` for `exit` too, so a shell exit ends with D (the previous status).
+  - Tested: zsh 5.9, bash 3.2.57 and 5.3.20, fish 3.7.1 and 4.9.3 (native and with `no-mark-prompt`), each on a
+    real PTY. Extra shell builds are found through `SILO_TEST_SHELL_DIRS` (colon-separated, test only).
 
 **P7-5: status, notification and approval UI.** After P7-2 and P7-3.
 - **Files:** `silo-app/src/{pane.rs, titlebar.rs, switcher.rs, workspace.rs, notifications.rs (new), approvals.rs
