@@ -378,6 +378,15 @@ async fn dirty_note_once_per_checkpoint() {
         count
     };
     let inject = |text: &str| BlockMsg::Inject { bytes: text.as_bytes().to_vec(), input: Vec::new() };
+    // The probe that first sees `sleep` publishes its busy status (a
+    // change); under load it can come late, so wait for it.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while block.status.lock().unwrap().busy.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("busy");
     block.checkpoint().await.unwrap();
     dirty(&mut notes);
     block.checkpoint().await.unwrap();
