@@ -194,8 +194,10 @@ impl Workspace {
             Command::SwitchSession => self.toggle_switcher(window, cx),
             Command::NextSession => self.step_session(1, window, cx),
             Command::PreviousSession => self.step_session(-1, window, cx),
-            Command::NewTab => self.new_window(window, cx),
+            Command::NewTab => self.new_tab_like_focused(window, cx),
+            Command::NewTerminalTab => self.new_window(window, cx),
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
+            Command::NewTabChooser => self.toggle_new_tab_menu(window, cx),
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
                     self.call(Method::WindowClose { window_id: w.id.clone() });
@@ -399,7 +401,9 @@ impl Workspace {
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
+            | Command::NewTerminalTab
             | Command::NewBrowserTab
+            | Command::NewTabChooser
             | Command::CloseTab
             | Command::RenameTab
             | Command::SplitRight

@@ -72,8 +72,10 @@ commands! {
     NextSession => "Next Session", "Sessions", ["cmd-alt-]"];
     PreviousSession => "Previous Session", "Sessions", ["cmd-alt-["];
     // Tabs
-    NewTab => "New Tab", "Tabs", ["cmd-t"];
+    NewTab => "New Tab", "Tabs", ["cmd-t"], "Same kind as the focused block";
+    NewTerminalTab => "New Terminal Tab", "Tabs", [];
     NewBrowserTab => "New Browser Tab", "Tabs", ["cmd-alt-t"];
+    NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"];
     CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
     RenameTab => "Rename Tab…", "Tabs", [];
     NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
@@ -156,7 +158,8 @@ impl Command {
             Self::CloseSession => Method("session.close"),
             Self::SwitchSession => Method("app.switcher"),
             Self::NextSession | Self::PreviousSession => Method("app.session_step"),
-            Self::NewTab | Self::NewBrowserTab => Method("window.create"),
+            // The chooser's pick is the `kind` param.
+            Self::NewTab | Self::NewTerminalTab | Self::NewBrowserTab | Self::NewTabChooser => Method("window.create"),
             Self::CloseTab => Method("window.close"),
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
@@ -348,6 +351,10 @@ mod tests {
         assert_eq!(Command::MovePaneEdgeLeft.hint().as_deref(), Some("⌃⌘←"));
         assert_eq!(Command::EqualizePanes.hint().as_deref(), Some("⌃⌘="));
         assert_eq!(Command::NewPane.hint().as_deref(), Some("⌘↩"));
+        assert_eq!(Command::NewTab.hint().as_deref(), Some("⌘T"));
+        assert_eq!(Command::NewBrowserTab.hint().as_deref(), Some("⌥⌘T"));
+        assert_eq!(Command::NewTabChooser.hint().as_deref(), Some("⌃⌘T"));
+        assert_eq!(Command::NewTerminalTab.hint(), None);
     }
 
     #[test]
