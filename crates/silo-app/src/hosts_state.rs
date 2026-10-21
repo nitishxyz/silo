@@ -4,7 +4,7 @@
 //! `Workspace`, which keeps a snapshot of `entries` (see `sync_hosts`).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -13,13 +13,14 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscrip
 use silo_client::{Control, transport::EndpointAddr};
 use silo_proto::{
     control::{Event, Method},
-    model::{SessionSummary, SessionView},
+    model::{BlockStatus, SessionSummary, SessionView},
 };
 
 use crate::{
     cache::{self, CacheWriter, CachedTree},
     conn::ConnEvent,
     hosts::{self, AppState, HostInfo, HostState, RemoteHost},
+    notifications::{self, Seen},
 };
 
 /// What a window sees of a host.
@@ -49,6 +50,8 @@ struct Owned {
     /// Mirrors waiting for their pane: from the cache, or kept in memory
     /// when a window switches away.
     restored: HashMap<String, silo_client::Mirror>,
+    /// The last `block.status` of every block that reported one.
+    statuses: HashMap<String, BlockStatus>,
 }
 
 /// A connection event of `host`, already applied to `HostsState`.
@@ -91,6 +94,12 @@ pub struct HostsState {
     state: AppState,
     /// Machines offering to link (see `offers.rs`).
     pub(crate) offers: crate::offers::Offers,
+    /// Owner actions waiting for the user (see `approvals.rs`).
+    pub(crate) approvals: crate::approvals::Approvals,
+    /// Notifications shown and not yet taken away.
+    delivered: HashSet<String>,
+    /// Routes clicked notifications.
+    _clicks: Option<Task<()>>,
     /// hosts.json's last seen (mtime, length); see `watch_hosts`.
     hosts_stamp: Option<(std::time::SystemTime, u64)>,
     _watch: Option<Task<()>>,
@@ -120,6 +129,16 @@ impl HostsState {
             let state = hosts::load_state(&home);
             crate::theme::apply_ui_font(&state.ui_font_family, cx);
             let offers = crate::offers::Offers::default();
+            let (clicks_tx, mut clicks) = tokio::sync::mpsc::unbounded_channel();
+            #[cfg(debug_assertions)]
+            test_clicks(&rt, clicks_tx.clone());
+            notifications::install(clicks_tx);
+            notifications::set_badge(0);
+            let clicks = cx.spawn(async move |_, cx| {
+                while let Some(target) = clicks.recv().await {
+                    cx.update(|cx| reveal(&target, cx));
+                }
+            });
             let mut this = Self {
                 rt,
                 home: home.clone(),
@@ -127,6 +146,9 @@ impl HostsState {
                 owned: Vec::new(),
                 state,
                 offers,
+                approvals: crate::approvals::Approvals::default(),
+                delivered: HashSet::new(),
+                _clicks: Some(clicks),
                 hosts_stamp: hosts::stamp(&home),
                 _watch: None,
                 _quit: quit,
@@ -272,7 +294,7 @@ impl HostsState {
         let sessions = tree.as_ref().map(|t: &CachedTree| t.sessions.clone()).unwrap_or_default();
         let state = HostState::Connecting;
         self.entries.push(HostEntry { info, state, control: None, sessions, paused, incompatible: None, removed: false });
-        self.owned.push(Owned { conn: Some(conn), cache, tree, restored });
+        self.owned.push(Owned { conn: Some(conn), cache, tree, restored, statuses: HashMap::new() });
         cx.notify();
         index
     }
@@ -286,6 +308,7 @@ impl HostsState {
         entry.removed = true;
         entry.control = None;
         self.owned[host].conn = None;
+        self.host_down(host);
         cx.notify();
     }
 
@@ -325,17 +348,25 @@ impl HostsState {
                 entry.control = None;
                 entry.incompatible = None;
                 entry.state = HostState::Unreachable(reason.clone());
+                self.host_down(host);
             }
             ConnEvent::Quit => cx.quit(),
             ConnEvent::Resync => self.refresh_sessions(host, cx),
             ConnEvent::Addr(addr) => self.save_addr(host, addr),
-            ConnEvent::NotPaired => (entry.control, entry.state) = (None, HostState::NotPaired),
-            ConnEvent::Incompatible => (entry.control, entry.state) = (None, HostState::Incompatible),
+            ConnEvent::NotPaired => {
+                (entry.control, entry.state) = (None, HostState::NotPaired);
+                self.host_down(host);
+            }
+            ConnEvent::Incompatible => {
+                (entry.control, entry.state) = (None, HostState::Incompatible);
+                self.host_down(host);
+            }
             ConnEvent::IncompatibleServer(server) => {
                 entry.control = None;
                 entry.sessions.clear();
                 entry.state = HostState::Unreachable(server.headline());
                 entry.incompatible = Some(server.clone());
+                self.host_down(host);
             }
             ConnEvent::Event(Event::SessionsChanged { sessions }) => {
                 sessions.sort_by_key(|s| s.created_at);
@@ -346,9 +377,105 @@ impl HostsState {
                 self.gc_cache(host);
             }
             ConnEvent::Event(Event::HostOffered { offer }) => self.host_offered(host, offer, cx),
+            ConnEvent::Event(Event::BlockStatus { status }) => self.block_status(host, status),
+            ConnEvent::Event(Event::BlockAttention { block_id, session_id, session_name, block_title, reason, title, body, .. }) => {
+                let info = &self.entries[host].info;
+                let (key, name) = (info.key(), info.name.clone());
+                let host_on = !self.state.quiet_hosts.contains(&key);
+                let seen = seen(cx, host, session_id, block_id);
+                let notify = notifications::wanted(&self.state.notifications, host_on, *reason, seen);
+                tracing::debug!(host = name, block = block_id, ?reason, ?seen, host_on, notify, "attention");
+                if notify {
+                    let note = notifications::attention_note(&name, &key, session_id, session_name, block_id, block_title, *reason, title, body);
+                    self.delivered.insert(note.id.clone());
+                    notifications::deliver(note);
+                }
+            }
+            ConnEvent::Event(Event::ApprovalRequested { id, summary, caller, expires_in_ms, .. }) => {
+                self.approvals.requested(host, id, summary, caller, *expires_in_ms, std::time::Instant::now());
+                let info = &self.entries[host].info;
+                let key = info.key();
+                // The card is in the key window; away from Silo, say so.
+                if cx.active_window().is_none() && self.state.notifications.on && !self.state.quiet_hosts.contains(&key) {
+                    let card = self.approvals.cards.last().expect("just added");
+                    let note = notifications::Note {
+                        id: notifications::approval_identifier(&key, id),
+                        title: format!("{} · approval", info.name),
+                        subtitle: format!("{} wants to", card.caller),
+                        body: card.summary.clone(),
+                        target: notifications::Target { host: key, session_id: None, block_id: None },
+                    };
+                    self.delivered.insert(note.id.clone());
+                    notifications::deliver(note);
+                }
+            }
+            ConnEvent::Event(Event::ApprovalResolved { id, .. }) => {
+                self.approvals.resolved(host, id);
+                let note = notifications::approval_identifier(&self.entries[host].info.key(), id);
+                if self.delivered.remove(&note) {
+                    notifications::remove(vec![note]);
+                }
+            }
             ConnEvent::Event(_) => {}
         }
+        self.update_badge();
         cx.emit(HostEvent { host, event });
+    }
+
+    /// `host` is gone (disconnected, removed): its waiting approvals failed
+    /// with it and its statuses are unknown until it is back.
+    fn host_down(&mut self, host: usize) {
+        self.approvals.host_gone(host);
+        self.owned[host].statuses.clear();
+    }
+
+    /// A block's new status: kept, and notifications of records gone from
+    /// it (seen on any device) taken away.
+    fn block_status(&mut self, host: usize, status: &BlockStatus) {
+        let key = self.entries[host].info.key();
+        let stale = notifications::stale(&self.delivered, &key, status);
+        for id in &stale {
+            self.delivered.remove(id);
+        }
+        notifications::remove(stale);
+        let statuses = &mut self.owned[host].statuses;
+        if status.records.is_empty() && status.progress.is_none() && status.busy.is_none() {
+            statuses.remove(&status.block_id);
+        } else {
+            statuses.insert(status.block_id.clone(), status.clone());
+        }
+    }
+
+    /// Blocked + error records across every connected host, on the Dock.
+    fn update_badge(&self) {
+        let count: u32 = self
+            .entries
+            .iter()
+            .filter(|h| !h.removed && h.control.is_some())
+            .flat_map(|h| &h.sessions)
+            .map(|s| s.attention.blocked + s.attention.error)
+            .sum();
+        notifications::set_badge(count);
+    }
+
+    /// Whether `host`'s notifications are on (Settings › Hosts).
+    pub fn notifies(&self, host: usize) -> bool {
+        self.entries.get(host).is_some_and(|h| !self.state.quiet_hosts.contains(&h.info.key()))
+    }
+
+    /// Turn `host`'s notifications on or off.
+    pub fn set_notifies(&mut self, host: usize, on: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.entries.get(host).map(|h| h.info.key()) else { return };
+        tracing::debug!(host, on, "host notifications");
+        self.update_state(
+            |s| {
+                s.quiet_hosts.retain(|k| *k != key);
+                if !on {
+                    s.quiet_hosts.push(key);
+                }
+            },
+            cx,
+        );
     }
 
     /// A remote server's new route (already in hosts.json): used now.
@@ -368,6 +495,7 @@ impl HostsState {
                 sessions.sort_by_key(|s| s.created_at);
                 let _ = this.update(cx, |this, cx| {
                     this.entries[host].sessions = sessions;
+                    this.update_badge();
                     cx.notify();
                 });
             }
@@ -397,6 +525,70 @@ impl HostsState {
             }
         });
     }
+}
+
+/// How much of `host`'s block the user sees across Silo's windows.
+fn seen(cx: &App, host: usize, session: &str, block: &str) -> Seen {
+    let key = cx.active_window();
+    let mut seen = Seen::Hidden;
+    for handle in cx.windows() {
+        let Some(workspace) = handle.downcast::<crate::workspace::Workspace>() else { continue };
+        let Ok(ws) = workspace.read(cx) else { continue };
+        if ws.active_host != host || ws.view.as_ref().is_none_or(|v| v.session.id != session) {
+            continue;
+        }
+        let Some(w) = ws.active_window() else { continue };
+        let shown = if w.zoomed { w.focused == block } else { crate::floats::window_blocks(w).iter().any(|b| b == block) };
+        if !shown || key.is_none() {
+            continue;
+        }
+        if key == Some(handle) && w.focused == block {
+            return Seen::Looking;
+        }
+        seen = Seen::Visible;
+    }
+    seen
+}
+
+/// Debug builds, for UI tests where macOS won't grant notifications to a
+/// dev bundle unattended: `SILO_TEST_NOTIFICATION_CLICK=<file>` makes a
+/// line `host session block` written there count as a click on such a
+/// notification (the file is removed once read).
+#[cfg(debug_assertions)]
+fn test_clicks(rt: &tokio::runtime::Handle, clicks: tokio::sync::mpsc::UnboundedSender<notifications::Target>) {
+    let Some(path) = std::env::var_os("SILO_TEST_NOTIFICATION_CLICK").map(PathBuf::from) else { return };
+    rt.spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let _ = std::fs::remove_file(&path);
+            let mut words = text.split_whitespace().map(str::to_owned);
+            let target = notifications::target(words.next(), words.next(), words.next());
+            tracing::info!(?target, "notification clicked (test)");
+            if let Some(target) = target
+                && clicks.send(target).is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
+/// A clicked notification: bring Silo forward and show its host, session
+/// and block in the frontmost window.
+fn reveal(target: &notifications::Target, cx: &mut App) {
+    let shared = HostsState::global(cx);
+    let Some(host) = shared.read(cx).entries.iter().position(|h| !h.removed && h.info.key() == target.host) else {
+        tracing::info!(host = target.host, "notification for a host no longer here");
+        return;
+    };
+    let frontmost = cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().find_map(|w| w.downcast::<crate::workspace::Workspace>());
+    let Some(handle) = frontmost.or_else(|| crate::open_window(None, cx).ok()) else { return };
+    let _ = handle.update(cx, |workspace, window, cx| {
+        window.activate_window();
+        workspace.reveal_block(host, target.session_id.clone(), target.block_id.clone(), window, cx);
+    });
+    cx.activate(true);
 }
 
 #[cfg(test)]

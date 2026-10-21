@@ -436,6 +436,10 @@ impl Workspace {
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
             .child(self.block_icon_view(&w.focused, "tab", 12.0, if primary { chrome.accent } else { chrome.icon }, cx))
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .when_some(self.window_mark(w), |el, mark| {
+                let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
+                el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
+            })
             .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))))
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {

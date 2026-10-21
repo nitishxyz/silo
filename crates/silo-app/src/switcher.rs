@@ -322,6 +322,12 @@ impl Workspace {
             Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
             Item::AddHost => (Some("add-host"), "Add Machine…".into(), None, false),
         };
+        let counts = match &item {
+            Item::Session { host, id } => self.hosts[*host].sessions.iter().find(|s| &s.id == id).map(|s| s.attention),
+            _ => None,
+        };
+        let tip = counts.map(crate::block_status::counts_text).filter(|t| !t.is_empty());
+        let badges = counts.map(|c| crate::block_status::count_badges(c, theme::overlay())).unwrap_or_default();
         let is_session = matches!(item, Item::Session { .. });
         let rename_id = if let Item::Session { id, .. } = &item { Some(id.clone()) } else { None };
         let muted = matches!(item, Item::Connect(_));
@@ -357,6 +363,8 @@ impl Workspace {
                     .text_color(rgb(if muted { theme::muted() } else { theme::foreground() }))
                     .child(label),
             )
+            .when(!badges.is_empty(), |el| el.child(div().flex().flex_none().gap(px(3.0)).children(badges)))
+            .when_some(tip, |el, tip| el.tooltip(crate::tooltip::Tooltip::text(tip)))
             .children(hint.map(|h| div().flex_none().text_size(px(11.0)).text_color(rgb(theme::muted())).child(h)))
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if let Some(s) = this.switcher.as_mut()

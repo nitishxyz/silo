@@ -197,6 +197,78 @@ impl HostInfo {
     pub fn remote(home: PathBuf, host: &RemoteHost) -> Self {
         Self { name: host.name.clone(), local: false, transport: Transport::Iroh { home, addr: host.addr.clone() } }
     }
+
+    /// Stable across launches and routes: `local`, or the remote server's
+    /// EndpointId. Names the host in notification settings and payloads.
+    #[must_use]
+    pub fn key(&self) -> String {
+        self.transport.remote_id().unwrap_or_else(|| LOCAL_KEY.to_owned())
+    }
+}
+
+/// [`HostInfo::key`] of this Mac.
+pub const LOCAL_KEY: &str = "local";
+
+/// Which notifications this device shows (Settings › Notifications).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyPrefs {
+    #[serde(default = "yes")]
+    pub on: bool,
+    /// A program needs you (blocked).
+    #[serde(default = "yes")]
+    pub blocked: bool,
+    #[serde(default = "yes")]
+    pub done: bool,
+    #[serde(default = "yes")]
+    pub error: bool,
+    /// Programs' own notifications (OSC 9 / 777).
+    #[serde(default = "yes")]
+    pub program: bool,
+    /// Only for blocks not on screen.
+    #[serde(default = "yes")]
+    pub only_hidden: bool,
+}
+
+impl Default for NotifyPrefs {
+    fn default() -> Self {
+        Self { on: true, blocked: true, done: true, error: true, program: true, only_hidden: true }
+    }
+}
+
+/// One switch of [`NotifyPrefs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyField {
+    On,
+    Blocked,
+    Done,
+    Error,
+    Program,
+    OnlyHidden,
+}
+
+impl NotifyPrefs {
+    #[must_use]
+    pub fn get(&self, field: NotifyField) -> bool {
+        match field {
+            NotifyField::On => self.on,
+            NotifyField::Blocked => self.blocked,
+            NotifyField::Done => self.done,
+            NotifyField::Error => self.error,
+            NotifyField::Program => self.program,
+            NotifyField::OnlyHidden => self.only_hidden,
+        }
+    }
+
+    pub fn set(&mut self, field: NotifyField, on: bool) {
+        *match field {
+            NotifyField::On => &mut self.on,
+            NotifyField::Blocked => &mut self.blocked,
+            NotifyField::Done => &mut self.done,
+            NotifyField::Error => &mut self.error,
+            NotifyField::Program => &mut self.program,
+            NotifyField::OnlyHidden => &mut self.only_hidden,
+        } = on;
+    }
 }
 
 /// Pane layout density.
@@ -247,6 +319,11 @@ pub struct AppState {
     /// Pages visited in browser blocks, newest first, per host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_pages: Vec<crate::browser_home::RecentPage>,
+    #[serde(default)]
+    pub notifications: NotifyPrefs,
+    /// Hosts ([`HostInfo::key`]) whose notifications are off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quiet_hosts: Vec<String>,
 }
 
 impl Default for AppState {
@@ -262,6 +339,8 @@ impl Default for AppState {
             translucent_apps: false,
             check_updates: true,
             recent_pages: Vec::new(),
+            notifications: NotifyPrefs::default(),
+            quiet_hosts: Vec::new(),
         }
     }
 }
@@ -402,6 +481,8 @@ pub(crate) mod tests {
             translucent_apps: true,
             check_updates: false,
             recent_pages: Vec::new(),
+            notifications: NotifyPrefs { done: false, ..NotifyPrefs::default() },
+            quiet_hosts: vec!["local".into()],
         };
         save_state(&dir, &state);
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
@@ -410,6 +491,11 @@ pub(crate) mod tests {
         assert_eq!((back.density, back.show_pane_headers, back.match_running_app), (Density::Compact, false, false));
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         assert!(!back.check_updates);
+        assert_eq!((back.notifications.done, back.notifications.blocked), (false, true));
+        assert_eq!(back.quiet_hosts, ["local"]);
+        assert_eq!(old.notifications, NotifyPrefs::default(), "notifications are on unless turned off");
+        let partial: AppState = serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
+        assert!(partial.notifications.on && partial.notifications.only_hidden && !partial.notifications.done);
         // The exact family persists, independent of the terminal font.
         let state = AppState { ui_font_family: "Helvetica Neue".into(), ..state };
         save_state(&dir, &state);

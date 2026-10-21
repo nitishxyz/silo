@@ -79,6 +79,7 @@ impl Workspace {
                     _ => host_status(&h.state, h.paused.load(std::sync::atomic::Ordering::Acquire)),
                 },
                 removable: !h.info.local,
+                notify: self.host_notifies(index),
             })
             .collect();
         let shortcuts = Command::ALL.iter().filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? })).collect();
@@ -137,6 +138,8 @@ impl Workspace {
             translucent_apps: self.translucent_apps(),
             updates: self.updater.read(cx).enabled(),
             check_updates: self.check_updates(),
+            notify: self.notify_prefs(),
+            notify_denied: crate::notifications::denied(),
             ui_font,
             terminal,
             hosts,
@@ -412,6 +415,22 @@ impl Workspace {
             }
             SettingsEvent::SetCheckUpdates(on) => {
                 self.set_check_updates(*on, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetNotify(field, on) => {
+                let (field, on) = (*field, *on);
+                tracing::debug!(?field, on, "notifications");
+                self.shared.update(cx, |shared, cx| shared.update_state(|s| s.notifications.set(field, on), cx));
+                Outcome::default()
+            }
+            SettingsEvent::SetHostNotify(id, on) => {
+                if let Ok(host) = id.parse::<usize>() {
+                    self.shared.update(cx, |shared, cx| shared.set_notifies(host, *on, cx));
+                }
+                Outcome::default()
+            }
+            SettingsEvent::OpenNotificationSettings => {
+                crate::notifications::open_system_settings();
                 Outcome::default()
             }
             SettingsEvent::SetUiFontFamily(family) => {

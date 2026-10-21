@@ -44,7 +44,10 @@ icons!(
     "settings-info",
     "settings-keyboard",
     "settings-search",
-    "settings-shapes"
+    "settings-shapes",
+    "settings-bell",
+    "question",
+    "key"
 );
 
 #[cfg(test)]

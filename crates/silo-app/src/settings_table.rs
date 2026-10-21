@@ -3,6 +3,7 @@
 //! lists, reads and applies settings through it.
 
 use crate::{
+    hosts::NotifyField,
     material::Material,
     settings_panel::{ColorSlot, CursorShape, Density, Section, SettingsEvent, SettingsSnapshot},
     terminal_prefs,
@@ -26,6 +27,12 @@ pub enum SettingId {
     Scrollback,
     RestoreDefaults,
     CheckUpdates,
+    Notifications,
+    NotifyOnlyHidden,
+    NotifyBlocked,
+    NotifyDone,
+    NotifyError,
+    NotifyProgram,
     Shortcuts,
     Hosts,
     PairDevice,
@@ -149,6 +156,60 @@ pub const SETTINGS: &[Setting] = &[
         Toggle,
         "update updates upgrade new version release automatic"
     ),
+    setting!(
+        SettingId::Notifications,
+        "Notifications",
+        "Show notifications",
+        Notifications,
+        Some("Notifications"),
+        Toggle,
+        "notifications alerts banners"
+    ),
+    setting!(
+        SettingId::NotifyOnlyHidden,
+        "Notify only for blocks not on screen",
+        "Only when the block isn't visible",
+        Notifications,
+        Some("Notifications"),
+        Toggle,
+        "notifications visible hidden screen focused"
+    ),
+    setting!(
+        SettingId::NotifyBlocked,
+        "Notify when a program needs you",
+        "A program needs you",
+        Notifications,
+        Some("Notify when"),
+        Toggle,
+        "notifications blocked needs you permission question"
+    ),
+    setting!(
+        SettingId::NotifyDone,
+        "Notify when a program is done",
+        "A program is done",
+        Notifications,
+        Some("Notify when"),
+        Toggle,
+        "notifications done finished"
+    ),
+    setting!(
+        SettingId::NotifyError,
+        "Notify when a program fails",
+        "A program fails",
+        Notifications,
+        Some("Notify when"),
+        Toggle,
+        "notifications error failed"
+    ),
+    setting!(
+        SettingId::NotifyProgram,
+        "Program notifications",
+        "A program sends a notification",
+        Notifications,
+        Some("Notify when"),
+        Toggle,
+        "notifications osc 9 777 program"
+    ),
     setting!(SettingId::Hosts, "Hosts", "Hosts", Hosts, None, Open, "hosts machines remote add remove rename"),
     setting!(
         SettingId::PairDevice,
@@ -188,6 +249,19 @@ fn label_of<T: PartialEq>(options: &[(T, &'static str)], value: &T) -> String {
 }
 
 impl SettingId {
+    /// The notification switch this setting is.
+    fn notify_field(self) -> Option<NotifyField> {
+        Some(match self {
+            Self::Notifications => NotifyField::On,
+            Self::NotifyOnlyHidden => NotifyField::OnlyHidden,
+            Self::NotifyBlocked => NotifyField::Blocked,
+            Self::NotifyDone => NotifyField::Done,
+            Self::NotifyError => NotifyField::Error,
+            Self::NotifyProgram => NotifyField::Program,
+            _ => return None,
+        })
+    }
+
     #[must_use]
     pub fn setting(self) -> &'static Setting {
         SETTINGS.iter().find(|s| s.id == self).expect("every setting is declared")
@@ -212,6 +286,9 @@ impl SettingId {
     /// A toggle's state.
     #[must_use]
     pub fn on(self, s: &SettingsSnapshot) -> Option<bool> {
+        if let Some(field) = self.notify_field() {
+            return Some(s.notify.get(field));
+        }
         Some(match self {
             Self::PaneHeaders => s.show_pane_headers,
             Self::MatchRunningApp => s.match_running_app,
@@ -226,6 +303,9 @@ impl SettingId {
     /// A toggle set to `on`.
     #[must_use]
     pub fn toggled(self, on: bool) -> Option<SettingsEvent> {
+        if let Some(field) = self.notify_field() {
+            return Some(SettingsEvent::SetNotify(field, on));
+        }
         Some(match self {
             Self::PaneHeaders => SettingsEvent::SetPaneHeaders(on),
             Self::MatchRunningApp => SettingsEvent::SetMatchRunningApp(on),
@@ -239,6 +319,9 @@ impl SettingId {
 
     /// Record a toggle's new state in `s` (the app applies it a moment later).
     pub fn set_on(self, s: &mut SettingsSnapshot, on: bool) {
+        if let Some(field) = self.notify_field() {
+            return s.notify.set(field, on);
+        }
         match self {
             Self::PaneHeaders => s.show_pane_headers = on,
             Self::MatchRunningApp => s.match_running_app = on,

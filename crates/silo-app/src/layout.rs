@@ -473,8 +473,11 @@ impl Workspace {
         let close = on(|this, b, _| this.close_block_id(b));
         let focus_block = block.clone();
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
+        let status = self.render_status_mark(id, palette, cx);
+        let progress = self.render_progress_bar(id, palette);
         div()
             .id(gpui::ElementId::Name(format!("pane-header-{id}").into()))
+            .relative()
             .flex()
             .flex_row()
             .flex_none()
@@ -502,6 +505,7 @@ impl Workspace {
                     .child(div().flex_none().text_color(rgb(if active { ink } else { muted })).child(name))
                     .children(cwd.map(|c| div().min_w_0().text_ellipsis().text_color(rgb(muted)).child(c))),
             )
+            .children(status)
             // Actions show on the active pane, and on any pane while the
             // pointer is over it; they keep their space so nothing shifts.
             // In a pane too narrow for every button the row shrinks and,
@@ -535,6 +539,7 @@ impl Workspace {
                 }),
             )
             .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), icon: d.icon, offset })))
+            .children(progress)
             .into_any_element()
     }
 

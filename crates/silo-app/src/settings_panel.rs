@@ -50,6 +50,8 @@ pub struct SettingsHost {
     pub address: String,
     pub status: String,
     pub removable: bool,
+    /// This device shows the host's notifications.
+    pub notify: bool,
 }
 
 /// Populate from the command registry, not a separate hard-coded shortcut table.
@@ -278,6 +280,9 @@ pub struct SettingsSnapshot {
     /// This build updates itself (a release Silo.app in Applications).
     pub updates: bool,
     pub check_updates: bool,
+    pub notify: crate::hosts::NotifyPrefs,
+    /// macOS refused Silo's notifications.
+    pub notify_denied: bool,
     pub ui_font: UiFontSettings,
     pub terminal: TerminalSettings,
     pub hosts: Vec<SettingsHost>,
@@ -303,6 +308,8 @@ impl Default for SettingsSnapshot {
             translucent_apps: false,
             updates: true,
             check_updates: true,
+            notify: crate::hosts::NotifyPrefs::default(),
+            notify_denied: false,
             ui_font: UiFontSettings::default(),
             terminal: TerminalSettings::from_prefs(&TerminalPrefs::default(), terminal_prefs::DEFAULT_FONT.into()),
             hosts: Vec::new(),
@@ -334,6 +341,11 @@ pub enum SettingsEvent {
     SetTintWithApp(bool),
     SetTranslucentApps(bool),
     SetCheckUpdates(bool),
+    SetNotify(crate::hosts::NotifyField, bool),
+    /// A host's notifications on this device (host id, on).
+    SetHostNotify(String, bool),
+    /// System Settings › Notifications.
+    OpenNotificationSettings,
     /// The UI font family; empty = Automatic (the system font).
     SetUiFontFamily(String),
     SetTheme(String),
@@ -366,19 +378,21 @@ pub(crate) enum Section {
     Appearance,
     Terminal,
     Keyboard,
+    Notifications,
     Hosts,
     Server,
     About,
 }
 
 impl Section {
-    const ALL: [Self; 6] = [Self::Appearance, Self::Terminal, Self::Keyboard, Self::Hosts, Self::Server, Self::About];
+    const ALL: [Self; 7] = [Self::Appearance, Self::Terminal, Self::Keyboard, Self::Notifications, Self::Hosts, Self::Server, Self::About];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
             Self::Keyboard => "Keyboard",
+            Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
             Self::Server => "Server",
             Self::About => "About",
@@ -390,6 +404,7 @@ impl Section {
             Self::Appearance => "settings-shapes",
             Self::Terminal => "terminal",
             Self::Keyboard => "settings-keyboard",
+            Self::Notifications => "settings-bell",
             Self::Hosts => "globe",
             Self::Server => "settings-hard-drive",
             Self::About => "settings-info",
@@ -402,6 +417,7 @@ impl Section {
             Self::Appearance => 0x008b_5cf6,
             Self::Terminal => 0x0014_b8a6,
             Self::Keyboard => 0x0063_66f1,
+            Self::Notifications => 0x00ef_4444,
             Self::Hosts => 0x000e_a5e9,
             Self::Server => 0x00f5_9e0b,
             Self::About => 0x0000_78d4,
@@ -414,7 +430,8 @@ impl Section {
             Self::Appearance => "general preferences layout theme colors",
             Self::Terminal => "preview settings file json configuration config edit open reload finder",
             Self::Keyboard => "shortcuts keys commands bindings",
-            Self::Hosts => "remote local address add remove iroh",
+            Self::Notifications => "alerts banners dock badge needs you done error",
+            Self::Hosts => "remote local address add remove iroh notifications notify",
             Self::Server => "daemon status version log start stop restart sessions",
             Self::About => "silo version revision build libghostty",
         };
@@ -1558,6 +1575,7 @@ impl SettingsPanel {
                 ));
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
+            Section::Notifications => out.extend(self.notifications_page(cx)),
             Section::Keyboard => {
                 let show_all = self.query.is_empty() || self.text_matches(&format!("{} {}", section.label(), section.keywords()));
                 let rows: Vec<AnyElement> = s
@@ -1576,6 +1594,7 @@ impl SettingsPanel {
                 let mut rows = Vec::new();
                 for (index, host) in s.hosts.iter().enumerate() {
                     let confirming = self.pending_remove.as_deref() == Some(host.id.as_str());
+                    let notify = (!confirming).then(|| self.host_notify(index, host, cx));
                     let control = if confirming {
                         let id = host.id.clone();
                         Some(
@@ -1648,6 +1667,12 @@ impl SettingsPanel {
                                 .children(control)
                                 .into_any_element(),
                         )
+                    };
+                    let control = match (notify, control) {
+                        (Some(notify), Some(control)) => {
+                            Some(div().flex().items_center().gap(px(10.0)).child(notify).child(control).into_any_element())
+                        }
+                        (notify, control) => notify.or(control),
                     };
                     rows.push(Self::row(host.name.clone(), Some(host.status.clone().into()), control, narrow));
                 }
@@ -1794,6 +1819,68 @@ impl SettingsPanel {
             }
         }
         out
+    }
+
+    /// Settings › Notifications: on/off, which reasons, and only for blocks
+    /// not on screen. Each host has its own switch in Hosts.
+    fn notifications_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::hosts::NotifyField as F;
+        let s = &self.snapshot;
+        let toggle = |id: SettingId, element: &'static str, field: F, cx: &mut Context<Self>| {
+            let panel = cx.entity().downgrade();
+            Toggle::new(element, id.label(), s.notify.get(field))
+                .on_toggle(move |on, _, cx| {
+                    let _ = panel.update(cx, |_, cx| cx.emit(SettingsEvent::SetNotify(field, on)));
+                })
+                .into_any_element()
+        };
+        let mut out = Vec::new();
+        let (description, control): (gpui::SharedString, AnyElement) = if s.notify_denied {
+            (
+                "Turned off for Silo in System Settings".into(),
+                Self::emit_button("settings-notify-system", "Open System Settings", SettingsEvent::OpenNotificationSettings, cx),
+            )
+        } else {
+            ("Programs that need you, finish or fail, from every host".into(), toggle(SettingId::Notifications, "settings-notify-on", F::On, cx))
+        };
+        out.push(self.group(
+            Some("Notifications"),
+            vec![
+                Self::row(SettingId::Notifications.label(), Some(description), Some(control), false),
+                Self::row(
+                    SettingId::NotifyOnlyHidden.label(),
+                    Some("Never for the block you are looking at".into()),
+                    Some(toggle(SettingId::NotifyOnlyHidden, "settings-notify-hidden", F::OnlyHidden, cx)),
+                    false,
+                ),
+            ],
+        ));
+        let reasons = [
+            (SettingId::NotifyBlocked, "settings-notify-blocked", F::Blocked),
+            (SettingId::NotifyDone, "settings-notify-done", F::Done),
+            (SettingId::NotifyError, "settings-notify-error", F::Error),
+            (SettingId::NotifyProgram, "settings-notify-program", F::Program),
+        ];
+        let rows = reasons.into_iter().map(|(id, element, field)| Self::row(id.label(), None, Some(toggle(id, element, field, cx)), false)).collect();
+        out.push(self.group(Some("Notify when"), rows));
+        out.push(Self::note("Each host can be turned off in Hosts."));
+        out
+    }
+
+    /// A host row's notification switch.
+    fn host_notify(&self, index: usize, host: &SettingsHost, cx: &mut Context<Self>) -> AnyElement {
+        let panel = cx.entity().downgrade();
+        let id = host.id.clone();
+        let toggle = Toggle::new(("settings-host-notify", index), "Notifications", host.notify).on_toggle(move |on, _, cx| {
+            let _ = panel.update(cx, |_, cx| cx.emit(SettingsEvent::SetHostNotify(id.clone(), on)));
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Notify"))
+            .child(toggle)
+            .into_any_element()
     }
 
     /// Settings › Server › Paired devices: the server id, devices with
@@ -2145,7 +2232,7 @@ mod tests {
 
     #[test]
     fn sidebar_sections_have_search_terms_and_icons() {
-        assert_eq!(Section::ALL.len(), 6);
+        assert_eq!(Section::ALL.len(), 7);
         assert_eq!(Section::ALL[0], Section::Appearance, "Settings opens on Appearance");
         assert!(!Section::ALL.iter().any(|s| s.label() == "General"));
         for section in Section::ALL {

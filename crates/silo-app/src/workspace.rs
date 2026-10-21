@@ -126,7 +126,25 @@ pub struct Workspace {
     /// The process's updater, and its changes and check outcomes.
     pub(crate) updater: Entity<crate::updater::Updater>,
     _updater: [Subscription; 2],
+    /// The focused block with unseen results, since when, and whether its
+    /// records were marked seen (see `seen_tick`).
+    seen: Option<SeenWatch>,
+    _seen: Task<()>,
 }
+
+/// A focused block with done/error records being watched for 1 s.
+struct SeenWatch {
+    block: String,
+    since: Instant,
+    /// The done/error records (id, updated) showing when it started.
+    records: Vec<(String, u64)>,
+    sent: bool,
+}
+
+/// How long a block must be focused in the key window for its done/error
+/// records to count as seen, and how often that is checked.
+const SEEN_AFTER: Duration = Duration::from_secs(1);
+const SEEN_TICK: Duration = Duration::from_millis(200);
 
 impl Workspace {
     /// A window on the process's hosts, showing `session` (host index,
@@ -173,6 +191,14 @@ impl Workspace {
                 }
             }),
         ];
+        let seen = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SEEN_TICK).await;
+                if this.update_in(cx, |this, window, cx| this.seen_tick(window, cx)).is_err() {
+                    return;
+                }
+            }
+        });
         let mut reduce = crate::material::watch();
         let reduce_transparency = *reduce.borrow_and_update();
         let transparency = cx.spawn(async move |this, cx| {
@@ -256,6 +282,8 @@ impl Workspace {
             _hosts: [hosts_changed, host_events, offer_events],
             updater,
             _updater: updater_subscriptions,
+            seen: None,
+            _seen: seen,
         };
         this.sync_hosts(cx);
         // Paint the cached tree until the server answers (unless another
@@ -352,6 +380,83 @@ impl Workspace {
 
     pub(crate) fn block_info(&self, block: &str) -> Option<&silo_proto::model::BlockInfo> {
         self.view.as_ref()?.blocks.iter().find(|b| b.id == block)
+    }
+
+    /// What block `block`'s programs report, if anything.
+    pub(crate) fn block_status(&self, block: &str) -> Option<&silo_proto::model::BlockStatus> {
+        self.view.as_ref()?.status.iter().find(|s| s.block_id == block)
+    }
+
+    /// The trusted label program text of `block` is shown under.
+    pub(crate) fn status_label(&self, block: &str, cx: &App) -> String {
+        let host = self.hosts.get(self.active_host).map(|h| h.info.name.clone()).unwrap_or_default();
+        let session = self.view.as_ref().map(|v| v.session.name.clone()).unwrap_or_default();
+        let title = self
+            .panes
+            .get(block)
+            .map(|(p, _)| p.read(cx).title())
+            .or_else(|| self.block_info(block).map(crate::pane::block_title))
+            .unwrap_or_default();
+        crate::block_status::trusted_label(&host, &session, &title)
+    }
+
+    /// A focused block's done/error records count as seen once it has been
+    /// focused in the key window for [`SEEN_AFTER`]: `block.status_seen`,
+    /// which clears them on every device.
+    fn seen_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let unseen = |status: &silo_proto::model::BlockStatus| -> Vec<(String, u64)> {
+            status
+                .records
+                .iter()
+                .filter(|r| matches!(r.state, silo_proto::model::StatusState::Done | silo_proto::model::StatusState::Error))
+                .map(|r| (r.id.clone(), r.updated_at))
+                .collect()
+        };
+        let focused = window.is_window_active().then(|| self.focused_block(window, cx)).flatten();
+        let current = focused.and_then(|b| Some((self.block_status(&b).map(unseen).filter(|r| !r.is_empty())?, b)));
+        let Some((records, block)) = current else {
+            self.seen = None;
+            return;
+        };
+        match &mut self.seen {
+            Some(watch) if watch.block == block => {
+                if watch.sent || now - watch.since < SEEN_AFTER {
+                    return;
+                }
+                // Only what was showing all along; a newer record waits.
+                let ids: Vec<String> = watch.records.iter().filter(|r| records.contains(r)).map(|(id, _)| id.clone()).collect();
+                if ids.is_empty() {
+                    *watch = SeenWatch { block, since: now, records, sent: false };
+                    return;
+                }
+                watch.sent = true;
+                if !self.host_supports(silo_proto::compat::feature::STATUS) {
+                    return;
+                }
+                tracing::debug!(block, ?ids, "status seen");
+                self.call(Method::BlockStatusSeen { block_id: block, ids: Some(ids) });
+            }
+            _ => self.seen = Some(SeenWatch { block, since: now, records, sent: false }),
+        }
+    }
+
+    /// Show `block` (a clicked notification): its host and session in this
+    /// window, its tab, and focus on it.
+    pub(crate) fn reveal_block(&mut self, host: usize, session: Option<String>, block: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!(host, ?session, ?block, "reveal");
+        match session {
+            Some(session) => self.open_session(host, session, window, cx),
+            None => self.switch_host(host, window, cx),
+        }
+        if let Some(block) = block {
+            // The server makes it its tab's focused block and that tab the
+            // session's; the view that follows focuses it here.
+            self.server_focus = None;
+            self.call(Method::BlockFocus { block_id: block.clone() });
+            self.focus_block(&block, window, cx);
+        }
+        cx.notify();
     }
 
     /// Whether this window's host has `feature` (see `silo_proto::compat`);
@@ -457,15 +562,25 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
                 }
             }
-            // Status, approvals, forwarded requests and watchers come with
-            // their UI (Phase 7).
+            ConnEvent::Event(Event::BlockStatus { status }) => {
+                if let Some(view) = self.view.as_mut()
+                    && view.blocks.iter().any(|b| b.id == status.block_id)
+                {
+                    view.status.retain(|s| s.block_id != status.block_id);
+                    if !(status.records.is_empty() && status.progress.is_none() && status.busy.is_none()) {
+                        view.status.push(status.clone());
+                    }
+                }
+            }
+            // Notifications and approval cards live in `HostsState`; the
+            // bell stays ignored; command records and watchers come with
+            // their UI (P7-6, P7-7).
             ConnEvent::Event(
                 Event::BlockBell { .. }
                 | Event::HostOffered { .. }
                 | Event::GrantsChanged { .. }
                 | Event::ApprovalRequested { .. }
                 | Event::ApprovalResolved { .. }
-                | Event::BlockStatus { .. }
                 | Event::BlockAttention { .. }
                 | Event::CommandFinished { .. }
                 | Event::SessionWatchers { .. },
@@ -1123,6 +1238,15 @@ impl Workspace {
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.translucent_apps = on, cx));
     }
 
+    pub(crate) fn notify_prefs(&self) -> hosts::NotifyPrefs {
+        self.state.notifications
+    }
+
+    /// Whether `host`'s notifications are on here.
+    pub(crate) fn host_notifies(&self, host: usize) -> bool {
+        self.hosts.get(host).is_some_and(|h| !self.state.quiet_hosts.contains(&h.info.key()))
+    }
+
     pub(crate) fn check_updates(&self) -> bool {
         self.state.check_updates
     }
@@ -1365,6 +1489,7 @@ impl Render for Workspace {
         let switcher = self.render_switcher(window, cx);
         let sheet = self.render_add_host(cx);
         let offers = self.render_offers(window, cx);
+        let approvals = self.render_approvals(window, cx);
         let palette = self.render_palette(window, cx);
         let picker = self.render_picker(window, cx);
         div()
@@ -1397,6 +1522,7 @@ impl Render for Workspace {
             .children(settings)
             .children(switcher)
             .children(offers)
+            .children(approvals)
             .children(sheet)
             .children(palette)
             .children(picker)
