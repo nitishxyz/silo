@@ -158,7 +158,7 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
         let id = error.data.as_ref().and_then(|d| d["approval"].as_str()).unwrap().to_owned();
         assert_eq!(code(other.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err()).code, "not_found");
         cli.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap();
-        assert_eq!(code(cli.call_value(Method::ServerShutdown { force: false }).await.unwrap_err()).code, RpcError::CONFIRM, "confirmed for pair.create only");
+        assert_eq!(code(cli.call_value(Method::ServerShutdown {}).await.unwrap_err()).code, RpcError::CONFIRM, "confirmed for pair.create only");
         cli.call::<PairInvite>(pair()).await.unwrap();
         assert_eq!(code(cli.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap_err()).code, "not_found", "single-use");
         assert_eq!(code(cli.call_value(pair()).await.unwrap_err()).code, RpcError::CONFIRM, "single-use");
@@ -232,7 +232,7 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
 
     // The app's own calls need nobody.
     app.call::<PairInvite>(pair()).await.unwrap();
-    app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    app.call_value(Method::ServerShutdown {}).await.unwrap();
     drop((app, cli, other));
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -343,7 +343,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     host_app.subscribe().await.unwrap();
     let call = tokio::spawn({
         let cli = cli.clone();
-        async move { cli.call_value(Method::ServerShutdown { force: false }).await }
+        async move { cli.call_value(Method::ServerShutdown {}).await }
     });
     let (id, action, _, caller) = requested_by(&mut host_events).await;
     assert_eq!(action, "server.shutdown");
@@ -420,7 +420,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     // Removed while it waits: an allowed call of the device goes nowhere.
     let call = tokio::spawn({
         let cli = cli.clone();
-        async move { cli.call_value(Method::ServerShutdown { force: false }).await }
+        async move { cli.call_value(Method::ServerShutdown {}).await }
     });
     let (id, ..) = requested_by(&mut host_events).await;
     host_app.call_value(Method::PairRevoke { id: mac_net.id().to_string() }).await.unwrap();
@@ -434,7 +434,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     for net in [mac_net, other_net, cli_net, fake_net, up_net] {
         net.close().await.unwrap();
     }
-    host_app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    host_app.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(host_app);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -530,7 +530,7 @@ async fn a_removed_device_takes_its_links_and_tokens_but_not_the_devices_it_pair
     for net in [mac_net, cli_net, viewer_net, phone_net, phone_cli_net] {
         net.close().await.unwrap();
     }
-    host_app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    host_app.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(host_app);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
