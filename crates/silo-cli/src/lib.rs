@@ -1,7 +1,6 @@
 //! Command logic of the `silo` CLI, callable from tests.
 
 pub mod clipboard;
-pub mod hosts;
 pub mod link;
 pub mod update;
 pub mod upgrade;
@@ -11,14 +10,16 @@ use std::{path::Path, time::Duration};
 use anyhow::{Context, bail};
 use silo_client::{
     Control, Events, IncompatibleProtocol, Offline, Unauthorized,
-    transport::{EndpointAddr, Net, PairTicket, RelayConfig, RemoteConn, Unreachable},
+    transport::{EndpointId, Identity, Net, PairTicket, RelayConfig, RemoteConn, Unreachable},
 };
 use silo_proto::{
     control::{Method, PairInvite, PairedDevice, PairedDevices, ServerInfo},
+    device::DeviceProof,
     model::{BlockKind, SessionSummary, SessionView},
 };
 
-use crate::hosts::{Host, Hosts, client_dir};
+pub use silo_client::hosts;
+use silo_client::hosts::{Host, Hosts, client_dir};
 
 /// `90`, `90s`, `10m`, `2h` or `1d`.
 ///
@@ -85,9 +86,63 @@ pub struct Remote {
     pub net: Net,
 }
 
-async fn bind(home: &Path, options: &NetOptions) -> anyhow::Result<Net> {
-    let identity = silo_client::client_identity(&client_dir(home)).context("load client identity")?;
-    Net::bind(&identity, options.relay.clone(), options.mdns).await
+/// This process's way to hosts. Hosts pair the device key this CLI shares
+/// with the app (`<home>/client`), but a relay keeps one connection per
+/// endpoint id: binding that key would knock the app (or another CLI run)
+/// off it. So each run has an endpoint of its own, with a fresh key, that
+/// speaks for the device key with a [`DeviceProof`].
+pub struct Endpoint {
+    pub net: Net,
+    /// The device key this endpoint speaks for; `None` when bound with it.
+    device: Option<Identity>,
+}
+
+fn device_identity(home: &Path) -> anyhow::Result<Identity> {
+    silo_client::client_identity(&client_dir(home)).context("load client identity")
+}
+
+impl Endpoint {
+    /// An endpoint of this process's own, speaking for the device key.
+    ///
+    /// # Errors
+    /// Unreadable device key or bind failure.
+    pub async fn own(home: &Path, options: &NetOptions) -> anyhow::Result<Self> {
+        let device = device_identity(home)?;
+        let net = Net::bind(&Identity::ephemeral(), options.relay.clone(), options.mdns).await?;
+        Ok(Self { net, device: Some(device) })
+    }
+
+    /// Bound with the device key itself: to pair it, and for hosts from
+    /// before device proofs (see [`Endpoint::refused`]).
+    ///
+    /// # Errors
+    /// Unreadable device key or bind failure.
+    pub async fn device(home: &Path, options: &NetOptions) -> anyhow::Result<Self> {
+        let net = Net::bind(&device_identity(home)?, options.relay.clone(), options.mdns).await?;
+        Ok(Self { net, device: None })
+    }
+
+    /// What a hello to `server` carries to speak for the device key.
+    #[must_use]
+    pub fn proof(&self, server: EndpointId) -> Option<DeviceProof> {
+        self.device.as_ref().map(|device| silo_client::device_proof(device, server, self.net.id()))
+    }
+
+    pub async fn close(self) {
+        let _ = self.net.close().await;
+    }
+
+    /// A host refused this endpoint of the process's own as an unknown
+    /// device: it predates device proofs (silo 0.1.3 and before) and knows
+    /// only the device key itself. The endpoint to repeat the attempt
+    /// with, bound with that key.
+    ///
+    /// # Errors
+    /// Binding failed.
+    pub async fn refused(self, home: &Path, options: &NetOptions) -> anyhow::Result<Self> {
+        self.close().await;
+        Self::device(home, options).await
+    }
 }
 
 /// A clear message for the typed remote failures.
@@ -130,25 +185,39 @@ pub async fn reach(net: &Net, host: &Host) -> anyhow::Result<RemoteConn> {
 /// # Errors
 /// Unknown host, dial failure, or a typed refusal (see [`explain`]).
 pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, client_name: &str) -> anyhow::Result<Remote> {
-    let net = bind(home, options).await?;
-    let result =
+    let (endpoint, result) =
         if host.get(..silo_client::transport::TICKET_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(silo_client::transport::TICKET_PREFIX)) {
             let ticket = PairTicket::decode(host)?;
-            silo_client::pair(&net, &ticket, client_name).await
+            // Pairing grants the endpoint's key: the device key itself.
+            let endpoint = Endpoint::device(home, options).await?;
+            let result = silo_client::pair(&endpoint.net, &ticket, client_name).await;
+            (endpoint, result)
         } else {
             let host = Hosts::load(home)?.find(host)?.clone();
-            match reach(&net, &host).await {
-                Ok(rc) => Control::over_remote(rc, client_name, false, None).await,
-                Err(error) => Err(error),
+            let hello = async |endpoint: &Endpoint| {
+                let rc = reach(&endpoint.net, &host).await?;
+                match endpoint.proof(host.addr.id) {
+                    Some(proof) => Control::over_remote_as(rc, client_name, false, proof).await,
+                    None => Control::over_remote(rc, client_name, false, None).await,
+                }
+            };
+            let own = Endpoint::own(home, options).await?;
+            match hello(&own).await {
+                Err(error) if error.downcast_ref::<Unauthorized>().is_some() => {
+                    let device = own.refused(home, options).await?;
+                    let result = hello(&device).await;
+                    (device, result)
+                }
+                result => (own, result),
             }
         };
     match result {
         Ok((control, events)) => {
-            refresh_host(home, &control).await?;
-            Ok(Remote { control, events, net })
+            hosts::refresh_host(home, &control).await?;
+            Ok(Remote { control, events, net: endpoint.net })
         }
         Err(error) => {
-            let _ = net.close().await;
+            endpoint.close().await;
             Err(explain(error))
         }
     }
@@ -162,12 +231,13 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
 /// Pairing failed or `hosts.json` could not be written.
 pub async fn add_host(home: &Path, ticket: &str, name: Option<String>, options: &NetOptions, client_name: &str) -> anyhow::Result<hosts::Host> {
     let ticket = PairTicket::decode(ticket)?;
-    let net = bind(home, options).await?;
+    // Pairing grants the endpoint's key: the device key itself.
+    let net = Endpoint::device(home, options).await?.net;
     let paired = match silo_client::pair(&net, &ticket, client_name).await {
         // Prefer the server's own view of its address over the ticket's.
         Ok((control, _)) => {
             let hostname = control.hello().server.hostname.clone();
-            current_addr(&control).await.map(|addr| (addr.filter(|a| a.id == ticket.addr.id), hostname))
+            hosts::current_addr(&control).await.map(|addr| (addr.filter(|a| a.id == ticket.addr.id), hostname))
         }
         Err(error) => Err(explain(error)),
     };
@@ -183,48 +253,6 @@ pub async fn add_host(home: &Path, ticket: &str, name: Option<String>, options: 
 /// RPC failure.
 pub async fn server_info(control: &Control) -> anyhow::Result<ServerInfo> {
     control.call(Method::ServerInfo {}).await
-}
-
-/// The server's current address from `server.info`, if it reports one.
-///
-/// # Errors
-/// RPC failure or an undecodable address.
-pub async fn current_addr(control: &Control) -> anyhow::Result<Option<EndpointAddr>> {
-    let info = server_info(control).await?;
-    info.endpoint_addr.map(serde_json::from_value).transpose().context("decode server endpoint_addr")
-}
-
-/// Update the stored address of the connected host when it moved. Hosts
-/// not in `hosts.json` (an unsaved ticket) are left alone.
-///
-/// # Errors
-/// RPC failure or `hosts.json` I/O.
-pub async fn refresh_host(home: &Path, control: &Control) -> anyhow::Result<()> {
-    match current_addr(control).await? {
-        Some(addr) => store_addr(home, addr),
-        None => Ok(()),
-    }
-}
-
-/// Store `addr` (a host's own report of its address) for the stored host
-/// with its id when it moved; an address without any route is ignored.
-///
-/// # Errors
-/// `hosts.json` I/O.
-pub fn store_addr(home: &Path, addr: EndpointAddr) -> anyhow::Result<()> {
-    if addr.is_empty() {
-        return Ok(());
-    }
-    let id = addr.id.to_string();
-    if Hosts::load(home)?.hosts.iter().any(|h| h.id == id && h.addr != addr) {
-        Hosts::update(home, |hosts| {
-            if hosts.hosts.iter().any(|h| h.id == id) {
-                hosts.upsert(addr, None)?;
-            }
-            Ok(())
-        })?;
-    }
-    Ok(())
 }
 
 /// `pair.create` with `ttl`.
@@ -389,62 +417,5 @@ mod tests {
         assert!(art.lines().count() > 10);
         assert!(art.contains('\u{2580}') || art.contains('\u{2584}') || art.contains('\u{2588}'));
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn hosts_round_trip_and_dedupe() {
-        let home = std::env::temp_dir().join(format!("silo-cli-hosts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        let (a, b) = (addr(&home.join("a")), addr(&home.join("b")));
-        assert!(Hosts::load(&home).unwrap().hosts.is_empty());
-        let moved = a.clone().with_ip_addr(([10, 0, 0, 1], 1).into());
-        let hosts = Hosts::update(&home, |hosts| {
-            hosts.upsert(a.clone(), Some("work".into())).unwrap();
-            hosts.upsert(b.clone(), None).unwrap();
-            assert!(hosts.upsert(b.clone(), Some("work".into())).is_err(), "names are unique");
-            // Same id again: updated in place, name kept.
-            hosts.upsert(moved.clone(), None).unwrap();
-            assert_eq!(hosts.hosts.len(), 2);
-            Ok(hosts.clone())
-        })
-        .unwrap();
-
-        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(home.join("hosts.json")).unwrap().permissions());
-        assert_eq!(mode & 0o777, 0o600);
-        let loaded = Hosts::load(&home).unwrap();
-        assert_eq!(loaded, hosts);
-        assert_eq!(loaded.find("work").unwrap().addr, moved);
-        assert_eq!(loaded.find(&a.id.to_string()[..6]).unwrap().name, "work");
-        assert_eq!(loaded.find(&b.id.to_string()).unwrap().name, b.id.to_string()[..10]);
-        assert!(loaded.find("nope").is_err());
-
-        Hosts::update(&home, |hosts| hosts.remove("work").map(drop)).unwrap();
-        assert_eq!(Hosts::load(&home).unwrap().hosts.len(), 1);
-        // A failed change writes nothing; an unreadable file is never overwritten.
-        assert!(Hosts::update(&home, |hosts| hosts.remove("nope").map(drop)).is_err());
-        assert_eq!(Hosts::load(&home).unwrap().hosts.len(), 1);
-        std::fs::write(home.join("hosts.json"), "{ not json").unwrap();
-        assert!(Hosts::update(&home, |_| Ok(())).is_err());
-        assert_eq!(std::fs::read_to_string(home.join("hosts.json")).unwrap(), "{ not json");
-        let _ = std::fs::remove_dir_all(home);
-    }
-
-    #[test]
-    fn a_known_host_keeps_its_name_when_paired_again() {
-        let home = std::env::temp_dir().join(format!("silo-cli-repair-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        let (a, b) = (addr(&home.join("a")), addr(&home.join("b")));
-        let mut hosts = Hosts::default();
-        assert_eq!(hosts.pair(a.clone(), None, "batmini.local").unwrap().name, "batmini.local", "a new host takes its hostname");
-        hosts.hosts[0].name = "mini".into();
-        // `silo remote install` again: same key, new route, name kept.
-        let moved = a.clone().with_ip_addr(([10, 0, 0, 1], 1).into());
-        let host = hosts.pair(moved.clone(), None, "batmini.local").unwrap().clone();
-        assert_eq!((host.name.as_str(), &host.addr, hosts.hosts.len()), ("mini", &moved, 1));
-        // `silo hosts add --name` is the user's choice.
-        assert_eq!(hosts.pair(moved, Some("studio".into()), "batmini.local").unwrap().name, "studio");
-        // A fresh key is another host, named afresh.
-        assert_eq!(hosts.pair(b, None, "studio").unwrap().name, "studio 2");
-        let _ = std::fs::remove_dir_all(home);
     }
 }

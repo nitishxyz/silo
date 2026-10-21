@@ -8,7 +8,7 @@ use anyhow::{Context, bail};
 use silo_client::{Control, Events, Unauthorized, transport::PairTicket};
 use silo_proto::control::{Event, HostOffer, InvitePurpose, Method, OfferSource, PairInvite};
 
-use crate::{NetOptions, bind, explain};
+use crate::{Endpoint, NetOptions, explain};
 
 /// How long the device invite sent by `silo join` stays valid.
 pub const JOIN_OFFER_TTL: Duration = Duration::from_secs(600);
@@ -43,9 +43,10 @@ pub async fn require_remote(control: &Control) -> anyhow::Result<()> {
 /// Invalid, expired or used join ticket; the other machine is unreachable.
 pub async fn offer(home: &Path, join: &str, offer_ticket: &str, name: &str, options: &NetOptions) -> anyhow::Result<()> {
     let join = PairTicket::decode(join.trim()).context("invalid join ticket")?;
-    let net = bind(home, options).await?;
-    let result = silo_client::offer_host(&net, &join, offer_ticket, name).await;
-    let _ = net.close().await;
+    // A join invite pairs nothing: any endpoint of this process's own does.
+    let endpoint = Endpoint::own(home, options).await?;
+    let result = silo_client::offer_host(&endpoint.net, &join, offer_ticket, name).await;
+    endpoint.close().await;
     result.map_err(|error| {
         if error.downcast_ref::<Unauthorized>().is_some() {
             anyhow::anyhow!("the join ticket is invalid, expired or already used; create a new one")

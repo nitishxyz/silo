@@ -6,8 +6,9 @@ use anyhow::Context;
 use silo_proto::{
     BUILD,
     control::{Empty, Method},
+    device::DeviceProof,
 };
-use silo_transport::{Conn, EndpointAddr, Identity, Net, PairTicket, RemoteConn};
+use silo_transport::{Conn, EndpointAddr, EndpointId, Identity, Net, PairTicket, RemoteConn};
 
 use crate::{Control, Events};
 
@@ -18,6 +19,13 @@ use crate::{Control, Events};
 /// Unreadable or invalid key material.
 pub fn client_identity(dir: &Path) -> anyhow::Result<Identity> {
     Identity::load_or_create(dir)
+}
+
+/// The paired `device` key's proof that `endpoint` (another process's
+/// endpoint) speaks for it to `server`.
+#[must_use]
+pub fn device_proof(device: &Identity, server: EndpointId, endpoint: EndpointId) -> DeviceProof {
+    DeviceProof { device: device.node_id(), signature: device.prove(server, endpoint) }
 }
 
 impl Control {
@@ -45,7 +53,17 @@ impl Control {
     /// See [`Control::connect_remote`].
     pub async fn over_remote(rc: RemoteConn, client_name: &str, passive: bool, invite: Option<&PairTicket>) -> anyhow::Result<(Self, Events)> {
         let invite = invite.map(PairTicket::encode);
-        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, invite).await
+        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, invite, None).await
+    }
+
+    /// [`Control::over_remote`] as the paired device `proof` is from (see
+    /// [`device_proof`]); servers before device proofs refuse it as an
+    /// unknown device.
+    ///
+    /// # Errors
+    /// See [`Control::connect_remote`].
+    pub async fn over_remote_as(rc: RemoteConn, client_name: &str, passive: bool, proof: DeviceProof) -> anyhow::Result<(Self, Events)> {
+        Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, None, Some(proof)).await
     }
 }
 

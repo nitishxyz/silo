@@ -6,7 +6,8 @@
 //! fields. It has its own [`UpgradeRejected`] so `REJECT` and the data
 //! stream types stay free to change.
 //!
-//! The first stream of a connection starts with `UPGRADE_HELLO` (`{}`);
+//! The first stream of a connection starts with `UPGRADE_HELLO`
+//! ([`UpgradeHello`], `{}` from builds before device proofs);
 //! the server answers [`HostBuild`]. The client may stop there (a check)
 //! or send [`UpgradeBinary`] and then `UPGRADE_CHUNK` frames holding
 //! exactly `size` bytes, or, with `release`, no chunks: the server fetches
@@ -43,7 +44,12 @@ pub const BUSY: &str = "busy";
 pub const HANDOFF: &str = "handoff";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct UpgradeHello {}
+pub struct UpgradeHello {
+    /// The paired device this endpoint speaks for (see
+    /// [`crate::device`]); without it the endpoint itself must be paired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<crate::device::DeviceProof>,
+}
 
 /// The running server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

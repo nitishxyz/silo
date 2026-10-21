@@ -9,13 +9,13 @@ use std::{
 
 use anyhow::{Context, bail};
 use silo_client::{
-    transport::{Conn, Net, RemoteConn},
+    transport::{Conn, RemoteConn},
     upgrade::{self as stream, Refused},
 };
 use silo_proto::upgrade::{self, Decision, HostBuild, version_text};
 
 use crate::{
-    NetOptions, bind,
+    Endpoint, NetOptions,
     hosts::Host,
     link::{Install, Platform, staged_failure},
 };
@@ -161,15 +161,35 @@ pub fn kept(before: &[String], after: &[String]) -> String {
 /// The host is unreachable or refuses, the new build could not take over,
 /// or it does not come back on the new build.
 pub async fn paired(home: &Path, host: &Host, candidate: &Candidate, force: bool, options: &NetOptions) -> anyhow::Result<String> {
-    let net = bind(home, options).await?;
-    let result = paired_on(home, &net, host, candidate, force).await;
-    let _ = net.close().await;
+    let opening = async {
+        let own = Endpoint::own(home, options).await?;
+        anyhow::Ok(match open(home, &own, host).await {
+            Err(error) if error.downcast_ref::<Refused>().is_some_and(|r| r.code == "unauthorized") => {
+                let device = own.refused(home, options).await?;
+                let opened = open(home, &device, host).await;
+                (device, opened)
+            }
+            opened => (own, opened),
+        })
+    };
+    let (endpoint, opened) = slow(opening, || format!("{}: connecting…", host.name)).await?;
+    let result = match opened {
+        Ok(opened) => paired_on(home, &endpoint, host, opened, candidate, force).await,
+        Err(error) => Err(error),
+    };
+    endpoint.close().await;
     result
 }
 
-async fn paired_on(home: &Path, net: &Net, host: &Host, candidate: &Candidate, force: bool) -> anyhow::Result<String> {
+async fn paired_on(
+    home: &Path,
+    endpoint: &Endpoint,
+    host: &Host,
+    (rc, opened): (RemoteConn, stream::Upgrade),
+    candidate: &Candidate,
+    force: bool,
+) -> anyhow::Result<String> {
     let name = &host.name;
-    let (rc, opened) = slow(open(home, net, host), || format!("{name}: connecting…")).await?;
     let before = opened.host.clone();
     let running = version_text(&before.version, &before.build);
     let decided = candidate
@@ -213,7 +233,7 @@ async fn paired_on(home: &Path, net: &Net, host: &Host, candidate: &Candidate, f
     };
     let result = tokio::select! {
         failed = failure => failed,
-        after = come_back(home, net, host, &started.build) => after,
+        after = come_back(home, endpoint, host, &started.build) => after,
     };
     rc.close(b"done");
     let after = match result {
@@ -237,9 +257,9 @@ async fn slow<T>(future: impl Future<Output = T>, line: impl FnOnce() -> String)
 
 /// Reach `host` as every command does ([`crate::reach`]) and open an
 /// upgrade stream; the stored address is refreshed from the host's report.
-async fn open(home: &Path, net: &Net, host: &Host) -> anyhow::Result<(RemoteConn, stream::Upgrade)> {
-    let rc = crate::reach(net, host).await?;
-    let opened = match stream::open(&Conn::Iroh(rc.clone())).await {
+async fn open(home: &Path, endpoint: &Endpoint, host: &Host) -> anyhow::Result<(RemoteConn, stream::Upgrade)> {
+    let rc = crate::reach(&endpoint.net, host).await?;
+    let opened = match stream::open(&Conn::Iroh(rc.clone()), endpoint.proof(host.addr.id)).await {
         Ok(opened) => opened,
         Err(error) => {
             rc.close(b"done");
@@ -247,18 +267,18 @@ async fn open(home: &Path, net: &Net, host: &Host) -> anyhow::Result<(RemoteConn
         }
     };
     if let Some(addr) = opened.host.endpoint_addr.clone().and_then(|addr| serde_json::from_value(addr).ok()) {
-        crate::store_addr(home, addr)?;
+        crate::hosts::store_addr(home, addr)?;
     }
     Ok((rc, opened))
 }
 
 /// Wait for `host` to serve `build`, for at most [`COME_BACK`].
-async fn come_back(home: &Path, net: &Net, host: &Host, build: &str) -> anyhow::Result<HostBuild> {
+async fn come_back(home: &Path, endpoint: &Endpoint, host: &Host, build: &str) -> anyhow::Result<HostBuild> {
     let deadline = tokio::time::Instant::now() + COME_BACK;
     let attempts = async {
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok((rc, opened)) = open(home, net, host).await {
+            if let Ok((rc, opened)) = open(home, endpoint, host).await {
                 let found = opened.host.clone();
                 opened.close().await;
                 rc.close(b"done");

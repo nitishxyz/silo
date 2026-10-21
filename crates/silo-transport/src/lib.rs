@@ -6,7 +6,7 @@ mod stream;
 mod ticket;
 pub mod tunnel;
 
-pub use identity::Identity;
+pub use identity::{Identity, verify_proof};
 pub use iroh::endpoint::{Path, PathList};
 pub use iroh::{EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 pub use net::{CTL_ALPN, CtlIncoming, Net, NetOptions, RelayConfig, RemoteConn, TUNNEL_ALPN, TunnelIncoming, Unreachable};

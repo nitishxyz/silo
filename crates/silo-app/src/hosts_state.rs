@@ -351,13 +351,10 @@ impl HostsState {
         cx.emit(HostEvent { host, event });
     }
 
-    /// A remote server's new route: used now and saved in hosts.json.
+    /// A remote server's new route (already in hosts.json): used now.
     fn save_addr(&mut self, host: usize, addr: &silo_client::transport::EndpointAddr) {
         if let hosts::Transport::Iroh { addr: current, .. } = &mut self.entries[host].info.transport {
             current.clone_from(addr);
-        }
-        if let Err(error) = hosts::update(&self.home, |saved| hosts::merge_addr(saved, addr)) {
-            tracing::warn!("save host address: {error:#}");
         }
     }
 

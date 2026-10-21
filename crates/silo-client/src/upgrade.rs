@@ -6,7 +6,9 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 use silo_proto::{
-    Frame, kind, read_frame,
+    Frame,
+    device::DeviceProof,
+    kind, read_frame,
     upgrade::{CHUNK, HostBuild, UpgradeBinary, UpgradeHello, UpgradeRejected, UpgradeStarted},
     write_frame,
 };
@@ -36,13 +38,14 @@ pub struct Upgrade {
 }
 
 /// Open an upgrade stream on `conn`; it must be the connection's first
-/// stream for a remote server.
+/// stream for a remote server, which authenticates the endpoint itself or
+/// the paired `device` it speaks for (see [`crate::device_proof`]).
 ///
 /// # Errors
 /// Connection failure or a refusal ([`Refused`]).
-pub async fn open(conn: &Conn) -> anyhow::Result<Upgrade> {
+pub async fn open(conn: &Conn, device: Option<DeviceProof>) -> anyhow::Result<Upgrade> {
     let mut stream = conn.open_stream().await?;
-    write_frame(&mut stream, &Frame::json(kind::UPGRADE_HELLO, &UpgradeHello {})?).await?;
+    write_frame(&mut stream, &Frame::json(kind::UPGRADE_HELLO, &UpgradeHello { device })?).await?;
     stream.flush().await?;
     let host = match read_frame(&mut stream).await? {
         Some(frame) if frame.kind == kind::HOST_BUILD => frame.parse()?,

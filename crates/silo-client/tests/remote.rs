@@ -168,7 +168,7 @@ async fn upgrade_stream_checks_and_refuses() {
 
     let stranger = device(&home, "x").await;
     let rc = stranger.dial(ticket.addr.clone()).await.unwrap();
-    let error = upgrade::open(&Conn::Iroh(rc)).await.err().unwrap();
+    let error = upgrade::open(&Conn::Iroh(rc), None).await.err().unwrap();
     assert_eq!(error.downcast_ref::<Refused>().unwrap().code, "unauthorized", "{error:#}");
     stranger.close().await.unwrap();
 
@@ -186,7 +186,7 @@ async fn upgrade_stream_checks_and_refuses() {
         std::fs::write(&script, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
         // Held: the connection must outlive the stream.
         let conn = Conn::Iroh(net.dial(ticket.addr.clone()).await.unwrap());
-        let opened = timeout(T, upgrade::open(&conn)).await.unwrap().unwrap();
+        let opened = timeout(T, upgrade::open(&conn, None)).await.unwrap().unwrap();
         assert_eq!(opened.host.build, silo_proto::BUILD);
         assert_eq!(opened.host.platform, silo_proto::upgrade::platform());
         assert_eq!(opened.host.sessions.len(), 1);

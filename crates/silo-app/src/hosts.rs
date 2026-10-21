@@ -24,19 +24,6 @@ impl RemoteHost {
     }
 }
 
-/// Take a fresher route reported by the server: only for the same
-/// EndpointId and only when it changed. Returns whether `hosts` changed.
-pub fn merge_addr(hosts: &mut [RemoteHost], addr: &EndpointAddr) -> bool {
-    let id = addr.id.to_string();
-    match hosts.iter_mut().find(|h| h.id == id) {
-        Some(host) if host.addr != *addr && !addr.is_empty() => {
-            host.addr = addr.clone();
-            true
-        }
-        _ => false,
-    }
-}
-
 /// Whether a host with the same EndpointId is saved already.
 #[must_use]
 pub fn find<'a>(hosts: &'a [RemoteHost], id: &str) -> Option<&'a RemoteHost> {
@@ -363,19 +350,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn server_reported_addr_merges() {
+    fn server_reported_addr_is_stored_as_the_cli_does() {
         let dir = temp("merge");
-        let mut hosts = vec![RemoteHost::new(addr(&dir.join("a")), "a".into())];
-        let old = hosts[0].addr.clone();
-        assert!(!merge_addr(&mut hosts, &old), "unchanged");
+        let old = addr(&dir.join("a"));
+        update(&dir, |hosts| hosts.push(RemoteHost::new(old.clone(), "a".into()))).unwrap();
         let moved = EndpointAddr::new(old.id).with_ip_addr("10.0.0.2:5000".parse().unwrap());
-        assert!(merge_addr(&mut hosts, &moved));
-        assert_eq!(hosts[0].addr, moved);
-        assert_eq!(hosts[0].id, old.id.to_string(), "id is kept");
+        silo_client::hosts::store_addr(&dir, moved.clone()).unwrap();
+        assert_eq!(load(&dir)[0].addr, moved);
+        assert_eq!((load(&dir)[0].id.as_str(), load(&dir)[0].name.as_str()), (old.id.to_string().as_str(), "a"), "id and name are kept");
         // An address with no routes, or of another server, is ignored.
-        assert!(!merge_addr(&mut hosts, &EndpointAddr::new(old.id)));
-        assert!(!merge_addr(&mut hosts, &addr(&dir.join("b"))));
-        assert_eq!(hosts[0].addr, moved);
+        silo_client::hosts::store_addr(&dir, EndpointAddr::new(old.id)).unwrap();
+        silo_client::hosts::store_addr(&dir, addr(&dir.join("b"))).unwrap();
+        assert_eq!(load(&dir).iter().map(|h| &h.addr).collect::<Vec<_>>(), [&moved]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

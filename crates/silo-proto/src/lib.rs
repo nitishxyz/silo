@@ -11,6 +11,7 @@ pub mod api;
 pub mod compat;
 pub mod control;
 pub mod data;
+pub mod device;
 pub mod drops;
 pub mod frame;
 pub mod model;

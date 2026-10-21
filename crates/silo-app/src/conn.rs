@@ -392,9 +392,7 @@ pub fn start(rt: &tokio::runtime::Handle, transport: Transport, paused: Arc<Atom
 
 /// The remote server's current route from `server.info`, if it has one.
 async fn server_addr(control: &Control) -> Option<silo_client::transport::EndpointAddr> {
-    let info: silo_proto::control::ServerInfo =
-        control.call(silo_proto::control::Method::ServerInfo {}).await.inspect_err(|e| tracing::debug!("server.info: {e:#}")).ok()?;
-    serde_json::from_value(info.endpoint_addr?).inspect_err(|e| tracing::debug!("server address: {e}")).ok()
+    silo_client::hosts::current_addr(control).await.inspect_err(|e| tracing::debug!("server address: {e:#}")).ok().flatten()
 }
 
 async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused: Arc<AtomicBool>) {
@@ -488,13 +486,20 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                         }
                         _ = info.tick(), if remote => {
                             if let Some(addr) = server_addr(&control).await
-                                && let Transport::Iroh { addr: current, .. } = &mut transport
-                                && *current != addr
+                                && let Transport::Iroh { home, addr: current } = &mut transport
                                 && addr.id == current.id
+                                && !addr.is_empty()
                             {
-                                current.clone_from(&addr);
-                                if tx.send(ConnEvent::Addr(addr)).is_err() {
-                                    return;
+                                // Stored as the CLI does: hosts.json may hold
+                                // an older route than this connection's.
+                                if let Err(error) = silo_client::hosts::store_addr(home, addr.clone()) {
+                                    tracing::warn!("save host address: {error:#}");
+                                }
+                                if *current != addr {
+                                    current.clone_from(&addr);
+                                    if tx.send(ConnEvent::Addr(addr)).is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }

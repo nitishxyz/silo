@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use silo_proto::{
     BUILD, Frame,
     control::{ClientHello, Event, Method, Request, RpcError, ServerHello, ServerMessage},
+    device::DeviceProof,
     kind, read_frame, spawn_reader, write_frame,
 };
 use silo_transport::Conn;
@@ -189,7 +190,7 @@ impl Control {
     /// Connection or handshake failure; a build rejection is a
     /// [`IncompatibleProtocol`], a refused device [`Unauthorized`].
     pub async fn connect_build(conn: Conn, client_name: &str, passive: bool, build: &str) -> anyhow::Result<(Self, Events)> {
-        Self::handshake(conn, client_name, passive, build, None).await
+        Self::handshake(conn, client_name, passive, build, None, None).await
     }
 
     /// Hello over a fresh stream on `conn`, then start the reader/writer.
@@ -199,9 +200,10 @@ impl Control {
         passive: bool,
         build: &str,
         invite: Option<String>,
+        device: Option<DeviceProof>,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let hello = ClientHello { build: build.to_owned(), ..ClientHello::ours(client_name, passive, invite) };
+        let hello = ClientHello { build: build.to_owned(), device, ..ClientHello::ours(client_name, passive, invite) };
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;
         let hello = match read_frame(&mut stream).await {

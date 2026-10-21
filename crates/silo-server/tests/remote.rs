@@ -16,12 +16,13 @@ use silo_proto::{
         RpcError, ServerHello, ServerMessage, SpawnSpec,
     },
     data::{ClientData, Clip, DataHello, ServerData},
+    device::DeviceProof,
     kind,
     model::TermSize,
     paths, read_frame, write_frame,
 };
 use silo_server::sysclip::Fake;
-use silo_transport::{BiStream, EndpointAddr, Identity, Net, PairTicket, RelayConfig, RemoteConn};
+use silo_transport::{BiStream, EndpointAddr, EndpointId, Identity, Net, PairTicket, RelayConfig, RemoteConn};
 use tokio::{io::AsyncWriteExt, task::JoinHandle, time::timeout};
 
 const T: Duration = Duration::from_secs(10);
@@ -132,9 +133,13 @@ async fn data_on(rc: &RemoteConn, ticket: &str) -> Option<u8> {
 /// A hello speaking `protocol`, from a build other than the server's: only
 /// the protocol decides admission.
 async fn hello_on(rc: &RemoteConn, protocol: u32, invite: Option<&str>) -> (BiStream, Result<ServerHello, RpcError>) {
-    let mut stream = rc.open_stream().await.unwrap();
     let hello = ClientHello { protocol, build: "another-build".into(), ..ClientHello::ours("remote-test", false, invite.map(Into::into)) };
-    send(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await;
+    send_hello(rc, &hello).await
+}
+
+async fn send_hello(rc: &RemoteConn, hello: &ClientHello) -> (BiStream, Result<ServerHello, RpcError>) {
+    let mut stream = rc.open_stream().await.unwrap();
+    send(&mut stream, &Frame::json(kind::CONTROL_HELLO, hello).unwrap()).await;
     let reply = match timeout(T, read_frame(&mut stream)).await.unwrap() {
         Ok(Some(frame)) if frame.kind == kind::CONTROL_HELLO => Ok(frame.parse().unwrap()),
         Ok(Some(frame)) => match frame.parse().unwrap() {
@@ -150,6 +155,84 @@ async fn connect(net: &Net, addr: &EndpointAddr, protocol: u32, invite: Option<&
     let rc = timeout(T, net.dial(addr.clone())).await.unwrap().unwrap();
     let (stream, reply) = hello_on(&rc, protocol, invite).await;
     reply.map(|_| Ctl { rc, stream, next: 0 })
+}
+
+/// A hello from `net` speaking for the device `proof` is from.
+async fn connect_as(net: &Net, addr: &EndpointAddr, proof: Option<DeviceProof>) -> Result<Ctl, RpcError> {
+    let rc = timeout(T, net.dial(addr.clone())).await.unwrap().unwrap();
+    let (stream, reply) = send_hello(&rc, &ClientHello { device: proof, ..ClientHello::ours("silo cli", false, None) }).await;
+    reply.map(|_| Ctl { rc, stream, next: 0 })
+}
+
+/// `by`'s proof that `endpoint` speaks for it to `server`.
+fn proof(by: &Identity, server: EndpointId, endpoint: EndpointId) -> Option<DeviceProof> {
+    Some(DeviceProof { device: by.node_id(), signature: by.prove(server, endpoint) })
+}
+
+async fn ephemeral() -> Net {
+    Net::bind(&Identity::ephemeral(), RelayConfig::Disabled, false).await.unwrap()
+}
+
+/// What an upgrade stream from `net` speaking for `proof`'s device gets:
+/// the host's build, or the refusal code.
+async fn upgrade_as(net: &Net, addr: &EndpointAddr, proof: Option<DeviceProof>) -> Result<String, String> {
+    let rc = timeout(T, net.dial(addr.clone())).await.unwrap().unwrap();
+    let opened = timeout(T, silo_client::upgrade::open(&silo_transport::Conn::Iroh(rc.clone()), proof)).await.unwrap();
+    rc.close(b"done");
+    match opened {
+        Ok(opened) => Ok(opened.host.build),
+        Err(error) => Err(error.downcast::<silo_client::upgrade::Refused>().unwrap().code),
+    }
+}
+
+/// Every process has an endpoint of its own (a relay keeps one connection
+/// per endpoint id) and speaks for the paired device key with its proof,
+/// as each CLI run does beside the app. The proof binds the device, the
+/// server and the endpoint; revoking the device ends them all.
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoints_speak_for_a_paired_device() {
+    let home = temp_home("proof");
+    let task = start(&home).await;
+    let control = owner(&home).await;
+    let (invite, addr) = invite(&control, 60).await;
+    let key = Identity::load_or_create(home.join("device-app")).unwrap();
+    let app_net = device(&home, "app").await;
+    let mut app = connect(&app_net, &addr, PROTOCOL, Some(&invite)).await.unwrap();
+
+    let (own, other, stranger) = (ephemeral().await, ephemeral().await, Identity::ephemeral());
+    for refused in [
+        None,
+        proof(&key, addr.id, other.id()),
+        proof(&key, other.id(), own.id()),
+        proof(&stranger, addr.id, own.id()),
+        Some(DeviceProof { device: key.node_id(), signature: "00".repeat(64) }),
+    ] {
+        assert_eq!(code(connect_as(&own, &addr, refused.clone()).await.map(|_| ())), RpcError::UNAUTHORIZED, "{refused:?}");
+        assert_eq!(upgrade_as(&own, &addr, refused).await, Err("unauthorized".into()));
+    }
+
+    // Two endpoints speaking for the device at once, beside the device itself.
+    let mut cli = connect_as(&own, &addr, proof(&key, addr.id, own.id())).await.unwrap();
+    let mut cli2 = connect_as(&other, &addr, proof(&key, addr.id, other.id())).await.unwrap();
+    for ctl in [&mut app, &mut cli, &mut cli2] {
+        ctl.call(Method::SessionList {}).await.unwrap();
+    }
+    assert_eq!(code(cli.call(Method::PairList {}).await), RpcError::FORBIDDEN, "still not the owner");
+    assert_eq!(upgrade_as(&own, &addr, proof(&key, addr.id, own.id())).await, Ok(silo_proto::BUILD.to_owned()));
+    let devices: PairedDevices = control.call(Method::PairList {}).await.unwrap();
+    assert_eq!(devices.devices.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), [key.node_id()], "no new grants");
+
+    control.call_value(Method::PairRevoke { id: key.node_id() }).await.unwrap();
+    for ctl in [&app, &cli, &cli2] {
+        timeout(T, ctl.rc.closed()).await.unwrap();
+    }
+    assert_eq!(code(connect_as(&own, &addr, proof(&key, addr.id, own.id())).await.map(|_| ())), RpcError::UNAUTHORIZED);
+    assert_eq!(upgrade_as(&own, &addr, proof(&key, addr.id, own.id())).await, Err("unauthorized".into()));
+    drop((app, cli, cli2));
+    for net in [app_net, own, other] {
+        net.close().await.unwrap();
+    }
+    shutdown(control, task).await;
 }
 
 fn shell() -> SpawnSpec {

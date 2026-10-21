@@ -885,6 +885,23 @@
   },
   "hellos": {
     "ClientHello": {
+      "$defs": {
+        "DeviceProof": {
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "signature": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "device",
+            "signature"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "build": {
@@ -892,6 +909,16 @@
         },
         "client_name": {
           "type": "string"
+        },
+        "device": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceProof"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "features": {
           "default": [],

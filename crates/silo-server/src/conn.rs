@@ -86,7 +86,7 @@ where
         (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
         (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
         (kind::UPLOAD_HELLO, Expect::Any | Expect::Data) => upload(server, first, reader, writer, peer).await,
-        (kind::UPGRADE_HELLO, Expect::Any | Expect::Control) => crate::upgrade::serve(server, reader, writer, peer).await,
+        (kind::UPGRADE_HELLO, Expect::Any | Expect::Control) => crate::upgrade::serve(server, first, reader, writer, peer).await,
         other => {
             tracing::debug!("unexpected first frame {:#x}", other.0);
             Ok(())
@@ -172,21 +172,30 @@ where
     // Compatibility is checked first: an incompatible peer never enrolls.
     let admitted = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
         Err(error)
-    } else if let Peer::Remote { endpoint_id, .. } = &peer {
+    } else if let Peer::Remote { endpoint_id, conn_id } = &peer {
         let mut auth = server.auth();
         // Checked under the lock: once the upgrade commits, pairing is
         // frozen and the successor's re-read sees every grant.
         if server.upgrading.load(Ordering::SeqCst) {
             Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
         } else {
-            auth.authorize(endpoint_id, &hello.client_name, hello.invite.as_deref()).map(Some)
+            crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref()).and_then(|device| {
+                let admission = auth.authorize(&device, &hello.client_name, hello.invite.as_deref())?;
+                auth.speak_for(*conn_id, &device);
+                Ok(Some((admission, device)))
+            })
         }
     } else {
         Ok(None)
     };
+    // The paired device a remote peer speaks for.
+    let device_id = match &admitted {
+        Ok(Some((_, device))) => Some(device.clone()),
+        _ => None,
+    };
     // A join-invite connection's invite id; it ends once it has offered.
     let join = match admitted {
-        Ok(Some(Admission::Join { invite_id })) => Some(invite_id),
+        Ok(Some((Admission::Join { invite_id }, _))) => Some(invite_id),
         Ok(_) => None,
         Err(error) => {
             tx.send(Frame::json(kind::CONTROL, &ServerMessage::Response { id: 0, result: None, error: Some(error) })?);
@@ -196,10 +205,7 @@ where
         }
     };
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
-    let device = match &peer {
-        Peer::Remote { endpoint_id, .. } => server.auth().devices().into_iter().find(|d| d.id == *endpoint_id).map(|d| d.name),
-        Peer::Local => None,
-    };
+    let device = device_id.and_then(|id| server.auth().devices().into_iter().find(|d| d.id == id).map(|d| d.name));
     let client_id = {
         let mut reg = server.registry.lock().unwrap();
         let id = reg.add_client(hello.client_name.clone(), hello.passive);

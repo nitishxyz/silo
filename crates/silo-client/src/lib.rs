@@ -4,6 +4,7 @@
 pub mod cache;
 mod control;
 mod data;
+pub mod hosts;
 mod mirror;
 pub mod mismatch;
 mod predict;
@@ -24,7 +25,7 @@ pub use data::{DataSender, DataStream};
 pub use mirror::{Applied, Mirror, engine_config};
 pub use mismatch::IncompatibleServer;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
-pub use remote::{client_identity, offer_host, pair};
+pub use remote::{client_identity, device_proof, offer_host, pair};
 pub use spawn::{connect_or_spawn, server_running};
 pub use upload::{Upload, UploadSource, upload};
 

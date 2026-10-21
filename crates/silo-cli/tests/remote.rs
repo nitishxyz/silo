@@ -11,7 +11,7 @@ use std::{
 use silo_cli::{NetOptions, hosts::Hosts};
 use silo_client::{
     Control,
-    transport::{EndpointAddr, PairTicket, RelayConfig},
+    transport::{EndpointAddr, Net, PairTicket, RelayConfig},
 };
 use silo_proto::{
     control::{InvitePurpose, Method, SpawnSpec},
@@ -156,13 +156,13 @@ async fn pair_then_remote_ls() {
     let sessions = silo_cli::sessions(&remote.control).await.unwrap();
     assert!(silo_cli::format_sessions(&sessions).contains("remote-one:"));
     // A stale stored address is refreshed from `server.info` on connect.
-    let current = silo_cli::current_addr(&remote.control).await.unwrap().unwrap();
+    let current = silo_cli::hosts::current_addr(&remote.control).await.unwrap().unwrap();
     Hosts::update(&client_home, |stale| {
         stale.hosts[0].addr = invite_addr.clone();
         Ok(())
     })
     .unwrap();
-    silo_cli::refresh_host(&client_home, &remote.control).await.unwrap();
+    silo_cli::hosts::refresh_host(&client_home, &remote.control).await.unwrap();
     assert_eq!(Hosts::load(&client_home).unwrap().hosts[0].addr, current);
     // Remote never spawns a server for the client.
     assert!(!paths::socket(&client_home).exists());
@@ -172,6 +172,65 @@ async fn pair_then_remote_ls() {
     drop(remote.control);
     remote.net.close().await.unwrap();
 
+    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(owner);
+    timeout(T, task).await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(server_home);
+    let _ = std::fs::remove_dir_all(client_home);
+}
+
+/// The app and the CLI share the device key in `<home>/client`, which
+/// hosts paired (as before device proofs), yet never share an endpoint id:
+/// a relay keeps one connection per id, so a CLI run would knock the app
+/// off it. The app (the device key itself) and two CLI runs at once all
+/// connect and stay connected on that one pairing.
+#[tokio::test(flavor = "multi_thread")]
+async fn app_and_cli_runs_connect_at_once_on_one_pairing() {
+    let server_home = temp_home("shared-server");
+    let client_home = temp_home("shared-client");
+    let task = start(&server_home).await;
+    let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
+    let options = NetOptions { relay: RelayConfig::Disabled, mdns: false };
+    // Paired as every client paired so far: the device key's endpoint itself.
+    let device = silo_client::client_identity(&silo_cli::hosts::client_dir(&client_home)).unwrap();
+    let invite = PairTicket::decode(&ticket(&owner).await).unwrap();
+    let pairing = Net::bind(&device, RelayConfig::Disabled, false).await.unwrap();
+    drop(timeout(T, silo_client::pair(&pairing, &invite, "laptop")).await.unwrap().unwrap());
+    pairing.close().await.unwrap();
+    Hosts::update(&client_home, |hosts| hosts.upsert(invite.addr.clone(), Some("box".into())).map(drop)).unwrap();
+
+    // The app: its endpoint is the device key, as before.
+    let app_net = Net::bind(&device, RelayConfig::Disabled, false).await.unwrap();
+    let (app, _app_events) = timeout(T, Control::connect_remote(&app_net, invite.addr.clone(), "app", false, None)).await.unwrap().unwrap();
+    let (one, two) = tokio::join!(
+        timeout(T, silo_cli::connect_remote(&client_home, "box", &options, "silo cli")),
+        timeout(T, silo_cli::connect_remote(&client_home, "box", &options, "silo cli")),
+    );
+    let (one, two) = (one.unwrap().unwrap(), two.unwrap().unwrap());
+    let ids = [app_net.id(), one.net.id(), two.net.id()];
+    assert_eq!(ids[0], device.id());
+    assert!(ids[0] != ids[1] && ids[0] != ids[2] && ids[1] != ids[2], "every process has an endpoint id of its own: {ids:?}");
+
+    for _ in 0..3 {
+        for control in [&app, &one.control, &two.control] {
+            assert!(!control.is_closed());
+            silo_cli::sessions(control).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let devices = silo_cli::devices(&owner).await.unwrap();
+    assert_eq!(devices.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), [device.node_id()], "one pairing for all");
+
+    // A CLI run ending leaves the app and the other run connected.
+    drop(one.control);
+    one.net.close().await.unwrap();
+    for control in [&app, &two.control] {
+        silo_cli::sessions(control).await.unwrap();
+    }
+
+    drop((app, two.control));
+    app_net.close().await.unwrap();
+    two.net.close().await.unwrap();
     owner.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();
@@ -209,7 +268,7 @@ async fn upgrade_reaches_a_moved_host() {
     assert_eq!(line, up_to_date);
     let stored = Hosts::load(&client_home).unwrap().hosts[0].addr.clone();
     assert_ne!(stored, stale, "refreshed from the host's report");
-    assert_eq!(Some(stored), silo_cli::current_addr(&owner).await.unwrap());
+    assert_eq!(Some(stored), silo_cli::hosts::current_addr(&owner).await.unwrap());
 
     // The host answers only after 12 s.
     owner.call_value(Method::ServerShutdown {}).await.unwrap();

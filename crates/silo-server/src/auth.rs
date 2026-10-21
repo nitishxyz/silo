@@ -8,7 +8,10 @@ use std::{
 };
 
 use anyhow::Context;
-use silo_proto::control::{HostOffer, InvitePurpose, OfferSource, PairedDevice, RpcError};
+use silo_proto::{
+    control::{HostOffer, InvitePurpose, OfferSource, PairedDevice, RpcError},
+    device::DeviceProof,
+};
 use silo_store::HostKey;
 use silo_transport::{INVITE_SECRET_LEN, PairTicket, RemoteConn};
 
@@ -79,6 +82,17 @@ pub fn host_offer(ticket: &str, name: &str, source: OfferSource) -> Option<HostO
     let endpoint_id = PairTicket::decode(ticket).ok()?.addr.id.to_string();
     let name = name.trim().chars().filter(|c| !c.is_control()).take(MAX_OFFER_NAME).collect();
     Some(HostOffer { ticket: ticket.trim().to_owned(), name, endpoint_id, source })
+}
+
+/// The device a remote endpoint authenticates as: the one whose `proof`
+/// it presents, else itself. `server_id` is this server's endpoint id.
+pub fn device_of(server_id: &str, endpoint_id: &str, proof: Option<&DeviceProof>) -> Result<String, RpcError> {
+    let Some(proof) = proof else { return Ok(endpoint_id.to_owned()) };
+    let parse = |id: &str| id.parse::<silo_transport::EndpointId>().map_err(RpcError::internal);
+    let (server, endpoint) = (parse(server_id)?, parse(endpoint_id)?);
+    silo_transport::verify_proof(&proof.device, &proof.signature, server, endpoint)
+        .map(|device| device.to_string())
+        .map_err(|e| RpcError::unauthorized(format!("{e:#}")))
 }
 
 impl Auth {
@@ -184,6 +198,14 @@ impl Auth {
 
     pub fn add_live(&mut self, endpoint_id: String, conn: RemoteConn) {
         self.live.insert(conn.id(), (endpoint_id, conn));
+    }
+
+    /// The live connection `conn_id` speaks for `device`: revoking it
+    /// closes the connection.
+    pub fn speak_for(&mut self, conn_id: u64, device: &str) {
+        if let Some((endpoint, _)) = self.live.get_mut(&conn_id) {
+            device.clone_into(endpoint);
+        }
     }
 
     pub fn remove_live(&mut self, conn_id: u64) {

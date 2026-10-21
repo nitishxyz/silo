@@ -41,6 +41,10 @@ pub struct ClientHello {
     /// are authenticated by their endpoint id.
     #[serde(default)]
     pub invite: Option<String>,
+    /// Remote only: the paired device this endpoint speaks for. Without
+    /// it the endpoint itself must be the paired device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<crate::device::DeviceProof>,
 }
 
 impl ClientHello {
@@ -57,6 +61,7 @@ impl ClientHello {
             token: None,
             passive,
             invite,
+            device: None,
         }
     }
 }

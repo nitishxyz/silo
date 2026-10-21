@@ -21,7 +21,7 @@ use silo_proto::{
     BUILD, Frame, kind,
     release::{download, version_of},
     spawn_reader,
-    upgrade::{self, Decision, HostBuild, MAX_BINARY, UpgradeBinary, UpgradeRejected, UpgradeStarted},
+    upgrade::{self, Decision, HostBuild, MAX_BINARY, UpgradeBinary, UpgradeHello, UpgradeRejected, UpgradeStarted},
     write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -39,15 +39,31 @@ type Refusal = (&'static str, String);
 /// Serve an upgrade stream whose `UPGRADE_HELLO` was read. Remote peers
 /// must be paired devices: they already run any program here, so replacing
 /// the server grants nothing more.
-pub async fn serve<R, W>(server: Arc<Server>, reader: R, mut writer: W, peer: Peer) -> std::io::Result<()>
+pub async fn serve<R, W>(server: Arc<Server>, hello: Frame, reader: R, mut writer: W, peer: Peer) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    if let Peer::Remote { endpoint_id, .. } = &peer
-        && !server.auth().is_paired(endpoint_id)
-    {
-        return reject(&mut writer, ("unauthorized", "this device is not paired with the host".into())).await;
+    let hello = match hello.parse::<UpgradeHello>() {
+        Ok(hello) => hello,
+        Err(error) => return reject(&mut writer, ("bad_request", error.to_string())).await,
+    };
+    if let Peer::Remote { endpoint_id, conn_id } = &peer {
+        let device = crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref());
+        let refused = match device {
+            Ok(device) => {
+                let mut auth = server.auth();
+                let paired = auth.is_paired(&device);
+                if paired {
+                    auth.speak_for(*conn_id, &device);
+                }
+                (!paired).then(|| "this device is not paired with the host".to_owned())
+            }
+            Err(error) => Some(error.message),
+        };
+        if let Some(reason) = refused {
+            return reject(&mut writer, ("unauthorized", reason)).await;
+        }
     }
     let endpoint_addr = server.info_now().await.endpoint_addr;
     let status = HostBuild {
