@@ -980,6 +980,35 @@ has merged.
   - ⇧⌘A selects exactly the last output;
   - a failed command shows a red tick that survives app restart and server hot upgrade;
   - `silo run <block> -- false` exits 1.
+- **As built** (where it differs from the plan above):
+  - Also touched: `silo-vt` (`placement`, `select_output_before`, `scroll_prompt` in `adapter.c`/`sys.rs`),
+    `silo-client/src/cache.rs`, `silo-app/src/{app_requests.rs, workspace.rs}`, `silo-cli/src/run.rs` (new).
+  - The mirror keeps D rows only (`CommandEnd` has no exit code). It pins a `COMMAND_END` only when its `offset`
+    equals the mirror's `next_offset` and skips it otherwise. A `COMMANDS` anchor above the restored head waits
+    until its history page arrives. It is counted from the head's top row, which is tracked until then. A new
+    snapshot head drops every row. RIS, clear and pruning drop rows lazily (`Placement::Gone`). At most 1000 are
+    kept.
+  - Exit codes come from the control plane: each pane calls `block.commands` whenever its stream starts and
+    follows `block.command_finished`. The tick is drawn only for records with a non-zero exit.
+  - **Survives app restart:** `MirrorCheckpoint` (and the cache's `BlockMeta`, `commands` `#[serde(default)]`)
+    stores the rows as `rows_from_bottom` and re-pins them after restore, because a resumed stream sends no
+    `COMMANDS`. **Survives hot upgrade:** a resume keeps the mirror's rows, and a snapshot attach gets
+    `COMMANDS` from the server's restored anchors. While the alternate screen is up a checkpoint has no rows.
+  - Select output: Ghostty's OUTPUT selection from the last cell of the row above the D row. That is the
+    command's whole output, up to the next prompt row. It needs no C row on the client. The selection's start is
+    scrolled into view. "Last" is the newest of the server's last finished record and the mirror's newest row. If
+    that row is gone (alternate screen, pruned), nothing is selected and the status bar says "No command output
+    to select". The app method then returns `not_found`.
+  - ⌥⌘C (`CopyCommandOutput`) selects, then copies. The commands also work offline (on the mirror) and are
+    available whenever a session is shown.
+  - Tick: 2 px, 4 px left of the grid (in the pane padding), `theme::danger()`, one row tall. On hover over the
+    first cell column of a ticked row the pane shows `exit 1 · 2.3 s · <command>` (command through `untrusted`,
+    at most 120 chars).
+  - `silo run <block> [--timeout 30s] -- <cmd…>` subscribes, reads the newest record index, sends the command
+    (words shell-quoted unless plain) plus Enter, waits for the next `block.command_finished` of that block with
+    a higher index, and prints `terminal.command_output` for that index (`(output truncated)` on stderr when
+    cut). It exits with the code, or fails when the shell sent none. It needs a shell that marks commands: bash
+    3.2 makes no records (P7-3), so there it waits until `--timeout`. `silo wait` is not built.
 
 **P7-7: sharing.** After P7-5 and P7-8.
 - **Files:** `silo-transport/src/share.rs (new)` (`ShareTicket`), `silo-app/src/{share.rs (new), hosts_state.rs,
