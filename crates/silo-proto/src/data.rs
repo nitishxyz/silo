@@ -84,6 +84,23 @@ pub const MAX_CLIP_TEXT: usize = 1024 * 1024;
 /// Largest clipboard content a client may answer a read with.
 pub const MAX_CLIP_BYTES: usize = 10 * 1024 * 1024;
 
+/// Payload of [`kind::COMMAND_END`]: command `record` (its index) ended on
+/// the line `rows_from_bottom` rows above the last, after the `Output`
+/// frame ending at `offset` was applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommandEnd {
+    pub offset: u64,
+    pub record: u64,
+    pub rows_from_bottom: u32,
+}
+
+/// An element of [`kind::COMMANDS`], in snapshot coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommandAnchor {
+    pub record: u64,
+    pub rows_from_bottom: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ClipboardLocation {

@@ -9,18 +9,21 @@ use std::{
 use serde::{Deserialize, Serialize};
 use silo_proto::{
     Frame,
-    control::{BrowserCommand, Created, DataTicket, Dock, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
+    access::{Rights, Scope},
+    compat::feature,
+    control::{BrowserCommand, ClientRole, Created, DataTicket, Dock, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
     data::ticket_hex,
     kind,
     model::{
         Axis, BlockId, BlockInfo, BlockKind, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle, SessionId, SessionInfo, SessionSummary,
-        SessionView, TermSize, WindowId, WindowInfo, browser_url, short_client_name,
+        SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
     },
 };
 use silo_pty::SpawnConfig;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use crate::{
+    access::{On, Principal, rights_on, sees_block, sees_session},
     block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms},
     browser::{Block, BrowserBlock, Report},
 };
@@ -153,25 +156,109 @@ pub struct ClientEntry {
     pub origin: Option<u64>,
     /// What the client advertised in its hello (see `silo_proto::compat`).
     pub features: Vec<String>,
+    /// Who it acts as.
+    pub principal: Principal,
+    pub role: ClientRole,
+    /// The pane (block) the client's process runs in, if any.
+    pub pane: Option<BlockId>,
+    /// Its process has a controlling terminal (unix clients).
+    pub tty: bool,
+    /// Its open data streams by stream id: block, rights, and what ends
+    /// the stream.
+    pub streams: HashMap<u64, (BlockId, Rights, Option<tokio::sync::oneshot::Sender<()>>)>,
 }
 
 impl ClientEntry {
+    pub fn new(name: String, passive: bool) -> Self {
+        let label = short_client_name(&name).to_owned();
+        Self {
+            name,
+            label,
+            passive,
+            events: None,
+            close: None,
+            attached: 0,
+            origin: None,
+            features: Vec::new(),
+            principal: Principal::Owner,
+            role: ClientRole::Cli,
+            pane: None,
+            tty: false,
+            streams: HashMap::new(),
+        }
+    }
+
     /// Whether the client advertised `feature` (`None`: needs none).
-    fn supports(&self, feature: Option<&str>) -> bool {
+    pub fn supports(&self, feature: Option<&str>) -> bool {
         feature.is_none_or(|f| self.features.iter().any(|x| x == f))
+    }
+
+    /// Close the client's control connection and data streams.
+    fn close_all(&mut self) {
+        self.events = None;
+        for (_, _, end) in self.streams.values_mut() {
+            if let Some(end) = end.take() {
+                let _ = end.send(());
+            }
+        }
+        if let Some(close) = self.close.take() {
+            let _ = close.send(());
+        }
     }
 }
 
 /// The feature (`silo_proto::compat::feature`) a client must advertise to
-/// receive `event`; none yet, every protocol-1 client knows every event.
-fn needed_feature(_event: &Event) -> Option<&'static str> {
-    None
+/// receive `event`.
+fn needed_feature(event: &Event) -> Option<&'static str> {
+    match event {
+        Event::GrantsChanged { .. } | Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::SessionWatchers { .. } => {
+            Some(feature::ACCESS)
+        }
+        Event::AppRequest { .. } => Some(feature::APP_REQUESTS),
+        Event::BlockStatus { .. } | Event::BlockAttention { .. } | Event::CommandFinished { .. } => Some(feature::STATUS),
+        Event::SessionsChanged { .. }
+        | Event::SessionChanged { .. }
+        | Event::SessionClosed { .. }
+        | Event::BlockChanged { .. }
+        | Event::BlockBell { .. }
+        | Event::OpenSession { .. }
+        | Event::BrowserCommand { .. }
+        | Event::HostOffered { .. } => None,
+    }
+}
+
+/// Which clients receive an event, by their principal.
+#[derive(Clone, Debug)]
+pub enum Visibility {
+    /// Every client; session summaries limited to the visible sessions.
+    Sessions,
+    Session(SessionId),
+    Block {
+        block: BlockId,
+        session: Option<SessionId>,
+    },
+    /// The owner only: the event carries secrets.
+    Owner,
+    Clients(Vec<ClientId>),
+}
+
+impl Visibility {
+    fn admits(&self, id: ClientId, client: &ClientEntry) -> bool {
+        match self {
+            Self::Sessions => true,
+            Self::Session(session) => sees_session(&client.principal, session),
+            Self::Block { block, session } => sees_block(&client.principal, block, session.as_deref()),
+            Self::Owner => client.principal == Principal::Owner,
+            Self::Clients(ids) => ids.contains(&id),
+        }
+    }
 }
 
 struct Ticket {
     block_id: BlockId,
     client_id: ClientId,
     origin: Option<u64>,
+    rights: Rights,
     expires: Instant,
 }
 
@@ -195,6 +282,9 @@ pub struct Registry {
     pub parked: HashMap<BlockId, silo_pty::Detached>,
     /// Start a session whenever none is left (see `keep_session`).
     keep_session: bool,
+    /// Scopes of sessions and blocks closed since last taken: their grants
+    /// go (see `Server::settle_grants`).
+    pub gone: Vec<Scope>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -224,6 +314,7 @@ impl Registry {
             persist_kick: Arc::new(Notify::new()),
             parked: HashMap::new(),
             keep_session: false,
+            gone: Vec::new(),
         }
     }
 
@@ -306,14 +397,14 @@ impl Registry {
     pub fn add_client(&mut self, name: String, passive: bool) -> ClientId {
         let id = self.next_client;
         self.next_client += 1;
-        let label = short_client_name(&name).to_owned();
-        self.clients.insert(id, ClientEntry { name, label, passive, events: None, close: None, attached: 0, origin: None, features: Vec::new() });
+        self.clients.insert(id, ClientEntry::new(name, passive));
         id
     }
 
     pub fn remove_client(&mut self, id: ClientId) {
-        self.clients.remove(&id);
+        let watched: HashSet<BlockId> = self.clients.remove(&id).map(|c| c.streams.into_values().map(|(b, _, _)| b).collect()).unwrap_or_default();
         self.tickets.retain(|_, t| t.client_id != id);
+        self.watchers_changed(watched);
         let mut disowned = Vec::new();
         for (block_id, block) in &mut self.blocks {
             match block {
@@ -338,32 +429,172 @@ impl Registry {
         self.clients.get(&id).map(|c| c.label.clone()).unwrap_or_default()
     }
 
+    /// The session of a session id or name.
+    pub fn session_id(&self, id: &str) -> Option<SessionId> {
+        self.session(id).ok().map(|s| s.id.clone())
+    }
+
+    /// The session holding window `window`.
+    pub fn window_session(&self, window: &str) -> Option<SessionId> {
+        self.locate_window(window).ok().map(|(si, _)| self.sessions[si].id.clone())
+    }
+
+    /// The session holding block `block` in its tree.
+    pub fn block_session(&self, block: &str) -> Option<SessionId> {
+        self.locate(block).ok().map(|(si, _)| self.sessions[si].id.clone())
+    }
+
+    /// Who sees `event`.
+    fn visibility(&self, event: &Event) -> Visibility {
+        let block = |id: &str| Visibility::Block { block: id.to_owned(), session: self.block_session(id) };
+        match event {
+            Event::SessionsChanged { .. } => Visibility::Sessions,
+            Event::SessionChanged { view } => Visibility::Session(view.session.id.clone()),
+            Event::SessionClosed { session_id } | Event::OpenSession { session_id } | Event::SessionWatchers { session_id, .. } => {
+                Visibility::Session(session_id.clone())
+            }
+            Event::BlockChanged { block } => Visibility::Block { block: block.id.clone(), session: Some(block.session_id.clone()) },
+            Event::BlockAttention { block_id, session_id, .. } | Event::CommandFinished { block_id, session_id, .. } => {
+                Visibility::Block { block: block_id.clone(), session: Some(session_id.clone()) }
+            }
+            Event::BlockBell { block_id } | Event::BrowserCommand { block_id, .. } => block(block_id),
+            Event::BlockStatus { status } => block(&status.block_id),
+            Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
+            // Sent with `emit_clients` to their recipients only.
+            Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::AppRequest { .. } => Visibility::Clients(Vec::new()),
+        }
+    }
+
     pub fn emit(&mut self, event: Event) {
-        self.emit_to(event, false);
+        let visibility = self.visibility(&event);
+        self.emit_to(event, &visibility);
     }
 
-    /// Emit to local (owner) clients only: the event carries secrets.
+    /// Emit to the owner only: the event carries secrets.
     pub fn emit_owner(&mut self, event: Event) {
-        self.emit_to(event, true);
+        self.emit_to(event, &Visibility::Owner);
     }
 
-    fn emit_to(&mut self, event: Event, owner_only: bool) {
+    /// Emit to `clients` only.
+    pub fn emit_clients(&mut self, event: Event, clients: Vec<ClientId>) {
+        self.emit_to(event, &Visibility::Clients(clients));
+    }
+
+    fn emit_to(&mut self, event: Event, visibility: &Visibility) {
         let needs = needed_feature(&event);
         self.seq += 1;
+        let seq = self.seq;
+        // Session summaries are limited per principal; the full list is
+        // shared by every principal that sees the whole server.
+        let summaries = match &event {
+            Event::SessionsChanged { sessions } => Some(sessions.clone()),
+            _ => None,
+        };
         let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
         let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
             return;
         };
-        let wanted = |c: &ClientEntry| (!owner_only || c.origin.is_none()) && c.supports(needs);
-        for client in self.clients.values_mut().filter(|c| wanted(c)) {
+        for (&id, client) in self.clients.iter_mut().filter(|(id, c)| visibility.admits(**id, c) && c.supports(needs)) {
             let Some(sink) = &client.events else { continue };
+            let frame = match &summaries {
+                Some(sessions) if rights_on(&client.principal, On::Server).is_none() => {
+                    let sessions = sessions.iter().filter(|s| sees_session(&client.principal, &s.id)).cloned().collect();
+                    let message = ServerMessage::Event { seq, event: Box::new(Event::SessionsChanged { sessions }) };
+                    let Ok(frame) = Frame::json(kind::CONTROL, &message) else { continue };
+                    frame
+                }
+                _ => frame.clone(),
+            };
             let overflow = sink.queued.load(std::sync::atomic::Ordering::Acquire) > EVENT_BACKLOG;
-            if overflow || !sink.send(frame.clone()) {
+            if overflow || !sink.send(frame) {
+                tracing::debug!(client = id, "event backlog exceeded; closing");
                 client.events = None;
                 if let Some(close) = client.close.take() {
                     let _ = close.send(());
                 }
             }
+        }
+    }
+
+    /// Close every client admitted with one of `grants`.
+    pub fn close_grant_clients(&mut self, grants: &[String]) {
+        for client in self.clients.values_mut() {
+            if client.principal.grant_id().is_some_and(|g| grants.iter().any(|x| x == g)) {
+                client.close_all();
+            }
+        }
+    }
+
+    /// Subscribed app clients holding `rights` server-wide that speak the
+    /// approval events.
+    pub fn approvers(&self, rights: Rights) -> Vec<ClientId> {
+        let mut ids: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::ACCESS)))
+            .filter(|(_, c)| rights_on(&c.principal, On::Server).is_some_and(|r| r >= rights))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Subscribed app clients with a data stream on `block` that speak the
+    /// approval events.
+    pub fn block_approvers(&self, block: &str) -> Vec<ClientId> {
+        let mut ids: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::ACCESS)))
+            .filter(|(_, c)| c.streams.values().any(|(b, _, _)| b == block))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A data stream of `client` opened on `block`.
+    pub fn add_stream(&mut self, client: ClientId, stream: u64, block: &str, rights: Rights, end: tokio::sync::oneshot::Sender<()>) {
+        if let Some(entry) = self.clients.get_mut(&client) {
+            entry.streams.insert(stream, (block.to_owned(), rights, Some(end)));
+            self.watchers_changed([block.to_owned()].into());
+        }
+    }
+
+    pub fn remove_stream(&mut self, client: ClientId, stream: u64) {
+        let removed = self.clients.get_mut(&client).and_then(|c| c.streams.remove(&stream));
+        if let Some((block, _, _)) = removed {
+            self.watchers_changed([block].into());
+        }
+    }
+
+    /// Clients with data streams on blocks of `session`.
+    pub fn watchers(&self, session: &str) -> Vec<Watcher> {
+        let Ok(session) = self.session(session) else { return Vec::new() };
+        let blocks: HashSet<BlockId> = session.blocks().into_iter().collect();
+        let mut watchers: Vec<Watcher> = self
+            .clients
+            .iter()
+            .filter_map(|(&client_id, c)| {
+                let mut watched: Vec<BlockId> = c.streams.values().filter(|(b, _, _)| blocks.contains(b)).map(|(b, _, _)| b.clone()).collect();
+                if watched.is_empty() {
+                    return None;
+                }
+                watched.sort();
+                watched.dedup();
+                let rights = c.streams.values().filter(|(b, _, _)| blocks.contains(b)).map(|(_, r, _)| *r).max().unwrap_or(Rights::View);
+                Some(Watcher { client_id, label: c.label.clone(), principal: c.principal.watcher_kind(), rights, blocks: watched })
+            })
+            .collect();
+        watchers.sort_by_key(|w| w.client_id);
+        watchers
+    }
+
+    fn watchers_changed(&mut self, blocks: HashSet<BlockId>) {
+        let sessions: HashSet<SessionId> = blocks.iter().filter_map(|b| self.block_session(b)).collect();
+        for session_id in sessions {
+            let watchers = self.watchers(&session_id);
+            self.emit(Event::SessionWatchers { session_id, watchers });
         }
     }
 
@@ -383,8 +614,14 @@ impl Registry {
                 blocks: s.blocks().len(),
                 attached_clients: 0,
                 created_at: s.created_at,
+                attention: Default::default(),
             })
             .collect()
+    }
+
+    /// [`Self::summaries`] of the sessions `principal` sees.
+    pub fn summaries_for(&self, principal: &Principal) -> Vec<SessionSummary> {
+        self.summaries().into_iter().filter(|s| sees_session(principal, &s.id)).collect()
     }
 
     fn session(&self, id: &str) -> Result<&Session, RpcError> {
@@ -398,7 +635,7 @@ impl Registry {
     pub fn view(&self, id: &str) -> Result<SessionView, RpcError> {
         let session = self.session(id)?;
         let blocks = session.blocks().iter().filter_map(|b| self.block_info(b)).collect();
-        Ok(SessionView { session: session.info(), blocks })
+        Ok(SessionView { session: session.info(), blocks, status: Vec::new(), watchers: self.watchers(&session.id) })
     }
 
     pub fn block_info(&self, id: &str) -> Option<BlockInfo> {
@@ -744,6 +981,7 @@ impl Registry {
             self.kill_block(&block);
         }
         self.sessions.remove(si);
+        self.gone.push(Scope::Session { session_id: sid.clone() });
         self.emit(Event::SessionClosed { session_id: sid });
         self.sessions_changed();
         self.keep_one();
@@ -760,6 +998,7 @@ impl Registry {
     fn kill_block(&mut self, block_id: &str) {
         // Closing a block hangs up its program, parked or not.
         self.parked.remove(block_id);
+        self.gone.push(Scope::Block { block_id: block_id.to_owned() });
         if let Some(Block::Terminal(handle)) = self.blocks.remove(block_id) {
             handle.send(BlockMsg::Shutdown);
         }
@@ -771,6 +1010,10 @@ impl Registry {
     /// remaining block, else the block taking over the closed one's space.
     pub fn remove_block(&mut self, block_id: &str) {
         self.blocks.remove(block_id);
+        let scope = Scope::Block { block_id: block_id.to_owned() };
+        if !self.gone.contains(&scope) {
+            self.gone.push(scope);
+        }
         let Ok((si, wi)) = self.locate(block_id) else {
             return;
         };
@@ -812,6 +1055,7 @@ impl Registry {
         if session.windows.is_empty() {
             let sid = session.id.clone();
             self.sessions.remove(si);
+            self.gone.push(Scope::Session { session_id: sid.clone() });
             self.emit(Event::SessionClosed { session_id: sid });
         } else {
             if session.active_window == removed.id {
@@ -823,24 +1067,25 @@ impl Registry {
         self.keep_one();
     }
 
-    pub fn issue_ticket(&mut self, client_id: ClientId, block_id: &str) -> Result<DataTicket, RpcError> {
+    /// A data ticket for `block_id`, whose streams get `rights`.
+    pub fn issue_ticket(&mut self, client_id: ClientId, block_id: &str, rights: Rights) -> Result<DataTicket, RpcError> {
         self.block(block_id)?;
         let now = Instant::now();
         self.tickets.retain(|_, t| t.expires > now);
         let ticket = ticket_hex(&rand::random::<[u8; 16]>());
         let origin = self.clients.get(&client_id).and_then(|c| c.origin);
-        self.tickets.insert(ticket.clone(), Ticket { block_id: block_id.to_owned(), client_id, origin, expires: now + TICKET_TTL });
+        self.tickets.insert(ticket.clone(), Ticket { block_id: block_id.to_owned(), client_id, origin, rights, expires: now + TICKET_TTL });
         Ok(DataTicket { ticket, expires_in_ms: TICKET_TTL.as_millis() as u64 })
     }
 
-    /// Consume a ticket presented on `origin`: `(block, client)`. A ticket
-    /// issued to another connection is refused and left unconsumed.
-    pub fn redeem(&mut self, ticket: &str, origin: Option<u64>) -> Option<(BlockId, ClientId)> {
+    /// Consume a ticket presented on `origin`: `(block, client, rights)`. A
+    /// ticket issued to another connection is refused and left unconsumed.
+    pub fn redeem(&mut self, ticket: &str, origin: Option<u64>) -> Option<(BlockId, ClientId, Rights)> {
         if self.tickets.get(ticket)?.origin != origin {
             return None;
         }
         let t = self.tickets.remove(ticket)?;
-        (t.expires > Instant::now() && self.clients.contains_key(&t.client_id)).then_some((t.block_id, t.client_id))
+        (t.expires > Instant::now() && self.clients.contains_key(&t.client_id)).then_some((t.block_id, t.client_id, t.rights))
     }
 
     pub fn handle_note(&mut self, note: Note) {
@@ -1113,20 +1358,13 @@ mod tests {
 
     #[test]
     fn feature_events_reach_only_clients_advertising_it() {
-        let client = |features: &[&str]| ClientEntry {
-            name: String::new(),
-            label: String::new(),
-            passive: false,
-            events: None,
-            close: None,
-            attached: 0,
-            origin: None,
-            features: features.iter().map(|&f| f.to_owned()).collect(),
-        };
+        let client =
+            |features: &[&str]| ClientEntry { features: features.iter().map(|&f| f.to_owned()).collect(), ..ClientEntry::new(String::new(), false) };
         assert!(client(&[]).supports(None));
         assert!(!client(&[]).supports(Some("synthetic")));
         assert!(client(&["synthetic"]).supports(Some("synthetic")));
         assert_eq!(needed_feature(&Event::BlockBell { block_id: "b".into() }), None);
+        assert_eq!(needed_feature(&Event::GrantsChanged { grants: Vec::new() }), Some(feature::ACCESS));
     }
 
     #[test]

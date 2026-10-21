@@ -19,10 +19,21 @@ use crate::control::RpcError;
 /// protocol 1 (everything in protocol 1 every peer has). Gate on them with
 /// `Control::peer_supports` (client) and the server's per-client event
 /// filter; the app greys out commands that need one.
-pub mod feature {}
+pub mod feature {
+    /// Grants, scoped principals, approvals and their events
+    /// (`grants.changed`, `approval.*`, `session.watchers`).
+    pub const ACCESS: &str = "access";
+    /// The app runs forwarded `app.*` requests (`app.request`).
+    pub const APP_REQUESTS: &str = "app_requests";
+    /// Block status events (`block.status`, `block.attention`,
+    /// `block.command_finished`).
+    pub const STATUS: &str = "status";
+    /// The client handles `busy` refusals of closes (and sends `force`).
+    pub const CLOSE_GUARD: &str = "close_guard";
+}
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] = &[];
+pub const FEATURES: &[&str] = &[feature::ACCESS];
 
 /// [`FEATURES`] as sent in a hello.
 #[must_use]

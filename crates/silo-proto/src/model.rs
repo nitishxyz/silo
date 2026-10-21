@@ -513,6 +513,13 @@ pub fn private_host(host: &str) -> bool {
 pub struct SessionView {
     pub session: SessionInfo,
     pub blocks: Vec<BlockInfo>,
+    /// Status of the session's blocks that have any (never bumps
+    /// `revision`).
+    #[serde(default)]
+    pub status: Vec<BlockStatus>,
+    /// Clients with a data stream on a block of the session.
+    #[serde(default)]
+    pub watchers: Vec<Watcher>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -523,6 +530,148 @@ pub struct SessionSummary {
     pub blocks: usize,
     pub attached_clients: usize,
     pub created_at: u64,
+    #[serde(default)]
+    pub attention: AttentionCounts,
+}
+
+/// A program's status report (OSC 7501), as published.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProgramStatus {
+    /// `""` is the root record; `a/b` lies beneath `a`.
+    pub id: String,
+    pub state: StatusState,
+    #[serde(default)]
+    pub kind: Option<StatusKind>,
+    /// Percent, 0..=100.
+    #[serde(default)]
+    pub progress: Option<u8>,
+    /// Effective (inherited from the nearest ancestor).
+    #[serde(default)]
+    pub app: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub message: String,
+    /// Unix ms.
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a blocked program waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusKind {
+    Permission,
+    Question,
+    Auth,
+    #[serde(other)]
+    Unknown,
+}
+
+/// OSC 9;4 progress of a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Progress {
+    pub state: ProgressState,
+    #[serde(default)]
+    pub percent: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgressState {
+    Set,
+    Error,
+    Indeterminate,
+    Pause,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A running program a close would end.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Busy {
+    /// The foreground program's name, e.g. `vim`.
+    pub process: String,
+    /// The command line, when the shell reported one (OSC 133).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Unix ms when this busy period began.
+    pub since: u64,
+}
+
+/// Everything a block reports about its programs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BlockStatus {
+    pub block_id: BlockId,
+    #[serde(default)]
+    pub records: Vec<ProgramStatus>,
+    #[serde(default)]
+    pub progress: Option<Progress>,
+    #[serde(default)]
+    pub busy: Option<Busy>,
+}
+
+/// Records per state across a session's blocks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AttentionCounts {
+    #[serde(default)]
+    pub working: u32,
+    #[serde(default)]
+    pub blocked: u32,
+    #[serde(default)]
+    pub done: u32,
+    #[serde(default)]
+    pub error: u32,
+}
+
+/// One command a shell ran (OSC 133 C..D).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommandRecord {
+    /// Monotonic per block.
+    pub index: u64,
+    #[serde(default)]
+    pub command: Option<String>,
+    /// `None` while running or when the shell sent none.
+    #[serde(default)]
+    pub exit: Option<i32>,
+    /// Unix ms; `None` without an output-start mark.
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+/// How a watcher is admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WatcherKind {
+    Owner,
+    Device,
+    Token,
+    Link,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A client with a data stream on blocks of a session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Watcher {
+    pub client_id: ClientId,
+    pub label: String,
+    pub principal: WatcherKind,
+    pub rights: crate::access::Rights,
+    pub blocks: Vec<BlockId>,
 }
 
 #[cfg(test)]

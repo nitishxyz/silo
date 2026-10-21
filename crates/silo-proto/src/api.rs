@@ -4,9 +4,11 @@
 use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
+use crate::access::{Rights, Scope};
 use crate::control::{
-    ApiMethod, Capture, Created, DataTicket, Dock, Empty, InvitePurpose, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices,
-    Pasted, ServerInfo, SizeInfo, SpawnSpec,
+    ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
+    GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted,
+    ServerInfo, SizeInfo, SpawnSpec,
 };
 use crate::data::{ClipKind, ClipboardLocation};
 use crate::model::{Axis, BlockKind, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
@@ -21,6 +23,7 @@ pub fn describe(name: &str) -> Option<MethodDescription> {
         description: (*description).to_owned(),
         params_schema: params_schema(name)?,
         result_schema: result_schema(&method).to_value(),
+        access: Some(crate::access::access(name, &method)),
         example,
     })
 }
@@ -77,17 +80,68 @@ fn result_schema(method: &Method) -> Schema {
         M::DataConnect { .. } => schema_for!(DataTicket),
         M::PairCreate { .. } => schema_for!(PairInvite),
         M::PairList {} => schema_for!(PairedDevices),
-        M::ServerShutdown {} | M::Ping {} | M::EventsSubscribe {} | M::SessionRename { .. } | M::SessionClose { .. } => schema_for!(Empty),
-        M::WindowSelect { .. } | M::WindowClose { .. } | M::WindowRename { .. } | M::WindowMove { .. } => schema_for!(Empty),
-        M::BlockClose { .. } | M::BlockFocus { .. } | M::BlockZoom { .. } | M::BlockSwap { .. } => {
+        M::ServerLog { .. } => schema_for!(LogText),
+        M::BlockView { .. } => schema_for!(BlockView),
+        M::BlocksBusy { .. } => schema_for!(BusyBlocks),
+        M::BlockCommands { .. } => schema_for!(CommandRecords),
+        M::TerminalCommandOutput { .. } => schema_for!(CommandOutput),
+        M::GrantCreate { .. } => schema_for!(GrantCreated),
+        M::GrantList {} => schema_for!(Grants),
+        M::ServerShutdown {} | M::ServerRestart { .. } | M::Ping {} | M::EventsSubscribe {} | M::SessionRename { .. } | M::SessionClose { .. } => {
             schema_for!(Empty)
         }
-        M::BlockFloat { .. } | M::BlockMove { .. } | M::LayoutRatio { .. } => schema_for!(Empty),
+        M::WindowSelect { .. } | M::WindowStep { .. } | M::WindowClose { .. } | M::WindowRename { .. } | M::WindowMove { .. } => schema_for!(Empty),
+        M::BlockClose { .. }
+        | M::BlockFocus { .. }
+        | M::BlockFocusStep { .. }
+        | M::BlockFocusDir { .. }
+        | M::BlockZoom { .. }
+        | M::BlockSwap { .. } => {
+            schema_for!(Empty)
+        }
+        M::BlockFloat { .. }
+        | M::BlockMove { .. }
+        | M::LayoutRatio { .. }
+        | M::LayoutGrow { .. }
+        | M::LayoutEdge { .. }
+        | M::LayoutEqualize { .. } => {
+            schema_for!(Empty)
+        }
+        M::BlockStatusSeen { .. } | M::GrantRevoke { .. } | M::ApprovalAnswer { .. } | M::AppReply { .. } => schema_for!(Empty),
         M::TerminalSend { .. } | M::TerminalResize { .. } | M::TerminalClear { .. } | M::TerminalReset { .. } => schema_for!(Empty),
         M::OwnBlock { .. } | M::DisownBlock { .. } | M::UiOpenSession { .. } | M::PairRevoke { .. } => schema_for!(Empty),
         M::BrowserNavigate { .. } | M::BrowserBack { .. } | M::BrowserForward { .. } | M::BrowserReload { .. } => schema_for!(Empty),
         M::BrowserZoom { .. } | M::BrowserReport { .. } => schema_for!(Empty),
         M::HostOffer { .. } => schema_for!(Empty),
+        M::AppWindowNew { .. }
+        | M::AppWindowCycle { .. }
+        | M::AppSwitcher { .. }
+        | M::AppSessionStep { .. }
+        | M::AppHostsAdd { .. }
+        | M::AppHostsRename { .. }
+        | M::AppHostsRemove { .. }
+        | M::AppHostsList { .. }
+        | M::AppCopy { .. }
+        | M::AppPaste { .. }
+        | M::AppSelectAll { .. }
+        | M::AppAppearance { .. }
+        | M::AppPaneHeaders { .. }
+        | M::AppFullScreen { .. }
+        | M::AppSettingsOpen { .. }
+        | M::AppSettingsReload { .. }
+        | M::AppSettingsOpenFile { .. }
+        | M::AppSettingsGet { .. }
+        | M::AppSettingsSet { .. }
+        | M::AppUpdateCheck { .. }
+        | M::AppPalette { .. }
+        | M::AppHide { .. }
+        | M::AppHideOthers { .. }
+        | M::AppShowAll { .. }
+        | M::AppQuit { .. }
+        | M::AppJumpPrompt { .. }
+        | M::AppSelectOutput { .. }
+        | M::AppCopyOutput { .. }
+        | M::AppOpenShare { .. } => schema_for!(AppResult),
     }
 }
 
@@ -100,6 +154,8 @@ pub fn examples() -> Vec<Method> {
     vec![
         M::ServerInfo {},
         M::ServerShutdown {},
+        M::ServerRestart { force: false },
+        M::ServerLog { lines: Some(200) },
         M::ApiList {},
         M::ApiDescribe { method: "block.split".into() },
         M::Ping {},
@@ -111,23 +167,34 @@ pub fn examples() -> Vec<Method> {
         M::SessionClose { session_id: s() },
         M::WindowCreate { session_id: s(), spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some("localhost:3000".into()) },
         M::WindowSelect { session_id: s(), window_id: w() },
+        M::WindowStep { session_id: s(), delta: 1 },
         M::WindowClose { window_id: w() },
         M::WindowRename { window_id: w(), name: Some("logs".into()) },
         M::WindowMove { window_id: w(), index: 0 },
+        M::BlockView { block_id: b() },
         M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None },
         M::BlockClose { block_id: b() },
         M::BlockFocus { block_id: b() },
+        M::BlockFocusStep { block_id: b(), delta: -1 },
+        M::BlockFocusDir { block_id: b(), direction: Direction::Left },
         M::BlockZoom { block_id: b(), zoomed: true },
         M::BlockSwap { block_id: b(), other_block_id: "b5e6f7a8b".into() },
         M::BlockFloat { block_id: b(), rect: Some(FloatRect::default()) },
         M::BlockMove { block_id: b(), rect: None, dock: Some(Dock { target: "b5e6f7a8b".into(), axis: Axis::Vertical }) },
         M::LayoutRatio { window_id: w(), path: vec![1], ratio: 0.4 },
+        M::LayoutGrow { block_id: b(), delta: 0.05 },
+        M::LayoutEdge { block_id: b(), direction: Direction::Right },
+        M::LayoutEqualize { window_id: w() },
+        M::BlocksBusy { session_id: Some(s()), window_id: None, block_ids: None },
+        M::BlockStatusSeen { block_id: b(), ids: None },
+        M::BlockCommands { block_id: b(), limit: Some(20) },
         M::TerminalSend { block_id: b(), text: "ls\r".into() },
         M::TerminalCapture { block_id: b(), history: false },
         M::TerminalSize { block_id: b() },
         M::TerminalResize { block_id: b(), size: TermSize { columns: 120, rows: 40, cell_width: 16, cell_height: 34 } },
         M::TerminalClear { block_id: b() },
         M::TerminalReset { block_id: b() },
+        M::TerminalCommandOutput { block_id: b(), index: None },
         M::ClipboardRead { block_id: b(), kind: ClipKind::Image },
         M::ClipboardWrite { block_id: b(), location: ClipboardLocation::Standard, text: "hello".into() },
         M::OwnBlock { block_ids: vec![b()], mode: OwnMode::Take },
@@ -152,6 +219,46 @@ pub fn examples() -> Vec<Method> {
         M::PairList {},
         M::PairRevoke { id: "7c3e5f0d9a1b4c6e8f2a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e".into() },
         M::HostOffer { ticket: "silo1aeaqcaibaeaq".into(), name: "mini".into() },
+        M::GrantCreate {
+            scope: Scope::Session { session_id: s() },
+            rights: Rights::Interact,
+            kind: GrantKind::Token,
+            ttl_secs: Some(8 * 3600),
+            label: Some("claude-code".into()),
+        },
+        M::GrantList {},
+        M::GrantRevoke { id: "3f9a1c0d5e7b2a46".into() },
+        M::ApprovalAnswer { id: "a1b2c3d4e5f60718".into(), allow: true },
+        M::AppReply { request_id: "r1b2c3d4e5f60718".into(), result: Some(json!({})), error: None },
+        M::AppWindowNew { session_id: Some(s()), client_id: None },
+        M::AppWindowCycle { client_id: None },
+        M::AppSwitcher { client_id: None },
+        M::AppSessionStep { delta: 1, client_id: None },
+        M::AppHostsAdd { ticket: Some("silo1aeaqcaibaeaq".into()), client_id: None },
+        M::AppHostsRename { host: "mini".into(), name: "studio".into(), client_id: None },
+        M::AppHostsRemove { host: "mini".into(), client_id: None },
+        M::AppHostsList { client_id: None },
+        M::AppCopy { block_id: Some(b()), client_id: None },
+        M::AppPaste { block_id: None, client_id: None },
+        M::AppSelectAll { block_id: None, client_id: None },
+        M::AppAppearance { density: Density::Compact, client_id: None },
+        M::AppPaneHeaders { visible: false, client_id: None },
+        M::AppFullScreen { on: None, client_id: Some(3) },
+        M::AppSettingsOpen { section: Some("terminal".into()), client_id: None },
+        M::AppSettingsReload { client_id: None },
+        M::AppSettingsOpenFile { client_id: None },
+        M::AppSettingsGet { id: Some("font_size".into()), client_id: None },
+        M::AppSettingsSet { id: "font_size".into(), value: json!(14), client_id: None },
+        M::AppUpdateCheck { client_id: None },
+        M::AppPalette { query: Some("split".into()), client_id: None },
+        M::AppHide { client_id: None },
+        M::AppHideOthers { client_id: None },
+        M::AppShowAll { client_id: None },
+        M::AppQuit { client_id: None },
+        M::AppJumpPrompt { delta: -1, block_id: None, client_id: None },
+        M::AppSelectOutput { block_id: None, client_id: None },
+        M::AppCopyOutput { block_id: None, client_id: None },
+        M::AppOpenShare { link: "https://silo.example/#silos1aeaqcaibaeaq".into(), client_id: None },
     ]
 }
 
@@ -259,6 +366,35 @@ mod tests {
             assert!(d.result_schema.is_object(), "{name}");
         }
         assert!(describe("nope").is_none());
+    }
+
+    /// Every method in [`METHODS`] publishes what it needs, and the
+    /// published form matches [`crate::access::need`].
+    #[test]
+    fn every_method_declares_access() {
+        use crate::access::{AccessKind, Need, TargetKind, need};
+        for (name, _) in METHODS {
+            let d = describe(name).unwrap_or_else(|| panic!("{name} does not describe"));
+            let access = d.access.unwrap_or_else(|| panic!("{name} declares no access"));
+            let method = examples().into_iter().find(|m| method_name(m) == *name).unwrap();
+            match need(&method) {
+                Need::Open => assert_eq!(access.kind, AccessKind::Open, "{name}"),
+                Need::Offer => assert_eq!(access.kind, AccessKind::Offer, "{name}"),
+                Need::AppReply => assert_eq!(access.kind, AccessKind::AppReply, "{name}"),
+                Need::Rights { rights, approval, .. } => {
+                    assert_eq!((access.kind, access.rights, access.approval), (AccessKind::Rights, Some(rights), approval), "{name}");
+                    let target = access.target.unwrap_or_else(|| panic!("{name} has no target"));
+                    match &access.param {
+                        Some(param) => assert!(d.params_schema["properties"].get(param).is_some(), "{name}: no param {param}"),
+                        None => assert_eq!(target, TargetKind::Server, "{name}"),
+                    }
+                }
+            }
+            assert_eq!(access.app, name.starts_with("app.") && *name != "app.reply", "{name}");
+            if access.rights == Some(Rights::Owner) {
+                assert_eq!(access.target, Some(TargetKind::Server), "{name}: owner rights exist only server-wide");
+            }
+        }
     }
 
     #[test]

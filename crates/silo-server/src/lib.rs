@@ -2,19 +2,27 @@
 //! authoritative terminal state, serving clients over a unix socket (and,
 //! later, iroh).
 
+pub mod access;
+pub mod app_bridge;
+pub mod approval;
 pub mod auth;
 pub mod block;
 pub mod browser;
 pub mod bundle;
+pub mod close_guard;
 pub mod conn;
 pub mod drops;
+pub mod grants;
 pub mod handoff;
+pub mod layout_cmds;
 mod names;
 pub mod notify;
 pub mod persist;
+pub mod prompts;
 pub mod registry;
 pub mod remote;
 pub mod shell;
+pub mod status;
 pub mod sysclip;
 pub mod tunnel;
 pub mod upgrade;
@@ -57,6 +65,12 @@ pub struct Config {
     /// The host's system clipboard remote pastes are pushed into and, where
     /// it can be watched, copied back from; `None` (the default) for none.
     pub system_clipboard: Option<Arc<dyn sysclip::SystemClipboard>>,
+    /// Owner actions from clients that are not a Silo app wait for a human
+    /// (Phase 7 §9). Off by default for embedded servers; `silo server`
+    /// turns it on.
+    pub require_approval: bool,
+    /// How often expired grants are removed and their connections closed.
+    pub grant_sweep: Duration,
 }
 
 impl Default for Config {
@@ -71,9 +85,14 @@ impl Default for Config {
             pin_initial_path: false,
             port: None,
             system_clipboard: None,
+            require_approval: false,
+            grant_sweep: GRANT_SWEEP,
         }
     }
 }
+
+/// Default [`Config::grant_sweep`].
+pub const GRANT_SWEEP: Duration = Duration::from_secs(60);
 
 impl Config {
     fn net_options(&self) -> NetOptions {
@@ -96,6 +115,9 @@ pub struct Server {
     pub relays: bool,
     last_activity: Mutex<Instant>,
     pub clipboard: HostClipboard,
+    /// See [`Config::require_approval`].
+    pub require_approval: bool,
+    pub approvals: approval::Approvals,
 }
 
 /// The host's system clipboard as remote clients see it.
@@ -176,6 +198,30 @@ impl Server {
     pub fn touch(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
+        }
+    }
+
+    /// Close the connections of removed grants and tell the owner.
+    pub fn revoked(&self, gone: &[silo_proto::access::Grant]) {
+        if gone.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = gone.iter().map(|g| g.id.clone()).collect();
+        tracing::info!(grants = ?ids, "grants removed; closing their connections");
+        let grants = self.auth().grants();
+        let mut reg = self.registry.lock().unwrap();
+        reg.close_grant_clients(&ids);
+        reg.emit_owner(silo_proto::control::Event::GrantsChanged { grants });
+    }
+
+    /// Remove the grants of closed sessions and blocks, and expired ones.
+    pub fn settle_grants(&self) {
+        let gone_scopes = std::mem::take(&mut self.registry.lock().unwrap().gone);
+        let now = grants::unix_secs();
+        let removed = self.auth().remove_where(|g| g.expired(now) || gone_scopes.contains(&g.scope));
+        match removed {
+            Ok(gone) => self.revoked(&gone),
+            Err(error) => tracing::warn!("remove grants: {error}"),
         }
     }
 
@@ -342,11 +388,23 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         relays: config.relay != RelayConfig::Disabled,
         last_activity: Mutex::new(Instant::now()),
         clipboard: HostClipboard { system: config.system_clipboard.clone(), ..HostClipboard::default() },
+        require_approval: config.require_approval,
+        approvals: approval::Approvals::default(),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
     }
     let _clipboard_task = AbortOnDrop(tokio::spawn(watch_clipboard(server.clone())));
+    let sweep_server = server.clone();
+    let sweep = config.grant_sweep;
+    let _sweep_task = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(sweep).await;
+            if !sweep_server.upgrading.load(Ordering::SeqCst) {
+                sweep_server.settle_grants();
+            }
+        }
+    }));
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
     let (incoming, tunnels) = incoming.unzip();
     let _remote_task = incoming.map(|incoming| AbortOnDrop(tokio::spawn(remote::accept_loop(server.clone(), incoming))));

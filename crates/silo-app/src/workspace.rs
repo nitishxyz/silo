@@ -455,7 +455,20 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
                 }
             }
-            ConnEvent::Event(Event::BlockBell { .. } | Event::HostOffered { .. }) => {}
+            // Status, approvals, forwarded requests and watchers come with
+            // their UI (Phase 7).
+            ConnEvent::Event(
+                Event::BlockBell { .. }
+                | Event::HostOffered { .. }
+                | Event::GrantsChanged { .. }
+                | Event::ApprovalRequested { .. }
+                | Event::ApprovalResolved { .. }
+                | Event::AppRequest { .. }
+                | Event::BlockStatus { .. }
+                | Event::BlockAttention { .. }
+                | Event::CommandFinished { .. }
+                | Event::SessionWatchers { .. },
+            ) => {}
         }
         cx.notify();
     }

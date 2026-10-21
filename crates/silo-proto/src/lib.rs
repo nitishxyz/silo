@@ -7,6 +7,7 @@
 //! stream to one block using a ticket obtained over control,
 //! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket.
 
+pub mod access;
 pub mod api;
 pub mod compat;
 pub mod control;
@@ -18,6 +19,7 @@ pub mod model;
 pub mod offer;
 pub mod paths;
 pub mod release;
+pub mod text;
 pub mod upgrade;
 pub mod upload;
 
@@ -89,6 +91,12 @@ pub mod kind {
     pub const CLIPBOARD_WRITE: u8 = 0x8c;
     /// `request: u64 LE | kind: u8`, see [`crate::data::ServerData::ClipboardRead`].
     pub const CLIPBOARD_READ: u8 = 0x8d;
+    /// JSON [`crate::data::CommandEnd`]: a command finished in the output
+    /// just sent.
+    pub const COMMAND_END: u8 = 0x8f;
+    /// JSON `[`[`crate::data::CommandAnchor`]`]`: where the snapshot's
+    /// commands ended (sent right after `SNAPSHOT_HEAD`).
+    pub const COMMANDS: u8 = 0x90;
 
     /// JSON [`crate::upload::UploadHello`].
     pub const UPLOAD_HELLO: u8 = 0x20;

@@ -199,6 +199,8 @@ mod tests {
                 created_at: 0,
             },
             blocks: Vec::new(),
+            status: Vec::new(),
+            watchers: Vec::new(),
         }
     }
 

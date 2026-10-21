@@ -26,6 +26,8 @@ use silo_proto::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
+use silo_proto::control::RpcError;
+
 use crate::{Server, auth::Peer};
 
 /// Longest wait for the next frame of a binary.
@@ -37,8 +39,9 @@ const PREFIX: &str = ".silo.upgrade.";
 type Refusal = (&'static str, String);
 
 /// Serve an upgrade stream whose `UPGRADE_HELLO` was read. Remote peers
-/// must be paired devices: they already run any program here, so replacing
-/// the server grants nothing more.
+/// must be paired devices (control at server scope): they already run any
+/// program here, so replacing the server grants nothing more. A connected
+/// Silo app approves it once a binary is offered.
 pub async fn serve<R, W>(server: Arc<Server>, hello: Frame, reader: R, mut writer: W, peer: Peer) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -48,23 +51,31 @@ where
         Ok(hello) => hello,
         Err(error) => return reject(&mut writer, ("bad_request", error.to_string())).await,
     };
+    // Upgrades need control at server scope (and approval, see below).
+    let mut grant = None;
     if let Peer::Remote { endpoint_id, conn_id } = &peer {
         let device = crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref());
-        let refused = match device {
-            Ok(device) => {
-                let mut auth = server.auth();
-                let paired = auth.is_paired(&device);
-                if paired {
-                    auth.speak_for(*conn_id, &device);
-                }
-                (!paired).then(|| "this device is not paired with the host".to_owned())
+        let admitted = device.map(|device| {
+            let mut auth = server.auth();
+            let found = auth.device_grant(&device);
+            if let Some(found) = &found {
+                auth.bind(*conn_id, &found.id);
             }
-            Err(error) => Some(error.message),
+            found
+        });
+        let principal = match admitted {
+            Ok(Some(found)) => crate::access::Principal::Grant(Box::new(found)),
+            Ok(None) => return reject(&mut writer, ("unauthorized", "this device is not paired with the host".to_owned())).await,
+            Err(error) => return reject(&mut writer, ("unauthorized", error.message)).await,
         };
-        if let Some(reason) = refused {
-            return reject(&mut writer, ("unauthorized", reason)).await;
+        if !crate::access::rights_on(&principal, crate::access::On::Server).is_some_and(|r| r >= silo_proto::access::Rights::Control) {
+            return reject(&mut writer, ("unauthorized", "this device may not upgrade the host".to_owned())).await;
+        }
+        if let crate::access::Principal::Grant(found) = principal {
+            grant = Some(*found);
         }
     }
+
     let endpoint_addr = server.info_now().await.endpoint_addr;
     let status = HostBuild {
         version: server.info.version.clone(),
@@ -84,6 +95,11 @@ where
         Ok(binary) => binary,
         Err(error) => return reject(&mut writer, ("bad_request", error.to_string())).await,
     };
+    // Asked only once a binary is offered: checking the build asks nothing.
+    if let Err(error) = crate::approval::gate_upgrade(&server, grant.as_ref()).await {
+        let code = if error.code == RpcError::TIMEOUT { "timeout" } else { "denied" };
+        return reject(&mut writer, (code, error.message)).await;
+    }
     let target = match target_exe(&server.home) {
         Ok(target) => target,
         Err(refusal) => return reject(&mut writer, refusal).await,

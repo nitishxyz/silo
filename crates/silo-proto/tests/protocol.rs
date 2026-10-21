@@ -8,7 +8,8 @@ use serde_json::{Map, Value, json};
 use silo_proto::{
     Frame, PROTOCOL, api,
     control::{ClientHello, Event, METHODS, ServerHello},
-    data::{ClientData, Clip, ClipKind, ClipboardLocation, DataHello, Reject, ServerData, Welcome},
+    data::{ClientData, Clip, ClipKind, ClipboardLocation, CommandAnchor, CommandEnd, DataHello, Reject, ServerData, Welcome},
+    kind,
     model::{TermSize, TerminalConfig},
     upload::{UploadEntry, UploadHello, Uploaded},
 };
@@ -81,6 +82,12 @@ fn data_frames() -> Map<String, Value> {
         ("ClipboardRead/types", ServerData::ClipboardRead { request: 7, kind: ClipKind::Types }),
     ]
     .map(|(name, data)| (format!("server/{name}"), data.to_frame()));
+    // Decoded by the clients that use them (Phase 7 prompts); pinned here.
+    let anchors = [CommandAnchor { record: 6, rows_from_bottom: 40 }, CommandAnchor { record: 7, rows_from_bottom: 3 }];
+    let commands = [
+        ("server/CommandEnd".to_owned(), Frame::json(kind::COMMAND_END, &CommandEnd { offset: 0x0102, record: 7, rows_from_bottom: 3 }).unwrap()),
+        ("server/Commands".to_owned(), Frame::json(kind::COMMANDS, &anchors).unwrap()),
+    ];
     let client = [
         ("Input", ClientData::Input(b"ls\r".to_vec())),
         ("Resize", ClientData::Resize(size)),
@@ -98,10 +105,10 @@ fn data_frames() -> Map<String, Value> {
     let show = |frame: Frame| {
         let encoded = frame.encode();
         let (header, payload) = encoded.split_at(5);
-        let json = serde_json::from_slice::<Value>(payload).is_ok() && payload.first() == Some(&b'{');
+        let json = serde_json::from_slice::<Value>(payload).is_ok() && matches!(payload.first(), Some(b'{' | b'['));
         json!(format!("{} {}", hex(header), if json { String::from_utf8_lossy(payload).into_owned() } else { hex(payload) }))
     };
-    server.into_iter().chain(client).map(|(name, frame)| (name, show(frame))).collect()
+    server.into_iter().chain(commands).chain(client).map(|(name, frame)| (name, show(frame))).collect()
 }
 
 fn schema() -> Value {

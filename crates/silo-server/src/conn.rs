@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use silo_proto::{
-    Frame, api, compat,
+    Frame,
+    access::{DEFAULT_LINK_TTL_SECS, Grant, MAX_GRANT_TTL_SECS, Need, Rights, Scope, SecretKind, Who, encode_secret, need, secret_hash},
+    api, compat,
     control::{
-        ApiMethod, BrowserCommand, ClientHello, Empty, Event, METHODS, Method, OfferSource, PairInvite, PairedDevices, Pasted, Request, RpcError,
-        ServerHello, ServerMessage,
+        ApiMethod, BlockView, BrowserCommand, ClientHello, ClientRole, Empty, Event, GrantCreated, GrantKind, Grants, METHODS, Method, OfferSource,
+        PairInvite, PairedDevices, Pasted, Request, RpcError, ServerHello, ServerMessage,
     },
-    data::{ClientData, DataHello, MAX_CLIP_TEXT, Reject},
+    data::{ClientData, ClipKind, DataHello, MAX_CLIP_TEXT, Reject},
     kind,
     model::short_client_name,
     read_frame, spawn_reader,
@@ -24,9 +26,12 @@ use tokio::{
 
 use crate::{
     Server,
+    access::{On, Principal, rights_on},
+    approval,
     auth::{Admission, Peer},
     block::{Attach, BlockMsg, Sink},
     browser::{Block, Report},
+    grants::{new_id, unix_secs},
     handoff,
     registry::New,
 };
@@ -75,7 +80,7 @@ where
 {
     let (mut reader, writer) = tokio::io::split(stream);
     let first = match &peer {
-        Peer::Local => read_frame(&mut reader).await,
+        Peer::Local { .. } => read_frame(&mut reader).await,
         Peer::Remote { .. } => tokio::time::timeout(HELLO_TIMEOUT, read_frame_max(&mut reader, REMOTE_HELLO_MAX)).await.unwrap_or(Ok(None)),
     };
     let first = match first {
@@ -102,7 +107,10 @@ where
 pub async fn accept(server: Arc<Server>, stream: tokio::net::UnixStream, upgrades: mpsc::UnboundedSender<std::os::unix::net::UnixStream>) {
     match handoff::peek_magic(&stream).await {
         Ok(true) => {}
-        Ok(false) => return serve(server, stream, Peer::Local, Expect::Any, None).await,
+        Ok(false) => {
+            let pid = stream.peer_cred().ok().and_then(|c| c.pid());
+            return serve(server, stream, Peer::Local { pid }, Expect::Any, None).await;
+        }
         Err(error) => return tracing::debug!("peek: {error}"),
     }
     let stream = match stream.into_std() {
@@ -170,36 +178,12 @@ where
     let hello: ClientHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer);
     // Compatibility is checked first: an incompatible peer never enrolls.
-    let admitted = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
-        Err(error)
-    } else if let Peer::Remote { endpoint_id, conn_id } = &peer {
-        let mut auth = server.auth();
-        // Checked under the lock: once the upgrade commits, pairing is
-        // frozen and the successor's re-read sees every grant.
-        if server.upgrading.load(Ordering::SeqCst) {
-            Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
-        } else {
-            crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref()).and_then(|device| {
-                // Only an endpoint itself redeems invites: one speaking for
-                // a device never pairs it or joins.
-                let invite = hello.invite.as_deref().filter(|_| hello.device.is_none());
-                let admission = auth.authorize(&device, &hello.client_name, invite)?;
-                auth.speak_for(*conn_id, &device);
-                Ok(Some((admission, device)))
-            })
-        }
-    } else {
-        Ok(None)
+    let admitted = match compat::check(hello.protocol, &hello.vt) {
+        Err(error) => Err(error),
+        Ok(()) => admit(&server, &peer, &hello),
     };
-    // The paired device a remote peer speaks for.
-    let device_id = match &admitted {
-        Ok(Some((_, device))) => Some(device.clone()),
-        _ => None,
-    };
-    // A join-invite connection's invite id; it ends once it has offered.
-    let join = match admitted {
-        Ok(Some((Admission::Join { invite_id }, _))) => Some(invite_id),
-        Ok(_) => None,
+    let (principal, device) = match admitted {
+        Ok(admitted) => admitted,
         Err(error) => {
             if error.code == "internal" {
                 tracing::warn!(client = hello.client_name, "hello refused: {}", error.message);
@@ -210,16 +194,29 @@ where
             return Ok(());
         }
     };
+    // A join-invite connection's invite id; it ends once it has offered.
+    let join = match &principal {
+        Principal::Offer { invite_id } => Some(invite_id.clone()),
+        _ => None,
+    };
+    let role = hello.role;
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
-    let device = device_id.and_then(|id| server.auth().devices().into_iter().find(|d| d.id == id).map(|d| d.name));
     let client_id = {
         let mut reg = server.registry.lock().unwrap();
+        let (pane, tty) = match &peer {
+            Peer::Local { pid } => approval::origin(*pid, &reg),
+            Peer::Remote { .. } => (None, false),
+        };
         let id = reg.add_client(hello.client_name.clone(), hello.passive);
         if let Some(entry) = reg.clients.get_mut(&id) {
             entry.close = Some(close_tx);
             entry.origin = peer.conn_id();
             entry.label = label(&hello.client_name, device.as_deref());
             entry.features.clone_from(&hello.features);
+            entry.principal = principal.clone();
+            entry.role = role;
+            entry.pane = pane;
+            entry.tty = tty;
         }
         id
     };
@@ -230,6 +227,7 @@ where
     if let Some(on_admit) = on_admit.filter(|_| join.is_none()) {
         let _ = on_admit.send(());
     }
+    let ctx = Ctx { id: client_id, principal, role };
 
     let mut frames = spawn_reader(reader, 64);
     let joining = join.is_some();
@@ -267,10 +265,14 @@ where
                     }
                 };
                 let id = request.id;
-                if let Err(error) = permitted(&peer, join.is_some(), &request.method) {
-                    respond(&tx, id, Err(error));
-                    continue;
-                }
+                let gate = crate::access::check(&ctx.principal, ctx.role, &request.method, &server.registry.lock().unwrap());
+                let gate = match gate {
+                    Ok(gate) => gate,
+                    Err(error) => {
+                        respond(&tx, id, Err(error));
+                        continue;
+                    }
+                };
                 if let (Some(invite_id), Method::HostOffer { ticket, name }) = (&join, &request.method) {
                     let source = OfferSource::Join { invite_id: invite_id.clone() };
                     let Some(offer) = crate::auth::host_offer(ticket, name, source) else {
@@ -287,17 +289,13 @@ where
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
                 let shutdown = matches!(request.method, Method::ServerShutdown {});
-                let read_only = matches!(
-                    request.method,
-                    Method::ServerInfo {} | Method::ApiList {} | Method::ApiDescribe { .. } | Method::Ping {} | Method::EventsSubscribe {} | Method::SessionList {} | Method::SessionView { .. }
-                );
-                let result = if server.upgrading.load(Ordering::SeqCst) && !read_only {
-                    Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"))
-                } else {
-                    handle(&server, client_id, request.method).await
-                };
+                let result = run(&server, &ctx, gate.approval, request.method).await;
+                let done = result.is_ok();
                 respond(&tx, id, result);
-                if shutdown {
+                if !server.registry.lock().unwrap().gone.is_empty() {
+                    server.settle_grants();
+                }
+                if shutdown && done {
                     server.shutdown.notify_one();
                 }
             }
@@ -341,32 +339,169 @@ fn browser(server: &Server, block_id: &str, command: BrowserCommand) -> Result<V
     Ok(json!({}))
 }
 
-/// A join-invite connection (`joining`) may only call `host.offer`, which
-/// nobody else may. Owner-only methods: pairing and stopping the server.
-/// (Handoffs arrive only over the unix socket; a paired device may install
-/// a new build through an upgrade stream, see [`crate::upgrade`].)
-/// Everything else is open to paired devices.
-fn permitted(peer: &Peer, joining: bool, method: &Method) -> Result<(), RpcError> {
-    match (joining, method) {
-        (true, Method::HostOffer { .. }) => return Ok(()),
-        (true, _) => return Err(RpcError::unauthorized("a join invite only permits host.offer")),
-        (false, Method::HostOffer { .. }) => return Err(RpcError::forbidden("host.offer")),
-        (false, _) => {}
-    }
-    let name = match method {
-        Method::ServerShutdown {} => "server.shutdown",
-        Method::PairCreate { .. } => "pair.create",
-        Method::PairList {} => "pair.list",
-        Method::PairRevoke { .. } => "pair.revoke",
-        _ => return Ok(()),
+/// A control connection's caller.
+pub struct Ctx {
+    pub id: u64,
+    pub principal: Principal,
+    pub role: ClientRole,
+}
+
+/// Who a hello is admitted as, and the paired device's name for its label.
+/// Remote hellos carry exactly one of a paired endpoint (or device proof),
+/// an invite or a grant's secret; local ones may carry an agent token.
+fn admit(server: &Server, peer: &Peer, hello: &ClientHello) -> Result<(Principal, Option<String>), RpcError> {
+    let mut auth = server.auth();
+    let (endpoint_id, conn_id) = match peer {
+        Peer::Local { .. } => {
+            return match &hello.grant {
+                None => Ok((Principal::Owner, None)),
+                Some(token) => Ok((Principal::Grant(Box::new(auth.redeem_secret(SecretKind::Token, token)?)), None)),
+            };
+        }
+        Peer::Remote { endpoint_id, conn_id } => (endpoint_id, *conn_id),
     };
-    match peer {
-        Peer::Local => Ok(()),
-        Peer::Remote { .. } => Err(RpcError::forbidden(name)),
+    // Checked under the lock: once the upgrade commits, pairing is frozen
+    // and the successor's re-read sees every grant.
+    if server.upgrading.load(Ordering::SeqCst) {
+        return Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"));
+    }
+    if let Some(secret) = &hello.grant {
+        if hello.invite.is_some() || hello.device.is_some() {
+            return Err(RpcError::unauthorized("a hello carries one of a device, an invite or a grant"));
+        }
+        let grant = auth.redeem_secret(SecretKind::Link, secret)?;
+        auth.bind(conn_id, &grant.id);
+        return Ok((Principal::Grant(Box::new(grant)), None));
+    }
+    let device = crate::auth::device_of(&server.info.endpoint_id, endpoint_id, hello.device.as_ref())?;
+    // Only an endpoint itself redeems invites: one speaking for a device
+    // never pairs it or joins.
+    let invite = hello.invite.as_deref().filter(|_| hello.device.is_none());
+    match auth.authorize(&device, &hello.client_name, invite)? {
+        Admission::Device(grant) => {
+            auth.bind(conn_id, &grant.id);
+            let name = grant.label.clone();
+            Ok((Principal::Grant(grant), Some(name)))
+        }
+        Admission::Join { invite_id } => Ok((Principal::Offer { invite_id }, None)),
     }
 }
 
-async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value, RpcError> {
+/// Whether `method` only reads (allowed while upgrading).
+fn read_only(method: &Method) -> bool {
+    matches!(need(method), Need::Open | Need::Rights { rights: Rights::View, .. })
+}
+
+/// Run a checked call: refuse mutations while upgrading, wait for any
+/// approval, check closes, then handle it.
+async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Result<Value, RpcError> {
+    if server.upgrading.load(Ordering::SeqCst) && !read_only(&method) {
+        return Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"));
+    }
+    if let Method::ClipboardRead { block_id, kind } = method {
+        return clipboard_read(server, ctx, &block_id, kind, approval).await;
+    }
+    if approval {
+        approval::gate(server, ctx.id, &method, Rights::Owner).await?;
+    }
+    if matches!(
+        method,
+        Method::BlockClose { .. }
+            | Method::WindowClose { .. }
+            | Method::SessionClose { .. }
+            | Method::ServerShutdown {}
+            | Method::ServerRestart { .. }
+    ) {
+        crate::close_guard::check(server, ctx.id, &method)?;
+    }
+    handle(server, ctx, method).await
+}
+
+/// Ask the block's attached clients for the clipboard. A read that needs
+/// approval shows the card to the attached apps; an app answering at once
+/// (right after a paste gesture) is that approval.
+async fn clipboard_read(server: &Server, ctx: &Ctx, block_id: &str, kind: ClipKind, approval: bool) -> Result<Value, RpcError> {
+    let read = || async {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        server.registry.lock().unwrap().block(block_id)?.send(BlockMsg::ClipboardRead { kind, reply });
+        Ok::<_, RpcError>(tokio::time::timeout(CLIPBOARD_READ_TIMEOUT, rx).await.ok().and_then(Result::ok).flatten())
+    };
+    let approvers = if approval && server.require_approval { server.registry.lock().unwrap().block_approvers(block_id) } else { Vec::new() };
+    if approvers.is_empty() {
+        return to_value(Pasted { content: read().await? });
+    }
+    let (caller, summary) = {
+        let reg = server.registry.lock().unwrap();
+        (approval::caller(&reg, ctx.id), approval::summary(&Method::ClipboardRead { block_id: block_id.to_owned(), kind }, &[]))
+    };
+    let pending = approval::start(server, approvers, "clipboard.read", summary, caller);
+    if let Some(content) = read().await? {
+        approval::settle(server, &pending, true);
+        return to_value(Pasted { content: Some(content) });
+    }
+    approval::finish(server, pending).await?;
+    to_value(Pasted { content: read().await? })
+}
+
+fn grant_create(
+    server: &Server,
+    ctx: &Ctx,
+    scope: Scope,
+    rights: Rights,
+    kind: GrantKind,
+    ttl: Option<u64>,
+    label: Option<String>,
+) -> Result<Value, RpcError> {
+    let kind = match kind {
+        GrantKind::Token => SecretKind::Token,
+        GrantKind::Link => SecretKind::Link,
+        GrantKind::Account => return Err(RpcError::bad_request("accounts need a login server")),
+    };
+    if rights == Rights::Owner {
+        return Err(RpcError::bad_request("tokens and links cannot hold owner rights"));
+    }
+    let (scope, created_by) = {
+        let reg = server.registry.lock().unwrap();
+        let scope = match scope {
+            Scope::Server => Scope::Server,
+            Scope::Session { session_id } => {
+                Scope::Session { session_id: reg.session_id(&session_id).ok_or_else(|| RpcError::not_found(format!("session {session_id}")))? }
+            }
+            Scope::Block { block_id } if reg.blocks.contains_key(&block_id) => Scope::Block { block_id },
+            Scope::Block { block_id } => return Err(RpcError::not_found(format!("block {block_id}"))),
+            Scope::Unknown => return Err(RpcError::bad_request("unsupported scope")),
+        };
+        (scope, reg.client_label(ctx.id))
+    };
+    let ttl = ttl.or((kind == SecretKind::Link).then_some(DEFAULT_LINK_TTL_SECS));
+    if ttl.is_some_and(|t| t == 0 || t > MAX_GRANT_TTL_SECS) {
+        return Err(RpcError::bad_request(format!("ttl_secs must be between 1 and {MAX_GRANT_TTL_SECS}")));
+    }
+    let secret = rand::random::<[u8; silo_proto::access::SECRET_LEN]>();
+    let now = unix_secs();
+    let grant = Grant {
+        id: new_id(),
+        who: Who::Secret { kind, hash: secret_hash(&secret) },
+        scope,
+        rights,
+        label: label.map(|l| silo_proto::text::untrusted(&l, silo_proto::text::MAX_TITLE)).unwrap_or_default(),
+        created_at: now,
+        created_by,
+        expires_at: ttl.map(|t| now + t),
+        last_seen: 0,
+    };
+    let grants = {
+        let mut auth = server.auth();
+        auth.add_grant(grant.clone())?;
+        auth.grants()
+    };
+    server.registry.lock().unwrap().emit_owner(Event::GrantsChanged { grants });
+    tracing::info!(grant = grant.id, ?kind, "grant created");
+    to_value(GrantCreated { grant, secret: encode_secret(kind, &secret), ticket: None })
+}
+
+async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, RpcError> {
+    let client_id = ctx.id;
     match method {
         Method::ServerInfo {} => to_value(server.info_now().await),
         Method::ServerShutdown {} => Ok(json!({})),
@@ -380,7 +515,7 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             to_value(Empty {})
         }
         Method::EventsSubscribe {} => Ok(json!({})),
-        Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries()),
+        Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries_for(&ctx.principal)),
         Method::SessionCreate { name, spawn, kind, url } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref() };
             to_value(server.registry.lock().unwrap().create_session(name, &new)?)
@@ -472,12 +607,7 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::SizeInfo { reply });
             to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
         }
-        Method::ClipboardRead { block_id, kind } => {
-            let (reply, rx) = tokio::sync::oneshot::channel();
-            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::ClipboardRead { kind, reply });
-            let content = tokio::time::timeout(CLIPBOARD_READ_TIMEOUT, rx).await.ok().and_then(Result::ok).flatten();
-            to_value(Pasted { content })
-        }
+        Method::ClipboardRead { block_id, kind } => clipboard_read(server, ctx, &block_id, kind, false).await,
         Method::ClipboardWrite { block_id, location: _, text } => {
             if text.len() > MAX_CLIP_TEXT {
                 let (len, max) = (silo_proto::drops::human_size(text.len() as u64), silo_proto::drops::human_size(MAX_CLIP_TEXT as u64));
@@ -508,7 +638,16 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
             server.registry.lock().unwrap().own(client_id, &block_ids, None)?;
             Ok(json!({}))
         }
-        Method::DataConnect { block_id } => to_value(server.registry.lock().unwrap().issue_ticket(client_id, &block_id)?),
+        Method::DataConnect { block_id } => {
+            let mut reg = server.registry.lock().unwrap();
+            let session = reg.block_session(&block_id);
+            let rights = rights_on(&ctx.principal, On::Block { block: &block_id, session: session.as_deref() }).unwrap_or(Rights::View);
+            to_value(reg.issue_ticket(client_id, &block_id, rights)?)
+        }
+        Method::BlockView { block_id } => {
+            let block = server.registry.lock().unwrap().block_info(&block_id).ok_or_else(|| RpcError::not_found(format!("block {block_id}")))?;
+            to_value(BlockView { block, status: None })
+        }
         Method::BrowserNavigate { block_id, url } => browser(server, &block_id, BrowserCommand::Navigate { url }),
         Method::BrowserBack { block_id } => browser(server, &block_id, BrowserCommand::Back),
         Method::BrowserForward { block_id } => browser(server, &block_id, BrowserCommand::Forward),
@@ -548,11 +687,67 @@ async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value
         }
         Method::PairList {} => to_value(PairedDevices { devices: server.auth().devices() }),
         Method::PairRevoke { id } => {
-            server.auth().revoke(&id)?;
+            let gone = server.auth().revoke_device(&id)?;
+            server.revoked(&gone);
             Ok(json!({}))
         }
         // Only join connections, answered in the control loop.
         Method::HostOffer { .. } => Err(RpcError::forbidden("host.offer")),
+        Method::GrantCreate { scope, rights, kind, ttl_secs, label } => grant_create(server, ctx, scope, rights, kind, ttl_secs, label),
+        Method::GrantList {} => to_value(Grants { grants: server.auth().grants() }),
+        Method::GrantRevoke { id } => {
+            let gone = server.auth().remove_where(|g| g.id == id)?;
+            if gone.is_empty() {
+                return Err(RpcError::not_found(format!("grant {id}")));
+            }
+            server.revoked(&gone);
+            Ok(json!({}))
+        }
+        Method::ApprovalAnswer { id, allow } => {
+            server.approvals.answer(client_id, &id, allow)?;
+            to_value(Empty {})
+        }
+        Method::BlocksBusy { .. } => crate::close_guard::handle(server, client_id, method).await,
+        Method::BlockStatusSeen { .. } => crate::status::handle(server, client_id, method).await,
+        Method::BlockCommands { .. } | Method::TerminalCommandOutput { .. } => crate::prompts::handle(server, client_id, method).await,
+        Method::ServerRestart { .. }
+        | Method::ServerLog { .. }
+        | Method::WindowStep { .. }
+        | Method::BlockFocusStep { .. }
+        | Method::BlockFocusDir { .. }
+        | Method::LayoutGrow { .. }
+        | Method::LayoutEdge { .. }
+        | Method::LayoutEqualize { .. } => crate::layout_cmds::handle(server, client_id, method).await,
+        Method::AppReply { .. }
+        | Method::AppWindowNew { .. }
+        | Method::AppWindowCycle { .. }
+        | Method::AppSwitcher { .. }
+        | Method::AppSessionStep { .. }
+        | Method::AppHostsAdd { .. }
+        | Method::AppHostsRename { .. }
+        | Method::AppHostsRemove { .. }
+        | Method::AppHostsList { .. }
+        | Method::AppCopy { .. }
+        | Method::AppPaste { .. }
+        | Method::AppSelectAll { .. }
+        | Method::AppAppearance { .. }
+        | Method::AppPaneHeaders { .. }
+        | Method::AppFullScreen { .. }
+        | Method::AppSettingsOpen { .. }
+        | Method::AppSettingsReload { .. }
+        | Method::AppSettingsOpenFile { .. }
+        | Method::AppSettingsGet { .. }
+        | Method::AppSettingsSet { .. }
+        | Method::AppUpdateCheck { .. }
+        | Method::AppPalette { .. }
+        | Method::AppHide { .. }
+        | Method::AppHideOthers { .. }
+        | Method::AppShowAll { .. }
+        | Method::AppQuit { .. }
+        | Method::AppJumpPrompt { .. }
+        | Method::AppSelectOutput { .. }
+        | Method::AppCopyOutput { .. }
+        | Method::AppOpenShare { .. } => crate::app_bridge::handle(server, client_id, method).await,
     }
 }
 
@@ -570,7 +765,7 @@ where
     };
     if let Err(error) = compat::check(hello.protocol, &hello.vt) {
         reject(&error.code, &error.message)?;
-    } else if let Some((block_id, client_id)) = redeemed {
+    } else if let Some((block_id, client_id, rights)) = redeemed {
         let block = {
             let reg = server.registry.lock().unwrap();
             reg.blocks.get(&block_id).and_then(Block::terminal).map(|b| (b.tx.clone(), reg.client_name(client_id), reg.client_label(client_id)))
@@ -579,6 +774,11 @@ where
             let sub_id = rand::random::<u64>();
             let cancelled = tx.cancelled();
             let remote = matches!(peer, Peer::Remote { .. });
+            // Below interact a stream only watches: what it sends that
+            // would type, size, configure or touch clipboards is dropped.
+            let interact = rights >= Rights::Interact;
+            let (end, mut ended) = tokio::sync::oneshot::channel();
+            server.registry.lock().unwrap().add_stream(client_id, sub_id, &block_id, rights, end);
             let _ = block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: hello.resume, sink: tx.clone(), remote })));
             drop(tx);
             let mut frames = spawn_reader(reader, 256);
@@ -592,12 +792,20 @@ where
                 let frame = tokio::select! {
                     frame = frames.recv() => frame,
                     () = &mut cancelled => break,
+                    _ = &mut ended => break,
                 };
                 let Some(Ok(frame)) = frame else { break };
                 match ClientData::from_frame(frame) {
                     Ok(ClientData::Ack(offset)) => {
                         let _ = block.send(BlockMsg::Ack { sub_id, offset });
                     }
+                    Ok(
+                        ClientData::Input(_)
+                        | ClientData::Resize(_)
+                        | ClientData::Config(_)
+                        | ClientData::ClipboardContent { .. }
+                        | ClientData::ClipboardPush { .. },
+                    ) if !interact => {}
                     Ok(ClientData::Input(bytes)) => {
                         tracing::trace!(target: "silo::latency", stage = "server_input");
                         if remote {
@@ -625,6 +833,7 @@ where
                 server.clipboard.remote_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = block.send(BlockMsg::Detach(sub_id));
+            server.registry.lock().unwrap().remove_stream(client_id, sub_id);
             writer_task.abort();
             return Ok(());
         }
@@ -648,7 +857,9 @@ where
     let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
     let result = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
         Err((RpcError::INCOMPATIBLE, error.message))
-    } else if let Some((block_id, _)) = redeemed {
+    } else if redeemed.as_ref().is_some_and(|(_, _, rights)| *rights < Rights::Interact) {
+        Err((RpcError::FORBIDDEN, "this grant cannot upload files".to_owned()))
+    } else if let Some((block_id, _, _)) = redeemed {
         if server.registry.lock().unwrap().blocks.get(&block_id).and_then(Block::terminal).is_some() {
             let mut frames = spawn_reader(reader, 16);
             crate::drops::receive(&server.home, hello.total, &mut frames).await
@@ -675,29 +886,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn paired_devices_may_drive_browsers() {
-        let remote = Peer::Remote { endpoint_id: "peer".into(), conn_id: 1 };
-        let report = Method::BrowserReport {
-            block_id: "b".into(),
-            url: "u".into(),
-            title: String::new(),
-            favicon: None,
-            loading: false,
-            history: Vec::new(),
-            index: 0,
-        };
-        for method in [Method::BrowserNavigate { block_id: "b".into(), url: "u".into() }, Method::BrowserBack { block_id: "b".into() }, report] {
-            assert!(permitted(&remote, false, &method).is_ok());
-        }
-        assert_eq!(permitted(&remote, false, &Method::ServerShutdown {}).unwrap_err().code, RpcError::FORBIDDEN);
-        let offer = Method::HostOffer { ticket: "t".into(), name: "n".into() };
-        assert_eq!(permitted(&remote, false, &offer).unwrap_err().code, RpcError::FORBIDDEN);
-        assert_eq!(permitted(&Peer::Local, false, &offer).unwrap_err().code, RpcError::FORBIDDEN);
-        assert!(permitted(&remote, true, &offer).is_ok());
-        assert_eq!(permitted(&remote, true, &Method::SessionList {}).unwrap_err().code, RpcError::UNAUTHORIZED);
-    }
 
     #[test]
     fn label_is_short_with_a_distinct_device_name() {

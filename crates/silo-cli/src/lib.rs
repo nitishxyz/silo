@@ -13,7 +13,8 @@ use silo_client::{
     transport::{EndpointId, Identity, Net, PairTicket, RelayConfig, RemoteConn, Unreachable},
 };
 use silo_proto::{
-    control::{Method, PairInvite, PairedDevice, PairedDevices, ServerInfo},
+    access::{Grant, Rights, Scope, Who},
+    control::{GrantCreated, GrantKind, Grants, Method, PairInvite, PairedDevice, PairedDevices, RpcError, ServerInfo},
     device::DeviceProof,
     model::{BlockKind, SessionSummary, SessionView},
 };
@@ -271,7 +272,50 @@ pub async fn server_info(control: &Control) -> anyhow::Result<ServerInfo> {
 /// # Errors
 /// RPC failure; [`Offline`] is explained.
 pub async fn create_invite(control: &Control, ttl: Duration) -> anyhow::Result<PairInvite> {
-    control.call(Method::PairCreate { ttl_secs: ttl.as_secs(), purpose: silo_proto::control::InvitePurpose::Device }).await.map_err(explain)
+    let method = || Method::PairCreate { ttl_secs: ttl.as_secs(), purpose: silo_proto::control::InvitePurpose::Device };
+    confirmed(control, || control.call(method())).await.map_err(explain)
+}
+
+/// Run `call`. When no Silo app can approve it and the server lets this
+/// terminal confirm instead (`confirm`), ask on the terminal, answer, and
+/// run it once more.
+///
+/// # Errors
+/// The call's error, or a declined confirmation.
+pub async fn confirmed<T, F, Fut>(control: &Control, call: F) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    let error = match call().await {
+        Err(error) => error,
+        ok => return ok,
+    };
+    let Some(confirm) = error.downcast_ref::<RpcError>().filter(|e| e.code == RpcError::CONFIRM) else { return Err(error) };
+    let data = confirm.data.clone().unwrap_or_default();
+    let id = data["approval"].as_str().unwrap_or_default().to_owned();
+    let summary = data["summary"].as_str().unwrap_or(&confirm.message).to_owned();
+    let allow = ask_terminal(&format!("{summary}. Allow? [y/N] "));
+    control.call_value(Method::ApprovalAnswer { id, allow }).await?;
+    if !allow {
+        bail!("cancelled");
+    }
+    call().await
+}
+
+/// Ask `prompt` on the controlling terminal; yes only for `y`/`yes`.
+fn ask_terminal(prompt: &str) -> bool {
+    use std::io::{BufRead, Write};
+    let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else { return false };
+    let mut writer = &tty;
+    if writer.write_all(format!("silo: {prompt}").as_bytes()).and_then(|()| writer.flush()).is_err() {
+        return false;
+    }
+    let mut answer = String::new();
+    if std::io::BufReader::new(&tty).read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim(), "y" | "Y" | "yes")
 }
 
 /// # Errors
@@ -293,8 +337,86 @@ pub async fn revoke(control: &Control, key: &str) -> anyhow::Result<PairedDevice
         (Some(_), Some(_)) => bail!("{key:?} matches several devices"),
         _ => bail!("no paired device {key:?}"),
     };
-    control.call_value(Method::PairRevoke { id: device.id.clone() }).await?;
+    confirmed(control, || control.call_value(Method::PairRevoke { id: device.id.clone() })).await?;
     Ok(device)
+}
+
+/// `grant.create` of an agent token.
+///
+/// # Errors
+/// RPC failure or a declined confirmation.
+pub async fn create_token(
+    control: &Control,
+    scope: Scope,
+    rights: Rights,
+    ttl: Option<Duration>,
+    label: Option<String>,
+) -> anyhow::Result<GrantCreated> {
+    let method =
+        || Method::GrantCreate { scope: scope.clone(), rights, kind: GrantKind::Token, ttl_secs: ttl.map(|t| t.as_secs()), label: label.clone() };
+    confirmed(control, || control.call(method())).await
+}
+
+/// # Errors
+/// RPC failure.
+pub async fn grants(control: &Control) -> anyhow::Result<Vec<Grant>> {
+    let grants: Grants = control.call(Method::GrantList {}).await?;
+    Ok(grants.grants)
+}
+
+/// Revoke the grant whose id is or starts with `key`.
+///
+/// # Errors
+/// No match, an ambiguous prefix, RPC failure or a declined confirmation.
+pub async fn revoke_grant(control: &Control, key: &str) -> anyhow::Result<Grant> {
+    let grants = grants(control).await?;
+    let mut matches = grants.iter().filter(|g| g.id.starts_with(key));
+    let grant = match (matches.next(), matches.next()) {
+        (Some(grant), None) => grant.clone(),
+        (Some(_), Some(_)) => bail!("{key:?} matches several grants"),
+        _ => bail!("no grant {key:?}"),
+    };
+    confirmed(control, || control.call_value(Method::GrantRevoke { id: grant.id.clone() })).await?;
+    Ok(grant)
+}
+
+/// One line per grant, as `silo grants` prints them.
+#[must_use]
+pub fn format_grants(grants: &[Grant]) -> String {
+    let mut out = String::new();
+    for g in grants {
+        let who = match &g.who {
+            Who::Device { .. } => "device",
+            Who::Secret { kind: silo_proto::access::SecretKind::Token, .. } => "token",
+            Who::Secret { kind: silo_proto::access::SecretKind::Link, .. } => "link",
+            Who::Account { .. } => "account",
+            _ => "unknown",
+        };
+        let rights = serde_json::to_value(g.rights).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        let scope = match &g.scope {
+            Scope::Server => "server".to_owned(),
+            Scope::Session { session_id } => format!("session {session_id}"),
+            Scope::Block { block_id } => format!("block {block_id}"),
+            Scope::Unknown => "unknown".to_owned(),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let expires = match g.expires_at {
+            Some(at) => format!(", expires in {}", until(at.saturating_sub(now))),
+            None => String::new(),
+        };
+        let label = if g.label.is_empty() { String::new() } else { format!("  {}", g.label) };
+        out.push_str(&format!("{}  {who}  {rights} on {scope}{label}{expires}\n", g.id));
+    }
+    out
+}
+
+fn until(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 /// # Errors
@@ -378,6 +500,7 @@ mod tests {
             blocks: 1,
             attached_clients,
             created_at: 0,
+            attention: Default::default(),
         };
         let view = |blocks: &[(&str, &str)]| -> SessionView {
             let blocks: Vec<_> = blocks
