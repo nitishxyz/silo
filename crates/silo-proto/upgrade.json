@@ -5,6 +5,7 @@
       "build": {
         "type": "string"
       },
+      "endpoint_addr": {},
       "platform": {
         "type": "string"
       },

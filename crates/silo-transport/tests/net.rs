@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use common::TempDir;
-use silo_transport::{Conn, EndpointAddr, Identity, Net, NetOptions, RelayConfig, RemoteConn, TransportAddr};
+use silo_transport::{Conn, EndpointAddr, Identity, Net, NetOptions, RelayConfig, RemoteConn, TransportAddr, Unreachable};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
@@ -71,6 +71,19 @@ async fn ctl_connect_streams_and_close() {
     timeout(T, rc.closed()).await.unwrap();
     timeout(T, server.close()).await.unwrap().unwrap();
     assert!(timeout(T, incoming.next()).await.unwrap().is_none());
+}
+
+/// A peer without any address is unreachable, and says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn dial_without_address_is_unreachable() {
+    let tmp = TempDir::new();
+    let id = Identity::load_or_create(tmp.path().join("c")).unwrap();
+    let peer = Identity::load_or_create(tmp.path().join("p")).unwrap();
+    let net = Net::bind(&id, RelayConfig::Disabled, false).await.unwrap();
+    let error = timeout(T, net.dial(EndpointAddr::new(peer.id()))).await.unwrap().err().unwrap();
+    let unreachable = error.downcast_ref::<Unreachable>().expect("typed");
+    assert_eq!((unreachable.id, unreachable.reason), (peer.id(), "no address is known for it"));
+    timeout(T, net.close()).await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

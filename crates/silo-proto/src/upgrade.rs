@@ -54,6 +54,11 @@ pub struct HostBuild {
     pub platform: String,
     /// Ids of its sessions.
     pub sessions: Vec<String>,
+    /// Its current reachable address, as in
+    /// [`crate::control::ServerInfo::endpoint_addr`]: clients refresh
+    /// stored host addresses from it. Absent from older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_addr: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -7,7 +7,7 @@ use silo_proto::{
     BUILD,
     control::{Empty, Method},
 };
-use silo_transport::{Conn, EndpointAddr, Identity, Net, PairTicket};
+use silo_transport::{Conn, EndpointAddr, Identity, Net, PairTicket, RemoteConn};
 
 use crate::{Control, Events};
 
@@ -36,6 +36,14 @@ impl Control {
         invite: Option<&PairTicket>,
     ) -> anyhow::Result<(Self, Events)> {
         let rc = net.dial(addr).await.context("dial server")?;
+        Self::over_remote(rc, client_name, passive, invite).await
+    }
+
+    /// [`Control::connect_remote`] over `rc`, a connection just dialed.
+    ///
+    /// # Errors
+    /// See [`Control::connect_remote`].
+    pub async fn over_remote(rc: RemoteConn, client_name: &str, passive: bool, invite: Option<&PairTicket>) -> anyhow::Result<(Self, Events)> {
         let invite = invite.map(PairTicket::encode);
         Self::handshake(Conn::Iroh(rc), client_name, passive, BUILD, invite).await
     }

@@ -4,7 +4,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, bail};
@@ -20,10 +20,11 @@ use crate::{
     link::{Install, Platform, staged_failure},
 };
 
-/// How long a host gets to come back on the new build.
-const COME_BACK: Duration = Duration::from_secs(60);
-/// How long one connection attempt may take.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a host gets to come back on the new build. It restarts on new
+/// ports, so reaching it again may take an address lookup.
+const COME_BACK: Duration = Duration::from_secs(90);
+/// A step taking longer than this is announced.
+const SLOW: Duration = Duration::from_secs(2);
 
 /// Where the new silo comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,22 +154,22 @@ pub fn kept(before: &[String], after: &[String]) -> String {
     }
 }
 
-/// Upgrade the stored `host` over its paired connection; returns the line
-/// to print.
+/// Upgrade the stored `host` over its paired connection, saying on stderr
+/// what takes long; returns the line to print.
 ///
 /// # Errors
 /// The host is unreachable or refuses, the new build could not take over,
 /// or it does not come back on the new build.
 pub async fn paired(home: &Path, host: &Host, candidate: &Candidate, force: bool, options: &NetOptions) -> anyhow::Result<String> {
     let net = bind(home, options).await?;
-    let result = paired_on(&net, host, candidate, force).await;
+    let result = paired_on(home, &net, host, candidate, force).await;
     let _ = net.close().await;
     result
 }
 
-async fn paired_on(net: &Net, host: &Host, candidate: &Candidate, force: bool) -> anyhow::Result<String> {
+async fn paired_on(home: &Path, net: &Net, host: &Host, candidate: &Candidate, force: bool) -> anyhow::Result<String> {
     let name = &host.name;
-    let (rc, opened) = open(net, host).await?;
+    let (rc, opened) = slow(open(home, net, host), || format!("{name}: connecting…")).await?;
     let before = opened.host.clone();
     let running = version_text(&before.version, &before.build);
     let decided = candidate
@@ -186,8 +187,14 @@ async fn paired_on(net: &Net, host: &Host, candidate: &Candidate, force: bool) -
         Err(error) => Err(error.context(format!("upgrade {name}"))),
     };
     let sent = match candidate {
-        Candidate::Release { version } => opened.fetch_release(version, force).await,
-        Candidate::File { path, .. } => opened.send(path, force).await,
+        Candidate::Release { version } => {
+            eprintln!("{name}: fetching silo {version}…");
+            opened.fetch_release(version, force).await
+        }
+        Candidate::File { path, .. } => {
+            eprintln!("{name}: sending {}…", path.display());
+            opened.send(path, force).await
+        }
     };
     let handover = match sent {
         Ok(handover) => handover,
@@ -196,7 +203,8 @@ async fn paired_on(net: &Net, host: &Host, candidate: &Candidate, force: bool) -
             return refused(error);
         }
     };
-    let build = handover.started.build.clone();
+    let started = handover.started.clone();
+    eprintln!("{name}: handing over to {}…", version_text(&started.version, &started.build));
     // A failed takeover is reported on the stream at once; a committed one
     // ends it, and the new build answers on a new connection.
     let failure = async {
@@ -205,7 +213,7 @@ async fn paired_on(net: &Net, host: &Host, candidate: &Candidate, force: bool) -
     };
     let result = tokio::select! {
         failed = failure => failed,
-        after = come_back(net, host, &build) => after,
+        after = come_back(home, net, host, &started.build) => after,
     };
     rc.close(b"done");
     let after = match result {
@@ -215,39 +223,54 @@ async fn paired_on(net: &Net, host: &Host, candidate: &Candidate, force: bool) -
     Ok(format!("{name}: {running} → {}, {}", version_text(&after.version, &after.build), kept(&before.sessions, &after.sessions)))
 }
 
-async fn open(net: &Net, host: &Host) -> anyhow::Result<(RemoteConn, stream::Upgrade)> {
-    let attempt = async {
-        let rc = net.dial(host.addr.clone()).await.context("dial host")?;
-        match stream::open(&Conn::Iroh(rc.clone())).await {
-            Ok(opened) => Ok((rc, opened)),
-            Err(error) => {
+/// `future`, saying `line` on stderr once it takes longer than [`SLOW`].
+async fn slow<T>(future: impl Future<Output = T>, line: impl FnOnce() -> String) -> T {
+    tokio::pin!(future);
+    tokio::select! {
+        done = &mut future => done,
+        () = tokio::time::sleep(SLOW) => {
+            eprintln!("{}", line());
+            future.await
+        }
+    }
+}
+
+/// Reach `host` as every command does ([`crate::reach`]) and open an
+/// upgrade stream; the stored address is refreshed from the host's report.
+async fn open(home: &Path, net: &Net, host: &Host) -> anyhow::Result<(RemoteConn, stream::Upgrade)> {
+    let rc = crate::reach(net, host).await?;
+    let opened = match stream::open(&Conn::Iroh(rc.clone())).await {
+        Ok(opened) => opened,
+        Err(error) => {
+            rc.close(b"done");
+            return Err(error.context(format!("reach {}", host.name)));
+        }
+    };
+    if let Some(addr) = opened.host.endpoint_addr.clone().and_then(|addr| serde_json::from_value(addr).ok()) {
+        crate::store_addr(home, addr)?;
+    }
+    Ok((rc, opened))
+}
+
+/// Wait for `host` to serve `build`, for at most [`COME_BACK`].
+async fn come_back(home: &Path, net: &Net, host: &Host, build: &str) -> anyhow::Result<HostBuild> {
+    let deadline = tokio::time::Instant::now() + COME_BACK;
+    let attempts = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok((rc, opened)) = open(home, net, host).await {
+                let found = opened.host.clone();
+                opened.close().await;
                 rc.close(b"done");
-                Err(error)
+                if found.build == build {
+                    return found;
+                }
             }
         }
     };
-    tokio::time::timeout(DIAL_TIMEOUT, attempt)
-        .await
-        .unwrap_or_else(|_| bail!("{} did not answer", host.name))
-        .with_context(|| format!("reach {}", host.name))
-}
-
-/// Wait for `host` to serve `build`.
-async fn come_back(net: &Net, host: &Host, build: &str) -> anyhow::Result<HostBuild> {
-    let deadline = Instant::now() + COME_BACK;
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if let Ok((rc, opened)) = open(net, host).await {
-            let found = opened.host.clone();
-            opened.close().await;
-            rc.close(b"done");
-            if found.build == build {
-                return Ok(found);
-            }
-        }
-        if Instant::now() >= deadline {
-            bail!("{} did not come back on the new build; see the server log there", host.name);
-        }
+    match tokio::time::timeout_at(deadline, attempts).await {
+        Ok(found) => Ok(found),
+        Err(_) => bail!("{} did not come back on the new build within {} s; see the server log there", host.name, COME_BACK.as_secs()),
     }
 }
 

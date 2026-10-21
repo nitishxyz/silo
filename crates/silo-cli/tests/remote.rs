@@ -29,7 +29,13 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> tokio::task::JoinHandle<()> {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
+    start_on(home, None).await
+}
+
+/// [`start`] with the remote endpoint on UDP `port`.
+async fn start_on(home: &Path, port: Option<u16>) -> tokio::task::JoinHandle<()> {
+    let config =
+        silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, port, ..Default::default() };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     for _ in 0..500 {
         if silo_client::server_running(home).await {
@@ -166,6 +172,59 @@ async fn pair_then_remote_ls() {
     drop(remote.control);
     remote.net.close().await.unwrap();
 
+    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(owner);
+    timeout(T, task).await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(server_home);
+    let _ = std::fs::remove_dir_all(client_home);
+}
+
+/// `silo remote upgrade` reaches a host as `--host` does: through stored
+/// addresses gone stale (refreshed from the host's report), and when the
+/// host takes longer to answer than one dial used to be given (10 s).
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_reaches_a_moved_host() {
+    use silo_cli::upgrade::{Candidate, Source, paired};
+    let server_home = temp_home("upgrade-server");
+    let client_home = temp_home("upgrade-client");
+    let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+    let task = start_on(&server_home, Some(port)).await;
+    let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
+    let options = NetOptions { relay: RelayConfig::Disabled, mdns: false };
+    let host = timeout(T, silo_cli::add_host(&client_home, &ticket(&owner).await, Some("box".into()), &options, "laptop")).await.unwrap().unwrap();
+    let candidate = Candidate::new(&Source::Local).unwrap();
+    let up_to_date = format!("box: already up to date ({})", silo_proto::upgrade::version_text(env!("CARGO_PKG_VERSION"), silo_proto::BUILD));
+    let here = |port| -> SocketAddr { (Ipv4Addr::LOCALHOST, port).into() };
+    let store = |addr: EndpointAddr| {
+        Hosts::update(&client_home, |hosts| {
+            hosts.hosts[0].addr = addr;
+            Ok(hosts.hosts[0].clone())
+        })
+        .unwrap()
+    };
+
+    // An address from before the host moved, beside the current one.
+    let stale = EndpointAddr::new(host.addr.id).with_ip_addr(here(1)).with_ip_addr(here(port));
+    let line = timeout(T, paired(&client_home, &store(stale.clone()), &candidate, false, &options)).await.unwrap().unwrap();
+    assert_eq!(line, up_to_date);
+    let stored = Hosts::load(&client_home).unwrap().hosts[0].addr.clone();
+    assert_ne!(stored, stale, "refreshed from the host's report");
+    assert_eq!(Some(stored), silo_cli::current_addr(&owner).await.unwrap());
+
+    // The host answers only after 12 s.
+    owner.call_value(Method::ServerShutdown {}).await.unwrap();
+    drop(owner);
+    timeout(T, task).await.unwrap().unwrap();
+    let host = store(EndpointAddr::new(host.addr.id).with_ip_addr(here(port)));
+    let upgrade = tokio::spawn({
+        let (client_home, options) = (client_home.clone(), options.clone());
+        async move { paired(&client_home, &host, &candidate, false, &options).await }
+    });
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let task = start_on(&server_home, Some(port)).await;
+    assert_eq!(timeout(Duration::from_secs(30), upgrade).await.unwrap().unwrap().unwrap(), up_to_date);
+
+    let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
     owner.call_value(Method::ServerShutdown {}).await.unwrap();
     drop(owner);
     timeout(T, task).await.unwrap().unwrap();

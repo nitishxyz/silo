@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
-use iroh::endpoint::{Connection, ConnectionError, PathList, presets};
+use iroh::endpoint::{ConnectError, ConnectWithOptsError, ConnectingError, Connection, ConnectionError, PathList, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -112,8 +112,13 @@ impl Net {
 
     async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<RemoteConn> {
         let id = addr.id;
-        let conn = self.endpoint.connect(addr, alpn).await.with_context(|| format!("connect to {id}"))?;
-        Ok(RemoteConn { conn })
+        match self.endpoint.connect(addr, alpn).await {
+            Ok(conn) => Ok(RemoteConn { conn }),
+            Err(error) => match unreachable(&error) {
+                Some(reason) => Err(Unreachable { id, reason }.into()),
+                None => Err(error).with_context(|| format!("connect to {id}")),
+            },
+        }
     }
 
     /// Start accepting CTL_ALPN and TUNNEL_ALPN connections. Each CTL
@@ -138,6 +143,32 @@ impl Net {
             None => self.endpoint.close().await,
         }
         Ok(())
+    }
+}
+
+/// A dial nobody answered. iroh gives up on a handshake after its idle
+/// timeout (30 s), time to look the peer up and try its relay when the
+/// addresses dialed are outdated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unreachable {
+    pub id: EndpointId,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "connect to {}: {}", self.id, self.reason)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+fn unreachable(error: &ConnectError) -> Option<&'static str> {
+    match error {
+        ConnectError::Connect { source: ConnectWithOptsError::NoAddress { .. }, .. } => Some("no address is known for it"),
+        ConnectError::Connecting { source: ConnectingError::ConnectionError { source: ConnectionError::TimedOut, .. }, .. }
+        | ConnectError::Connection { source: ConnectionError::TimedOut, .. } => Some("timed out: none of its addresses or relays answered"),
+        _ => None,
     }
 }
 

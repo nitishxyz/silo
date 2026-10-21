@@ -49,11 +49,13 @@ where
     {
         return reject(&mut writer, ("unauthorized", "this device is not paired with the host".into())).await;
     }
+    let endpoint_addr = server.info_now().await.endpoint_addr;
     let status = HostBuild {
         version: server.info.version.clone(),
         build: BUILD.to_owned(),
         platform: upgrade::platform(),
         sessions: server.registry.lock().unwrap().summaries().into_iter().map(|s| s.id).collect(),
+        endpoint_addr,
     };
     send(&mut writer, &Frame::json(kind::HOST_BUILD, &status)?).await?;
     let mut frames = spawn_reader(reader, 16);

@@ -11,14 +11,14 @@ use std::{path::Path, time::Duration};
 use anyhow::{Context, bail};
 use silo_client::{
     Control, Events, IncompatibleProtocol, Offline, Unauthorized,
-    transport::{EndpointAddr, Net, PairTicket, RelayConfig},
+    transport::{EndpointAddr, Net, PairTicket, RelayConfig, RemoteConn, Unreachable},
 };
 use silo_proto::{
     control::{Method, PairInvite, PairedDevice, PairedDevices, ServerInfo},
     model::{BlockKind, SessionSummary, SessionView},
 };
 
-use crate::hosts::{Hosts, client_dir};
+use crate::hosts::{Host, Hosts, client_dir};
 
 /// `90`, `90s`, `10m`, `2h` or `1d`.
 ///
@@ -102,7 +102,26 @@ pub fn explain(error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<Offline>().is_some() {
         return anyhow::anyhow!("the server has no reachable address yet (relay not connected); retry in a moment");
     }
+    if let Some(e) = error.downcast_ref::<Unreachable>() {
+        return anyhow::anyhow!("could not reach the host ({}); is its silo running?", e.reason);
+    }
     error
+}
+
+/// Dial the stored `host`, as every command reaching a paired host does.
+/// No limit of its own: when the stored addresses are outdated (each
+/// restart of a host moves its ports) iroh needs the time it allows for
+/// address lookup and the relay.
+///
+/// # Errors
+/// Nothing answered (see [`explain`]) or another dial failure.
+pub async fn reach(net: &Net, host: &Host) -> anyhow::Result<RemoteConn> {
+    net.dial(host.addr.clone()).await.map_err(|error| {
+        if let Some(e) = error.downcast_ref::<Unreachable>() {
+            return anyhow::anyhow!("could not reach {} ({}); is its silo running?", host.name, e.reason);
+        }
+        error.context(format!("reach {}", host.name))
+    })
 }
 
 /// Connect to `host`: a pairing ticket (redeemed now, not stored) or a
@@ -117,8 +136,11 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
             let ticket = PairTicket::decode(host)?;
             silo_client::pair(&net, &ticket, client_name).await
         } else {
-            let addr = Hosts::load(home)?.find(host)?.addr.clone();
-            Control::connect_remote(&net, addr, client_name, false, None).await
+            let host = Hosts::load(home)?.find(host)?.clone();
+            match reach(&net, &host).await {
+                Ok(rc) => Control::over_remote(rc, client_name, false, None).await,
+                Err(error) => Err(error),
+            }
         };
     match result {
         Ok((control, events)) => {
@@ -178,9 +200,21 @@ pub async fn current_addr(control: &Control) -> anyhow::Result<Option<EndpointAd
 /// # Errors
 /// RPC failure or `hosts.json` I/O.
 pub async fn refresh_host(home: &Path, control: &Control) -> anyhow::Result<()> {
-    let Some(addr) = current_addr(control).await? else {
+    match current_addr(control).await? {
+        Some(addr) => store_addr(home, addr),
+        None => Ok(()),
+    }
+}
+
+/// Store `addr` (a host's own report of its address) for the stored host
+/// with its id when it moved; an address without any route is ignored.
+///
+/// # Errors
+/// `hosts.json` I/O.
+pub fn store_addr(home: &Path, addr: EndpointAddr) -> anyhow::Result<()> {
+    if addr.is_empty() {
         return Ok(());
-    };
+    }
     let id = addr.id.to_string();
     if Hosts::load(home)?.hosts.iter().any(|h| h.id == id && h.addr != addr) {
         Hosts::update(home, |hosts| {
