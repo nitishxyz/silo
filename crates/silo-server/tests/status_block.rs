@@ -9,7 +9,7 @@ use std::{
 
 use silo_proto::{
     Frame,
-    control::{Capture, CommandOutput, Event, ServerMessage, SpawnSpec},
+    control::{AttentionReason, Capture, CommandOutput, Event, ServerMessage, SpawnSpec},
     data::{CommandAnchor, ServerData},
     kind,
     model::{BlockInfo, BlockKind, BlockStatus, Busy, CommandRecord, Lifecycle, StatusState, TermSize},
@@ -530,4 +530,30 @@ async fn a_reset_clears_the_program_title() {
         assert!(Instant::now() < deadline, "title still custom after RIS");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Alternates blocked and done on one record, each in its own write, then
+/// ends on error.
+const FLOOD: &str = r#"$|=1; for my $i (1..1500) { print "\e]7501;state=", ($i % 2 ? "blocked" : "done"), ":id=w\e\\"; select(undef, undef, undef, 0.001) } print "\e]7501;state=error:id=w\e\\FLOODED"; sleep 30"#;
+
+#[tokio::test]
+async fn a_status_flood_is_paced_and_its_last_state_still_arrives() {
+    let started = Instant::now();
+    let mut block = Block::spawn("b-flood", 80, &["perl", "-e", FLOOD]);
+    let (mut statuses, mut attentions) = (0_u32, Vec::new());
+    let deadline = started + T;
+    while !(states(&block.status()) == [("w".to_owned(), StatusState::Error)] && attentions.last() == Some(&AttentionReason::Error)) {
+        match tokio::time::timeout_at(deadline.into(), block.notes.recv()).await {
+            Ok(Some(Note::Status(_))) => statuses += 1,
+            Ok(Some(Note::Attention { reason, .. })) => attentions.push(reason),
+            Ok(Some(_)) => {}
+            _ => panic!("never saw the final state: {:?} after {statuses} statuses, {attentions:?}", block.status()),
+        }
+    }
+    block.wait_for("FLOODED").await;
+    let secs = started.elapsed().as_secs_f64();
+    assert!(secs > 1.0, "the flood took a while: {secs}");
+    // 8 at once then 4/s; 5 at once then 1/s (plus one for rounding).
+    assert!(f64::from(statuses) <= 9.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
+    assert!(attentions.len() as f64 <= 6.0 + secs, "{} block.attention in {secs:.1} s: {attentions:?}", attentions.len());
 }

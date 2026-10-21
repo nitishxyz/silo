@@ -713,7 +713,6 @@ struct Actor {
 }
 
 /// Block status and command records (Phase 7 §5, §7.3).
-#[derive(Default)]
 struct Status {
     records: Records,
     progress: Option<(Progress, Instant)>,
@@ -723,10 +722,43 @@ struct Status {
     commands: CommandLog,
     /// Per command index: where its output started (C) and where it ended (D).
     anchors: HashMap<u64, (Option<TrackedRow>, Option<TrackedRow>)>,
+    /// Attention: notifications over the pace are dropped; the latest
+    /// record transition over it is `held` until the pace allows.
     pacer: Pacer,
-    /// When status last went out, and whether a progress-only change waits.
+    held: Option<HeldAttention>,
+    /// State changes published at once, up to a pace; later ones wait.
+    changes: Pacer,
+    /// When status last went out, and whether a change waits.
     sent_at: Option<Instant>,
     pending: bool,
+}
+
+/// A record's attention held back by the pace: sent later only if the
+/// record is still in `state` then.
+struct HeldAttention {
+    id: String,
+    state: StatusState,
+    reason: AttentionReason,
+    title: String,
+    body: String,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            records: Records::default(),
+            progress: None,
+            busy: None,
+            marks: None,
+            commands: CommandLog::default(),
+            anchors: HashMap::new(),
+            pacer: Pacer::default(),
+            held: None,
+            changes: Pacer::changes(),
+            sent_at: None,
+            pending: false,
+        }
+    }
 }
 
 impl Status {
@@ -1278,8 +1310,8 @@ impl Actor {
         if let Some(since) = self.held_since {
             timeout = timeout.min(HOLD_LIMIT.saturating_sub(since.elapsed()));
         }
-        if let (true, Some(sent)) = (self.status.pending, self.status.sent_at) {
-            timeout = timeout.min(PROGRESS_INTERVAL.saturating_sub(sent.elapsed()));
+        if let Some(wait) = self.status_wait() {
+            timeout = timeout.min(wait);
         }
         if let Some((_, at)) = self.status.progress {
             timeout = timeout.min(PROGRESS_TTL.saturating_sub(at.elapsed()));
@@ -1607,9 +1639,11 @@ impl Actor {
         }
     }
 
-    /// Publish the status if it changed: state changes at once,
-    /// progress-only changes at most every [`PROGRESS_INTERVAL`]. Never
-    /// touches the session revision.
+    /// Publish the status if it changed: state changes at once up to
+    /// [`Pacer::changes`], progress-only changes at most every
+    /// [`PROGRESS_INTERVAL`]; anything over that waits for `tick_status`,
+    /// so the last state always goes out. Never touches the session
+    /// revision.
     fn publish_status(&mut self) {
         let status = self.status_now();
         let Ok(mut shared) = self.shared_status.lock() else { return };
@@ -1619,7 +1653,9 @@ impl Actor {
         }
         let states = |s: &BlockStatus| s.records.iter().map(|r| (r.id.clone(), r.state, r.kind)).collect::<Vec<_>>();
         let urgent = states(&shared) != states(&status) || shared.busy != status.busy;
-        if !urgent && self.status.sent_at.is_some_and(|at| at.elapsed() < PROGRESS_INTERVAL) {
+        let allowed =
+            if urgent { self.status.changes.allow(Instant::now()) } else { self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) };
+        if !allowed {
             self.status.pending = true;
             return;
         }
@@ -1631,14 +1667,35 @@ impl Actor {
         let _ = self.notes.send(Note::Status(self.id.clone()));
     }
 
-    /// Send a coalesced progress change once due; drop stale progress.
+    /// How long until a waiting status change or held attention is due.
+    fn status_wait(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let status = self.status.pending.then(|| {
+            let interval = self.status.sent_at.map_or(Duration::ZERO, |at| PROGRESS_INTERVAL.saturating_sub(at.elapsed()));
+            interval.max(self.status.changes.wait(now))
+        });
+        let held = self.status.held.as_ref().map(|_| self.status.pacer.wait(now));
+        status.into_iter().chain(held).min()
+    }
+
+    /// Send a coalesced status change or held attention once due; drop
+    /// stale progress.
     fn tick_status(&mut self) {
         if self.status.progress.is_some_and(|(_, at)| at.elapsed() >= PROGRESS_TTL) {
             self.status.progress = None;
             self.publish_status();
         }
-        if self.status.pending && self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) {
+        if self.status.pending
+            && self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL)
+            && self.status.changes.wait(Instant::now()).is_zero()
+        {
             self.publish_status();
+        }
+        if self.status.held.is_some() && self.status.pacer.wait(Instant::now()).is_zero() {
+            let held = self.status.held.take().expect("checked");
+            if self.status.records.state(&held.id) == Some(held.state) {
+                self.attention(held.reason, held.title, held.body, None);
+            }
         }
     }
 
@@ -1679,8 +1736,18 @@ impl Actor {
         }
     }
 
-    fn attention(&self, reason: AttentionReason, title: String, body: String) {
-        let _ = self.notes.send(Note::Attention { block_id: self.id.clone(), reason, title, body, at: now_ms() });
+    /// Raise attention within the pace. Over it, a notification is
+    /// dropped and a record transition (`record`: id and state) is held,
+    /// replacing an older held one, until the pace allows.
+    fn attention(&mut self, reason: AttentionReason, title: String, body: String, record: Option<(String, StatusState)>) {
+        if self.status.pacer.allow(Instant::now()) {
+            if record.as_ref().is_some_and(|(id, _)| self.status.held.as_ref().is_some_and(|held| held.id == *id)) {
+                self.status.held = None;
+            }
+            let _ = self.notes.send(Note::Attention { block_id: self.id.clone(), reason, title, body, at: now_ms() });
+        } else if let Some((id, state)) = record {
+            self.status.held = Some(HeldAttention { id, state, reason, title, body });
+        }
     }
 
     /// Apply the server terminal's hook events in order. Returns the
@@ -1713,9 +1780,10 @@ impl Actor {
                     };
                     let heading = untrusted(if title.trim().is_empty() { &app } else { &title }, MAX_TITLE);
                     let body = untrusted(&message, silo_proto::text::MAX_MESSAGE);
+                    let record = (id.clone(), state);
                     let report = Report { id, state: Some(state), kind, progress, app, title, message };
                     if let Some(reason) = self.status.records.report(report, now_ms()) {
-                        self.attention(reason, heading, body);
+                        self.attention(reason, heading, body, Some(record));
                     }
                     changed = true;
                 }
@@ -1724,9 +1792,7 @@ impl Actor {
                     changed = true;
                 }
                 VtEvent::Notify { title, body } => {
-                    if self.status.pacer.allow(Instant::now()) {
-                        self.attention(AttentionReason::Notification, untrusted(&title, MAX_TITLE), untrusted(&body, MAX_BODY));
-                    }
+                    self.attention(AttentionReason::Notification, untrusted(&title, MAX_TITLE), untrusted(&body, MAX_BODY), None);
                 }
                 VtEvent::Prompt { step: PromptStep::PromptStart, prompt_kind: PromptKind::Primary, .. } => {
                     changed |= self.status.records.settle();

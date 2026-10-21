@@ -79,6 +79,12 @@ impl Records {
         self.records.is_empty()
     }
 
+    /// The state of `id`'s record, if it has one.
+    #[must_use]
+    pub fn state(&self, id: &str) -> Option<StatusState> {
+        self.records.get(id).map(|r| r.state)
+    }
+
     /// Replace `report.id`'s record. Returns the attention reason when the
     /// record enters blocked, done or error.
     pub fn report(&mut self, report: Report, now_ms: u64) -> Option<AttentionReason> {
@@ -201,33 +207,56 @@ pub fn progress(state: silo_vt::ProgressReportState, percent: i8) -> Option<Prog
     Some(Progress { state, percent: u8::try_from(percent).ok().filter(|p| *p <= 100) })
 }
 
-/// Notifications a block may raise: 1/s, bursts of 5.
+/// A token bucket: `rate` per second, bursts of `burst`.
 #[derive(Debug)]
 pub struct Pacer {
     tokens: f64,
     at: Option<Instant>,
+    burst: f64,
+    rate: f64,
 }
 
+/// Attention a block may raise (OSC 7501 transitions and OSC 9/777).
 impl Default for Pacer {
     fn default() -> Self {
-        Self { tokens: Self::BURST, at: None }
+        Self::new(5, 1)
     }
 }
 
 impl Pacer {
-    const BURST: f64 = 5.0;
+    #[must_use]
+    pub fn new(burst: u32, rate: u32) -> Self {
+        Self { tokens: f64::from(burst), at: None, burst: f64::from(burst), rate: f64::from(rate) }
+    }
 
-    /// Whether a notification at `now` may go out (and count it).
+    /// State changes a block publishes at once: 4/s, bursts of 8. Later
+    /// ones wait (coalesced); the last state always goes out.
+    #[must_use]
+    pub fn changes() -> Self {
+        Self::new(8, 4)
+    }
+
+    fn tokens(&self, now: Instant) -> f64 {
+        let refill = self.at.map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f64() * self.rate);
+        (self.tokens + refill).min(self.burst)
+    }
+
+    /// Whether one more may go out at `now` (and count it).
     pub fn allow(&mut self, now: Instant) -> bool {
-        if let Some(at) = self.at {
-            self.tokens = (self.tokens + now.saturating_duration_since(at).as_secs_f64()).min(Self::BURST);
-        }
+        self.tokens = self.tokens(now);
         self.at = Some(now);
         if self.tokens < 1.0 {
             return false;
         }
         self.tokens -= 1.0;
         true
+    }
+
+    /// How long from `now` until [`Self::allow`] passes (rounded up).
+    #[must_use]
+    pub fn wait(&self, now: Instant) -> Duration {
+        let missing = 1.0 - self.tokens(now);
+        if missing <= 0.0 { Duration::ZERO } else { Duration::from_secs_f64(missing / self.rate) + Duration::from_millis(1) }
     }
 }
 
@@ -457,6 +486,18 @@ mod tests {
         assert_eq!((0..7).filter(|_| pacer.allow(start)).count(), 5);
         assert!(!pacer.allow(start + Duration::from_millis(500)));
         assert!(pacer.allow(start + Duration::from_millis(1100)));
+    }
+
+    #[test]
+    fn state_changes_are_paced_four_a_second_with_bursts_of_eight() {
+        let mut pacer = Pacer::changes();
+        let start = Instant::now();
+        assert_eq!((0..20).filter(|_| pacer.allow(start)).count(), 8);
+        let wait = pacer.wait(start);
+        assert!(wait > Duration::from_millis(240) && wait <= Duration::from_millis(252), "{wait:?}");
+        assert!(!pacer.allow(start + wait - Duration::from_millis(5)));
+        assert_eq!(pacer.wait(start + wait), Duration::ZERO);
+        assert!(pacer.allow(start + wait));
     }
 
     fn inputs() -> BusyInputs {
