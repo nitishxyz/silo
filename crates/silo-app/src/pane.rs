@@ -20,9 +20,9 @@ use gpui::{
 };
 use silo_client::{Applied, Control, DataSender, DataStream, Mirror, Predictor, cache::MirrorCheckpoint, transport::Conn};
 use silo_proto::{
-    control::{Method, OwnMode},
+    control::{CommandRecords, Method, OwnMode},
     data::{ClientData, ClipKind, ClipboardLocation, ServerData},
-    model::{BlockInfo, Lifecycle, TermSize},
+    model::{BlockInfo, CommandRecord, Lifecycle, TermSize},
 };
 use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, Predicted, PreparedFrame, terminal_canvas};
 use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
@@ -92,6 +92,26 @@ pub fn lifecycle_label(lifecycle: Lifecycle, exited: Option<i32>) -> Option<Stri
 
 /// Quiet time after the last grid change before the PTY is resized.
 const SIZE_SETTLE: Duration = Duration::from_millis(120);
+
+/// Longest command line shown in a failed command's hover.
+const MAX_HOVER_COMMAND: usize = 120;
+
+/// `exit 1 · 2.3 s · cargo build`, for a failed command's hover.
+fn command_summary(record: &CommandRecord) -> String {
+    let mut parts = Vec::new();
+    if let Some(exit) = record.exit {
+        parts.push(format!("exit {exit}"));
+    }
+    if let Some(ms) = record.duration_ms {
+        #[allow(clippy::cast_precision_loss)]
+        let seconds = ms as f64 / 1000.0;
+        parts.push(if seconds < 10.0 { format!("{seconds:.1} s") } else { format!("{seconds:.0} s") });
+    }
+    if let Some(command) = record.command.as_deref().map(|c| silo_proto::text::untrusted(c, MAX_HOVER_COMMAND)).filter(|c| !c.is_empty()) {
+        parts.push(command);
+    }
+    parts.join(" · ")
+}
 
 pub struct Pane {
     pub block_id: String,
@@ -173,6 +193,13 @@ pub struct Pane {
     active: bool,
     attempt: u64,
     stream_task: Option<Task<()>>,
+    /// The block's finished commands with a non-zero exit, by index: their
+    /// D rows get the gutter tick.
+    failed: std::collections::BTreeMap<u64, CommandRecord>,
+    /// The newest finished command the server reported.
+    last_command: Option<u64>,
+    /// The failed command whose tick the pointer is over, and its row.
+    hovered_command: Option<(u64, u16)>,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -279,6 +306,9 @@ impl Pane {
             active: false,
             attempt: 0,
             stream_task: None,
+            failed: std::collections::BTreeMap::new(),
+            last_command: None,
+            hovered_command: None,
         };
         pane.saved = pane.dirty();
         pane.connect(cx);
@@ -482,8 +512,108 @@ impl Pane {
         self.send_size();
         self.own_requested = None;
         self.own(if self.active { OwnMode::Take } else { OwnMode::Request });
+        self.load_commands(cx);
         cx.notify();
         true
+    }
+
+    /// Fetch the block's command records (exit codes for the gutter).
+    fn load_commands(&mut self, cx: &mut Context<Self>) {
+        let Some(control) = self.control.clone() else { return };
+        let block_id = self.block_id.clone();
+        let call = self.rt.spawn(async move { control.call::<CommandRecords>(Method::BlockCommands { block_id, limit: None }).await });
+        cx.spawn(async move |this, cx| {
+            let records = match call.await {
+                Ok(Ok(records)) => records.records,
+                Ok(Err(error)) => {
+                    tracing::debug!("block.commands: {error:#}");
+                    return;
+                }
+                Err(_) => return,
+            };
+            let _ = this.update(cx, |pane, cx| {
+                pane.failed.clear();
+                pane.last_command = None;
+                for record in records {
+                    pane.command_finished(record, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A command finished in this block (`block.command_finished`).
+    pub fn command_finished(&mut self, record: CommandRecord, cx: &mut Context<Self>) {
+        // `block.commands` lists the running one too.
+        if record.exit.is_none() && record.duration_ms.is_none() {
+            return;
+        }
+        self.last_command = self.last_command.max(Some(record.index));
+        if record.exit.is_some_and(|code| code != 0) {
+            self.failed.insert(record.index, record);
+            while self.failed.len() > silo_client::MAX_COMMAND_ROWS {
+                self.failed.pop_first();
+            }
+            cx.notify();
+        }
+    }
+
+    /// Scroll `delta` shell prompts up (negative) or down.
+    pub fn jump_prompt(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if let Some(vt) = self.mirror.terminal() {
+            vt.scroll_prompt(delta);
+            self.generation += 1;
+            cx.notify();
+        }
+    }
+
+    /// Select the last finished command's output; whether it had any.
+    pub fn select_output(&mut self, cx: &mut Context<Self>) -> bool {
+        let last = self.last_command.max(self.mirror.last_command());
+        if last.is_some_and(|record| self.mirror.select_command_output(record)) {
+            self.generation += 1;
+            cx.notify();
+            return true;
+        }
+        cx.emit(PaneEvent::Notice(crate::status::Status::info("No command output to select")));
+        false
+    }
+
+    /// Copy the last finished command's output (selecting it); whether it
+    /// had any.
+    pub fn copy_output(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.select_output(cx) {
+            return false;
+        }
+        self.copy(cx);
+        true
+    }
+
+    /// Failed commands' D rows in the viewport.
+    fn failed_rows(&mut self) -> Vec<(u64, u16)> {
+        if self.failed.is_empty() {
+            return Vec::new();
+        }
+        let mut marks = self.mirror.command_marks();
+        marks.retain(|(record, _)| self.failed.contains_key(record));
+        marks
+    }
+
+    /// Track the pointer over the gutter ticks.
+    fn hover_gutter(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let hovered = match (self.content_bounds, self.metrics) {
+            (Some(bounds), Some(metrics)) if position.x < bounds.left() + px(metrics.width) && position.y >= bounds.top() => {
+                let row = f32::from(position.y - bounds.top()) / metrics.height.max(1.0);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let row = row as u16;
+                self.failed_rows().into_iter().find(|&(_, y)| y == row)
+            }
+            _ => None,
+        };
+        if hovered != self.hovered_command {
+            self.hovered_command = hovered;
+            cx.notify();
+        }
     }
 
     fn reset_mirror(&mut self) {
@@ -1451,11 +1581,19 @@ impl Render for Pane {
         let solid = self.translucency.is_none();
         let outside = || div().absolute().when(solid, |el| el.bg(rgb(theme::surface()))).border_color(rgb(theme::border()));
         let (cells, predicted_cursor) = self.predictor.overlay();
+        let failed = self.failed_rows();
+        let hovered = self
+            .hovered_command
+            .filter(|mark| failed.contains(mark))
+            .and_then(|(record, row)| Some((command_summary(self.failed.get(&record)?), row)))
+            .filter(|(text, _)| !text.is_empty());
         let overlay = Overlay {
             predicted: cells.into_iter().map(|c| Predicted { row: c.row, column: c.column, text: c.text }).collect(),
             predicted_cursor,
             predicted_underline: rgb(theme::muted()),
             predicted_foreground: rgb(self.mirror.render_config().map_or_else(theme::foreground, |c| c.foreground)),
+            failed: failed.iter().map(|&(_, row)| row).collect(),
+            failed_color: rgb(theme::danger()),
             ..Overlay::default()
         };
         let trace = self.trace.clone().zip(self.prepared.clone()).map(|(t, p)| (t, p, overlay.predicted.clone()));
@@ -1494,6 +1632,7 @@ impl Render for Pane {
                 if this.dragging && event.pressed_button != Some(gpui::MouseButton::Left) {
                     this.end_drag();
                 }
+                this.hover_gutter(event.position, cx);
                 let tracking = this.last_frame.as_ref().is_some_and(|f| f.mouse_tracking);
                 if this.dragging || tracking {
                     this.pointer(event.position, MouseAction::Motion, mouse_button(event.pressed_button), event.modifiers, window.scale_factor(), cx);
@@ -1558,6 +1697,24 @@ impl Render for Pane {
                     }))
                 })
                 .when_some(edge_x.zip(edge_y), |el, (x, y)| el.child(outside().left(x).top(y).right_0().bottom_0()))
+                .when_some(hovered, |el, (text, row)| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px(metrics.width))
+                            .top(px(f32::from(row) * metrics.height))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .continuous(4.0)
+                            .bg(theme::overlay_fill())
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::foreground()))
+                            .text_size(px(11.0))
+                            .whitespace_nowrap()
+                            .child(text),
+                    )
+                })
                 .when_some(trace, |el, (trace, prepared, predicted)| el.child(crate::latency::paint_probe(trace, prepared, predicted)))
                 .child(input_canvas(entity, metrics))
                 .child(

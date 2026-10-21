@@ -592,17 +592,20 @@ impl Workspace {
                     }
                 }
             }
+            ConnEvent::Event(Event::CommandFinished { block_id, record, .. }) => {
+                if let Some((pane, _)) = self.panes.get(block_id) {
+                    pane.update(cx, |pane, cx| pane.command_finished(record.clone(), cx));
+                }
+            }
             // Notifications and approval cards live in `HostsState`; the
-            // bell stays ignored; command records and watchers come with
-            // their UI (P7-6, P7-7).
+            // bell stays ignored.
             ConnEvent::Event(
                 Event::BlockBell { .. }
                 | Event::HostOffered { .. }
                 | Event::GrantsChanged { .. }
                 | Event::ApprovalRequested { .. }
                 | Event::ApprovalResolved { .. }
-                | Event::BlockAttention { .. }
-                | Event::CommandFinished { .. },
+                | Event::BlockAttention { .. },
             ) => {}
         }
         cx.notify();

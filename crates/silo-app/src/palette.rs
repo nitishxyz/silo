@@ -309,6 +309,22 @@ impl Workspace {
                     self.call(Method::TerminalReset { block_id });
                 }
             }
+            Command::JumpToPreviousPrompt | Command::JumpToNextPrompt => {
+                let delta = if command == Command::JumpToPreviousPrompt { -1 } else { 1 };
+                if let Some(pane) = self.focused_pane(window, cx) {
+                    pane.update(cx, |pane, cx| pane.jump_prompt(delta, cx));
+                }
+            }
+            Command::SelectCommandOutput => {
+                if let Some(pane) = self.focused_pane(window, cx) {
+                    pane.update(cx, |pane, cx| pane.select_output(cx));
+                }
+            }
+            Command::CopyCommandOutput => {
+                if let Some(pane) = self.focused_pane(window, cx) {
+                    pane.update(cx, |pane, cx| pane.copy_output(cx));
+                }
+            }
             Command::RestartServer if self.incompatible().is_some() => self.upgrade_server(cx),
             Command::RestartServer => {
                 self.status = Some(Status::progress("Restarting server…"));
@@ -424,6 +440,10 @@ impl Workspace {
             | Command::ClosePane
             | Command::ClearScrollback
             | Command::ResetTerminal => connected && self.view.is_some(),
+            // On the mirror: also offline.
+            Command::JumpToPreviousPrompt | Command::JumpToNextPrompt | Command::SelectCommandOutput | Command::CopyCommandOutput => {
+                self.view.is_some()
+            }
             _ => true,
         }
     }

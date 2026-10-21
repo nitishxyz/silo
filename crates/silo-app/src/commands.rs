@@ -118,6 +118,10 @@ commands! {
     SelectAll => "Select All", "Edit", ["cmd-a"];
     ClearScrollback => "Clear Scrollback", "Terminal", [], "Clears the screen and history for every client";
     ResetTerminal => "Reset Terminal", "Terminal", [];
+    JumpToPreviousPrompt => "Jump to Previous Prompt", "Terminal", ["cmd-up"];
+    JumpToNextPrompt => "Jump to Next Prompt", "Terminal", ["cmd-down"];
+    SelectCommandOutput => "Select Command Output", "Terminal", ["cmd-shift-a"], "The last command's output";
+    CopyCommandOutput => "Copy Command Output", "Terminal", ["cmd-alt-c"], "The last command's output";
     // Server & app
     RestartServer => "Restart Server", "Server", [], "Ends every session";
     StopServer => "Stop Server", "Server", [], "Ends every session";
@@ -188,6 +192,9 @@ impl Command {
             Self::SelectAll => Method("app.select_all"),
             Self::ClearScrollback => Method("terminal.clear"),
             Self::ResetTerminal => Method("terminal.reset"),
+            Self::JumpToPreviousPrompt | Self::JumpToNextPrompt => Method("app.jump_prompt"),
+            Self::SelectCommandOutput => Method("app.select_output"),
+            Self::CopyCommandOutput => Method("app.copy_output"),
             Self::RestartServer => Method("server.restart"),
             Self::StopServer => Method("server.shutdown"),
             Self::StartServer => Cli("up"),
@@ -361,6 +368,10 @@ mod tests {
         assert_eq!(Command::NewBrowserTab.hint().as_deref(), Some("⌥⌘T"));
         assert_eq!(Command::NewTabChooser.hint().as_deref(), Some("⌃⌘T"));
         assert_eq!(Command::NewTerminalTab.hint(), None);
+        assert_eq!(Command::JumpToPreviousPrompt.hint().as_deref(), Some("⌘↑"));
+        assert_eq!(Command::JumpToNextPrompt.hint().as_deref(), Some("⌘↓"));
+        assert_eq!(Command::SelectCommandOutput.hint().as_deref(), Some("⇧⌘A"));
+        assert_eq!(Command::CopyCommandOutput.hint().as_deref(), Some("⌥⌘C"));
     }
 
     #[test]

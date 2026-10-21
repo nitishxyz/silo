@@ -29,10 +29,6 @@ fn setting(key: &str) -> Result<SettingId, RpcError> {
     SETTINGS.iter().map(|s| s.id).find(|id| setting_key(*id) == key).ok_or_else(|| RpcError::not_found(format!("setting {key}")))
 }
 
-fn unsupported(name: &str) -> RpcError {
-    RpcError::new(RpcError::METHOD_NOT_FOUND, format!("{name} is not supported by this app"))
-}
-
 impl Workspace {
     /// A forwarded request from host `host`: run here if this window is
     /// the one it is for, and reply.
@@ -216,12 +212,36 @@ impl Workspace {
                 let ticket = silo_client::transport::ShareTicket::parse(&link).map_err(|_| RpcError::bad_request("not a share link"))?;
                 self.open_share(ticket, window, cx);
             }
-            Method::AppJumpPrompt { .. } | Method::AppSelectOutput { .. } | Method::AppCopyOutput { .. } => {
-                return Err(unsupported(&name));
+            Method::AppJumpPrompt { delta, block_id, .. } => {
+                self.terminal_pane(block_id.as_deref(), window, cx)?.update(cx, |pane, cx| pane.jump_prompt(delta, cx));
+            }
+            Method::AppSelectOutput { block_id, .. } => {
+                if !self.terminal_pane(block_id.as_deref(), window, cx)?.update(cx, |pane, cx| pane.select_output(cx)) {
+                    return Err(RpcError::not_found("command output"));
+                }
+            }
+            Method::AppCopyOutput { block_id, .. } => {
+                if !self.terminal_pane(block_id.as_deref(), window, cx)?.update(cx, |pane, cx| pane.copy_output(cx)) {
+                    return Err(RpcError::not_found("command output"));
+                }
             }
             _ => return Err(RpcError::bad_request(format!("{name} is not an app method"))),
         }
         Ok(json!({}))
+    }
+
+    /// The terminal pane of `block` (focusing it first), or the focused one.
+    fn terminal_pane(
+        &mut self,
+        block: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<gpui::Entity<crate::pane::Pane>, RpcError> {
+        let Some(block) = block else {
+            return self.focused_pane(window, cx).ok_or_else(|| RpcError::not_found("a focused terminal"));
+        };
+        self.focus_block(block, window, cx);
+        self.panes.get(block).map(|(pane, _)| pane.clone()).ok_or_else(|| RpcError::not_found(format!("terminal {block}")))
     }
 
     /// Run an edit command in `block` (focusing it first), or the focused one.
