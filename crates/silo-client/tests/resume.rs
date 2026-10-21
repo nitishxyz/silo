@@ -76,6 +76,9 @@ async fn live(control: &Control, block: &str, marker: &str) -> (Mirror, DataStre
     let mut mirror = Mirror::new();
     let mut stream = attach(control, block, &mut mirror).await;
     assert_eq!(stream.welcome.mode, StartMode::Snapshot);
+    // Type only at a prompt: input sent earlier is echoed by the tty before
+    // the shell prints its first prompt, which then precedes the output.
+    pump_until(&mut stream, &mut mirror, |m| m.coherent() && !m.screen_text().is_empty()).await;
     stream.send(&ClientData::Input(format!("PS1='$ '; echo {marker}\n").into_bytes()));
     let line = format!("\n{marker}\n$");
     pump_until(&mut stream, &mut mirror, |m| m.coherent() && m.screen_text().contains(&line)).await;

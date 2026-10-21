@@ -78,7 +78,11 @@ fn login() -> SpawnSpec {
     SpawnSpec { command: Vec::new(), ..shell() }
 }
 
+/// Type `text` once the block shows something (a fresh shell's prompt):
+/// input sent earlier is echoed by the tty before that prompt, which then
+/// precedes the command's output on its line (dash has no line editor).
 async fn send(control: &Control, block: &str, text: &str) {
+    wait_for("prompt", async || !capture(control, block).await.trim().is_empty()).await;
     control.call_value(Method::TerminalSend { block_id: block.into(), text: text.into() }).await.unwrap();
 }
 

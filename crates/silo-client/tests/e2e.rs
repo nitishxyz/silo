@@ -386,15 +386,22 @@ async fn clear_and_reset_body() {
     pump_until(&mut stream, &mut a, |m| m.terminal().unwrap().scroll_state().unwrap().total < 30).await;
     let capture: Capture = control.call(Method::TerminalCapture { block_id: block.clone(), history: true }).await.unwrap();
     assert!(!capture.text.contains("old-"), "{}", capture.text);
-    // Reset: alt screen is left and the screen cleared for everyone.
+    // Reset: alt screen is left and the screen cleared for everyone. Reset
+    // only at the prompt: earlier, the rest of the command's output (echo's
+    // newline, the prompt) lands after the reset.
     stream.send(&ClientData::Input(b"printf '\\033[?1049hALT'; echo\n".to_vec()));
-    pump_until(&mut stream, &mut a, |m| m.screen_text().contains("ALT")).await;
+    pump_until(&mut stream, &mut a, |m| m.screen_text().contains("ALT\n$")).await;
     control.call_value(Method::TerminalReset { block_id: block.clone() }).await.unwrap();
-    pump_until(&mut stream, &mut a, |m| !m.screen_text().contains("ALT") && m.screen_text().contains('$')).await;
+    // The shell redraws its prompt alone on the cleared screen (^L).
+    pump_until(&mut stream, &mut a, |m| m.screen_text() == "$").await;
+    // A snapshot client shows the same screen at the same offset.
     let mut b = Mirror::new();
     let mut stream_b = attach(&control, &block, &mut b).await;
     let a_offset = a.resume().unwrap().offset;
     pump_until(&mut stream_b, &mut b, |m| m.resume().is_some_and(|r| r.offset >= a_offset)).await;
+    let b_offset = b.resume().unwrap().offset;
+    pump_until(&mut stream, &mut a, |m| m.resume().is_some_and(|r| r.offset >= b_offset)).await;
+    assert_eq!(a.resume(), b.resume());
     assert_eq!(a.screen_text(), b.screen_text());
     control.call_value(Method::ServerShutdown {}).await.unwrap();
 }
