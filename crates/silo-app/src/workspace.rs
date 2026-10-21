@@ -247,7 +247,7 @@ impl Workspace {
             picker: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
-            new_tab_menu: crate::new_tab_menu::NewTabMenu::new(window, cx),
+            new_tab_menu: crate::new_tab_menu::NewTabMenu::default(),
             settings: None,
             pairing: crate::settings::Pairing::default(),
             last_fullscreen: std::cell::Cell::new(None),
@@ -1454,6 +1454,7 @@ impl Render for Workspace {
             && self.settings.is_none()
             && self.add_host.is_none()
             && !self.appearance_menu.open
+            && !self.new_tab_menu.is_open()
         {
             cx.defer_in(window, |this, window, cx| {
                 // Re-check: an overlay may have taken focus meanwhile.
@@ -1464,6 +1465,7 @@ impl Render for Workspace {
                     && this.add_host.is_none()
                     && this.settings.is_none()
                     && !this.appearance_menu.open
+                    && !this.new_tab_menu.is_open()
                 {
                     this.refocus_terminal(window, cx);
                 }

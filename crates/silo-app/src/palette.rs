@@ -167,6 +167,9 @@ impl Workspace {
         if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll) {
             self.close_palette(window, cx);
         }
+        if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll | Command::NewTabChooser) {
+            self.close_new_tab_menu(window, cx);
+        }
         let block = self.focused_block(window, cx);
         let server_command = matches!(command, Command::StartServer | Command::StopServer | Command::RestartServer);
         if server_command && !self.hosts.get(self.active_host).is_some_and(|h| h.info.local) {
@@ -934,7 +937,7 @@ impl Workspace {
     }
 
     /// A new tab holding a browser on `url`.
-    fn open_page_tab(&mut self, url: String) {
+    pub(crate) fn open_page_tab(&mut self, url: String) {
         let Some(view) = &self.view else { return };
         let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
         self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url) });

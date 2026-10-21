@@ -271,7 +271,7 @@ impl Workspace {
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
             let comfortable = !compact;
             let menu_open = self.appearance_menu.open;
-            let new_tab_open = self.new_tab_menu.open;
+            let new_tab_open = self.new_tab_menu.is_open();
             // The strip and the empty space after it take tab drops. The
             // space after the last tab means "move to the end".
             let last = view.session.windows.len().saturating_sub(1);
