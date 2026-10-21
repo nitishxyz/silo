@@ -360,9 +360,9 @@ until all text, the terminal foreground included, reads at 4.5:1 over the theme 
 - In order:
   - access rules: grants `{who, scope, rights}`, one need table, streams included;
   - one API: every app command is a method, `app.*` forwarded to an app, `silo do` from `api.describe`;
-  - server-side block status (OSC 7501, 9;4, 9/777, 133, RIS);
+  - server-side block status (OSC 7501, 9;4, 9/777, 133, RIS), including whether a block is busy;
   - notifications on every device;
-  - OSC 133 prompt features;
+  - OSC 133 prompt features, and confirm before closing a busy block;
   - Silo-to-Silo sharing (`silos1` tickets in a URL fragment);
   - agent safety (approvals, scoped tokens, attribution).
 - Deferred: agent skill, MCP server, Lua config/actions, web client, iOS client, login server.

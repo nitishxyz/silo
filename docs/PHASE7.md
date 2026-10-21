@@ -34,6 +34,8 @@ byte-identical to the `.zig-cache/o/*/ghostty/vt/terminal.h` copy).
 | Shell wrappers | zsh `ZDOTDIR` files, bash `--rcfile`, fish `vendor_conf.d` (`silo-server/src/shell.rs:61`, `:85`, `:104`); they only fix `PATH`. No OSC 133 |
 | Block events | `Note::{Changed, Exited, Bell, Offer, Dirty}` (`block.rs:318`); `block.bell` is emitted (`registry.rs:854`) and ignored by the app (`silo-app/src/workspace.rs:458`). `Checkpoint` carries title/pwd but no status (`block.rs:296`) |
 | Attribution | `ClientHello.client_name` (`control.rs:31`) → `ClientEntry.label` (`registry.rs:143`, `conn.rs:218`) → `BlockInfo.owner_name` (`silo-proto/src/model.rs:381`), shown as "sized by …" (`pane.rs:1641`) |
+| Foreground process | `Pty::foreground_pid` (`tcgetpgrp` on the master, `silo-pty/src/lib.rs:460`), `Pty::pid` (`:448`), `process_name` (`:546`). The actor's `probe()` reads them every `PROBE_INTERVAL` = 400 ms (`block.rs:40`, `:1093`, `:1834`) for the title and cwd only. `BlockHandle.command` marks blocks started with an explicit command (`block.rs:333`) |
+| Closing | App ⌘W → `close_block_id` → `block.close` with no check (`silo-app/src/workspace.rs:973`). Palette confirm only for `CloseSession`, `RestartServer`, `StopServer` (`commands.rs:154`, `palette.rs:146-149`). CLI `silo kill` → `session.close` (`silo-cli/src/main.rs:556`), `silo kill-server` → shutdown (`:587`). Closing the last app window quits the app (`silo-app/src/main.rs:160`); the server and its processes keep running |
 | Web | libghostty-vt has a WASM surface (`GHOSTTY/include/ghostty/vt/wasm.h`). iroh 1.3.0 browser support is unverified |
 
 ## 2. Decisions
@@ -46,9 +48,13 @@ byte-identical to the `.zig-cache/o/*/ghostty/vt/terminal.h` copy).
    to a connected app). The CLI (`silo do`) and later Lua/MCP/agent tooling are generated from `api.describe`.
 3. **Block status lives on the server**, in the server terminal's callbacks, kept exactly by the 7501 rules,
    sent as its own seq'd event, included in `session.view`, never bumping the session revision.
+   It includes `busy`: whether a program is running, decided by the server from OSC 133 marks and the PTY
+   foreground process group (§5.7).
 4. **Notifications:** the server broadcasts; each device decides (Settings globally, Hosts tab per host).
 5. **OSC 133:** the server's shell wrappers emit marks. Marks live in both terminals' grids (they are terminal
    state and travel in snapshots); command records (exit, duration, command line) live on the server.
+   **Closing a busy block asks first** (§7.5): one dialog on the closing device, enforced by the server, `--force`
+   in the CLI, and a setting to turn it off.
 6. **Sharing** is a grant with a bearer secret, carried in a `silos1…` ticket in a URL fragment that works for Silo
    and the future web client.
 7. **Agent safety:** full access by default; a fixed list of owner actions needs human approval in a Silo app;
@@ -150,7 +156,7 @@ pub fn need(method: &Method) -> Need   // exhaustive match: a new Method without
 
 | Need | Methods |
 |---|---|
-| Open | `server.info`, `api.list`, `api.describe`, `ping`, `events.subscribe`, `session.list` (filtered to visible sessions), `approval.answer` (handler checks approver eligibility, §9) |
+| Open | `server.info`, `api.list`, `api.describe`, `ping`, `events.subscribe`, `session.list` (filtered to visible sessions), `blocks.busy` (filtered to viewable blocks, §7.5), `approval.answer` (handler checks approver eligibility, §9) |
 | Offer | `host.offer` |
 | AppReply | `app.reply` |
 | view · block | `block.view`, `terminal.capture`, `terminal.size`, `data.connect`, `block.commands`, `terminal.command_output` |
@@ -408,6 +414,51 @@ pub struct AttentionCounts { pub working: u32, pub blocked: u32, pub done: u32, 
 - **Session switcher:** `AttentionCounts` per session as small badges.
 - **Dock badge:** blocked + error across all connected hosts (`NSApp.dockTile.badgeLabel`), cleared at 0.
 
+### 5.7 Busy blocks
+
+**Shape:** `BlockStatus` gains `#[serde(default)] busy: Option<Busy>`.
+
+```rust
+pub struct Busy {
+    pub process: String,          // "vim"; through `untrusted`, 64 chars
+    pub command: Option<String>,  // the OSC 133 command line, when the shell sent one
+    pub since: u64,               // unix ms when this busy period began
+}
+```
+
+**Rule** (`silo-server/src/status.rs` `busy()`, pure; inputs gathered by the actor). Only a `Running` terminal block
+can be busy; exited, restored and browser blocks never are. A running block is busy when **any** of these holds:
+
+1. **Marks:** the shell's last OSC 133 step is C (output start) with no D since. Marks are reset at A and at RIS.
+   This is the only way to see a builtin running (`read x`, a `while` loop with a builtin body), because then the
+   foreground pgrp is the shell itself.
+2. **Foreground:** `foreground_pid()` ≠ `pty.pid()` (the shell) and `process_name(fg)` is not harmless.
+3. **Command block** (`BlockHandle.command`): there is no shell, so `pty.pid()` is the program. The block is busy
+   while it runs, unless `process_name(fg or pid)` is harmless.
+
+Marks decide whenever the shell sends them; rule 2 still applies on top of them. A program running in the
+foreground may forward another shell's marks: `ssh` to a host with shell integration passes through the remote
+prompt's A. Without rule 2, a running `ssh` would then look idle.
+
+**Harmless names: decided, built-in and short.** Only shells: `sh bash zsh fish dash ksh mksh tcsh csh nu xonsh
+elvish login`, compared after stripping a leading `-`. A shell at its prompt has nothing in flight, so a nested
+`bash` or `zsh` doesn't prompt. Everything else does, including `ssh`, `less`, `man` and `tail -f`. A guess list
+is wrong for someone (an `ssh` session, a pager over a long query), and confirming costs one keystroke. There is no
+user-editable list in Phase 7; the deferred Lua hooks can add one later.
+
+**`process`:** the foreground process's name. When the foreground is the shell (rule 1 with a builtin), it is the
+first word of the command line, falling back to `"a command"`.
+
+**Freshness:**
+- Marks update `busy` at once.
+- The foreground check runs in `probe()` every 400 ms (`block.rs:1093`).
+- A close check asks each target actor directly (`BlockMsg::Busy {reply}`), which re-probes first, so a program
+  started 100 ms ago is never missed.
+
+**Publishing:**
+- A change in `busy` (start, end, or a different `process`) emits `block.status`, with no revision bump.
+- `since` survives a handoff through the `Checkpoint` status (§5.5). A restored block has no process and no `busy`.
+
 ## 6. Notifications
 
 - **Server:** broadcasts `block.attention` to every client with view on the block. It never decides.
@@ -492,6 +543,68 @@ The wrappers add marks after the user's files ran, interactive shells only:
   - `silo wait <block> [--timeout S]` waits for the next `block.command_finished` and exits with its code.
   - `silo run <block> -- <command…>` = `terminal.send` + wait + print `terminal.command_output`, then exit with the
     command's code. This is the agent-facing path.
+
+### 7.5 Confirm before closing a busy block
+
+**What asks:** closing a pane (`block.close`), a tab (`window.close`) or a session (`session.close`), and stopping
+or restarting the server (`server.shutdown`, `server.restart`). These are the actions that end processes.
+
+**Quit and closing an app window don't ask.** They end nothing: the server keeps every session running
+(`main.rs:160` only quits the app). Asking there would teach users to click through the dialog.
+
+**Protocol (additive):**
+- `block.close`, `window.close`, `session.close`, `server.shutdown` and `server.restart` gain
+  `#[serde(default)] force: bool`.
+- New method `blocks.busy {session_id?, window_id?, block_ids?} → {busy: Vec<BusyBlock>}`. All params omitted
+  means the whole server. Results are filtered to blocks the caller can view.
+
+  ```rust
+  pub struct BusyBlock {
+      pub block_id: BlockId, pub session_id: SessionId, pub window_id: WindowId,
+      pub session_name: String, pub block_title: String,   // block_title through `untrusted`
+      pub busy: Busy,
+  }
+  ```
+- `RpcError` (`control.rs:406`) gains `#[serde(default, skip_serializing_if = "Option::is_none")] data:
+  Option<Value>`.
+- **Refusal:** a close without `force` that would end busy blocks fails with code `busy`, the message and
+  `data: {busy: [BusyBlock]}`. Nothing is closed: the operation is all or nothing.
+  - Message for one block: `vim is running in 'api'`.
+  - Message for several: `3 programs are running: vim in 'api', cargo in 'build', ssh in 'prod'` (at most 3 named,
+    then `and N more`).
+- **Feature** `compat::feature::CLOSE_GUARD = "close_guard"`. The server enforces the guard only for clients that
+  advertise it, so older apps and CLIs close as they do today (PROTOCOL=1 additive rule, `compat.rs:1-14`).
+- **Single check site:** `silo-server/src/close_guard.rs` (new) `check(registry, targets, force, client) ->
+  Result<(), RpcError>`. `conn.rs` calls it before those five handlers, after the access check.
+
+**App flow** (`silo-app/src/close_confirm.rs`, new):
+
+1. Close Pane / Close Tab / Close Session / Stop Server / Restart Server call `blocks.busy` for their target.
+2. If anything is busy, **one** dialog opens. It lists every busy block (process, block title, session › tab
+   when it spans several; at most 8 rows, then "and N more") and shows the command line on hover. The buttons are
+   **Close** (default **Cancel**; ⌘⌫ confirms).
+   - For the destructive commands (`commands.rs:154`), this dialog *is* their confirmation, with the busy list
+     added. There is never a second dialog.
+   - With nothing busy, non-destructive closes go ahead at once, and destructive ones show today's confirmation.
+3. After confirming, the close is sent with `force: true`. Without confirmation it is sent with `force: false`.
+   If a block became busy in between, the server answers `busy` and the dialog opens again from `error.data`.
+
+**Setting:** Settings › General › "Confirm before closing running programs" (default on, a `settings_table.rs`
+row). When it's off, the app skips `blocks.busy` and always sends `force: true`. Destructive-command
+confirmations stay.
+
+**Another device closing:** the check runs in the caller's request, so the dialog appears on the device doing the
+closing: a phone, a second Mac, or a shared-link client with control rights. Other devices only see the block go
+away.
+
+**CLI:**
+- `silo kill <session>` and `silo kill-server` gain `--force`. The generated `silo do block.close` etc. get
+  `--force` from the schema.
+- **On `busy`:**
+  - If stdin is a TTY, the CLI prints the list and asks `Close anyway? [y/N]`, then retries with `force: true`.
+  - Otherwise it exits 1 with `silo: vim is running in 'api'; pass --force to close it anyway`.
+  - Agents get the same refusal unless they pass `--force` on purpose. This is a guard against accidents, not
+    security (decision 8).
 
 ## 8. Silo-to-Silo sharing
 
@@ -590,6 +703,8 @@ has merged.
   - **All** Phase 7 protocol: every method, event, field, data kind and feature in §3–§9.
   - Methods owned by later tasks are dispatched from `conn.rs` to `fn handle` in `silo-server/src/{app_bridge,
     status, prompts, layout_cmds}.rs`, created here as stubs returning `method_not_found`.
+  - `conn.rs` calls `close_guard::check` before the five close handlers (§7.5). `close_guard.rs` is created here
+    as a stub that always allows.
   - Grants, principals, the need table, stream checks, event visibility, approvals (server side) and the
     `devices.sealed` conversion.
 - **Acceptance:**
@@ -624,8 +739,10 @@ has merged.
 **P7-3: server terminal hooks (status, notifications, command records).** After P7-1.
 - **Files:** `silo-vt/src/{adapter.c, adapter.h, sys.rs, model.rs, lib.rs}`, `silo-server/src/{status.rs,
   prompts.rs, block.rs}`, `silo-server/src/registry.rs` (status in view/summaries, visibility).
-- **Work:** §5.1–§5.5 and §7.3, including `COMMAND_END`/`COMMANDS` frames, `block.commands`,
-  `terminal.command_output` and the RESET title fix.
+- **Work:**
+  - §5.1–§5.5 and §7.3, including `COMMAND_END`/`COMMANDS` frames, `block.commands`,
+    `terminal.command_output` and the RESET title fix;
+  - §5.7 busy detection: `status.rs` `busy()`, the harmless list, `BlockMsg::Busy`, and `busy` in `block.status`.
 - **Acceptance (unit + block tests):**
   - every rule in §5.2 has its own test (replace, subtree clear, app inheritance, prompt-start clear, exit clear,
     done kept until seen, 256 LRU eviction, RIS);
@@ -633,7 +750,13 @@ has merged.
   - progress ticks emit `block.status` without changing `revision`;
   - bidi/zero-width chars are stripped;
   - a hot-upgrade handoff keeps working records, and a crash restore keeps only done/error;
-  - after a snapshot attach, `COMMANDS` rows point at the D lines (checked against `capture`).
+  - after a snapshot attach, `COMMANDS` rows point at the D lines (checked against `capture`);
+  - busy, without marks (`bash --norc`): `sleep 30` → `busy{process:"sleep"}` within one probe; a nested `bash`
+    at its prompt → not busy;
+  - busy, with marks: C then `read x` (foreground = shell) → `busy{process:"read", command:"read x"}`; D clears it;
+  - a foreground child that prints `ESC]133;A` while running stays busy (the ssh case);
+  - a command block running `sleep` is busy, and one running `zsh` is not;
+  - busy changes emit `block.status` without changing `revision`.
 
 **P7-4: shell marks.** After P7-1, in parallel with P7-3.
 - **Files:** `silo-server/src/shell.rs`.
@@ -675,12 +798,42 @@ has merged.
 
 **P7-8: web spike.** Independent; start with P7-1.
 - **Files:** `spikes/iroh-wasm/**` (new, outside the workspace).
-- **Acceptance:** a written result in `docs/PHASE7.md` §12. A browser page dials a native `silo` server's
-  `EndpointAddr` (relay-only) with `silo/ctl/1`, completes `ClientHello` with a link secret, opens a second bi
-  stream for data, and decodes a snapshot with libghostty-vt WASM. Or: the specific blocker.
+- **Acceptance:** a written result in a new `docs/PHASE7.md` §13 "Spike result". A browser page dials a native
+  `silo` server's `EndpointAddr` (relay-only) with `silo/ctl/1`, completes `ClientHello` with a link secret, opens a
+  second bi stream for data, and decodes a snapshot with libghostty-vt WASM. Or: the specific blocker.
 
-Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → P7-5 → P7-6 and P7-7.
-**Verifiable headless:** P7-1, P7-3, P7-4, and P7-2's server side. P7-5/P7-6 need the GUI.
+**P7-9: close guard, server and CLI.** After P7-2 and P7-3.
+- **Files:** `silo-server/src/close_guard.rs` (replaces the P7-1 stub), `silo-cli/src/{main.rs, generated.rs}`.
+- **Work:**
+  - §7.5 server side: `blocks.busy`, the all-or-nothing `busy` refusal with `error.data`, enforcement gated on
+    `close_guard`;
+  - CLI `--force`, the TTY prompt, and the non-TTY refusal.
+- **Acceptance (server tests with real PTYs + CLI tests):**
+  - `block.close` on a block running `sleep 30` from a `close_guard` client gives `busy`, with `data.busy[0].busy.process
+    == "sleep"`, and the block is still there; `force: true` closes it;
+  - `window.close` on a tab with one busy and one idle pane gives `busy` and closes neither;
+  - `session.close`, `server.shutdown` and `server.restart` behave the same;
+  - a block that starts `sleep` 50 ms before the close is still caught (the fresh `BlockMsg::Busy` probe);
+  - a client without `close_guard` closes as today;
+  - `blocks.busy` from a block-scoped link lists only that block;
+  - `silo kill S` with stdin not a TTY exits 1, with stderr `silo: sleep is running in '…'; pass --force to close
+    it anyway`; `--force` closes it; under a pty, answering `y` closes it and the default (Enter) keeps it.
+
+**P7-10: close confirmation in the app.** After P7-6 and P7-9.
+- **Files:** `silo-app/src/{close_confirm.rs (new), palette.rs, workspace.rs, commands.rs, settings_table.rs,
+  settings_panel.rs}`.
+- **Acceptance (UI driver):**
+  - ⌘W on a pane running `vim` shows "vim is running in '<title>'"; Cancel keeps it, Close closes it;
+  - Close Tab with three busy panes shows one dialog listing all three;
+  - Close Session with nothing busy shows only today's confirmation; with `cargo build` running, one dialog that
+    includes it;
+  - with the setting off, ⌘W closes at once;
+  - closing from a second connected app (remote host) shows the dialog there and nothing on the first;
+  - the race path: the server's `busy` answer to a `force: false` close reopens the dialog;
+  - Quit and closing the last window never ask, and the processes are still running after relaunch.
+
+Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → (P7-5 ∥ P7-9) → P7-6 and P7-7 → P7-10.
+**Verifiable headless:** P7-1, P7-3, P7-4, P7-9, and P7-2's server side. P7-5, P7-6 and P7-10 need the GUI.
 
 ## 12. Risks
 
@@ -688,6 +841,10 @@ Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → P7-5 → P7-6 and P7-7.
   paste gesture for clipboard reads.
 - **Spoofable `role: app`:** any same-uid process can claim to be the app and approve itself. This is accepted by
   decision 8, and the hello is not the security boundary.
+- **Busy false positives:** a background job that takes the terminal (`fg`), or a program that `setpgid`s itself
+  into the foreground, counts as busy. That is correct: closing would kill it.
+  **False negatives:** a daemonized child that left the foreground group and a shell without marks running a
+  builtin aren't seen. Neither is protected today either.
 - **Per-client event filtering** serializes `sessions.changed` per principal class. Cheap at Silo's client counts;
   measured in P7-1.
 - **Row anchors** depend on the mirror being exact, which the differential fuzz test already gates (GAPS §1).
