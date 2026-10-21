@@ -990,6 +990,30 @@ has merged.
   - revoke closes it at once;
   - a block link can't `session.view`;
   - `silos1` and `silo1` tickets never parse as each other.
+- **As built** (where it differs from the plan above):
+  - `ShareTicket::new` keeps only the relay URLs of the server's address (§13). With relays off the ticket holds
+    the endpoint id alone, which only an address lookup (mDNS on the same network) can resolve, and the dialog
+    says the link works only for Silo on the same network (that path is not tested). `ShareTicket::parse` takes a
+    full link (any origin, ticket after `#`) or a bare ticket. `SHARE_ORIGIN` is a placeholder
+    (`https://nitishxyz.github.io/silo/share/`) until §10 Q2 is decided; only the fragment matters.
+    `protocol.json` pins the prefix, the postcard bytes and the text of a fixed ticket (`share_ticket`).
+  - `grant.create {kind: link}` needs the endpoint (it waits for the home relay like `pair.create`); without
+    remote access it fails `internal`.
+  - **`ServerHello.granted`** (additive, `{scope, rights, expires_at}`): set for connections admitted by a link or
+    token, so a shared link's client knows what it sees. The app shows a block link as one tab built from
+    `block.view` (`share::block_view`), since block principals can't `session.view`, and never creates a session
+    on a shared host.
+  - A link connection's label is `<client> · <link label>` ("Silo · Ana"); the sheet's "Who it's for" field is
+    the label. The titlebar shows non-owner watchers other than this app (links and tokens with view marked
+    "(view)"); the pane header's "watched by …" is not built.
+  - App: "Share Session…", "Share Pane…" (view/interact, 1 day/1 hour/7 days, Copy, QR, Stop Sharing for the
+    scope's links from `grant.list`; a paired device, which can't list grants, sees the link it just made).
+    "Open Shared Link…" opens Add Machine, whose ticket field takes a share link too; so does `app.open_share`.
+    Opened links are kept in `$SILO_HOME/shares.json` (0600: bearer secrets), one host per link
+    (`share:<secret digest>`), outside hosts.json; Rename/Remove Host work on them. A refused link (revoked,
+    expired) shows "Link revoked or expired" and is not retried.
+  - Acceptance: `silo-server/tests/share.rs` (two servers, relays off, loopback dial); ticket cross-parsing is
+    also in `silo-transport`'s unit tests.
 
 **P7-8: web spike.** Independent; start with P7-1.
 - **Files:** `spikes/iroh-wasm/**` (new, outside the workspace).
