@@ -256,9 +256,10 @@ async fn lost_commit_after_ready_keeps_programs() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The old server cannot read the successor's READY (`fault`): it may have
-/// been written, so the old server exits instead of re-adopting, and the
-/// successor alone serves the same programs and sessions.
+/// The old server cannot read the successor's READY (`fault`; READY did
+/// arrive): as READY may have been written, the old server exits instead
+/// of re-adopting, and the successor alone serves the same programs and
+/// sessions.
 async fn lost_ready_leaves_one_server(name: &str, fault: silo_server::handoff::ReadyFault) {
     let home = temp_home(name);
     let old = start_with(silo_server::Config { ready_fault: Some(fault), ..config(&home) }).await;
@@ -276,7 +277,13 @@ async fn lost_ready_leaves_one_server(name: &str, fault: silo_server::handoff::R
     // to it, queued until it accepts.
     let control = connect(&home).await;
     assert_same(&before, &view(&control, &created.session_id).await);
-    resume(&control, &created.block_id, &mut tail).await;
+    // Output the old server had not sent yet may be gone from the stream,
+    // so attach afresh rather than resume: the same program keeps counting.
+    let mut stream = DataStream::open(&control, &created.block_id, None).await.unwrap();
+    let mut tail = Tail { epoch: stream.welcome.epoch, next: stream.welcome.offset, text: String::new() };
+    assert!(pump(&mut stream, &mut tail, |t| t.numbers().len() > 20).await, "the program keeps running");
+    assert_consecutive(&tail.numbers());
+    drop(stream);
     control.call_value(Method::SessionRename { session_id: created.session_id.clone(), name: "renamed".into() }).await.unwrap();
     assert_eq!(view(&control, &created.session_id).await.session.name, "renamed");
 

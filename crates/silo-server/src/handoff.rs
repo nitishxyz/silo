@@ -238,7 +238,7 @@ enum Slot {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadyFault {
-    /// The read fails without consuming anything.
+    /// The read fails, once `READY` arrived, without consuming it.
     Error,
     /// The bytes read differ from `READY`.
     Corrupt,
@@ -263,6 +263,7 @@ enum Outcome {
 
 fn read_ready(sock: &mut UnixStream, fault: Option<ReadyFault>) -> Outcome {
     if fault == Some(ReadyFault::Error) {
+        let _ = wait_readable(sock);
         return Outcome::Unknown(io::Error::other("injected READY read error"));
     }
     let mut got = vec![0u8; READY.len()];
@@ -281,6 +282,23 @@ fn read_ready(sock: &mut UnixStream, fault: Option<ReadyFault>) -> Outcome {
         got[0] ^= 0xff;
     }
     if got == READY { Outcome::Ready } else { Outcome::Unknown(invalid("unexpected upgrade message")) }
+}
+
+/// Block until `sock` has data (or its end) to read, consuming nothing.
+#[allow(unsafe_code)]
+fn wait_readable(sock: &UnixStream) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd { fd: sock.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    loop {
+        // SAFETY: poll reads and writes one pollfd.
+        if unsafe { libc::poll(&raw mut pfd, 1, -1) } >= 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// Old side, after [`MAGIC`] was read: release every block, transfer them
@@ -638,7 +656,8 @@ mod tests {
         assert!(matches!(outcome(b"REA", None), Outcome::Unknown(_)), "partial");
         assert!(matches!(outcome(b"RESET\n", None), Outcome::Unknown(_)), "different");
         assert!(matches!(outcome(READY, Some(ReadyFault::Corrupt)), Outcome::Unknown(_)));
-        assert!(matches!(outcome(b"", Some(ReadyFault::Error)), Outcome::Unknown(_)), "even with nothing written");
+        assert!(matches!(outcome(READY, Some(ReadyFault::Error)), Outcome::Unknown(_)), "READY there but not read");
+        assert!(matches!(outcome(b"", Some(ReadyFault::Error)), Outcome::Unknown(_)), "a failed read proves nothing");
     }
 
     #[tokio::test]
