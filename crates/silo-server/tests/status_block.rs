@@ -101,6 +101,15 @@ impl Block {
         self.handle.send(BlockMsg::Input(text.as_bytes().to_vec()));
     }
 
+    /// A stream attached before any marks: the program waits on `read go`
+    /// and gets its line only after the actor has taken the attach.
+    fn attach_then_go(&self) -> UnboundedReceiver<Frame> {
+        let (tx, live) = unbounded_channel();
+        self.handle.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink: Sink::new(tx), remote: false })));
+        self.input("\n");
+        live
+    }
+
     /// The close check: a fresh probe.
     async fn busy(&self) -> Option<Busy> {
         let (reply, rx) = tokio::sync::oneshot::channel();
@@ -330,7 +339,7 @@ async fn a_final_state_right_after_progress_is_never_coalesced_away() {
     assert_eq!(done.progress.and_then(|p| p.percent), Some(20), "the last progress goes out with it");
 }
 
-const COMMANDS: &str = "i=0; while [ $i -lt 3 ]; do \
+const COMMANDS: &str = "read go; i=0; while [ $i -lt 3 ]; do \
     printf '\\033]133;A\\007$ \\033]133;B\\007cmd%s\\r\\n\\033]133;C\\007out%s\\r\\n\\033]133;D;%s\\007MARK-D%s\\r\\n' $i $i $i $i; \
     j=0; while [ $j -lt 4 ]; do echo filler$i.$j; j=$((j+1)); done; i=$((i+1)); done; printf TAIL; read l";
 
@@ -338,8 +347,7 @@ const COMMANDS: &str = "i=0; while [ $i -lt 3 ]; do \
 async fn commands_rows_after_a_snapshot_attach_point_at_the_d_lines() {
     let block = Block::sh("b-rows", COMMANDS);
     // A live stream sees each COMMAND_END right after its OUTPUT frame.
-    let (tx, mut live) = unbounded_channel();
-    block.handle.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink: Sink::new(tx), remote: false })));
+    let mut live = block.attach_then_go();
     block.wait_for("TAIL").await;
     let records = block.commands().await;
     assert_eq!(records.iter().map(|r| r.exit).collect::<Vec<_>>(), [Some(0), Some(1), Some(2)]);
@@ -401,9 +409,8 @@ async fn a_d_without_a_c_makes_no_record_and_never_flips_busy() {
         ("b-d-double", "A\\007$ \\033]133;C;cmdline_url=ls\\007out\\r\\n\\033]133;D;0\\007\\033]133;D;0\\007\\033]133;A\\007$ \\033]133;D;0", 1),
     ];
     for (id, marks, expected) in cases {
-        let block = Block::sh(id, &format!("printf '\\033]133;{marks}\\007DONE'; read l"));
-        let (tx, mut live) = unbounded_channel();
-        block.handle.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 7, resume: None, sink: Sink::new(tx), remote: false })));
+        let block = Block::sh(id, &format!("read go; printf '\\033]133;{marks}\\007DONE'; read l"));
+        let mut live = block.attach_then_go();
         block.wait_for("DONE").await;
         let records = block.commands().await;
         assert_eq!(records.len(), expected, "{id}: {records:?}");
