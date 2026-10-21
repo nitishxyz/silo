@@ -1639,9 +1639,9 @@ impl Actor {
         }
     }
 
-    /// Publish the status if it changed: state changes at once up to
-    /// [`Pacer::changes`], progress-only changes at most every
-    /// [`PROGRESS_INTERVAL`]; anything over that waits for `tick_status`,
+    /// Publish the status if it changed: state changes at once,
+    /// progress-only changes at most every [`PROGRESS_INTERVAL`], all of
+    /// them within [`Pacer::changes`]; anything over that waits for `tick_status`,
     /// so the last state always goes out. Never touches the session
     /// revision.
     fn publish_status(&mut self) {
@@ -1653,8 +1653,10 @@ impl Actor {
         }
         let states = |s: &BlockStatus| s.records.iter().map(|r| (r.id.clone(), r.state, r.kind)).collect::<Vec<_>>();
         let urgent = states(&shared) != states(&status) || shared.busy != status.busy;
-        let allowed =
-            if urgent { self.status.changes.allow(Instant::now()) } else { self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) };
+        // Every publish counts against the pace: steady progress (4/s)
+        // keeps the bucket full, so state changes still go out at once.
+        let due = urgent || self.status.sent_at.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL);
+        let allowed = due && self.status.changes.allow(Instant::now());
         if !allowed {
             self.status.pending = true;
             return;

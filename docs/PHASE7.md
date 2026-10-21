@@ -825,7 +825,8 @@ has merged.
     4/s. A 7501 attention's `title` is the record title (else its app), `body` its message.
   - **Flood bounds (review):** state changes (records' `(id, state, kind)` or `busy`) go out at once up to a token
     bucket of 8, refilled at 4/s, per block; over it they wait and `tick_status` publishes the latest, so the final
-    state always arrives. `block.attention` shares one bucket per block (burst 5, 1/s) for 7501 transitions and
+    state always arrives. Progress-only publishes count against the same bucket (at 4/s they keep it full).
+    `block.attention` shares one bucket per block (burst 5, 1/s) for 7501 transitions and
     OSC 9/777: an over-pace notification is dropped; an over-pace transition is held (the newest replaces it) and
     sent once the pace allows, only if its record is still in that state.
   - **Lost hook events (review):** when the vt queue overflowed (`lost`), the dropped oldest events may have been a

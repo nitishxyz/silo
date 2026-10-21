@@ -553,8 +553,8 @@ async fn a_status_flood_is_paced_and_its_last_state_still_arrives() {
     block.wait_for("FLOODED").await;
     let secs = started.elapsed().as_secs_f64();
     assert!(secs > 1.0, "the flood took a while: {secs}");
-    // 8 at once then 4/s (and one for busy, one for rounding); 5 at once then 1/s (and one for rounding).
-    assert!(f64::from(statuses) <= 10.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
+    // 8 at once then 4/s, busy included; 5 at once then 1/s (plus one each for rounding).
+    assert!(f64::from(statuses) <= 9.0 + 4.0 * secs, "{statuses} block.status in {secs:.1} s");
     assert!(attentions.len() as f64 <= 6.0 + secs, "{} block.attention in {secs:.1} s: {attentions:?}", attentions.len());
 }
 
