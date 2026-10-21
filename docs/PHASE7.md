@@ -614,13 +614,15 @@ away.
 - **Ticket:** `silos1` + lowercase unpadded base32 of postcard `ShareTicket {addr: EndpointAddr, secret: [u8; 32],
   vt: String}`. `1` is not a base32 digit, so it can't be confused with a `silo1` pairing ticket. `vt` lets a web
   loader pick the libghostty build before connecting (VT must match exactly, `compat.rs:48`).
+  - **Decided (§13):** `addr` carries the endpoint id and **only the relay URL**, no direct addresses: a browser
+    can't use them and a shared link would leak them. Silo apps still move to a direct path after dialing.
 - **Link:** `https://<SHARE_ORIGIN>/#silos1…`. The ticket is in the fragment, so it never reaches an HTTP server.
   - Silo accepts the full link or the bare ticket in "Open Shared Link…" (`app.open_share`). macOS can't claim
     https links without a domain association, so there is no `silo://` scheme.
   - The web client (deferred) reads `location.hash`.
 - **Redeeming:** the client dials `addr` with its own endpoint, `ClientHello.grant = base32(secret)`, `role: app`.
-  Link grants are **bearer and reusable** until expiry or revocation, because a browser endpoint changes per page
-  load.
+  Link grants are **bearer secrets, reusable** (not single-use) until expiry or revocation, because a browser
+  endpoint changes per page load (decided, §13).
   - The shared session appears in the app as a host entry marked "shared", showing only what the grant covers.
   - Session shares see the session; block shares see one block, through `block.view` and its data stream.
 - **Who is watching:** `SessionView` gains `#[serde(default)] watchers: Vec<Watcher {client_id, label, principal:
@@ -668,7 +670,11 @@ away.
 
 ## 10. Open questions
 
-1. **No app connected, owner action needs approval (user to decide).**
+1. **No app connected, owner action needs approval. Decided: B, restricted** (below). With no app able to approve,
+   the server answers `confirm` (`data: {approval, summary}`) only to a caller outside every pane of this server
+   (§9 peer-pid ancestry finds no block) that has a controlling tty. The CLI asks `Allow? [y/N]` on `/dev/tty`,
+   answers with `approval.answer`, and repeats the call, which consumes that one confirmation. Anyone else gets
+   `forbidden` "Approve in Silo: no Silo app is connected".
    - **A.** Fail: `forbidden` "Approve in Silo: no Silo app is connected".
    - **B.** Fall back to a y/N confirmation the CLI reads from `/dev/tty`.
 
@@ -679,7 +685,7 @@ away.
      (`silo-cli/src/main.rs:793-803`), and so does `silo join` (`silo-cli/src/link.rs:65`). So does `silo pair` on
      a headless server.
 
-   **Recommendation: B, restricted.** Allow the tty confirmation only when the calling process is **not** inside
+   **Chosen: B, restricted.** Allow the tty confirmation only when the calling process is **not** inside
    any pane of this server (the §9 peer-pid ancestry check finds no block) and has a controlling tty. Otherwise A.
    That keeps SSH setup working and closes the in-pane agent case. Residual risk: an agent that SSHes to another
    host and runs `silo` there answers that host's prompt itself.
@@ -717,6 +723,17 @@ has merged.
   - an existing `devices.sealed` home opens with the same devices;
   - `pair.create` from a non-app client emits `approval.requested` and resolves on `approval.answer`;
   - `protocol.json` is updated additively; `cargo test -p silo-proto -p silo-server -p silo-cli` passes.
+- **As built** (where it differs from the plan above):
+  - `force` on `block.close`/`window.close`/`session.close`/`server.shutdown` is left to P7-9 (`server.restart` has
+    it): existing callers construct those variants, and the field is additive whenever it lands.
+  - `COMMAND_END`/`COMMANDS` kinds and their payloads (`data::{CommandEnd, CommandAnchor}`) are pinned in
+    `protocol.json`; `ServerData` decodes them with P7-3/P7-6, so clients skip them as unknown until then.
+  - The view-only rule is enforced where data frames are read (`conn.rs`); `Attach` is unchanged.
+  - Upgrade approval is asked once `UPGRADE_BINARY` arrives (a build check asks nothing), and an upgrade goes ahead
+    as before when no app can approve: headless hosts keep `silo remote upgrade`.
+  - Approvals are on in `silo server` (`Config::require_approval`), off for embedded servers (tests).
+  - `grant.create {kind: link}` returns `ticket: null` until P7-7 adds `ShareTicket`; the secret is returned.
+  - Block-scoped principals list no sessions in `session.list`.
 
 **P7-2: one API.** After P7-1. Runs in parallel with P7-3 and P7-4.
 - **Files:** `silo-proto/src/layout_ops.rs (new)`; `silo-server/src/{app_bridge.rs, layout_cmds.rs}`;
