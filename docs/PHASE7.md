@@ -1131,8 +1131,9 @@ has merged.
     server agreed, or the call failed with anything but `busy`: a bootout after a refusal would end what the user
     just kept. `paused` is set in the reply's task, before the connection drops, so the loop does not start the
     server again. Meanwhile the status says "Stopping server…".
-  - Stop/Restart from Settings › Server keep the panel's own confirmation, so a busy server shows the dialog after
-    it (from the refusal), above the panel. The palette's Stop/Restart/Close Session ask first and never show two.
+  - Stop/Restart from Settings › Server ask first too (`SettingsEvent::AskServer`): with something running the
+    dialog opens above the panel; otherwise the panel shows its own inline confirmation. Like the palette's
+    Stop/Restart/Close Session, they never show two.
   - The dialog: first line `vim is running in 'api'` (several: `3 programs are running`), then for several one row
     each (`process in 'title'`, plus `session › tab` when the list spans sessions, the tab when it spans tabs, at
     most 8, then `and N more`), then what closing does (`Closing the tab ends them.`). Cancel is the default

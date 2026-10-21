@@ -507,6 +507,22 @@ impl Workspace {
                 Ok(name) => Outcome::noted(format!("Removed host “{name}”.")),
                 Err(error) => Outcome::failed(error),
             },
+            // Something running: the close dialog is the confirmation;
+            // else the panel's own.
+            SettingsEvent::AskServer(action) => {
+                let action = *action;
+                let command = if action == ServerAction::Stop { Command::StopServer } else { Command::RestartServer };
+                let ask = move |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
+                    if let Some(modal) = &this.settings {
+                        modal.panel.update(cx, |panel, cx| panel.confirm_server(action, cx));
+                    }
+                };
+                match self.close_target_of(command).filter(|_| self.confirm_close()) {
+                    Some(target) => self.when_idle(target, window, cx, ask),
+                    None => ask(self, window, cx),
+                }
+                return None;
+            }
             // The panel asked for confirmation already; run the commands
             // directly instead of through the palette's confirm step.
             SettingsEvent::Server(action) => {

@@ -372,6 +372,10 @@ pub enum SettingsEvent {
     RemoveHost(String),
     OpenServerLog,
     Server(ServerAction),
+    /// Restart… / Stop…: the workspace asks what runs first, then shows
+    /// either its close dialog or the panel's confirmation
+    /// ([`SettingsPanel::confirm_server`]), never both.
+    AskServer(ServerAction),
     /// `pair.create`: show a new pairing ticket.
     PairDevice,
     RevokeDevice(String),
@@ -667,6 +671,12 @@ impl SettingsPanel {
     pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.search.read(cx).focus.clone();
         focus.focus(window, cx);
+    }
+
+    /// Ask to confirm a server action inline (nothing is running).
+    pub fn confirm_server(&mut self, action: ServerAction, cx: &mut Context<Self>) {
+        self.pending_server = Some(action);
+        cx.notify();
     }
 
     /// Show `setting`'s page scrolled to it.
@@ -1741,13 +1751,8 @@ impl SettingsPanel {
                             ("settings-server-action", action as usize),
                             label,
                             ButtonKind::Secondary,
-                            move |this, cx| {
-                                if action == ServerAction::Start {
-                                    cx.emit(SettingsEvent::Server(action));
-                                } else {
-                                    this.pending_server = Some(action);
-                                    cx.notify();
-                                }
+                            move |_, cx| {
+                                cx.emit(if action == ServerAction::Start { SettingsEvent::Server(action) } else { SettingsEvent::AskServer(action) });
                             },
                             cx,
                         ));
