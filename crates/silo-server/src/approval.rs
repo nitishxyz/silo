@@ -552,9 +552,6 @@ mod tests {
             }
         };
         let shell = pty.pid();
-        let (shell_info, orphan_info) = (process(shell).unwrap(), process(orphan).unwrap());
-        let panes: HashMap<i32, BlockId> = [(shell, "b".to_owned())].into();
-        let ttys: HashMap<u64, BlockId> = [(shell_info.tty.expect("the pane's terminal"), "b".to_owned())].into();
         let reaches = |mut pid: i32| {
             for _ in 0..64 {
                 if pid == shell {
@@ -567,7 +564,16 @@ mod tests {
             }
             false
         };
-        assert!(!reaches(orphan), "reparented away from the shell");
+        // The subshell prints the pid before it exits, so the orphan may
+        // still be its child for a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while reaches(orphan) {
+            assert!(std::time::Instant::now() < deadline, "never reparented away from the shell");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (shell_info, orphan_info) = (process(shell).unwrap(), process(orphan).unwrap());
+        let panes: HashMap<i32, BlockId> = [(shell, "b".to_owned())].into();
+        let ttys: HashMap<u64, BlockId> = [(shell_info.tty.expect("the pane's terminal"), "b".to_owned())].into();
         assert_eq!(orphan_info.tty, shell_info.tty);
         assert_eq!(origin_in(orphan, &panes, &ttys, process), (Some("b".into()), false));
         // SAFETY: signalling the test's own children.
