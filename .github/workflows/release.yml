@@ -132,7 +132,7 @@ jobs:
       - name: Build silo
         if: matrix.os == 'linux'
         run: cargo build -p silo-cli --release --locked
-      # Builds silo, silo-menubar, the CEF helper and the app into
+      # Builds silo, silo-menubar, otto-silo, the CEF helper and the app into
       # target/Silo.app (Developer ID signed, hardened runtime).
       - name: Build Silo.app
         if: matrix.os == 'macos'

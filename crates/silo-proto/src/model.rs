@@ -329,6 +329,8 @@ pub enum BlockKind {
     #[default]
     Terminal,
     Browser,
+    /// An otto session shown as a chat; no process.
+    Agent,
     /// A block kind of a newer server: shown as unsupported.
     #[serde(other)]
     Unknown,
@@ -384,6 +386,20 @@ pub struct BlockInfo {
     /// Engine state; `Some` exactly when `kind` is [`BlockKind::Browser`].
     #[serde(default)]
     pub browser: Option<BrowserState>,
+    /// Shown otto session; `Some` exactly when `kind` is [`BlockKind::Agent`].
+    #[serde(default)]
+    pub agent: Option<AgentState>,
+}
+
+/// Server-held state of an agent block; the app sets it with `agent.set`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentState {
+    /// The shown otto session; `None` until the first prompt.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The otto session title; empty before the first prompt.
+    #[serde(default)]
+    pub title: String,
 }
 
 /// A client name up to its first ` (`, without a trailing version:

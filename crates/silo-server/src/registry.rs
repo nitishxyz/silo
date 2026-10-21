@@ -15,8 +15,8 @@ use silo_proto::{
     data::ticket_hex,
     kind,
     model::{
-        AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle, SessionId,
-        SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
+        AgentState, AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle,
+        SessionId, SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
     },
     text::{MAX_TITLE, untrusted},
 };
@@ -25,6 +25,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use crate::{
     access::{On, Principal, device_grant, rights_on, sees_block, sees_session},
+    agent::AgentBlock,
     block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms},
     browser::{Block, BrowserBlock, Report},
 };
@@ -423,6 +424,7 @@ impl Registry {
                         disowned.push(block_id.clone());
                     }
                 }
+                Block::Agent(_) => {}
             }
         }
         for block_id in disowned {
@@ -635,18 +637,16 @@ impl Registry {
         crate::status::counts(statuses.iter().flat_map(|s| &s.records))
     }
 
-    /// A terminal block's status, when it has any.
+    /// A terminal or agent block's status, when it has any.
     pub fn block_status(&self, id: &str) -> Option<BlockStatus> {
-        let Some(Block::Terminal(handle)) = self.blocks.get(id) else { return None };
-        let status = handle.status.lock().ok()?.clone();
+        let status = self.blocks.get(id)?.status()?;
         (!status.records.is_empty() || status.progress.is_some() || status.busy.is_some()).then_some(status)
     }
 
     /// A block published a new status: send it, and the session summaries
     /// when its counts changed (never on progress alone; no revision bump).
     fn status_changed(&mut self, id: &str) {
-        let Some(Block::Terminal(handle)) = self.blocks.get(id) else { return };
-        let Ok(status) = handle.status.lock().map(|s| s.clone()) else { return };
+        let Some(status) = self.blocks.get(id).and_then(Block::status) else { return };
         self.emit(Event::BlockStatus { status });
         let Ok((si, _)) = self.locate(id) else { return };
         let counts = self.attention_counts(&self.sessions[si]);
@@ -687,6 +687,16 @@ impl Registry {
         match self.blocks.get(id) {
             Some(Block::Terminal(handle)) => Ok(handle),
             Some(Block::Browser(_)) => Err(RpcError::bad_request(format!("block {id} is a browser"))),
+            Some(Block::Agent(_)) => Err(RpcError::bad_request(format!("block {id} is an agent"))),
+            None => Err(RpcError::not_found(format!("block {id}"))),
+        }
+    }
+
+    /// An agent block; `bad_request` for another kind.
+    fn agent(&mut self, id: &str) -> Result<&mut AgentBlock, RpcError> {
+        match self.blocks.get_mut(id) {
+            Some(Block::Agent(agent)) => Ok(agent),
+            Some(_) => Err(RpcError::bad_request(format!("block {id} is not an agent"))),
             None => Err(RpcError::not_found(format!("block {id}"))),
         }
     }
@@ -695,7 +705,7 @@ impl Registry {
     fn browser(&mut self, id: &str) -> Result<&mut BrowserBlock, RpcError> {
         match self.blocks.get_mut(id) {
             Some(Block::Browser(browser)) => Ok(browser),
-            Some(Block::Terminal(_)) => Err(RpcError::bad_request(format!("block {id} is not a browser"))),
+            Some(_) => Err(RpcError::bad_request(format!("block {id} is not a browser"))),
             None => Err(RpcError::not_found(format!("block {id}"))),
         }
     }
@@ -758,7 +768,13 @@ impl Registry {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         };
+        if new.kind == BlockKind::Agent {
+            let info = BlockInfo { size: TermSize::default(), ..info };
+            self.blocks.insert(id.clone(), Block::Agent(Box::new(AgentBlock::new(info, AgentState::default()))));
+            return Ok(id);
+        }
         if new.kind == BlockKind::Browser {
             let url = browser_url(new.url.unwrap_or("about:blank"))
                 .ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
@@ -1186,6 +1202,7 @@ impl Registry {
                 }
                 (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, label.clone(), mode),
                 (Some(Block::Browser(browser)), None) => browser.disown(client_id),
+                (Some(Block::Agent(_)), _) => false,
                 (None, _) => return Err(RpcError::not_found(format!("block {id}"))),
             };
             if changed {
@@ -1212,6 +1229,34 @@ impl Registry {
     pub fn browser_report(&mut self, client_id: ClientId, block_id: &str, report: Report) -> Result<(), RpcError> {
         self.browser(block_id)?.report(client_id, report)?;
         self.block_changed(block_id);
+        Ok(())
+    }
+
+    /// `agent.set`: the shown otto session and its title.
+    pub fn agent_set(&mut self, block_id: &str, session_id: Option<String>, title: Option<String>) -> Result<(), RpcError> {
+        if self.agent(block_id)?.set(session_id, title)? {
+            self.block_changed(block_id);
+            if let Ok((si, _)) = self.locate(block_id) {
+                self.session_changed(si);
+            }
+        }
+        Ok(())
+    }
+
+    /// `block.report` on an agent block.
+    pub fn agent_report(&mut self, block_id: &str, report: crate::status::Report) -> Result<(), RpcError> {
+        if let Some((reason, title, body)) = self.agent(block_id)?.report(report, block::now_ms()) {
+            self.handle_note(Note::Attention { block_id: block_id.to_owned(), reason, title, body, at: block::now_ms() });
+        }
+        self.status_changed(block_id);
+        Ok(())
+    }
+
+    /// `block.status_seen` on an agent block.
+    pub fn agent_seen(&mut self, block_id: &str, ids: Option<&[String]>) -> Result<(), RpcError> {
+        if self.agent(block_id)?.seen(ids) {
+            self.status_changed(block_id);
+        }
         Ok(())
     }
 }
@@ -1471,6 +1516,7 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         };
         let config = spawn_config("b", &["/bin/sh".into(), "-c".into(), script.into()], None);
         let mut handle = block::spawn(info, &config, notes.clone()).unwrap();

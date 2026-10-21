@@ -360,7 +360,14 @@ pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<
                 message: params.message.unwrap_or_default(),
             };
             let (reply, rx) = tokio::sync::oneshot::channel();
-            server.registry.lock().unwrap().block(&params.block_id)?.send(BlockMsg::Report { report, reply });
+            {
+                let mut reg = server.registry.lock().unwrap();
+                if let Some(crate::browser::Block::Agent(_)) = reg.blocks.get(&params.block_id) {
+                    reg.agent_report(&params.block_id, report)?;
+                    return serde_json::to_value(Empty {}).map_err(RpcError::internal);
+                }
+                reg.block(&params.block_id)?.send(BlockMsg::Report { report, reply });
+            }
             rx.await.map_err(|_| RpcError::not_found(format!("block {}", params.block_id)))?;
             serde_json::to_value(Empty {}).map_err(RpcError::internal)
         }
@@ -368,8 +375,13 @@ pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<
             let (reply, rx) = tokio::sync::oneshot::channel();
             {
                 let mut reg = server.registry.lock().unwrap();
-                if let Some(crate::browser::Block::Browser(browser)) = reg.blocks.get_mut(&params.block_id) {
-                    if browser.notifications.allow(Instant::now()) {
+                let pacer = match reg.blocks.get_mut(&params.block_id) {
+                    Some(crate::browser::Block::Browser(browser)) => Some(&mut browser.notifications),
+                    Some(crate::browser::Block::Agent(agent)) => Some(&mut agent.attention),
+                    _ => None,
+                };
+                if let Some(pacer) = pacer {
+                    if pacer.allow(Instant::now()) {
                         reg.handle_note(crate::block::Note::Attention {
                             block_id: params.block_id,
                             reason: AttentionReason::Notification,
@@ -387,7 +399,14 @@ pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<
         }
         Method::BlockStatusSeen { block_id, ids } => {
             let (reply, rx) = tokio::sync::oneshot::channel();
-            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::StatusSeen { ids, reply });
+            {
+                let mut reg = server.registry.lock().unwrap();
+                if let Some(crate::browser::Block::Agent(_)) = reg.blocks.get(&block_id) {
+                    reg.agent_seen(&block_id, ids.as_deref())?;
+                    return serde_json::to_value(Empty {}).map_err(RpcError::internal);
+                }
+                reg.block(&block_id)?.send(BlockMsg::StatusSeen { ids, reply });
+            }
             rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?;
             serde_json::to_value(Empty {}).map_err(RpcError::internal)
         }

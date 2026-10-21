@@ -22,6 +22,10 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 data-encoding.workspace = true
+otto-client.workspace = true
+otto-proto.workspace = true
+otto-llm = { workspace = true, default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
 idna = "1"
 qrcode = { version = "0.14", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }

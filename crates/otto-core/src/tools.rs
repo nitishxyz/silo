@@ -80,7 +80,6 @@ pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::Too
 }
 pub(crate) fn tools(cx: Arc<Context>, loaded: &BTreeSet<String>) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = [("skill","Load a skill by name",json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
-     ("todos","Replace or inspect this session's todo list",json!({"type":"object","properties":{"items":{"type":"array","items":{"type":"object"}}}})),
      ("subagent","Delegate, list, status, message, or stop child agents",json!({"type":"object","properties":{"action":{"type":"string","enum":["delegate","list","status","message","stop"]},"task":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"string"},"delivery":{"type":"string","enum":["queue","interrupt"]}},"required":["action"]}))]
     .into_iter().map(|(name,description,input_schema)|Arc::new(SessionTool{spec:ToolSpec{name:name.into(),description:description.into(),input_schema,output_schema:None,effects:if name=="subagent"{Effects::PROCESS}else{Effects::READ},sensitive:vec![],loading:Default::default(),mode:Default::default(),presentations:vec![],source:Default::default(),exclusive:name=="subagent"},cx:cx.clone()}) as Arc<dyn Tool>).collect();
     let pending: Vec<_> = deferred(&cx).into_iter().filter(|s| !loaded.contains(&s.name)).collect();
@@ -160,22 +159,6 @@ impl Tool for SessionTool {
                     .find(|s| s.name == name)
                     .ok_or_else(|| ToolError::invalid("unknown skill"))?;
                 Ok(ToolOutput::text(tokio::fs::read_to_string(skill.path).await.map_err(|e| ToolError::failed(e.to_string()))?))
-            }
-            "todos" => {
-                if input.get("items").is_some_and(|items| !items.is_array()) {
-                    return Err(ToolError::invalid("items must be an array"));
-                }
-                let todos = self
-                    .cx
-                    .state(move |s| {
-                        if let Some(items) = input.get("items") {
-                            s.todos = items.clone();
-                        }
-                        s.todos.to_string()
-                    })
-                    .await
-                    .map_err(|e| ToolError::failed(e.to_string()))?;
-                Ok(ToolOutput::text(todos))
             }
             _ => crate::subagents::call(&self.cx, input).await.map(ToolOutput::text).map_err(|e| ToolError::failed(e.to_string())),
         }

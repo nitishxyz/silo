@@ -11,8 +11,8 @@
 //! 2. old -> successor: frames of `u32 LE length` + bytes:
 //!    - one JSON [`Transfer`] (tree, block infos, fd index);
 //!    - one [`crate::persist::encode`]d checkpoint per `Transfer::blocks`
-//!      entry, in order (browser blocks travel as `Transfer::browsers`
-//!      state only).
+//!      entry, in order (browser and agent blocks travel as
+//!      `Transfer::browsers` state only).
 //! 3. old -> successor: the PTY masters and PTY host status pipes via
 //!    `SCM_RIGHTS`, in messages of at most [`FDS_PER_MESSAGE`] descriptors,
 //!    each with a 4-byte `u32 LE` payload holding its descriptor count
@@ -74,7 +74,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     Server,
     block::{self, BlockHandle, Handoff, Note},
-    browser::{Block, BrowserBlock},
+    browser::Block,
     persist,
     registry::Session,
 };
@@ -93,7 +93,7 @@ pub struct Transfer {
     pub server_id: String,
     pub sessions: Vec<Session>,
     pub blocks: Vec<Record>,
-    /// Browser blocks: no process, so their info is all there is.
+    /// Browser and agent blocks: no process, so their info is all there is.
     pub browsers: Vec<BlockInfo>,
 }
 
@@ -317,7 +317,7 @@ pub(crate) async fn give(
 ) -> anyhow::Result<Given> {
     let (handles, browsers, sessions, mut parked) = {
         let mut reg = server.registry.lock().unwrap();
-        // Browsers stay registered: mutations are refused while upgrading.
+        // Browsers and agents stay registered: mutations are refused while upgrading.
         let terminals = reg.blocks.extract_if(|_, b| matches!(b, Block::Terminal(_)));
         let handles: Vec<_> = terminals.filter_map(|(id, b)| b.into_terminal().map(|h| (id, h))).collect();
         let browsers = reg.blocks.values().filter_map(Block::info).collect::<Vec<_>>();
@@ -488,7 +488,7 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
     let (lock, listener) = (std::fs::File::from(lock), std::os::unix::net::UnixListener::from(listener));
     listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(listener)?;
-    let browsers = transfer.browsers.into_iter().map(|info| Ok((info.id.clone(), Block::Browser(Box::new(BrowserBlock::restore(info)?)))));
+    let browsers = transfer.browsers.into_iter().map(|info| Ok((info.id.clone(), Block::restore(info)?)));
     let browsers = browsers.collect::<anyhow::Result<Vec<_>>>()?;
     let blocks = adopt(transfer.blocks, checkpoints, fds, notes).await?;
     let blocks = commit(sock, blocks).await;
@@ -687,6 +687,7 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         };
         let config = silo_pty::SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() };
         let handle = block::spawn(info.clone(), &config, notes.clone()).unwrap();

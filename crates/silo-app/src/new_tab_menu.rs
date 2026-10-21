@@ -29,9 +29,10 @@ pub struct TabKind {
     pub command: Command,
 }
 
-pub const TAB_KINDS: [TabKind; 2] = [
+pub const TAB_KINDS: [TabKind; 3] = [
     TabKind { kind: BlockKind::Terminal, label: "Terminal", icon: "terminal", command: Command::NewTerminalTab },
     TabKind { kind: BlockKind::Browser, label: "Browser", icon: "globe", command: Command::NewBrowserTab },
+    TabKind { kind: BlockKind::Agent, label: "Agent", icon: crate::agent_block::ICON, command: Command::NewAgentTab },
 ];
 
 /// The terminal row: ⌘T's kind when nothing (or no known kind) is focused.
@@ -180,7 +181,8 @@ impl Workspace {
     }
 
     fn row_supported(&self, row: &Row) -> bool {
-        row.command().feature().is_none_or(|f| self.host_supports(f))
+        let command = row.command();
+        command.feature().is_none_or(|f| self.host_supports(f)) && (command != Command::NewAgentTab || self.agents_here())
     }
 
     /// Open row `index`; a row the host can't open stays, saying so.
@@ -321,6 +323,7 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         }
     }
 
@@ -329,6 +332,7 @@ mod tests {
     }
 
     const BROWSER: usize = 1;
+    const AGENT: usize = 2;
 
     /// The commands of `query`'s rows, in order.
     fn commands(query: &str) -> Vec<Command> {
@@ -337,9 +341,10 @@ mod tests {
 
     #[test]
     fn new_tab_opens_the_focused_kind() {
-        let blocks = [block("t", BlockKind::Terminal), block("b", BlockKind::Browser), block("u", BlockKind::Unknown)];
+        let blocks = [block("t", BlockKind::Terminal), block("b", BlockKind::Browser), block("a", BlockKind::Agent), block("u", BlockKind::Unknown)];
         assert_eq!(row(Some("t"), &blocks), Command::NewTerminalTab);
         assert_eq!(row(Some("b"), &blocks), Command::NewBrowserTab);
+        assert_eq!(row(Some("a"), &blocks), Command::NewAgentTab);
         assert_eq!(row(None, &blocks), Command::NewTerminalTab, "nothing focused");
         assert_eq!(row(Some("t"), &[]), Command::NewTerminalTab, "no window");
         assert_eq!(row(Some("u"), &blocks), Command::NewTerminalTab, "a kind no tab starts with");
@@ -349,6 +354,7 @@ mod tests {
     fn every_kind_is_a_row_opening_it() {
         assert_eq!(TAB_KINDS[TERMINAL].kind, BlockKind::Terminal);
         assert_eq!(TAB_KINDS[BROWSER].kind, BlockKind::Browser);
+        assert_eq!(TAB_KINDS[AGENT].kind, BlockKind::Agent);
         let blocks: Vec<BlockInfo> = TAB_KINDS.iter().map(|t| block(t.label, t.kind)).collect();
         for (index, t) in TAB_KINDS.iter().enumerate() {
             // ⌘T on a block of this kind and ↩ on the preselected row
@@ -372,7 +378,8 @@ mod tests {
 
     #[test]
     fn typing_filters_and_selects_the_best_match() {
-        assert_eq!(rows(""), vec![Row::Kind(TERMINAL, Vec::new()), Row::Kind(BROWSER, Vec::new())]);
+        assert_eq!(rows(""), vec![Row::Kind(TERMINAL, Vec::new()), Row::Kind(BROWSER, Vec::new()), Row::Kind(AGENT, Vec::new())]);
+        assert_eq!(commands("age"), vec![Command::NewAgentTab]);
         #[allow(clippy::single_range_in_vec_init, reason = "one highlighted run")]
         let highlighted = vec![0..2];
         assert_eq!(rows("br"), vec![Row::Kind(BROWSER, highlighted)], "matched range highlighted");

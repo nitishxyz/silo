@@ -200,6 +200,7 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
         owner_name: None,
         pid: None,
         browser: None,
+        agent: None,
     };
     let spec = counter();
     let config = silo_pty::SpawnConfig { command: spec.command.iter().map(Into::into).collect(), ..Default::default() };

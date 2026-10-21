@@ -190,7 +190,7 @@ impl Runtime {
             otto_tools::registry::tools_for_family(&family)
                 .iter()
                 .map(|t| t.spec().name.clone())
-                .chain(["skill".into(), "todos".into(), "subagent".into()])
+                .chain(["skill".into(), "subagent".into()])
                 .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
                 .collect()
         } else {

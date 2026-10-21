@@ -21,7 +21,8 @@ impl Services {
         Ok(Self { providers, logins: Default::default(), script: crate::script::load()? })
     }
     fn statuses(&self) -> Result<Vec<AuthStatus>, RpcError> {
-        self.providers
+        let mut statuses = self
+            .providers
             .status()
             .into_iter()
             .map(|status| {
@@ -36,12 +37,18 @@ impl Services {
                     account: status.account_id,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        // The test script model counts as a signed-in provider.
+        if self.script.is_some() {
+            statuses.push(AuthStatus { provider: "test".into(), mode: AuthMode::ApiKey, signed_in: true, expires_at: None, account: None });
+        }
+        Ok(statuses)
     }
     fn status_for(&self, provider: &str) -> Result<AuthStatus, RpcError> {
         self.statuses()?.into_iter().find(|s| s.provider == provider).ok_or_else(|| RpcError::not_found(provider))
     }
     fn models(&self, provider: Option<&str>) -> Vec<ModelInfo> {
+        let script = self.script.as_ref().filter(|_| provider.is_none_or(|p| p == "test")).map(|s| s.info().clone());
         self.providers
             .status()
             .into_iter()
@@ -50,6 +57,7 @@ impl Services {
                 self.providers
                     .list_models(Some(&s.provider), Some(if s.mode.as_deref() == Some("subscription") { Mode::Subscription } else { Mode::ApiKey }))
             })
+            .chain(script)
             .collect()
     }
 }

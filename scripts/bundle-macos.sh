@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build target/Silo.app: the GPUI client, the `silo` server/CLI binary (as
-# silo-server) and the silo-menubar agent in Contents/MacOS.
+# silo-server), the silo-menubar agent and the otto-silo daemon (agent
+# blocks) in Contents/MacOS.
 #
 # Signed ad-hoc, or with SILO_SIGN_IDENTITY (a Developer ID Application
 # identity in the keychain) under the hardened runtime with secure
@@ -23,7 +24,7 @@ cargo_flags=()
 app_flags=(--no-default-features)
 [[ -n "$features" ]] && app_flags+=(--features "$features")
 
-cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar
+cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar -p otto-cli --bins
 cargo build "${cargo_flags[@]}" -p silo-web --bin silo-web-helper
 cargo build "${cargo_flags[@]}" -p silo-app "${app_flags[@]}"
 
@@ -37,6 +38,8 @@ cp "$out/silo" "$app/Contents/MacOS/silo-server"
 # copies of both out of <SILO_HOME>/runtime/<build> as `silo` and
 # `silo-menubar`, so the bundle can be replaced while they run.
 cp "$out/silo-menubar" "$app/Contents/MacOS/silo-menubar"
+# The otto daemon agent blocks connect to (started by the app).
+cp "$out/otto-silo" "$app/Contents/MacOS/otto-silo"
 # Browser engine: CEF framework + four helper apps (copies of
 # silo-web-helper), as silo-web's README describes.
 cef="${CEF_PATH:-$("$root/scripts/fetch-cef.sh")}"
@@ -132,6 +135,7 @@ for helper in "${helpers[@]}"; do
 done
 sign "$app/Contents/MacOS/silo-server"
 sign "$app/Contents/MacOS/silo-menubar"
+sign "$app/Contents/MacOS/otto-silo"
 sign --entitlements "$devices" "$app"
 codesign --verify --deep --strict "$app"
 echo "built $app"

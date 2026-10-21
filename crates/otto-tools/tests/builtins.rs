@@ -201,7 +201,16 @@ async fn ask_and_registry() {
         }
         assert_eq!(registry.lookup("apply_patch").is_some(), family == "openai");
         assert_eq!(registry.lookup("edit").is_some(), family != "openai");
+        assert!(registry.lookup("update_todos").is_some());
         assert!(!registry.list_specs().is_empty());
     }
     assert!(web_fetch::WebFetch::default().call(json!({"url":"file:///etc/passwd"}), cx(d.path())).await.is_err());
+}
+#[tokio::test]
+async fn update_todos_acks_progress() {
+    let d = tempfile::tempdir().unwrap();
+    let todos = json!({"todos":[{"step":"Read","status":"completed"},{"step":"Fix","status":"in_progress"},{"step":"Test","status":"pending"}]});
+    assert_eq!(call(&update_todos::UpdateTodos::default(), todos, d.path()).await.joined_text(), "1/3 done");
+    let bad = json!({"todos":[{"step":"Read","status":"done"}]});
+    assert!(update_todos::UpdateTodos::default().call(bad, cx(d.path())).await.is_err());
 }

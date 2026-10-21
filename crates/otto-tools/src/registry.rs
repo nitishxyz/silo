@@ -42,6 +42,7 @@ pub fn tools_for_family(family: &str) -> Vec<Arc<dyn Tool>> {
         Arc::new(shell::Job::new(jobs)),
         Arc::new(web_fetch::WebFetch::default()),
         Arc::new(ask_user::AskUser::default()),
+        Arc::new(update_todos::UpdateTodos::default()),
     ];
     if family.eq_ignore_ascii_case("openai") {
         tools.push(Arc::new(apply_patch::ApplyPatch::default()));

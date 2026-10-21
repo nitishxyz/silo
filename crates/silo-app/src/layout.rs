@@ -319,11 +319,19 @@ impl Workspace {
             .pane_enter
             .get(id)
             .and_then(|(started, edge)| motion::progress(*started, motion::PANE_ENTER, now).map(|p| edge.offset(1.0 - p)));
-        let inner: AnyElement = match (self.panes.get(id), self.browsers.get(id)) {
-            (Some((pane, _)), _) => pane.clone().into_any_element(),
-            (None, Some((pane, _))) => pane.clone().into_any_element(),
-            (None, None) if crate::browser_pane::kind_of(self.block_info(id)) == crate::browser_pane::Kind::Unsupported => unsupported(),
-            (None, None) => div().size_full().into_any_element(),
+        let inner: AnyElement = match (self.panes.get(id), self.browsers.get(id), self.agents.get(id)) {
+            (Some((pane, _)), _, _) => pane.clone().into_any_element(),
+            (None, Some((pane, _)), _) => pane.clone().into_any_element(),
+            (None, None, Some((pane, _))) => pane.clone().into_any_element(),
+            (None, None, None)
+                if matches!(
+                    crate::browser_pane::kind_of(self.block_info(id)),
+                    crate::browser_pane::Kind::Unsupported | crate::browser_pane::Kind::Agent
+                ) =>
+            {
+                unsupported()
+            }
+            (None, None, None) => div().size_full().into_any_element(),
         };
         let fill_color = self.card_fill(id, cx);
         // A float, or the pane zooming over its siblings, sits over the
@@ -436,6 +444,7 @@ impl Workspace {
         let glyph = self.block_icon(id);
         let (name, cwd) = match browser {
             Some(title) => (title, None),
+            None if info.as_ref().is_some_and(|i| i.kind == silo_proto::model::BlockKind::Agent) => (info.map(|i| i.title).unwrap_or_default(), None),
             None => header_labels(info.as_ref()),
         };
         let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into(), icon: glyph });
@@ -918,6 +927,7 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         };
         assert_eq!(header_labels(Some(&info("-zsh", Some(format!("{home}/dev"))))), ("zsh".into(), Some("~/dev".into())));
         assert_eq!(header_labels(Some(&info("", None))), ("shell".into(), None));

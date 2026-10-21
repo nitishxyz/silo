@@ -3,6 +3,7 @@
 //! later, iroh).
 
 pub mod access;
+pub mod agent;
 pub mod app_bridge;
 pub mod approval;
 pub mod auth;

@@ -37,6 +37,7 @@ fn info(id: &str, columns: u16) -> BlockInfo {
         owner_name: None,
         pid: None,
         browser: None,
+        agent: None,
     }
 }
 

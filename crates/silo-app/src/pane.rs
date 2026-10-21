@@ -2038,6 +2038,7 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: None,
+            agent: None,
         }
     }
 

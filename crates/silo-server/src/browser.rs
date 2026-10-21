@@ -4,10 +4,10 @@
 
 use silo_proto::{
     control::{BrowserCommand, OwnMode, RpcError},
-    model::{BlockInfo, BlockKind, BrowserState, ClientId, HistoryEntry},
+    model::{BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, HistoryEntry},
 };
 
-use crate::block::BlockHandle;
+use crate::{agent::AgentBlock, block::BlockHandle};
 
 /// Longest URL or title accepted in a report.
 pub const TEXT_MAX: usize = 8 * 1024;
@@ -16,27 +16,50 @@ pub const TEXT_MAX: usize = 8 * 1024;
 pub enum Block {
     Terminal(BlockHandle),
     Browser(Box<BrowserBlock>),
+    Agent(Box<AgentBlock>),
 }
 
 impl Block {
+    /// A process-less block rebuilt from saved or transferred metadata.
+    ///
+    /// # Errors
+    /// `info` is a terminal's or lacks its kind's state.
+    pub fn restore(info: BlockInfo) -> anyhow::Result<Self> {
+        match info.kind {
+            BlockKind::Browser => Ok(Self::Browser(Box::new(BrowserBlock::restore(info)?))),
+            BlockKind::Agent => Ok(Self::Agent(Box::new(AgentBlock::restore(info)?))),
+            BlockKind::Terminal | BlockKind::Unknown => anyhow::bail!("block {} has a process", info.id),
+        }
+    }
+
     pub fn info(&self) -> Option<BlockInfo> {
         match self {
             Self::Terminal(handle) => handle.info.lock().ok().map(|i| i.clone()),
             Self::Browser(browser) => Some(browser.info()),
+            Self::Agent(agent) => Some(agent.info()),
+        }
+    }
+
+    /// The published status (possibly empty); browsers have none.
+    pub fn status(&self) -> Option<BlockStatus> {
+        match self {
+            Self::Terminal(handle) => handle.status.lock().ok().map(|s| s.clone()),
+            Self::Browser(_) => None,
+            Self::Agent(agent) => Some(agent.status()),
         }
     }
 
     pub fn terminal(&self) -> Option<&BlockHandle> {
         match self {
             Self::Terminal(handle) => Some(handle),
-            Self::Browser(_) => None,
+            Self::Browser(_) | Self::Agent(_) => None,
         }
     }
 
     pub fn into_terminal(self) -> Option<BlockHandle> {
         match self {
             Self::Terminal(handle) => Some(handle),
-            Self::Browser(_) => None,
+            Self::Browser(_) | Self::Agent(_) => None,
         }
     }
 }

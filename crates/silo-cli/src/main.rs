@@ -196,6 +196,9 @@ enum Command {
         /// Run a browser at URL instead of a program; prints the session id.
         #[arg(long, value_name = "URL", conflicts_with_all = ["command", "detached", "cwd"])]
         browser: Option<String>,
+        /// Open an otto agent block instead of a program; prints the session id.
+        #[arg(long, conflicts_with_all = ["command", "detached", "browser"])]
+        agent: bool,
         /// Command to run instead of the login shell.
         #[arg(last = true)]
         command: Vec<String>,
@@ -705,7 +708,15 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             println!("{}", created.session_id);
             Ok(0)
         }
-        Command::New { name, detached, cwd, command, browser: None } => {
+        Command::New { name, cwd, agent: true, .. } => {
+            let (control, _, _net) = connect(host).await?;
+            let cwd = cwd.or_else(|| std::env::current_dir().ok()).map(|p| p.to_string_lossy().into_owned());
+            let spawn = SpawnSpec { cwd, ..SpawnSpec::default() };
+            let created: Created = control.call(Method::SessionCreate { name, spawn, kind: BlockKind::Agent, url: None }).await?;
+            println!("{}", created.session_id);
+            Ok(0)
+        }
+        Command::New { name, detached, cwd, command, browser: None, agent: false } => {
             let (control, _, _net) = connect(host).await?;
             let cwd = cwd.or_else(|| std::env::current_dir().ok()).map(|p| p.to_string_lossy().into_owned());
             let size = attach::host_size().map(|(c, r)| TermSize::new(c, r));

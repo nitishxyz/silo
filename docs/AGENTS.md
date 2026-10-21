@@ -91,11 +91,22 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 
 `target` is a ref from the last snapshot (`e12`) or a CSS selector (anything not matching `^e\d+$`).
 
-`Action` = `{url, title, dialog?: {kind, message}, snapshot?: string}`; every action takes
+`Action` = `{url, title, dialog?: {kind, message}, snapshot?: string, navigating_to?: string}`; every action takes
 `include_snapshot?: bool` (default false). A node keeps its ref until the page navigates; a ref from before fails
 with `bad_request` "ref e12 is not on the current page; take a new snapshot".
+Click, press, type with `submit` and dialog wait up to 300 ms for a main-frame navigation to start and then up to 5 s
+for it to commit and fire DOMContentLoaded, so the result shows the new page; if it has not committed,
+`navigating_to` carries the requested URL and there is no snapshot (the engine holds page commands until commit).
 
 All these are additive (protocol stays version 1); `protocol.json` is regenerated.
+
+### 3.4 Agent blocks
+
+| Method | Params | Result | Access |
+|---|---|---|---|
+| `agent.set` | `block_id, session_id?, title?` (the otto session an agent block shows; `docs/AGENT_BLOCK.md`) | `{}` | interact |
+
+`block.report` and `block.notify` work on agent blocks too (the app reports the shown session's turn state).
 
 ## 4. Engine: CDP in the app
 
@@ -214,9 +225,8 @@ Otto honours `Loading::Deferred` through `load_tools` (names or query), with loa
 browser schemas stay out of prompts until loaded. Native provider tool search is not yet used.
 Known gaps:
 - Browser tools need a Silo app showing the block's session (no headless engine yet).
-- An action's result carries the URL from before any navigation it started; `wait_for` or `snapshot` shows the new
-  page. `browser_navigate` back/forward retries once after 1.1 s, because a followed link reaches the block's
-  history only after the engine's report.
+- `browser_navigate` back/forward retries once after 1.1 s, because a followed link reaches the block's history only
+  after the engine's report.
 - `wait_for` defaults to 10 s.
 - Blocks of an in-process test server with a non-default home don't get `SILO_HOME`.
 

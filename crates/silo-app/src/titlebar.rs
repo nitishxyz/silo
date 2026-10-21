@@ -141,12 +141,13 @@ impl Workspace {
         self.block_icon(&w.focused)
     }
 
-    /// A block's glyph: a globe for a browser, else a terminal.
+    /// A block's glyph by kind.
     pub(crate) fn block_icon(&self, id: &str) -> &'static str {
         let block = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id));
         match crate::browser_pane::kind_of(block) {
             crate::browser_pane::Kind::Browser => "globe",
             crate::browser_pane::Kind::Terminal => "terminal",
+            crate::browser_pane::Kind::Agent => crate::agent_block::ICON,
             crate::browser_pane::Kind::Unsupported => "info",
         }
     }

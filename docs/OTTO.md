@@ -295,7 +295,7 @@ pub struct ToolSpec {
 
 `read`, `write`, `edit`/`multiedit` (str_replace family), `apply_patch` (patch family), `ls`, `tree`, `glob`,
 `search` (ripgrep's `grep` + `ignore` crates), `shell` (one-shot, pipes, timeout, background jobs), `web_fetch`,
-`web_search` (hosted when the provider has it), `todos`, `ask_user`, `skill`, `load_tools`, `subagent`
+`web_search` (hosted when the provider has it), `update_todos`, `ask_user`, `skill`, `load_tools`, `subagent`
 (delegate/list/message/stop/retry), `wait`.
 
 ### 5.2 Policy

@@ -270,6 +270,7 @@ pub fn need(method: &Method) -> Need {
         | M::BrowserReload { .. }
         | M::BrowserZoom { .. }
         | M::BrowserReport { .. }
+        | M::AgentSet { .. }
         | M::BlockFocus { .. }
         | M::BlockFocusStep { .. }
         | M::BlockFocusDir { .. }

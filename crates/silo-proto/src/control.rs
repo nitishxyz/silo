@@ -459,6 +459,16 @@ pub enum Method {
         index: usize,
     },
 
+    /// Agent blocks: the shown otto session and its title.
+    #[serde(rename = "agent.set")]
+    AgentSet {
+        block_id: BlockId,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+
     /// Ask attached UI clients (the app) to show a session.
     #[serde(rename = "ui.open_session")]
     UiOpenSession { session_id: SessionId },
@@ -768,6 +778,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.reload", "Reload a browser block, optionally bypassing the cache."),
     ("browser.zoom", "Set a browser block's zoom level (0 = 100%)."),
     ("browser.report", "Report a browser block's engine state (owner only)."),
+    ("agent.set", "Set an agent block's shown otto session and title."),
     ("ui.open_session", "Ask subscribed UI clients to show a session."),
     ("pair.create", "Create a single-use device-pairing or join invite (owner only)."),
     ("pair.list", "List paired devices (owner only)."),

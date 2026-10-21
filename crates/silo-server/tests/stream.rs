@@ -27,6 +27,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
         owner_name: None,
         pid: None,
         browser: None,
+        agent: None,
     }
 }
 

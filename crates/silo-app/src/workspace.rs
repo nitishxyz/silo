@@ -75,11 +75,16 @@ pub struct Workspace {
     pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
     /// Browser blocks' panes (terminal blocks are in `panes`).
     pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
+    /// Agent blocks' panes (local host only).
+    pub(crate) agents: HashMap<String, (Entity<crate::agent::AgentPane>, Subscription)>,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
     /// A blank browser this client created: its address bar gets focus
     /// once its pane exists.
     pub(crate) address_pending: Option<String>,
+    /// A new agent this client created: its composer gets focus once its
+    /// pane exists.
+    pub(crate) composer_pending: Option<String>,
     pub(crate) focus: FocusHandle,
     pub(crate) switcher: Option<Switcher>,
     pub(crate) add_host: Option<AddHostSheet>,
@@ -241,8 +246,10 @@ impl Workspace {
             wanted_block: None,
             panes: HashMap::new(),
             browsers: HashMap::new(),
+            agents: HashMap::new(),
             server_focus: None,
             address_pending: None,
+            composer_pending: None,
             focus: cx.focus_handle(),
             switcher: None,
             add_host: None,
@@ -552,9 +559,11 @@ impl Workspace {
                     // Its blocks are gone with it: nothing to disown.
                     self.panes.clear();
                     self.browsers.clear();
+                    self.agents.clear();
                     self.view = None;
                     self.server_focus = None;
                     self.address_pending = None;
+                    self.composer_pending = None;
                     self.motion.reset();
                     self.focus.focus(window, cx);
                     self.choose_session(None, window, cx);
@@ -563,6 +572,9 @@ impl Workspace {
             ConnEvent::Event(Event::BlockChanged { block }) => {
                 if let Some((pane, _)) = self.browsers.get(&block.id) {
                     pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
+                } else if let Some((pane, _)) = self.agents.get(&block.id) {
+                    let session = block.agent.as_ref().and_then(|a| a.session_id.clone());
+                    pane.update(cx, |pane, cx| pane.show(session, block.cwd.clone(), cx));
                 } else if let Some((pane, _)) = self.panes.get(&block.id) {
                     pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
                 }
@@ -708,9 +720,11 @@ impl Workspace {
         let blocks: Vec<String> = self.panes.keys().chain(self.browsers.keys()).cloned().collect();
         self.panes.clear();
         self.browsers.clear();
+        self.agents.clear();
         self.view = None;
         self.server_focus = None;
         self.address_pending = None;
+        self.composer_pending = None;
         self.motion.reset();
         if !blocks.is_empty() {
             self.call(Method::DisownBlock { block_ids: blocks });
@@ -834,15 +848,22 @@ impl Workspace {
         let all: Vec<String> = view.session.windows.iter().flat_map(crate::floats::window_blocks).collect();
         self.panes.retain(|id, _| all.contains(id));
         self.browsers.retain(|id, _| all.contains(id));
+        self.agents.retain(|id, _| all.contains(id));
         let active = self.active_window().cloned();
         let of_kind =
             |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
         let browsers = of_kind(crate::browser_pane::Kind::Browser);
-        let unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
+        let agents = of_kind(crate::browser_pane::Kind::Agent);
+        let mut unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
+        if !self.agents_here() {
+            unsupported.extend(agents.iter().cloned());
+        }
         if let Some(active) = &active {
             for block in crate::floats::window_blocks(active) {
                 if browsers.contains(&block) {
                     self.ensure_browser(&block, window, cx);
+                } else if agents.contains(&block) && !unsupported.contains(&block) {
+                    self.ensure_agent(&block, window, cx);
                 } else if !self.panes.contains_key(&block) && !unsupported.contains(&block) {
                     let control = self.control();
                     let rt = self.rt.clone();
@@ -894,6 +915,9 @@ impl Workspace {
         for info in infos {
             if let Some((pane, _)) = self.browsers.get(&info.id) {
                 pane.update(cx, |pane, cx| pane.set_info(info, cx));
+            } else if let Some((pane, _)) = self.agents.get(&info.id) {
+                let session = info.agent.and_then(|a| a.session_id);
+                pane.update(cx, |pane, cx| pane.show(session, info.cwd, cx));
             } else if let Some((pane, _)) = self.panes.get(&info.id) {
                 pane.update(cx, |pane, cx| pane.set_info(info, cx));
             }
@@ -909,13 +933,15 @@ impl Workspace {
                 || self
                     .browsers
                     .values()
-                    .any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window));
+                    .any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window))
+                || self.agents.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx));
             if self.server_focus.as_deref() != Some(&focused) || !local {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
             }
         }
         self.focus_new_browser(window, cx);
+        self.focus_new_agent(window, cx);
         self.save_tree(cx);
         cx.notify();
     }
@@ -1012,12 +1038,14 @@ impl Workspace {
         } else if let Some((pane, _)) = self.browsers.get(block) {
             let handle = pane.read(cx).focus.clone();
             handle.focus(window, cx);
+        } else if let Some((pane, _)) = self.agents.get(block) {
+            pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
         }
     }
 
     /// Return keyboard focus to the terminal after closing an overlay.
     pub(crate) fn refocus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_window().map(|w| w.focused.clone()).filter(|b| self.panes.contains_key(b) || self.browsers.contains_key(b)) {
+        match self.active_window().map(|w| w.focused.clone()).filter(|b| self.has_pane(b)) {
             Some(block) => self.focus_block(&block, window, cx),
             // No terminal (server stopped, no session): keep key bindings
             // working by focusing the workspace itself.
@@ -1094,6 +1122,7 @@ impl Workspace {
             .find(|(_, (p, _))| p.read(cx).focus.is_focused(window))
             .map(|(id, _)| id.clone())
             .or_else(|| self.browser_focused(window, cx))
+            .or_else(|| self.agent_focused(window, cx))
             .or_else(|| self.active_window().map(|w| w.focused.clone()))
     }
 
@@ -1103,7 +1132,15 @@ impl Workspace {
     }
 
     pub(crate) fn cwd_of(&self, block: &str, cx: &gpui::App) -> Option<String> {
-        self.panes.get(block).and_then(|(p, _)| p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()))
+        match self.panes.get(block) {
+            Some((p, _)) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
+            None => self.block_info(block).filter(|i| i.kind == BlockKind::Agent).and_then(|i| i.cwd.clone()),
+        }
+    }
+
+    /// Whether `block` has a pane of any kind here.
+    pub(crate) fn has_pane(&self, block: &str) -> bool {
+        self.panes.contains_key(block) || self.browsers.contains_key(block) || self.agents.contains_key(block)
     }
 
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1465,7 +1502,7 @@ impl Render for Workspace {
         // keeps working. Focus lost with its pane (switching to a host
         // that is not connected) goes to the workspace, so shortcuts
         // keep working. Overlays own their focus and are left alone.
-        let terminal = self.active_window().is_some_and(|w| self.panes.contains_key(&w.focused) || self.browsers.contains_key(&w.focused));
+        let terminal = self.active_window().is_some_and(|w| self.has_pane(&w.focused));
         if ((self.focus.is_focused(window) && terminal) || window.focused(cx).is_none())
             && self.switcher.is_none()
             && self.palette.is_none()

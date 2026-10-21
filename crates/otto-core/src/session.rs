@@ -76,7 +76,6 @@ pub(crate) struct Pending {
     pub questions: HashMap<String, (PendingQuestion, oneshot::Sender<String>)>,
     pub steer: Vec<QueuedInput>,
     pub policy: otto_tools::policy::Policy,
-    pub todos: serde_json::Value,
     pub started: bool,
 }
 pub(crate) struct Context {
@@ -176,8 +175,7 @@ pub(crate) async fn spawn(runtime: Runtime, row: otto_store::Session) -> Result<
     let (tx, rx) = mpsc::channel(128);
     let (journal, journal_rx) = mpsc::channel(128);
     let (state, state_rx) = mpsc::channel(128);
-    let pending =
-        Pending { approvals: HashMap::new(), questions: HashMap::new(), steer: vec![], policy, todos: serde_json::json!([]), started: false };
+    let pending = Pending { approvals: HashMap::new(), questions: HashMap::new(), steer: vec![], policy, started: false };
     let (events, _) = broadcast::channel(4096);
     let (deltas, _) = broadcast::channel(4096);
     let busy = Arc::new(Mutex::new(false));
@@ -210,6 +208,7 @@ async fn actor(
             && let Some(input) = queue.pop_front()
         {
             turn += 1;
+            let _ = cx.commit(Event::QueueChanged { queued: queue.iter().cloned().collect() }, Projection::None, turn, 0).await;
             cancel = CancellationToken::new();
             let c = cx.clone();
             let token = cancel.clone();
@@ -260,7 +259,7 @@ async fn actor(
                 Command::Prompt(input)=>{if archived{let _=cx.commit(Event::Error{class:"archived".into(),message:"Unarchive the session before prompting".into(),retryable:false},Projection::None,turn,0).await;continue;}else if active.is_some()&&input.delivery==Delivery::Steer{state.steer.push(input)}else{if input.delivery==Delivery::Interrupt{cancel.cancel();queue.push_front(input)}else{queue.push_back(input)}}let _=cx.commit(Event::QueueChanged{queued:queue.iter().cloned().collect()},Projection::None,turn,0).await;}
                 Command::Outbox(child,payload,reply)=>{let id=cx.row.id.clone();let result=cx.runtime.db(move|s|{let version=s.session(&child)?.ok_or(Error::Closed)?.last_seq;s.outbox_push(&id,&child,version,payload)?;Ok(())}).await;let success=result.is_ok();let _=reply.send(result);if success&&!archived&&!cancel.is_cancelled(){if active.is_none(){queue.push_back(QueuedInput{id:crate::id(),input:vec![],delivery:Delivery::Queue});}else{wake_pending=true;}}}
                 Command::Shutdown(reply)=>{cancel.cancel();if let Some(mut task)=active.take(){loop{tokio::select!{Some(op)=state_rx.recv()=>op(&mut state),_= &mut task=>break,Some(entry)=journal.recv()=>{let result=cx.commit(entry.event,entry.projection,entry.turn,entry.step).await;let _=entry.reply.send(result);}}}}let _=reply.send(());break;}
-                Command::Cancel=>{cancel.cancel();wake_pending=false;queue.clear();state.steer.clear();let children=cx.runtime.list_sessions(&cx.row.project_id,false).await.unwrap_or_default();for child in children{if child.parent_id.as_deref()==Some(&cx.row.id) && let Some(handle)=cx.runtime.0.actors.lock().await.get(&child.id).cloned(){let _=handle.tx.send(Command::Cancel).await;}}}
+                Command::Cancel=>{cancel.cancel();wake_pending=false;let queued=!queue.is_empty()||!state.steer.is_empty();queue.clear();state.steer.clear();if queued{let _=cx.commit(Event::QueueChanged{queued:vec![]},Projection::None,turn,0).await;}let children=cx.runtime.list_sessions(&cx.row.project_id,false).await.unwrap_or_default();for child in children{if child.parent_id.as_deref()==Some(&cx.row.id) && let Some(handle)=cx.runtime.0.actors.lock().await.get(&child.id).cloned(){let _=handle.tx.send(Command::Cancel).await;}}}
                 Command::View(reply)=>{let id=cx.row.id.clone();let pending=&state;let approvals=pending.approvals.values().map(|p|p.0.clone()).collect();let questions=pending.questions.values().map(|p|p.0.clone()).collect();let queued=queue.iter().cloned().chain(pending.steer.iter().cloned()).collect();let busy=active.is_some();let waiting=!pending.approvals.is_empty()||!pending.questions.is_empty();let result=cx.runtime.db(move|s|{let row=s.session(&id)?.ok_or(Error::Closed)?;let mut info=crate::runtime::info(s,row)?;info.status=if waiting{SessionStatus::WaitingApproval}else if busy{SessionStatus::Busy}else{info.status};Ok(SessionView{seq:info.last_seq,info,items:s.items(&id)?,pending_approvals:approvals,pending_questions:questions,queue:queued,running_tool_calls:s.tool_calls(&id)?.into_iter().filter(|t|matches!(t.status,otto_store::ToolStatus::Intent|otto_store::ToolStatus::Running)).map(|t|RunningToolCall{call_id:t.call_id,name:t.name,input:t.input}).collect()})}).await;let _=reply.send(result);}
                 Command::Approval(id,decision,note,reply)=>{if !state.approvals.contains_key(&id){let _=reply.send(Err(Error::Invalid("unknown approval".into())));continue;}else if let Some(note)=note{let item=otto_llm::Item::new(crate::id(),otto_llm::Role::System,vec![otto_llm::Part::System{text:format!("Approval {id} note: {note}")}]);if let Err(error)=cx.commit(Event::ItemDone{item:item.clone()},Projection::PutItem(item),turn,0).await{let _=reply.send(Err(error));continue;}}let pending=state.approvals.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::ApprovalResolved{approval_id:id,decision},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(decision);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown approval".into()))};let _=reply.send(result);}
                 Command::Question(id,answer,reply)=>{let pending=state.questions.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::QuestionResolved{question_id:id,answer:answer.clone()},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(answer);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown question".into()))};let _=reply.send(result);}

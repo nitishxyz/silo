@@ -3,6 +3,8 @@
 mod adaptive;
 mod add_host;
 mod address;
+mod agent;
+mod agent_block;
 mod app_log;
 mod app_requests;
 mod appearance;

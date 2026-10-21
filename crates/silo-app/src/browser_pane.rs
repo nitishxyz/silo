@@ -19,6 +19,8 @@ pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 pub enum Kind {
     Terminal,
     Browser,
+    /// An otto session; a "Not supported" card on remote hosts.
+    Agent,
     /// A newer server's block kind: no pane, a "Not supported" card.
     Unsupported,
 }
@@ -27,6 +29,7 @@ pub enum Kind {
 pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     match info.map(|i| i.kind) {
         Some(BlockKind::Browser) => Kind::Browser,
+        Some(BlockKind::Agent) => Kind::Agent,
         Some(BlockKind::Unknown) => Kind::Unsupported,
         _ => Kind::Terminal,
     }
@@ -48,6 +51,7 @@ pub fn icon_for(kind: Kind, loading: bool, favicon: bool) -> Icon {
         Kind::Browser if loading => Icon::Spinner,
         Kind::Browser if favicon => Icon::Favicon,
         Kind::Browser => Icon::Glyph("globe"),
+        Kind::Agent => Icon::Glyph(crate::agent_block::ICON),
         Kind::Unsupported => Icon::Glyph("info"),
     }
 }
@@ -1635,12 +1639,14 @@ mod tests {
             owner_name: None,
             pid: None,
             browser: (kind == BlockKind::Browser).then(|| BrowserState::new("about:blank".into())),
+            agent: (kind == BlockKind::Agent).then(Default::default),
         }
     }
 
     #[test]
     fn pane_kind_follows_block_kind() {
         assert_eq!(kind_of(Some(&info(BlockKind::Browser))), Kind::Browser);
+        assert_eq!(kind_of(Some(&info(BlockKind::Agent))), Kind::Agent);
         assert_eq!(kind_of(Some(&info(BlockKind::Terminal))), Kind::Terminal);
         assert_eq!(kind_of(None), Kind::Terminal);
     }

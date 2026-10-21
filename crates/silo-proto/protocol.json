@@ -31,6 +31,22 @@
   },
   "events": {
     "$defs": {
+      "AgentState": {
+        "properties": {
+          "session_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AppCall": {
         "properties": {
           "method": {
@@ -93,6 +109,17 @@
       },
       "BlockInfo": {
         "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "browser": {
             "anyOf": [
               {
@@ -178,6 +205,10 @@
               "terminal",
               "browser"
             ],
+            "type": "string"
+          },
+          {
+            "const": "agent",
             "type": "string"
           },
           {
@@ -2297,6 +2328,39 @@
     }
   },
   "methods": {
+    "agent.set": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "api.describe": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3835,6 +3899,10 @@
                 "type": "string"
               },
               {
+                "const": "agent",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -4029,8 +4097,35 @@
       },
       "result": {
         "$defs": {
+          "AgentState": {
+            "properties": {
+              "session_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "BlockInfo": {
             "properties": {
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "browser": {
                 "anyOf": [
                   {
@@ -4116,6 +4211,10 @@
                   "terminal",
                   "browser"
                 ],
+                "type": "string"
+              },
+              {
+                "const": "agent",
                 "type": "string"
               },
               {
@@ -4661,6 +4760,12 @@
               }
             ]
           },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "snapshot": {
             "type": [
               "string",
@@ -4838,6 +4943,12 @@
               }
             ]
           },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "snapshot": {
             "type": [
               "string",
@@ -4953,6 +5064,12 @@
               }
             ]
           },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "snapshot": {
             "type": [
               "string",
@@ -5043,6 +5160,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "snapshot": {
@@ -5175,6 +5298,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "snapshot": {
@@ -5373,6 +5502,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "snapshot": {
@@ -5644,6 +5779,12 @@
               }
             ]
           },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "snapshot": {
             "type": [
               "string",
@@ -5779,6 +5920,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "snapshot": {
@@ -7164,6 +7311,10 @@
                 "type": "string"
               },
               {
+                "const": "agent",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -7481,6 +7632,22 @@
       },
       "result": {
         "$defs": {
+          "AgentState": {
+            "properties": {
+              "session_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "Axis": {
             "enum": [
               "horizontal",
@@ -7490,6 +7657,17 @@
           },
           "BlockInfo": {
             "properties": {
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "browser": {
                 "anyOf": [
                   {
@@ -7575,6 +7753,10 @@
                   "terminal",
                   "browser"
                 ],
+                "type": "string"
+              },
+              {
+                "const": "agent",
                 "type": "string"
               },
               {
@@ -8587,6 +8769,10 @@
                   "terminal",
                   "browser"
                 ],
+                "type": "string"
+              },
+              {
+                "const": "agent",
                 "type": "string"
               },
               {

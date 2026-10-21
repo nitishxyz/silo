@@ -334,7 +334,7 @@ async fn server_discovery_defaults_and_fork_replay() {
     assert!(r.agents(Some(dir.path())).iter().any(|a| a.name == "plan"));
     let tools = r.tools(&s.id).await.unwrap();
     assert!(tools.iter().any(|t| t.name == "write" && t.effects.contains(&"write".into())));
-    assert!(tools.iter().any(|t| t.name == "todos"));
+    assert!(tools.iter().any(|t| t.name == "update_todos"));
     assert!(!r.busy());
     let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
     prompt(&s).await;

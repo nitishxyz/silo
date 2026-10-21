@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wrap already-built debug binaries in a dev bundle CEF can start from:
 #   <target>/debug/SiloDev.app  (exe = silo-app, helpers = copies of it,
-#   framework = symlink into CEF_PATH, silo/silo-menubar next to the exe).
+#   framework = symlink into CEF_PATH, silo/silo-menubar/otto-silo next to the exe).
 # Usage: scripts/dev-bundle.sh   (prints the bundle's executable path)
 set -euo pipefail
 
@@ -47,7 +47,7 @@ sign() {
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
 plist SiloDev xyz.nitish.silo.dev > "$app/Contents/Info.plist"
 install_bin "$out/silo-app" "$app/Contents/MacOS/SiloDev"
-for bin in silo silo-menubar; do
+for bin in silo silo-menubar otto-silo; do
   [[ -f "$out/$bin" ]] && ln -sf "$out/$bin" "$app/Contents/MacOS/$bin"
 done
 for suffix in "" " (GPU)" " (Renderer)" " (Plugin)"; do

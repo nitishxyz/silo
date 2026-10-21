@@ -232,6 +232,8 @@ pub struct BrowserAction {
     pub dialog: Option<BrowserDialog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigating_to: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

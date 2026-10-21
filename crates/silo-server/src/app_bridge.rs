@@ -137,6 +137,7 @@ pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcErr
     let block = match reg.blocks.get(block_id) {
         Some(crate::browser::Block::Browser(block)) => block,
         Some(crate::browser::Block::Terminal(_)) => return Err(RpcError::bad_request(format!("block {block_id} is a terminal"))),
+        Some(crate::browser::Block::Agent(_)) => return Err(RpcError::bad_request(format!("block {block_id} is an agent"))),
         None => return Err(RpcError::not_found(format!("block {block_id}"))),
     };
     block

@@ -18,7 +18,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender};
 use crate::{
     Server,
     block::{self, BlockHandle, Checkpoint, Note},
-    browser::{Block, BrowserBlock},
+    browser::Block,
     registry::{self, Session},
 };
 
@@ -121,8 +121,8 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
     let mut blocks = HashMap::new();
     for record in manifest.blocks {
         let id = record.info.id.clone();
-        if record.info.kind == BlockKind::Browser {
-            blocks.insert(id, Block::Browser(Box::new(BrowserBlock::restore(record.info)?)));
+        if matches!(record.info.kind, BlockKind::Browser | BlockKind::Agent) {
+            blocks.insert(id, Block::restore(record.info)?);
             continue;
         }
         let restored = record

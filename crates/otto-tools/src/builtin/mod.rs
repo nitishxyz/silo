@@ -8,6 +8,7 @@ pub mod read;
 pub mod search;
 pub mod shell;
 pub mod tree;
+pub mod update_todos;
 pub mod web_fetch;
 pub mod write;
 use crate::{Effects, ToolCx, ToolError, ToolSpec};

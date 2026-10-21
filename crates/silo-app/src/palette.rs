@@ -190,6 +190,11 @@ impl Workspace {
             self.flash(Status::info("Switch to This Mac to manage its server"), cx);
             return;
         }
+        if matches!(command, Command::NewAgent | Command::NewAgentTab) && !self.agents_here() {
+            let note = self.not_supported();
+            self.flash(Status::info(note), cx);
+            return;
+        }
         match command {
             Command::NewSession => {
                 self.close_switcher(window, cx);
@@ -214,6 +219,7 @@ impl Workspace {
             Command::NewTab => self.new_tab_like_focused(window, cx),
             Command::NewTerminalTab => self.new_window(window, cx),
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
+            Command::NewAgentTab => self.new_agent_tab(window, cx),
             Command::NewTabChooser => self.toggle_new_tab_menu(window, cx),
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
@@ -265,6 +271,11 @@ impl Workspace {
             Command::OpenUrl => {
                 if let Some(block) = block {
                     self.open_palette_step(Step::Input(Input::OpenUrl(block)), String::new(), window, cx);
+                }
+            }
+            Command::NewAgent => {
+                if let Some(block) = block {
+                    self.new_agent(block, cx);
                 }
             }
             Command::AddHost => {
@@ -422,6 +433,7 @@ impl Workspace {
             Command::CommandPalette => false,
             Command::CheckForUpdates => self.updater.read(cx).enabled(),
             Command::NewSession => connected,
+            Command::NewAgent | Command::NewAgentTab => connected && local && self.view.is_some(),
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab

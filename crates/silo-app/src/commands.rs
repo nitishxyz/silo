@@ -75,6 +75,7 @@ commands! {
     NewTab => "New Tab", "Tabs", ["cmd-t"], "Same kind as the focused block";
     NewTerminalTab => "New Terminal Tab", "Tabs", [];
     NewBrowserTab => "New Browser Tab", "Tabs", ["cmd-alt-t"];
+    NewAgentTab => "New Agent Tab", "Tabs", [];
     NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"];
     CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
     RenameTab => "Rename Tab…", "Tabs", [];
@@ -104,6 +105,8 @@ commands! {
     // Browser
     NewBrowser => "New Browser", "Browser", [];
     OpenUrl => "Open URL…", "Browser", [];
+    // Agent
+    NewAgent => "New Agent", "Agent", ["cmd-shift-o"], "An otto agent beside the focused pane";
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];
@@ -167,11 +170,11 @@ impl Command {
             Self::SwitchSession => Method("app.switcher"),
             Self::NextSession | Self::PreviousSession => Method("app.session_step"),
             // The chooser's pick is the `kind` param.
-            Self::NewTab | Self::NewTerminalTab | Self::NewBrowserTab | Self::NewTabChooser => Method("window.create"),
+            Self::NewTab | Self::NewTerminalTab | Self::NewBrowserTab | Self::NewAgentTab | Self::NewTabChooser => Method("window.create"),
             Self::CloseTab => Method("window.close"),
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
-            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewBrowser => Method("block.split"),
+            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewBrowser | Self::NewAgent => Method("block.split"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
             Self::FocusPaneLeft | Self::FocusPaneRight | Self::FocusPaneUp | Self::FocusPaneDown => Method("block.focus_dir"),
@@ -368,6 +371,7 @@ mod tests {
         assert_eq!(Command::NewBrowserTab.hint().as_deref(), Some("⌥⌘T"));
         assert_eq!(Command::NewTabChooser.hint().as_deref(), Some("⌃⌘T"));
         assert_eq!(Command::NewTerminalTab.hint(), None);
+        assert_eq!(Command::NewAgent.hint().as_deref(), Some("⇧⌘O"));
         assert_eq!(Command::JumpToPreviousPrompt.hint().as_deref(), Some("⌘↑"));
         assert_eq!(Command::JumpToNextPrompt.hint().as_deref(), Some("⌘↓"));
         assert_eq!(Command::SelectCommandOutput.hint().as_deref(), Some("⇧⌘A"));
