@@ -158,7 +158,7 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
         let id = error.data.as_ref().and_then(|d| d["approval"].as_str()).unwrap().to_owned();
         assert_eq!(code(other.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap_err()).code, "not_found");
         cli.call_value(Method::ApprovalAnswer { id: id.clone(), allow: true }).await.unwrap();
-        assert_eq!(code(cli.call_value(Method::ServerShutdown {}).await.unwrap_err()).code, RpcError::CONFIRM, "confirmed for pair.create only");
+        assert_eq!(code(cli.call_value(Method::ServerShutdown { force: false }).await.unwrap_err()).code, RpcError::CONFIRM, "confirmed for pair.create only");
         cli.call::<PairInvite>(pair()).await.unwrap();
         assert_eq!(code(cli.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap_err()).code, "not_found", "single-use");
         assert_eq!(code(cli.call_value(pair()).await.unwrap_err()).code, RpcError::CONFIRM, "single-use");
@@ -232,7 +232,7 @@ async fn owner_actions_from_non_app_clients_wait_for_an_app() {
 
     // The app's own calls need nobody.
     app.call::<PairInvite>(pair()).await.unwrap();
-    app.call_value(Method::ServerShutdown {}).await.unwrap();
+    app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop((app, cli, other));
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
@@ -258,11 +258,24 @@ async fn invite(admin: &Control) -> (PairTicket, EndpointAddr) {
 /// invite from `admin` as `name`, subscribed.
 async fn device_app(admin: &Control, key: &Identity, name: &str) -> (Net, Control, Events, EndpointAddr) {
     let (ticket, addr) = invite(admin).await;
+    let (net, control, events) = pair_with(&ticket, &addr, key, name).await.unwrap();
+    (net, control, events, addr)
+}
+
+/// A device's Silo app bound with `key`, paired at `addr` with `ticket`
+/// as `name`, subscribed.
+async fn pair_with(ticket: &PairTicket, addr: &EndpointAddr, key: &Identity, name: &str) -> anyhow::Result<(Net, Control, Events)> {
     let net = Net::bind(key, RelayConfig::Disabled, false).await.unwrap();
     let rc = timeout(T, net.dial(addr.clone())).await.unwrap().unwrap();
-    let (control, events) = as_role(ClientRole::App, Control::over_remote(rc, name, false, Some(&ticket))).await.unwrap();
+    let (control, events) = match as_role(ClientRole::App, Control::over_remote(rc, name, false, Some(ticket))).await {
+        Ok(connected) => connected,
+        Err(error) => {
+            net.close().await.unwrap();
+            return Err(error);
+        }
+    };
     control.subscribe().await.unwrap();
-    (net, control, events, addr)
+    Ok((net, control, events))
 }
 
 /// A process of its own on `key`'s device (a CLI run) speaking for it.
@@ -330,7 +343,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     host_app.subscribe().await.unwrap();
     let call = tokio::spawn({
         let cli = cli.clone();
-        async move { cli.call_value(Method::ServerShutdown {}).await }
+        async move { cli.call_value(Method::ServerShutdown { force: false }).await }
     });
     let (id, action, _, caller) = requested_by(&mut host_events).await;
     assert_eq!(action, "server.shutdown");
@@ -407,7 +420,7 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     // Removed while it waits: an allowed call of the device goes nowhere.
     let call = tokio::spawn({
         let cli = cli.clone();
-        async move { cli.call_value(Method::ServerShutdown {}).await }
+        async move { cli.call_value(Method::ServerShutdown { force: false }).await }
     });
     let (id, ..) = requested_by(&mut host_events).await;
     host_app.call_value(Method::PairRevoke { id: mac_net.id().to_string() }).await.unwrap();
@@ -421,16 +434,29 @@ async fn a_device_s_calls_are_approved_at_that_device() {
     for net in [mac_net, other_net, cli_net, fake_net, up_net] {
         net.close().await.unwrap();
     }
-    host_app.call_value(Method::ServerShutdown {}).await.unwrap();
+    host_app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(host_app);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Removing a device removes what it created: the token and the link it
-/// minted, with their connections. Its token mints nothing.
+/// `cli`'s call, approved at its device's app `app`.
+async fn approved<T: serde::de::DeserializeOwned + Send + 'static>(cli: &Control, app: &Control, events: &mut Events, method: Method) -> T {
+    let call = tokio::spawn({
+        let cli = cli.clone();
+        async move { cli.call::<T>(method).await }
+    });
+    let (id, ..) = requested_by(events).await;
+    app.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
+    timeout(T, call).await.unwrap().unwrap().unwrap()
+}
+
+/// Removing a device removes the links and tokens it created, with their
+/// connections; its token mints nothing. A device its invite paired stays
+/// paired and connected, with what that device created; its unredeemed
+/// invite pairs nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_removed_device_takes_its_grants_with_it() {
+async fn a_removed_device_takes_its_links_and_tokens_but_not_the_devices_it_paired() {
     let home = temp_home("cascade");
     let task = start(&home).await;
     // The owner's app, unsubscribed: the device's own app is the approver.
@@ -439,25 +465,30 @@ async fn a_removed_device_takes_its_grants_with_it() {
     let (mac_net, mac_app, mut mac_events, addr) = device_app(&host_app, &mac, "Ana's Mac").await;
     let (cli_net, cli, _) = speaking_for(&mac, &addr, ClientRole::Cli).await;
     let list = || async { host_app.call::<Grants>(Method::GrantList {}).await.unwrap().grants };
-    let device: Grant = list().await.into_iter().find(|g| g.who == Who::Device { id: mac_net.id().to_string() }).unwrap();
+    let device_grant = |id: String| async move { list().await.into_iter().find(|g| matches!(&g.who, Who::Device { id: d } if *d == id)).unwrap() };
+    let device: Grant = device_grant(mac_net.id().to_string()).await;
 
-    let mut approved = async |method: Method| -> GrantCreated {
-        let call = tokio::spawn({
-            let cli = cli.clone();
-            async move { cli.call::<GrantCreated>(method).await }
-        });
-        let (id, ..) = requested_by(&mut mac_events).await;
-        mac_app.call_value(Method::ApprovalAnswer { id, allow: true }).await.unwrap();
-        timeout(T, call).await.unwrap().unwrap().unwrap()
-    };
     let grant = |kind, rights| Method::GrantCreate { scope: Scope::Server, rights, kind, ttl_secs: None, label: None };
-    let token = approved(grant(GrantKind::Token, Rights::Interact)).await;
-    let link = approved(grant(GrantKind::Link, Rights::View)).await;
+    let token: GrantCreated = approved(&cli, &mac_app, &mut mac_events, grant(GrantKind::Token, Rights::Interact)).await;
+    let link: GrantCreated = approved(&cli, &mac_app, &mut mac_events, grant(GrantKind::Link, Rights::View)).await;
     for created in [&token, &link] {
         assert_eq!(created.grant.created_by_grant.as_deref(), Some(device.id.as_str()), "the device is recorded as creator");
     }
     let owners: GrantCreated = host_app.call(grant(GrantKind::Token, Rights::View)).await.unwrap();
     assert_eq!(owners.grant.created_by_grant, None, "the owner's grants have no creator");
+
+    // The Mac pairs a phone, which mints a token of its own; a second
+    // invite of the Mac's stays unredeemed.
+    let mut mac_invite = async || PairTicket::decode(&approved::<PairInvite>(&cli, &mac_app, &mut mac_events, pair()).await.ticket).unwrap();
+    let (phone_ticket, unused_ticket) = (mac_invite().await, mac_invite().await);
+    let phone = Identity::load_or_create(home.join("device-phone")).unwrap();
+    let (phone_net, phone_app, mut phone_events) = pair_with(&phone_ticket, &addr, &phone, "Ana's Phone").await.unwrap();
+    let phone_device = device_grant(phone_net.id().to_string()).await;
+    assert_eq!(phone_device.created_by_grant.as_deref(), Some(device.id.as_str()), "paired via the Mac");
+    let (phone_cli_net, phone_cli, _) = speaking_for(&phone, &addr, ClientRole::Cli).await;
+    let phone_token: GrantCreated = approved(&phone_cli, &phone_app, &mut phone_events, grant(GrantKind::Token, Rights::Interact)).await;
+    assert_eq!(phone_token.grant.created_by_grant.as_deref(), Some(phone_device.id.as_str()));
+    let phone_agent = connect_token(&home, &phone_token.secret).await;
 
     // The token creates nothing.
     let agent = connect_token(&home, &token.secret).await;
@@ -480,14 +511,26 @@ async fn a_removed_device_takes_its_grants_with_it() {
     host_app.call_value(Method::PairRevoke { id: mac_net.id().to_string() }).await.unwrap();
     timeout(T, agent.closed()).await.expect("the device's token's connection closes");
     timeout(T, viewer.closed()).await.expect("the device's link's connection closes");
-    let left: Vec<String> = list().await.into_iter().map(|g| g.id).collect();
-    assert_eq!(left, [owners.grant.id], "the device's grants are gone, the owner's stay");
+    let mut left: Vec<String> = list().await.into_iter().map(|g| g.id).collect();
+    left.sort();
+    let mut expected = [owners.grant.id, phone_device.id, phone_token.grant.id];
+    expected.sort();
+    assert_eq!(left, expected, "the Mac's links and tokens are gone; the owner's, the phone and the phone's token stay");
+    for still in [&phone_app, &phone_cli, &phone_agent] {
+        timeout(T, still.call_value(Method::Ping {})).await.unwrap().expect("the phone and its token stay connected");
+    }
 
-    drop((cli, mac_app, agent, stream));
-    for net in [mac_net, cli_net, viewer_net] {
+    // The Mac's unredeemed invite lets nobody in.
+    let stranger = Identity::load_or_create(home.join("device-stranger")).unwrap();
+    assert!(pair_with(&unused_ticket, &addr, &stranger, "Stranger").await.is_err(), "a removed device's invite pairs nothing");
+    let devices = list().await.into_iter().filter(|g| matches!(g.who, Who::Device { .. })).count();
+    assert_eq!(devices, 1, "only the phone is paired");
+
+    drop((cli, mac_app, agent, stream, phone_app, phone_cli, phone_agent));
+    for net in [mac_net, cli_net, viewer_net, phone_net, phone_cli_net] {
         net.close().await.unwrap();
     }
-    host_app.call_value(Method::ServerShutdown {}).await.unwrap();
+    host_app.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop(host_app);
     timeout(T, task).await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);

@@ -213,15 +213,19 @@ events. That avoids per-principal pruned layouts.
   `ClientEntry.close`).
 - A 60 s sweeper removes expired grants and closes their connections. `last_seen` keeps today's debounce
   (`auth.rs:25`).
-- **Created grants go with their creator.** `Grant.created_by_grant` (additive, `#[serde(default)]`) is the grant
-  of the principal that created it: a paired device's grant for the links and tokens it mints (`grant.create`)
-  and for the device its invite paired (`pair.create`; the invite keeps its creator until redeemed, and an
-  invite whose creator is gone pairs nothing). The local owner's grants have none. Removing a grant, by
-  revocation, expiry or its scope closing, also removes every grant it created, transitively
-  (`Grants::remove_where`), and closes all their connections. A lost laptop's links, tokens and the devices it
-  paired go with it. Tokens and links cannot create grants (they never hold owner, nor reach it by approval).
-  Grants from before this was kept have no creator and stay until revoked or expired: the creator is not
-  guessed (`created_by` is only a label). A downgraded server drops the field when it rewrites the file.
+- **Created links and tokens go with their creator; devices do not.** `Grant.created_by_grant` (additive,
+  `#[serde(default)]`) is the grant of the principal that created it: a paired device's grant for the links and
+  tokens it mints (`grant.create`) and for the device its invite paired (`pair.create`; the invite keeps its
+  creator until redeemed, and an invite whose creator is gone or expired pairs nothing). The local owner's
+  grants have none. Removing a grant, by revocation, expiry or its scope closing, also removes every link and
+  token it created, transitively through links and tokens only (`Grants::remove_where`), and closes all their
+  connections. A lost laptop's links and tokens go with it. **Device grants are never removed this way**, and
+  the cascade stops at them: a device the laptop paired stays paired, with the links and tokens it created,
+  until it is revoked itself. Removing one device must not cut off the others; devices are only removed
+  explicitly. For a device, `created_by_grant` is provenance only ("paired via the laptop"). Tokens and links
+  cannot create grants (they never hold owner, nor reach it by approval). Grants from before this was kept
+  have no creator and stay until revoked or expired: the creator is not guessed (`created_by` is only a
+  label). A downgraded server drops the field when it rewrites the file.
 
 ### 3.7 Room for the login server (not built)
 
@@ -684,8 +688,9 @@ away.
       no grant and cannot be revoked by anyone.
     - **Removed while waiting:** an approved device call (or upgrade) runs only if the device's grant still
       stands once the answer arrives; else `forbidden`.
-    - **Removing a device removes what it created** (§3.6): its links and tokens, and the devices its invites
-      paired, with their connections.
+    - **Removing a device removes the links and tokens it created** (§3.6), with their connections, and its
+      unredeemed invites pair nothing. The devices its invites paired stay paired and connected, with what
+      they created: removing one device must not cut off others; devices are only removed explicitly.
   - **`clipboard.read` asks nobody: the paste gesture is the approval** (`pane.rs:978`). The attached apps answer a
     read only right after the user pasted into that block, else nothing within 3 s, exactly as before Phase 7. It
     needs interact on the block, so a scoped agent token can still read the images pasted into its pane.

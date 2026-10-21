@@ -139,8 +139,10 @@ impl Grants {
         Ok(())
     }
 
-    /// Remove the grants `remove` selects and, transitively, every grant
-    /// one of them created (`created_by_grant`); the removed ones.
+    /// Remove the grants `remove` selects and, transitively, every link
+    /// and token one of them created (`created_by_grant`); the removed
+    /// ones. Device grants are never removed this way, so the cascade stops
+    /// at them: removing one device must not cut off the devices it paired.
     pub fn remove_where(&mut self, remove: impl Fn(&Grant) -> bool) -> Result<Vec<Grant>, RpcError> {
         let before = self.grants.clone();
         let (mut gone, mut kept): (Vec<Grant>, Vec<Grant>) = std::mem::take(&mut self.grants).into_iter().partition(|g| remove(g));
@@ -149,7 +151,7 @@ impl Grants {
             let ids: Vec<String> = gone[from..].iter().map(|g| g.id.clone()).collect();
             from = gone.len();
             let (created, rest): (Vec<Grant>, Vec<Grant>) =
-                kept.into_iter().partition(|g| g.created_by_grant.as_ref().is_some_and(|c| ids.contains(c)));
+                kept.into_iter().partition(|g| matches!(g.who, Who::Secret { .. }) && g.created_by_grant.as_ref().is_some_and(|c| ids.contains(c)));
             gone.extend(created);
             kept = rest;
         }
@@ -212,14 +214,14 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_grant_removes_what_it_created_transitively() {
+    fn removing_a_grant_removes_the_links_and_tokens_it_created_transitively() {
         let home = PathBuf::from(format!("/tmp/silo-grants-cascade-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let dir = home.join("state");
         let mut grants = Grants::open(&dir, HostKey::load_or_create(&dir).unwrap()).unwrap();
-        let grant = |id: &str, by: Option<&str>| Grant {
+        let grant = |id: &str, device: bool, by: Option<&str>| Grant {
             id: id.into(),
-            who: Who::Secret { kind: SecretKind::Link, hash: id.into() },
+            who: if device { Who::Device { id: id.into() } } else { Who::Secret { kind: SecretKind::Link, hash: id.into() } },
             scope: Scope::Server,
             rights: Rights::View,
             label: String::new(),
@@ -229,17 +231,30 @@ mod tests {
             expires_at: None,
             last_seen: 0,
         };
-        // a ← b ← c (a created b, b created c); d is the owner's; e is from
-        // before creators were kept.
-        for g in [grant("a", None), grant("b", Some("a")), grant("c", Some("b")), grant("d", None), grant("e", None)] {
+        // Device a created link b, which created c; a paired device f, which
+        // created token g. d is the owner's; e is from before creators were
+        // kept.
+        for g in [
+            grant("a", true, None),
+            grant("b", false, Some("a")),
+            grant("c", false, Some("b")),
+            grant("d", false, None),
+            grant("e", false, None),
+            grant("f", true, Some("a")),
+            grant("g", false, Some("f")),
+        ] {
             grants.add(g).unwrap();
         }
         let gone: Vec<String> = grants.remove_where(|g| g.id == "a").unwrap().into_iter().map(|g| g.id).collect();
         assert_eq!(gone, ["a", "b", "c"]);
         let kept: Vec<&str> = grants.all().iter().map(|g| g.id.as_str()).collect();
-        assert_eq!(kept, ["d", "e"]);
+        assert_eq!(kept, ["d", "e", "f", "g"], "the paired device and what it created stay");
+        assert_eq!(grants.all()[2].created_by_grant.as_deref(), Some("a"), "its provenance is kept");
         let reopened = Grants::open(&dir, HostKey::load_or_create(&dir).unwrap()).unwrap();
         assert_eq!(reopened.all(), grants.all(), "saved");
+        // Removing f directly takes g with it.
+        let gone: Vec<String> = grants.remove_where(|g| g.id == "f").unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(gone, ["f", "g"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 }
