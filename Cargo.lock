@@ -6583,7 +6583,7 @@ dependencies = [
 
 [[package]]
 name = "silo-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -6611,7 +6611,7 @@ dependencies = [
 
 [[package]]
 name = "silo-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -6631,7 +6631,7 @@ dependencies = [
 
 [[package]]
 name = "silo-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -6653,7 +6653,7 @@ dependencies = [
 
 [[package]]
 name = "silo-latency"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "rand 0.9.5",
@@ -6668,7 +6668,7 @@ dependencies = [
 
 [[package]]
 name = "silo-menubar"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "objc2 0.6.5",
@@ -6684,7 +6684,7 @@ dependencies = [
 
 [[package]]
 name = "silo-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "data-encoding",
  "iroh",
@@ -6700,7 +6700,7 @@ dependencies = [
 
 [[package]]
 name = "silo-pty"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -6708,7 +6708,7 @@ dependencies = [
 
 [[package]]
 name = "silo-render"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "gpui",
  "silo-vt",
@@ -6716,7 +6716,7 @@ dependencies = [
 
 [[package]]
 name = "silo-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -6740,7 +6740,7 @@ dependencies = [
 
 [[package]]
 name = "silo-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chacha20poly1305",
  "libc",
@@ -6750,7 +6750,7 @@ dependencies = [
 
 [[package]]
 name = "silo-transport"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -6766,14 +6766,14 @@ dependencies = [
 
 [[package]]
 name = "silo-vt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "silo-web"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cef",
