@@ -402,12 +402,12 @@ async fn run(server: &Server, ctx: &Ctx, approval: bool, method: Method) -> Resu
     if server.upgrading.load(Ordering::SeqCst) && !read_only(&method) {
         return Err(RpcError::new("upgrading", "the server is handing over to a new build; retry"));
     }
-    if approval {
-        approval::gate(server, ctx.id, &method, Rights::Owner).await?;
     let close = crate::close_guard::is_close(&method);
     if close {
         crate::close_guard::check(server, ctx.id, &method).await?;
     }
+    if approval {
+        approval::gate(server, ctx.id, &method, Rights::Owner).await?;
         if close {
             crate::close_guard::check(server, ctx.id, &method).await?;
         }
