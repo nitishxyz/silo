@@ -78,6 +78,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::SessionCompact { .. }
         | M::ApprovalAnswer { .. }
         | M::QuestionAnswer { .. }
+        | M::AuthLoginCancel { .. }
         | M::AuthLogout { .. }
         | M::ConfigSet { .. } => schema_for!(Empty),
     }
@@ -122,6 +123,7 @@ pub fn examples() -> Vec<Method> {
         M::AuthStatus {},
         M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true },
         M::AuthLoginComplete { login_id: "login1".into(), code: None },
+        M::AuthLoginCancel { login_id: "login1".into() },
         M::AuthLogout { provider: "openai".into() },
         M::ToolsList { session_id: Some("s1".into()) },
         M::AgentsList {},

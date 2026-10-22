@@ -22,6 +22,9 @@ impl AuthService for BlockingAuth {
     fn login_complete(&self, _: String, _: Option<String>) -> AuthFuture<'_, AuthStatus> {
         Box::pin(std::future::pending())
     }
+    fn login_cancel(&self, _: String) -> AuthFuture<'_, ()> {
+        Box::pin(std::future::pending())
+    }
     fn logout(&self, _: String) -> AuthFuture<'_, ()> {
         Box::pin(std::future::pending())
     }

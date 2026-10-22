@@ -43,6 +43,79 @@ pub fn progress(started: Instant, duration: Duration, now: Instant) -> Option<f3
     (elapsed < duration).then(|| ease_out(elapsed.as_secs_f32() / duration.as_secs_f32()))
 }
 
+/// Interface motion (agent block): expand/collapse, enter/leave, morphs.
+pub const UI: Duration = Duration::from_millis(260);
+pub const UI_FAST: Duration = Duration::from_millis(180);
+
+/// `cubic-bezier(0.25, 1, 0.5, 1)`: the interface's ease-out.
+pub fn ease_ui(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (x1, y1, x2, y2) = (0.25_f32, 1.0_f32, 0.5_f32, 1.0_f32);
+    let bez = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s).powi(2) + 3.0 * b * s * s * (1.0 - s) + s.powi(3);
+    // Solve x(s) = t by bisection (monotonic x), then y(s).
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if bez(x1, x2, mid) < t { lo = mid } else { hi = mid }
+    }
+    bez(y1, y2, (lo + hi) / 2.0)
+}
+
+/// Eased (`ease_ui`) progress of an interface animation, `None` once done
+/// or under Reduce Motion.
+pub fn enter(started: Instant, duration: Duration, now: Instant, reduce: bool) -> Option<f32> {
+    let duration = duration.mul_f32(slowdown());
+    let elapsed = now.saturating_duration_since(started);
+    (!reduce && elapsed < duration).then(|| ease_ui(elapsed.as_secs_f32() / duration.as_secs_f32()))
+}
+
+/// A two-state transition (open/closed, shown/hidden) that can reverse
+/// mid-way: `value` eases from wherever it was toward 0 or 1.
+#[derive(Clone, Copy, Debug)]
+pub struct Toggle {
+    on: bool,
+    from: f32,
+    at: Option<Instant>,
+    duration: Duration,
+}
+
+impl Toggle {
+    pub const fn new(on: bool, duration: Duration) -> Self {
+        Self { on, from: if on { 1.0 } else { 0.0 }, at: None, duration }
+    }
+
+    pub const fn on(&self) -> bool {
+        self.on
+    }
+
+    /// Turn on or off from the current value; no-op if already there.
+    pub fn set(&mut self, on: bool, now: Instant, reduce: bool) {
+        if self.on != on {
+            self.from = self.value(now, reduce);
+            self.on = on;
+            self.at = Some(now);
+        }
+    }
+
+    /// 0 (off) … 1 (on), eased.
+    pub fn value(&self, now: Instant, reduce: bool) -> f32 {
+        let target = if self.on { 1.0 } else { 0.0 };
+        match self.at.and_then(|at| enter(at, self.duration, now, reduce)) {
+            Some(p) => self.from + (target - self.from) * p,
+            None => target,
+        }
+    }
+
+    pub fn moving(&self, now: Instant, reduce: bool) -> bool {
+        self.at.is_some_and(|at| enter(at, self.duration, now, reduce).is_some())
+    }
+
+    /// Off and done moving: nothing to draw.
+    pub fn hidden(&self, now: Instant, reduce: bool) -> bool {
+        !self.on && !self.moving(now, reduce)
+    }
+}
+
 /// `SILO_MOTION_SLOWDOWN=10` stretches every animation, for inspecting
 /// intermediate frames in UI tests.
 fn slowdown() -> f32 {
@@ -353,6 +426,19 @@ mod tests {
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn ui_ease_and_toggle() {
+        assert!(ease_ui(0.0).abs() < 1e-3 && (ease_ui(1.0) - 1.0).abs() < 1e-3);
+        assert!(ease_ui(0.25) > 0.6, "front-loaded");
+        let now = Instant::now();
+        let mut t = Toggle::new(false, UI);
+        assert!(t.hidden(now, false));
+        t.set(true, now, false);
+        assert!(t.value(now, false) < 0.01 && t.moving(now, false));
+        assert!((t.value(now + Duration::from_secs(60), false) - 1.0).abs() < 1e-6);
+        assert!((t.value(now, true) - 1.0).abs() < 1e-6, "reduce motion: instant");
     }
 
     #[test]

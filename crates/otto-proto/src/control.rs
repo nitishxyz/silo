@@ -153,6 +153,8 @@ pub enum Method {
     },
     #[serde(rename = "auth.login_complete")]
     AuthLoginComplete { login_id: String, code: Option<String> },
+    #[serde(rename = "auth.login_cancel")]
+    AuthLoginCancel { login_id: String },
     #[serde(rename = "auth.logout")]
     AuthLogout { provider: String },
     #[serde(rename = "tools.list")]
@@ -203,6 +205,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("auth.status", "List provider authentication status without secrets."),
     ("auth.login", "Store an API key or begin subscription login."),
     ("auth.login_complete", "Complete subscription login."),
+    ("auth.login_cancel", "Abandon a pending subscription login."),
     ("auth.logout", "Remove provider credentials."),
     ("tools.list", "List tools available to a session."),
     ("agents.list", "List agent definitions."),
@@ -280,6 +283,10 @@ pub enum LoginResult {
         verification_uri: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_secs: Option<u64>,
+        /// The provider shows a code to paste into `auth.login_complete`; otherwise
+        /// `auth.login_complete` without a code waits for the browser or device approval.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        needs_code: bool,
     },
 }
 

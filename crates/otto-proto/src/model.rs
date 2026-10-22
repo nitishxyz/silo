@@ -164,6 +164,12 @@ pub struct AuthStatus {
     pub signed_in: bool,
     pub expires_at: Option<i64>,
     pub account: Option<String>,
+    /// Sign-in modes this provider supports, independent of the current state.
+    #[serde(default)]
+    pub modes: Vec<AuthMode>,
+    /// Set on the provider new sessions default to: the model they use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

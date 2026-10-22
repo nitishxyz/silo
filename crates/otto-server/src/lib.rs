@@ -27,6 +27,8 @@ pub trait AuthService: Send + Sync {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>>;
     fn login(&self, provider: String, mode: AuthMode, api_key: Option<String>, device: bool) -> AuthFuture<'_, LoginResult>;
     fn login_complete(&self, login_id: String, code: Option<String>) -> AuthFuture<'_, AuthStatus>;
+    /// Drops a pending login, aborting an in-flight `login_complete` for it.
+    fn login_cancel(&self, login_id: String) -> AuthFuture<'_, ()>;
     fn logout(&self, provider: String) -> AuthFuture<'_, ()>;
     fn list_models(&self, provider: Option<String>) -> AuthFuture<'_, Vec<ModelInfo>>;
 }

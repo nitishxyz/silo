@@ -33,6 +33,7 @@ sink for the CLI's tracing subscriber. It does not install a global subscriber.
 - `status(&self) -> AuthFuture<'_, Vec<AuthStatus>>`
 - `login(&self, provider: String, mode: AuthMode, api_key: Option<String>, device: bool) -> AuthFuture<'_, LoginResult>`
 - `login_complete(&self, login_id: String, code: Option<String>) -> AuthFuture<'_, AuthStatus>`
+- `login_cancel(&self, login_id: String) -> AuthFuture<'_, ()>` (drops a pending login and aborts an in-flight `login_complete`)
 - `logout(&self, provider: String) -> AuthFuture<'_, ()>`
 - `list_models(&self, provider: Option<String>) -> AuthFuture<'_, Vec<ModelInfo>>`
 
@@ -42,6 +43,11 @@ config or tracing events. `auth.login` accepts `device: bool` (defaults to false
 valid only for subscription mode. `LoginResult::Pending` retains `url` and `login_id`
 and adds optional `user_code: String`, `verification_uri: String`, and
 `interval_secs: u64`. Missing values deserialize as None and None values are omitted.
+`needs_code: bool` (omitted when false) says the provider shows a code to paste into
+`auth.login_complete`; otherwise `login_complete` without a code waits for the browser
+redirect or device approval. `AuthStatus.modes` lists the sign-in modes a provider
+supports (also when signed out); `AuthStatus.default_model` is set on the provider new
+sessions default to.
 The CLI implementation must pass the device flag to its provider login flow and
 populate these fields for device authorization; browser logins use None.
 

@@ -2,7 +2,7 @@
 //! IME through GPUI's input handler. ⏎ submits, ⇧⏎/⌥⏎ insert a newline;
 //! it grows to `max_lines` and then scrolls.
 
-use std::{ops::Range, time::Instant};
+use std::{cell::Cell, ops::Range, rc::Rc, time::Instant};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
@@ -16,6 +16,15 @@ pub enum EditorEvent {
     Changed,
     Submit,
     Escape,
+    /// ↑ / ↓ / Tab while [`Editor::nav`] is on (a menu over the composer).
+    Nav(Nav),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Up,
+    Down,
+    Tab,
 }
 
 pub struct Editor {
@@ -26,6 +35,8 @@ pub struct Editor {
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     scroll: Pixels,
+    /// Sideways scroll of a single-line field.
+    hscroll: Pixels,
     layout: Option<Layout>,
     selecting: bool,
     blink: Blink,
@@ -33,6 +44,34 @@ pub struct Editor {
     blink_task: Option<Task<()>>,
     /// Shown as dots (API keys).
     pub mask: bool,
+    /// Ignores edits (a pill input while its submit is in flight).
+    pub read_only: bool,
+    /// Newlines are dropped (typed or pasted).
+    pub single_line: bool,
+    /// Height changes ease (the composer) instead of jumping.
+    pub animate_growth: bool,
+    /// ↑ / ↓ / Tab go to a menu instead of moving the caret.
+    pub nav: bool,
+    grow: Rc<Cell<Grow>>,
+}
+
+/// The shown line count and the height it eases from.
+#[derive(Clone, Copy, Default)]
+struct Grow {
+    lines: usize,
+    from: f32,
+    at: Option<Instant>,
+}
+
+impl Grow {
+    fn height(self, line_height: f32, max: usize, now: Instant, reduce: bool) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let target = line_height * self.lines.min(max) as f32;
+        match self.at.and_then(|at| crate::motion::enter(at, crate::motion::UI_FAST, now, reduce)) {
+            Some(p) => self.from + (target - self.from) * p,
+            None => target,
+        }
+    }
 }
 
 struct Layout {
@@ -85,13 +124,24 @@ impl Editor {
             marked: None,
             placeholder: placeholder.into(),
             scroll: px(0.0),
+            hscroll: px(0.0),
             layout: None,
             selecting: false,
             blink: Blink::default(),
             caret: false,
             blink_task: None,
             mask: false,
+            read_only: false,
+            single_line: false,
+            animate_growth: false,
+            nav: false,
+            grow: Rc::default(),
         }
+    }
+
+    /// The height is still easing to a new line count.
+    pub fn growing(&self, now: Instant, reduce: bool) -> bool {
+        self.grow.get().at.is_some_and(|at| crate::motion::enter(at, crate::motion::UI_FAST, now, reduce).is_some())
     }
 
     fn display(&self) -> String {
@@ -106,6 +156,12 @@ impl Editor {
     /// Displayed offset → text offset.
     fn undisp(&self, offset: usize) -> usize {
         if self.mask { self.text.char_indices().nth(offset / '\u{2022}'.len_utf8()).map_or(self.text.len(), |(i, _)| i) } else { offset }
+    }
+
+    /// A displayed offset under the pointer → text offset (the placeholder
+    /// is laid out while empty, but none of it is text).
+    fn hit(&self, displayed: usize) -> usize {
+        if self.text.is_empty() { 0 } else { self.undisp(displayed).min(self.text.len()) }
     }
 
     pub fn text(&self) -> &str {
@@ -125,6 +181,7 @@ impl Editor {
         self.selection = self.text.len()..self.text.len();
         self.marked = None;
         self.scroll = px(0.0);
+        self.hscroll = px(0.0);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -159,6 +216,16 @@ impl Editor {
     }
 
     fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let flat;
+        let text = if self.single_line && text.contains(['\n', '\r']) {
+            flat = text.replace(['\n', '\r'], "");
+            flat.as_str()
+        } else {
+            text
+        };
         self.text.replace_range(range.clone(), text);
         let end = range.start + text.len();
         self.selection = end..end;
@@ -208,6 +275,9 @@ impl Editor {
         let m = k.modifiers;
         let cursor = self.cursor();
         match k.key.as_str() {
+            "up" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Up)),
+            "down" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Down)),
+            "tab" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Tab)),
             "enter" if m.shift || m.alt => self.insert("\n", cx),
             "enter" if !m.platform && !m.control => cx.emit(EditorEvent::Submit),
             "escape" => cx.emit(EditorEvent::Escape),
@@ -379,7 +449,7 @@ impl Editor {
                     window.focus(&focus, cx);
                     e.update(cx, |ed, cx| {
                         let Some(layout) = &ed.layout else { return };
-                        let offset = ed.undisp(layout.offset(event.position - layout.origin));
+                        let offset = ed.hit(layout.offset(event.position - layout.origin));
                         ed.selecting = true;
                         if event.click_count >= 2 {
                             ed.selection = word_start(&ed.text, offset)..word_end(&ed.text, offset);
@@ -398,7 +468,7 @@ impl Editor {
                         return;
                     }
                     if let Some(layout) = &ed.layout {
-                        let offset = ed.undisp(layout.offset(event.position - layout.origin));
+                        let offset = ed.hit(layout.offset(event.position - layout.origin));
                         ed.select_to(offset, cx);
                     }
                 });
@@ -445,8 +515,8 @@ impl IntoElement for EditorElement {
     }
 }
 
-fn runs(text: &str, marked: Option<&Range<usize>>, window: &Window, color: Hsla) -> Vec<TextRun> {
-    let run = TextRun { len: text.len(), font: window.text_style().font(), color, background_color: None, underline: None, strikethrough: None };
+fn runs(text: &str, marked: Option<&Range<usize>>, font: gpui::Font, color: Hsla) -> Vec<TextRun> {
+    let run = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
     match marked {
         Some(m) if m.end <= text.len() => [
             TextRun { len: m.start, ..run.clone() },
@@ -460,9 +530,9 @@ fn runs(text: &str, marked: Option<&Range<usize>>, window: &Window, color: Hsla)
     }
 }
 
-fn shape(text: &str, runs: &[TextRun], width: Pixels, window: &Window) -> Vec<WrappedLine> {
-    let size = window.text_style().font_size.to_pixels(window.rem_size());
-    window.text_system().shape_text(SharedString::from(text.to_owned()), size, runs, Some(width), None).map(|l| l.into_vec()).unwrap_or_default()
+/// `width`: wrap there; `None`: one unwrapped line (single-line fields scroll sideways).
+fn shape(text: &str, runs: &[TextRun], size: Pixels, width: Option<Pixels>, window: &Window) -> Vec<WrappedLine> {
+    window.text_system().shape_text(SharedString::from(text.to_owned()), size, runs, width, None).map(|l| l.into_vec()).unwrap_or_default()
 }
 
 impl Element for EditorElement {
@@ -486,19 +556,29 @@ impl Element for EditorElement {
     ) -> (LayoutId, ()) {
         let editor = self.editor.read(cx);
         let text = if editor.text.is_empty() { editor.placeholder.to_string() } else { editor.display() };
+        let grow = editor.animate_growth.then(|| editor.grow.get()).filter(|g| g.lines > 0);
+        let single = editor.single_line;
+        let reduce = cx.reduce_motion();
         let max = self.max_lines;
         let color = self.colors.text;
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
+        // The measure runs outside this element's text style: take it now.
+        let font = window.text_style().font();
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let lh = window.line_height();
         let id = window.request_measured_layout(style, move |known, available, window, _| {
             let width = known.width.or(match available.width {
                 gpui::AvailableSpace::Definite(w) => Some(w),
                 _ => None,
             });
-            let lh = window.line_height();
-            let lines = width.map_or(1, |w| {
-                let runs = runs(&text, None, window, color);
-                shape(&text, &runs, w, window).iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1)
+            // Growing: the line count painted last, eased; paint records new counts.
+            if let Some(grow) = grow {
+                return size(width.unwrap_or(px(0.0)), px(grow.height(f32::from(lh), max, Instant::now(), reduce)));
+            }
+            let lines = width.filter(|_| !single).map_or(1, |w| {
+                let runs = runs(&text, None, font.clone(), color);
+                shape(&text, &runs, font_size, Some(w), window).iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1)
             });
             #[allow(clippy::cast_precision_loss)]
             size(width.unwrap_or(px(0.0)), lh * lines.min(max) as f32)
@@ -527,15 +607,16 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (text, marked, empty, focus) = {
+        let (text, marked, empty, focus, single) = {
             let e = self.editor.read(cx);
             let empty = e.text.is_empty();
             let marked = e.marked.as_ref().map(|m| e.disp(m.start)..e.disp(m.end));
-            (if empty { e.placeholder.to_string() } else { e.display() }, marked, empty, e.focus.clone())
+            (if empty { e.placeholder.to_string() } else { e.display() }, marked, empty, e.focus.clone(), e.single_line)
         };
         let color = if empty { self.colors.placeholder } else { self.colors.text };
-        let runs = runs(&text, marked.as_ref(), window, color);
-        let lines = shape(&text, &runs, bounds.size.width, window);
+        let runs = runs(&text, marked.as_ref(), window.text_style().font(), color);
+        let wrap = (!single).then_some(bounds.size.width);
+        let lines = shape(&text, &runs, window.text_style().font_size.to_pixels(window.rem_size()), wrap, window);
         let line_height = window.line_height();
         let mut starts = Vec::with_capacity(lines.len());
         let mut tops = Vec::with_capacity(lines.len());
@@ -550,8 +631,19 @@ impl Element for EditorElement {
             return;
         }
         let focused = focus.is_focused(window) && window.is_window_active();
+        let count = lines.iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1);
+        let reduce = cx.reduce_motion();
+        self.editor.update(cx, |e, cx| {
+            let g = e.grow.get();
+            if e.animate_growth && g.lines != count {
+                let now = Instant::now();
+                let from = if g.lines == 0 { None } else { Some(g.height(f32::from(line_height), self.max_lines, now, reduce)) };
+                e.grow.set(Grow { lines: count, from: from.unwrap_or_default(), at: from.map(|_| now) });
+                cx.notify();
+            }
+        });
         let mut layout = Layout { lines, starts, tops, origin: bounds.origin, line_height, bounds };
-        let (selection, scroll, show_caret) = self.editor.update(cx, |e, cx| {
+        let (selection, scroll, hscroll, show_caret) = self.editor.update(cx, |e, cx| {
             let caret = if empty { point(px(0.0), px(0.0)) } else { layout.position(e.disp(e.cursor())) };
             let max = (layout.height() - bounds.size.height).max(px(0.0));
             if caret.y < e.scroll {
@@ -560,10 +652,21 @@ impl Element for EditorElement {
                 e.scroll = caret.y + line_height - bounds.size.height;
             }
             e.scroll = e.scroll.clamp(px(0.0), max);
+            // A single line keeps the caret in view sideways.
+            if single {
+                let width = bounds.size.width - px(2.0);
+                if caret.x < e.hscroll {
+                    e.hscroll = caret.x;
+                } else if caret.x > e.hscroll + width {
+                    e.hscroll = caret.x - width;
+                }
+                let full = layout.lines.first().map_or(px(0.0), |l| l.size(line_height).width);
+                e.hscroll = e.hscroll.clamp(px(0.0), (full - width).max(px(0.0)));
+            }
             let show = e.caret_phase(focused && e.selection.is_empty(), cx);
-            (if empty { 0..0 } else { e.disp(e.selection.start)..e.disp(e.selection.end) }, e.scroll, show)
+            (if empty { 0..0 } else { e.disp(e.selection.start)..e.disp(e.selection.end) }, e.scroll, e.hscroll, show)
         });
-        layout.origin = point(bounds.origin.x, bounds.origin.y - scroll);
+        layout.origin = point(bounds.origin.x - hscroll, bounds.origin.y - scroll);
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
         window.with_content_mask(Some(gpui::ContentMask { bounds, ..Default::default() }), |window| {
             if !selection.is_empty() {
@@ -648,6 +751,9 @@ impl EntityInputHandler for Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range.as_ref().map(|r| self.range_from_utf16(r)).or(self.marked.clone()).unwrap_or(self.selection.clone());
         self.text.replace_range(range.clone(), text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
@@ -681,7 +787,7 @@ impl EntityInputHandler for Editor {
 
     fn character_index_for_point(&mut self, p: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         let layout = self.layout.as_ref()?;
-        Some(self.offset_to_utf16(self.undisp(layout.offset(p - layout.origin))))
+        Some(self.offset_to_utf16(self.hit(layout.offset(p - layout.origin))))
     }
 }
 

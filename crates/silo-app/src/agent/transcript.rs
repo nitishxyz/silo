@@ -40,6 +40,27 @@ pub enum Kind {
     Other,
 }
 
+impl Kind {
+    /// The line's icon (`assets/icons/<name>.svg`).
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Kind::Reasoning => "brain",
+            Kind::Read => "file-text",
+            Kind::List => "folder",
+            Kind::Search => "search",
+            Kind::Shell | Kind::Terminal => "terminal",
+            Kind::Edit => "pencil",
+            Kind::Fetch | Kind::Browser => "globe",
+            Kind::Ask => "question",
+            Kind::Todos => "list-todo",
+            Kind::Subagent => "bot",
+            Kind::Error => "x-circle",
+            Kind::Other => "circle",
+        }
+    }
+}
+
 /// Inline detail under a line, shown by its `›`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Detail {
@@ -278,9 +299,9 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     }
     if let Some(error) = input.error.map(str::trim).filter(|e| !e.is_empty()) {
         lines.push(Line {
-            title: clip(error, 120),
+            title: clip(&turn_error(error), 120),
             status: Status::Error,
-            detail: (error.lines().count() > 1 || error.chars().count() > 120).then(|| Detail::Text(error.to_owned())),
+            detail: Some(Detail::Text(error.to_owned())),
             ..Line::new("error", Kind::Error)
         });
     }
@@ -602,8 +623,8 @@ impl EditStats {
     fn desc(&self) -> Option<String> {
         match self.removed {
             _ if self.added == 0 && self.removed.unwrap_or(0) == 0 => None,
-            Some(removed) => Some(format!("+{} \u{2212}{removed}", self.added)),
-            None => Some(format!("+{}", self.added)),
+            Some(removed) if removed > 0 => Some(format!("+{} \u{2212}{removed}", self.added)),
+            _ => Some(format!("+{}", self.added)),
         }
     }
 }
@@ -811,6 +832,17 @@ fn json_of(text: &str) -> Value {
     serde_json::from_str(text.trim()).unwrap_or(Value::Null)
 }
 
+/// A turn's error in words: without its class prefix (`Auth: …`), and a
+/// rejected sign-in says so (the full text stays in the line's details).
+fn turn_error(error: &str) -> String {
+    let line = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(error);
+    match line.split_once(": ") {
+        Some(("Auth", _)) => "The provider didn't accept the sign-in · /providers".to_owned(),
+        Some((class, rest)) if !class.contains(' ') && class.chars().next().is_some_and(char::is_uppercase) && !rest.is_empty() => rest.to_owned(),
+        _ => line.to_owned(),
+    }
+}
+
 /// The first non-empty line, at most `max` characters.
 #[must_use]
 pub fn clip(text: &str, max: usize) -> String {
@@ -911,8 +943,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn turn_errors_read_as_words() {
+        assert_eq!(turn_error("Auth: static credential rejected"), "The provider didn't accept the sign-in · /providers");
+        assert_eq!(turn_error("Timeout: no response in 60s"), "no response in 60s");
+        assert_eq!(turn_error("\nsomething broke: badly"), "something broke: badly");
+    }
+
     fn call(id: &str, name: &str, input: Value) -> Part {
         Part::ToolCall { call_id: id.into(), name: name.into(), input, kind: CallKind::Function, opaque: None }
+    }
+
+    #[test]
+    fn kind_icons_exist() {
+        use Kind::*;
+        for kind in [Reasoning, Read, List, Search, Shell, Edit, Fetch, Terminal, Browser, Ask, Todos, Subagent, Error, Other] {
+            assert!(crate::assets::has_icon(kind.icon()), "{kind:?}: {}", kind.icon());
+        }
     }
 
     fn result(id: &str, text: &str, is_error: bool) -> Part {

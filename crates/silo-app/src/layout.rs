@@ -442,9 +442,16 @@ impl Workspace {
             .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
         let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
         let glyph = self.block_icon(id);
+        // An agent on its chat screen: the session title opens the switcher,
+        // and History / New Session join the pane buttons.
+        let agent = self.agents.get(id).map(|(p, _)| p.clone());
+        let session = agent.as_ref().and_then(|p| p.read(cx).header_title());
         let (name, cwd) = match browser {
             Some(title) => (title, None),
-            None if info.as_ref().is_some_and(|i| i.kind == silo_proto::model::BlockKind::Agent) => (info.map(|i| i.title).unwrap_or_default(), None),
+            None if session.is_some() => (session.clone().unwrap_or_default(), None),
+            None if info.as_ref().is_some_and(|i| i.kind == silo_proto::model::BlockKind::Agent) => {
+                (info.map(|i| i.title).filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent".into()), None)
+            }
             None => header_labels(info.as_ref()),
         };
         let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into(), icon: glyph });
@@ -486,6 +493,37 @@ impl Workspace {
                 this.close_block_id(block.clone(), window, cx);
             })
         };
+        let session_controls = session.is_some().then(|| agent.clone()).flatten().map(|pane| {
+            let (p1, p2, p3) = (pane.clone(), pane.clone(), pane);
+            let title = div()
+                .id(gpui::ElementId::Name(format!("pane-agent-title-{id}").into()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .min_w_0()
+                .pl(px(5.0))
+                .pr(px(3.0))
+                .h(px(BUTTON))
+                .continuous(control)
+                .cursor_pointer()
+                .hover(|s| s.bg(palette.hover()))
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().text_color(rgb(if active { ink } else { muted })).child(name.clone()))
+                .child(icon("chevron-down", 11.0, icon_color))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| p1.update(cx, |p, cx| p.open_sessions(window, cx)));
+            let history = button("agent-history", "history", "Sessions  ⌘J")
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| p2.update(cx, |p, cx| p.open_sessions(window, cx)));
+            let new = button("agent-new", "new-session", "New Session  /new")
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| p3.update(cx, |p, cx| p.start_new_session(window, cx)));
+            (title, history, new)
+        });
+        let (agent_title, agent_buttons) = match session_controls {
+            Some((title, history, new)) => (Some(title), Some([history, new])),
+            None => (None, None),
+        };
         let focus_block = block.clone();
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         let status = self.render_status_mark(id, palette, cx);
@@ -517,7 +555,11 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(div().flex_none().text_color(rgb(if active { ink } else { muted })).child(name))
+                    .map(|el| match agent_title {
+                        // The title's hover fill reaches past its text; the text keeps its place.
+                        Some(title) => el.items_center().ml(px(-5.0)).child(title),
+                        None => el.child(div().flex_none().text_color(rgb(if active { ink } else { muted })).child(name)),
+                    })
                     .children(cwd.map(|c| div().min_w_0().text_ellipsis().text_color(rgb(muted)).child(c))),
             )
             .children(status)
@@ -535,6 +577,7 @@ impl Workspace {
                     .justify_end()
                     .items_center()
                     .when(!active, |el| el.opacity(0.0).group_hover(card_group(id), |s| s.opacity(1.0)))
+                    .children(agent_buttons.into_iter().flatten())
                     // A float can't be split or zoomed: Close only.
                     .when(!floating, |el| {
                         el.child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))

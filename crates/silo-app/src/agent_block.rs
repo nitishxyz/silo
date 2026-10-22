@@ -11,7 +11,7 @@ use silo_proto::{
 use crate::agent::{AgentPane, AgentPaneEvent, AgentStatus};
 
 /// The block's glyph (pane header, tab, New Tab row).
-pub const ICON: &str = "settings-shapes";
+pub const ICON: &str = "agent";
 
 /// `block.report` for a turn state.
 #[must_use]
@@ -60,6 +60,7 @@ impl crate::workspace::Workspace {
                 }
                 AgentPaneEvent::Status(status) => this.call(report(block, *status)),
                 AgentPaneEvent::Reveal(target) => this.reveal_agent_target(target.clone(), window, cx),
+                AgentPaneEvent::Header => {}
             }
             cx.notify();
         });

@@ -139,6 +139,10 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!(state.config.auth.login(provider, mode, api_key, device).await?))
         }
         Method::AuthLoginComplete { login_id, code } => Ok(json!(state.config.auth.login_complete(login_id, code).await?)),
+        Method::AuthLoginCancel { login_id } => {
+            state.config.auth.login_cancel(login_id).await?;
+            Ok(json!({}))
+        }
         Method::AuthLogout { provider } => {
             state.config.auth.logout(provider).await?;
             Ok(json!({}))

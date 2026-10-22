@@ -61,11 +61,15 @@ impl AuthService for NoAuth {
                 user_code: Some("ABCD".into()),
                 verification_uri: Some("https://example.test/device".into()),
                 interval_secs: Some(5),
+                needs_code: false,
             })
         })
     }
     fn login_complete(&self, _: String, _: Option<String>) -> AuthFuture<'_, AuthStatus> {
         Box::pin(async { Err(RpcError::auth_required("test")) })
+    }
+    fn login_cancel(&self, _: String) -> AuthFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
     fn logout(&self, _: String) -> AuthFuture<'_, ()> {
         Box::pin(async { Ok(()) })

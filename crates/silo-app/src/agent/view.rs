@@ -7,18 +7,20 @@ use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, MouseButton, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle, Window, div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb,
 };
-use otto_proto::{ApprovalDecision, ApprovalMode, AuthMode, SessionStatus};
+use otto_proto::{ApprovalDecision, ApprovalMode, SessionStatus};
 
 use super::{
-    AgentPane, AgentPaneEvent, Conn, ENTER, FADE, FOLD, Overlay,
+    AgentPane, AgentPaneEvent, Card, Conn, ENTER, FADE, FOLD, Overlay,
     editor::{Editor, EditorColors},
     markdown::{Block, Inline},
-    transcript::{self, Detail, Group, Kind, Line, Row, Status, TodoStatus},
+    pill_input, rows,
+    transcript::{self, Detail, Group, Line, Row, Status, TodoStatus},
 };
 use crate::{
     assets::icon,
     motion,
     theme::{self, Continuous as _},
+    tooltip::Tooltip,
 };
 
 /// Width of the reading column.
@@ -27,6 +29,10 @@ const LINE_H: f32 = 24.0;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
 const TEXT: f32 = 13.5;
+/// Height of an open `›` detail (240 max plus its margins).
+const DETAIL_H: f32 = 250.0;
+/// The composer's text line height.
+const COMPOSER_LINE: f32 = 20.0;
 
 fn hsla(c: u32, alpha: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
@@ -42,12 +48,99 @@ fn mono() -> SharedString {
     theme::summary().1.into()
 }
 
-/// Eased progress of an animation, or `None` once done (instant with reduce motion).
-fn eased(started: Instant, duration: std::time::Duration, now: Instant, cx: &App) -> Option<f32> {
-    if cx.reduce_motion() {
-        return None;
+/// The foreground over the background at `amount`.
+fn ink(amount: f32) -> u32 {
+    theme::mix(theme::background(), theme::foreground(), amount)
+}
+
+/// One step above the pane background (composer, tray, cards).
+fn raised() -> u32 {
+    theme::popover()
+}
+
+fn provider_logo(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("provider-anthropic"),
+        "openai" => Some("provider-openai"),
+        _ => None,
     }
-    motion::progress(started, duration, now)
+}
+
+/// A square icon button.
+fn icon_button(id: impl Into<gpui::ElementId>, name: &'static str, size: f32, side: f32, color: u32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(side))
+        .flex()
+        .items_center()
+        .justify_center()
+        .continuous(7.0)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::hover_fill()))
+        .child(icon(name, size, color))
+}
+
+/// A disclosure chevron: right when closed (0), down when open (1), turning in between.
+fn chevron(open: f32, size: f32, color: u32) -> gpui::Svg {
+    icon("chevron-right", size, color).with_transformation(gpui::Transformation::rotate(gpui::radians(open * std::f32::consts::FRAC_PI_2)))
+}
+
+/// A centered empty state: the agent mark, a title and an optional subtitle.
+fn empty_state(title: impl Into<SharedString>, subtitle: Option<String>) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .text_center()
+        .child(icon("agent", 22.0, theme::muted()))
+        .child(div().mt(px(10.0)).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).child(title.into()))
+        .children(subtitle.map(|s| div().mt(px(6.0)).text_size(px(12.5)).text_color(rgb(theme::muted())).child(s)))
+}
+
+/// A muted note under a popover's list.
+fn footnote(text: &'static str) -> gpui::Div {
+    div()
+        .mt(px(4.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .px(px(8.0))
+        .border_t_1()
+        .border_color(rgb(ink(0.1)))
+        .text_size(px(11.5))
+        .text_color(rgb(theme::muted()))
+        .child(text)
+}
+
+thread_local! {
+    /// Set by [`eased`] while anything is mid-animation in this frame.
+    static MOVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Eased (`motion::ease_ui`) progress of an animation, or `None` once done
+/// (instant with Reduce Motion). Keeps frames coming while it runs.
+pub(super) fn eased(started: Instant, duration: std::time::Duration, now: Instant, cx: &App) -> Option<f32> {
+    let p = motion::enter(started, duration, now, cx.reduce_motion());
+    if p.is_some() {
+        MOVING.set(true);
+    }
+    p
+}
+
+/// A [`motion::Toggle`]'s value, keeping frames coming while it moves.
+pub(super) fn toggled(toggle: &motion::Toggle, now: Instant, cx: &App) -> f32 {
+    let reduce = cx.reduce_motion();
+    if toggle.moving(now, reduce) {
+        MOVING.set(true);
+    }
+    toggle.value(now, reduce)
+}
+
+/// Request the next frame if anything drawn so far was mid-animation.
+pub(super) fn keep_moving(window: &mut Window) {
+    if MOVING.take() {
+        window.request_animation_frame();
+    }
 }
 
 /// A running title: a bright band sweeping across muted text.
@@ -96,17 +189,7 @@ fn ago(ms: i64) -> String {
     }
 }
 
-fn provider_glyph(provider: &str) -> String {
-    match provider {
-        "anthropic" => "A\\".into(),
-        "openai" => "OpenAI".into(),
-        "google" => "G".into(),
-        "xai" => "xAI".into(),
-        other => other.into(),
-    }
-}
-
-fn provider_name(provider: &str) -> String {
+pub(super) fn provider_name(provider: &str) -> String {
     match provider {
         "anthropic" => "Anthropic".into(),
         "openai" => "OpenAI".into(),
@@ -144,20 +227,41 @@ fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> gpui:
 }
 
 impl AgentPane {
+    /// Start an expand/collapse motion `key` (inside transcript row `row`) toward `open`.
+    fn flip(&mut self, key: String, row: String, open: bool, cx: &App) {
+        let now = Instant::now();
+        let reduce = cx.reduce_motion();
+        let entry = self.anims.entry(key).or_insert_with(|| (row, motion::Toggle::new(!open, motion::UI)));
+        entry.1.set(open, now, reduce);
+        // What was clicked stays put: the list stops pinning its bottom.
+        self.list.set_follow_mode(gpui::FollowMode::Normal);
+    }
+
+    /// 0 (closed) … 1 (open) of motion `key`; `open` once it settled.
+    fn openness(&self, key: &str, open: bool, now: Instant, cx: &App) -> f32 {
+        self.anims.get(key).map_or(if open { 1.0 } else { 0.0 }, |(_, t)| toggled(t, now, cx))
+    }
+
     /// Something moves this frame (shimmer, entries, folds, fades).
-    fn animating(&self, now: Instant) -> bool {
+    fn animating(&self, now: Instant, cx: &App) -> bool {
+        let reduce = cx.reduce_motion();
         self.running
+            || self.editor.read(cx).growing(now, reduce)
             || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live))
-            || self.entered.values().any(|at| now.duration_since(*at) < ENTER)
-            || self.fold_at.values().any(|at| now < *at + FOLD)
-            || self.marks.as_ref().is_some_and(|(_, m)| m.iter().any(|(_, at)| now.duration_since(*at) < FADE))
-            || self.tray_shown.is_some_and(|at| now.duration_since(at) < ENTER)
-            || self.morph.is_some_and(|at| now.duration_since(at) < ENTER)
+            || self.entered.values().any(|at| motion::enter(*at, ENTER, now, reduce).is_some())
+            || self.fold_at.values().any(|at| now < *at || motion::enter(*at, FOLD, now, reduce).is_some())
+            || self.marks.as_ref().is_some_and(|(_, m)| m.iter().any(|(_, at)| motion::enter(*at, FADE, now, reduce).is_some()))
     }
 
     pub(super) fn render_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let now = Instant::now();
-        if self.animating(now) && !cx.reduce_motion() {
+        self.settle_focus(window, cx);
+        let header = Some(self.header_title());
+        if self.header_seen != header {
+            self.header_seen = header;
+            cx.emit(AgentPaneEvent::Header);
+        }
+        if self.animating(now, cx) && !cx.reduce_motion() {
             window.request_animation_frame();
         }
         // Folding groups change height every frame; a finished fold is measured once more.
@@ -168,7 +272,7 @@ impl AgentPane {
                 && now >= *at
             {
                 self.list.remeasure_items(ix..ix + 1);
-                if now >= *at + FOLD || cx.reduce_motion() {
+                if motion::enter(*at, FOLD, now, cx.reduce_motion()).is_none() {
                     settled.push(g.key.clone());
                 }
             }
@@ -176,11 +280,29 @@ impl AgentPane {
         for key in settled {
             self.fold_at.remove(&key);
         }
+        // Rows opening or closing change height every frame; a finished one once more.
+        let reduce = cx.reduce_motion();
+        let mut done = Vec::new();
+        for (key, (row, toggle)) in &self.anims {
+            if let Some(ix) = self.rows.iter().position(|r| r.key() == row) {
+                self.list.remeasure_items(ix..ix + 1);
+            }
+            if !toggle.moving(now, reduce) {
+                done.push(key.clone());
+            }
+        }
+        for key in done {
+            self.anims.remove(&key);
+        }
         if self.list.is_following_tail() {
             self.unseen = false;
         }
+        // The composer arrives (first connection, back from Providers) with a rise.
+        let visible = self.composer_visible();
+        self.bottom_shown.set(visible, now, cx.reduce_motion());
+        let rise = toggled(&self.bottom_shown, now, cx);
         let bg = theme::background();
-        div()
+        let pane = div()
             .id(gpui::ElementId::Name(format!("agent-{}", self.block_id).into()))
             .key_context("AgentPane")
             .track_focus(&self.focus)
@@ -202,143 +324,156 @@ impl AgentPane {
                     }
                 }),
             )
-            .child(self.render_title(cx))
             .child(self.render_body(window, cx))
-            .child(self.render_bottom(window, cx))
-            .children(self.render_overlay(window, cx))
-            .into_any_element()
+            .when(visible, |el| {
+                let bottom = self.render_bottom(window, cx);
+                el.child(div().flex_none().relative().top(px((1.0 - rise) * 8.0)).opacity(rise).child(bottom))
+            })
+            .children(self.render_backdrop(cx))
+            .children(self.popover(Overlay::Sessions, window, cx))
+            .children(self.render_signin_dialog(window, cx))
+            .into_any_element();
+        keep_moving(window);
+        pane
     }
 
-    fn render_title(&self, cx: &mut Context<Self>) -> AnyElement {
-        let title = self
-            .mirror()
-            .map(|m| m.info.title.clone())
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| if self.session_id.is_some() { "Untitled".into() } else { "New session".into() });
-        div()
-            .flex_none()
-            .h(px(34.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .id("agent-title")
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .min_w_0()
-                    .px(px(6.0))
-                    .h(px(24.0))
-                    .continuous(7.0)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover_fill()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Sessions, window, cx)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(title),
-                    )
-                    .child(div().flex_none().text_size(px(11.0)).text_color(rgb(theme::muted())).child("⌄")),
-            )
-            .into_any_element()
-    }
-
+    /// The area above the composer; switching what it shows (connecting,
+    /// sign-in, empty, transcript…) fades the new content in with a 6 pt rise.
     fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let body = div().flex_1().min_h_0().w_full().relative();
+        let now = Instant::now();
+        let (mode, content) = self.body_content(window, cx);
+        if self.body_mode.0 != mode {
+            self.body_mode = (mode, Some(now));
+        }
+        let t = self.body_mode.1.and_then(|at| eased(at, motion::UI, now, cx)).unwrap_or(1.0);
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(div().size_full().relative().top(px((1.0 - t) * 6.0)).opacity(t).child(content))
+            .children(self.render_new_activity(now, cx))
+            .into_any_element()
+    }
+
+    fn body_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (u8, AnyElement) {
         let centered =
             |child: AnyElement| div().size_full().flex().flex_col().items_center().justify_center().px(px(24.0)).child(child).into_any_element();
         match &self.conn {
-            Conn::Connecting => {
-                return body
-                    .child(centered(div().text_color(rgb(theme::muted())).child("Connecting to otto…").into_any_element()))
-                    .into_any_element();
-            }
+            Conn::Connecting => return (1, centered(empty_state("Connecting to otto…", None).into_any_element())),
             Conn::Failed(error) => {
-                let retry = chip("agent-retry", "Try again").text_color(rgb(theme::accent())).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.conn = Conn::Connecting;
-                    this.load(cx);
-                    cx.notify();
-                }));
-                return body
-                    .child(centered(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().text_color(rgb(theme::muted())).child(error.clone()))
-                            .child(retry)
-                            .into_any_element(),
-                    ))
-                    .into_any_element();
+                let retry = chip("agent-retry", "Try again").mt(px(12.0)).text_color(rgb(theme::accent())).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
+                        this.conn = Conn::Connecting;
+                        this.load(cx);
+                        cx.notify();
+                    },
+                ));
+                return (2, centered(empty_state("Can't reach otto", Some(error.clone())).child(retry).into_any_element()));
             }
             Conn::Ready => {}
         }
-        if self.catalog.as_ref().is_some_and(|c| !c.any_signed_in()) {
-            return body.child(centered(self.render_signin(window, cx))).into_any_element();
+        if self.showing_signin() {
+            return (if self.managing_providers() { 3 } else { 4 }, centered(self.render_signin(window, cx)));
         }
         if let Some(error) = &self.error {
-            return body.child(centered(div().text_color(rgb(theme::muted())).child(error.clone()).into_any_element())).into_any_element();
+            // Sending from here starts a new session; the old one can't be reached.
+            let reason =
+                if error.contains("not found") { "It may have been deleted. Ask anything to start a new one.".to_owned() } else { error.clone() };
+            let new = chip("agent-error-new", "New session")
+                .mt(px(12.0))
+                .bg(theme::control_fill())
+                .active(|s| s.scale(0.96))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_new_session(window, cx)));
+            return (5, centered(empty_state("Couldn't open this session", Some(reason)).child(new).into_any_element()));
         }
         if self.rows.is_empty() {
-            let hint = if self.session_id.is_some() && self.state.is_none() {
-                div().text_color(rgb(theme::muted())).child("Loading…")
-            } else {
-                let place = self.project.as_ref().and_then(|p| std::path::Path::new(&p.root).file_name().map(|n| n.to_string_lossy().into_owned()));
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(div().text_size(px(16.0)).font_weight(FontWeight::MEDIUM).child("What should we work on?"))
-                    .children(place.map(|p| div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(p)))
-            };
-            return body.child(centered(hint.into_any_element())).into_any_element();
+            if self.session_id.is_some() && self.state.is_none() {
+                return (6, centered(empty_state("Loading…", None).into_any_element()));
+            }
+            let place = self.project.as_ref().and_then(|p| std::path::Path::new(&p.root).file_name().map(|n| n.to_string_lossy().into_owned()));
+            return (7, centered(empty_state("What should we work on?", place).into_any_element()));
         }
-        let list = gpui::list(self.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx))).size_full();
-        let pill = (self.unseen && !self.list.is_following_tail()).then(|| {
-            div().absolute().bottom(px(8.0)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("agent-new-activity")
-                    .px(px(10.0))
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .capsule()
-                    .bg(rgb(theme::popover()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .shadow_sm()
-                    .text_size(px(12.0))
-                    .cursor_pointer()
-                    .child("↓ New activity")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.list.scroll_to_end();
-                        this.list.set_follow_mode(gpui::FollowMode::Tail);
-                        this.unseen = false;
-                        cx.notify();
-                    })),
-            )
-        });
-        body.child(list).children(pill).into_any_element()
+        (8, gpui::list(self.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx))).size_full().into_any_element())
+    }
+
+    /// `↓ New activity` while scrolled up and something arrived below; it rises in and sinks away.
+    fn render_new_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reduce = cx.reduce_motion();
+        let show = self.unseen && !self.list.is_following_tail() && !self.rows.is_empty();
+        self.unseen_anim.set(show, now, reduce);
+        if self.unseen_anim.hidden(now, reduce) {
+            return None;
+        }
+        let t = toggled(&self.unseen_anim, now, cx);
+        Some(
+            div()
+                .absolute()
+                .bottom(px(8.0 + (1.0 - t) * -8.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .opacity(t)
+                .child(
+                    div()
+                        .id("agent-new-activity")
+                        .pl(px(8.0))
+                        .pr(px(10.0))
+                        .h(px(26.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .capsule()
+                        .bg(theme::overlay_fill())
+                        .border_1()
+                        .border_color(rgb(ink(0.12)))
+                        .shadow_sm()
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::hover_fill()))
+                        .active(|s| s.scale(0.96))
+                        .child(icon("chevron-down", 12.0, theme::muted()))
+                        .child("New activity")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.list.scroll_to_end();
+                            this.list.set_follow_mode(gpui::FollowMode::Tail);
+                            this.unseen = false;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
         let now = Instant::now();
+        // Gap above the row; a paragraph already ends with 8 of its own.
+        let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
+            (None, _) => 16.0,
+            (Some(Row::User { .. }), _) => 20.0,
+            (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
+            (Some(Row::Group(_)), Row::User { .. }) => 28.0,
+            (Some(Row::Text { .. }), _) => 4.0,
+            (Some(Row::Group(_)), Row::Text { .. }) => 12.0,
+            (Some(Row::Group(_)), Row::Group(_)) => 4.0,
+        };
         let content = match &row {
             Row::User { text, .. } => div()
-                .pt(px(if ix == 0 { 12.0 } else { 22.0 }))
-                .pb(px(8.0))
                 .flex()
                 .justify_end()
-                .child(div().max_w(relative(0.8)).text_color(rgb(theme::muted())).child(text.clone()))
+                .child(
+                    div()
+                        .max_w(relative(0.8))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .continuous(14.0)
+                        .bg(rgb(ink(0.06)))
+                        .text_color(rgb(ink(0.85)))
+                        .line_height(px(21.0))
+                        .child(text.clone()),
+                )
                 .into_any_element(),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
@@ -348,7 +483,10 @@ impl AgentPane {
             Some(t) => div().relative().top(px((1.0 - t) * 6.0)).opacity(t).child(content).into_any_element(),
             None => content,
         };
-        div().w_full().flex().justify_center().px(px(20.0)).child(div().w_full().max_w(px(COLUMN)).child(content)).into_any_element()
+        let row =
+            div().w_full().flex().justify_center().px(px(20.0)).pt(px(top)).child(div().w_full().max_w(px(COLUMN)).child(content)).into_any_element();
+        keep_moving(window);
+        row
     }
 
     fn group_started(&self, g: &Group) -> Option<u64> {
@@ -367,6 +505,7 @@ impl AgentPane {
             }
         };
         let open = self.toggled.contains(&key);
+        let openness = self.openness(&format!("grp:{key}"), open, now, cx);
         let muted = theme::muted();
         let header_text = if g.live {
             match self.group_started(g) {
@@ -386,33 +525,38 @@ impl AgentPane {
                 .gap(px(8.0))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    if !this.toggled.remove(&toggle_key) {
+                    let open = !this.toggled.remove(&toggle_key);
+                    if open {
                         this.toggled.insert(toggle_key.clone());
                     }
-                    if let Some(ix) = this.rows.iter().position(|r| r.key() == toggle_key) {
-                        this.list.remeasure_items(ix..ix + 1);
-                    }
+                    this.flip(format!("grp:{toggle_key}"), toggle_key.clone(), open, cx);
                     cx.notify();
                 }))
                 .child(div().w(px(16.0)).flex_none().flex().justify_center().map(|el| {
                     if g.live {
                         el.child(crate::browser_pane::spinner(&key, 13.0, muted, cx))
                     } else {
-                        el.text_size(px(12.0)).text_color(rgb(if g.failed { theme::danger() } else { muted })).child(if open && fold >= 1.0 {
-                            "⌄"
-                        } else {
-                            "›"
-                        })
+                        el.child(chevron(if fold >= 1.0 { openness } else { 0.0 }, 12.0, if g.failed { theme::danger() } else { muted }))
                     }
                 }))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| {
                     if g.live { el.child(shimmer(&header_text, now, self.epoch, cx)) } else { el.text_color(rgb(muted)).child(header_text) }
                 }));
-        let mut column = div().py(px(4.0)).flex().flex_col().child(header);
+        let mut column = div().text_size(px(13.0)).flex().flex_col().child(header);
         if fold >= 1.0 {
-            if open {
-                let lines: Vec<AnyElement> = g.lines.iter().map(|l| self.render_line(l, false, 1.0, now, window, cx)).collect();
-                column = column.child(div().pl(px(18.0)).flex().flex_col().children(lines));
+            if openness > 0.0 {
+                let lines: Vec<AnyElement> = g.lines.iter().map(|l| self.render_line(&key, l, false, 1.0, now, window, cx)).collect();
+                // Grows to its lines (and any open details) while it opens.
+                #[allow(clippy::cast_precision_loss)]
+                let full = g.lines.len() as f32 * LINE_H + g.lines.iter().filter(|l| self.details.contains(&l.key)).count() as f32 * DETAIL_H;
+                column = column.child(
+                    div()
+                        .pl(px(24.0))
+                        .flex()
+                        .flex_col()
+                        .when(openness < 1.0, |el| el.max_h(px(full * openness)).overflow_hidden().opacity(openness))
+                        .children(lines),
+                );
             }
             return column.into_any_element();
         }
@@ -425,16 +569,18 @@ impl AgentPane {
             .enumerate()
             .map(|(i, l)| {
                 let dim = if n - i <= 2 { 1.0 } else { 0.55 };
-                self.render_line(l, g.live && i + 1 == n, dim, now, window, cx)
+                self.render_line(&key, l, g.live && i + 1 == n, dim, now, window, cx)
             })
             .collect();
+        // A new line pushes the others up: the whole list slides one line.
+        let push = if g.live && n > 1 { shown.last().and_then(|l| self.entered.get(&l.key)).and_then(|at| eased(*at, ENTER, now, cx)) } else { None };
         let max = LINE_H * LIVE_LINES;
         let hover_key = key.clone();
         let count = g.lines.len();
         let window_el = div()
             .id(gpui::ElementId::Name(format!("live-{key}").into()))
             .relative()
-            .pl(px(18.0))
+            .pl(px(24.0))
             .max_h(px(max * (1.0 - fold)))
             .opacity(1.0 - fold)
             .overflow_hidden()
@@ -445,7 +591,14 @@ impl AgentPane {
                 this.frozen = hovered.then(|| (hover_key.clone(), count));
                 cx.notify();
             }))
-            .children(lines.into_iter().map(|l| div().flex_none().child(l)))
+            .child(
+                div()
+                    .relative()
+                    .top(px(push.map_or(0.0, |p| (1.0 - p) * LINE_H)))
+                    .flex()
+                    .flex_col()
+                    .children(lines.into_iter().map(|l| div().flex_none().child(l))),
+            )
             .when(f32::from(window.line_height()) > 0.0 && n as f32 > LIVE_LINES - 0.5, |el| {
                 let bg = theme::background();
                 el.child(div().absolute().top_0().left_0().right_0().h(px(28.0)).bg(linear_gradient(
@@ -457,16 +610,36 @@ impl AgentPane {
         column.child(window_el).into_any_element()
     }
 
-    fn render_line(&mut self, line: &Line, newest: bool, dim: f32, now: Instant, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn render_line(
+        &mut self,
+        group: &str,
+        line: &Line,
+        newest: bool,
+        dim: f32,
+        now: Instant,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = theme::muted();
         let key = line.key.clone();
         let open = self.details.contains(&key);
-        let glyph: AnyElement = match line.status {
-            Status::Running => crate::browser_pane::spinner(&key, 12.0, muted, cx),
-            Status::Error => div().text_color(rgb(theme::danger())).child("✕").into_any_element(),
-            Status::Pending => div().text_color(rgb(muted)).opacity(0.6).child("○").into_any_element(),
-            Status::Done => div().text_color(rgb(muted)).child(if line.kind == Kind::Edit { "✎" } else { "✓" }).into_any_element(),
+        let openness = self.openness(&format!("det:{key}"), open, now, cx);
+        // A status change swaps the icon in (scale 0.8 → 1, fade).
+        let since = match self.line_status.get(&key) {
+            Some((status, at)) if *status == line.status => *at,
+            Some(_) => now,
+            None => now.checked_sub(std::time::Duration::from_secs(60)).unwrap_or(now),
         };
+        self.line_status.insert(key.clone(), (line.status, since));
+        let swap = eased(since, motion::UI_FAST, now, cx).unwrap_or(1.0);
+        let glyph: AnyElement = match line.status {
+            Status::Running => crate::browser_pane::spinner(&key, 13.0, muted, cx),
+            Status::Error => icon("x-circle", 14.0, theme::danger()).into_any_element(),
+            Status::Pending => div().opacity(0.5).child(icon(line.kind.icon(), 14.0, muted)).into_any_element(),
+            Status::Done => icon(line.kind.icon(), 14.0, muted).into_any_element(),
+        };
+        let glyph = div().flex().opacity(swap).scale(0.8 + 0.2 * swap).child(glyph);
         let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| match line.status {
             Status::Running if newest => el.child(shimmer(&line.title, now, self.epoch, cx)),
             Status::Error => el.text_color(rgb(theme::danger())).child(line.title.clone()),
@@ -474,6 +647,7 @@ impl AgentPane {
             _ => el.child(line.title.clone()),
         });
         let detail_key = key.clone();
+        let group = group.to_owned();
         let has_detail = line.detail.is_some();
         let reveal = line.reveal.clone();
         let row = div()
@@ -487,30 +661,31 @@ impl AgentPane {
                 if !has_detail {
                     return;
                 }
-                if !this.details.remove(&detail_key) {
+                let open = !this.details.remove(&detail_key);
+                if open {
                     this.details.insert(detail_key.clone());
                 }
-                this.list.remeasure();
+                this.flip(format!("det:{detail_key}"), group.clone(), open, cx);
                 cx.notify();
             }))
-            .child(div().w(px(16.0)).flex_none().flex().justify_center().text_size(px(12.0)).child(glyph))
+            .child(div().w(px(16.0)).flex_none().flex().justify_center().child(glyph))
             .child(title)
             .child(div().flex_1())
-            .children(line.desc.clone().map(|d| div().flex_none().text_size(px(12.0)).text_color(rgb(muted)).child(d)))
-            .when(has_detail, |el| {
-                el.child(div().flex_none().w(px(12.0)).text_size(px(12.0)).text_color(rgb(muted)).child(if open { "⌄" } else { "›" }))
-            })
-            .children(reveal.map(|block| {
+            .children(line.desc.clone().map(|d| {
                 div()
-                    .id(gpui::ElementId::Name(format!("reveal-{key}").into()))
                     .flex_none()
-                    .px(px(4.0))
-                    .continuous(5.0)
+                    .max_w(relative(0.5))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(px(12.0))
                     .text_color(rgb(muted))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover_fill()).text_color(rgb(theme::foreground())))
-                    .child("↗")
+                    .child(d)
+            }))
+            .when(has_detail, |el| el.child(chevron(openness, 12.0, muted)))
+            .children(reveal.map(|block| {
+                icon_button(gpui::ElementId::Name(format!("reveal-{key}").into()), "arrow-up-right", 12.0, 20.0, muted)
+                    .tooltip(Tooltip::text("Show block"))
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         cx.emit(AgentPaneEvent::Reveal(block.clone()));
@@ -521,7 +696,10 @@ impl AgentPane {
             let tail = tail[tail.len().saturating_sub(4)..].join("\n");
             div().pl(px(24.0)).pb(px(4.0)).text_size(px(12.0)).line_height(px(18.0)).text_color(rgb(muted)).opacity(0.8).child(tail)
         });
-        let detail = open.then(|| line.detail.as_ref().map(|d| render_detail(&key, d))).flatten();
+        let detail = (openness > 0.0)
+            .then(|| line.detail.as_ref().map(|d| render_detail(&key, d)))
+            .flatten()
+            .map(|d| div().when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(d));
         let enter = self.entered.get(&key).and_then(|at| eased(*at, ENTER, now, cx));
         let (shift, alpha) = enter.map_or((0.0, 1.0), |t| ((1.0 - t) * 6.0, t));
         div().relative().top(px(shift)).opacity(alpha * dim).child(row).children(stream).children(detail).into_any_element()
@@ -573,134 +751,160 @@ impl AgentPane {
                 .flex()
                 .gap(px(2.0))
                 .h(px(24.0))
+                .ml(px(-5.0))
                 .opacity(0.0)
                 .group_hover(group, |s| s.opacity(1.0))
-                .text_color(rgb(theme::muted()))
                 .child(
-                    chip(gpui::ElementId::Name(format!("copy-{key}").into()), "Copy")
+                    icon_button(gpui::ElementId::Name(format!("copy-{key}").into()), "copy", 13.0, 24.0, theme::muted())
+                        .tooltip(Tooltip::text("Copy"))
                         .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))),
                 )
                 .children(question.map(|q| {
-                    chip(gpui::ElementId::Name(format!("retry-{key}").into()), "Retry")
+                    icon_button(gpui::ElementId::Name(format!("retry-{key}").into()), "rotate-ccw", 13.0, 24.0, theme::muted())
+                        .tooltip(Tooltip::text("Retry"))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(q.clone(), cx)))
                 }))
         });
-        div().group(SharedString::from(format!("answer-{key}"))).py(px(6.0)).flex().flex_col().children(els).children(actions).into_any_element()
+        div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions).into_any_element()
     }
 
     // ---- bottom: notice, card, tray, composer, footer ----
 
     fn render_bottom(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let notice = self.notice.clone().map(|n| div().pb(px(6.0)).px(px(6.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
+        let notice = self
+            .notice
+            .clone()
+            .map(|n| div().pb(px(8.0)).px(px(pill_input::HALO + pill_input::TEXT_X)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
+        let popovers: Vec<AnyElement> =
+            [Overlay::Agents, Overlay::Models, Overlay::Menu, Overlay::Slash].into_iter().filter_map(|o| self.popover(o, window, cx)).collect();
         div()
             .flex_none()
             .w_full()
             .flex()
             .justify_center()
-            .px(px(14.0))
-            .pb(px(8.0))
+            .px(px(20.0))
+            .pt(px(4.0))
+            .pb(px(12.0))
             .child(
                 div()
+                    .relative()
                     .w_full()
-                    .max_w(px(COLUMN + 16.0))
+                    .max_w(px(COLUMN))
                     .flex()
                     .flex_col()
                     .children(notice)
                     .children(self.render_card(cx))
                     .children(self.render_tray(cx))
                     .child(self.render_composer(window, cx))
-                    .child(self.render_footer(cx)),
+                    .child(self.render_footer(cx))
+                    .children(popovers),
             )
             .into_any_element()
     }
 
+    /// The approval or question card above the composer: rises in (height,
+    /// opacity, 8 pt slide) and sinks away once answered.
     fn render_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let m = self.mirror()?;
-        let card = || {
-            div()
-                .mb(px(8.0))
-                .p(px(12.0))
-                .continuous(12.0)
-                .bg(rgb(theme::popover()))
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-        };
-        if let Some(q) = m.pending_questions.first() {
-            let options: Vec<AnyElement> = q
-                .options
-                .iter()
-                .enumerate()
-                .map(|(i, option)| {
-                    let id = q.question_id.clone();
-                    let answer = option.clone();
-                    chip(("agent-option", i), option.clone())
-                        .bg(theme::control_fill())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer_question(id.clone(), answer.clone(), cx)))
-                        .into_any_element()
-                })
-                .collect();
-            return Some(
-                card()
-                    .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone()))
-                    .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
-                    .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below ⏎"))
-                    .into_any_element(),
-            );
+        let now = Instant::now();
+        let reduce = cx.reduce_motion();
+        let live = self.mirror().and_then(|m| {
+            m.pending_questions
+                .first()
+                .cloned()
+                .map(Card::Question)
+                .or_else(|| m.pending_approvals.first().cloned().map(|a| Card::Approval(a, m.pending_approvals.len() - 1)))
+        });
+        match &live {
+            Some(c) => {
+                if self.card.as_ref().map(Card::id) != Some(c.id()) || !self.card_anim.on() {
+                    self.card_anim = motion::Toggle::new(false, motion::UI);
+                    self.card_anim.set(true, now, reduce);
+                }
+                self.card = live.clone();
+            }
+            None => self.card_anim.set(false, now, reduce),
         }
-        let a = m.pending_approvals.first()?;
-        let more = m.pending_approvals.len() - 1;
-        let summary = transcript::clip(&a.summary, 160);
-        let button = |id: &'static str, label: &'static str, hint: &'static str, primary: bool| {
-            div()
-                .id(id)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(10.0))
-                .h(px(26.0))
-                .continuous(8.0)
-                .text_size(px(12.5))
-                .cursor_pointer()
-                .map(|el| if primary { el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())) } else { el.bg(theme::control_fill()) })
-                .hover(|s| s.opacity(0.9))
-                .child(label)
-                .when(!hint.is_empty(), |el| el.child(div().text_size(px(11.0)).opacity(0.7).child(hint)))
-        };
-        Some(
-            card()
-                .child(
+        if self.card_anim.hidden(now, reduce) {
+            self.card = None;
+            return None;
+        }
+        let t = toggled(&self.card_anim, now, cx);
+        let active = live.is_some();
+        let card =
+            div().mb(px(10.0)).p(px(14.0)).continuous(14.0).bg(rgb(raised())).border_1().border_color(rgb(ink(0.15))).flex().flex_col().gap(px(10.0));
+        let body = match self.card.clone()? {
+            Card::Question(q) => {
+                let options: Vec<AnyElement> = q
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, option)| {
+                        let id = q.question_id.clone();
+                        let answer = option.clone();
+                        chip(("agent-option", i), option.clone())
+                            .bg(theme::control_fill())
+                            .when(active, |el| {
+                                el.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer_question(id.clone(), answer.clone(), cx)))
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
+                card.child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(icon("lock", 13.0, theme::muted()))
+                        .child(icon("question", 16.0, theme::muted()))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone())),
+                )
+                .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
+                .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))
+            }
+            Card::Approval(a, more) => {
+                let summary = transcript::clip(&a.summary, 160);
+                let button = |id: &'static str, label: &'static str, hint: &'static str, primary: bool| {
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(12.0))
+                        .h(px(28.0))
+                        .capsule()
+                        .text_size(px(12.5))
+                        .map(|el| {
+                            if primary { el.bg(rgb(theme::foreground())).text_color(rgb(theme::background())) } else { el.bg(theme::control_fill()) }
+                        })
+                        .when(active, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)).active(|s| s.scale(0.96)))
+                        .child(label)
+                        .when(!hint.is_empty(), |el| el.child(div().text_size(px(11.0)).opacity(0.6).font_family(mono()).child(hint)))
+                };
+                let answer =
+                    |decision: ApprovalDecision| cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| this.answer_approval(decision, cx));
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon("lock", 14.0, theme::muted()))
                         .child(div().font_weight(FontWeight::MEDIUM).child(format!("Allow {}?", a.tool)))
                         .when(more > 0, |el| el.child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child(format!("+{more} more")))),
                 )
-                .when(!summary.is_empty(), |el| el.child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(summary)))
+                .when(!summary.is_empty(), |el| {
+                    el.child(div().text_size(px(12.0)).font_family(mono()).text_color(rgb(theme::muted())).child(summary))
+                })
                 .child(
                     div()
                         .flex()
                         .gap(px(6.0))
-                        .child(
-                            button("agent-allow", "Allow", "⏎", true)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.answer_approval(ApprovalDecision::Allow, cx))),
-                        )
-                        .child(
-                            button("agent-always", "Always", "", false)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.answer_approval(ApprovalDecision::AlwaysAllow, cx))),
-                        )
-                        .child(
-                            button("agent-deny", "Deny", "esc", false)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.answer_approval(ApprovalDecision::Deny, cx))),
-                        ),
+                        .child(button("agent-allow", "Allow", "⏎", true).when(active, |el| el.on_click(answer(ApprovalDecision::Allow))))
+                        .child(button("agent-always", "Always", "", false).when(active, |el| el.on_click(answer(ApprovalDecision::AlwaysAllow))))
+                        .child(button("agent-deny", "Deny", "esc", false).when(active, |el| el.on_click(answer(ApprovalDecision::Deny)))),
                 )
-                .into_any_element(),
-        )
+            }
+        };
+        Some(div().flex_none().max_h(px(320.0 * t)).overflow_hidden().opacity(t).relative().top(px((1.0 - t) * 8.0)).child(body).into_any_element())
     }
 
     fn render_tray(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -724,67 +928,71 @@ impl AgentPane {
         }
         let now = Instant::now();
         let muted = theme::muted();
+        let fg = theme::foreground();
         let (done, total) = transcript::progress(&self.todos);
-        let current = transcript::current(&self.todos).map(|t| t.step.clone());
-        let open = self.tray_open;
+        let openness = toggled(&self.tray_anim, now, cx);
+        let status_icon = |status: TodoStatus| match status {
+            TodoStatus::Completed => icon("circle-check", 14.0, muted),
+            TodoStatus::InProgress => icon("circle-dot", 14.0, theme::accent()),
+            TodoStatus::Cancelled => icon("x-circle", 14.0, muted),
+            TodoStatus::Pending => icon("circle", 14.0, muted),
+        };
+        let item = |status: TodoStatus, step: String| {
+            let finished = matches!(status, TodoStatus::Completed | TodoStatus::Cancelled);
+            div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).child(status_icon(status)).child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(rgb(if finished { muted } else { fg }))
+                    .when(finished, |el| el.line_through())
+                    .child(step),
+            )
+        };
+        // Hidden under the composer's top half.
+        let tuck = pill_input::HEIGHT / 2.0 + pill_input::HALO;
         let mut tray = div()
-            .mx(px(14.0))
-            .mb(px(-12.0))
-            .pb(px(12.0))
-            .px(px(12.0))
-            .pt(px(4.0))
-            .continuous(12.0)
-            .bg(theme::control_fill())
-            .text_size(px(12.0))
+            .mx(px(28.0))
+            .mb(px(-tuck))
+            .pb(px(tuck))
+            .rounded_tl(px(12.0))
+            .rounded_tr(px(12.0))
+            .bg(rgb(raised()))
+            .border_1()
+            .border_color(rgb(ink(0.15)))
+            .font_family(mono())
+            .text_size(px(12.5))
             .flex()
             .flex_col();
-        if !self.todos.is_empty() {
+        if openness > 0.0 && !self.todos.is_empty() {
+            #[allow(clippy::cast_precision_loss)]
+            let full = self.todos.len() as f32 * 26.0 + 11.0;
             tray = tray.child(
                 div()
-                    .id("agent-tray")
-                    .h(px(26.0))
+                    .flex_none()
+                    .max_h(px(full * openness))
+                    .overflow_hidden()
+                    .opacity(openness)
                     .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.tray_open = !this.tray_open;
-                        cx.notify();
-                    }))
-                    .child(div().flex_none().text_color(rgb(muted)).child("☰ Todos"))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().when(!open, |el| el.children(current)))
-                    .child(div().flex_none().text_color(rgb(muted)).child(format!("{done}/{total} done")))
-                    .child(div().flex_none().text_color(rgb(muted)).child(if open { "⌄" } else { "⌃" })),
+                    .flex_col()
+                    .justify_end()
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt(px(8.0))
+                            .pb(px(2.0))
+                            .px(px(14.0))
+                            .flex()
+                            .flex_col()
+                            .children(self.todos.iter().map(|t| div().h(px(26.0)).flex().items_center().child(item(t.status, t.step.clone())))),
+                    )
+                    .child(div().flex_none().mx(px(14.0)).h(px(1.0)).bg(rgb(ink(0.1)))),
             );
-            if open {
-                tray = tray.children(self.todos.iter().map(|t| {
-                    let (glyph, color) = match t.status {
-                        TodoStatus::Completed => ("✓", muted),
-                        TodoStatus::InProgress => ("◐", theme::accent()),
-                        TodoStatus::Cancelled => ("⊘", muted),
-                        TodoStatus::Pending => ("○", muted),
-                    };
-                    div()
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(div().w(px(14.0)).flex_none().text_color(rgb(color)).child(glyph))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .when(matches!(t.status, TodoStatus::Completed | TodoStatus::Cancelled), |el| el.text_color(rgb(muted)))
-                                .when(t.status == TodoStatus::Cancelled, |el| el.line_through())
-                                .child(t.step.clone()),
-                        )
-                }));
-            }
         }
         if !queue.is_empty() {
-            tray = tray.child(div().flex().flex_wrap().gap(px(6.0)).py(px(4.0)).children(queue.into_iter().map(|q| {
+            tray = tray.child(div().px(px(14.0)).pt(px(8.0)).flex().flex_wrap().gap(px(6.0)).children(queue.into_iter().map(|q| {
                 div()
                     .max_w(px(260.0))
                     .px(px(8.0))
@@ -792,7 +1000,8 @@ impl AgentPane {
                     .flex()
                     .items_center()
                     .capsule()
-                    .bg(rgb(theme::background()))
+                    .bg(rgb(ink(0.08)))
+                    .text_size(px(12.0))
                     .text_color(rgb(muted))
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -800,22 +1009,57 @@ impl AgentPane {
                     .child(format!("Queued · {}", transcript::clip(&q, 60)))
             })));
         }
-        let shift = self.tray_shown.and_then(|at| eased(at, ENTER, now, cx));
-        Some(match shift {
-            Some(t) => div().relative().top(px((1.0 - t) * 12.0)).opacity(t).child(tray).into_any_element(),
-            None => tray.into_any_element(),
-        })
+        if !self.todos.is_empty() {
+            let current = transcript::current(&self.todos).map(|t| (t.status, t.step.clone()));
+            tray = tray.child(
+                div()
+                    .id("agent-tray")
+                    .h(px(34.0))
+                    .px(px(14.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        let open = !this.tray_anim.on();
+                        this.tray_anim.set(open, Instant::now(), cx.reduce_motion());
+                        cx.notify();
+                    }))
+                    .child(
+                        div().flex_none().flex().items_center().gap(px(8.0)).text_color(rgb(fg)).child(icon("list-todo", 14.0, muted)).child("Todos"),
+                    )
+                    .child(div().flex_none().w(px(1.0)).h(px(14.0)).bg(rgb(ink(0.15))).opacity(1.0 - openness))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .opacity(1.0 - openness)
+                            .when(openness < 1.0, |el| el.children(current.map(|(s, step)| item(s, step)))),
+                    )
+                    .child(div().flex_none().text_color(rgb(muted)).child(format!("{done}/{total} done")))
+                    .child(
+                        icon("chevron-up", 12.0, muted)
+                            .with_transformation(gpui::Transformation::rotate(gpui::radians(openness * std::f32::consts::PI))),
+                    ),
+            );
+        } else {
+            tray = tray.child(div().h(px(8.0)));
+        }
+        // Rises from behind the composer, pushing the transcript up as it goes.
+        let t = self.tray_shown.and_then(|at| eased(at, motion::UI, now, cx)).unwrap_or(1.0);
+        Some(div().flex_none().mt(px(-38.0 * (1.0 - t))).opacity(t).child(tray).into_any_element())
     }
 
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let focused = self.editor.read(cx).focus.is_focused(window);
-        let empty = self.editor.read(cx).text().trim().is_empty();
+        let empty = self.editor.read(cx).text().trim().is_empty() && self.attachments.is_empty();
         let question = self.mirror().is_some_and(|m| !m.pending_questions.is_empty());
         let placeholder = if question {
             "Answer…"
         } else if self.running {
             "Queue a follow-up"
-        } else if self.session_id.is_some() {
+        } else if self.session_id.is_some() && self.error.is_none() {
             "Reply"
         } else {
             "Ask anything"
@@ -824,524 +1068,505 @@ impl AgentPane {
         let colors = EditorColors {
             text: rgb(theme::foreground()).into(),
             placeholder: rgb(theme::muted()).into(),
-            caret: rgb(theme::accent()).into(),
+            caret: rgb(theme::foreground()).into(),
             selection: hsla(theme::selection(), 0.6),
         };
         let editor = Editor::element(&self.editor, 8, colors, cx);
         let stop = self.running && empty;
         let enabled = stop || !empty;
         let now = Instant::now();
-        let morph = self.morph.and_then(|at| eased(at, ENTER, now, cx)).unwrap_or(1.0);
-        let send = div()
-            .id("agent-send")
-            .flex_none()
-            .size(px(30.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .capsule()
-            .map(|el| {
-                if enabled {
-                    el.bg(rgb(theme::foreground())).text_color(rgb(theme::background())).cursor_pointer()
-                } else {
-                    el.bg(theme::control_fill()).text_color(rgb(theme::muted()))
-                }
-            })
-            .child(
-                div()
-                    .text_size(px((if stop { 11.0 } else { 15.0 }) * (0.6 + 0.4 * morph)))
-                    .opacity(morph)
-                    .font_weight(FontWeight::BOLD)
-                    .child(if stop { "■" } else { "↑" }),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        let reduce = cx.reduce_motion();
+        self.send_ready.set(enabled, now, reduce);
+        let t = self.send_ready.value(now, reduce);
+        let morph = self.morph.and_then(|at| eased(at, motion::UI, now, cx)).unwrap_or(1.0);
+        let glyph = if stop { 14.0 } else { 18.0 };
+        let send = pill_input::circle(
+            "agent-send",
+            t,
+            enabled,
+            div()
+                .opacity(morph)
+                .child(icon(if stop { "stop" } else { "arrow-up" }, glyph * (0.6 + 0.4 * morph), pill_input::circle_colors(t).1))
+                .into_any_element(),
+        )
+        .absolute()
+        .right(px(pill_input::INSET - pill_input::BORDER))
+        .bottom(px(pill_input::INSET - pill_input::BORDER))
+        .tooltip(Tooltip::text(if stop { "Stop" } else { "Send  ⏎" }))
+        .when(enabled, |el| {
+            el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if stop {
                     this.stop(cx);
                 } else {
                     this.submit(window, cx);
                 }
-            }));
-        let menu = div()
-            .id("agent-menu")
-            .flex_none()
-            .size(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .capsule()
-            .text_color(rgb(theme::muted()))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::hover_fill()))
-            .child("⋮")
+            }))
+        });
+        // Centered on the first text line, at the pill's leading-icon place.
+        let menu = pill_input::lead_button("agent-menu", "more-vertical")
+            .absolute()
+            .left(px(pill_input::LEAD - 14.0 - pill_input::TEXT_X))
+            .top(px(COMPOSER_LINE / 2.0 - 14.0))
+            .tooltip(Tooltip::text("Options"))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Menu, window, cx)));
-        let accent = theme::accent();
-        div()
+        let chips = (!self.attachments.is_empty()).then(|| {
+            div().pb(px(8.0)).flex().flex_wrap().gap(px(6.0)).children(self.attachments.iter().enumerate().map(|(i, a)| {
+                let enter = eased(a.at, motion::UI, now, cx).unwrap_or(1.0);
+                div()
+                    .relative()
+                    .left(px((1.0 - enter) * -6.0))
+                    .opacity(enter)
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .pl(px(8.0))
+                    .pr(px(4.0))
+                    .capsule()
+                    .bg(rgb(ink(0.08)))
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme::muted()))
+                    .child(icon("image", 12.0, theme::muted()))
+                    .child(div().max_w(px(160.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(a.name.clone()))
+                    .child(
+                        div()
+                            .id(("agent-attachment", i))
+                            .size(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::hover_fill()))
+                            .child(icon("close", 10.0, theme::muted()))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if i < this.attachments.len() {
+                                    this.attachments.remove(i);
+                                }
+                                cx.notify();
+                            })),
+                    )
+            }))
+        });
+        let pad_y = (pill_input::HEIGHT - 2.0 * pill_input::BORDER - COMPOSER_LINE) / 2.0;
+        let pill = pill_input::pill(focused, false)
+            .pl(px(pill_input::TEXT_X - pill_input::BORDER))
+            .pr(px(pill_input::INSET + pill_input::CIRCLE + 10.0 - pill_input::BORDER))
+            .py(px(pad_y))
+            .font_family(mono())
+            .text_size(px(14.0))
+            .line_height(px(COMPOSER_LINE))
             .flex()
-            .items_end()
-            .gap(px(6.0))
-            .p(px(8.0))
-            .continuous(16.0)
-            .bg(rgb(theme::popover()))
-            .border_1()
-            .border_color(rgb(if focused { theme::mix(theme::border(), accent, 0.45) } else { theme::border() }))
-            .when(focused, |el| {
-                el.shadow(vec![BoxShadow {
-                    color: hsla(accent, 0.18),
-                    offset: point(px(0.0), px(0.0)),
-                    blur_radius: px(0.0),
-                    spread_radius: px(3.0),
-                    inset: false,
-                }])
-            })
-            .child(menu)
-            .child(div().flex_1().min_w_0().py(px(4.0)).line_height(px(20.0)).child(editor))
-            .child(send)
-            .into_any_element()
+            .flex_col()
+            .children(chips)
+            .child(div().relative().child(editor).child(menu))
+            .child(send);
+        pill_input::halo(false, pill).into_any_element()
+    }
+
+    /// The model the next prompt goes to: the session's, else the pick, else the daemon's default.
+    fn model(&self) -> Option<(String, String)> {
+        match (self.mirror(), &self.choice.model) {
+            (Some(m), _) if !m.info.model.is_empty() => Some((m.info.provider.clone(), m.info.model.clone())),
+            (_, Some(pick)) => Some(pick.clone()),
+            _ => self.catalog.as_ref()?.default_model(self.choice.agent.as_deref().unwrap_or("build")),
+        }
+    }
+
+    /// Context use and cost of the shown session (`12% · $0.31`).
+    fn usage(&self) -> Option<String> {
+        let (provider, model) = self.model()?;
+        let size = self.catalog.as_ref()?.models.iter().find(|m| m.id == model && m.provider.as_str() == provider).map(|m| m.caps.context_window);
+        let mut parts = Vec::new();
+        if let (Some(used), Some(size)) = (self.context, size.filter(|s| *s > 0)) {
+            #[allow(clippy::cast_precision_loss)]
+            parts.push(format!("{:.0}% context", used as f64 * 100.0 / size as f64));
+        }
+        if let Some(cost) = self.mirror().map(|m| m.info.usage.cost_usd).filter(|c| *c > 0.0) {
+            parts.push(format!("${cost:.2}"));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
-        let info = self.mirror().map(|m| m.info.clone());
+        let agent = self.mirror().map(|m| m.info.agent.clone()).or_else(|| self.choice.agent.clone()).unwrap_or_else(|| "build".into());
+        let model = self.model();
         let catalog = self.catalog.as_ref();
-        let agent = info.as_ref().map(|i| i.agent.clone()).or_else(|| self.choice.agent.clone()).unwrap_or_else(|| "build".into());
-        let (provider, model) = match (&info, &self.choice.model) {
-            (Some(i), _) => (i.provider.clone(), i.model.clone()),
-            (None, Some((p, m))) => (p.clone(), m.clone()),
-            (None, None) => (String::new(), "Default model".into()),
-        };
-        let sub = catalog.is_some_and(|c| c.subscription(&provider));
-        let window_size =
-            catalog.and_then(|c| c.models.iter().find(|m| m.id == model && m.provider.as_str() == provider)).map(|m| m.caps.context_window);
-        let mut usage = Vec::new();
-        if let (Some(used), Some(size)) = (self.context, window_size.filter(|s| *s > 0)) {
-            #[allow(clippy::cast_precision_loss)]
-            usage.push(format!("{:.0}%", used as f64 * 100.0 / size as f64));
-        }
-        if let Some(cost) = info.as_ref().map(|i| i.usage.cost_usd).filter(|c| *c > 0.0) {
-            usage.push(format!("${cost:.2}"));
-        }
-        let mode = self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode);
-        let model_label =
-            if provider.is_empty() { model } else { format!("{} / {}{}", provider_glyph(&provider), model, if sub { " (sub)" } else { "" }) };
-        div()
-            .h(px(28.0))
-            .px(px(4.0))
+        let sub = model.as_ref().is_some_and(|(p, _)| catalog.is_some_and(|c| c.subscription(p)));
+        let vision = model
+            .as_ref()
+            .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.vision)));
+        let tooltip = self.usage();
+        let agent_button = div()
+            .id("agent-agent")
             .flex()
             .items_center()
-            .gap(px(2.0))
-            .text_size(px(11.5))
+            .gap(px(4.0))
+            .h(px(22.0))
+            .px(px(6.0))
+            .continuous(6.0)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover_fill()))
+            .child(agent.to_uppercase())
+            .child(icon("chevron-up", 12.0, muted))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Agents, window, cx)));
+        let model_button = div()
+            .id("agent-model")
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(22.0))
+            .px(px(6.0))
+            .continuous(6.0)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover_fill()))
+            .when_some(tooltip, |el, usage| el.tooltip(Tooltip::text(usage)))
+            .map(|el| match &model {
+                Some((provider, id)) => el
+                    .map(|el| match provider_logo(provider) {
+                        Some(logo) => el.child(icon(logo, 13.0, ink(0.8))),
+                        None => el.child(div().flex_none().text_color(rgb(ink(0.8))).child(provider.clone())),
+                    })
+                    .child(div().flex_none().text_color(rgb(ink(0.35))).child("/"))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(ink(0.72))).child(id.clone()))
+                    .when(sub, |el| el.child(div().flex_none().text_color(rgb(ink(0.38))).child("(sub)"))),
+                None => el.child("No model"),
+            })
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Models, window, cx)));
+        let image = div()
+            .id("agent-image")
+            .size(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .continuous(6.0)
+            .tooltip(Tooltip::text(if vision { "Attach image" } else { "This model can't read images" }))
+            .child(icon("image", 14.0, muted))
+            .map(|el| {
+                if vision {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(theme::hover_fill()))
+                        .active(|s| s.scale(0.92))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.attach_image(cx)))
+                } else {
+                    el.opacity(0.4)
+                }
+            });
+        // Both ends inset like the composer's text: the agent label starts
+        // under the placeholder, the image glyph ends as far from the right.
+        let inset = pill_input::HALO + pill_input::TEXT_X;
+        div()
+            .mt(px(8.0))
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .font_family(mono())
+            .text_size(px(12.0))
             .text_color(rgb(muted))
-            .child(
-                chip("agent-agent", format!("{} ⌃", agent.to_uppercase()))
-                    .font_weight(FontWeight::MEDIUM)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Agents, window, cx))),
-            )
-            .child(
-                chip("agent-model", model_label)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Models, window, cx))),
-            )
-            .when(mode != ApprovalMode::Auto, |el| el.child(div().flex_none().px(px(6.0)).child(mode_label(mode))))
-            .child(div().flex_1())
-            .child(div().flex_none().px(px(6.0)).child(usage.join(" · ")))
+            .child(div().flex_1().min_w_0().flex().items_center().pl(px(inset - 6.0)).child(agent_button))
+            .child(div().flex_none().max_w(relative(0.5)).min_w_0().flex().justify_center().child(model_button))
+            .child(div().flex_1().min_w_0().flex().items_center().justify_end().pr(px(inset - 4.0)).child(image))
             .into_any_element()
     }
 
     // ---- popovers ----
 
-    fn render_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let overlay = self.overlay?;
+    /// Clicking outside an open popover closes it (the slash menu stays while the `/` does).
+    fn render_backdrop(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.overlay.is_none() || self.overlay == Some(Overlay::Slash) {
+            return None;
+        }
+        Some(
+            div()
+                .id("agent-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// `which`'s card while open or fading out: the switcher hangs under the
+    /// pane header, the others sit above their trigger. Opens with height +
+    /// opacity and a 6 pt slide from its anchor.
+    fn popover(&mut self, which: Overlay, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let now = Instant::now();
+        if self.overlay_shown != Some(which) || self.overlay_anim.hidden(now, cx.reduce_motion()) {
+            return None;
+        }
+        let t = toggled(&self.overlay_anim, now, cx);
+        let body = match which {
+            Overlay::Sessions => self.render_sessions(window, cx),
+            Overlay::Models => self.render_models(window, cx),
+            Overlay::Agents => self.render_agents(cx),
+            Overlay::Menu => self.render_menu(cx),
+            Overlay::Slash => self.render_slash(cx),
+        };
+        let width = match which {
+            Overlay::Sessions => 440.0,
+            Overlay::Models => 340.0,
+            Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
+        };
+        let below = which == Overlay::Sessions;
         let card = div()
             .id("agent-popover")
             .occlude()
-            .absolute()
-            .left(px(12.0))
-            .right(px(12.0))
-            .max_w(px(if overlay == Overlay::Sessions { 440.0 } else { 340.0 }))
-            .continuous(10.0)
+            .relative()
+            .top(px((1.0 - t) * if below { -6.0 } else { 6.0 }))
+            .opacity(t)
+            .w(px(width))
+            .max_w(relative(1.0))
+            .max_h(px(40.0 + 520.0 * t))
+            .overflow_hidden()
+            .p(px(6.0))
+            .continuous(12.0)
             .bg(theme::overlay_fill())
             .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
-            .text_size(px(12.5))
+            .border_color(rgb(ink(0.12)))
+            .shadow(vec![BoxShadow {
+                color: hsla(0, if theme::is_light() { 0.12 } else { 0.4 }),
+                offset: point(px(0.0), px(8.0)),
+                blur_radius: px(28.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .text_size(px(13.0))
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .map(
-                |el| if overlay == Overlay::Sessions { el.top(px(34.0)) } else { el.bottom(px(if overlay == Overlay::Menu { 84.0 } else { 36.0 })) },
-            );
-        let body = match overlay {
-            Overlay::Sessions => self.render_sessions(window, cx),
-            Overlay::Models => self.render_models(cx),
-            Overlay::Agents => self.render_agents(cx),
-            Overlay::Menu => self.render_menu(cx),
-        };
-        let backdrop = div()
-            .id("agent-backdrop")
+            .child(body);
+        let anchor = div()
             .absolute()
-            .top_0()
             .left_0()
-            .size_full()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(window, cx)));
-        let card = card.when(overlay == Overlay::Sessions, |el| {
-            el.on_action(cx.listener(|this, _: &crate::commands::act::NewWindow, window, cx| this.new_session(window, cx)))
-        });
-        Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(card.child(body)).into_any_element())
-    }
-
-    fn filter_row(&self) -> AnyElement {
-        div()
+            .right_0()
             .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(34.0))
-            .px(px(12.0))
-            .border_b_1()
-            .border_color(rgb(theme::border()))
-            .child(icon("filter", 13.0, theme::muted()))
-            .child(self.filter.clone())
-            .into_any_element()
+            .map(|el| match which {
+                Overlay::Models => el.justify_center(),
+                Overlay::Sessions => el,
+                _ => el.pl(px(pill_input::HALO)),
+            })
+            .map(|el| if below { el.top(px(4.0)).px(px(6.0)) } else { el.bottom(relative(1.0)).pb(px(8.0)) })
+            .child(card);
+        Some(gpui::deferred(anchor).with_priority(1).into_any_element())
     }
 
-    fn menu_row(&self, id: gpui::ElementId, index: usize, selected: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(28.0))
-            .mx(px(4.0))
-            .px(px(8.0))
-            .continuous(crate::radius::MENU_ROW)
-            .when(selected, |el| el.bg(theme::row_fill()))
-            .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
-            .cursor_pointer()
-            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                if this.selected != index {
-                    this.selected = index;
-                    cx.notify();
-                }
-            }))
+    /// A row that takes the keyboard selection on hover.
+    fn pick_row(&self, row: gpui::Stateful<gpui::Div>, index: usize, selected: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        rows::clickable(row, selected).on_mouse_move(cx.listener(move |this, _, _, cx| {
+            if this.selected != index {
+                this.selected = index;
+                cx.notify();
+            }
+        }))
     }
 
-    fn render_sessions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let muted = theme::muted();
+    fn search_field(&self, window: &Window, cx: &App) -> AnyElement {
+        let focused = self.filter.read(cx).focus.is_focused(window);
+        rows::search(focused, self.filter.clone()).into_any_element()
+    }
+
+    fn render_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.session_id.clone();
-        let rows: Vec<(String, String, String, SessionStatus, i64)> =
-            self.session_choices(cx).into_iter().map(|s| (s.id.clone(), super::session_label(s), s.model.clone(), s.status, s.updated_at)).collect();
-        let count = rows.len();
-        let mut list = div().id("agent-sessions").flex().flex_col().py(px(4.0)).max_h(px(320.0)).overflow_y_scroll();
-        for (i, (id, title, model, status, updated)) in rows.into_iter().enumerate() {
+        // The shown session is named as in the pane header (its first prompt until otto titles it).
+        let shown = self.header_title();
+        let choices: Vec<(String, String, String, SessionStatus, i64)> = self
+            .session_choices(cx)
+            .into_iter()
+            .map(|s| {
+                let title = match &shown {
+                    Some(t) if s.title.trim().is_empty() && current.as_deref() == Some(s.id.as_str()) => t.clone(),
+                    _ => super::session_label(s),
+                };
+                (s.id.clone(), title, s.model.clone(), s.status, s.updated_at)
+            })
+            .collect();
+        let count = choices.len();
+        let mut list = div().id("agent-sessions").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        for (i, (id, title, model, status, updated)) in choices.into_iter().enumerate() {
             let checked = current.as_deref() == Some(id.as_str());
             let state = match status {
-                SessionStatus::Busy => "running",
-                SessionStatus::WaitingApproval => "needs you",
-                SessionStatus::Error => "error",
-                _ => "",
+                SessionStatus::Busy => Some("running"),
+                SessionStatus::WaitingApproval => Some("needs you"),
+                SessionStatus::Error => Some("error"),
+                _ => None,
             };
-            let dot = session_dot(status);
+            let subtitle = [Some(model.as_str()).filter(|m| !m.is_empty()), state, Some(ago(updated).as_str())]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let lead = session_dot(status).map(|c| div().size(px(7.0)).rounded_full().bg(rgb(c)).into_any_element());
+            let row = rows::row(
+                gpui::ElementId::Name(format!("session-{id}").into()),
+                i == self.selected,
+                lead,
+                div().when(checked, |el| el.font_weight(FontWeight::MEDIUM)).child(title),
+                Some(div().child(subtitle).into_any_element()),
+                checked.then(rows::check),
+            );
             list = list.child(
-                self.menu_row(gpui::ElementId::Name(format!("session-{id}").into()), i, i == self.selected, cx)
-                    .child(div().w(px(10.0)).flex_none().flex().justify_center().children(dot.map(|c| {
-                        if status == SessionStatus::WaitingApproval {
-                            div().text_size(px(9.0)).text_color(rgb(c)).child("◆").into_any_element()
-                        } else {
-                            div().size(px(6.0)).rounded_full().bg(rgb(c)).into_any_element()
-                        }
-                    })))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .when(checked, |el| el.font_weight(FontWeight::MEDIUM))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(110.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(11.0))
-                            .text_color(rgb(muted))
-                            .child(model),
-                    )
-                    .child(div().flex_none().w(px(58.0)).text_size(px(11.0)).text_color(rgb(muted)).child(state))
-                    .child(div().flex_none().w(px(28.0)).text_size(px(11.0)).text_color(rgb(muted)).text_right().child(ago(updated)))
+                self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.pick_session(id.clone(), window, cx))),
             );
         }
-        list = list.child(
-            self.menu_row("agent-new-session".into(), count, self.selected == count, cx)
-                .child(div().w(px(10.0)).flex_none().text_color(rgb(muted)).child("＋"))
-                .child(div().flex_1().child("New session"))
-                .child(div().flex_none().text_size(px(11.0)).text_color(rgb(muted)).child("⌘N"))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_session(window, cx))),
-        );
-        div().flex().flex_col().child(self.filter_row()).child(list).into_any_element()
+        if count == 0 {
+            let empty = if self.filter.read(cx).text.trim().is_empty() { "No sessions yet" } else { "No matching sessions" };
+            list = list.child(rows::row("agent-sessions-empty", false, None, div().text_color(rgb(theme::muted())).child(empty), None, None));
+        }
+        let new = rows::row("agent-new-session", self.selected == count, Some(rows::lead("new-session", false)), "New session", None, None);
+        let new = self
+            .pick_row(new, count, self.selected == count, cx)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_session(window, cx)));
+        div().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(new).into_any_element()
     }
 
-    fn render_models(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
-        let current = self.choice.model.clone();
+        let current = self.model();
         let catalog = self.catalog.clone().unwrap_or_default();
-        let rows: Vec<(String, String, String)> =
+        let choices: Vec<(String, String, String)> =
             self.model_choices(cx).into_iter().map(|m| (m.provider.as_str().to_owned(), m.id.clone(), m.name.clone())).collect();
-        let mut list = div().id("agent-models").flex().flex_col().py(px(4.0)).max_h(px(300.0)).overflow_y_scroll();
-        if rows.is_empty() {
-            list = list.child(div().px(px(12.0)).py(px(8.0)).text_color(rgb(muted)).child("No models"));
+        let mut list = div().id("agent-models").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        if choices.is_empty() {
+            list = list.child(rows::row("agent-models-empty", false, None, div().text_color(rgb(muted)).child("No matching models"), None, None));
         }
-        for (i, (provider, id, name)) in rows.into_iter().enumerate() {
+        let mut group: Option<String> = None;
+        for (i, (provider, id, name)) in choices.into_iter().enumerate() {
+            if group.as_deref() != Some(provider.as_str()) {
+                let label =
+                    if catalog.subscription(&provider) { format!("{} · subscription", provider_name(&provider)) } else { provider_name(&provider) };
+                list = list.child(rows::section(label, provider_logo(&provider).map(|logo| icon(logo, 13.0, muted).into_any_element())));
+                group = Some(provider.clone());
+            }
             let checked = current.as_ref().is_some_and(|(p, m)| *p == provider && *m == id);
-            let sub = catalog.subscription(&provider);
+            let subtitle = (!name.is_empty() && name != id).then(|| div().child(name).into_any_element());
+            let row = rows::row(
+                gpui::ElementId::Name(format!("model-{provider}-{id}").into()),
+                i == self.selected,
+                None,
+                div().font_family(mono()).text_size(px(12.5)).child(id),
+                subtitle,
+                checked.then(rows::check),
+            );
             list = list.child(
-                self.menu_row(gpui::ElementId::Name(format!("model-{provider}-{id}").into()), i, i == self.selected, cx)
-                    .child(div().w(px(12.0)).flex_none().when(checked, |el| el.child(icon("check", 11.0, theme::foreground()))))
-                    .child(div().flex_none().w(px(44.0)).text_size(px(11.0)).text_color(rgb(muted)).child(provider_glyph(&provider)))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(id))
-                    .when(!name.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .max_w(px(110.0))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(11.0))
-                                .text_color(rgb(muted))
-                                .child(name),
-                        )
-                    })
-                    .when(sub, |el| el.child(div().flex_none().text_size(px(10.5)).text_color(rgb(muted)).child("sub")))
+                self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
+        let usage = self.usage();
         div()
             .flex()
             .flex_col()
-            .child(self.filter_row())
-            .child(list)
-            .when(self.session_id.is_some(), |el| {
+            .when_some(usage, |el, u| {
                 el.child(
                     div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .border_t_1()
-                        .border_color(rgb(theme::border()))
-                        .text_size(px(11.0))
+                        .h(px(26.0))
+                        .px(px(rows::PAD))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .font_family(mono())
+                        .text_size(px(11.5))
                         .text_color(rgb(muted))
-                        .child("Applies to new sessions"),
+                        .child(u),
                 )
             })
+            .child(self.search_field(window, cx))
+            .child(list)
+            .when(self.session_id.is_some(), |el| el.child(footnote("Applies to new sessions")))
             .into_any_element()
     }
 
     fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = theme::muted();
         let current = self.mirror().map(|m| m.info.agent.clone()).or_else(|| self.choice.agent.clone()).unwrap_or_else(|| "build".into());
-        let mut agents: Vec<(String, String)> =
-            self.catalog.as_ref().map(|c| c.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect()).unwrap_or_default();
-        if agents.is_empty() {
-            agents = vec![("build".into(), String::new()), ("plan".into(), String::new())];
-        }
-        let mut list = div().id("agent-agents").flex().flex_col().py(px(4.0)).max_h(px(300.0)).overflow_y_scroll();
-        for (i, (name, description)) in agents.into_iter().enumerate() {
+        let mut list = div().id("agent-agents").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        for (i, (name, description)) in self.agent_choices().into_iter().enumerate() {
             let checked = name == current;
-            let pick = name.clone();
+            let subtitle = (!description.is_empty()).then(|| div().child(transcript::clip(&description, 80)).into_any_element());
+            let row = rows::row(
+                gpui::ElementId::Name(format!("agent-{name}").into()),
+                i == self.selected,
+                Some(rows::lead(if name == "plan" { "list-todo" } else { "bot" }, checked)),
+                div().font_family(mono()).text_size(px(12.5)).child(name.to_uppercase()),
+                subtitle,
+                checked.then(rows::check),
+            );
             list = list.child(
-                self.menu_row(gpui::ElementId::Name(format!("agent-{name}").into()), i, false, cx)
-                    .child(div().w(px(12.0)).flex_none().when(checked, |el| el.child(icon("check", 11.0, theme::foreground()))))
-                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name.to_uppercase()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(11.0))
-                            .text_color(rgb(muted))
-                            .child(transcript::clip(&description, 60)),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.choice.agent = Some(pick.clone());
-                        this.close_overlay(window, cx);
-                    })),
+                self.pick_row(row, i, i == self.selected, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .child(list)
-            .when(self.session_id.is_some(), |el| {
-                el.child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .border_t_1()
-                        .border_color(rgb(theme::border()))
-                        .text_size(px(11.0))
-                        .text_color(rgb(muted))
-                        .child("Applies to new sessions"),
-                )
-            })
-            .into_any_element()
+        div().flex().flex_col().child(list).when(self.session_id.is_some(), |el| el.child(footnote("Applies to new sessions"))).into_any_element()
     }
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = theme::muted();
         let mode = self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode);
-        let mut list = div().id("agent-menu-list").flex().flex_col().py(px(4.0));
-        list = list.child(div().px(px(12.0)).pt(px(4.0)).pb(px(2.0)).text_size(px(11.0)).text_color(rgb(muted)).child("Approvals"));
-        for (i, (m, label, hint)) in [
-            (ApprovalMode::Auto, "Auto", "Run tools without asking"),
-            (ApprovalMode::AskOnEffects, "Ask", "Ask before changes"),
-            (ApprovalMode::Plan, "Plan", "Read-only"),
+        let mut list = div().id("agent-menu-list").flex().flex_col().child(rows::section("Approvals", None));
+        for (i, (label, glyph, hint)) in
+            [("Auto", "lock-off", "Run tools without asking"), ("Ask", "lock", "Ask before changes"), ("Plan", "list-todo", "Read-only")]
+                .into_iter()
+                .enumerate()
+        {
+            let checked = mode_label(mode) == label;
+            let row = rows::row(
+                ("agent-mode", i),
+                i == self.selected,
+                Some(rows::lead(glyph, checked)),
+                label,
+                Some(div().child(hint).into_any_element()),
+                checked.then(rows::check),
+            );
+            list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.activate_choice(i, window, cx);
+            })));
+        }
+        list = list.child(rows::divider());
+        for (i, (id, glyph, label, note)) in [
+            ("agent-menu-new", "new-session", "New session", "/new"),
+            ("agent-menu-sessions", "history", "Sessions", "⌘J"),
+            ("agent-menu-providers", "plug", "Providers", "/providers"),
         ]
         .into_iter()
         .enumerate()
         {
-            let checked = mode_label(mode) == label;
-            list = list.child(
-                self.menu_row(("agent-mode", i).into(), i, false, cx)
-                    .child(div().w(px(12.0)).flex_none().when(checked, |el| el.child(icon("check", 11.0, theme::foreground()))))
-                    .child(div().flex_none().child(label))
-                    .child(div().flex_1().text_size(px(11.0)).text_color(rgb(muted)).child(hint))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.set_mode(m, cx);
-                        this.close_overlay(window, cx);
-                    })),
-            );
+            let i = i + 3;
+            let row = rows::row(id, i == self.selected, Some(rows::lead(glyph, false)), label, None, Some(rows::note(note)));
+            list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.activate_choice(i, window, cx);
+            })));
         }
-        list = list.child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(theme::border())));
-        list = list.child(
-            self.menu_row("agent-menu-new".into(), 9, false, cx)
-                .child(div().w(px(12.0)).flex_none().text_color(rgb(muted)).child("＋"))
-                .child(div().flex_1().child("New session"))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_session(window, cx))),
-        );
         list.into_any_element()
     }
 
-    // ---- sign in ----
-
-    fn render_signin(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let muted = theme::muted();
-        let auth = self.catalog.as_ref().map(|c| c.auth.clone()).unwrap_or_default();
-        let mut providers: Vec<String> = auth.iter().map(|a| a.provider.clone()).collect();
-        providers.dedup();
-        let mut column = div()
-            .w_full()
-            .max_w(px(380.0))
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(div().text_size(px(16.0)).font_weight(FontWeight::MEDIUM).child("Sign in to start"))
-            .child(div().text_size(px(12.5)).text_color(rgb(muted)).child("otto needs a model provider."));
-        let field = |entity: &gpui::Entity<Editor>, cx: &mut Context<Self>| {
-            let colors = EditorColors {
-                text: rgb(theme::foreground()).into(),
-                placeholder: rgb(muted).into(),
-                caret: rgb(theme::accent()).into(),
-                selection: hsla(theme::selection(), 0.6),
-            };
-            div()
-                .flex_1()
-                .min_w_0()
-                .px(px(8.0))
-                .py(px(4.0))
-                .continuous(8.0)
-                .bg(theme::well_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .child(Editor::element(entity, 1, colors, cx))
-        };
-        if let Some(pending) = &self.signin.pending {
-            let provider = provider_name(&pending.provider);
-            let url = pending.url.clone();
-            column = column.child(div().font_weight(FontWeight::MEDIUM).child(format!("Signing in to {provider}")));
-            if let Some(code) = &pending.user_code {
-                column = column
-                    .child(div().text_size(px(12.5)).text_color(rgb(muted)).child("Enter this code in your browser:"))
-                    .child(div().text_size(px(18.0)).font_family(mono()).child(code.clone()))
-                    .child(div().text_size(px(12.0)).text_color(rgb(muted)).child("Waiting…"));
-            } else {
-                column = column.child(div().text_size(px(12.5)).text_color(rgb(muted)).child("Finish in your browser, then paste the code:")).child(
-                    div().flex().gap(px(6.0)).child(field(&self.code_field, cx)).child(
-                        chip("agent-code-ok", "Continue")
-                            .bg(theme::control_fill())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.submit_code(cx))),
-                    ),
-                );
-            }
-            column = column.child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(chip("agent-login-open", "Open again").text_color(rgb(theme::accent())).on_click(move |_, _, cx| cx.open_url(&url)))
-                    .child(chip("agent-login-cancel", "Cancel").text_color(rgb(muted)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.signin = super::SignIn::default();
-                        cx.notify();
-                    }))),
+    fn render_slash(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let choices = self.slash_choices(cx);
+        let mode = mode_label(self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode));
+        if choices.is_empty() {
+            return rows::row("agent-slash-empty", false, None, div().text_color(rgb(theme::muted())).child("No matching command"), None, None)
+                .into_any_element();
+        }
+        let mut list = div().id("agent-slash").flex().flex_col().max_h(px(rows::ROW_H * 6.0)).overflow_y_scroll();
+        for (i, c) in choices.into_iter().enumerate() {
+            let act = c.act;
+            let current = matches!(act, super::SlashAct::Mode(m) if mode_label(m) == mode);
+            let row = rows::row(
+                ("agent-slash", i),
+                i == self.selected,
+                Some(rows::lead(c.icon, i == self.selected || current)),
+                div().font_family(mono()).text_size(px(12.5)).child(format!("/{}", c.name)),
+                Some(div().child(c.about).into_any_element()),
+                current.then(rows::check),
             );
-        } else {
-            for (i, provider) in providers.iter().enumerate() {
-                let modes: Vec<AuthMode> = auth.iter().filter(|a| a.provider == *provider).map(|a| a.mode).collect();
-                let key_open = self.signin.key_for.as_deref() == Some(provider.as_str());
-                let p1 = provider.clone();
-                let p2 = provider.clone();
-                column = column.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(div().flex_1().child(provider_name(provider)))
-                        .when(modes.contains(&AuthMode::ApiKey), |el| {
-                            el.child(chip(("agent-key", i), "API key").text_color(rgb(theme::accent())).on_click(cx.listener(
-                                move |this, _: &ClickEvent, window, cx| {
-                                    this.signin.key_for = Some(p1.clone());
-                                    this.signin.error = None;
-                                    let focus = this.key_field.read(cx).focus.clone();
-                                    window.focus(&focus, cx);
-                                    cx.notify();
-                                },
-                            )))
-                        })
-                        .when(modes.contains(&AuthMode::Subscription), |el| {
-                            el.child(chip(("agent-sub", i), "Sign in").text_color(rgb(theme::accent())).on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    this.login(p2.clone(), AuthMode::Subscription, None, cx);
-                                },
-                            )))
-                        }),
-                );
-                if key_open {
-                    column = column.child(
-                        div().flex().gap(px(6.0)).child(field(&self.key_field, cx)).child(
-                            chip("agent-key-save", "Save")
-                                .bg(theme::control_fill())
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.submit_key(cx))),
-                        ),
-                    );
-                }
-            }
+            list = list.child(
+                self.pick_row(row, i, i == self.selected, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_slash(act, window, cx))),
+            );
         }
-        if self.signin.busy {
-            column = column.child(div().text_size(px(12.0)).text_color(rgb(muted)).child("Working…"));
-        }
-        if let Some(error) = &self.signin.error {
-            column = column.child(div().text_size(px(12.0)).text_color(rgb(theme::danger())).child(error.clone()));
-        }
-        column.into_any_element()
+        list.into_any_element()
     }
 }
 
@@ -1355,11 +1580,11 @@ fn render_detail(key: &str, detail: &Detail) -> AnyElement {
         .px(px(10.0))
         .py(px(8.0))
         .continuous(8.0)
-        .bg(rgb(faint()))
+        .bg(rgb(ink(0.04)))
         .text_size(px(12.0))
         .line_height(px(17.0))
         .text_color(rgb(muted))
-        .max_h(px(260.0))
+        .max_h(px(240.0))
         .overflow_y_scroll();
     match detail {
         Detail::Text(text) => base.child(text.clone()).into_any_element(),
