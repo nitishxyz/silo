@@ -11,6 +11,9 @@
 //   ui-driver click x y [count] [shift]
 //   ui-driver rclick x y
 //   ui-driver scroll x y lines                  (positive = up)
+//   ui-driver swipe x y dx [steps]              phased trackpad pixel scroll (positive dx = right)
+//   ui-driver pinch x y scale [steps]           trackpad magnify gesture (best effort: private
+//                                                  CGEvent gesture fields; may not reach AppKit)
 //   ui-driver move x y
 //   ui-driver mean file.png                     -> mean brightness (0-255)
 //   ui-driver down x y | dragto x y | up x y    split drag (hold the button between calls)
@@ -249,6 +252,75 @@ case "scroll":
         let e = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 1, wheel1: lines > 0 ? 1 : -1, wheel2: 0, wheel3: 0)!
         e.post(tap: .cghidEventTap)
         usleep(10_000)
+    }
+case "swipe":
+    // kCGScrollPhase: began 1, changed 2, ended 4.
+    post(.mouseMoved, CGPoint(x: num(2), y: num(3)))
+    usleep(30_000)
+    let steps = args.count > 5 ? Int(args[5])! : 16
+    let step = Int32(num(4) / Double(steps))
+    func phased(_ dx: Int32, _ phase: Int64) {
+        let e = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: dx, wheel3: 0)!
+        e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        e.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        e.post(tap: .cghidEventTap)
+        usleep(12_000)
+    }
+    phased(0, 1)
+    for _ in 0..<steps { phased(step, 2) }
+    phased(0, 4)
+case "pinch":
+    // An NSEventTypeGesture (29) carrying a zoom (HID type 8): fields 110
+    // (HID type), 113 (magnification), 132 (phase: began 1, changed 2, ended 4).
+    let p = CGPoint(x: num(2), y: num(3))
+    post(.mouseMoved, p)
+    usleep(30_000)
+    let steps = args.count > 5 ? Int(args[5])! : 12
+    let per = pow(num(4), 1.0 / Double(steps)) - 1
+    func magnify(_ value: Double, _ phase: Int64) {
+        guard let e = CGEvent(source: source) else { return }
+        e.type = CGEventType(rawValue: 29)!
+        e.location = p
+        e.setIntegerValueField(CGEventField(rawValue: 110)!, value: 8)
+        e.setDoubleValueField(CGEventField(rawValue: 113)!, value: value)
+        e.setIntegerValueField(CGEventField(rawValue: 132)!, value: phase)
+        e.post(tap: .cghidEventTap)
+        usleep(16_000)
+    }
+    magnify(0, 1)
+    for _ in 0..<steps { magnify(per, 2) }
+    magnify(0, 4)
+case "pan":
+    // A phased vertical pixel scroll (`pan x y dy [steps]`), then momentum
+    // (kCGScrollWheelEventMomentumPhase: begin 1, continue 2, end 3).
+    post(.mouseMoved, CGPoint(x: num(2), y: num(3)))
+    usleep(30_000)
+    let steps = args.count > 5 ? Int(args[5])! : 16
+    let step = Int32(num(4) / Double(steps))
+    func vertical(_ dy: Int32, phase: Int64, momentum: Int64) {
+        let e = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0)!
+        e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        e.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        e.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+        e.post(tap: .cghidEventTap)
+        usleep(12_000)
+    }
+    vertical(0, phase: 1, momentum: 0)
+    for _ in 0..<steps { vertical(step, phase: 2, momentum: 0) }
+    vertical(0, phase: 4, momentum: 0)
+    vertical(step, phase: 0, momentum: 1)
+    for i in 0..<10 { vertical(step * Int32(10 - i) / 10, phase: 0, momentum: 2) }
+    vertical(0, phase: 0, momentum: 3)
+case "smartzoom":
+    // A two-finger double tap: a gesture event carrying a zoom toggle (HID type 22).
+    let p = CGPoint(x: num(2), y: num(3))
+    post(.mouseMoved, p)
+    usleep(30_000)
+    if let e = CGEvent(source: source) {
+        e.type = CGEventType(rawValue: 29)!
+        e.location = p
+        e.setIntegerValueField(CGEventField(rawValue: 110)!, value: 22)
+        e.post(tap: .cghidEventTap)
     }
 default:
     fputs("unknown command\n", stderr)

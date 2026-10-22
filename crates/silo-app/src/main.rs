@@ -26,6 +26,7 @@ mod controls;
 mod finder;
 mod floats;
 mod fonts;
+mod gesture;
 mod hosts;
 mod hosts_state;
 mod incompatible;

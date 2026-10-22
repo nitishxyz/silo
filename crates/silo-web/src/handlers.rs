@@ -155,6 +155,10 @@ wrap_render_handler! {
                 self.shared.push(Event::ImeBounds { x, y, width, height });
             }
         }
+
+        fn on_scroll_offset_changed(&self, _browser: Option<&mut Browser>, x: f64, y: f64) {
+            *lock(&self.shared.scroll) = (x, y);
+        }
     }
 }
 

@@ -179,28 +179,48 @@ enum Chord {
     Reload,
     Stop,
     Edit(silo_web::Edit),
+    /// ⌘+ (1), ⌘− (-1), ⌘0 (0): page zoom.
+    Zoom(i8),
 }
 
-/// ⌘L / ⌘R / ⌘. and ⌘X / ⌘Z / ⇧⌘Z on the page, and ⌘← / ⌘→ unless a page
-/// text field has focus (there they move the caret). Nothing for the
-/// address bar. ⌘C / ⌘V / ⌘A are app commands that reach the page too.
+/// ⌘L / ⌘R / ⌘. / ⌘+ / ⌘− / ⌘0 and ⌘X / ⌘Z / ⇧⌘Z on the page, and ⌘← / ⌘→
+/// unless a page text field has focus (there they move the caret). Nothing
+/// for the address bar. ⌘C / ⌘V / ⌘A are app commands that reach the page too.
 fn page_chord(key: &str, m: gpui::Modifiers, page_focused: bool, editable: bool) -> Option<Chord> {
     if !page_focused || !m.platform || m.control || m.alt {
         return None;
     }
     if m.shift {
-        return key.eq_ignore_ascii_case("z").then_some(Chord::Edit(silo_web::Edit::Redo));
+        return match key {
+            "=" | "+" => Some(Chord::Zoom(1)),
+            _ => key.eq_ignore_ascii_case("z").then_some(Chord::Edit(silo_web::Edit::Redo)),
+        };
     }
     match key {
         "l" => Some(Chord::Address),
         "r" => Some(Chord::Reload),
         "." => Some(Chord::Stop),
+        "=" | "+" => Some(Chord::Zoom(1)),
+        "-" => Some(Chord::Zoom(-1)),
+        "0" => Some(Chord::Zoom(0)),
         "x" => Some(Chord::Edit(silo_web::Edit::Cut)),
         "z" => Some(Chord::Edit(silo_web::Edit::Undo)),
         "left" if !editable => Some(Chord::Back),
         "right" if !editable => Some(Chord::Forward),
         _ => None,
     }
+}
+
+/// CEF page zoom levels ⌘+ / ⌘− step through (≈ 58%–249%).
+const ZOOM_LEVELS: std::ops::RangeInclusive<f32> = -3.0..=5.0;
+
+/// The zoom level after `step` (0 resets) from `level`, on half-level steps.
+fn zoom_step(level: f32, step: i8) -> f32 {
+    if step == 0 {
+        return 0.0;
+    }
+    let next = ((level * 2.0).round() + f32::from(step)) / 2.0;
+    next.clamp(*ZOOM_LEVELS.start(), *ZOOM_LEVELS.end())
 }
 
 pub fn follow_title(state: &mut BrowserState, title: &str) {
@@ -298,7 +318,28 @@ pub struct BrowserPane {
     /// A URL the engine refused for its certificate (its interstitial
     /// shows, nothing commits): the bar shows it instead.
     blocked: Option<String>,
+    /// Two-finger horizontal swipes that navigate.
+    swipe: crate::gesture::SwipeTracker,
+    /// "Swipe between pages" is on, as read when the gesture began.
+    swipe_enabled: bool,
+    swipe_arrow: Option<SwipeArrow>,
+    /// Whether an element under the pointer can scroll toward its start or
+    /// end, as the page answered for the current gesture, and that query.
+    swipe_scrollers: Option<[bool; 2]>,
+    swipe_query: u64,
+    /// The touch points of a pinch or smart zoom in flight.
+    pinch: Option<crate::gesture::PinchTouch>,
+    smart_zoom: Option<gpui::Task<()>>,
+    /// The page scale as pinched here, reset by navigation.
+    page_scale: f32,
     _subs: Vec<gpui::Subscription>,
+}
+
+/// The back/forward arrow a navigation swipe pulls in from the page's edge.
+struct SwipeArrow {
+    direction: crate::gesture::Direction,
+    progress: f32,
+    shown: crate::motion::Toggle,
 }
 
 impl BrowserPane {
@@ -375,6 +416,14 @@ impl BrowserPane {
             security: None,
             security_open: false,
             blocked: None,
+            swipe: crate::gesture::SwipeTracker::default(),
+            swipe_enabled: false,
+            swipe_arrow: None,
+            swipe_scrollers: None,
+            swipe_query: 0,
+            pinch: None,
+            smart_zoom: None,
+            page_scale: 1.0,
             _subs: subs,
         }
     }
@@ -654,6 +703,7 @@ impl BrowserPane {
                     if follow_url(state, &mut self.span, &url, back_forward) {
                         self.engine_url.clone_from(&url);
                     }
+                    self.page_scale = 1.0;
                     self.security_open = false;
                     self.blocked = None;
                     visits.push((url, None));
@@ -963,10 +1013,208 @@ impl BrowserPane {
         page.mouse_move(x, y, mods(m), &self.held);
     }
 
-    fn wheel(&self, event: &gpui::ScrollWheelEvent) {
-        let (Some(page), Some((x, y))) = (self.page.as_ref(), self.local(event.position)) else { return };
+    /// Trackpad scrolls go to the page unless they are a navigation swipe.
+    fn wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut gpui::Context<Self>) {
+        use crate::gesture::{Direction, Swipe};
+        let (Some(page), Some((x, y))) = (self.page.clone(), self.local(event.position)) else { return };
         let delta = event.delta.pixel_delta(gpui::px(40.0));
-        page.wheel(x, y, f32::from(delta.x), f32::from(delta.y), mods(event.modifiers));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        if event.delta.precise() && event.touch_phase == gpui::TouchPhase::Started {
+            self.swipe_enabled = gpui_platform::swipe_navigation_enabled();
+            if self.swipe_enabled {
+                self.query_scrollers(&page, (x, y), cx);
+            }
+        }
+        if !event.delta.precise() || !self.swipe_enabled {
+            page.wheel(x, y, dx, dy, mods(event.modifiers));
+            return;
+        }
+        // History that way, and no scroller under the pointer that would take
+        // the swipe (unknown until the page answered: then the page keeps it).
+        let scrollers = self.swipe_scrollers;
+        let back = self.history_step(-1) && scrollers.is_some_and(|[back, _]| !back);
+        let forward = self.history_step(1) && scrollers.is_some_and(|[_, forward]| !forward);
+        let can = |d: Direction| if d == Direction::Back { back } else { forward };
+        let now = Instant::now();
+        let reduce = cx.reduce_motion();
+        match self.swipe.scroll(event.touch_phase, (dx, dy), page.scroll_offset().0, can) {
+            Swipe::Pass => page.wheel(x, y, dx, dy, mods(event.modifiers)),
+            Swipe::Track { direction, progress } => {
+                let arrow = self.swipe_arrow.get_or_insert_with(|| SwipeArrow {
+                    direction,
+                    progress,
+                    shown: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
+                });
+                arrow.direction = direction;
+                arrow.progress = progress;
+                arrow.shown.set(true, now, reduce);
+                cx.notify();
+            }
+            Swipe::Commit(direction) => {
+                if let Some(arrow) = &mut self.swipe_arrow {
+                    arrow.shown.set(false, now, reduce);
+                }
+                if direction == Direction::Back {
+                    self.back()
+                } else {
+                    self.forward()
+                }
+                cx.notify();
+            }
+            Swipe::Abort => {
+                if let Some(arrow) = &mut self.swipe_arrow {
+                    arrow.progress = 0.0;
+                    arrow.shown.set(false, now, reduce);
+                }
+                cx.notify();
+            }
+            Swipe::Drop => {}
+        }
+    }
+
+    /// Ask the page whether an element under `point` can still scroll
+    /// horizontally toward its start (a back swipe) or its end (forward).
+    fn query_scrollers(&mut self, page: &std::rc::Rc<silo_web::Browser>, (x, y): (f32, f32), cx: &mut gpui::Context<Self>) {
+        const PROBE: &str = "(x, y, s) => { const v = visualViewport, d = devicePixelRatio; \
+            let e = document.elementFromPoint(v.offsetLeft + x * s / d / v.scale, v.offsetTop + y * s / d / v.scale); \
+            let back = false, forward = false; \
+            for (; e && e !== document.body && e !== document.documentElement; e = e.parentElement) { \
+              const o = getComputedStyle(e).overflowX, max = e.scrollWidth - e.clientWidth; \
+              if ((o === 'auto' || o === 'scroll') && max > 0) { const l = Math.abs(e.scrollLeft); \
+                if (l > 0) back = true; if (l < max - 1) forward = true; } } \
+            return [back, forward]; }";
+        self.swipe_scrollers = None;
+        self.swipe_query += 1;
+        let query = self.swipe_query;
+        let page = page.clone();
+        let expression = format!("({PROBE})({x}, {y}, {})", self.scale);
+        cx.spawn(async move |this, cx| {
+            let reply = page.cdp("Runtime.evaluate", serde_json::json!({"expression": expression, "returnByValue": true})).await;
+            let value = reply.ok().map(|r| r["result"]["value"].clone());
+            let answer = value.and_then(|v| Some([v[0].as_bool()?, v[1].as_bool()?]));
+            let _ = this.update(cx, |this, _| {
+                if this.swipe_query == query {
+                    this.swipe_scrollers = answer;
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A trackpad pinch, as two touch points the page zooms its visual
+    /// viewport by.
+    fn pinch(&mut self, event: &gpui::PinchEvent) {
+        let Some(page) = self.page.clone() else { return };
+        match event.phase {
+            gpui::TouchPhase::Started => {
+                self.end_pinch(silo_web::Pinch::Cancel);
+                let Some(center) = self.local(event.position) else { return };
+                let mut touch = crate::gesture::PinchTouch::new(center);
+                page.pinch(silo_web::Pinch::Start, touch.start_points());
+                page.pinch(silo_web::Pinch::Move, touch.points());
+                if event.delta != 0.0 {
+                    self.page_scale = crate::gesture::scaled(self.page_scale, touch.magnify(event.delta));
+                    page.pinch(silo_web::Pinch::Move, touch.points());
+                }
+                self.pinch = Some(touch);
+            }
+            gpui::TouchPhase::Moved => {
+                if self.smart_zoom.is_some() {
+                    return;
+                }
+                let Some(touch) = &mut self.pinch else { return };
+                self.page_scale = crate::gesture::scaled(self.page_scale, touch.magnify(event.delta));
+                page.pinch(silo_web::Pinch::Move, touch.points());
+            }
+            gpui::TouchPhase::Ended if self.smart_zoom.is_none() => self.end_pinch(silo_web::Pinch::End),
+            gpui::TouchPhase::Ended => {}
+            gpui::TouchPhase::Cancelled => self.end_pinch(silo_web::Pinch::Cancel),
+        }
+    }
+
+    /// Lifts (or cancels) the touch points of a pinch or smart zoom.
+    fn end_pinch(&mut self, step: silo_web::Pinch) {
+        self.smart_zoom = None;
+        if let (Some(touch), Some(page)) = (self.pinch.take(), &self.page) {
+            page.pinch(step, touch.points());
+        }
+    }
+
+    /// Smart zoom (two-finger double tap): to 2× at the pointer, or back to 1×.
+    fn smart_zoom(&mut self, event: &gpui::SmartMagnifyEvent, cx: &mut gpui::Context<Self>) {
+        let (Some(page), Some(center)) = (self.page.clone(), self.local(event.position)) else { return };
+        self.end_pinch(silo_web::Pinch::Cancel);
+        let touch = crate::gesture::PinchTouch::new(center);
+        page.pinch(silo_web::Pinch::Start, touch.start_points());
+        page.pinch(silo_web::Pinch::Move, touch.points());
+        self.pinch = Some(touch);
+        let steps = crate::gesture::smart_zoom_steps(self.page_scale, if cx.reduce_motion() { 2 } else { 12 });
+        self.smart_zoom = Some(cx.spawn(async move |this, cx| {
+            for spread in steps {
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+                let moved = this.update(cx, |this, _| {
+                    let (Some(touch), Some(page)) = (this.pinch.as_mut(), this.page.as_ref()) else { return false };
+                    this.page_scale = crate::gesture::scaled(this.page_scale, touch.spread_to(spread));
+                    page.pinch(silo_web::Pinch::Move, touch.points());
+                    true
+                });
+                if !moved.unwrap_or(false) {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                if let (Some(touch), Some(page)) = (this.pinch.take(), this.page.as_ref()) {
+                    page.pinch(silo_web::Pinch::End, touch.points());
+                }
+                this.smart_zoom = None;
+            });
+        }));
+    }
+
+    fn zoom(&self, step: i8) {
+        let level = self.state.as_ref().map_or(0.0, |s| s.zoom);
+        let zoom = zoom_step(level, step);
+        if zoom != level || step == 0 {
+            self.send(Method::BrowserZoom { block_id: self.block_id.clone(), zoom });
+        }
+    }
+
+    /// The swipe arrow, over the page at its leading or trailing edge.
+    fn swipe_arrow(&mut self, window: &mut gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
+        use gpui::{div, prelude::*, px, rgb};
+        let (now, reduce) = (Instant::now(), cx.reduce_motion());
+        if self.swipe_arrow.as_ref().is_some_and(|a| a.shown.hidden(now, reduce)) {
+            self.swipe_arrow = None;
+        }
+        let arrow = self.swipe_arrow.as_ref()?;
+        if arrow.shown.moving(now, reduce) {
+            window.request_animation_frame();
+        }
+        const SIZE: f32 = 36.0;
+        let full = arrow.progress >= 1.0;
+        let inset = -SIZE + (SIZE + 16.0) * crate::motion::ease_out(arrow.progress);
+        let (icon, bg) = if full {
+            (crate::theme::accent_on(crate::theme::accent()), rgb(crate::theme::accent()))
+        } else {
+            (crate::theme::foreground(), crate::theme::overlay_fill())
+        };
+        let back = arrow.direction == crate::gesture::Direction::Back;
+        let chip = div()
+            .absolute()
+            .top_1_2()
+            .mt(px(-SIZE / 2.0))
+            .size(px(SIZE))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(bg)
+            .border_1()
+            .border_color(rgb(crate::theme::border()))
+            .shadow_md()
+            .opacity(arrow.shown.value(now, reduce))
+            .child(crate::assets::icon(if back { "back" } else { "forward" }, 16.0, icon));
+        Some(if back { chip.left(px(inset)) } else { chip.right(px(inset)) }.into_any_element())
     }
 }
 
@@ -1423,7 +1671,7 @@ pub(crate) fn spinner(id: &str, size: f32, color: u32, cx: &gpui::App) -> gpui::
 }
 
 impl gpui::Render for BrowserPane {
-    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, rgb};
         let mut page = div()
             .id(gpui::ElementId::Name(format!("browser-{}", self.block_id).into()))
@@ -1450,7 +1698,9 @@ impl gpui::Render for BrowserPane {
                     this.mouse_move(e.position, e.modifiers);
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, _| this.wheel(e)))
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| this.wheel(e, cx)))
+            .on_pinch(cx.listener(|this, e: &gpui::PinchEvent, _, _| this.pinch(e)))
+            .on_smart_magnify(cx.listener(|this, e: &gpui::SmartMagnifyEvent, _, cx| this.smart_zoom(e, cx)))
             .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
                 let inside = e.bounds.contains(&e.event.position);
                 let (Some(page), Some((x, y))) = (this.page.clone(), this.local(e.event.position)) else { return };
@@ -1492,11 +1742,23 @@ impl gpui::Render for BrowserPane {
             .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Back), cx.listener(|this, _, _, _| this.back()))
             .on_mouse_down(gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward), cx.listener(|this, _, _, _| this.forward()));
         let empty = (self.empty && self.error.is_none()).then(|| self.empty_state(cx));
-        let page = page.child(page_canvas(cx.entity())).children(empty).when_some(self.error.clone(), |el, _| {
-            el.child(
-                div().absolute().inset_0().flex().items_center().justify_center().text_color(rgb(crate::theme::muted())).child("Can't open the page"),
-            )
-        });
+        let arrow = self.swipe_arrow(window, cx);
+        let page = page
+            .child(page_canvas(cx.entity()))
+            .children(empty)
+            .when_some(self.error.clone(), |el, _| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(crate::theme::muted()))
+                        .child("Can't open the page"),
+                )
+            })
+            .children(arrow);
         div().flex().flex_col().size_full().min_w_0().min_h_0().child(self.strip(cx)).child(page)
     }
 }
@@ -1603,6 +1865,7 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
                 Chord::Reload => pane.reload(),
                 Chord::Stop => pane.stop(),
                 Chord::Edit(edit) => pane.edit(edit),
+                Chord::Zoom(step) => pane.zoom(step),
             }
             cx.stop_propagation();
         });
@@ -1815,5 +2078,19 @@ mod tests {
         assert_eq!(page_chord("z", cmd, true, true), Some(Chord::Edit(silo_web::Edit::Undo)));
         assert_eq!(page_chord("z", shift, true, true), Some(Chord::Edit(silo_web::Edit::Redo)));
         assert_eq!(page_chord("x", cmd, false, false), None, "the address bar cuts its own text");
+        assert_eq!(page_chord("=", cmd, true, true), Some(Chord::Zoom(1)));
+        assert_eq!(page_chord("=", shift, true, false), Some(Chord::Zoom(1)), "⌘+ is ⇧⌘= on US layouts");
+        assert_eq!(page_chord("-", cmd, true, false), Some(Chord::Zoom(-1)));
+        assert_eq!(page_chord("0", cmd, true, false), Some(Chord::Zoom(0)));
+        assert_eq!(page_chord("0", cmd, false, false), None, "the address bar");
+    }
+
+    #[test]
+    fn zoom_steps_by_half_levels_within_limits() {
+        assert!((zoom_step(0.0, 1) - 0.5).abs() < f32::EPSILON);
+        assert!((zoom_step(0.3, -1) - 0.0).abs() < f32::EPSILON, "snaps to half levels");
+        assert!((zoom_step(5.0, 1) - 5.0).abs() < f32::EPSILON);
+        assert!((zoom_step(-3.0, -1) + 3.0).abs() < f32::EPSILON);
+        assert!(zoom_step(2.5, 0).abs() < f32::EPSILON);
     }
 }

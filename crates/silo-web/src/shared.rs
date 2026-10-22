@@ -112,6 +112,8 @@ pub(crate) struct Shared {
     pub(crate) queued: Mutex<Option<String>>,
     /// The last main-frame URL refused for its certificate.
     pub(crate) cert_failed: Mutex<Option<String>>,
+    /// The root layer's scroll offset in view points.
+    pub(crate) scroll: Mutex<(f64, f64)>,
 }
 
 /// Whether `url` is no page: empty or `about:blank`.

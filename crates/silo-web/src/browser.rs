@@ -40,6 +40,15 @@ pub enum Edit {
     SelectAll,
 }
 
+/// A step of a two-finger touch pinch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pinch {
+    Start,
+    Move,
+    End,
+    Cancel,
+}
+
 impl Runtime {
     pub fn create_browser(&self, options: BrowserOptions) -> Result<Browser> {
         let shared = Arc::new(Shared {
@@ -57,6 +66,7 @@ impl Runtime {
             shown: AtomicBool::new(false),
             queued: Mutex::new(None),
             cert_failed: Mutex::new(None),
+            scroll: Mutex::new((0.0, 0.0)),
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
@@ -176,6 +186,11 @@ impl Browser {
         }
     }
 
+    /// The page's root scroll offset in view points, as last reported.
+    pub fn scroll_offset(&self) -> (f64, f64) {
+        *lock(&self.shared.scroll)
+    }
+
     pub fn resize(&self, size: ViewSize) {
         let previous = std::mem::replace(&mut *lock(&self.shared.view), size);
         if previous.scale != size.scale
@@ -273,6 +288,33 @@ impl Browser {
         let event = mouse_event(x, y, mods, &[]);
         if let Some(host) = self.host() {
             host.send_mouse_wheel_event(Some(&event), dx.round() as i32, dy.round() as i32);
+        }
+    }
+
+    /// A pinch as two touch points: Chromium's gesture recognizer turns
+    /// their spread into a page-scale (visual viewport) zoom.
+    pub fn pinch(&self, step: Pinch, points: [(f32, f32); 2]) {
+        let Some(host) = self.host() else { return };
+        let type_ = match step {
+            Pinch::Start => TouchEventType::PRESSED,
+            Pinch::Move => TouchEventType::MOVED,
+            Pinch::End => TouchEventType::RELEASED,
+            Pinch::Cancel => TouchEventType::CANCELLED,
+        };
+        for (id, (x, y)) in points.into_iter().enumerate() {
+            let event = TouchEvent {
+                id: id as i32,
+                x,
+                y,
+                radius_x: 0.0,
+                radius_y: 0.0,
+                rotation_angle: 0.0,
+                pressure: 0.0,
+                type_,
+                modifiers: 0,
+                pointer_type: PointerType::TOUCH,
+            };
+            host.send_touch_event(Some(&event));
         }
     }
 

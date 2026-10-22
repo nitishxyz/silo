@@ -145,6 +145,51 @@ checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs`
   `RenderHandler::on_ime_composition_range_changed`. This is new work; desktop-platform had none.
 - Commands from the palette/CLI: "New Browser Split" → `block.split{kind:browser,url}`.
 
+**Gestures** (`gesture.rs`, pure state; `browser_pane.rs` wires it):
+- **Pinch** (`on_pinch`) zooms like Chrome on macOS: the page's visual viewport, with no reflow and no change to
+  `BrowserState.zoom`. `Browser::pinch` sends two touch points spreading around the pinch center (±200 pt, scaled
+  by the gesture). They go down 16 pt inside that radius and move out to it at once: Chromium's touch slop
+  swallows that first move, so the pinch measures from the full radius and lands on the scale asked for.
+  Chromium's gesture recognizer turns the spread into a page-scale pinch, clamped to 1×–3× (measured in this
+  windowless browser); navigation resets it. One gesture's spread is limited to 0.35×–6× of its start, so
+  going from 3× back to 1× may take two pinches.
+- **Smart zoom** (two-finger double tap, `on_smart_magnify`; fork `SmartMagnifyEvent`): 2× at the pointer, or back
+  to 1× (the narrowest spread, clamped by Chromium), as a short synthetic pinch of 12 frames (2 under Reduce
+  Motion). The scale the pane tracks is an estimate; it only decides which way smart zoom goes.
+- **Swipe back/forward:** only when "Swipe between pages" is on (`gpui_platform::swipe_navigation_enabled`).
+  - A phased pixel scroll locks its axis after 8 pt; it is horizontal when |dx| > 2|dy|.
+  - When it starts, the pane asks the page (one `Runtime.evaluate`) whether an element under the pointer
+    can still scroll horizontally toward its start (a back swipe) or its end (forward). Until the page
+    answers, and whenever an element would take it, the page keeps the gesture, as in Chrome.
+  - After 32 pt it takes over from the page if the page's root scroll offset (`on_scroll_offset_changed`)
+    hasn't moved and history steps that way. From then on the page gets no deltas.
+  - An arrow chip slides in from that edge and fills with the accent at 140 pt more; it commits on release.
+    Release short of that, reverse, or a cancelled gesture aborts.
+  - Momentum after a navigation swipe is dropped. Mouse wheels and mouse swipe buttons are unchanged.
+- **⌘+ / ⌘− / ⌘0** step page zoom (`browser.zoom`) by half CEF levels in [-3, 5]; ⌘0 resets. In the address bar
+  they do nothing to the page.
+- `scripts/ui-driver.swift`: `swipe x y dx [steps]` (phased horizontal pixel scroll), `pan x y dy [steps]`
+  (phased vertical scroll plus momentum), `pinch x y scale [steps]` and `smartzoom x y` (synthetic gesture
+  events; both reach AppKit). Check zoom with `browser.eval` of `visualViewport.scale`.
+
+**Verified (2026-10-22, macOS, synthetic events from `ui-driver` against a local page):**
+- **Pinch:**
+  - 1.8 → `visualViewport.scale` 1.81 with `innerWidth` unchanged (no reflow), no text selection and no
+    context menu.
+  - Pinching further stops at 3×; pinching out returns to 1×.
+- **Smart zoom:** toggles 2.01× ↔ 1×, repeatably.
+- **Swipe:**
+  - A 300 pt right swipe goes back; a 60 pt or 160 pt swipe aborts.
+  - Over a horizontally scrolled element, right swipes scroll it (400 → 112 → 0) instead of navigating.
+    Once it is at its start, the next right swipe goes back.
+  - A forward swipe without forward history does nothing.
+  - A precise vertical pan with momentum scrolls its full distance (450 px).
+- **Zoom chords:** ⌘+ shows `120%` in the zoom pill, ⌘− steps down, ⌘0 resets, and ⌘0 in the address bar
+  leaves the zoom alone.
+
+**Not verified:** a real trackpad (all of the above used synthetic CGEvents); the system's two-finger secondary
+click during smart zoom; right-to-left scrollers (the scroller check uses `|scrollLeft|`).
+
 **Ghost/motion:** `ghost()` for browser panes returns the last `CVPixelBuffer`, so animations reuse the texture.
 
 ## 5. Tunnels (`silo/tunnel/1`)
