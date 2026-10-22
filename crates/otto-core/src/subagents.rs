@@ -6,6 +6,12 @@
 //! boundary, or by a new turn when it is idle, and acknowledged in the same
 //! transaction as the delivered item, so each delivers exactly once, also
 //! across restarts (`Runtime::deliver_pending`).
+//!
+//! The user can take a child over from its own pane: their input marks it
+//! (`meta.user`: `steered` / `took_over`) and its next report says so. A turn
+//! the user stopped or interrupted does not report; it holds (`meta.held`)
+//! until a later turn reports, else it reports as `stopped` once the child has
+//! stayed idle for `Runtime::subagent_hold` (or at the next start).
 use crate::{CreateSession, Error, Result, session::Context};
 use otto_proto::{Delivery, Event, InputPart, SessionStatus};
 use otto_store::Projection;
@@ -49,7 +55,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
             }
             if let Some(child) = target {
                 // reuse_session: continue an existing child with a new task.
-                cx.runtime.prompt(child, vec![InputPart::Text { text: task }], Delivery::Queue).await?;
+                cx.runtime.prompt_child(child, vec![InputPart::Text { text: task }], Delivery::Queue).await?;
                 cx.emit(
                     Event::SubagentChanged { parent: cx.row.id.clone(), child: child.into(), status: SessionStatus::Busy },
                     Projection::None,
@@ -97,7 +103,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     ..Default::default()
                 })
                 .await?;
-            child.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
+            child.submit(vec![InputPart::Text { text: task }], Delivery::Queue, false).await?;
             cx.emit(
                 Event::SubagentChanged { parent: cx.row.id.clone(), child: child.id.clone(), status: SessionStatus::Busy },
                 Projection::None,
@@ -122,7 +128,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     Ok(status.to_string())
                 }
                 "stop" => {
-                    cx.runtime.cancel(child).await?;
+                    cx.runtime.cancel_child(child).await?;
                     Ok("stopped".into())
                 }
                 "message" => {
@@ -132,12 +138,12 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                         _ => Delivery::Queue,
                     };
                     let text = text.ok_or_else(|| Error::Invalid("message required".into()))?;
-                    cx.runtime.prompt(child, vec![InputPart::Text { text }], delivery).await?;
+                    cx.runtime.prompt_child(child, vec![InputPart::Text { text }], delivery).await?;
                     Ok("sent".into())
                 }
                 "retry" => {
                     let task = row.meta["task"].as_str().map(str::to_owned).or(text).ok_or_else(|| Error::Invalid("nothing to retry".into()))?;
-                    cx.runtime.prompt(child, vec![InputPart::Text { text: format!("Retry the task: {task}") }], Delivery::Queue).await?;
+                    cx.runtime.prompt_child(child, vec![InputPart::Text { text: format!("Retry the task: {task}") }], Delivery::Queue).await?;
                     Ok(json!({"session_id":child,"status":"started"}).to_string())
                 }
                 _ => Err(Error::Invalid("unknown subagent action".into())),
@@ -152,7 +158,106 @@ fn last_text(items: &[otto_llm::Item], limit: usize) -> String {
 }
 
 pub(crate) fn payload(row: &otto_store::Session, items: &[otto_llm::Item], turn: i64, status: &str, error: Option<String>) -> Value {
-    json!({"child":row.id,"agent":row.agent,"title":row.title,"turn":turn,"status":status,"result":last_text(items, RESULT_LIMIT),"error":error})
+    json!({"child":row.id,"agent":row.agent,"title":row.title,"turn":turn,"status":status,"result":last_text(items, RESULT_LIMIT),"error":error,"user":row.meta["user"]})
+}
+
+/// Change the child's meta in the store and in its live row (actor only).
+async fn set_meta(cx: &Context, f: impl FnOnce(&mut Value) + Send + 'static) -> Result<()> {
+    let id = cx.row.id.clone();
+    let row = cx
+        .runtime
+        .db(move |s| {
+            let mut row = s.session(&id)?.ok_or(Error::Closed)?;
+            if !row.meta.is_object() {
+                row.meta = json!({});
+            }
+            f(&mut row.meta);
+            s.update_session(&id, otto_store::SessionUpdate { meta: Some(row.meta.clone()), ..Default::default() })?;
+            Ok(row)
+        })
+        .await?;
+    cx.set_row(row);
+    Ok(())
+}
+
+/// The user steered the child, or stopped / interrupted it (`took_over`).
+pub(crate) async fn mark(cx: &Context, took_over: bool) {
+    let current = cx.live().row.meta["user"].clone();
+    let value = if took_over || current == "took_over" { "took_over" } else { "steered" };
+    if current == value {
+        return;
+    }
+    if let Err(error) = set_meta(cx, move |meta| meta["user"] = json!(value)).await {
+        tracing::warn!(session=%cx.row.id, %error, "subagent takeover not recorded");
+    }
+}
+
+/// After a child turn: a turn the user stopped holds its report; a reported
+/// one clears the takeover marks.
+pub(crate) async fn turn_ended(cx: &Context, turn: i64, cancelled: bool, user_stopped: bool) {
+    let meta = cx.live().row.meta.clone();
+    let result = if user_stopped {
+        let hold = cx.runtime.subagent_hold();
+        let (runtime, id) = (std::sync::Arc::downgrade(&cx.runtime.0), cx.row.id.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            let Some(runtime) = runtime.upgrade() else { return };
+            let open = runtime.actors.lock().await.get(&id).cloned();
+            if let Some(handle) = open {
+                let _ = handle.tx.send(crate::session::Command::Release(turn)).await;
+            }
+        });
+        set_meta(cx, move |meta| meta["held"] = json!(turn)).await
+    } else if !cancelled && (!meta["user"].is_null() || !meta["held"].is_null()) {
+        set_meta(cx, clear).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
+        tracing::warn!(session=%cx.row.id, %error, "subagent hold not recorded");
+    }
+}
+
+pub(crate) fn clear(meta: &mut Value) {
+    if let Some(meta) = meta.as_object_mut() {
+        meta.remove("user");
+        meta.remove("held");
+    }
+}
+
+/// The child stayed idle after the user stopped turn `held`: report it now.
+pub(crate) async fn release(cx: &Context, held: i64) {
+    if cx.live().row.meta["held"] != json!(held) {
+        return;
+    }
+    let result = async {
+        let id = cx.row.id.clone();
+        let Some(row) = cx.runtime.db(move |s| release_held(s, &id)).await? else { return Ok(()) };
+        cx.set_row(row);
+        let (runtime, parent) = (cx.runtime.clone(), cx.row.parent_id.clone().unwrap_or_default());
+        tokio::spawn(async move {
+            if let Err(error) = runtime.wake(parent.clone()).await {
+                tracing::warn!(session=%parent, %error, "outbox wake deferred to the next start");
+            }
+        });
+        Ok::<_, Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(session=%cx.row.id, %error, "held subagent report deferred to the next start");
+    }
+}
+
+/// Push the held report of a stopped child and clear its marks (actor or
+/// start); the updated row when there was one.
+pub(crate) fn release_held(s: &mut otto_store::Store, id: &str) -> Result<Option<otto_store::Session>> {
+    let Some(mut row) = s.session(id)? else { return Ok(None) };
+    let Some(turn) = row.meta["held"].as_i64() else { return Ok(None) };
+    let payload = payload(&row, &s.items(id)?, turn, "stopped", None);
+    s.outbox_push(row.parent_id.as_deref().unwrap_or_default(), id, turn, payload)?;
+    clear(&mut row.meta);
+    s.update_session(id, otto_store::SessionUpdate { meta: Some(row.meta.clone()), ..Default::default() })?;
+    Ok(Some(row))
 }
 
 /// Record a finished child turn for the parent, then wake the parent.
@@ -179,6 +284,15 @@ pub(crate) async fn deliver(cx: &Context, turn: i64, step: i64) -> Result<()> {
     let entries = cx.runtime.db(move |s| Ok(s.outbox_pending(&id)?)).await?;
     for entry in entries {
         let p = &entry.payload;
+        // A session's own notice (a background command's result): its text.
+        if let Some(text) = p["notice"].as_str() {
+            let item =
+                otto_llm::Item::new(format!("outbox-{}", entry.id), otto_llm::Role::System, vec![otto_llm::Part::System { text: text.into() }]);
+            match cx.item(item, turn, step).await {
+                Ok(()) | Err(Error::Store(otto_store::Error::InvalidTransition(_))) => continue,
+                Err(error) => return Err(error),
+            }
+        }
         let mut text = format!(
             "Subagent completion: child {} ({}, \"{}\") finished turn {} with status {}.",
             entry.from_session,
@@ -187,6 +301,12 @@ pub(crate) async fn deliver(cx: &Context, turn: i64, step: i64) -> Result<()> {
             p["turn"],
             p["status"].as_str().unwrap_or("done")
         );
+        match (p["status"].as_str(), p["user"].as_str()) {
+            (Some("stopped"), _) => text.push_str("\nThe user stopped this sub-agent."),
+            (_, Some("took_over")) => text.push_str("\nThe user took over this sub-agent; the result reflects their input."),
+            (_, Some("steered")) => text.push_str("\nThe user steered this sub-agent; the result reflects their input."),
+            _ => {}
+        }
         if let Some(error) = p["error"].as_str() {
             text.push_str(&format!("\nError: {error}"));
         }
@@ -199,7 +319,7 @@ pub(crate) async fn deliver(cx: &Context, turn: i64, step: i64) -> Result<()> {
             Err(Error::Store(otto_store::Error::InvalidTransition(_))) => continue,
             Err(error) => return Err(error),
         }
-        let status = if p["status"] == "done" { SessionStatus::Idle } else { SessionStatus::Error };
+        let status = if p["status"] == "done" || p["status"] == "stopped" { SessionStatus::Idle } else { SessionStatus::Error };
         cx.emit(Event::SubagentChanged { parent: cx.row.id.clone(), child: entry.from_session, status }, Projection::None, turn, step).await?;
     }
     Ok(())
@@ -214,7 +334,7 @@ pub(crate) async fn cancel_children(cx: &Context) {
         for child in children.into_iter().filter(subagent) {
             let open = runtime.0.actors.lock().await.get(&child.id).cloned();
             if let Some(handle) = open {
-                let _ = handle.cancel().await;
+                let _ = handle.stop(false).await;
             }
         }
     });

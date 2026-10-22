@@ -209,7 +209,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         let loaded = crate::tools::loaded(&cx).await?;
         // Sources (MCP) are listed every step, so list changes apply at once
         // and providers always get the complete current tool list.
-        let mut tools = otto_tools::registry::tools_for_family(&family);
+        let mut tools = cx.runtime.builtins(&family);
         tools.extend(cx.runtime.extra_tools());
         tools.extend(cx.runtime.source_tools(&cx.root).await);
         let session_tools = crate::tools::tools(cx.clone(), &tools, &loaded);
@@ -488,6 +488,8 @@ async fn execute(
     tcx.project_root = cx.root.clone();
     tcx.approver = Some(bridge.clone());
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
+    tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
+    tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
     let mut tool = lookup.get(&name).cloned();
     // A provider-defined tool's call becomes the built-in it maps to; policy,
     // hooks and the journal see the built-in's name and canonical input.

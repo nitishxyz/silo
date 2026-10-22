@@ -5,3 +5,4 @@ mod patch;
 mod patch_edges;
 mod policy;
 mod safety;
+mod terminals;

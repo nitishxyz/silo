@@ -30,7 +30,7 @@ pub(crate) fn pattern(pattern: &str, name: &str) -> bool {
 
 /// Built-ins for the model's family, registered extras, and project sources (MCP).
 pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
-    let mut all = otto_tools::registry::tools_for_family(&cx.live().family());
+    let mut all = cx.runtime.builtins(&cx.live().family());
     all.extend(cx.runtime.extra_tools());
     all.extend(cx.runtime.source_tools(&cx.root).await);
     all

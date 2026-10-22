@@ -178,6 +178,17 @@ pub struct ToolCx {
     /// Runtime services for tools that need the session (subagents, todos,
     /// skills), downcast by those tools.
     pub services: Option<Arc<dyn Any + Send + Sync>>,
+    /// The calling session, then its ancestors (a subagent's commands run
+    /// next to its parent's agent block).
+    pub sessions: Vec<String>,
+    /// Delivers text to the calling session later (background results).
+    pub mailbox: Option<Arc<dyn Mailbox>>,
+}
+
+/// Text for a session after its call returned: injected at its next step,
+/// or starting a turn when it is idle.
+pub trait Mailbox: Send + Sync {
+    fn deliver(&self, text: String);
 }
 
 impl ToolCx {
@@ -192,6 +203,8 @@ impl ToolCx {
             approver: None,
             spill_dir: None,
             services: None,
+            sessions: Vec::new(),
+            mailbox: None,
         }
     }
     pub fn progress(&self, message: Option<String>, output: Option<String>) {

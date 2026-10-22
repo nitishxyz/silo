@@ -47,6 +47,11 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
 - `add_source(Arc<dyn otto_tools::ProjectSources>)` adds project-dependent tools
   (MCP via `otto-mcp`), listed again before every model request and granted by
   pattern (`mcp__*` by default). `shutdown` stops them.
+- `set_terminals(Arc<dyn otto_tools::builtin::shell::Terminals>)` runs `shell` commands in a terminal host
+  (silo's parked command blocks, `otto_silo_tools::silo`); short read-only ones and calls it does not serve use
+  pipes. Shell jobs are runtime-wide; a job's result (background, or a command that waited for input) is delivered
+  to its session as a system item through the outbox (`{notice}` from the session to itself). Archiving a session
+  stops its jobs.
 - `deliver_pending() -> Result<usize>` wakes sessions with undelivered outbox
   entries; call it once after registering tools and sources.
 - `queue_remove(id, input_id)` and `queue_update(id, input_id, Delivery)` (also on

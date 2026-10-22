@@ -14,6 +14,17 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
             store.outbox_push(row.parent_id.as_deref().unwrap_or_default(), id, *turn, payload)?;
         }
     }
+    // A turn the user stopped held its report; the hold ends with the daemon
+    // (an interrupted later turn already reported instead).
+    for session in store.all_sessions()?.into_iter().filter(|s| crate::subagents::subagent(s) && !s.meta["held"].is_null()) {
+        if recovered.interrupted_turns.iter().any(|(id, _)| *id == session.id) {
+            let mut meta = session.meta.clone();
+            crate::subagents::clear(&mut meta);
+            store.update_session(&session.id, SessionUpdate { meta: Some(meta), ..Default::default() })?;
+        } else {
+            crate::subagents::release_held(store, &session.id)?;
+        }
+    }
     for session in store.all_sessions()? {
         let items = store.items(&session.id)?;
         let calls = store.tool_calls(&session.id)?;
@@ -70,6 +81,29 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
         }
         if !missing.is_empty() {
             let item = Item::new(crate::id(), Role::Tool, missing.into_values().collect());
+            store.append(&session.id, record(&Event::ItemDone { item: item.clone() }, 0, 0)?, Projection::PutItem(item))?;
+        }
+        // Shell jobs ran in the stopped process: those that never reported
+        // say so now, without starting a turn.
+        let reported: Vec<String> = items
+            .iter()
+            .filter(|i| i.role == Role::System)
+            .flat_map(|i| &i.parts)
+            .filter_map(|p| match p {
+                Part::System { text } => Some(text.clone()),
+                _ => None,
+            })
+            .chain(store.outbox_pending(&session.id)?.into_iter().filter_map(|e| e.payload["notice"].as_str().map(str::to_owned)))
+            .collect();
+        for call in calls.iter().filter(|c| c.name == "shell" && c.status == ToolStatus::Done) {
+            let Some(job) = call.output.as_ref().and_then(|o| o["metadata"]["job_id"].as_str()) else { continue };
+            let head = format!("Background shell {job} ");
+            if reported.iter().any(|t| t.starts_with(&head)) {
+                continue;
+            }
+            let command: String = call.input["command"].as_str().unwrap_or_default().chars().take(120).collect();
+            let text = format!("{head}(`{command}`) was stopped (the otto server restarted).\n");
+            let item = Item::new(crate::id(), Role::System, vec![Part::System { text }]);
             store.append(&session.id, record(&Event::ItemDone { item: item.clone() }, 0, 0)?, Projection::PutItem(item))?;
         }
         if matches!(session.status.as_str(), "busy" | "waiting_approval") {

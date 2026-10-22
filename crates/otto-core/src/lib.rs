@@ -5,6 +5,7 @@ pub mod commands;
 mod compaction;
 mod deltas;
 mod hooks;
+mod mailbox;
 mod prepared;
 mod prompt;
 mod recovery;

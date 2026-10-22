@@ -9,6 +9,6 @@ pub mod registry;
 pub mod spec;
 
 pub use spec::{
-    Approver, CallMode, Effects, Loading, NativeTool, OutputPart, Presentation, Progress, ProjectSources, Source, Tool, ToolCx, ToolError,
+    Approver, CallMode, Effects, Loading, Mailbox, NativeTool, OutputPart, Presentation, Progress, ProjectSources, Source, Tool, ToolCx, ToolError,
     ToolErrorKind, ToolOutput, ToolSource, ToolSpec, Truncation,
 };

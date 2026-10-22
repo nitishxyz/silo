@@ -90,10 +90,15 @@ pub(crate) struct Inner {
     extra: Mutex<Vec<Arc<dyn otto_tools::Tool>>>,
     /// Project-dependent tools (MCP), listed again before each model request.
     sources: Mutex<Vec<Arc<dyn otto_tools::ProjectSources>>>,
+    /// What every session's shells share: background jobs and the terminal
+    /// host (silo) commands run in.
+    shell: Mutex<otto_tools::builtin::shell::Host>,
     /// Set by shutdown: no actor starts afterwards.
     closing: std::sync::atomic::AtomicBool,
     /// Name untitled sessions after their first turn (`set_auto_title`).
     auto_title: std::sync::atomic::AtomicBool,
+    /// How long a child the user stopped holds its report (`set_subagent_hold`), in ms.
+    hold: std::sync::atomic::AtomicU64,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -108,8 +113,10 @@ impl Runtime {
             defaults: Mutex::new(SessionDefaults::default()),
             extra: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
+            shell: Mutex::new(otto_tools::builtin::shell::Host::default()),
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
+            hold: std::sync::atomic::AtomicU64::new(120_000),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -147,6 +154,14 @@ impl Runtime {
     pub(crate) fn auto_title(&self) -> bool {
         self.0.auto_title.load(std::sync::atomic::Ordering::Relaxed)
     }
+    /// A child turn the user stopped reports to the parent only after the
+    /// child stays idle this long (default 2 min); a new turn reports instead.
+    pub fn set_subagent_hold(&self, hold: std::time::Duration) {
+        self.0.hold.store(hold.as_millis().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub(crate) fn subagent_hold(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0.hold.load(std::sync::atomic::Ordering::Relaxed))
+    }
     pub(crate) fn defaults(&self) -> SessionDefaults {
         self.0.defaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
@@ -171,6 +186,15 @@ impl Runtime {
     }
     pub(crate) fn extra_tools(&self) -> Vec<Arc<dyn otto_tools::Tool>> {
         self.0.extra.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    /// Run `shell` commands in `terminals` (silo's parked command blocks)
+    /// when it serves the call; pipes otherwise.
+    pub fn set_terminals(&self, terminals: Arc<dyn otto_tools::builtin::shell::Terminals>) {
+        self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).terminals = Some(terminals);
+    }
+    /// The built-ins for `family`, sharing this runtime's jobs and terminals.
+    pub(crate) fn builtins(&self, family: &str) -> Vec<Arc<dyn otto_tools::Tool>> {
+        otto_tools::registry::tools_with(family, &self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
     /// Add project-dependent tools (MCP servers). Their tools are granted by
     /// pattern (`mcp__*` by default) and listed again before every request,
@@ -410,11 +434,20 @@ impl Runtime {
     pub fn events(&self) -> broadcast::Receiver<Event> {
         self.0.global.subscribe()
     }
+    /// User input; to a subagent it counts as steering or taking it over (§7.4).
     pub async fn prompt(&self, id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<String> {
         self.session(id).await?.prompt(input, delivery).await
     }
+    /// Input from a parent session to its child.
+    pub(crate) async fn prompt_child(&self, id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<String> {
+        self.session(id).await?.submit(input, delivery, false).await
+    }
+    /// The user stops the turn; a subagent then holds its report (§7.4).
     pub async fn cancel(&self, id: &str) -> Result<()> {
         self.session(id).await?.cancel().await
+    }
+    pub(crate) async fn cancel_child(&self, id: &str) -> Result<()> {
+        self.session(id).await?.stop(false).await
     }
     pub async fn answer_approval(&self, id: &str, approval: &str, decision: ApprovalDecision) -> Result<()> {
         self.session(id).await?.answer_approval(approval, decision).await
@@ -450,7 +483,13 @@ impl Runtime {
         Box::pin(async move { runtime.update(&id, SessionUpdate { title: Some(title), ..Default::default() }, true).await })
     }
     pub async fn archive(&self, id: &str, archived: bool) -> Result<()> {
-        self.update(id, SessionUpdate { archived: Some(archived), ..Default::default() }, false).await.map(drop)
+        self.update(id, SessionUpdate { archived: Some(archived), ..Default::default() }, false).await?;
+        // A closed session's background commands stop with it.
+        if archived {
+            let jobs = self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).jobs.clone();
+            jobs.stop_session(id).await;
+        }
+        Ok(())
     }
     /// Change the session's provider, model, agent or effort (`session.update`).
     pub async fn configure(&self, id: &str, change: Configure) -> Result<SessionInfo> {

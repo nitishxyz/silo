@@ -560,6 +560,33 @@ async fn delegate_tool_delivers_outbox() {
 }
 
 #[tokio::test]
+async fn background_shell_result_is_delivered_to_the_session() {
+    let script = vec![call("bg", "shell", serde_json::json!({"command":"sleep 0.2; printf bg-done","background":true}))];
+    let (_dir, r, s, _) = setup(vec![script, text("started"), text("noted"), text("noted")], "build").await;
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    loop {
+        if let Event::ApprovalRequested { approval_id, .. } = live.recv().await.unwrap().1 {
+            s.answer_approval(&approval_id, ApprovalDecision::Allow).await.unwrap();
+            break;
+        }
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let view = s.view().await.unwrap();
+            let delivered = |text: &str| text.starts_with("Background shell job-") && text.contains("exited with code 0.\nbg-done");
+            if view.items.iter().any(|i| i.parts.iter().any(|p| matches!(p, Part::System { text } if delivered(text)))) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn question_and_steer_at_boundary() {
     let (_dir, r, s, m) =
         setup(vec![vec![call("q", "ask_user", serde_json::json!({"question":"Which?","options":["one","two"]}))], text("done")], "build").await;
@@ -975,6 +1002,75 @@ async fn recover_unknown_without_rerun() {
     assert!(matches!(&view.items[0].parts[0], Part::ToolResult { is_error: true, .. }));
     assert!(serde_json::to_string(&view.items).unwrap().contains("outcome unknown"));
     assert!(model.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn background_jobs_of_a_stopped_process_report_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut store = Store::open(&path).unwrap();
+    let project = store.create_project(dir.path().to_str().unwrap()).unwrap();
+    let session = store
+        .create_session(otto_store::NewSession {
+            project_id: project.id,
+            parent_id: None,
+            agent: "build".into(),
+            model: "test".into(),
+            provider: "test".into(),
+            title: String::new(),
+            cwd: dir.path().to_string_lossy().into(),
+            meta: serde_json::Value::Null,
+        })
+        .unwrap();
+    let record = || otto_store::EventRecord { turn: 1, step: 1, kind: "tool.call".into(), payload: serde_json::json!({}) };
+    for (call, job) in [("a", "job-1"), ("b", "job-2")] {
+        store
+            .append(
+                &session.id,
+                record(),
+                otto_store::Projection::ToolIntent {
+                    call_id: call.into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({"command": "cargo test"}),
+                },
+            )
+            .unwrap();
+        let output = otto_tools::ToolOutput::text("Started").with_metadata(serde_json::json!({"job_id": job, "background": true}));
+        let output = serde_json::to_value(output).unwrap();
+        store
+            .append(&session.id, record(), otto_store::Projection::ToolOutcome { call_id: call.into(), status: otto_store::ToolStatus::Done, output })
+            .unwrap();
+    }
+    let done = otto_llm::Item::new(
+        "r",
+        otto_llm::Role::System,
+        vec![Part::System { text: "Background shell job-2 (`cargo test`) exited with code 0.\n".into() }],
+    );
+    store.append(&session.id, record(), otto_store::Projection::PutItem(done)).unwrap();
+    drop(store);
+    let model = ScriptedModel::new(vec![]);
+    let open = || RuntimeConfig {
+        store: Arc::new(Mutex::new(Store::open(&path).unwrap())),
+        models: Arc::new(Resolver(model.clone())),
+        state_dir: dir.path().into(),
+        user_config_dir: dir.path().join("user"),
+    };
+    let stopped = |view: &otto_proto::SessionView| {
+        view.items
+            .iter()
+            .flat_map(|i| &i.parts)
+            .filter(|p| matches!(p, Part::System { text } if text.contains("was stopped (the otto server restarted)")))
+            .count()
+    };
+    let runtime = Runtime::new(open()).await.unwrap();
+    let view = runtime.view(&session.id).await.unwrap();
+    assert!(serde_json::to_string(&view.items).unwrap().contains("Background shell job-1 (`cargo test`) was stopped"));
+    assert_eq!(stopped(&view), 1, "only the job that never reported");
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+    let runtime = Runtime::new(open()).await.unwrap();
+    assert_eq!(stopped(&runtime.view(&session.id).await.unwrap()), 1, "once");
+    assert!(model.requests.lock().unwrap().is_empty(), "no turn");
 }
 
 /// Rules Anthropic `input_schema` and OpenAI function `parameters` both enforce.
