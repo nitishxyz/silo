@@ -1,7 +1,7 @@
 # Otto: an agent harness for silo (research + plan)
 
-Status: direction decided (§11.1). **O0–O2 implemented on branch `otto`, verified offline** (§0). Still open: the
-shell runner details (§6.2, §11.2), cross-machine conflicts (§12).
+Status: direction decided (§11.1). **O0–O2 implemented on branch `otto`, verified offline** (§0). Still open:
+cross-machine conflicts (§12).
 
 ## 0. Implementation status
 
@@ -13,7 +13,7 @@ shell runner details (§6.2, §11.2), cross-machine conflicts (§12).
 | O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, native client tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Native client tools follow `caps.native_tools`, one rule per model and auth mode: Claude `text_editor_20250728`/`bash_20250124` on every catalog model; OpenAI `apply_patch` and `shell` (local) per each model page's supported tools (`apply_patch`, `hosted_shell`), API key only, since the Codex CLI sends the ChatGPT endpoint only function/custom tools; everything else gets the built-ins | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
 | O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 12 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
 | Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
-| O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`. Not built: `shell` as a parked command block, per-subagent grants, the `service` tunnel target | `silo-tools`, `otto-silo-tools`, `silo-cli` |
+| O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`; parked blocks (`block.spawn`/`park`/`reveal`) and `shell` in parked command blocks with background results delivered to the session (§6.2). Not built: per-subagent grants, the `service` tunnel target | `silo-proto`, `silo-server`, `silo-tools`, `otto-silo-tools`, `otto-tools`, `silo-cli` |
 | O7 agent block | Built: otto sessions as a native chat block in the app (docs/AGENT_BLOCK.md) | `silo-app/src/agent` |
 | O6, O8 | Not started beyond the `browser_*` tools above | – |
 
@@ -42,6 +42,13 @@ subscription refresh; the models.dev catalog refresh.
 - Automatic titles are tried once per session actor; a restarted daemon may try a still-untitled session once more.
   The Claude plan comes from `/api/oauth/profile` at login and refresh (best effort, not verified live); older
   stored credentials report none until their next refresh.
+- O5 shell: `background: true` is a field of the built-in `shell`; models given a native shell (Claude's
+  `bash_20250124`, OpenAI's local `shell`) can't set it, so they get no background jobs (they use `terminal_open`).
+  Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
+  restarted)` system item at startup (no turn starts). `waiting_for_input` is a heuristic (`line_prompt`: canonical
+  tty, cursor ending a non-empty line, 2 s quiet); a prompt that ends with a newline, or a raw-mode one, isn't seen
+  and the call runs to its timeout. The agent block recognises job reports by their system text
+  (`Background shell <id> …`), since system items carry no metadata.
 
 Each crate's `README.md` lists its own limitations.
 
@@ -468,8 +475,9 @@ pub struct ToolSpec {
 
 ## 6. Silo toolset (for any harness)
 
-> **Superseded by `docs/AGENTS.md`**: client-side `silo-tools` crate (no `tools.call`), ordinary blocks (no parked
-> blocks), CDP accessibility snapshots for browsers. Kept below for history.
+> **Superseded by `docs/AGENTS.md`**: client-side `silo-tools` crate (no `tools.call`), CDP accessibility snapshots
+> for browsers. Kept below for history, except §6.2 (parked command blocks for agent commands), which is current
+> and which AGENTS.md §3.5 describes as built.
 
 **Idea:** silo publishes a curated, agent-shaped tool registry next to its control API. It does not expose all of
 `api.describe`: layout ratios aren't agent tools. Otto consumes it natively; other harnesses get it over MCP.
@@ -497,14 +505,16 @@ pub struct ToolSpec {
 | `browser.snapshot` / `click` / `type` / `press` / `scroll` / `wait_for` / `screenshot` / `evaluate` / `console` / `network` | **new**: forwarded to the app that owns the block (`app.request` path), executed in CEF through the DevTools protocol (`execute_dev_tools_method`) | Engine-side actions need an attached app. With none: an error, not a timeout (TS lesson). Headless server-side Chromium later (PLAN §6) |
 | `notify` | Phase 7 notifications | Tell the user on every device |
 
-### 6.2 Where agent commands run (proposal)
+### 6.2 Where agent commands run (decided 2026-10-22)
 
 The rule is "whichever is cheaper, but use silo blocks when they work well". Proposal: **every agent command runs
-in its own parked silo command block when silo is connected; pipes are the fallback.**
+in its own parked silo command block when silo is connected; pipes are the fallback.** Built in O5 with the routing
+the cost gate called for (below): short read-only commands always use pipes.
 
 **Parked blocks (new in silo).** A session gets `parked: Vec<BlockId>`: blocks that live in the session but in no
 layout, so nobody sees them by default. Their PTY, server terminal, snapshot, status and access rules are the same
-as any other block.
+as any other block. They live in the user's current session, next to the agent block that started them (no
+separate hidden session).
 - `block.park {block_id}` and `block.reveal {block_id, as: float|split}`. Revealing a float reuses `Float`.
   Parking a block in a layout removes it from the layout and keeps it running.
 - Their owner is the agent block that started them: the agent block lists them under each tool call. The silo
@@ -525,26 +535,76 @@ as any other block.
    last screen. The agent block shows "needs you" and reveals the block on click; the user types into it, and the
    call completes when the process exits. The agent can also answer with `terminal.send`.
 5. Parallel calls are separate blocks. A timeout kills the process group; `background: true` returns a handle
-   instead (async tool, §5).
-6. **Retention:** exited command blocks stay parked with their final screen and scrollback, so the user can open
-   any past command in full color. Each session keeps the last N (for example 50) and closes the oldest. Closing the
-   agent session closes them all. Pinning keeps one.
+   instead (async tool, §5): for work that finishes and reports later (a test run, a build) while the agent keeps
+   working. Its result (exit code and output, as for a one-shot call) is delivered to the session when it exits;
+   the agent can also check on it or stop it.
+6. **No retention:** a command block lives exactly as long as its command. On exit the server captures the final
+   screen and scrollback (before the block goes), otto keeps the plain text (head and tail to the model, the full
+   text in its output file, shown in the tool card), and the block closes at once. Nothing is kept or restored
+   after a restart. One exception: a block the user has revealed stays on screen as an exited block until they
+   close it.
+
+**Lifetimes:**
+
+| | Runs | Lives until | Afterwards |
+|---|---|---|---|
+| `shell` | one command | it exits | text kept, block closed at once |
+| `shell {background: true}` | one finite command (tests, a build) | it exits or is stopped (otto, the user, or the agent session closing) | result delivered to the session, text kept, block closed |
+| `terminal.*` | a login shell, REPL, `ssh`, a dev server or watcher… | closed by otto or the user, or its shell exits | a normal block |
+
+Running background blocks can be revealed and typed into. When the agent session closes, its background blocks are
+stopped and its parked (hidden) terminals closed; terminals the user revealed, or that otto opened visible, belong
+to the layout and stay.
 
 **`shell` without silo** (silo not running, or a remote otto without a silo next to it): pipes, stdin
 `/dev/null`, the same env, the same output limits. The model sees the same tool either way.
 
-**`terminal.*`** stays for long-lived and interactive work: dev servers, watchers, REPLs, `ssh` sessions, anything
-the user should keep. Those are normal shell blocks, parked or revealed (`terminal.open {visible}`), and reused
-across calls.
+**`terminal.*`** stays for long-lived and interactive work: dev servers and watchers (processes that never return
+a result), REPLs, `ssh`, anything where state carries across calls (cwd, env, a venv) or the user may take over.
+Those are normal shell blocks, parked or revealed (`terminal.open {visible}`), reused across calls; the agent reads
+their output with `terminal.read`/`wait`.
 
 **Why blocks over pipes when silo is there:** watching and taking over are free, interactive prompts stop being
-failures, past commands keep their full output in silo's own scrollback store, and the agent block can embed a
-live mini-terminal in each tool card by reusing silo's terminal renderer on the block's data stream.
+failures, output comes from the server terminal (redraws resolved, no escape codes), and the agent block can embed
+a live mini-terminal in a running tool card by reusing silo's terminal renderer on the block's data stream.
 
 **Cost, measured before it becomes the default (O5 gate):** each call costs a PTY, a process spawn, a server
 terminal and a ring. Pipes pay only the spawn. The gate is spawn-to-first-byte and capture overhead on
-`git status`, `rg`, and `cargo check` with no-op builds. If a block adds more than about 10 ms at p50 or noticeable
-memory per 50 parked blocks, short read-only commands go through pipes and the rest through blocks.
+`git status`, `rg`, and `cargo check` with no-op builds. If a block adds more than about 10 ms at p50, short
+read-only commands go through pipes and the rest through blocks.
+
+Measured 2026-10-22 on the dev Mac (`silo-tools/tests/cost.rs`, ignored; throwaway server; `zsh -lc`, the same
+env both ways; block = `block.spawn` → `block.changed` exit → `terminal.capture`), p50 in ms (debug build in
+brackets). `rg` is not installed here, `git grep` stands in:
+
+| command | pipe | block | overhead |
+|---|---|---|---|
+| `true` | 4.5 | 12.5 | 8.0 (9.5) |
+| `echo hi` | 4.5 | 12.8 | 8.3 (9.0) |
+| `git status` | 16.5 | 25.5 | 9.0 (10.7) |
+| `git grep` | 18.2 | 26.7 | 8.5 (9.0) |
+| `cargo check` (no-op) | 198.0 | 198.1 | 0.1 (2.8) |
+
+Pipe spawn-to-first-byte is 4 ms; `block.spawn` itself takes 6.7 ms (PTY, server terminal, actor thread). A block
+adds 8–9 ms (release) to 9–11 ms (debug), at the gate, and doubles or triples short commands. **Routing:** short
+read-only commands (`otto_tools::builtin::shell::quick`: `git status|diff|log|show|…`, `ls`, `cat`, `rg`, `grep`,
+`find` without actions, `sed` without `-i`, … chained with pipes, `&&` or `;`, no redirection or substitution)
+run through pipes even with silo; everything else in command blocks.
+
+**As built:** `block.spawn {block_id: owner, command, cwd, env, size}` starts a parked block (no command: a login
+shell); `block.park`, `block.reveal {as: float|split}`; `SessionInfo.parked: [{id, owner}]`; closing the owner closes
+its parked blocks; a parked block closes when its program ends, and a command block's final screen and scrollback
+answer `terminal.capture` for 5 minutes; `Capture` gained `lifecycle`, `exited` and `line_prompt` (canonical tty,
+cursor ending a non-empty line). Blocks an owner parked (`block.spawn`) are dropped on a restart (hot upgrades carry
+them); the close guard counts an owner's running parked blocks when it closes. Otto
+finds the agent block showing the session (or its nearest ancestor) and owns its command blocks with it; without
+one, pipes. A prompt (`line_prompt` and 2 s quiet) returns `waiting_for_input` with the screen, `block_id` and a
+`job_id`; the call then continues as a job. Background results and those of answered prompts arrive as system
+messages through the outbox (`{notice}` entries from the session to itself); `job` checks or stops them; archiving a
+session stops its jobs. `terminal_open {visible: false}` parks a terminal next to the agent's block. A command
+block announces itself with a `block:<id>` progress message; closing its block stops the command (`stopped
+(closed)`). The agent block shows Open / Stop on such lines, `Needs you` for `waiting_for_input`, and background
+cards that finish when their report arrives (docs/AGENT_BLOCK.md §4f).
 
 ---
 
@@ -627,7 +687,19 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 - `delegate {task, agent?, session_id?}` (reuse), `list`, `status`, `message{queue|steer|interrupt}`, `stop`,
   `retry`; depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
   tool set = the agent's set ∩ the parent's grant, minus both deny lists.
-- With silo: each subagent can get its own scoped grant and its own panes.
+- **User takeover.** A client's `session.prompt` / `session.cancel` / `queue_update` to a child are the user's
+  (the parent's tool calls and its cancel cascade are not). User input marks the child (`meta.user`: `steered`, or
+  `took_over` once the user stopped or interrupted a running turn); the next report adds one line, `The user steered
+  this sub-agent; …` / `The user took over this sub-agent; …`, and clears the mark.
+  - A turn the user stopped or interrupted does not report (no `cancelled` result for the parent to act on). It
+    holds (`meta.held` = that turn) until a later child turn finishes and reports instead.
+  - If the child then stays idle for `Runtime::subagent_hold` (2 min), or the daemon restarts first, the held turn
+    reports as status `stopped` (`The user stopped this sub-agent.`). Both go through the same versioned outbox
+    record, so it is still exactly once.
+  - A user message to a finished child starts a new turn, which reports again and wakes the parent as usual.
+  - The parent's own `stop` still reports nothing.
+- With silo: each subagent can get its own scoped grant and its own panes; the agent block opens a child in its own
+  block for the user to steer or take over (docs/AGENT_BLOCK.md §4f).
 
 ### 7.5 Persistence (`otto-store`)
 
@@ -707,9 +779,10 @@ Interactions, xAI, the compat family, and the catalog.
 **O5: silo toolset.** `tools.rs`, `tools.list/call`, parked blocks (`block.park/reveal`), command blocks for
 `shell` (§6.2) with the cost gate, `terminal.open/run/send/read/list`, `otto-silo-tools`, `silo mcp`, scoped grants
 per subagent, and the `service` tunnel target.
-*Exit:* otto runs `cargo test` as a parked command block, reads the exit code, and the user reveals it mid-run; a
-`sudo` prompt reports `waiting_for_input` and completes after the user types; Claude Code runs the same tools via
-`silo mcp`; a remote CLI reaches otto over a service tunnel.
+*Exit:* otto runs `cargo test` as a parked command block, reads the exit code, and the user reveals it mid-run; the
+block closes on exit unless revealed; a `sudo` prompt reports `waiting_for_input` and completes after the user
+types; a background `cargo test` reports its result while the agent keeps working; a dev server runs in a terminal
+until stopped; Claude Code runs the same tools via `silo mcp`; a remote CLI reaches otto over a service tunnel.
 
 **O6: browser tools.** App-side CDP executor in `silo-app`/`silo-web`; forwarding; snapshot refs; screenshot to
 image result.
@@ -739,17 +812,12 @@ the harness; A survives a restart mid-task and resubscribes.
 | 5 | Naming | `otto-silo` binary and state dir for this version, crates `otto-*` in this workspace; rename to `otto` later (§3.1) |
 | 6 | History ownership | Our log is the truth (`store=false` by default); provider-side state is only a cache (§7.3) |
 | 7 | Default approval mode | `auto` ("yolo"). The other modes stay one flag or config value away; plan agents are always read-only (§5.2) |
+| 8 | Parked blocks' home | The user's current session, next to the agent block (§6.2) |
+| 9 | Command block retention | None: a command block lives as long as its command; otto keeps the text. Background shells are for finite work (tests, builds) whose result arrives later; servers and watchers run in terminals. Hidden terminals close with the agent session, revealed ones stay (§6.2) |
 
 ### 11.2 Open
 
-1. **Shell runner (§6.2).** Parked command blocks by default when silo is connected, pipes otherwise, with a cost
-   gate in O5. Alternatives: (a) pipes always, with silo only for `terminal.*`; (b) one reused hidden shell per
-   agent session with OSC 133 marks (cheaper, but it leaks state between calls and serializes parallel calls).
-2. **Parked blocks' home.** In the user's current session next to the agent block (proposed), or in a separate
-   hidden silo session per otto session?
-3. **Retention.** How many exited command blocks to keep per agent session, and whether they survive a silo
-   restart (silo's snapshots already make that possible).
-4. **Cross-machine conflicts (§12).** When A and B both edit after a handover: does A become read-only for that
+1. **Cross-machine conflicts (§12).** When A and B both edit after a handover: does A become read-only for that
    branch (proposed), or do both keep working with a merge at the end?
 
 ---

@@ -17,8 +17,11 @@ exact instead of guessed.
 
 Otto is the one native harness: it loads the same tools in-process and records them in its own sessions.
 
-**No special blocks.** An agent's terminals and browsers are ordinary blocks in ordinary sessions, visible,
-attachable and closable by the user. Placement is a parameter, not a concept.
+**Ordinary blocks, some parked.** An agent's terminals and browsers are ordinary blocks in ordinary sessions,
+attachable and closable by the user; placement is a parameter. One addition (`docs/OTTO.md` §6.2): a block can be
+*parked*, in its session but in no layout, owned by the block that started it (the agent block). Otto runs each
+`shell` command in a parked command block, and a hidden terminal is a parked shell. The user reveals one from the
+switcher or the agent block; closing the owner closes its parked blocks.
 
 ## 2. Layers
 
@@ -108,6 +111,22 @@ All these are additive (protocol stays version 1); `protocol.json` is regenerate
 
 `block.report` and `block.notify` work on agent blocks too (the app reports the shown session's turn state).
 
+### 3.5 Parked blocks
+
+| Method | Params | Result | Access |
+|---|---|---|---|
+| `block.spawn` | `block_id` (owner), `command?: [string]` (empty: login shell), `cwd?`, `env?: {k: v}`, `size?` (default 200×50) | `Created` (`window_id` empty) | control on the owner's session |
+| `block.park` | `block_id` (not the only block of its window) | `{}` | control |
+| `block.reveal` | `block_id`, `as?: float\|split` (default float; in the owner's window, else the active one) | `{}` | control |
+
+- `SessionInfo.parked: [{id, owner?}]`; parked blocks are in `session.view`'s `blocks` and `status`, with the same
+  PTY, server terminal, snapshot, status and access rules as any block.
+- A parked block closes when its program ends (a revealed command block stays, exited, until closed). A command
+  block's final screen and scrollback answer `terminal.capture` for 5 minutes after it closed.
+- `terminal.capture` also returns `lifecycle`, `exited` and `line_prompt` (the program reads a line: canonical tty,
+  cursor ending a non-empty line).
+- Persisted like other blocks while alive; parked command blocks are dropped on a restart.
+
 ## 4. Engine: CDP in the app
 
 Research (Playwright MCP, Chrome DevTools MCP, Oct 2026): agents work best from **accessibility snapshots with
@@ -153,7 +172,7 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 
 | Tool | Does | Built from |
 |---|---|---|
-| `terminal_open` | New shell block; optional `command` typed into it (or `exec: true` to make it the block's program); `cwd`; `place: split\|tab\|session` (default: split next to the agent's own block, else a tab in the `agents` session); returns `{block_id, session_id}` | `block.split`, `window.create`, `session.create`, `terminal.send` |
+| `terminal_open` | New shell block; optional `command` typed into it (or `exec: true` to make it the block's program); `cwd`; `place: split\|tab\|session` (default: split next to the agent's own block, else a tab in the `agents` session); `visible: false` parks it next to the agent's block instead; returns `{block_id, session_id}` | `block.split`, `window.create`, `session.create`, `block.spawn`, `terminal.send` |
 | `terminal_run` | Run a command in a block's shell (default: the agent's own reusable shell block, opened on first use), wait for it, return `{exit, duration_ms, output, truncated}` | `block.commands` + `terminal.send` + `block.command_finished` + `terminal.command_output` (as `silo run`) |
 | `terminal_send` | Type `text`, then `keys` (`enter`, `tab`, `esc`, `up`, `ctrl-c`, …); `submit: true` sends Enter after a short pause (TUIs treat text+CR in one write as a paste) | `terminal.send` |
 | `terminal_read` | Screen text, or the last `lines` with scrollback | `terminal.capture` |
@@ -210,6 +229,11 @@ each `silo-tools` descriptor as a `Tool` with `Source::Silo`, maps effects (read
 actions `PROCESS`, eval `PROCESS`), images to `OutputPart::Image`, and passes `cx.cancel` through. Browser tools are
 `Loading::Deferred`. Otto's own policy (default `auto`) applies before the call; silo's access and approvals apply
 inside it.
+
+It also gives otto's `shell` its terminal host (`otto_silo_tools::silo`, `Runtime::set_terminals`): a command
+that is not short and read-only runs in a parked command block owned by the agent block showing the session (or
+its nearest ancestor), through `Tools::spawn_command`, `watch` and `stop`; new terminals open next to that block
+too. Without silo or such a block, pipes run it. Results have the same shape either way.
 
 ## 8. Phases
 
