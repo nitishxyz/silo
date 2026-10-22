@@ -657,6 +657,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 port,
                 system_clipboard: silo_server::sysclip::native(),
                 require_approval: true,
+                agent_closed: Some(std::sync::Arc::new(hand_back)),
                 ..Default::default()
             };
             if takeover {
@@ -1335,6 +1336,20 @@ async fn takeover_reporting(config: silo_server::Config, status: Option<std::fs:
             takeover.await
         }
     }
+}
+
+/// An agent block showing otto `session` closed: if that is a sub-agent the
+/// user stopped, its held report goes to the parent (`session.hand_back`).
+/// Anything else is refused (`bad_request`) and ignored, as is an otto
+/// daemon that isn't running: its next start reports held turns itself.
+fn hand_back(session: String) {
+    let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+    rt.spawn(async move {
+        let Ok(otto) = otto_client::Connection::connect(&otto_proto::paths::home()).await else { return };
+        if let Err(error) = otto.hand_back(&session).await {
+            tracing::debug!(%session, %error, "closed agent block: nothing handed back");
+        }
+    });
 }
 
 /// Launch the menu-bar agent next to this binary when it runs from its

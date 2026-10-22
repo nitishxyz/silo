@@ -312,6 +312,8 @@ pub struct Registry {
     /// Final captures of command blocks that exited, for `terminal.capture`
     /// after a parked one closed.
     ended: HashMap<BlockId, (Capture, Instant)>,
+    /// Told the otto session of each agent block that closes.
+    pub agent_closed: Option<crate::AgentClosed>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -346,6 +348,7 @@ impl Registry {
             gone: Vec::new(),
             attention: HashMap::new(),
             ended: HashMap::new(),
+            agent_closed: None,
         }
     }
 
@@ -828,14 +831,14 @@ impl Registry {
     }
 
     pub fn create_session(&mut self, name: Option<String>, new: &New<'_>) -> Result<Created, RpcError> {
+        let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
+        // Before the block exists: a conflict closes nothing (an agent block's close hands its sub-agent back).
+        if self.sessions.iter().any(|s| s.name == name) {
+            return Err(RpcError::new("conflict", format!("session {name} already exists")));
+        }
         let session_id = self.fresh_id('s');
         let block_id = self.spawn_block(&session_id, new, TermSize::new(80, 24))?;
         let window_id = self.fresh_id('w');
-        let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| crate::names::generate(|n| self.sessions.iter().any(|s| s.name == n)));
-        if self.sessions.iter().any(|s| s.name == name) {
-            self.kill_block(&block_id);
-            return Err(RpcError::new("conflict", format!("session {name} already exists")));
-        }
         self.sessions.push(Session {
             id: session_id.clone(),
             name,
@@ -1213,15 +1216,29 @@ impl Registry {
         // Closing a block hangs up its program, parked or not.
         self.parked.remove(block_id);
         self.gone.push(Scope::Block { block_id: block_id.to_owned() });
-        if let Some(Block::Terminal(handle)) = self.blocks.remove(block_id) {
+        if let Some(Block::Terminal(handle)) = self.take_block(block_id) {
             handle.send(BlockMsg::Shutdown);
         }
+    }
+
+    /// Take `block_id` out of the blocks; a closed agent block reports the
+    /// otto session it showed ([`crate::Config::agent_closed`]) unless
+    /// another agent block still shows it.
+    fn take_block(&mut self, block_id: &str) -> Option<Block> {
+        let block = self.blocks.remove(block_id);
+        if let (Some(Block::Agent(agent)), Some(closed)) = (&block, &self.agent_closed)
+            && let Some(session) = agent.session_id()
+            && !self.blocks.values().any(|b| matches!(b, Block::Agent(a) if a.session_id() == Some(session)))
+        {
+            closed(session.to_owned());
+        }
+        block
     }
 
     /// Remove a closed block from its session's parked blocks, or from the
     /// layout or floats (see [`Self::detach`]).
     pub fn remove_block(&mut self, block_id: &str) {
-        self.blocks.remove(block_id);
+        self.take_block(block_id);
         let scope = Scope::Block { block_id: block_id.to_owned() };
         if !self.gone.contains(&scope) {
             self.gone.push(scope);
@@ -1803,5 +1820,34 @@ mod tests {
         reg.close_block(&block).unwrap();
         assert_eq!(reg.sessions.len(), 1, "closing its last block starts another");
         assert_ne!(reg.sessions[0].id, fresh);
+    }
+    #[test]
+    fn closing_the_last_agent_block_showing_a_session_reports_it_once() {
+        let (mut reg, _rx) = registry();
+        let closed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = closed.clone();
+        reg.agent_closed = Some(Arc::new(move |s| sink.lock().unwrap().push(s)));
+        let agent = |id: &str, session: &str| {
+            let info: BlockInfo = serde_json::from_value(serde_json::json!({
+                "id": id, "session_id": "s", "kind": "agent", "title": "", "size": {"columns": 80, "rows": 24},
+                "agent": {"session_id": session, "title": ""},
+            }))
+            .unwrap();
+            Block::restore(info).unwrap()
+        };
+        for (id, session) in [("a", "child"), ("b", "child"), ("d", "other"), ("e", "third")] {
+            reg.blocks.insert(id.into(), agent(id, session));
+        }
+        let took = |closed: &Arc<std::sync::Mutex<Vec<String>>>| std::mem::take(&mut *closed.lock().unwrap());
+        // Another block still shows it: not closed yet.
+        reg.close_block("a").unwrap();
+        assert!(took(&closed).is_empty());
+        reg.close_block("b").unwrap();
+        assert_eq!(took(&closed), ["child"]);
+        // A whole tab, then the whole session.
+        reg.close_window("w2").unwrap();
+        assert_eq!(took(&closed), ["other"]);
+        reg.close_session("s").unwrap();
+        assert_eq!(took(&closed), ["third"]);
     }
 }

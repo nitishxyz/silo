@@ -47,6 +47,11 @@ impl AgentBlock {
         BlockInfo { title, agent: Some(self.state.clone()), ..self.base.clone() }
     }
 
+    /// The otto session shown.
+    pub fn session_id(&self) -> Option<&str> {
+        self.state.session_id.as_deref()
+    }
+
     pub fn status(&self) -> BlockStatus {
         BlockStatus { block_id: self.base.id.clone(), records: self.records.published(), progress: None, busy: None }
     }

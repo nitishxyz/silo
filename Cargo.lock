@@ -7242,6 +7242,8 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "otto-client",
+ "otto-proto",
  "qrcode",
  "rustix 1.1.5",
  "serde",

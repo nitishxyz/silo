@@ -78,7 +78,15 @@ pub struct Config {
     /// A fault in reading a successor's `READY` (a test hook).
     #[doc(hidden)]
     pub ready_fault: Option<handoff::ReadyFault>,
+    /// Called with the otto session an agent block showed when that block
+    /// closes, however it closed (block, tab or session; any client). `silo
+    /// server` hands a stopped sub-agent back to its parent with it
+    /// (docs/AGENT_BLOCK.md §4f). Must not block: it runs under the registry lock.
+    pub agent_closed: Option<AgentClosed>,
 }
+
+/// See [`Config::agent_closed`].
+pub type AgentClosed = Arc<dyn Fn(String) + Send + Sync>;
 
 impl Default for Config {
     fn default() -> Self {
@@ -96,6 +104,7 @@ impl Default for Config {
             grant_sweep: GRANT_SWEEP,
             grant_sweep_ahead: Arc::default(),
             ready_fault: None,
+            agent_closed: None,
         }
     }
 }
@@ -494,6 +503,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
     }
+    server.registry.lock().unwrap().agent_closed.clone_from(&config.agent_closed);
     let _clipboard_task = AbortOnDrop(tokio::spawn(watch_clipboard(server.clone())));
     let sweep_server = server.clone();
     let sweep = config.grant_sweep;
