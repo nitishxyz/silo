@@ -535,6 +535,24 @@ fn shape(text: &str, runs: &[TextRun], size: Pixels, width: Option<Pixels>, wind
     window.text_system().shape_text(SharedString::from(text.to_owned()), size, runs, width, None).map(|l| l.into_vec()).unwrap_or_default()
 }
 
+/// The placeholder on one line, cut with `…` to fit `width` (it never wraps).
+fn fitted(text: &str, font: &gpui::Font, color: Hsla, size: Pixels, width: Pixels, window: &Window) -> String {
+    let wide =
+        |t: &str| shape(t, &runs(t, None, font.clone(), color), size, None, window).iter().map(|l| l.size(px(0.0)).width).fold(px(0.0), Pixels::max);
+    if wide(text) <= width {
+        return text.to_owned();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let cut = format!("{}…", chars.iter().collect::<String>().trim_end());
+        if wide(&cut) <= width {
+            return cut;
+        }
+    }
+    String::new()
+}
+
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -556,6 +574,7 @@ impl Element for EditorElement {
     ) -> (LayoutId, ()) {
         let editor = self.editor.read(cx);
         let text = if editor.text.is_empty() { editor.placeholder.to_string() } else { editor.display() };
+        let placeholder = editor.text.is_empty();
         let grow = editor.animate_growth.then(|| editor.grow.get()).filter(|g| g.lines > 0);
         let single = editor.single_line;
         let reduce = cx.reduce_motion();
@@ -576,7 +595,7 @@ impl Element for EditorElement {
             if let Some(grow) = grow {
                 return size(width.unwrap_or(px(0.0)), px(grow.height(f32::from(lh), max, Instant::now(), reduce)));
             }
-            let lines = width.filter(|_| !single).map_or(1, |w| {
+            let lines = width.filter(|_| !single && !placeholder).map_or(1, |w| {
                 let runs = runs(&text, None, font.clone(), color);
                 shape(&text, &runs, font_size, Some(w), window).iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1)
             });
@@ -614,9 +633,11 @@ impl Element for EditorElement {
             (if empty { e.placeholder.to_string() } else { e.display() }, marked, empty, e.focus.clone(), e.single_line)
         };
         let color = if empty { self.colors.placeholder } else { self.colors.text };
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let text = if empty { fitted(&text, &window.text_style().font(), color, font_size, bounds.size.width, window) } else { text };
         let runs = runs(&text, marked.as_ref(), window.text_style().font(), color);
-        let wrap = (!single).then_some(bounds.size.width);
-        let lines = shape(&text, &runs, window.text_style().font_size.to_pixels(window.rem_size()), wrap, window);
+        let wrap = (!single && !empty).then_some(bounds.size.width);
+        let lines = shape(&text, &runs, font_size, wrap, window);
         let line_height = window.line_height();
         let mut starts = Vec::with_capacity(lines.len());
         let mut tops = Vec::with_capacity(lines.len());

@@ -65,11 +65,19 @@ See §8 for status.
   step's end. A live header shows the turn's clock (`Working for` since the turn started, as the activity row it
   replaces did), so it can read more than the group's `Worked for`. While it waits the line reads `Needs approval`
   (`Needs your answer`) with a lock (question) icon, its subject muted on the right and no timer. Steps of a reloaded
-  session have no times.
+  session have no times, except what is still running: a session opened mid-run (a sub-agent's block) takes the
+  turn's start from `SessionView.turn_started_at` and each running call's from `RunningToolCall.started_at`, so its
+  `Working for` and line clocks match what the parent's bar implies.
 - **Line kinds:** reasoning (`Thought for Ns`), read/ls/tree/glob/search (`Read x`, `Searched for q  N results`),
   shell (`Ran cmd  1.2s` / `Failed to run cmd  exit N`), edit/write/multiedit/apply_patch (`Edited f  +a −d`),
   web_fetch, silo terminal/browser tools (`Opened browser localhost:3000  ↗`), subagents, ask_user, errors. Running
-  titles are present tense (`Running …`) and shimmer. Failed: red icon + red title.
+  titles are present tense (`Running …`) and shimmer. Failed: red icon + red title. Stopped by the user (■, `job
+  kill`, a closed block, a stopped turn or sub-agent stop cutting a call off): a muted stop square, neutral title
+  (`Stopped cargo test`; other tools `Read a.rs  stopped`), counted apart in the fold (`ran 2 commands, 1 stopped`).
+  A timeout stays an error (`timed out`).
+- **Paths:** display only (otto gets what the model sent): a leading `cd <project> &&` / `;` is dropped, `<project>/x`
+  reads `x`, other paths under home `~/…` (`transcript::display`), in line titles, descriptions and details, approval
+  cards and todos.
 - **Expand `›`:** inline detail under the line: command output tail, diff, tool output, in muted mono with a faintly
   lighter background (no border). **Jump `↗`:** for silo tool calls that name a `block_id`, focus that block.
 - **Assistant text:** markdown (paragraphs, headings, lists, inline code, fenced code with mono font, links,
@@ -77,7 +85,11 @@ See §8 for status.
 - **Hover actions** under a finished answer: copy, retry.
 - **Approvals and questions:** a card pinned above the composer (the one other framed element), keyboard: ⏎ allow,
   esc deny, plus "Always" when the decision supports it; questions show options + free text.
-- **Scroll:** pinned to bottom while streaming unless the user scrolled up; then a small `↓ New activity` pill.
+- **Scroll:** follows new activity while at the bottom; scrolling up (anywhere, including into an open group) stops
+  following and shows `↓ New activity`; scrolling back to the bottom or the pill resumes. Opening or closing a group
+  or detail doesn't change following (at the bottom it keeps following; scrolled up, the rows above stay put). "At
+  the bottom" is the scroll position (within 3 pt of the end, `view::Tail`), not only the list's follow flag: back
+  there (scrolled, or content settling) the pill hides, what was new counts as seen, and following resumes.
 
 ## 4. Composer
 
@@ -245,7 +257,7 @@ Units are points.
   unfold and `›` details (height + opacity, chevrons turn), tray expand (chevron turns) and rise from behind the
   composer, approval/question cards rise in and sink away, new trace lines push older ones up, status icons swap in,
   attachment chips, `↓ New activity`, body switches (connecting / sign-in / empty / transcript), composer rise after
-  sign-in, the activity row. Opening a group or detail stops tail-follow so the clicked line stays put.
+  sign-in, the activity row. Opening a group or detail leaves tail-follow as it is (§3 Scroll).
 - **Live group motion** (one model): keys and `entered` times are stamped once per key (`transcript::arrivals`),
   so nothing re-enters on unrelated updates. A group appearing where the activity row was takes its place: the row
   hides at once and the header stays where `Thinking…` was (no re-entry; the row uses the gap the group would, and
@@ -292,9 +304,10 @@ Units are points.
   - **Todos:** current item and `n/m done`; expanded, every item with its status icon.
   - **Sub-agents:** child sessions (`parent_id` = the shown session) that are busy or waiting, from `session.list`,
     refreshed on otto's `sessions.changed` (coalesced over 150 ms) and when subagent calls change or the turn
-    starts/ends; no polling. `bot · N running`, rows spinner (lock + `Needs approval` when waiting; `circle-check` +
-    `Returned` for 8 s after a child this pane saw running finishes) · agent · title · status, oldest first, returned
-    last. A row (hover fill, `↗` on hover) opens the child; so does `↗` on a transcript's subagent line.
+  starts/ends; no polling. `bot · N running`, rows spinner (lock + `Needs approval` when waiting; a muted stop square
+  + `Stopped` while a child the user stopped holds its report, `SessionInfo.report_held`; `circle-check` +
+  `Returned` for 8 s once its report went to the parent) · agent · title · status, oldest first, returned last. A
+  row (hover fill, `↗` on hover) opens the child; so does `↗` on a transcript's subagent line.
 - **Sub-agent block:** opening a child focuses the agent block already showing it (the server's blocks carry
   `agent.session_id`), else splits a new agent block beside the pane (`block.split` kind agent in its folder, with
   `agent: {session_id, title}` so it shows the child from its first frame), composer focused. It is a normal agent
@@ -304,14 +317,21 @@ Units are points.
   starts a new child turn; approvals, questions and the model/agent/effort pickers apply to the child as in any
   session. Results still return to the parent (docs/OTTO.md §7.4). Closing the block is only a view change: the
   child keeps running and reporting, and stays in the parent's bar.
+- **Narrow panes** (a split can be 60 wide; `view::Fit`): nothing overlaps; text truncates with `…` and items drop as
+  the pane narrows: the plan marker (<440), the provider logo (<340), bars' current item, sub-agent agent names and
+  the strip's parent title (<320), effort/image (<270), the composer's `⋮` (<240, the slash menu covers it), labels
+  beside icons (`Main agent`, bar labels, <230), the model (<200), the footer (<130), then the send circle (⏎
+  sends), the strip's `Sub-agent` and `Stop  esc` (a stop icon instead) under 120. Side padding 20 → 8 under 300,
+  the activity row's too.
+  The composer's placeholder stays on one line.
 - **Group header (Trace-style):** the summary (`Worked for 1s · ran 1 command`) starts at the column's left edge,
   the same x as reply text and every other row; the chevron follows it (8 gap) and turns when opened. Live: shimmer
   text, then a 12 spinner. Lines nest 12 under the header with their own 16 icon column. Opening a header or a `›`
-  detail keeps the clicked row and everything above it still (the list stops following and keeps its top anchor);
-  only what's below moves. Header rows are 24 in every state.
+  detail scrolled up keeps the clicked row and everything above it still (the list keeps its top anchor), only what's
+  below moves; at the bottom the list keeps following (the opened rows push up from the composer). Header rows are 24 in every state.
 - **Composer `⋮`:** a circle the size of send (36), no fill at rest, hover/press fill only.
-- **Provider-defined tools** (Claude `bash` / `str_replace_based_edit_tool`, GPT `apply_patch` operations and `shell`
-  commands) read like the built-ins they run as: `Ran …`, `Read …`, `Wrote …`, `Edited …`.
+- **Tool names** are always otto's own (`shell`, `read`, `edit`, …): providers get no predefined tools, and otto
+  shows old sessions' provider-defined calls as calls to ours (docs/OTTO.md §5).
 - **Command blocks** (docs/OTTO.md §6.2): a `shell` running in a parked command block gets `↗ Open` (reveals the
   block as a float, `block.reveal`) and a `■ Stop` (closes the block; the result reads `stopped (closed)`), from
   otto's `block:<id>` progress message. `waiting_for_input` turns the line into `Needs you` (warning terminal icon,
@@ -377,8 +397,8 @@ Known gaps:
   with `no_app` until that tab is opened.
 - New session (`/new`, header button) only clears the pane; the server keeps the previous `session_id` until the
   next prompt creates the new session, so a restart in between shows the previous session.
-- A tool line seen first mid-run (a session opened while it works, e.g. a sub-agent) has no duration, and the
-  `Working for` clock of a turn this pane didn't start counts from when the pane saw it.
+- A session opened mid-run: running calls and the turn are timed from otto's starts; steps that already finished
+  before the pane opened have no durations (items carry no times), so their group's `Worked for` is missing.
 - The effort clamp knows only models in the bundled catalog; an unlisted one gets its provider's common set.
 - No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
   can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
@@ -387,7 +407,8 @@ Known gaps:
   `Returned` rows only cover children this pane saw running; a child the user stopped and left reports `stopped`
   only after 2 min idle (`Runtime::subagent_hold`) or the next daemon start; any session with a `parent_id` (forks
   too, which the app doesn't create today) gets the sub-agent strip; ⌘J in a sub-agent block still opens the switcher.
-  A child the user stopped shows `Returned` in the bar although it holds its report.
+  A held report shows `Stopped` in the bar even after the pane reloads; `Returned` still covers only children this
+  pane saw out (running, waiting or held).
 - Live motion verified with `SILO_MOTION_SLOWDOWN=12` frames (handoff, arrivals under and past 6 lines, parallel
   arrivals, reasoning + tool, step finish, fold); hover hold, Reduce Motion and slowly streamed reasoning were not
   captured (the offline script streams instantly).

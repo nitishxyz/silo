@@ -55,6 +55,82 @@ fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
+/// Within this many points of the end the transcript counts as at the bottom.
+const AT_END: f32 = 3.0;
+
+/// How far the list is scrolled up from its end, from its last layout (0 when it doesn't scroll).
+pub(super) fn gap_to_end(list: &gpui::ListState) -> f32 {
+    f32::from(list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y).max(0.0)
+}
+
+/// Tail-follow from the actual scroll position, not only the list's follow
+/// flag (which the list turns back on only when it lays out, a frame late).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Tail {
+    /// At the bottom (following, or within [`AT_END`] of the end).
+    pub at_end: bool,
+    /// Turn following back on (back at the bottom, by scrolling or the content settling).
+    pub resume: bool,
+    /// Something new arrived since the user left the bottom (kept).
+    pub unseen: bool,
+    /// Show `↓ New activity`.
+    pub pill: bool,
+}
+
+impl Tail {
+    pub(super) fn of(following: bool, gap: f32, unseen: bool) -> Self {
+        let at_end = following || gap <= AT_END;
+        let unseen = unseen && !at_end;
+        Self { at_end, resume: at_end && !following, unseen, pill: unseen }
+    }
+}
+
+/// What a pane this wide shows (a split can be as narrow as 60): secondary
+/// items go first, the rest truncate, nothing overlaps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub(super) struct Fit {
+    /// The subscription marker after the model (`(Max)`).
+    pub plan: bool,
+    /// The provider logo and `/` before the model id.
+    pub provider: bool,
+    /// The effort and image buttons.
+    pub tools: bool,
+    /// The model button.
+    pub model: bool,
+    /// The footer at all.
+    pub footer: bool,
+    /// The composer's `⋮` circle (the slash menu does the same).
+    pub lead: bool,
+    /// Bars' current item and sub-agent rows' agent names; the strip's parent title.
+    pub detail: bool,
+    /// Labels next to icons (`Main agent`, a bar's label).
+    pub labels: bool,
+    /// The send circle, the strip's `Sub-agent` and Stop's words (⏎ sends, a stop icon stays).
+    pub send: bool,
+    /// Side padding of the column.
+    pub pad: f32,
+}
+
+impl Fit {
+    /// `width`: the pane's, 0 before it was laid out (then everything shows).
+    pub(super) fn of(width: f32) -> Self {
+        let w = if width > 0.0 { width } else { f32::MAX };
+        Self {
+            plan: w >= 440.0,
+            provider: w >= 340.0,
+            tools: w >= 270.0,
+            model: w >= 200.0,
+            footer: w >= 130.0,
+            lead: w >= 240.0,
+            detail: w >= 320.0,
+            labels: w >= 230.0,
+            send: w >= 120.0,
+            pad: if w >= 300.0 { 20.0 } else { 8.0 },
+        }
+    }
+}
+
 /// One bar above the composer (see `render_bars`).
 pub(super) struct Bar {
     pub key: &'static str,
@@ -320,14 +396,24 @@ fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> gpui:
 }
 
 impl AgentPane {
+    /// What this pane's width leaves room for.
+    pub(super) fn fit(&self) -> Fit {
+        Fit::of(self.width.get())
+    }
+
+    /// Where the transcript is relative to its end (as last laid out).
+    pub(super) fn tail(&self) -> Tail {
+        Tail::of(self.list.is_following_tail(), gap_to_end(&self.list), self.unseen)
+    }
+
     /// Start an expand/collapse motion `key` (inside transcript row `row`) toward `open`.
     fn flip(&mut self, key: String, row: String, open: bool, cx: &App) {
         let now = Instant::now();
         let reduce = cx.reduce_motion();
         let entry = self.anims.entry(key).or_insert_with(|| (row, motion::Toggle::new(!open, motion::UI)));
+        // Following is left alone: at the bottom the list keeps following the tail as the row grows or shrinks;
+        // scrolled up, it stays where the user put it (the remeasure keeps its anchor).
         entry.1.set(open, now, reduce);
-        // What was clicked stays put: the list stops pinning its bottom.
-        self.list.set_follow_mode(gpui::FollowMode::Normal);
     }
 
     /// 0 (closed) … 1 (open) of motion `key`; `open` once it settled.
@@ -398,14 +484,33 @@ impl AgentPane {
             let end = self.rows.len();
             self.list.remeasure_items(end..end + 1);
         }
-        if self.list.is_following_tail() {
-            self.unseen = false;
+        // Back at the bottom (scrolled there, or the content settled): follow again, nothing unseen.
+        let tail = self.tail();
+        if tail.resume {
+            self.list.set_follow_mode(gpui::FollowMode::Tail);
         }
+        self.unseen = tail.unseen;
         // The composer arrives (first connection, back from Providers) with a rise.
         let visible = self.composer_visible();
         self.bottom_shown.set(visible, now, cx.reduce_motion());
         let rise = toggled(&self.bottom_shown, now, cx);
         let bg = theme::background();
+        let width = self.width.clone();
+        // The pane's width, for what fits (a change lays out again).
+        let measure = gpui::canvas(
+            move |b, window, _| {
+                let w = f32::from(b.size.width);
+                if (width.get() - w).abs() > 0.5 {
+                    width.set(w);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let pane = div()
             .id(gpui::ElementId::Name(format!("agent-{}", self.block_id).into()))
             .key_context("AgentPane")
@@ -419,6 +524,7 @@ impl AgentPane {
             .font_family(theme::ui_font())
             .text_size(px(TEXT))
             .text_color(rgb(theme::foreground()))
+            .child(measure)
             .on_key_down(cx.listener(|this, event, window, cx| this.key_down(event, window, cx)))
             .on_mouse_down(
                 MouseButton::Left,
@@ -458,8 +564,27 @@ impl AgentPane {
             .w_full()
             .relative()
             .child(div().size_full().relative().top(px((1.0 - t) * 6.0)).opacity(t).child(content))
+            .child(self.tail_check())
             .children(self.render_new_activity(now, cx))
             .into_any_element()
+    }
+
+    /// After the list laid out this frame: a pill that's showing at the bottom, or following still off there,
+    /// draws once more (the list only learns it is back at the end when it lays out, after this render).
+    fn tail_check(&self) -> AnyElement {
+        let (list, pill) = (self.list.clone(), self.unseen);
+        gpui::canvas(
+            move |_, window, _| {
+                let tail = Tail::of(list.is_following_tail(), gap_to_end(&list), pill);
+                if tail.resume || (pill && !tail.pill) {
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
     }
 
     fn body_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (u8, AnyElement) {
@@ -506,7 +631,7 @@ impl AgentPane {
     /// `↓ New activity` while scrolled up and something arrived below; it rises in and sinks away.
     fn render_new_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reduce = cx.reduce_motion();
-        let show = self.unseen && !self.list.is_following_tail() && !self.rows.is_empty();
+        let show = self.tail().pill && !self.rows.is_empty();
         self.unseen_anim.set(show, now, reduce);
         if self.unseen_anim.hidden(now, reduce) {
             return None;
@@ -524,6 +649,7 @@ impl AgentPane {
                 .child(
                     div()
                         .id("agent-new-activity")
+                        .occlude()
                         .pl(px(8.0))
                         .pr(px(10.0))
                         .h(px(26.0))
@@ -559,9 +685,11 @@ impl AgentPane {
     }
 
     /// The quiet `Stop  esc` at the right end of the activity indicator; its
-    /// text ends on the column's edge, the hover fill reaches past it.
+    /// text ends on the column's edge, the hover fill reaches past it. The
+    /// narrowest panes get a stop icon.
     fn stop_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        div()
+        let words = self.fit().send;
+        let button = div()
             .id("agent-stop")
             .flex_none()
             .flex()
@@ -576,9 +704,12 @@ impl AgentPane {
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover_fill()).text_color(rgb(theme::foreground())))
             .active(|s| s.scale(0.96))
-            .child("Stop")
-            .child(div().font_family(mono()).text_size(px(11.0)).opacity(0.6).child("esc"))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop(cx)))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop(cx)));
+        if words {
+            button.child("Stop").child(div().font_family(mono()).text_size(px(11.0)).opacity(0.6).child("esc"))
+        } else {
+            button.child(icon("stop", 11.0, theme::muted())).tooltip(Tooltip::text("Stop  esc"))
+        }
     }
 
     /// Whether the activity row shows: a turn runs and no live group ends the transcript.
@@ -625,7 +756,7 @@ impl AgentPane {
             .flex()
             .flex_col()
             .items_center()
-            .px(px(20.0))
+            .px(px(self.fit().pad))
             .child(
                 div()
                     .w_full()
@@ -860,6 +991,7 @@ impl AgentPane {
                 Status::Pending => div().opacity(0.5).child(icon(line.kind.icon(), 14.0, muted)).into_any_element(),
                 Status::Waiting(question) => icon(if question { "question" } else { "lock" }, 14.0, theme::foreground()).into_any_element(),
                 Status::Input => icon("terminal", 14.0, theme::warning()).into_any_element(),
+                Status::Stopped => icon("stop", 12.0, muted).into_any_element(),
                 Status::Done => icon(line.kind.icon(), 14.0, muted).into_any_element(),
             }
         };
@@ -1069,12 +1201,13 @@ impl AgentPane {
             .into_iter()
             .filter_map(|o| self.popover(o, window, cx))
             .collect();
+        let fit = self.fit();
         div()
             .flex_none()
             .w_full()
             .flex()
             .justify_center()
-            .px(px(20.0))
+            .px(px(fit.pad))
             .pt(px(4.0))
             .pb(px(12.0))
             .child(
@@ -1088,7 +1221,7 @@ impl AgentPane {
                     .children(self.render_card(cx))
                     .children(self.render_bars(cx))
                     .child(self.render_composer(window, cx))
-                    .child(self.render_footer(cx))
+                    .children(fit.footer.then(|| self.render_footer(fit, cx)))
                     .children(popovers),
             )
             .into_any_element()
@@ -1153,7 +1286,12 @@ impl AgentPane {
                 .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))
             }
             Card::Approval(a, more) => {
-                let summary = transcript::clip(&a.summary, 160);
+                // `shell: cd <project> && …`: the command reads as on its line.
+                let summary = match a.summary.split_once(": ") {
+                    Some((tool, rest)) if !tool.contains(' ') => format!("{tool}: {}", self.shown(rest)),
+                    _ => self.shown(&a.summary),
+                };
+                let summary = transcript::clip(&summary, 160);
                 let button = |id: &'static str, label: &'static str, hint: &'static str, primary: bool| {
                     div()
                         .id(id)
@@ -1374,20 +1512,25 @@ impl AgentPane {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover_fill()))
         };
-        let has_summary = bar.summary.is_some();
+        // Narrow: the label and current item go; the note and chevron stay.
+        let fit = self.fit();
+        let summary = bar.summary.filter(|_| fit.detail);
+        let has_summary = summary.is_some();
         let collapsed = header(format!("bar-{key}"), 1.0 - o, 1.0 - o)
-            .child(div().flex_none().flex().items_center().gap(px(8.0)).text_color(rgb(fg)).child(bar.icon).child(bar.label))
-            .when_some(bar.summary, |el, s| {
+            .child(
+                div().flex_none().flex().items_center().gap(px(8.0)).text_color(rgb(fg)).child(bar.icon).when(fit.labels, |el| el.child(bar.label)),
+            )
+            .when_some(summary, |el, s| {
                 el.child(div().flex_none().w(px(1.0)).h(px(14.0)).bg(rgb(ink(0.15)))).child(div().flex_1().min_w_0().flex().child(s))
             })
             .when(!has_summary, |el| el.child(div().flex_1()))
-            .child(div().flex_none().text_color(rgb(muted)).child(bar.note))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(muted)).child(bar.note))
             .child(chevron(o))
             .on_click(cx.listener(toggle));
         #[allow(clippy::cast_precision_loss)]
         let full = bar.rows.len() as f32 * BAR_ROW + 8.0;
         let mut el = div()
-            .mx(px(28.0))
+            .mx(px(if fit.detail { 28.0 } else { 12.0 }))
             .bg(rgb(raised()))
             .border_1()
             .border_color(rgb(ink(0.15)))
@@ -1414,9 +1557,9 @@ impl AgentPane {
                         .border_b_1()
                         .border_color(rgb(ink(0.1)))
                         .child(icon(icon_name, 14.0, tint))
-                        .child(div().text_color(rgb(fg)).child(bar.open_label))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(fg)).child(bar.open_label))
                         .child(div().flex_1())
-                        .child(div().text_color(rgb(muted)).child(bar.open_note))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(muted)).child(bar.open_note))
                         .child(chevron(o))
                         .on_click(cx.listener(toggle)),
                 )
@@ -1517,9 +1660,18 @@ impl AgentPane {
             }))
         });
         let pad_y = (pill_input::HEIGHT - 2.0 * pill_input::BORDER - COMPOSER_LINE) / 2.0;
+        // Narrow: no `⋮` (the slash menu has it all), the text starts near the
+        // edge; narrowest, no send circle (⏎ sends).
+        let Fit { lead, send: circle, .. } = self.fit();
         let pill = pill_input::pill(focused, false)
-            .pl(px(pill_input::TEXT_X - pill_input::BORDER))
-            .pr(px(pill_input::INSET + pill_input::CIRCLE + 10.0 - pill_input::BORDER))
+            .pl(px(if lead {
+                pill_input::TEXT_X - pill_input::BORDER
+            } else if circle {
+                16.0
+            } else {
+                10.0
+            }))
+            .pr(px(if circle { pill_input::INSET + pill_input::CIRCLE + 10.0 - pill_input::BORDER } else { 10.0 }))
             .py(px(pad_y))
             .font_family(mono())
             .text_size(px(14.0))
@@ -1528,8 +1680,8 @@ impl AgentPane {
             .flex_col()
             .children(chips)
             .child(editor)
-            .child(menu)
-            .child(send);
+            .when(lead, |el| el.child(menu))
+            .when(circle, |el| el.child(send));
         pill_input::halo(false, pill).into_any_element()
     }
 
@@ -1560,15 +1712,16 @@ impl AgentPane {
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
-    fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_footer(&mut self, fit: Fit, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
         let agent = self.agent_name();
         let model = self.model();
         let catalog = self.catalog.as_ref();
-        let plan = model.as_ref().and_then(|(p, _)| catalog.and_then(|c| c.subscription(p)));
+        let plan = model.as_ref().filter(|_| fit.plan).and_then(|(p, _)| catalog.and_then(|c| c.subscription(p)));
         let reasons = model
             .as_ref()
-            .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.reasoning)));
+            .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.reasoning)))
+            && fit.tools;
         // Reasoning is on when the session asks for some effort (the provider's default reads as off).
         let effort = self.effort();
         let thinking = effort.is_some_and(|e| e != Effort::None);
@@ -1578,6 +1731,7 @@ impl AgentPane {
         let tooltip = self.usage();
         let agent_button = div()
             .id("agent-agent")
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(4.0))
@@ -1586,8 +1740,8 @@ impl AgentPane {
             .continuous(6.0)
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover_fill()))
-            .child(agent.to_uppercase())
-            .child(icon("chevron-up", 12.0, muted))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(agent.to_uppercase()))
+            .child(div().flex_none().flex().child(icon("chevron-up", 12.0, muted)))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Agents, window, cx)));
         let model_button = div()
             .id("agent-model")
@@ -1603,11 +1757,13 @@ impl AgentPane {
             .when_some(tooltip, |el, usage| el.tooltip(Tooltip::text(usage)))
             .map(|el| match &model {
                 Some((provider, id)) => el
-                    .map(|el| match provider_logo(provider) {
-                        Some(logo) => el.child(icon(logo, 13.0, ink(0.8))),
-                        None => el.child(div().flex_none().text_color(rgb(ink(0.8))).child(provider.clone())),
+                    .when(fit.provider, |el| {
+                        el.map(|el| match provider_logo(provider) {
+                            Some(logo) => el.child(div().flex_none().flex().child(icon(logo, 13.0, ink(0.8)))),
+                            None => el.child(div().flex_none().text_color(rgb(ink(0.8))).child(provider.clone())),
+                        })
+                        .child(div().flex_none().text_color(rgb(ink(0.35))).child("/"))
                     })
-                    .child(div().flex_none().text_color(rgb(ink(0.35))).child("/"))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(ink(0.72))).child(id.clone()))
                     .when_some(plan, |el, plan| el.child(div().flex_none().text_color(rgb(ink(0.38))).child(format!("({plan})")))),
                 None => el.child("No model"),
@@ -1658,6 +1814,8 @@ impl AgentPane {
         // At the circles' outer edges: the agent label starts under the ⋮
         // circle's left edge, the image glyph ends under the send circle's
         // right edge (button paddings 6 and 4).
+        // Left and right share what the model leaves; each clips its own (no overlap).
+        let side = || div().flex_1().flex_basis(px(0.0)).min_w_0().overflow_hidden().flex().items_center();
         div()
             .mt(px(8.0))
             .h(px(22.0))
@@ -1666,19 +1824,17 @@ impl AgentPane {
             .font_family(mono())
             .text_size(px(12.0))
             .text_color(rgb(muted))
-            .child(div().flex_1().min_w_0().flex().items_center().pl(px(pill_input::HALO + pill_input::INSET - 6.0)).child(agent_button))
-            .child(div().flex_none().max_w(relative(0.5)).min_w_0().flex().justify_center().child(model_button))
+            .child(side().pl(px(pill_input::HALO + pill_input::INSET - 6.0)).child(agent_button))
+            .when(fit.model, |el| {
+                el.child(div().flex_none().max_w(relative(0.5)).min_w_0().overflow_hidden().flex().justify_center().child(model_button))
+            })
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
+                side()
                     .justify_end()
                     .gap(px(2.0))
                     .pr(px(pill_input::HALO + pill_input::INSET - 4.0))
                     .children(brain)
-                    .child(image),
+                    .when(fit.tools, |el| el.child(image)),
             )
             .into_any_element()
     }
@@ -2265,5 +2421,46 @@ fn render_block(id: &str, block: &Block, tail: Option<(&[(usize, f32)], bool)>) 
             )
             .into_any_element(),
         Block::Rule => div().my(px(10.0)).h(px(1.0)).bg(rgb(theme::border())).into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fit, Tail};
+
+    #[test]
+    fn the_pill_and_following_come_from_the_scroll_position() {
+        // Following: at the end, nothing to resume, nothing unseen.
+        assert_eq!(Tail::of(true, 0.0, true), Tail { at_end: true, resume: false, unseen: false, pill: false });
+        // Scrolled up with something new below: the pill, following stays off.
+        assert_eq!(Tail::of(false, 240.0, true), Tail { at_end: false, resume: false, unseen: true, pill: true });
+        // Scrolled up, nothing new yet: no pill.
+        assert!(!Tail::of(false, 240.0, false).pill);
+        // Back at the bottom (scrolled, or a group folding/remeasuring settled) before the list noticed:
+        // no pill, follow again, and what was unseen is seen.
+        assert_eq!(Tail::of(false, 0.0, true), Tail { at_end: true, resume: true, unseen: false, pill: false });
+        assert_eq!(Tail::of(false, 2.5, true), Tail { at_end: true, resume: true, unseen: false, pill: false }, "a few px still counts");
+        assert!(Tail::of(false, 4.0, true).pill, "past the threshold it's scrolled up");
+    }
+
+    #[test]
+    fn narrow_panes_drop_secondary_items_in_order() {
+        let wide = Fit::of(800.0);
+        assert!(wide.plan && wide.provider && wide.tools && wide.model && wide.footer && wide.lead && wide.detail && wide.labels);
+        assert_eq!(Fit::of(0.0), wide, "not laid out yet: everything");
+        // Widest first: the plan, the provider, then the bar details, effort/image, labels, the model, the footer.
+        let order = |f: Fit| [f.plan, f.provider, f.detail, f.tools, f.lead, f.labels, f.model, f.footer, f.send];
+        let mut last = order(wide);
+        for w in (60..800).rev().step_by(10) {
+            #[allow(clippy::cast_precision_loss)]
+            let now = order(Fit::of(w as f32));
+            assert!(now.iter().zip(last).all(|(n, l)| !*n || l), "nothing comes back as the pane narrows ({w})");
+            assert!(now.windows(2).all(|p| !p[0] || p[1]), "a later item never goes before an earlier one ({w})");
+            last = now;
+        }
+        let split = Fit::of(190.0);
+        assert!(!split.model && split.footer && !split.lead && split.pad < 20.0);
+        let smallest = Fit::of(60.0);
+        assert!(!smallest.footer && !smallest.send, "the smallest split keeps only the composer, without its circle");
     }
 }

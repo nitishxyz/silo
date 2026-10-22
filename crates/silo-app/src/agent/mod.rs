@@ -242,6 +242,8 @@ pub struct AgentPane {
     todos: Vec<Todo>,
     times: Times,
     list: ListState,
+    /// The pane's width as last laid out: narrow panes drop secondary items.
+    width: std::rc::Rc<std::cell::Cell<f32>>,
     /// Something changed below while scrolled up.
     unseen: bool,
     editor: Entity<Editor>,
@@ -356,7 +358,9 @@ impl AgentPane {
             cwd,
             moving: None,
             rt,
-            epoch: Instant::now(),
+            width: std::rc::Rc::default(),
+            // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.
+            epoch: Instant::now().checked_sub(Duration::from_secs(86_400)).unwrap_or_else(Instant::now),
             conn: Conn::Connecting,
             catalog: None,
             project: None,
@@ -535,6 +539,12 @@ impl AgentPane {
         u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
+    /// A time otto reports (ms since the Unix epoch) on the pane's clock.
+    fn pane_ms(&self, at: i64) -> u64 {
+        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        self.now().saturating_sub(u64::try_from(wall.saturating_sub(at)).unwrap_or(0))
+    }
+
     /// Run `work` on the shared connection (tokio), then `done` on the pane.
     fn run<T, F, Fut>(&self, cx: &mut Context<Self>, work: F, done: impl FnOnce(&mut Self, Result<T, String>, &mut Context<Self>) + 'static)
     where
@@ -655,7 +665,7 @@ impl AgentPane {
         self.title.clear();
         self.reset_subagents();
         self.update = Update::default();
-        self.set_running(false);
+        self.set_running(false, None);
         // A prompt that is creating this session keeps its bubble.
         self.show_rows();
         cx.notify();
@@ -721,13 +731,14 @@ impl AgentPane {
         }
     }
 
-    fn set_running(&mut self, running: bool) {
+    /// `started`: when otto says the turn started (a turn already running when the session loaded).
+    fn set_running(&mut self, running: bool, started: Option<u64>) {
         // A turn this pane started is timed from the send.
         let sent = running && self.sent_at.take().is_some();
         if self.running != running {
             self.running = running;
             if running && !sent {
-                self.running_since = Some(self.now());
+                self.running_since = Some(started.unwrap_or_else(|| self.now()));
             }
         }
     }
@@ -740,6 +751,9 @@ impl AgentPane {
         let running = turn == Some(TurnStatus::Running);
         let waiting =
             m.pending_approvals.iter().map(|a| (a.call_id.clone(), false)).chain(m.pending_questions.iter().map(|q| (q.call_id.clone(), true)));
+        // Calls already running when the session loaded keep otto's start, so their clocks match the parent's.
+        let starts: Vec<(String, u64)> = m.tools.iter().filter_map(|(id, t)| t.started_at.map(|at| (id.clone(), self.pane_ms(at)))).collect();
+        self.times.seed(starts);
         self.times.observe(&m.items, &m.tools, running, waiting.collect(), now);
         let cwd = if m.info.cwd.is_empty() { self.cwd.clone() } else { Some(m.info.cwd.clone()) };
         let rows = transcript::build(&transcript::Input {
@@ -751,7 +765,10 @@ impl AgentPane {
             times: &self.times,
             now,
         });
-        let todos = transcript::todos(&m.items, &m.tools, &self.times);
+        let mut todos = transcript::todos(&m.items, &m.tools, &self.times);
+        for todo in &mut todos {
+            todo.step = transcript::display(&todo.step, cwd.as_deref());
+        }
         // Subagents are child sessions: their status comes from the session list
         // (refreshed on otto's `sessions.changed` too).
         let calls = m.tools.values().filter(|t| t.name == "subagent").count();
@@ -773,7 +790,7 @@ impl AgentPane {
             if matches!(status, AgentStatus::Done | AgentStatus::Idle) && input() { AgentStatus::Blocked { question: false } } else { status };
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
         self.set_status(status, cx);
-        self.set_running(running);
+        self.set_running(running, m.turn_started_at.map(|at| self.pane_ms(at)));
         self.update.reconcile(&m.info);
         if !m.info.title.is_empty() && m.info.title != self.title {
             self.title.clone_from(&m.info.title);
@@ -807,7 +824,8 @@ impl AgentPane {
         if let Some((range, count)) = change.splice {
             self.list.splice(range, count);
         }
-        if changed && !self.list.is_following_tail() && self.primed {
+        // New below only when the user is away from the bottom (not merely between the list's follow updates).
+        if changed && !self.tail().at_end && self.primed {
             self.unseen = true;
         }
         let primed = self.primed;
@@ -863,6 +881,12 @@ impl AgentPane {
 
     fn mirror(&self) -> Option<&otto_client::SessionMirror> {
         self.state.as_ref().map(|s| &s.mirror)
+    }
+
+    /// Text as shown (`transcript::display`) for the shown session's folder.
+    fn shown(&self, text: &str) -> String {
+        let cwd = self.mirror().map(|m| m.info.cwd.as_str()).filter(|c| !c.is_empty()).or(self.cwd.as_deref());
+        transcript::display(text, cwd)
     }
 
     fn editor_event(&mut self, event: &EditorEvent, window: &mut Window, cx: &mut Context<Self>) {

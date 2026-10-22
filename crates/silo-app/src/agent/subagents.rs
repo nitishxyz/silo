@@ -26,6 +26,8 @@ pub(super) enum SubState {
     Running,
     /// Waiting for an approval or an answer.
     Waiting,
+    /// The user stopped it: its report is held back from the parent.
+    Stopped,
     Returned,
 }
 
@@ -34,8 +36,13 @@ impl SubState {
         match self {
             Self::Running => "Running",
             Self::Waiting => "Needs approval",
+            Self::Stopped => "Stopped",
             Self::Returned => "Returned",
         }
+    }
+
+    fn active(self) -> bool {
+        matches!(self, Self::Running | Self::Waiting)
     }
 }
 
@@ -58,16 +65,18 @@ pub(super) struct Subs {
     refreshing: bool,
 }
 
-fn busy(s: &SessionInfo) -> bool {
-    matches!(s.status, SessionStatus::Busy | SessionStatus::WaitingApproval)
+/// Running, waiting, or holding its report: it has not returned yet.
+fn out(s: &SessionInfo) -> bool {
+    s.report_held || matches!(s.status, SessionStatus::Busy | SessionStatus::WaitingApproval)
 }
 
 impl Subs {
-    /// Note the children of `parent` in a fresh session list; `true` when one just returned.
+    /// Note the children of `parent` in a fresh session list; `true` when one
+    /// just returned (its report went to the parent).
     pub(super) fn track(&mut self, sessions: &[SessionInfo], parent: &str, now: Instant) -> bool {
         let mut returned = false;
         for s in sessions.iter().filter(|s| s.parent_id.as_deref() == Some(parent)) {
-            if busy(s) {
+            if out(s) {
                 self.running.insert(s.id.clone());
                 self.returned.remove(&s.id);
             } else if self.running.remove(&s.id) {
@@ -85,7 +94,7 @@ impl Subs {
         self.returned.clear();
     }
 
-    /// The bar's rows: children running or waiting, then those just returned, oldest first.
+    /// The bar's rows: children running, waiting or stopped, then those just returned, oldest first.
     pub(super) fn rows(&self, sessions: &[SessionInfo], parent: &str, now: Instant) -> Vec<SubRow> {
         let mut rows: Vec<(&SessionInfo, SubState)> = sessions
             .iter()
@@ -94,6 +103,7 @@ impl Subs {
                 let state = match s.status {
                     SessionStatus::WaitingApproval => SubState::Waiting,
                     SessionStatus::Busy => SubState::Running,
+                    _ if s.report_held => SubState::Stopped,
                     _ if self.returned.get(&s.id).is_some_and(|at| now.duration_since(*at) < RETURNED) => SubState::Returned,
                     _ => return None,
                 };
@@ -210,8 +220,13 @@ impl AgentPane {
     pub(super) fn subagent_bar(&mut self, cx: &mut Context<Self>) -> Option<Bar> {
         let rows = self.subagent_rows();
         let first = rows.first()?.title.clone();
-        let running = rows.iter().filter(|r| r.state != SubState::Returned).count();
-        let note = if running > 0 { format!("{running} running") } else { "Returned".into() };
+        let running = rows.iter().filter(|r| r.state.active()).count();
+        let stopped = rows.iter().filter(|r| r.state == SubState::Stopped).count();
+        let note = match (running, stopped) {
+            (0, 0) => "Returned".into(),
+            (0, n) => format!("{n} stopped"),
+            (n, _) => format!("{n} running"),
+        };
         let summary = (!first.is_empty()).then(|| {
             div()
                 .flex_1()
@@ -237,10 +252,12 @@ impl AgentPane {
 
     fn subagent_row(&self, i: usize, row: SubRow, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
+        let fit = self.fit();
         let group = gpui::SharedString::from(format!("subagent-{i}"));
         let glyph = match row.state {
             SubState::Waiting => icon("lock", 13.0, theme::warning()).into_any_element(),
             SubState::Running => crate::browser_pane::spinner(&format!("sub-{i}"), 12.0, muted, cx),
+            SubState::Stopped => icon("stop", 11.0, muted).into_any_element(),
             SubState::Returned => icon("circle-check", 13.0, muted).into_any_element(),
         };
         let id = row.id.clone();
@@ -256,7 +273,7 @@ impl AgentPane {
             .hover(|s| s.bg(theme::hover_fill()))
             .tooltip(Tooltip::text("Open sub-agent"))
             .child(div().w(px(14.0)).flex_none().flex().justify_center().child(glyph))
-            .child(div().flex_none().text_color(rgb(muted)).child(row.agent.to_uppercase()))
+            .when(fit.detail, |el| el.child(div().flex_none().text_color(rgb(muted)).child(row.agent.to_uppercase())))
             .child(
                 div()
                     .flex_1()
@@ -264,17 +281,22 @@ impl AgentPane {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_color(rgb(if row.state == SubState::Returned { muted } else { theme::foreground() }))
+                    .text_color(rgb(if row.state.active() { theme::foreground() } else { muted }))
                     .child(if row.title.is_empty() { "Working".into() } else { row.title }),
             )
             .child(
                 div()
-                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(px(11.5))
                     .text_color(rgb(if row.state == SubState::Waiting { theme::warning() } else { muted }))
                     .child(row.state.note()),
             )
-            .child(div().flex_none().opacity(0.0).group_hover(group, |s| s.opacity(1.0)).child(icon("arrow-up-right", 12.0, muted)))
+            .when(fit.labels, |el| {
+                el.child(div().flex_none().opacity(0.0).group_hover(group, |s| s.opacity(1.0)).child(icon("arrow-up-right", 12.0, muted)))
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_session_block(id.clone(), cx)))
             .into_any_element()
     }
@@ -283,20 +305,26 @@ impl AgentPane {
     pub(super) fn render_subagent_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let parent = self.parent_session()?.to_owned();
         let muted = theme::muted();
-        let title = self.sessions.iter().find(|s| s.id == parent).map(|s| s.title.clone()).filter(|t| !t.trim().is_empty());
+        // Narrow: the parent's title goes, then the labels (icons and tooltips stay).
+        let fit = self.fit();
+        let title = self.sessions.iter().find(|s| s.id == parent).map(|s| s.title.clone()).filter(|t| fit.detail && !t.trim().is_empty());
         Some(
             div()
                 .flex_none()
                 .h(px(32.0))
-                .px(px(14.0))
+                .px(px(if fit.labels { 14.0 } else { 8.0 }))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
+                .overflow_hidden()
                 .border_b_1()
                 .border_color(rgb(ink(0.1)))
                 .text_size(px(12.0))
-                .child(icon("bot", 13.0, theme::accent()))
-                .child(div().flex_none().text_color(rgb(theme::foreground())).child("Sub-agent"))
+                .when(fit.send, |el| {
+                    el.child(div().flex_none().flex().child(icon("bot", 13.0, theme::accent()))).child(
+                        div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(theme::foreground())).child("Sub-agent"),
+                    )
+                })
                 .children(
                     title.map(|t| {
                         div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(muted)).child(format!("of {t}"))
@@ -308,7 +336,7 @@ impl AgentPane {
                         .id("subagent-parent")
                         .flex_none()
                         .h(px(24.0))
-                        .px(px(8.0))
+                        .px(px(if fit.labels { 8.0 } else { 6.0 }))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
@@ -319,7 +347,7 @@ impl AgentPane {
                         .active(|s| s.scale(0.96))
                         .tooltip(Tooltip::text("Show the main agent"))
                         .child(icon("back", 12.0, muted))
-                        .child("Main agent")
+                        .when(fit.labels, |el| el.child("Main agent"))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_session_block(parent.clone(), cx))),
                 )
                 .into_any_element(),
@@ -348,6 +376,7 @@ mod tests {
             updated_at: created_at,
             last_seq: 0,
             usage: otto_proto::UsageTotals::default(),
+            report_held: false,
         }
     }
 
@@ -378,5 +407,29 @@ mod tests {
         subs.reset();
         list[0].status = SessionStatus::Idle;
         assert!(!subs.track(&list, "p", now), "a reset forgets what ran");
+    }
+
+    #[test]
+    fn a_child_the_user_stopped_reads_stopped_until_its_report_goes() {
+        let now = Instant::now();
+        let mut subs = Subs::default();
+        let mut list = vec![session("a", Some("p"), SessionStatus::Busy, 1)];
+        subs.track(&list, "p", now);
+        let state = |subs: &Subs, list: &[SessionInfo], at| subs.rows(list, "p", at).first().map(|r| r.state);
+        // Stopped: idle, holding its report.
+        (list[0].status, list[0].report_held) = (SessionStatus::Idle, true);
+        assert!(!subs.track(&list, "p", now));
+        assert_eq!(state(&subs, &list, now + RETURNED * 4), Some(SubState::Stopped), "stays while held");
+        // The report went to the parent: returned, for a while.
+        let sent = now + RETURNED * 5;
+        list[0].report_held = false;
+        assert!(subs.track(&list, "p", sent));
+        assert_eq!(state(&subs, &list, sent), Some(SubState::Returned));
+        assert_eq!(state(&subs, &list, sent + RETURNED), None);
+        // Held when the pane first sees it (a reload): stopped too.
+        let mut fresh = Subs::default();
+        list[0].report_held = true;
+        fresh.track(&list, "p", now);
+        assert_eq!(state(&fresh, &list, now), Some(SubState::Stopped));
     }
 }
