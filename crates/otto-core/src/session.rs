@@ -330,10 +330,11 @@ async fn actor(
                 if let Some(Ok(Err(e)))=&result {tracing::error!(session=%cx.row.id,error=%e,"turn failed");}
                 if !titled&&matches!(result,Some(Ok(Ok(()))))&&cx.live().row.title.is_empty()&&cx.runtime.auto_title(){titled=true;let c=cx.clone();tokio::spawn(async move{if let Err(error)=crate::title::name(&c).await{tracing::warn!(session=%c.row.id,%error,"automatic title failed");}});}
                 active=None;state.approvals.clear();state.questions.clear();state.halt=None;state.after_tools.clear();
+                // TurnFinished goes out before a held report's SessionChanged, which comes after it in the log.
+                if let Some(event)=finished_event.take(){let _=cx.events.send(event);}
                 if subagent{crate::subagents::turn_ended(&cx,turn,cancel.is_cancelled(),std::mem::take(&mut user_stopped)).await;}
                 // Steers the turn never reached run next, after any interrupt that ended it.
                 let at=state.queue.iter().take_while(|q|q.delivery==Delivery::Interrupt).count();let leftover:Vec<_>=state.native.drain(..).chain(state.steer.drain(..)).collect();for (i,input) in leftover.into_iter().enumerate(){state.queue.insert(at+i,input);}
-                if let Some(event)=finished_event.take(){let _=cx.events.send(event);}
                 if wake_pending { wake_pending=false;let id=cx.row.id.clone();if cx.runtime.db(move|s|Ok(!s.outbox_pending(&id)?.is_empty())).await.unwrap_or(false){state.wake=true;} }
             }
             command=rx.recv()=>{let Some(command)=command else {cancel.cancel();break};match command {
