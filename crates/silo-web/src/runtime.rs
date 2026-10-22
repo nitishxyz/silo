@@ -129,7 +129,17 @@ impl Runtime {
         };
         let mut app = BrowserApp::new(PumpHandler::new(config.schedule), config.switches);
         let args = args::Args::new();
-        if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
+        // Chromium installs its own SIGCHLD handler over tokio's: tokio's child
+        // processes (`git`, `curl`…) would never be seen exiting.
+        let mut sigchld = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+        // SAFETY: reads the current action into a zeroed `sigaction`.
+        let saved = unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), sigchld.as_mut_ptr()) } == 0;
+        let initialized = initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) == 1;
+        if saved {
+            // SAFETY: restores the action read above.
+            unsafe { libc::sigaction(libc::SIGCHLD, sigchld.as_ptr(), std::ptr::null_mut()) };
+        }
+        if !initialized {
             bail!("cef::initialize failed (see {}/cef.log)", root.display());
         }
         Ok(Runtime { profiles_dir: profiles, profiles: Default::default(), _args: args, _loader: loader })
