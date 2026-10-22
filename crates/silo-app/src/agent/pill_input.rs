@@ -23,14 +23,14 @@ use super::editor::{Editor, EditorColors, EditorEvent};
 use crate::{assets::icon, motion, theme};
 
 /// Shared metrics of every pill (this input and the composer), from the pill's outer edges.
-pub const HEIGHT: f32 = 52.0;
-pub const HALO: f32 = 5.0;
-pub const CIRCLE: f32 = 40.0;
-pub const BORDER: f32 = 1.5;
+pub const HEIGHT: f32 = 46.0;
+pub const HALO: f32 = 3.0;
+pub const CIRCLE: f32 = 36.0;
+pub const BORDER: f32 = 1.0;
 /// Center of the leading icon: the circle's center, mirrored.
 pub const LEAD: f32 = INSET + CIRCLE / 2.0;
-/// Where the text starts.
-pub const TEXT_X: f32 = 52.0;
+/// Where the text starts: past the leading circle, mirroring the trailing one.
+pub const TEXT_X: f32 = INSET + CIRCLE + 10.0;
 /// The circle's inset on every side it touches.
 pub const INSET: f32 = (HEIGHT - CIRCLE) / 2.0;
 const VALID: Duration = Duration::from_millis(180);
@@ -60,6 +60,8 @@ pub struct PillInput {
     valid_at: Option<Instant>,
     /// Reserve the error line so an error never moves what follows.
     reserve_error: bool,
+    /// Off: no trailing circle (a secondary field; ⏎ still submits).
+    submit_circle: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -78,13 +80,13 @@ fn ink(amount: f32) -> u32 {
 /// The halo around a pill; `child` is the pill from [`pill`].
 pub fn halo(error: bool, child: impl IntoElement) -> Div {
     // Opaque, so what tucks behind (the composer's tray) never shows through.
-    let fill = if error { theme::mix(theme::background(), theme::danger(), 0.14) } else { ink(if theme::is_light() { 0.05 } else { 0.06 }) };
+    let fill = if error { theme::mix(theme::background(), theme::danger(), 0.12) } else { ink(if theme::is_light() { 0.03 } else { 0.035 }) };
     div().w_full().p(px(HALO)).rounded(px(HEIGHT / 2.0 + HALO)).bg(rgb(fill)).child(child)
 }
 
 /// The pill itself: border, fill and full radius (kept when it grows).
 pub fn pill(focused: bool, error: bool) -> Div {
-    let border = if error { hsla(theme::danger(), 0.8) } else { rgb(ink(if focused { 0.45 } else { 0.28 })).into() };
+    let border = if error { hsla(theme::danger(), 0.8) } else { rgb(ink(if focused { 0.3 } else { 0.2 })).into() };
     let fill = ink(if theme::is_light() { 0.065 } else { 0.08 });
     let mut el = div().relative().w_full().min_h(px(HEIGHT)).rounded(px(HEIGHT / 2.0)).border_color(border).bg(rgb(fill));
     let w: gpui::AbsoluteLength = px(BORDER).into();
@@ -114,18 +116,19 @@ pub fn circle(id: impl Into<ElementId>, t: f32, enabled: bool, glyph: AnyElement
         .when(enabled, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)).active(|s| s.scale(0.94)))
 }
 
-/// A round icon button at the leading icon's place (the composer's `⋮`).
+/// The leading circle (the composer's `⋮`): the trailing circle's size, filled only on hover/press.
 pub fn lead_button(id: impl Into<ElementId>, name: &'static str) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(28.0))
+        .flex_none()
+        .size(px(CIRCLE))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .cursor_pointer()
         .hover(|s| s.bg(theme::hover_fill()))
-        .active(|s| s.scale(0.92))
+        .active(|s| s.bg(theme::hover_fill()).scale(0.94))
         .child(icon(name, 16.0, theme::muted()))
 }
 
@@ -150,6 +153,7 @@ impl PillInput {
             valid: false,
             valid_at: None,
             reserve_error: true,
+            submit_circle: true,
             _subscriptions: subscriptions,
         }
     }
@@ -187,6 +191,16 @@ impl PillInput {
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.editor.update(cx, |e, cx| e.set_placeholder(placeholder, cx));
+    }
+
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.set_text(text, cx));
+        self.refresh_valid(cx);
+    }
+
+    pub fn set_submit_circle(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.submit_circle = on;
+        cx.notify();
     }
 
     /// `None`: any non-empty value is valid.
@@ -293,7 +307,7 @@ impl Render for PillInput {
         let glyph = if self.loading {
             crate::browser_pane::spinner("pill-input", 16.0, arrow, cx)
         } else {
-            icon("arrow-right", 18.0, arrow).into_any_element()
+            icon("arrow-right", 16.0, arrow).into_any_element()
         };
         let submit = circle("pill-submit", t, enabled, glyph).when(enabled, |el| el.on_click(cx.listener(|this, _, _, cx| this.submit(cx))));
         let reveal = self.masked.then(|| {
@@ -314,15 +328,16 @@ impl Render for PillInput {
         let field_focus = focus.clone();
         let pill = pill(focused, error)
             .h(px(HEIGHT))
-            .pl(px(LEAD - 9.0 - BORDER))
+            .pl(px(LEAD - 8.0 - BORDER))
             .pr(px(INSET - BORDER))
             .flex()
             .items_center()
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| window.focus(&field_focus, cx))
-            .child(div().flex_none().w(px(TEXT_X - LEAD + 9.0)).child(icon(self.icon, 18.0, muted)))
-            .child(div().flex_1().min_w_0().mr(px(8.0)).text_size(px(16.0)).child(Editor::element(&self.editor, 1, colors, cx)))
+            .child(div().flex_none().w(px(TEXT_X - LEAD + 8.0)).child(icon(self.icon, 16.0, muted)))
+            .child(div().flex_1().min_w_0().mr(px(8.0)).text_size(px(15.0)).child(Editor::element(&self.editor, 1, colors, cx)))
             .children(reveal)
-            .child(submit);
+            .when(self.submit_circle, |el| el.child(submit))
+            .when(!self.submit_circle, |el| el.child(div().flex_none().h(px(CIRCLE))));
         div().w_full().flex().flex_col().child(halo(error, pill)).when(self.reserve_error || error, |el| {
             el.child(
                 div()

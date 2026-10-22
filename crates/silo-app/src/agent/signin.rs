@@ -84,7 +84,13 @@ struct Dialog {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Step {
     ApiKey,
-    Login { login_id: String, url: String, flow: Flow },
+    /// A local or custom server's address (and, for `custom`, an optional key).
+    Endpoint,
+    Login {
+        login_id: String,
+        url: String,
+        flow: Flow,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,15 +136,52 @@ fn plan(provider: &str) -> &'static str {
     }
 }
 
+/// Providers reached at an address the user sets: their default, if any.
+fn endpoint(provider: &str) -> Option<&'static str> {
+    match provider {
+        "ollama" => Some("http://127.0.0.1:11434"),
+        "lmstudio" => Some("http://127.0.0.1:1234/v1"),
+        "custom" => Some(""),
+        _ => None,
+    }
+}
+
+fn url_valid(url: &str) -> bool {
+    let url = url.trim();
+    (url.starts_with("http://") || url.starts_with("https://")) && url.len() > 10 && !url.contains(char::is_whitespace)
+}
+
 /// The row's second line when connected.
 fn connection_label(status: &AuthStatus) -> &'static str {
-    if status.mode == AuthMode::Subscription { "Connected · subscription" } else { "Connected · API key" }
+    match status.provider.as_str() {
+        "ollama" | "lmstudio" => "Connected · local",
+        "custom" => "Connected",
+        _ if status.mode == AuthMode::Subscription => "Connected · subscription",
+        _ => "Connected · API key",
+    }
+}
+
+/// The row's second line when not connected.
+fn offer(status: &AuthStatus) -> &'static str {
+    match status.provider.as_str() {
+        "ollama" | "lmstudio" => "Local, no key needed",
+        "custom" => "OpenAI-compatible server",
+        p if status.modes.contains(&AuthMode::Subscription) => plan(p),
+        _ => "API key",
+    }
 }
 
 fn key_hint(provider: &str) -> String {
     match provider {
         "anthropic" => "Create one in the Anthropic Console".into(),
         "openai" => "Create one on the OpenAI platform".into(),
+        "google" => "Create one in Google AI Studio".into(),
+        "xai" => "Create one in the xAI Console".into(),
+        "openrouter" => "Create one on OpenRouter".into(),
+        "deepseek" => "Create one on the DeepSeek platform".into(),
+        "moonshotai" => "Create one on the Moonshot platform".into(),
+        "zai" => "Create one on the Z.ai platform".into(),
+        "minimax" => "Create one on the MiniMax platform".into(),
         other => format!("Paste your {} key", super::view::provider_name(other)),
     }
 }
@@ -166,6 +209,16 @@ fn logo(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "provider-anthropic",
         "openai" => "provider-openai",
+        "google" => "provider-google",
+        "xai" => "provider-xai",
+        "openrouter" => "provider-openrouter",
+        "deepseek" => "provider-deepseek",
+        "moonshotai" => "provider-moonshotai",
+        "zai" => "provider-zai",
+        "minimax" => "provider-minimax",
+        "ollama" => "provider-ollama",
+        "lmstudio" => "provider-lmstudio",
+        "custom" => "plug",
         _ => "agent",
     }
 }
@@ -327,6 +380,7 @@ impl AgentPane {
             dialog.focus_pending = false;
             let target = match &dialog.step {
                 Step::ApiKey => self.key_field.read(cx).focus_handle(cx),
+                Step::Endpoint => self.url_field.read(cx).focus_handle(cx),
                 Step::Login { flow: Flow::Code, .. } => self.code_field.read(cx).focus_handle(cx),
                 Step::Login { .. } => dialog.focus.clone(),
             };
@@ -367,6 +421,7 @@ impl AgentPane {
         self.signin = SignIn { attempt, ..SignIn::default() };
         self.key_field.update(cx, |e, cx| e.clear(cx));
         self.code_field.update(cx, |e, cx| e.clear(cx));
+        self.url_field.update(cx, |e, cx| e.clear(cx));
         cx.notify();
     }
 
@@ -381,7 +436,26 @@ impl AgentPane {
             self.key_field.update(cx, |i, cx| {
                 i.clear(cx);
                 i.set_placeholder(placeholder, cx);
+                i.set_submit_circle(true, cx);
                 i.set_validate(Some(Rc::new(move |key: &str| key_valid(&p, key))), cx);
+            });
+        }
+        if step == Step::Endpoint {
+            let current = self.catalog.as_ref().and_then(|c| c.auth.iter().find(|a| a.provider == provider)).and_then(|a| a.base_url.clone());
+            let default = endpoint(&provider).unwrap_or_default();
+            let url = current.unwrap_or_else(|| default.to_owned());
+            self.url_field.update(cx, |i, cx| {
+                i.clear(cx);
+                i.set_placeholder(if default.is_empty() { "https://host/v1" } else { default }, cx);
+                i.set_validate(Some(Rc::new(url_valid)), cx);
+                i.set_text(&url, cx);
+            });
+            // `custom` may need a key; local servers don't.
+            self.key_field.update(cx, |i, cx| {
+                i.clear(cx);
+                i.set_placeholder("API key (optional)", cx);
+                i.set_submit_circle(false, cx);
+                i.set_validate(None, cx);
             });
         }
         self.signin.dialog = Some(Dialog {
@@ -437,6 +511,17 @@ impl AgentPane {
         let provider = dialog.provider.clone();
         match (&dialog.step, dialog.spent) {
             (Step::Login { .. }, true) => self.start_subscription(provider, cx),
+            // Either field's ⏎: the address must be valid; the key is optional.
+            (Step::Endpoint, _) => {
+                let url = self.url_field.read(cx).text(cx);
+                if !url_valid(&url) {
+                    self.url_field.update(cx, |i, cx| i.set_error(Some("Enter an http:// or https:// address".into()), cx));
+                    return;
+                }
+                let key = (provider == "custom").then(|| self.key_field.read(cx).text(cx)).filter(|k| !k.is_empty());
+                self.set_dialog_busy(true);
+                self.save_endpoint(provider, url, key, cx);
+            }
             (Step::ApiKey, _) => {
                 let Some(key) = value else { return };
                 self.set_dialog_busy(true);
@@ -491,13 +576,51 @@ impl AgentPane {
         self.run(
             cx,
             move |c| async move {
-                c.call_typed::<LoginResult>(Method::AuthLogin { provider: p, mode: AuthMode::ApiKey, api_key: Some(key), device: false }).await
+                c.call_typed::<LoginResult>(Method::AuthLogin {
+                    provider: p,
+                    mode: AuthMode::ApiKey,
+                    api_key: Some(key),
+                    device: false,
+                    base_url: None,
+                })
+                .await
             },
             move |this, result, cx| {
                 if this.signin.attempt != attempt {
                     return;
                 }
                 match result {
+                    Ok(_) => this.signed_in(provider, Act::Key, cx),
+                    Err(error) => this.dialog_error(short(&error), false, cx),
+                }
+            },
+        );
+    }
+
+    /// Save a local or custom server's address (and key); connected once it answers.
+    fn save_endpoint(&mut self, provider: String, url: String, key: Option<String>, cx: &mut Context<Self>) {
+        let attempt = self.signin.attempt;
+        let p = provider.clone();
+        self.run(
+            cx,
+            move |c| async move {
+                c.call_typed::<LoginResult>(Method::AuthLogin {
+                    provider: p,
+                    mode: AuthMode::ApiKey,
+                    api_key: key,
+                    device: false,
+                    base_url: Some(url),
+                })
+                .await
+            },
+            move |this, result, cx| {
+                if this.signin.attempt != attempt {
+                    return;
+                }
+                match result {
+                    Ok(LoginResult::SignedIn { auth, .. }) if !auth.signed_in => {
+                        this.dialog_error("Saved, but no server answers there".into(), false, cx);
+                    }
                     Ok(_) => this.signed_in(provider, Act::Key, cx),
                     Err(error) => this.dialog_error(short(&error), false, cx),
                 }
@@ -520,7 +643,14 @@ impl AgentPane {
         self.run(
             cx,
             move |c| async move {
-                c.call_typed::<LoginResult>(Method::AuthLogin { provider: p, mode: AuthMode::Subscription, api_key: None, device: false }).await
+                c.call_typed::<LoginResult>(Method::AuthLogin {
+                    provider: p,
+                    mode: AuthMode::Subscription,
+                    api_key: None,
+                    device: false,
+                    base_url: None,
+                })
+                .await
             },
             move |this, result, cx| {
                 if this.signin.attempt != attempt {
@@ -710,11 +840,29 @@ impl AgentPane {
                 .gap(px(6.0))
                 .child(div().size(px(6.0)).rounded_full().bg(rgb(theme::success())))
                 .child(connection_label(status)),
-            (None, false) if status.modes.contains(&AuthMode::Subscription) => div().child(plan(&provider)),
-            (None, false) => div().child("API key"),
+            (None, false) => div().child(offer(status)),
         };
         let p = provider.clone();
-        let actions = if status.signed_in {
+        let actions = if endpoint(&provider).is_some() {
+            // Local and custom servers: set or change the address (no sign-out:
+            // a running server stays usable).
+            div().child(
+                self.button(
+                    format!("signin-endpoint-{i}"),
+                    if status.signed_in { Kind::Quiet } else { Kind::Outline },
+                    if status.signed_in { "Change" } else { "Connect" },
+                    ROW_BUTTON,
+                    state(Act::Key),
+                    cx,
+                    move |this, _, cx| {
+                        this.signin.error = None;
+                        this.signin.confirm = None;
+                        this.open_dialog(p.clone(), Step::Endpoint, cx);
+                    },
+                )
+                .when_some(fade, |el, t| el.opacity(t)),
+            )
+        } else if status.signed_in {
             let asking = self.signin.confirm.as_deref() == Some(provider.as_str());
             let p2 = provider.clone();
             div()
@@ -805,6 +953,8 @@ impl AgentPane {
         let step = dialog.step.clone();
         let (title, line, primary) = match &step {
             Step::ApiKey => (format!("{name} API key"), key_hint(&provider), "Save"),
+            Step::Endpoint if provider == "custom" => (format!("Connect {name}"), "Any OpenAI-compatible server".to_owned(), "Save"),
+            Step::Endpoint => (format!("Connect {name}"), format!("Where {name} runs; no key needed"), "Save"),
             Step::Login { flow: Flow::Code, .. } => {
                 ("Finish signing in".to_owned(), "Authorize in your browser, then paste the code".to_owned(), "Continue")
             }
@@ -818,6 +968,7 @@ impl AgentPane {
         let primary = if spent { "Try again" } else { primary };
         let pill = match &step {
             Step::ApiKey => Some(self.key_field.clone()),
+            Step::Endpoint => Some(self.url_field.clone()),
             Step::Login { flow: Flow::Code, .. } => Some(self.code_field.clone()),
             Step::Login { .. } => None,
         };
@@ -831,7 +982,12 @@ impl AgentPane {
                     p.set_enabled(!spent, cx);
                     p.set_error(error, cx);
                 });
-                pill.into_any_element()
+                // `custom` adds an optional key under the address.
+                let key = (step == Step::Endpoint && provider == "custom").then(|| {
+                    self.key_field.update(cx, |p, cx| p.set_loading(busy, cx));
+                    div().mt(px(6.0)).child(self.key_field.clone())
+                });
+                div().child(pill).children(key).into_any_element()
             }
             (Step::Login { flow: Flow::Device { code }, .. }, None) => {
                 let copy = code.clone();
@@ -875,7 +1031,7 @@ impl AgentPane {
                 .when(!spent, |el| el.child(crate::browser_pane::spinner("signin-wait", 16.0, muted, cx)).child("Waiting for the browser…"))
                 .into_any_element(),
         };
-        let has_pill = matches!(&step, Step::ApiKey | Step::Login { flow: Flow::Code, .. });
+        let has_pill = matches!(&step, Step::ApiKey | Step::Endpoint | Step::Login { flow: Flow::Code, .. });
         // The pill carries its own error line; other steps reserve one here.
         let error_line = (!has_pill).then(|| {
             div()
@@ -993,6 +1149,7 @@ mod tests {
             account: None,
             modes,
             default_model: None,
+            base_url: None,
         }
     }
 
@@ -1002,6 +1159,19 @@ mod tests {
         let auth = vec![status("anthropic", both.clone()), status("openai", both.clone()), status("test", vec![]), status("openai", both)];
         let shown: Vec<&str> = providers(&auth).into_iter().map(|a| a.provider.as_str()).collect();
         assert_eq!(shown, ["anthropic", "openai"]);
+    }
+
+    #[test]
+    fn every_provider_has_a_logo_and_endpoints_need_http() {
+        let ids = ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"];
+        for provider in ids {
+            assert!(crate::assets::has_icon(logo(provider)), "{provider}");
+            assert_ne!(logo(provider), "agent", "{provider}");
+        }
+        assert_eq!(ids.iter().filter(|p| endpoint(p).is_some()).count(), 3);
+        assert!(url_valid("http://127.0.0.1:11434"));
+        assert!(!url_valid("127.0.0.1:11434"));
+        assert!(!url_valid("http://a b"));
     }
 
     #[test]

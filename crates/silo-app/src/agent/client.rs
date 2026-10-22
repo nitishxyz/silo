@@ -122,6 +122,7 @@ mod tests {
             account: None,
             modes: vec![AuthMode::ApiKey, AuthMode::Subscription],
             default_model: default_model.map(Into::into),
+            base_url: None,
         }
     }
 

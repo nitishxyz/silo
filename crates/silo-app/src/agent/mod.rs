@@ -182,6 +182,16 @@ pub struct AgentPane {
     /// A request failed (prompt, approval, …); shown above the composer.
     notice: Option<String>,
     rows: Vec<Row>,
+    /// The transcript as otto has it (`rows` adds the optimistic bubble).
+    built: Vec<Row>,
+    /// A prompt sent but not yet recorded by otto.
+    optimistic: Option<Pending>,
+    /// Steers sent but not yet in otto's queue (or landed): the queue bar shows them meanwhile.
+    steers: Vec<Pending>,
+    /// Queue edits sent but not yet reflected by otto: removed (`None`) or a new delivery.
+    queue_edits: HashMap<String, Option<Delivery>>,
+    /// Sent at, until the turn is seen running.
+    sent_at: Option<Instant>,
     todos: Vec<Todo>,
     times: Times,
     list: ListState,
@@ -191,6 +201,8 @@ pub struct AgentPane {
     filter: Entity<TextField>,
     key_field: Entity<pill_input::PillInput>,
     code_field: Entity<pill_input::PillInput>,
+    /// A local or custom provider's address (the connect dialog).
+    url_field: Entity<pill_input::PillInput>,
     choice: Choice,
     overlay: Option<Overlay>,
     /// The overlay drawn while it fades out, and its open/close motion.
@@ -219,10 +231,16 @@ pub struct AgentPane {
     marks: Option<(String, Vec<(usize, Instant)>)>,
     /// Images attached to the next prompt.
     attachments: Vec<Attachment>,
-    tray_anim: crate::motion::Toggle,
-    tray_shown: Option<Instant>,
-    /// The send circle lights up when there is something to send (or stop).
+    /// Bars above the composer by key: expanded motion, and when each appeared.
+    bars: HashMap<&'static str, crate::motion::Toggle>,
+    bar_shown: HashMap<&'static str, Instant>,
+    /// Subagent calls seen, and when the session list was last refreshed for them.
+    subagent_calls: usize,
+    sessions_at: Option<Instant>,
+    /// The send circle lights up when there is something to send.
     send_ready: crate::motion::Toggle,
+    /// The activity row at the transcript's end (`Thinking…` + Stop).
+    activity: crate::motion::Toggle,
     /// The composer area is shown (rises in after sign-in).
     bottom_shown: crate::motion::Toggle,
     card: Option<Card>,
@@ -235,8 +253,8 @@ pub struct AgentPane {
     line_status: HashMap<String, (transcript::Status, Instant)>,
     /// What the body shows (connecting, sign-in, empty, transcript…) and since when.
     body_mode: (u8, Option<Instant>),
-    /// Running state changed at (send ↔ stop morph).
-    morph: Option<Instant>,
+    /// When the running turn was first seen (pane ms).
+    running_since: Option<u64>,
     running: bool,
     /// The shown session was created by this pane (its steps are timed from the start).
     fresh: bool,
@@ -265,18 +283,21 @@ impl AgentPane {
         let filter = cx.new(|cx| TextField::new("Filter", cx));
         let key_field = cx.new(|cx| pill_input::PillInput::new("Paste an API key", "key", cx).masked(cx));
         let code_field = cx.new(|cx| pill_input::PillInput::new("Paste the code", "key", cx));
+        let url_field = cx.new(|cx| pill_input::PillInput::new("Server address", "globe", cx));
         let subscriptions = vec![
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, _, event: &EditorEvent, window, cx| this.editor_event(event, window, cx)),
             cx.subscribe(&key_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe(&code_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
+            cx.subscribe(&url_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe_in(&filter, window, |this, _, event: &FieldEvent, window, cx| this.filter_event(event, window, cx)),
             cx.observe_global::<client::AuthChanged>(Self::reload_catalog),
             cx.on_focus_in(&focus, window, |_, _, cx| cx.emit(AgentPaneEvent::Activated)),
             // The pane itself has nothing to type into: focus lands on the composer.
             cx.on_focus(&focus, window, |this, window, cx| this.focus_composer(window, cx)),
         ];
-        let list = ListState::new(0, ListAlignment::Top, px(600.0));
+        // The rows, then the activity row.
+        let list = ListState::new(1, ListAlignment::Top, px(600.0));
         list.set_follow_mode(gpui::FollowMode::Tail);
         let mut pane = Self {
             block_id,
@@ -296,6 +317,11 @@ impl AgentPane {
             error: None,
             notice: None,
             rows: Vec::new(),
+            built: Vec::new(),
+            optimistic: None,
+            steers: Vec::new(),
+            queue_edits: HashMap::new(),
+            sent_at: None,
             todos: Vec::new(),
             times: Times::default(),
             list,
@@ -304,6 +330,7 @@ impl AgentPane {
             filter,
             key_field,
             code_field,
+            url_field,
             choice: Choice::default(),
             overlay: None,
             overlay_shown: None,
@@ -323,9 +350,12 @@ impl AgentPane {
             frozen: None,
             marks: None,
             attachments: Vec::new(),
-            tray_anim: crate::motion::Toggle::new(false, crate::motion::UI),
-            tray_shown: None,
+            bars: HashMap::new(),
+            bar_shown: HashMap::new(),
+            subagent_calls: 0,
+            sessions_at: None,
             send_ready: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
+            activity: crate::motion::Toggle::new(false, crate::motion::UI),
             bottom_shown: crate::motion::Toggle::new(false, crate::motion::UI),
             card: None,
             card_anim: crate::motion::Toggle::new(false, crate::motion::UI),
@@ -333,7 +363,7 @@ impl AgentPane {
             unseen_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             line_status: HashMap::new(),
             body_mode: (0, None),
-            morph: None,
+            running_since: None,
             running: false,
             fresh: false,
             usage_seen: None,
@@ -501,8 +531,10 @@ impl AgentPane {
         self.notice = None;
         self.times = if std::mem::take(&mut self.fresh) { Times::live() } else { Times::default() };
         self.rows.clear();
+        self.built.clear();
         self.todos.clear();
-        self.list.reset(0);
+        self.list.reset(1);
+        self.activity = crate::motion::Toggle::new(false, crate::motion::UI);
         self.list.set_follow_mode(gpui::FollowMode::Tail);
         self.unseen = false;
         self.primed = false;
@@ -521,6 +553,8 @@ impl AgentPane {
         self.context = None;
         self.title.clear();
         self.set_running(false);
+        // A prompt that is creating this session keeps its bubble.
+        self.show_rows();
         cx.notify();
         let Some(id) = self.session_id.clone() else {
             self.set_status(AgentStatus::Idle, cx);
@@ -585,9 +619,13 @@ impl AgentPane {
     }
 
     fn set_running(&mut self, running: bool) {
+        // A turn this pane started is timed from the send.
+        let sent = running && self.sent_at.take().is_some();
         if self.running != running {
             self.running = running;
-            self.morph = Some(Instant::now());
+            if running && !sent {
+                self.running_since = Some(self.now());
+            }
         }
     }
 
@@ -609,11 +647,22 @@ impl AgentPane {
             now,
         });
         let todos = transcript::todos(&m.items, &m.tools, &self.times);
-        if (!todos.is_empty() || !m.queue.is_empty()) && self.todos.is_empty() && self.state.as_ref().is_none_or(|s| s.mirror.queue.is_empty()) {
-            self.tray_shown = self.primed.then(Instant::now);
+        // Subagents are child sessions: their status comes from the session list.
+        let calls = m.tools.values().filter(|t| t.name == "subagent").count();
+        let stale = self.sessions_at.is_none_or(|at| at.elapsed() > SUBAGENT_POLL);
+        let busy = self.running != running || (stale && (running && calls > 0 || !self.subagents().is_empty()));
+        if calls != self.subagent_calls || busy {
+            self.subagent_calls = calls;
+            self.sessions_at = Some(Instant::now());
+            self.refresh_sessions(cx);
         }
         self.todos = todos;
-        self.sync_rows(rows);
+        self.built = rows;
+        self.show_rows();
+        // A turn that ended before it was seen running: its reply is there.
+        if self.optimistic.is_none() && !running && !matches!(self.built.last(), Some(Row::User { .. }) | None) {
+            self.sent_at = None;
+        }
         let status = transcript::agent_status(m.turn.map(|t| t.1), m.info.status, !m.pending_approvals.is_empty(), !m.pending_questions.is_empty());
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
         self.set_status(status, cx);
@@ -705,6 +754,8 @@ impl AgentPane {
                     self.close_overlay(window, cx);
                 } else if self.mirror().is_some_and(|m| !m.pending_approvals.is_empty()) {
                     self.answer_approval(ApprovalDecision::Deny, cx);
+                } else if self.running && self.editor.read(cx).text().trim().is_empty() && self.attachments.is_empty() {
+                    self.stop(cx);
                 }
             }
             EditorEvent::Changed => {
@@ -803,7 +854,99 @@ impl AgentPane {
         cx.notify();
     }
 
+    /// Change a pending input's delivery (`Some`) or withdraw it (`None`); the
+    /// queue bar shows the edit at once and drops it if otto refuses.
+    pub(super) fn edit_queued(&mut self, input_id: String, delivery: Option<Delivery>, cx: &mut Context<Self>) {
+        let Some(id) = self.session_id.clone() else { return };
+        self.queue_edits.insert(input_id.clone(), delivery);
+        let key = input_id.clone();
+        self.run(
+            cx,
+            move |c| async move {
+                match delivery {
+                    Some(delivery) => c.queue_update(&id, &input_id, delivery).await,
+                    None => c.queue_remove(&id, &input_id).await,
+                }
+            },
+            move |this, result, _| {
+                if let Err(error) = result {
+                    this.notice = Some(error);
+                    this.queue_edits.remove(&key);
+                }
+            },
+        );
+    }
+
+    /// The queue bar's rows: pending steers first (`Next step`), then inputs
+    /// waiting for the turn to end (`After turn`), with edits in flight applied.
+    pub(super) fn queue_rows(&self) -> Vec<QueueRow> {
+        let queue = self.mirror().map(|m| m.queue.as_slice()).unwrap_or_default();
+        // A steer otto already lists (by id, or by text before its id is known) shows once, as otto's.
+        let mut listed: Vec<String> = queue.iter().map(|q| input_text(&q.input)).collect();
+        let mut rows: Vec<QueueRow> = self
+            .steers
+            .iter()
+            .filter(|s| {
+                if s.id.as_ref().is_some_and(|id| queue.iter().any(|q| &q.id == id)) {
+                    return false;
+                }
+                let Some(i) = listed.iter().position(|t| t.trim() == s.text) else { return true };
+                listed.remove(i);
+                false
+            })
+            .map(|s| QueueRow { id: None, text: s.text.clone(), steer: true })
+            .collect();
+        if let Some(m) = self.mirror() {
+            for q in m.queue.iter().filter(|q| !q.input.is_empty()) {
+                let delivery = match self.queue_edits.get(&q.id) {
+                    Some(None) => continue,
+                    Some(Some(d)) => *d,
+                    None => q.delivery,
+                };
+                rows.push(QueueRow { id: Some(q.id.clone()), text: input_text(&q.input), steer: delivery == Delivery::Steer });
+            }
+        }
+        rows.sort_by_key(|r| !r.steer);
+        rows
+    }
+
+    /// An input on its way: shown until the session has one more user item with its text.
+    fn pending(&self, text: &str) -> Pending {
+        let text = text.trim().to_owned();
+        let users = user_count(&self.built, &text);
+        Pending { text, users, at: Instant::now(), id: None }
+    }
+
+    /// The transcript plus the optimistic bubble of a prompt otto hasn't recorded yet.
+    fn show_rows(&mut self) {
+        let users = |p: &Pending| user_count(&self.built, &p.text) > p.users;
+        if let Some(p) = self.optimistic.take_if(|p| users(p)) {
+            // The real item takes the bubble's place without fading in again.
+            if let Some(Row::User { key, .. }) = self.built.iter().rev().find(|r| matches!(r, Row::User { text, .. } if *text == p.text)) {
+                self.entered.remove(OPTIMISTIC);
+                self.entered.insert(key.clone(), p.at.checked_sub(ENTER).unwrap_or(p.at));
+            }
+        }
+        let built = &self.built;
+        // A steer leaves the pane's list once it landed or otto's queue lists it.
+        let queue = self.state.as_ref().map(|s| s.mirror.queue.as_slice()).unwrap_or_default();
+        self.steers.retain(|p| user_count(built, &p.text) <= p.users && !p.id.as_ref().is_some_and(|id| queue.iter().any(|q| &q.id == id)));
+        self.queue_edits.retain(|id, edit| queue.iter().any(|q| &q.id == id && Some(q.delivery) != *edit));
+        let mut rows = self.built.clone();
+        if let Some(p) = self.optimistic.as_ref().filter(|p| !p.text.is_empty()) {
+            rows.push(Row::User { key: OPTIMISTIC.to_owned(), text: p.text.clone() });
+        }
+        self.sync_rows(rows);
+    }
+
+    /// Sent, and the turn hasn't been seen running yet: the activity row shows at once.
+    fn awaiting(&self) -> bool {
+        self.sent_at.is_some_and(|at| at.elapsed() < AWAIT)
+    }
+
+    /// ⏎: sends; while a turn runs it steers (the agent reads it at its next step).
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let delivery = if self.running { Delivery::Steer } else { Delivery::Queue };
         let text = self.editor.read(cx).text().trim().to_owned();
         let question = self.mirror().and_then(|m| m.pending_questions.first()).map(|q| q.question_id.clone());
         if let (Some(question), false) = (question, text.is_empty()) {
@@ -832,13 +975,34 @@ impl AgentPane {
             // The shown session can't be opened: this prompt starts a new one.
             self.session_id = None;
         }
+        // Feedback at once: a steer waits in the queue bar until it lands; a
+        // prompt shows its bubble and the activity row before otto confirms.
+        if delivery == Delivery::Steer {
+            self.steers.push(self.pending(&text));
+        } else {
+            self.optimistic = Some(self.pending(&text));
+            self.entered.insert(OPTIMISTIC.to_owned(), Instant::now());
+            self.sent_at = Some(Instant::now());
+            self.running_since = Some(self.now());
+            self.show_rows();
+        }
         if let Some(id) = self.session_id.clone() {
+            let steer = delivery == Delivery::Steer;
             self.run(
                 cx,
-                move |c| async move { c.prompt(&id, input, Delivery::Queue).await },
-                move |this, result, cx| {
-                    if let Err(error) = result {
+                move |c| async move { c.prompt(&id, input, delivery).await },
+                move |this, result, cx| match result {
+                    // Known by id from now on: it leaves the pane's list once otto's queue has it.
+                    Ok(accepted) if steer => {
+                        if let Some(p) = this.steers.iter_mut().find(|p| p.text == text && p.id.is_none()) {
+                            p.id = Some(accepted.input_id);
+                        }
+                        this.show_rows();
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
                         this.notice = Some(error);
+                        this.unsend(&text);
                         this.editor.update(cx, |e, cx| e.set_text(text, cx));
                     }
                 },
@@ -871,13 +1035,25 @@ impl AgentPane {
                 }
                 Err(error) => {
                     this.notice = Some(error);
+                    this.unsend(&text);
                     this.editor.update(cx, |e, cx| e.set_text(text, cx));
                 }
             },
         );
     }
 
+    /// A send failed: its optimistic feedback goes.
+    fn unsend(&mut self, text: &str) {
+        self.steers.retain(|s| s.text != text);
+        if self.optimistic.as_ref().is_some_and(|p| p.text == text) {
+            self.optimistic = None;
+            self.sent_at = None;
+            self.show_rows();
+        }
+    }
+
     fn stop(&mut self, cx: &mut Context<Self>) {
+        self.sent_at = None;
         let Some(id) = self.session_id.clone() else { return };
         self.run(
             cx,
@@ -953,6 +1129,7 @@ impl AgentPane {
 
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_overlay(None, cx);
+        self.forget_sends();
         if self.session_id.is_some() {
             self.session_id = None;
             self.follow(cx);
@@ -963,12 +1140,32 @@ impl AgentPane {
     fn pick_session(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.set_overlay(None, cx);
         if self.session_id.as_deref() != Some(id.as_str()) {
+            self.forget_sends();
             let title = self.sessions.iter().find(|s| s.id == id).map(|s| s.title.clone()).unwrap_or_default();
             self.session_id = Some(id.clone());
             self.follow(cx);
             cx.emit(AgentPaneEvent::Session { session_id: id, title });
         }
         self.focus_composer(window, cx);
+    }
+
+    /// Running subagents of the shown session (child sessions still busy).
+    fn subagents(&self) -> Vec<&SessionInfo> {
+        let Some(id) = self.session_id.as_deref() else { return Vec::new() };
+        self.sessions
+            .iter()
+            .filter(|s| {
+                s.parent_id.as_deref() == Some(id) && matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)
+            })
+            .collect()
+    }
+
+    /// Leaving the shown session: its in-flight feedback stays with it.
+    fn forget_sends(&mut self) {
+        self.optimistic = None;
+        self.steers.clear();
+        self.queue_edits.clear();
+        self.sent_at = None;
     }
 
     fn open_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
@@ -1128,6 +1325,39 @@ impl AgentPane {
             cx.stop_propagation();
         }
     }
+}
+
+/// Key of the optimistic user bubble.
+const OPTIMISTIC: &str = "optimistic-user";
+/// How long a send shows activity without otto confirming the turn.
+const AWAIT: Duration = Duration::from_secs(15);
+/// How often the session list is refreshed while subagents may run.
+const SUBAGENT_POLL: Duration = Duration::from_secs(3);
+
+/// An input sent but not yet in the transcript.
+struct Pending {
+    text: String,
+    /// User items with this text when it was sent.
+    users: usize,
+    at: Instant,
+    /// otto's input id, once the send is accepted.
+    id: Option<String>,
+}
+
+/// A row of the queue bar; `id` is `None` for a steer otto hasn't confirmed yet.
+pub(super) struct QueueRow {
+    pub id: Option<String>,
+    pub text: String,
+    pub steer: bool,
+}
+
+fn user_count(rows: &[Row], text: &str) -> usize {
+    rows.iter().filter(|r| matches!(r, Row::User { text: t, .. } if t == text)).count()
+}
+
+/// The text parts of an input, joined.
+pub(super) fn input_text(input: &[InputPart]) -> String {
+    input.iter().filter_map(|p| if let InputPart::Text { text } = p { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ")
 }
 
 /// An image for the next prompt.

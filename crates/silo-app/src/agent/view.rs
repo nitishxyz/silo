@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, MouseButton, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle, Window, div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb,
 };
-use otto_proto::{ApprovalDecision, ApprovalMode, SessionStatus};
+use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, SessionStatus};
 
 use super::{
     AgentPane, AgentPaneEvent, Card, Conn, ENTER, FADE, FOLD, Overlay,
@@ -33,6 +33,49 @@ const TEXT: f32 = 13.5;
 const DETAIL_H: f32 = 250.0;
 /// The composer's text line height.
 const COMPOSER_LINE: f32 = 20.0;
+/// Indent of a group's lines under its header.
+const NEST: f32 = 12.0;
+/// A bar's header and row heights (bars above the composer).
+const BAR_HEADER: f32 = 34.0;
+const BAR_ROW: f32 = 28.0;
+/// Width of a queue row's hover actions (`Send later` + `×`).
+const QUEUE_ACTIONS: f32 = 112.0;
+
+/// One bar above the composer (see `render_bars`).
+struct Bar {
+    key: &'static str,
+    icon: AnyElement,
+    label: &'static str,
+    /// Collapsed: the current item, after a divider.
+    summary: Option<AnyElement>,
+    note: String,
+    open_label: String,
+    open_note: String,
+    rows: Vec<AnyElement>,
+}
+
+/// A todo with its status icon; finished ones struck through and muted.
+fn todo_item(status: TodoStatus, step: String) -> gpui::Div {
+    let muted = theme::muted();
+    let finished = matches!(status, TodoStatus::Completed | TodoStatus::Cancelled);
+    let glyph = match status {
+        TodoStatus::Completed => icon("circle-check", 14.0, muted),
+        TodoStatus::InProgress => icon("circle-dot", 14.0, theme::accent()),
+        TodoStatus::Cancelled => icon("x-circle", 14.0, muted),
+        TodoStatus::Pending => icon("circle", 14.0, muted),
+    };
+    div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).child(glyph).child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(rgb(if finished { muted } else { theme::foreground() }))
+            .when(finished, |el| el.line_through())
+            .child(step),
+    )
+}
 
 fn hsla(c: u32, alpha: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
@@ -195,6 +238,13 @@ pub(super) fn provider_name(provider: &str) -> String {
         "openai" => "OpenAI".into(),
         "google" => "Google".into(),
         "xai" => "xAI".into(),
+        "openrouter" => "OpenRouter".into(),
+        "deepseek" => "DeepSeek".into(),
+        "moonshotai" => "Kimi".into(),
+        "zai" => "Z.ai".into(),
+        "minimax" => "MiniMax".into(),
+        "lmstudio" => "LM Studio".into(),
+        "custom" => "Custom".into(),
         other => {
             let mut c = other.chars();
             c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
@@ -246,6 +296,7 @@ impl AgentPane {
     fn animating(&self, now: Instant, cx: &App) -> bool {
         let reduce = cx.reduce_motion();
         self.running
+            || self.awaiting()
             || self.editor.read(cx).growing(now, reduce)
             || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live))
             || self.entered.values().any(|at| motion::enter(*at, ENTER, now, reduce).is_some())
@@ -293,6 +344,12 @@ impl AgentPane {
         }
         for key in done {
             self.anims.remove(&key);
+        }
+        // The activity row eases its height; its gap follows the last row.
+        self.activity.set(self.activity_shown(), now, reduce);
+        if self.running || self.awaiting() || self.activity.moving(now, reduce) {
+            let end = self.rows.len();
+            self.list.remeasure_items(end..end + 1);
         }
         if self.list.is_following_tail() {
             self.unseen = false;
@@ -446,7 +503,90 @@ impl AgentPane {
         )
     }
 
+    /// `· 1 queued` after the activity label.
+    fn queued_note(&self) -> Option<gpui::Div> {
+        let queued = self.queue_rows().len();
+        (queued > 0).then(|| div().flex_none().pl(px(8.0)).text_color(rgb(theme::muted())).child(format!("· {queued} queued")))
+    }
+
+    /// The quiet `Stop  esc` at the right end of the activity indicator; its
+    /// text ends on the column's edge, the hover fill reaches past it.
+    fn stop_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("agent-stop")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(22.0))
+            .px(px(6.0))
+            .mr(px(-6.0))
+            .continuous(6.0)
+            .text_size(px(12.0))
+            .text_color(rgb(theme::muted()))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover_fill()).text_color(rgb(theme::foreground())))
+            .active(|s| s.scale(0.96))
+            .child("Stop")
+            .child(div().font_family(mono()).text_size(px(11.0)).opacity(0.6).child("esc"))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop(cx)))
+    }
+
+    /// Whether the activity row shows: a turn runs and no live group ends the transcript.
+    fn activity_shown(&self) -> bool {
+        (self.running || self.awaiting()) && !matches!(self.rows.last(), Some(Row::Group(g)) if g.live)
+    }
+
+    /// The list's last item: `Thinking…` / `Working for 12s` with Stop while a
+    /// turn runs (fades and slides in, eases its height), else bottom room.
+    fn render_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> AnyElement {
+        let t = toggled(&self.activity, now, cx);
+        let room = div().h(px(12.0));
+        if t <= 0.0 {
+            return room.into_any_element();
+        }
+        let gap = match self.rows.last() {
+            Some(Row::User { .. }) => 20.0,
+            Some(Row::Group(_)) => 12.0,
+            Some(Row::Text { .. }) | None => 4.0,
+        };
+        let label = match (self.rows.last(), self.running_since) {
+            (Some(Row::Text { .. } | Row::Group(_)), Some(since)) => format!("Working for {}", transcript::dur(self.now().saturating_sub(since))),
+            _ => "Thinking…".to_owned(),
+        };
+        let line = div()
+            .h(px(LINE_H))
+            .flex()
+            .items_center()
+            .text_size(px(13.0))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(shimmer(&label, now, self.epoch, cx)))
+            .children(self.queued_note())
+            .child(div().flex_1())
+            .child(self.stop_button(cx));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(20.0))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .h(px((gap + LINE_H) * t))
+                    .overflow_hidden()
+                    .child(div().pt(px(gap)).relative().top(px((1.0 - t) * 6.0)).opacity(t).child(line)),
+            )
+            .child(room)
+            .into_any_element()
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if ix == self.rows.len() {
+            let row = self.render_activity(Instant::now(), cx);
+            keep_moving(window);
+            return row;
+        }
         let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
         let now = Instant::now();
         // Gap above the row; a paragraph already ends with 8 of its own.
@@ -516,9 +656,13 @@ impl AgentPane {
             g.summary.clone()
         };
         let toggle_key = key.clone();
-        let header =
+        // The live group at the end is the activity indicator: Stop on its right.
+        let indicator = g.live && matches!(self.rows.last(), Some(Row::Group(last)) if last.key == key);
+        // Trace-style: the text on the column's edge, the chevron after it.
+        let trigger =
             div()
                 .id(gpui::ElementId::Name(format!("hdr-{key}").into()))
+                .min_w_0()
                 .h(px(LINE_H))
                 .flex()
                 .items_center()
@@ -532,16 +676,22 @@ impl AgentPane {
                     this.flip(format!("grp:{toggle_key}"), toggle_key.clone(), open, cx);
                     cx.notify();
                 }))
-                .child(div().w(px(16.0)).flex_none().flex().justify_center().map(|el| {
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| {
+                    if g.live { el.child(shimmer(&header_text, now, self.epoch, cx)) } else { el.text_color(rgb(muted)).child(header_text) }
+                }))
+                .child(div().flex_none().flex().map(|el| {
                     if g.live {
-                        el.child(crate::browser_pane::spinner(&key, 13.0, muted, cx))
+                        el.child(crate::browser_pane::spinner(&key, 12.0, muted, cx))
                     } else {
                         el.child(chevron(if fold >= 1.0 { openness } else { 0.0 }, 12.0, if g.failed { theme::danger() } else { muted }))
                     }
-                }))
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| {
-                    if g.live { el.child(shimmer(&header_text, now, self.epoch, cx)) } else { el.text_color(rgb(muted)).child(header_text) }
                 }));
+        let header = div()
+            .h(px(LINE_H))
+            .flex()
+            .items_center()
+            .child(trigger)
+            .when(indicator, |el| el.children(self.queued_note()).child(div().flex_1()).child(self.stop_button(cx)));
         let mut column = div().text_size(px(13.0)).flex().flex_col().child(header);
         if fold >= 1.0 {
             if openness > 0.0 {
@@ -551,7 +701,7 @@ impl AgentPane {
                 let full = g.lines.len() as f32 * LINE_H + g.lines.iter().filter(|l| self.details.contains(&l.key)).count() as f32 * DETAIL_H;
                 column = column.child(
                     div()
-                        .pl(px(24.0))
+                        .pl(px(NEST))
                         .flex()
                         .flex_col()
                         .when(openness < 1.0, |el| el.max_h(px(full * openness)).overflow_hidden().opacity(openness))
@@ -580,7 +730,7 @@ impl AgentPane {
         let window_el = div()
             .id(gpui::ElementId::Name(format!("live-{key}").into()))
             .relative()
-            .pl(px(24.0))
+            .pl(px(NEST))
             .max_h(px(max * (1.0 - fold)))
             .opacity(1.0 - fold)
             .overflow_hidden()
@@ -794,7 +944,7 @@ impl AgentPane {
                     .flex_col()
                     .children(notice)
                     .children(self.render_card(cx))
-                    .children(self.render_tray(cx))
+                    .children(self.render_bars(cx))
                     .child(self.render_composer(window, cx))
                     .child(self.render_footer(cx))
                     .children(popovers),
@@ -907,148 +1057,277 @@ impl AgentPane {
         Some(div().flex_none().max_h(px(320.0 * t)).overflow_hidden().opacity(t).relative().top(px((1.0 - t) * 8.0)).child(body).into_any_element())
     }
 
-    fn render_tray(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let queue: Vec<String> = self
-            .mirror()
-            .map(|m| {
-                m.queue
-                    .iter()
-                    .map(|q| {
-                        q.input
-                            .iter()
-                            .filter_map(|p| if let otto_proto::InputPart::Text { text } = p { Some(text.as_str()) } else { None })
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if self.todos.is_empty() && queue.is_empty() {
-            return None;
-        }
+    /// The bars stacked above the composer (subagents, todos, queue). Only
+    /// the bottom one tucks into the composer; those above float with a gap.
+    fn render_bars(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let now = Instant::now();
         let muted = theme::muted();
         let fg = theme::foreground();
-        let (done, total) = transcript::progress(&self.todos);
-        let openness = toggled(&self.tray_anim, now, cx);
-        let status_icon = |status: TodoStatus| match status {
-            TodoStatus::Completed => icon("circle-check", 14.0, muted),
-            TodoStatus::InProgress => icon("circle-dot", 14.0, theme::accent()),
-            TodoStatus::Cancelled => icon("x-circle", 14.0, muted),
-            TodoStatus::Pending => icon("circle", 14.0, muted),
-        };
-        let item = |status: TodoStatus, step: String| {
-            let finished = matches!(status, TodoStatus::Completed | TodoStatus::Cancelled);
-            div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).child(status_icon(status)).child(
+        let mut bars: Vec<Bar> = Vec::new();
+        let text = |s: String| div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(fg)).child(s);
+
+        let subagents: Vec<(String, String, bool)> =
+            self.subagents().into_iter().map(|s| (s.agent.clone(), s.title.clone(), s.status == SessionStatus::WaitingApproval)).collect();
+        if !subagents.is_empty() {
+            let n = subagents.len();
+            let first = subagents[0].1.clone();
+            bars.push(Bar {
+                key: "subagents",
+                icon: icon("bot", 14.0, theme::accent()).into_any_element(),
+                label: "Sub-agents",
+                summary: (!first.is_empty()).then(|| text(first).into_any_element()),
+                note: format!("{n} running"),
+                open_label: "Sub-agents".into(),
+                open_note: format!("{n} running"),
+                rows: subagents
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (agent, title, waiting))| {
+                        div()
+                            .h(px(BAR_ROW))
+                            .px(px(14.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(div().w(px(14.0)).flex_none().flex().justify_center().child(if waiting {
+                                icon("lock", 13.0, theme::warning()).into_any_element()
+                            } else {
+                                crate::browser_pane::spinner(&format!("sub-{i}"), 12.0, muted, cx)
+                            }))
+                            .child(div().flex_none().text_color(rgb(muted)).child(agent.to_uppercase()))
+                            .child(text(if title.is_empty() { "Working".into() } else { title }))
+                            .child(div().flex_none().text_color(rgb(muted)).child(if waiting { "needs approval" } else { "running" }))
+                            .into_any_element()
+                    })
+                    .collect(),
+            });
+        }
+
+        if !self.todos.is_empty() {
+            let (done, total) = transcript::progress(&self.todos);
+            let current = transcript::current(&self.todos).map(|t| (t.status, t.step.clone()));
+            bars.push(Bar {
+                key: "todos",
+                icon: icon("list-todo", 14.0, muted).into_any_element(),
+                label: "Todos",
+                summary: current.map(|(s, step)| todo_item(s, step).into_any_element()),
+                note: format!("{done}/{total} done"),
+                open_label: "Todos".into(),
+                open_note: format!("{done}/{total} done"),
+                rows: self
+                    .todos
+                    .iter()
+                    .map(|t| div().h(px(BAR_ROW)).px(px(14.0)).flex().items_center().child(todo_item(t.status, t.step.clone())).into_any_element())
+                    .collect(),
+            });
+        }
+
+        // Pending steers (they land at the next step), then inputs waiting for the turn to end.
+        let queue = self.queue_rows();
+        if !queue.is_empty() {
+            let n = queue.len();
+            let first = queue[0].text.clone();
+            bars.push(Bar {
+                key: "queue",
+                icon: icon("clock", 14.0, theme::warning()).into_any_element(),
+                label: "Queued",
+                summary: Some(text(if first.is_empty() { "Image".into() } else { first }).into_any_element()),
+                note: format!("{n} queued"),
+                open_label: "Queued messages".into(),
+                open_note: format!("{n} waiting"),
+                rows: queue.into_iter().enumerate().map(|(i, row)| self.queue_row(i, row, cx)).collect(),
+            });
+        }
+
+        let shown: Vec<&'static str> = bars.iter().map(|b| b.key).collect();
+        self.bar_shown.retain(|k, _| shown.contains(k));
+        let last = bars.len().saturating_sub(1);
+        bars.into_iter().enumerate().map(|(i, bar)| self.render_bar(bar, i == last, now, cx)).collect()
+    }
+
+    /// A pending input: position, text and when it lands (`Next step` / `After
+    /// turn`); on hover that note gives way to switching it and `×` removing it.
+    fn queue_row(&self, i: usize, row: super::QueueRow, cx: &mut Context<Self>) -> AnyElement {
+        let muted = theme::muted();
+        let group = SharedString::from(format!("queued-{i}"));
+        let super::QueueRow { id, text, steer } = row;
+        // Wide enough for the hover actions that take its place.
+        let note = div().flex_none().min_w(px(QUEUE_ACTIONS)).flex().justify_end().text_size(px(11.5)).text_color(rgb(muted)).child(if steer {
+            "Next step"
+        } else {
+            "After turn"
+        });
+        div()
+            .id(gpui::ElementId::Name(group.clone()))
+            .group(group.clone())
+            .relative()
+            .h(px(BAR_ROW))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .hover(|s| s.bg(theme::hover_fill()))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(18.0))
+                    .rounded_full()
+                    .bg(rgb(ink(0.08)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.5))
+                    .text_color(rgb(muted))
+                    .child(format!("{}", i + 1)),
+            )
+            .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_color(rgb(if finished { muted } else { fg }))
-                    .when(finished, |el| el.line_through())
-                    .child(step),
+                    .text_color(rgb(theme::foreground()))
+                    .child(if text.is_empty() { "Image".to_owned() } else { text }),
             )
+            .map(|el| match id {
+                // Not confirmed by otto yet: nothing to act on.
+                None => el.child(note),
+                Some(id) => {
+                    let (label, delivery) = if steer { ("Send later", Delivery::Queue) } else { ("Steer now", Delivery::Steer) };
+                    let switch_id = id.clone();
+                    let actions = div()
+                        .absolute()
+                        .right(px(8.0))
+                        .top_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .opacity(0.0)
+                        .group_hover(group.clone(), |s| s.opacity(1.0))
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("queue-switch-{i}").into()))
+                                .flex_none()
+                                .h(px(22.0))
+                                .px(px(6.0))
+                                .flex()
+                                .items_center()
+                                .continuous(6.0)
+                                .text_size(px(11.5))
+                                .text_color(rgb(muted))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::hover_fill()).text_color(rgb(theme::foreground())))
+                                .active(|s| s.scale(0.96))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.edit_queued(switch_id.clone(), Some(delivery), cx))),
+                        )
+                        .child(
+                            icon_button(gpui::ElementId::Name(format!("queue-remove-{i}").into()), "close", 12.0, 22.0, muted)
+                                .tooltip(Tooltip::text("Remove"))
+                                .active(|s| s.scale(0.92))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.edit_queued(id.clone(), None, cx))),
+                        );
+                    el.child(note.group_hover(group, |s| s.opacity(0.0))).child(actions)
+                }
+            })
+            .into_any_element()
+    }
+
+    /// One bar: a 34 header that crossfades between the collapsed summary and
+    /// the expanded title, then its rows (height + opacity, chevron turns).
+    fn render_bar(&mut self, bar: Bar, tucked: bool, now: Instant, cx: &mut Context<Self>) -> AnyElement {
+        let muted = theme::muted();
+        let fg = theme::foreground();
+        let primed = self.primed;
+        let appeared = *self.bar_shown.entry(bar.key).or_insert_with(|| if primed { now } else { now.checked_sub(motion::UI).unwrap_or(now) });
+        let o = toggled(self.bars.entry(bar.key).or_insert_with(|| motion::Toggle::new(false, motion::UI)), now, cx);
+        let key = bar.key;
+        let toggle = move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+            let reduce = cx.reduce_motion();
+            let t = this.bars.entry(key).or_insert_with(|| motion::Toggle::new(false, motion::UI));
+            let open = !t.on();
+            t.set(open, Instant::now(), reduce);
+            cx.notify();
         };
-        // Hidden under the composer's top half.
-        let tuck = pill_input::HEIGHT / 2.0 + pill_input::HALO;
-        let mut tray = div()
+        let chevron =
+            |o: f32| icon("chevron-up", 12.0, muted).with_transformation(gpui::Transformation::rotate(gpui::radians(o * std::f32::consts::PI)));
+        let header = |id: String, h: f32, alpha: f32| {
+            div()
+                .id(gpui::ElementId::Name(id.into()))
+                .flex_none()
+                .h(px(BAR_HEADER * h))
+                .overflow_hidden()
+                .opacity(alpha)
+                .px(px(14.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover_fill()))
+        };
+        let has_summary = bar.summary.is_some();
+        let collapsed = header(format!("bar-{key}"), 1.0 - o, 1.0 - o)
+            .child(div().flex_none().flex().items_center().gap(px(8.0)).text_color(rgb(fg)).child(bar.icon).child(bar.label))
+            .when_some(bar.summary, |el, s| {
+                el.child(div().flex_none().w(px(1.0)).h(px(14.0)).bg(rgb(ink(0.15)))).child(div().flex_1().min_w_0().flex().child(s))
+            })
+            .when(!has_summary, |el| el.child(div().flex_1()))
+            .child(div().flex_none().text_color(rgb(muted)).child(bar.note))
+            .child(chevron(o))
+            .on_click(cx.listener(toggle));
+        #[allow(clippy::cast_precision_loss)]
+        let full = bar.rows.len() as f32 * BAR_ROW + 8.0;
+        let mut el = div()
             .mx(px(28.0))
-            .mb(px(-tuck))
-            .pb(px(tuck))
-            .rounded_tl(px(12.0))
-            .rounded_tr(px(12.0))
             .bg(rgb(raised()))
             .border_1()
             .border_color(rgb(ink(0.15)))
+            .overflow_hidden()
             .font_family(mono())
             .text_size(px(12.5))
             .flex()
-            .flex_col();
-        if openness > 0.0 && !self.todos.is_empty() {
-            #[allow(clippy::cast_precision_loss)]
-            let full = self.todos.len() as f32 * 26.0 + 11.0;
-            tray = tray.child(
-                div()
-                    .flex_none()
-                    .max_h(px(full * openness))
-                    .overflow_hidden()
-                    .opacity(openness)
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .child(
-                        div()
-                            .flex_none()
-                            .pt(px(8.0))
-                            .pb(px(2.0))
-                            .px(px(14.0))
-                            .flex()
-                            .flex_col()
-                            .children(self.todos.iter().map(|t| div().h(px(26.0)).flex().items_center().child(item(t.status, t.step.clone())))),
-                    )
-                    .child(div().flex_none().mx(px(14.0)).h(px(1.0)).bg(rgb(ink(0.1)))),
-            );
+            .flex_col()
+            .child(collapsed);
+        if o > 0.0 {
+            let icon_name = match key {
+                "queue" => "clock",
+                "subagents" => "bot",
+                _ => "list-todo",
+            };
+            let tint = match key {
+                "queue" => theme::warning(),
+                "subagents" => theme::accent(),
+                _ => muted,
+            };
+            el = el
+                .child(
+                    header(format!("bar-open-{key}"), o, o)
+                        .border_b_1()
+                        .border_color(rgb(ink(0.1)))
+                        .child(icon(icon_name, 14.0, tint))
+                        .child(div().text_color(rgb(fg)).child(bar.open_label))
+                        .child(div().flex_1())
+                        .child(div().text_color(rgb(muted)).child(bar.open_note))
+                        .child(chevron(o))
+                        .on_click(cx.listener(toggle)),
+                )
+                .child(div().flex_none().max_h(px(full * o)).overflow_hidden().opacity(o).py(px(4.0)).flex().flex_col().children(bar.rows));
         }
-        if !queue.is_empty() {
-            tray = tray.child(div().px(px(14.0)).pt(px(8.0)).flex().flex_wrap().gap(px(6.0)).children(queue.into_iter().map(|q| {
-                div()
-                    .max_w(px(260.0))
-                    .px(px(8.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .capsule()
-                    .bg(rgb(ink(0.08)))
-                    .text_size(px(12.0))
-                    .text_color(rgb(muted))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(format!("Queued · {}", transcript::clip(&q, 60)))
-            })));
+        // Tucked under the composer's top half, or floating above the bar below.
+        let tuck = if tucked { pill_input::HEIGHT / 2.0 + pill_input::HALO } else { 0.0 };
+        let el = if tucked { el.rounded_tl(px(12.0)).rounded_tr(px(12.0)).mb(px(-tuck)).pb(px(tuck)) } else { el.continuous(12.0).mb(px(6.0)) };
+        // Rises from behind what's below: a bottom-anchored clip grows to the
+        // bar's height, pushing the transcript up as it goes. (No negative
+        // margins on this wrapper: taffy then mis-sizes the composer column.)
+        let t = eased(appeared, motion::UI, now, cx).unwrap_or(1.0);
+        let wrap = div().flex_none().opacity(t);
+        if t >= 1.0 {
+            return wrap.child(el).into_any_element();
         }
-        if !self.todos.is_empty() {
-            let current = transcript::current(&self.todos).map(|t| (t.status, t.step.clone()));
-            tray = tray.child(
-                div()
-                    .id("agent-tray")
-                    .h(px(34.0))
-                    .px(px(14.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let open = !this.tray_anim.on();
-                        this.tray_anim.set(open, Instant::now(), cx.reduce_motion());
-                        cx.notify();
-                    }))
-                    .child(
-                        div().flex_none().flex().items_center().gap(px(8.0)).text_color(rgb(fg)).child(icon("list-todo", 14.0, muted)).child("Todos"),
-                    )
-                    .child(div().flex_none().w(px(1.0)).h(px(14.0)).bg(rgb(ink(0.15))).opacity(1.0 - openness))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .opacity(1.0 - openness)
-                            .when(openness < 1.0, |el| el.children(current.map(|(s, step)| item(s, step)))),
-                    )
-                    .child(div().flex_none().text_color(rgb(muted)).child(format!("{done}/{total} done")))
-                    .child(
-                        icon("chevron-up", 12.0, muted)
-                            .with_transformation(gpui::Transformation::rotate(gpui::radians(openness * std::f32::consts::PI))),
-                    ),
-            );
-        } else {
-            tray = tray.child(div().h(px(8.0)));
-        }
-        // Rises from behind the composer, pushing the transcript up as it goes.
-        let t = self.tray_shown.and_then(|at| eased(at, motion::UI, now, cx)).unwrap_or(1.0);
-        Some(div().flex_none().mt(px(-38.0 * (1.0 - t))).opacity(t).child(tray).into_any_element())
+        let outer = BAR_HEADER + 2.0 + o * (BAR_HEADER + full) + if tucked { 0.0 } else { 6.0 };
+        wrap.h(px(outer * t)).overflow_hidden().flex().flex_col().justify_end().child(el.flex_none()).into_any_element()
     }
 
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1058,7 +1337,7 @@ impl AgentPane {
         let placeholder = if question {
             "Answer…"
         } else if self.running {
-            "Queue a follow-up"
+            "Message the agent"
         } else if self.session_id.is_some() && self.error.is_none() {
             "Reply"
         } else {
@@ -1072,41 +1351,23 @@ impl AgentPane {
             selection: hsla(theme::selection(), 0.6),
         };
         let editor = Editor::element(&self.editor, 8, colors, cx);
-        let stop = self.running && empty;
-        let enabled = stop || !empty;
+        // Always send: while a turn runs it steers (stopping is the activity row's, and esc).
+        let enabled = !empty;
         let now = Instant::now();
         let reduce = cx.reduce_motion();
         self.send_ready.set(enabled, now, reduce);
-        let t = self.send_ready.value(now, reduce);
-        let morph = self.morph.and_then(|at| eased(at, motion::UI, now, cx)).unwrap_or(1.0);
-        let glyph = if stop { 14.0 } else { 18.0 };
-        let send = pill_input::circle(
-            "agent-send",
-            t,
-            enabled,
-            div()
-                .opacity(morph)
-                .child(icon(if stop { "stop" } else { "arrow-up" }, glyph * (0.6 + 0.4 * morph), pill_input::circle_colors(t).1))
-                .into_any_element(),
-        )
-        .absolute()
-        .right(px(pill_input::INSET - pill_input::BORDER))
-        .bottom(px(pill_input::INSET - pill_input::BORDER))
-        .tooltip(Tooltip::text(if stop { "Stop" } else { "Send  ⏎" }))
-        .when(enabled, |el| {
-            el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                if stop {
-                    this.stop(cx);
-                } else {
-                    this.submit(window, cx);
-                }
-            }))
-        });
-        // Centered on the first text line, at the pill's leading-icon place.
+        let t = toggled(&self.send_ready, now, cx);
+        let send = pill_input::circle("agent-send", t, enabled, icon("arrow-up", 16.0, pill_input::circle_colors(t).1).into_any_element())
+            .absolute()
+            .right(px(pill_input::INSET - pill_input::BORDER))
+            .bottom(px(pill_input::INSET - pill_input::BORDER))
+            .tooltip(Tooltip::text(if self.running { "Steer  ⏎" } else { "Send  ⏎" }))
+            .when(enabled, |el| el.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.submit(window, cx))));
+        // The send circle, mirrored.
         let menu = pill_input::lead_button("agent-menu", "more-vertical")
             .absolute()
-            .left(px(pill_input::LEAD - 14.0 - pill_input::TEXT_X))
-            .top(px(COMPOSER_LINE / 2.0 - 14.0))
+            .left(px(pill_input::INSET - pill_input::BORDER))
+            .bottom(px(pill_input::INSET - pill_input::BORDER))
             .tooltip(Tooltip::text("Options"))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Menu, window, cx)));
         let chips = (!self.attachments.is_empty()).then(|| {
@@ -1159,7 +1420,8 @@ impl AgentPane {
             .flex()
             .flex_col()
             .children(chips)
-            .child(div().relative().child(editor).child(menu))
+            .child(editor)
+            .child(menu)
             .child(send);
         pill_input::halo(false, pill).into_any_element()
     }
@@ -1254,9 +1516,9 @@ impl AgentPane {
                     el.opacity(0.4)
                 }
             });
-        // Both ends inset like the composer's text: the agent label starts
-        // under the placeholder, the image glyph ends as far from the right.
-        let inset = pill_input::HALO + pill_input::TEXT_X;
+        // At the circles' outer edges: the agent label starts under the ⋮
+        // circle's left edge, the image glyph ends under the send circle's
+        // right edge (button paddings 6 and 4).
         div()
             .mt(px(8.0))
             .h(px(22.0))
@@ -1265,9 +1527,9 @@ impl AgentPane {
             .font_family(mono())
             .text_size(px(12.0))
             .text_color(rgb(muted))
-            .child(div().flex_1().min_w_0().flex().items_center().pl(px(inset - 6.0)).child(agent_button))
+            .child(div().flex_1().min_w_0().flex().items_center().pl(px(pill_input::HALO + pill_input::INSET - 6.0)).child(agent_button))
             .child(div().flex_none().max_w(relative(0.5)).min_w_0().flex().justify_center().child(model_button))
-            .child(div().flex_1().min_w_0().flex().items_center().justify_end().pr(px(inset - 4.0)).child(image))
+            .child(div().flex_1().min_w_0().flex().items_center().justify_end().pr(px(pill_input::HALO + pill_input::INSET - 4.0)).child(image))
             .into_any_element()
     }
 

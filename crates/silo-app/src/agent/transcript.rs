@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use otto_client::{ToolState, ToolStatus};
 use otto_llm::{Item, Part, ResultPart, Role};
 use otto_proto::{SessionStatus, TurnStatus};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::AgentStatus;
 
@@ -433,9 +433,36 @@ fn outcome(live: Option<&ToolState>, result: Option<&(String, bool)>) -> Option<
     result.map(|(text, error)| Outcome { text: text.clone(), error: *error, meta: Value::Null })
 }
 
+/// A provider-defined tool call (Claude's `bash` / `str_replace_based_edit_tool`,
+/// GPT's `apply_patch` operation / `shell` commands) as the built-in otto runs
+/// it, so it reads like any other line.
+fn native(name: &str, input: &Value) -> Option<(&'static str, Value)> {
+    let field = |key: &str| input[key].clone();
+    match name {
+        "bash" => Some(("shell", json!({"command": field("command")}))),
+        "str_replace_based_edit_tool" => Some(match input["command"].as_str() {
+            Some("view") => ("read", json!({"path": field("path")})),
+            Some("create") => ("write", json!({"path": field("path"), "content": field("file_text")})),
+            Some("str_replace") => ("edit", json!({"path": field("path"), "old_string": field("old_str"), "new_string": field("new_str")})),
+            _ => ("edit", json!({"path": field("path")})),
+        }),
+        "shell" if input["commands"].is_array() => {
+            let commands: Vec<&str> = input["commands"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            Some(("shell", json!({"command": commands.join("\n")})))
+        }
+        "apply_patch" if input["operation"].is_object() || input["type"].is_string() => {
+            let op = if input["operation"].is_object() { &input["operation"] } else { input };
+            Some(("edit", json!({"path": op["path"].clone()})))
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, result: Option<&(String, bool)>, cx: &Ctx<'_>) -> Line {
     let input = if input.is_null() { live.map_or(input, |t| &t.input) } else { input };
+    let mapped = native(name, input);
+    let (name, input) = mapped.as_ref().map_or((name, input), |(n, i)| (*n, i));
     let out = outcome(live, result);
     let mut status = match (&out, live.map(|t| t.status)) {
         (Some(o), _) if o.error => Status::Error,
@@ -1111,6 +1138,13 @@ mod tests {
         assert_eq!(line.title, "Fetched docs.rs/gpui");
         let line = tool("x", "mystery", &json!({}), None, Some(&ok("x")), &cx);
         assert_eq!((line.title.as_str(), line.kind), ("Used mystery", Kind::Other));
+        // Provider-defined tools read like the built-ins they map to.
+        let line = tool("b", "bash", &json!({"command": "sleep 1"}), None, Some(&ok("")), &cx);
+        assert_eq!((line.title.as_str(), line.kind), ("Ran sleep 1", Kind::Shell));
+        let line = tool("v", "str_replace_based_edit_tool", &json!({"command": "view", "path": "/work/app/a.rs"}), None, Some(&ok("x")), &cx);
+        assert_eq!((line.title.as_str(), line.kind), ("Read a.rs", Kind::Read));
+        let line = tool("o", "shell", &json!({"commands": ["ls", "pwd"]}), None, Some(&ok("x")), &cx);
+        assert_eq!(line.kind, Kind::Shell);
         let line = tool("q", "ask_user", &json!({"question": "Which branch?"}), None, Some(&ok("main")), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Asked Which branch?", Some("main")));
         let line = tool("d", "subagent", &json!({"action": "delegate", "task": "Review the diff", "agent": "plan"}), None, None, &cx);
