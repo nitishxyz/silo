@@ -160,7 +160,7 @@ impl Glide {
 
 /// `SILO_MOTION_SLOWDOWN=10` stretches every animation, for inspecting
 /// intermediate frames in UI tests.
-fn slowdown() -> f32 {
+pub fn slowdown() -> f32 {
     static FACTOR: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *FACTOR.get_or_init(|| std::env::var("SILO_MOTION_SLOWDOWN").ok().and_then(|v| v.parse().ok()).filter(|f: &f32| *f > 0.0).unwrap_or(1.0))
 }

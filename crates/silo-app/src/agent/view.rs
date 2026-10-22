@@ -10,10 +10,10 @@ use gpui::{
 use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, SessionStatus};
 
 use super::{
-    AgentPane, AgentPaneEvent, Card, Conn, ENTER, FADE, FOLD, Overlay,
+    AgentPane, AgentPaneEvent, Card, Conn, ENTER, FOLD, Overlay,
     editor::{Editor, EditorColors},
     markdown::{Block, Inline},
-    pill_input, rows,
+    pill_input, reveal, rows,
     transcript::{self, Detail, Group, Line, Row, Status, TodoStatus},
 };
 use crate::{
@@ -26,6 +26,8 @@ use crate::{
 /// Width of the reading column.
 const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
+/// The fade above the composer column, where the transcript scrolls out under it.
+const COMPOSER_FADE: f32 = 28.0;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
 const TEXT: f32 = 13.5;
@@ -430,7 +432,6 @@ impl AgentPane {
             || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live))
             || self.entered.values().any(|at| motion::enter(*at, ENTER, now, reduce).is_some())
             || self.fold_at.values().any(|at| now < *at || motion::enter(*at, FOLD, now, reduce).is_some())
-            || self.marks.as_ref().is_some_and(|(_, m)| m.iter().any(|(_, at)| motion::enter(*at, FADE, now, reduce).is_some()))
     }
 
     pub(super) fn render_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -445,10 +446,10 @@ impl AgentPane {
             window.request_animation_frame();
         }
         // Folding groups change height every frame; a finished fold is measured once more. Live groups too:
-        // their window opens as lines arrive and streaming reasoning glides.
+        // their window opens as lines arrive and streaming reasoning glides; and streaming text, whose height glides.
         let mut settled = Vec::new();
         for (ix, row) in self.rows.iter().enumerate() {
-            if matches!(row, Row::Group(g) if g.live) {
+            if matches!(row, Row::Group(g) if g.live) || matches!(row, Row::Text { key, .. } if self.reveals.contains_key(key)) {
                 self.list.remeasure_items(ix..ix + 1);
             }
             if let Row::Group(g) = row
@@ -485,8 +486,11 @@ impl AgentPane {
             self.list.remeasure_items(end..end + 1);
         }
         // Back at the bottom (scrolled there, or the content settled): follow again, nothing unseen.
+        // Not while a box inside takes a gesture: the transcript stays where it is under the pointer.
         let tail = self.tail();
-        if tail.resume {
+        if self.scroll.holding(now) {
+            self.list.pause_following_tail();
+        } else if tail.resume {
             self.list.set_follow_mode(gpui::FollowMode::Tail);
         }
         self.unseen = tail.unseen;
@@ -494,6 +498,21 @@ impl AgentPane {
         let visible = self.composer_visible();
         self.bottom_shown.set(visible, now, cx.reduce_motion());
         let rise = toggled(&self.bottom_shown, now, cx);
+        // The composer column floats over the transcript; the list's end is padded clear of it (its last item),
+        // following on through a change at the bottom (the input grows, a bar comes or goes).
+        if !visible {
+            self.composer_h.set(0.0);
+        }
+        let pad = self.composer_h.get();
+        if (pad - self.composer_pad).abs() > 0.5 {
+            self.composer_pad = pad;
+            let end = self.rows.len();
+            self.list.remeasure_items(end..end + 1);
+            if tail.at_end {
+                self.list.set_follow_mode(gpui::FollowMode::Tail);
+            }
+        }
+        self.scroll.set_inset(pad);
         let bg = theme::background();
         let width = self.width.clone();
         // The pane's width, for what fits (a change lays out again).
@@ -538,7 +557,51 @@ impl AgentPane {
             .child(self.render_body(window, cx))
             .when(visible, |el| {
                 let bottom = self.render_bottom(window, cx);
-                el.child(div().flex_none().relative().top(px((1.0 - rise) * 8.0)).opacity(rise).child(bottom))
+                let height = self.composer_h.clone();
+                let measure = gpui::canvas(
+                    move |b, window, _| {
+                        let h = f32::from(b.size.height);
+                        if (height.get() - h).abs() > 0.5 {
+                            height.set(h);
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full();
+                // What scrolls under it fades out above the column (as a live group's top does); only the
+                // column takes the pointer.
+                let fade = div().h(px(COMPOSER_FADE)).bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(hsla(bg, 0.0), 0.0),
+                    linear_color_stop(hsla(bg, 1.0), 1.0),
+                ));
+                let column = div()
+                    .id("agent-composer-column")
+                    .occlude()
+                    .relative()
+                    .bg(rgb(bg))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if !this.focus.contains_focused(window, cx) {
+                                this.focus_composer(window, cx);
+                            }
+                        }),
+                    )
+                    .child(bottom)
+                    .child(measure);
+                el.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .child(div().relative().top(px((1.0 - rise) * 8.0)).opacity(rise).flex().flex_col().child(fade).child(column)),
+                )
             })
             .children(self.render_backdrop(cx))
             .children(self.popover(Overlay::Sessions, window, cx))
@@ -565,6 +628,7 @@ impl AgentPane {
             .relative()
             .child(div().size_full().relative().top(px((1.0 - t) * 6.0)).opacity(t).child(content))
             .child(self.tail_check())
+            .child(self.scroll.router())
             .children(self.render_new_activity(now, cx))
             .into_any_element()
     }
@@ -588,8 +652,11 @@ impl AgentPane {
     }
 
     fn body_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (u8, AnyElement) {
-        let centered =
-            |child: AnyElement| div().size_full().flex().flex_col().items_center().justify_center().px(px(24.0)).child(child).into_any_element();
+        // Centred above the composer column (it floats over the body).
+        let pad = self.composer_h.get();
+        let centered = |child: AnyElement| {
+            div().size_full().flex().flex_col().items_center().justify_center().px(px(24.0)).pb(px(pad)).child(child).into_any_element()
+        };
         match &self.conn {
             Conn::Connecting => return (1, centered(empty_state("Connecting to otto…", None).into_any_element())),
             Conn::Failed(error) => {
@@ -640,7 +707,7 @@ impl AgentPane {
         Some(
             div()
                 .absolute()
-                .bottom(px(8.0 + (1.0 - t) * -8.0))
+                .bottom(px(self.composer_h.get() + 8.0 + (1.0 - t) * -8.0))
                 .left_0()
                 .right_0()
                 .flex()
@@ -721,7 +788,9 @@ impl AgentPane {
     /// turn runs (fades and slides in, eases its height), else bottom room.
     fn render_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> AnyElement {
         let t = toggled(&self.activity, now, cx);
-        let room = div().h(px(12.0));
+        // Room at the end, clear of the composer column floating over it and its fade.
+        let pad = self.composer_h.get();
+        let room = div().h(px(if pad > 0.0 { pad + COMPOSER_FADE } else { 12.0 }));
         if t <= 0.0 {
             return room.into_any_element();
         }
@@ -1119,7 +1188,7 @@ impl AgentPane {
             other => other.map(|(el, _)| el),
         };
         let detail = (openness > 0.0)
-            .then(|| line.detail.as_ref().map(|d| render_detail(&key, d)))
+            .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, &self.scroll)))
             .flatten()
             .map(|d| div().when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(d));
         let enter = self.entered.get(&key).and_then(|at| eased(*at, ENTER, now, cx));
@@ -1127,43 +1196,23 @@ impl AgentPane {
         div().relative().top(px(shift)).opacity(alpha * dim).child(row).children(stream).children(detail).into_any_element()
     }
 
-    fn markdown(&mut self, key: &str, text: &str) -> std::rc::Rc<Vec<Block>> {
-        if let Some((cached, blocks)) = self.parsed.get(key)
-            && cached == text
-        {
-            return blocks.clone();
-        }
-        let blocks = std::rc::Rc::new(super::markdown::parse(text));
-        self.parsed.insert(key.to_owned(), (text.to_owned(), blocks.clone()));
-        blocks
-    }
-
     fn render_text(&mut self, ix: usize, key: &str, text: &str, streaming: bool, now: Instant, cx: &mut Context<Self>) -> AnyElement {
-        let blocks = self.markdown(key, text);
-        // Freshly arrived text: (byte length before it, opacity), mapped onto the last block.
-        let fades: Vec<(usize, f32)> = match &self.marks {
-            Some((k, marks)) if k == key && !cx.reduce_motion() => {
-                let mut out = Vec::new();
-                let mut prev = None;
-                for (len, at) in marks {
-                    if let (Some(prev), Some(t)) = (prev, motion::progress(*at, FADE, now)) {
-                        out.push((text.len().saturating_sub(prev), t));
-                    }
-                    prev = Some(*len);
-                }
-                out
-            }
-            _ => Vec::new(),
-        };
-        let mut els: Vec<AnyElement> = Vec::new();
-        let last = blocks.len().saturating_sub(1);
-        for (i, block) in blocks.iter().enumerate() {
-            let tail = (i == last).then_some((&fades[..], streaming));
-            els.push(render_block(&format!("{key}-{i}"), block, tail));
-        }
-        if streaming && matches!(blocks.last(), None | Some(Block::Code { .. } | Block::Rule)) {
-            els.push(div().text_color(rgb(theme::muted())).child("▍").into_any_element());
-        }
+        // Parsed once per frame at most; completed blocks are kept as they are.
+        let mut doc = self.parsed.remove(key).unwrap_or_default();
+        doc.update(text);
+        let blocks = doc.blocks();
+        let reduce = cx.reduce_motion();
+        // Streaming: lines show once complete and fade in (`reveal`); blocks fully shown draw as usual.
+        let mut reveal = self.reveals.remove(key);
+        let shown = reveal.as_mut().map(|r| r.frame(key, blocks, text, streaming, self.width.get(), now, reduce));
+        let fx = reveal.as_ref().zip(shown.as_ref()).map(|(r, s)| Fx { lines: &s.lines, wraps: &r.wraps });
+        let settled = shown.as_ref().map_or(blocks.len(), |s| s.settled);
+        let els: Vec<AnyElement> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), theme::foreground(), &self.scroll))
+            .collect();
+        self.parsed.insert(key.to_owned(), doc);
         let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. }));
         let actions = answer.then(|| {
             let copy = text.to_owned();
@@ -1187,7 +1236,39 @@ impl AgentPane {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(q.clone(), cx)))
                 }))
         });
-        div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions).into_any_element()
+        let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
+        let (Some(mut r), Some(s)) = (reveal, shown) else { return body.into_any_element() };
+        // The height glides to what was measured, less the line being written (the list follows it at the
+        // bottom, so the transcript scrolls smoothly).
+        let natural = r.measured.get();
+        if r.quiet(now) {
+            r.height = motion::Glide::new(motion::UI);
+        }
+        let target = (natural - s.held).max(0.0);
+        r.height.target(target, now, reduce);
+        let h = r.height.value(now, reduce);
+        r.drawn = h;
+        let moving = r.height.moving(now, reduce);
+        r.idle = if s.done && !moving { r.idle + 1 } else { 0 };
+        if moving || s.moving || r.idle > 0 {
+            MOVING.set(true);
+        }
+        let measured = r.measured.clone();
+        // Done (twice, so the last measure is in): drawn as usual from the next frame, at the same height.
+        if r.idle < 2 {
+            self.reveals.insert(key.to_owned(), r);
+        }
+        // The list gives it `h`; it draws up to `SLACK` past that (a line fades in once its slot is nearly open,
+        // so nothing is uncovered by a moving edge), and the transparent line being written stays clipped.
+        div()
+            .h(px(h))
+            .relative()
+            .child(div().absolute().top_0().left_0().right_0().h(px(h + reveal::SLACK)).overflow_hidden().child(
+                div().relative().child(body).child(
+                    gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full(),
+                ),
+            ))
+            .into_any_element()
     }
 
     // ---- bottom: notice, card, tray, composer, footer ----
@@ -2236,10 +2317,19 @@ impl AgentPane {
     }
 }
 
-fn render_detail(key: &str, detail: &Detail) -> AnyElement {
+/// Lines that don't wrap, as one column as wide as the longest (so a box scrolls sideways to it); `scroller`
+/// lays them out in a row that keeps their own height.
+fn nowrap_lines<'a>(lines: impl Iterator<Item = (&'a str, Option<u32>)>) -> gpui::Div {
+    div().flex_none().min_w_full().flex().flex_col().children(lines.map(|(l, color)| {
+        div().whitespace_nowrap().when_some(color, |el, c| el.text_color(rgb(c))).child(if l.is_empty() { " ".to_owned() } else { l.to_owned() })
+    }))
+}
+
+fn render_detail(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
     let muted = theme::muted();
+    let id = format!("detail-{key}");
     let base = div()
-        .id(gpui::ElementId::Name(format!("detail-{key}").into()))
+        .id(gpui::ElementId::Name(id.clone().into()))
         .ml(px(24.0))
         .mt(px(2.0))
         .mb(px(6.0))
@@ -2250,17 +2340,16 @@ fn render_detail(key: &str, detail: &Detail) -> AnyElement {
         .text_size(px(12.0))
         .line_height(px(17.0))
         .text_color(rgb(muted))
-        .max_h(px(240.0))
-        .overflow_y_scroll();
+        .max_h(px(240.0));
     match detail {
-        Detail::Text(text) => base.child(text.clone()).into_any_element(),
-        Detail::Mono(text) => base
-            .font_family(mono())
-            .children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_owned() } else { l.to_owned() })))
+        Detail::Text(text) => scroll.scroller(&id, base, false).child(text.clone()).into_any_element(),
+        Detail::Mono(text) => scroll
+            .scroller(&id, base.flex().items_start().font_family(mono()), true)
+            .child(nowrap_lines(text.lines().map(|l| (l, None))))
             .into_any_element(),
-        Detail::Diff(text) => base
-            .font_family(mono())
-            .children(text.lines().map(|l| {
+        Detail::Diff(text) => scroll
+            .scroller(&id, base.flex().items_start().font_family(mono()), true)
+            .child(nowrap_lines(text.lines().map(|l| {
                 let color = if l.starts_with('+') && !l.starts_with("+++") {
                     theme::success()
                 } else if l.starts_with('-') && !l.starts_with("---") {
@@ -2268,20 +2357,40 @@ fn render_detail(key: &str, detail: &Detail) -> AnyElement {
                 } else {
                     muted
                 };
-                div().whitespace_nowrap().text_color(rgb(color)).child(if l.is_empty() { " ".to_owned() } else { l.to_owned() })
-            }))
+                (l, Some(color))
+            })))
             .into_any_element(),
     }
 }
 
-/// Styled runs of an inline: emphasis, code, links, and the fade of fresh text.
-fn inline_text(id: &str, inline: &Inline, fades: &[(usize, f32)], caret: bool) -> AnyElement {
-    let mut text = inline.text.clone();
-    let caret_at = caret.then(|| {
-        let at = text.len();
-        text.push('▍');
-        at
-    });
+/// A streaming message's line reveal while drawing its blocks not yet fully shown: each leaf's line
+/// starts and opacities (`reveal::Shown::lines`; a leaf not in it shows), and where each leaf's wrapped
+/// lines are reported after layout.
+struct Fx<'a> {
+    lines: &'a std::collections::HashMap<String, Vec<(usize, f32)>>,
+    wraps: &'a std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, reveal::Wrap>>>,
+}
+
+/// Opacity at `at` (a byte or line index) of a leaf's `lines`: shown when it isn't revealing.
+fn line_alpha(lines: Option<&[(usize, f32)]>, at: usize) -> f32 {
+    lines.map_or(1.0, |l| l.iter().rev().find(|(s, _)| *s <= at).map_or(0.0, |(_, a)| *a))
+}
+
+/// Where each wrapped line of a laid out text starts.
+fn wrap_of(layout: &gpui::TextLayout) -> reveal::Wrap {
+    let mut starts = Vec::new();
+    let mut at = 0;
+    for line in layout.line_layouts() {
+        starts.push(at);
+        starts.extend(line.wrap_boundaries.iter().map(|b| at + line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index));
+        at += line.len() + 1;
+    }
+    reveal::Wrap { starts, line_h: f32::from(layout.line_height()) }
+}
+
+/// Styled runs of an inline: emphasis, code, links, and the opacity of each wrapped line while it's revealed.
+fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u32) -> (AnyElement, gpui::TextLayout) {
+    let text = inline.text.clone();
     let len = text.len();
     let mut cuts: Vec<usize> = vec![0, len];
     for (r, _) in &inline.spans {
@@ -2290,23 +2399,21 @@ fn inline_text(id: &str, inline: &Inline, fades: &[(usize, f32)], caret: bool) -
     for (r, _) in &inline.links {
         cuts.extend([r.start, r.end]);
     }
-    // Fades count back from the end of the text (before the caret).
-    let body = caret_at.unwrap_or(len);
-    let fade_cuts: Vec<(usize, f32)> = fades
-        .iter()
-        .map(|(from_end, alpha)| {
-            let mut at = body.saturating_sub(*from_end);
-            while !text.is_char_boundary(at) {
-                at += 1;
-            }
-            (at, *alpha)
-        })
-        .collect();
-    cuts.extend(fade_cuts.iter().map(|(at, _)| *at));
-    cuts.extend(caret_at);
+    // Line starts come from the last layout: kept inside the text, on a char boundary.
+    let lines: Option<Vec<(usize, f32)>> = lines.map(|l| {
+        l.iter()
+            .map(|(at, alpha)| {
+                let mut at = (*at).min(len);
+                while !text.is_char_boundary(at) {
+                    at += 1;
+                }
+                (at, *alpha)
+            })
+            .collect()
+    });
+    cuts.extend(lines.iter().flatten().map(|(at, _)| *at));
     cuts.sort_unstable();
     cuts.dedup();
-    let fg = theme::foreground();
     let mut highlights = Vec::new();
     let mut code_ranges = Vec::new();
     for w in cuts.windows(2) {
@@ -2316,8 +2423,7 @@ fn inline_text(id: &str, inline: &Inline, fades: &[(usize, f32)], caret: bool) -
         }
         let style = inline.spans.iter().find(|(r, _)| r.start <= a && b <= r.end).map(|(_, s)| *s).unwrap_or_default();
         let link = inline.links.iter().any(|(r, _)| r.start <= a && b <= r.end);
-        let fade = fade_cuts.iter().rev().find(|(at, _)| *at <= a).map(|(_, alpha)| *alpha);
-        let is_caret = caret_at == Some(a);
+        let alpha = line_alpha(lines.as_deref(), a);
         let mut h = HighlightStyle::default();
         if style.bold {
             h.font_weight = Some(FontWeight::SEMIBOLD);
@@ -2329,98 +2435,151 @@ fn inline_text(id: &str, inline: &Inline, fades: &[(usize, f32)], caret: bool) -
             h.strikethrough = Some(StrikethroughStyle { thickness: px(1.0), color: None });
         }
         if style.code {
-            h.background_color = Some(rgb(faint()).into());
+            h.background_color = Some(hsla(faint(), alpha));
             code_ranges.push((a..b, mono()));
         }
-        let mut color = if link { theme::accent() } else { fg };
+        let color = if link { theme::accent() } else { fg };
         if link {
             h.underline = Some(UnderlineStyle { thickness: px(1.0), color: None, wavy: false });
         }
-        if is_caret {
-            color = theme::muted();
+        if link {
+            h.color = Some(hsla(color, 1.0));
         }
-        if link || is_caret || fade.is_some() {
-            h.color = Some(hsla(color, if is_caret { 1.0 } else { fade.unwrap_or(1.0) }));
+        // Not a transparent colour: gpui blends a highlight's colour over the text's, so only `fade_out` fades it.
+        if alpha < 1.0 {
+            h.fade_out = Some(1.0 - alpha);
         }
         if h != HighlightStyle::default() {
             highlights.push((a..b, h));
         }
     }
     let styled = StyledText::new(text).with_highlights(highlights).with_font_family_overrides(code_ranges);
+    let layout = styled.layout().clone();
     if inline.links.is_empty() {
-        return styled.into_any_element();
+        return (styled.into_any_element(), layout);
     }
     let ranges: Vec<_> = inline.links.iter().map(|(r, _)| r.clone()).collect();
     let urls: Vec<String> = inline.links.iter().map(|(_, u)| u.clone()).collect();
-    InteractiveText::new(gpui::ElementId::Name(id.to_owned().into()), styled)
+    let el = InteractiveText::new(gpui::ElementId::Name(id.to_owned().into()), styled)
         .on_click(ranges, move |ix, _, cx| cx.open_url(&urls[ix]))
-        .into_any_element()
+        .into_any_element();
+    (el, layout)
 }
 
-fn render_block(id: &str, block: &Block, tail: Option<(&[(usize, f32)], bool)>) -> AnyElement {
-    let (fades, caret) = tail.unwrap_or((&[], false));
-    match block {
-        Block::Para(inline) => div().pb(px(8.0)).line_height(px(21.0)).child(inline_text(id, inline, fades, caret)).into_any_element(),
-        Block::Heading(level, inline) => div()
-            .pt(px(8.0))
-            .pb(px(6.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_size(px(match level {
-                1 => 18.0,
-                2 => 16.0,
-                _ => 14.5,
-            }))
-            .child(inline_text(id, inline, fades, caret))
-            .into_any_element(),
-        Block::Code { text, .. } => div()
-            .id(gpui::ElementId::Name(id.to_owned().into()))
-            .mb(px(10.0))
-            .px(px(12.0))
-            .py(px(10.0))
-            .continuous(8.0)
-            .bg(rgb(faint()))
-            .font_family(mono())
-            .text_size(px(12.5))
-            .line_height(px(18.0))
-            .overflow_x_scroll()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_owned() } else { l.to_owned() }))),
+/// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
+fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
+    let lines = fx.and_then(|f| f.lines.get(id)).map(Vec::as_slice);
+    // A revealed text reports its wrapped lines once laid out.
+    let text = |inline: &Inline| {
+        let (el, layout) = inline_text(id, inline, lines, fg);
+        let report = fx.map(|f| {
+            let (wraps, id) = (f.wraps.clone(), id.to_owned());
+            gpui::canvas(
+                move |_, _, _| {
+                    wraps.borrow_mut().insert(id, wrap_of(&layout));
+                },
+                |_, _, _, _| {},
             )
-            .into_any_element(),
-        Block::List { start, items } => {
-            let last = items.len().saturating_sub(1);
+            .absolute()
+            .size_0()
+        });
+        (el, report)
+    };
+    match block {
+        Block::Para(inline) => {
+            let (el, report) = text(inline);
+            div().relative().pb(px(8.0)).line_height(px(21.0)).child(el).children(report).into_any_element()
+        }
+        Block::Heading(level, inline) => {
+            let (el, report) = text(inline);
             div()
+                .relative()
+                .pt(px(8.0))
                 .pb(px(6.0))
-                .flex()
-                .flex_col()
-                .children(items.iter().enumerate().map(|(i, blocks)| {
-                    let marker = start.map_or_else(|| "•".to_owned(), |s| format!("{}.", s + i as u64));
-                    let inner_last = blocks.len().saturating_sub(1);
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .child(div().flex_none().min_w(px(16.0)).text_color(rgb(theme::muted())).line_height(px(21.0)).child(marker))
-                        .child(div().flex_1().min_w_0().flex().flex_col().children(blocks.iter().enumerate().map(|(j, b)| {
-                            let t = (i == last && j == inner_last).then_some((fades, caret));
-                            render_block(&format!("{id}-{i}-{j}"), b, t)
-                        })))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(match level {
+                    1 => 18.0,
+                    2 => 16.0,
+                    _ => 14.5,
                 }))
+                .child(el)
+                .children(report)
                 .into_any_element()
         }
+        // A revealed box draws only its complete lines: nothing before the first; long lines scroll sideways.
+        Block::Code { .. } if lines.is_some_and(<[_]>::is_empty) => div().into_any_element(),
+        Block::Code { text, .. } => {
+            let el = div()
+                .id(gpui::ElementId::Name(id.to_owned().into()))
+                .mb(px(10.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .continuous(8.0)
+                .bg(rgb(faint()))
+                .font_family(mono())
+                .text_size(px(12.5))
+                .line_height(px(reveal::CODE_LINE))
+                .flex()
+                .items_start()
+                .when(lines.is_some(), |el| el.opacity(line_alpha(lines, 0)));
+            scroll
+                .scroller(id, el, true)
+                .child(div().flex_none().min_w_full().flex().flex_col().children(
+                    text.lines().take(lines.map_or(usize::MAX, <[_]>::len)).enumerate().map(|(v, l)| {
+                        div().whitespace_nowrap().when(v > 0 && lines.is_some(), |el| el.opacity(line_alpha(lines, v))).child(if l.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            l.to_owned()
+                        })
+                    }),
+                ))
+                .into_any_element()
+        }
+        Block::List { start, items } => div()
+            .pb(px(6.0))
+            .flex()
+            .flex_col()
+            .children(items.iter().enumerate().map(|(i, blocks)| {
+                let marker = start.map_or_else(|| "•".to_owned(), |s| format!("{}.", s + i as u64));
+                // A revealed item's marker comes in with its first line.
+                let shown = match fx {
+                    Some(_) if blocks.is_empty() => 0.0,
+                    Some(f) => f.lines.get(&format!("{id}-{i}-0")).map_or(1.0, |l| l.first().map_or(0.0, |(_, a)| *a)),
+                    None => 1.0,
+                };
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(16.0))
+                            .text_color(rgb(theme::muted()))
+                            .line_height(px(21.0))
+                            .when(shown < 1.0, |el| el.opacity(shown))
+                            .child(marker),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .children(blocks.iter().enumerate().map(|(j, b)| render_block(&format!("{id}-{i}-{j}"), b, fx, fg, scroll))),
+                    )
+            }))
+            .into_any_element(),
         Block::Quote(blocks) => div()
             .mb(px(8.0))
             .pl(px(12.0))
             .border_l_2()
             .border_color(rgb(theme::border()))
             .text_color(rgb(theme::muted()))
-            .children(
-                blocks.iter().enumerate().map(|(i, b)| render_block(&format!("{id}-q{i}"), b, (i + 1 == blocks.len()).then_some((fades, caret)))),
-            )
+            .children(blocks.iter().enumerate().map(|(i, b)| render_block(&format!("{id}-q{i}"), b, fx, theme::muted(), scroll)))
             .into_any_element(),
-        Block::Rule => div().my(px(10.0)).h(px(1.0)).bg(rgb(theme::border())).into_any_element(),
+        Block::Rule => {
+            div().my(px(10.0)).h(px(1.0)).bg(rgb(theme::border())).when(lines.is_some(), |el| el.opacity(line_alpha(lines, 0))).into_any_element()
+        }
     }
 }
 

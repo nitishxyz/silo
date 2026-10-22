@@ -59,6 +59,9 @@ struct Builder {
     stack: Vec<Frame>,
     style: [u32; 4],
     links: Vec<(usize, String)>,
+    /// Source offset of the top-level block being built, and of each one built.
+    at: usize,
+    starts: Vec<usize>,
 }
 
 impl Builder {
@@ -67,6 +70,9 @@ impl Builder {
     }
 
     fn add(&mut self, block: Block) {
+        if self.stack.len() == 1 {
+            self.starts.push(self.at);
+        }
         match self.stack.last_mut() {
             Some(Frame::Blocks(blocks)) => blocks.push(block),
             Some(Frame::List(_, items)) => {
@@ -128,10 +134,20 @@ impl Builder {
     }
 }
 
+/// All of `source` at once (the view parses through [`Doc`]).
+#[cfg(test)]
 #[must_use]
 pub fn parse(source: &str) -> Vec<Block> {
-    let mut b = Builder { stack: vec![Frame::Blocks(Vec::new())], style: [0; 4], links: Vec::new() };
-    for event in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH) {
+    parse_top(source).0
+}
+
+/// The blocks of `source` and where each top-level one starts.
+fn parse_top(source: &str) -> (Vec<Block>, Vec<usize>) {
+    let mut b = Builder { stack: vec![Frame::Blocks(Vec::new())], style: [0; 4], links: Vec::new(), at: 0, starts: Vec::new() };
+    for (event, range) in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+        if b.stack.len() == 1 && matches!(event, Event::Start(_) | Event::Rule) {
+            b.at = range.start;
+        }
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
@@ -245,8 +261,52 @@ pub fn parse(source: &str) -> Vec<Block> {
         }
     }
     match b.stack.pop() {
-        Some(Frame::Blocks(blocks)) => blocks,
-        _ => Vec::new(),
+        Some(Frame::Blocks(blocks)) => (blocks, b.starts),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+/// A growing (streaming) text's blocks: completed top-level blocks keep
+/// their identity and are never parsed again, only the last (open) one is.
+#[derive(Debug, Default)]
+pub struct Doc {
+    src: String,
+    /// `src[..stable_end]` parsed into `blocks[..stable]`, final.
+    stable_end: usize,
+    stable: usize,
+    blocks: Vec<Block>,
+}
+
+impl Doc {
+    /// Parse `text`; whatever it shares with the last text's completed blocks is kept.
+    pub fn update(&mut self, text: &str) {
+        if text == self.src {
+            return;
+        }
+        if !text.starts_with(&self.src[..self.stable_end]) {
+            *self = Self::default();
+        }
+        let open = &text[self.stable_end..];
+        let (mut tail, starts) = parse_top(open);
+        self.blocks.truncate(self.stable);
+        // A block followed by another one is complete: it's final from here on.
+        if tail.len() > 1 {
+            let cut = open[..starts[tail.len() - 1]].rfind('\n').map_or(0, |i| i + 1);
+            if cut > 0 {
+                let last = tail.pop().expect("two or more");
+                self.stable += tail.len();
+                self.stable_end += cut;
+                self.blocks.append(&mut tail);
+                tail.push(last);
+            }
+        }
+        self.blocks.append(&mut tail);
+        self.src.clear();
+        self.src.push_str(text);
+    }
+
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
     }
 }
 
@@ -306,5 +366,41 @@ mod tests {
         }
         let blocks = parse("Here:\n\n```sh\nls -la\n");
         assert_eq!(blocks[1], Block::Code { lang: Some("sh".into()), text: "ls -la".into() });
+    }
+
+    const REPLY: &str = "# Plan\n\nFirst **bold** and `code`,\nwrapped on.\n\n- one\n- two *it*\n\n  more of two\n\n1. first\n2. second\n\n\
+                         ```rust\nfn x() {\n    1\n}\n```\n\n> quoted\n> on\n\n---\n\nSetext\n---\n\nEnd.\n";
+
+    #[test]
+    fn doc_streamed_in_any_steps_matches_a_full_parse() {
+        for step in [1, 3, 7, 40] {
+            let mut doc = Doc::default();
+            let mut end = 0;
+            while end < REPLY.len() {
+                end = (end + step).min(REPLY.len());
+                while !REPLY.is_char_boundary(end) {
+                    end += 1;
+                }
+                doc.update(&REPLY[..end]);
+                assert_eq!(doc.blocks(), parse(&REPLY[..end]), "step {step} at {end}");
+            }
+            assert!(doc.stable > 5, "completed blocks were kept: {}", doc.stable);
+        }
+    }
+
+    #[test]
+    fn doc_keeps_completed_blocks_and_parses_only_the_open_one() {
+        let mut doc = Doc::default();
+        doc.update("Para one.\n\n- a\n");
+        assert_eq!((doc.stable, doc.stable_end), (1, 11));
+        let first = doc.blocks()[0].clone();
+        doc.update("Para one.\n\n- a\n- b\n\n```\ncode");
+        assert_eq!(doc.blocks()[0], first);
+        assert_eq!((doc.stable, doc.stable_end), (2, 20), "the list is complete once the fence opens");
+        assert_eq!(doc.blocks()[2], Block::Code { lang: None, text: "code".into() });
+        // Not a continuation (an edit, a retry): parsed afresh.
+        doc.update("Other.");
+        assert_eq!(doc.blocks(), parse("Other."));
+        assert_eq!(doc.stable, 0);
     }
 }

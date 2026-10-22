@@ -10,7 +10,9 @@ mod client;
 mod editor;
 mod markdown;
 mod pill_input;
+mod reveal;
 mod rows;
+mod scroll;
 mod signin;
 mod subagents;
 mod transcript;
@@ -80,8 +82,6 @@ const ENTER: Duration = Duration::from_millis(320);
 /// A finished group stays open this long before it folds.
 const FOLD_DELAY: Duration = Duration::from_millis(500);
 const FOLD: Duration = Duration::from_millis(320);
-/// New words fade in over this long.
-const FADE: Duration = Duration::from_millis(320);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Overlay {
@@ -244,6 +244,10 @@ pub struct AgentPane {
     list: ListState,
     /// The pane's width as last laid out: narrow panes drop secondary items.
     width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The composer column's height as last laid out (0 when hidden), and the one the list was last padded for:
+    /// the column floats over the transcript, whose end is padded clear of it.
+    composer_h: std::rc::Rc<std::cell::Cell<f32>>,
+    composer_pad: f32,
     /// Something changed below while scrolled up.
     unseen: bool,
     editor: Entity<Editor>,
@@ -277,8 +281,10 @@ pub struct AgentPane {
     details: HashSet<String>,
     /// Lines shown in the hovered live group (auto-scroll pauses).
     frozen: Option<(String, usize)>,
-    /// Arrival marks of the streaming text (byte length, when).
-    marks: Option<(String, Vec<(usize, Instant)>)>,
+    /// Line reveal of streaming text rows, by row key (kept until the last line faded in).
+    reveals: HashMap<String, reveal::Reveal>,
+    /// Scroll chaining of the boxes inside the transcript (details, code blocks).
+    scroll: std::rc::Rc<scroll::Inner>,
     /// Images attached to the next prompt.
     attachments: Vec<Attachment>,
     /// Bars above the composer by key: expanded motion, and when each appeared.
@@ -312,8 +318,8 @@ pub struct AgentPane {
     fresh: bool,
     usage_seen: Option<u64>,
     context: Option<u64>,
-    /// Parsed assistant text by row key.
-    parsed: HashMap<String, (String, std::rc::Rc<Vec<markdown::Block>>)>,
+    /// Parsed assistant text by row key (only a streaming text's open block parses again).
+    parsed: HashMap<String, markdown::Doc>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -351,6 +357,7 @@ impl AgentPane {
         // The rows, then the activity row.
         let list = ListState::new(1, ListAlignment::Top, px(600.0));
         list.set_follow_mode(gpui::FollowMode::Tail);
+        let scroll = scroll::Inner::new(list.clone());
         let mut pane = Self {
             block_id,
             focus,
@@ -359,6 +366,8 @@ impl AgentPane {
             moving: None,
             rt,
             width: std::rc::Rc::default(),
+            composer_h: std::rc::Rc::default(),
+            composer_pad: 0.0,
             // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.
             epoch: Instant::now().checked_sub(Duration::from_secs(86_400)).unwrap_or_else(Instant::now),
             conn: Conn::Connecting,
@@ -406,7 +415,8 @@ impl AgentPane {
             toggled: HashSet::new(),
             details: HashSet::new(),
             frozen: None,
-            marks: None,
+            reveals: HashMap::new(),
+            scroll,
             attachments: Vec::new(),
             bars: HashMap::new(),
             bar_shown: HashMap::new(),
@@ -535,14 +545,15 @@ impl AgentPane {
         window.focus(&focus, cx);
     }
 
+    /// The pane's clock: wall time (ms since the Unix epoch), the clock otto
+    /// records in, so live and recorded times are one timeline.
     fn now(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
 
     /// A time otto reports (ms since the Unix epoch) on the pane's clock.
-    fn pane_ms(&self, at: i64) -> u64 {
-        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-        self.now().saturating_sub(u64::try_from(wall.saturating_sub(at)).unwrap_or(0))
+    fn pane_ms(at: i64) -> u64 {
+        u64::try_from(at).unwrap_or(0)
     }
 
     /// Run `work` on the shared connection (tokio), then `done` on the pane.
@@ -624,7 +635,8 @@ impl AgentPane {
                 {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
                     this.sessions = sessions;
-                    this.track_subagents(cx);
+                    this.track_subagents();
+                    cx.notify();
                 }
             },
         );
@@ -658,7 +670,8 @@ impl AgentPane {
         self.streams.clear();
         self.card = None;
         self.card_anim = crate::motion::Toggle::new(false, crate::motion::UI);
-        self.marks = None;
+        self.reveals.clear();
+        self.scroll.clear();
         self.parsed.clear();
         self.usage_seen = None;
         self.context = None;
@@ -737,6 +750,7 @@ impl AgentPane {
         let sent = running && self.sent_at.take().is_some();
         if self.running != running {
             self.running = running;
+            self.subs.turn(running, Instant::now());
             if running && !sent {
                 self.running_since = Some(started.unwrap_or_else(|| self.now()));
             }
@@ -752,8 +766,10 @@ impl AgentPane {
         let waiting =
             m.pending_approvals.iter().map(|a| (a.call_id.clone(), false)).chain(m.pending_questions.iter().map(|q| (q.call_id.clone(), true)));
         // Calls already running when the session loaded keep otto's start, so their clocks match the parent's.
-        let starts: Vec<(String, u64)> = m.tools.iter().filter_map(|(id, t)| t.started_at.map(|at| (id.clone(), self.pane_ms(at)))).collect();
+        let starts: Vec<(String, u64)> = m.tools.iter().filter_map(|(id, t)| t.started_at.map(|at| (id.clone(), Self::pane_ms(at)))).collect();
         self.times.seed(starts);
+        // Steps that ran before the session loaded: otto's recorded times.
+        self.times.record(&m.items, &m.part_times);
         self.times.observe(&m.items, &m.tools, running, waiting.collect(), now);
         let cwd = if m.info.cwd.is_empty() { self.cwd.clone() } else { Some(m.info.cwd.clone()) };
         let rows = transcript::build(&transcript::Input {
@@ -790,7 +806,7 @@ impl AgentPane {
             if matches!(status, AgentStatus::Done | AgentStatus::Idle) && input() { AgentStatus::Blocked { question: false } } else { status };
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
         self.set_status(status, cx);
-        self.set_running(running, m.turn_started_at.map(|at| self.pane_ms(at)));
+        self.set_running(running, m.turn_started_at.map(Self::pane_ms));
         self.update.reconcile(&m.info);
         if !m.info.title.is_empty() && m.info.title != self.title {
             self.title.clone_from(&m.info.title);
@@ -847,7 +863,6 @@ impl AgentPane {
         if handoff.is_some() {
             self.activity = crate::motion::Toggle::new(false, crate::motion::UI);
         }
-        let mut stream = None;
         for row in &self.rows {
             match row {
                 Row::Group(g) if g.live => {
@@ -860,21 +875,15 @@ impl AgentPane {
                         self.streams.retain(|k, _| !g.lines.iter().any(|l| l.key == *k));
                     }
                 }
-                Row::Text { key, text, streaming: true } => stream = Some((key.clone(), text.len())),
+                // A message streaming before it was seen shows what's there at once.
+                Row::Text { key, streaming: true, .. } => {
+                    self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
+                }
                 Row::Text { .. } | Row::User { .. } => {}
             }
         }
-        self.marks = stream.map(|(key, len)| {
-            let mut marks = match self.marks.take() {
-                Some((k, marks)) if k == key => marks,
-                _ => Vec::new(),
-            };
-            marks.retain(|(_, at)| now.duration_since(*at) < FADE * 2);
-            if primed && len > 0 {
-                marks.push((len, now));
-            }
-            (key, marks)
-        });
+        let rows = &self.rows;
+        self.reveals.retain(|k, _| rows.iter().any(|r| r.key() == k));
     }
 
     // ---- actions ----

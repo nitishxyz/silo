@@ -64,10 +64,12 @@ See §8 for status.
   waiting for an approval or an answer counts; a group's `Worked for` spans its first step's start to its last
   step's end. A live header shows the turn's clock (`Working for` since the turn started, as the activity row it
   replaces did), so it can read more than the group's `Worked for`. While it waits the line reads `Needs approval`
-  (`Needs your answer`) with a lock (question) icon, its subject muted on the right and no timer. Steps of a reloaded
-  session have no times, except what is still running: a session opened mid-run (a sub-agent's block) takes the
-  turn's start from `SessionView.turn_started_at` and each running call's from `RunningToolCall.started_at`, so its
-  `Working for` and line clocks match what the parent's bar implies.
+  (`Needs your answer`) with a lock (question) icon, its subject muted on the right and no timer. The pane's clock is
+  wall time. Steps that ran before the session loaded (an app or daemon restart, an old session, a sub-agent opened
+  mid-run) take otto's recorded times, `SessionView.part_times` (`otto_proto::timing`: from the journal, by the same
+  rules: reasoning from its first delta until what follows streams, a call from its first input or its item until its
+  result or the turn's end), so `Worked for`, line times and `Thought for` read as they did live; the turn's start
+  comes from `SessionView.turn_started_at` and running calls' from `RunningToolCall.started_at`.
 - **Line kinds:** reasoning (`Thought for Ns`), read/ls/tree/glob/search (`Read x`, `Searched for q  N results`),
   shell (`Ran cmd  1.2s` / `Failed to run cmd  exit N`), edit/write/multiedit/apply_patch (`Edited f  +a −d`),
   web_fetch, silo terminal/browser tools (`Opened browser localhost:3000  ↗`), subagents, ask_user, errors. Running
@@ -81,7 +83,17 @@ See §8 for status.
 - **Expand `›`:** inline detail under the line: command output tail, diff, tool output, in muted mono with a faintly
   lighter background (no border). **Jump `↗`:** for silo tool calls that name a `block_id`, focus that block.
 - **Assistant text:** markdown (paragraphs, headings, lists, inline code, fenced code with mono font, links,
-  bold/italic). Streams with a `▍` caret; newly arrived words fade in.
+  bold/italic). Streams line by line (`agent/reveal.rs`): a wrapped line shows once complete (the next line or
+  block began; a paragraph's last line at its blank line, a heading's or code line's at its newline; all of it when
+  the stream ends); the message's height glides (`Glide`) open for it (what it measured less the line being
+  written, so at the bottom the transcript scrolls smoothly), and once the height drawn is within 4 of its slot
+  (and at least 60 ms after it completed) it fades in (`UI_FAST`) right where it ends up: nothing slides out from
+  under a clip, and the message may draw at most 4 past its height (the gap above the activity row). A burst is
+  staggered 40 ms apart, never more than 160 ms behind; a code block draws only its complete lines (nothing before
+  the first), a list marker and an item come in with their first line. Line opacity is a highlight `fade_out`: gpui
+  blends a highlight's colour over the text's, so a transparent colour does nothing.
+  Parsing goes through `markdown::Doc`: a top-level block followed by another is final, only the open last one
+  parses again (at most once a frame). Reduce Motion: same reveal, no fade or glide.
 - **Hover actions** under a finished answer: copy, retry.
 - **Approvals and questions:** a card pinned above the composer (the one other framed element), keyboard: ⏎ allow,
   esc deny, plus "Always" when the decision supports it; questions show options + free text.
@@ -90,6 +102,11 @@ See §8 for status.
   or detail doesn't change following (at the bottom it keeps following; scrolled up, the rows above stay put). "At
   the bottom" is the scroll position (within 3 pt of the end, `view::Tail`), not only the list's follow flag: back
   there (scrolled, or content settling) the pill hides, what was new counts as seen, and following resumes.
+  **Inner boxes** (open `›` details, max 240; code blocks) scroll on their own (`agent/scroll.rs`): mono output,
+  diffs and code scroll sideways to their longest line, no scrollbars. A gesture belongs to what it started on: over
+  a box that can scroll that way, the whole gesture (momentum too) moves only the box, even at its edge or once the
+  pointer left it; otherwise only the transcript moves. While a box takes a gesture the transcript doesn't follow
+  its tail; afterwards the usual rules apply (back at the end it follows, else the pill).
 
 ## 4. Composer
 
@@ -131,6 +148,13 @@ Units are points.
   20 between a user message and what follows, 12 between a group and text, trace lines 24 tall (13 text), prose
   13.5/1.55, code 12.5 mono.
 - **Header:** no in-pane top bar; see §4d (the silo pane header carries the session controls).
+- **Composer column** (notice, card, bars, pill, footer) floats over the transcript at the pane bottom (absolute,
+  opaque pane background; only it takes the pointer, `occlude`), with a 28 fade above it from the pane background to
+  transparent, so the transcript scrolls under it and fades out instead of being cut. Its height is measured each
+  frame: the transcript's end (the activity row's room) is padded by it plus the fade, so the last row and the
+  activity row scroll clear; a change (the input grows, a bar comes or goes) keeps a transcript at the bottom there.
+  `↓ New activity` sits 8 above the column, empty states centre above it, and inner boxes under it don't take the
+  wheel (`scroll::Inner::set_inset`).
 - **Composer** (bottom, 12 above the pane bottom edge incl. footer): a **pill**: 46 tall single-line, corner radius
   23 (stays 23 when it grows to multi-line, up to 8 lines), fill one step above the pane background, border 1.5 at
   ~45% foreground; focus = border to ~70% foreground, nothing else (no second ring). Left: `more-vertical` 16 at 18
@@ -266,7 +290,8 @@ Units are points.
   the header and older lines stay put while the window grows (once full at 6, they slide up together); the new line
   fades and slides 6 in; a line pushed past the two newest dims with it; the top fade comes in with the 6th line.
   Streaming reasoning eases its height to what it measured and folds away when it ends. A finished step only
-  crossfades its icon. Durations use tabular figures. A changed row is remeasured, not spliced (scroll anchor kept).
+  crossfades its icon. Durations use tabular figures. A changed row is remeasured, not spliced (scroll anchor kept);
+  streaming text is remeasured every frame while its reveal runs (§3 Assistant text).
 - **Errors:** a session that can't be opened says so with a `New session` action (sending starts one); otto's auth
   hints (`run otto-silo auth login …`) become "connect it with /providers"; a turn's `Auth:` error reads "The
   provider didn't accept the sign-in · /providers" (full text in its details).
@@ -305,9 +330,11 @@ Units are points.
   - **Sub-agents:** child sessions (`parent_id` = the shown session) that are busy or waiting, from `session.list`,
     refreshed on otto's `sessions.changed` (coalesced over 150 ms) and when subagent calls change or the turn
   starts/ends; no polling. `bot · N running`, rows spinner (lock + `Needs approval` when waiting; a muted stop square
-  + `Stopped` while a child the user stopped holds its report, `SessionInfo.report_held`; `circle-check` +
-  `Returned` for 8 s once its report went to the parent) · agent · title · status, oldest first, returned last. A
-  row (hover fill, `↗` on hover) opens the child; so does `↗` on a transcript's subagent line.
+  + `Stopped` while a child the user stopped holds its report, `SessionInfo.report_held`, with `Hand back` on hover in
+  the note's place; `circle-check` + `Returned` once its report went to the parent) · agent · title · status, oldest
+  first, returned last. A returned row stays while the parent's turn runs (or, the parent idle, through the turn its
+  report starts) and fades out (opacity and height, 260 ms) when that turn ends. A row (hover fill, `↗` on hover)
+  opens the child; so does `↗` on a transcript's subagent line.
 - **Sub-agent block:** opening a child focuses the agent block already showing it (the server's blocks carry
   `agent.session_id`), else splits a new agent block beside the pane (`block.split` kind agent in its folder, with
   `agent: {session_id, title}` so it shows the child from its first frame), composer focused. It is a normal agent
@@ -315,8 +342,13 @@ Units are points.
   the parent's block, or opens one); the pane header keeps the title but drops History / New Session. The composer takes
   the child over: ⏎ steers it while it runs, Stop/esc stops its turn, a message after that (or after it finished)
   starts a new child turn; approvals, questions and the model/agent/effort pickers apply to the child as in any
-  session. Results still return to the parent (docs/OTTO.md §7.4). Closing the block is only a view change: the
-  child keeps running and reporting, and stays in the parent's bar.
+  session. Results still return to the parent (docs/OTTO.md §7.4). Stopped, it holds its report until the user hands
+  it back: `↑ Hand back` in the strip beside `← Main agent` (or the bar row's), or closing its block
+  (`session.hand_back`); a new message reports with its turn instead. The close is the silo server's: whenever the
+  last agent block showing an otto session goes (block, tab or session closed; any window, device or the CLI),
+  `silo server` calls `session.hand_back` for it once (`Config::agent_closed`); otto refuses sessions holding
+  nothing, and that refusal is dropped quietly. Otherwise closing the block is only a view change: the child keeps
+  running and reporting, and stays in the parent's bar.
 - **Narrow panes** (a split can be 60 wide; `view::Fit`): nothing overlaps; text truncates with `…` and items drop as
   the pane narrows: the plan marker (<440), the provider logo (<340), bars' current item, sub-agent agent names and
   the strip's parent title (<320), effort/image (<270), the composer's `⋮` (<240, the slash menu covers it), labels
@@ -397,18 +429,19 @@ Known gaps:
   with `no_app` until that tab is opened.
 - New session (`/new`, header button) only clears the pane; the server keeps the previous `session_id` until the
   next prompt creates the new session, so a restart in between shows the previous session.
-- A session opened mid-run: running calls and the turn are timed from otto's starts; steps that already finished
-  before the pane opened have no durations (items carry no times), so their group's `Worked for` is missing.
+- Recorded times come from the coalesced journal, so a reloaded step can read up to 50 ms shorter than it did live;
+  a forked session's copied items have none.
 - The effort clamp knows only models in the bundled catalog; an unlisted one gets its provider's common set.
 - No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
   can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
   and attachment chips disappear at once.
 - Sub-agents: an already-open child is found only in the shown silo session (otherwise a new block opens);
-  `Returned` rows only cover children this pane saw running; a child the user stopped and left reports `stopped`
-  only after 2 min idle (`Runtime::subagent_hold`) or the next daemon start; any session with a `parent_id` (forks
-  too, which the app doesn't create today) gets the sub-agent strip; ⌘J in a sub-agent block still opens the switcher.
-  A held report shows `Stopped` in the bar even after the pane reloads; `Returned` still covers only children this
-  pane saw out (running, waiting or held).
+  `Returned` rows only cover children this pane saw out (running, waiting or held), so earlier turns' don't come back
+  after a reload; a held report shows `Stopped` even after a reload. The close hand-back reaches the otto home of the
+  silo server's environment (`OTTO_SILO_HOME`, else the default), so an app pointed at another otto home gets none;
+  with no otto daemon running it is skipped, and otto's next start reports the held turn. Any session with a
+  `parent_id` (forks too, which the app doesn't create today) gets the sub-agent strip; ⌘J in a sub-agent block still
+  opens the switcher.
 - Live motion verified with `SILO_MOTION_SLOWDOWN=12` frames (handoff, arrivals under and past 6 lines, parallel
   arrivals, reasoning + tool, step finish, fold); hover hold, Reduce Motion and slowly streamed reasoning were not
   captured (the offline script streams instantly).

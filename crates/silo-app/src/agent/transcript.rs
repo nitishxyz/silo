@@ -164,11 +164,13 @@ pub fn arrivals(old: &[Row], new: &[Row], seen: impl Fn(&str) -> bool) -> Vec<St
     out
 }
 
-/// When the client saw a step start and finish, in ms since the pane's
-/// epoch. Items carry no timestamps, so durations exist only for steps
-/// seen live; a reloaded session has none. Wall time: a call waiting for an
-/// approval or an answer is timed from when it was called, and a group's
-/// `Worked for` spans its steps (its live header shows the turn's clock).
+/// When a step started and finished, in wall ms (the clock otto records
+/// in). Steps seen live are timed as the client saw them; steps that ran
+/// before the session loaded take otto's recorded times
+/// (`SessionView.part_times`, the same rules from its journal), so a reloaded
+/// session reads as it did live. Wall time: a call waiting for an approval or
+/// an answer is timed from when it was called, and a group's `Worked for`
+/// spans its steps (its live header shows the turn's clock).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     pub start: Option<u64>,
@@ -220,6 +222,27 @@ impl Times {
     /// Calls that were running before this pane saw them, and when they started.
     pub fn seed(&mut self, starts: impl IntoIterator<Item = (String, u64)>) {
         self.starts.extend(starts);
+    }
+
+    /// otto's recorded times of `items`' parts; what this pane timed itself stays.
+    pub fn record(&mut self, items: &[Item], times: &[otto_proto::PartTime]) {
+        if times.is_empty() {
+            return;
+        }
+        let by_id: HashMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
+        for t in times {
+            let Some(part) = by_id.get(t.item_id.as_str()).and_then(|i| i.parts.get(t.part as usize)) else { continue };
+            let key = match part {
+                Part::ToolCall { call_id, .. } => call_id.clone(),
+                _ => format!("{}#{}", t.item_id, t.part),
+            };
+            if self.spans.contains_key(&key) {
+                continue;
+            }
+            let at = |ms: i64| u64::try_from(ms).unwrap_or(0);
+            self.spans.insert(key, Span { start: Some(at(t.started_at)), end: t.finished_at.map(at), seq: self.seq });
+            self.seq += 1;
+        }
     }
 
     fn see(&mut self, key: &str, known: bool, done: bool, now: u64) {
@@ -1691,6 +1714,94 @@ mod tests {
         let g = group_of(&rows[1]);
         assert!(g.summary.starts_with("Worked for 15s"), "{}", g.summary);
         assert_eq!(g.lines[0].desc.as_deref(), Some("15s"));
+    }
+
+    /// What a session shows once it is over: each group's summary and every line's title and time.
+    type Folded = Vec<(String, Vec<(String, Option<String>)>)>;
+    type Frame = (u64, Vec<Item>, HashMap<String, ToolState>, HashMap<String, bool>);
+
+    fn folded(rows: &[Row]) -> Folded {
+        rows.iter()
+            .filter_map(|r| match r {
+                Row::Group(g) => Some((g.summary.clone(), g.lines.iter().map(|l| (l.title.clone(), l.desc.clone())).collect())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reloaded_session_reads_the_times_it_showed_live() {
+        use otto_proto::timing::{Mark, part_times};
+        let shell = || call("c1", "shell", json!({"command": "cargo test"}));
+        let reasoning = |text: &str| Part::Reasoning { summary: None, text: Some(text.into()), opaque: None };
+        let (u, done) = (user("u", "go"), assistant("a", vec![reasoning("hmm"), Part::text("Let me look."), shell()]));
+        let finished = vec![
+            u.clone(),
+            done.clone(),
+            tool_item("r", vec![result("c1", "ok", false)]),
+            assistant("b", vec![reasoning("so"), Part::text("Done.")]),
+        ];
+        // Live, frame by frame (wall ms), as otto journals it.
+        let mut live = Times::live();
+        let tool = |status| HashMap::from([("c1".to_owned(), ToolState { name: "shell".into(), status, ..ToolState::default() })]);
+        let frames: Vec<Frame> = vec![
+            (1_000, vec![u.clone(), assistant("a", vec![])], HashMap::new(), HashMap::new()),
+            (1_100, vec![u.clone(), assistant("a", vec![reasoning("h")])], HashMap::new(), HashMap::new()),
+            (4_100, vec![u.clone(), assistant("a", vec![reasoning("hmm"), Part::text("Let")])], HashMap::new(), HashMap::new()),
+            (4_600, vec![u.clone(), assistant("a", vec![reasoning("hmm"), Part::text("Let me look.")])], tool(ToolStatus::Input), HashMap::new()),
+            // Called, then waiting for an approval: the wait counts.
+            (5_000, vec![u.clone(), done.clone()], tool(ToolStatus::Running), HashMap::from([("c1".to_owned(), false)])),
+            (6_500, vec![u.clone(), done.clone()], tool(ToolStatus::Running), HashMap::new()),
+            (9_000, vec![u.clone(), done.clone()], tool(ToolStatus::Done), HashMap::new()),
+            (9_010, finished[..3].to_vec(), tool(ToolStatus::Done), HashMap::new()),
+            (9_100, [&finished[..3], &[assistant("b", vec![reasoning("s")])][..]].concat(), tool(ToolStatus::Done), HashMap::new()),
+            (
+                9_900,
+                [&finished[..3], &[assistant("b", vec![reasoning("so"), Part::text("Do")])][..]].concat(),
+                tool(ToolStatus::Done),
+                HashMap::new(),
+            ),
+            (10_000, finished.clone(), tool(ToolStatus::Done), HashMap::new()),
+        ];
+        for (at, items, tools, waiting) in &frames {
+            live.observe(items, tools, true, waiting.clone(), *at);
+        }
+        live.observe(&finished, &tool(ToolStatus::Done), false, HashMap::new(), 10_050);
+        // The same run as otto's journal records it.
+        let mark = |kind: &str, at: i64, item: Option<&str>, call: Option<&str>| Mark {
+            kind: kind.into(),
+            at,
+            item_id: item.map(Into::into),
+            call_id: call.map(Into::into),
+        };
+        let marks = [
+            mark("item.started", 1_000, Some("a"), None),
+            mark("reasoning.delta", 1_100, Some("a"), None),
+            mark("reasoning.delta", 3_000, Some("a"), None),
+            mark("text.delta", 4_100, Some("a"), None),
+            mark("tool.input_delta", 4_600, None, Some("c1")),
+            mark("item.done", 5_000, Some("a"), None),
+            mark("tool.call", 5_000, None, Some("c1")),
+            mark("tool.result", 9_000, None, Some("c1")),
+            mark("item.done", 9_010, Some("r"), None),
+            mark("item.started", 9_050, Some("b"), None),
+            mark("reasoning.delta", 9_100, Some("b"), None),
+            mark("text.delta", 9_900, Some("b"), None),
+            mark("item.done", 10_000, Some("b"), None),
+            mark("turn.finished", 10_050, None, None),
+        ];
+        let mut history = Times::default();
+        history.record(&finished, &part_times(&finished, &marks));
+        history.observe(&finished, &HashMap::new(), false, HashMap::new(), 500_000);
+        let at = |times: &Times, tools: &HashMap<String, ToolState>| folded(&build_rows(&finished, tools, Some(TurnStatus::Done), times, 500_000));
+        let seen = at(&live, &tool(ToolStatus::Done));
+        assert_eq!(seen, at(&history, &HashMap::new()), "live and reloaded agree");
+        assert_eq!(seen[0].0, "Thought for 3s");
+        // From the call's first input to the last reasoning's end, the approval wait included.
+        assert_eq!(
+            seen[1],
+            ("Worked for 5s · ran 1 command".into(), vec![("Ran cargo test".into(), Some("4.4s".into())), ("Thought for 1s".into(), None)])
+        );
     }
 
     #[test]
