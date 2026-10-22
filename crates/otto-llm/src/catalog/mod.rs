@@ -28,6 +28,7 @@ const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// are not in models.dev; their models come from the server itself.
 pub const PROVIDERS: [&str; 10] = ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "lmstudio"];
 /// A refreshed feed must contain at least these.
+#[cfg(feature = "client")]
 const REQUIRED: [&str; 4] = ["anthropic", "openai", "google", "xai"];
 type Providers = BTreeMap<String, ModelsDevProvider>;
 
