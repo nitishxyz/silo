@@ -10,7 +10,8 @@
 //   ui-driver drag x1 y1 x2 y2 [shift]
 //   ui-driver click x y [count] [shift]
 //   ui-driver rclick x y
-//   ui-driver scroll x y lines                  (positive = up)
+//   ui-driver scroll x y lines [shift]          (positive = up; shift: shift+wheel as macOS delivers it,
+//                                                  sideways, positive = left)
 //   ui-driver swipe x y dx [steps]              phased trackpad pixel scroll (positive dx = right)
 //   ui-driver pinch x y scale [steps]           trackpad magnify gesture (best effort: private
 //                                                  CGEvent gesture fields; may not reach AppKit)
@@ -248,8 +249,11 @@ case "scroll":
     post(.mouseMoved, CGPoint(x: num(2), y: num(3)))
     usleep(30_000)
     let lines = Int32(args[4])!
+    let shift = args.count > 5 && args[5] == "shift"
     for _ in 0..<abs(lines) {
-        let e = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 1, wheel1: lines > 0 ? 1 : -1, wheel2: 0, wheel3: 0)!
+        let step: Int32 = lines > 0 ? 1 : -1
+        let e = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 2, wheel1: shift ? 0 : step, wheel2: shift ? step : 0, wheel3: 0)!
+        if shift { e.flags = .maskShift }
         e.post(tap: .cghidEventTap)
         usleep(10_000)
     }
@@ -292,7 +296,8 @@ case "pinch":
     magnify(0, 4)
 case "pan":
     // A phased vertical pixel scroll (`pan x y dy [steps]`), then momentum
-    // (kCGScrollWheelEventMomentumPhase: begin 1, continue 2, end 3).
+    // (kCGScrollWheelEventMomentumPhase: begin 1, continue 2, end 3);
+    // `pan x y dy steps x2 y2` moves the pointer to x2 y2 before the momentum.
     post(.mouseMoved, CGPoint(x: num(2), y: num(3)))
     usleep(30_000)
     let steps = args.count > 5 ? Int(args[5])! : 16
@@ -308,6 +313,7 @@ case "pan":
     vertical(0, phase: 1, momentum: 0)
     for _ in 0..<steps { vertical(step, phase: 2, momentum: 0) }
     vertical(0, phase: 4, momentum: 0)
+    if args.count > 7 { post(.mouseMoved, CGPoint(x: num(6), y: num(7))) }
     vertical(step, phase: 0, momentum: 1)
     for i in 0..<10 { vertical(step * Int32(10 - i) / 10, phase: 0, momentum: 2) }
     vertical(0, phase: 0, momentum: 3)
