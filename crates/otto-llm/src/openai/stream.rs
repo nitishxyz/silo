@@ -164,11 +164,13 @@ impl State {
                     "server_error" => 500,
                     _ => 400,
                 };
-                return Err(crate::http::classify_status(
+                let body = serde_json::json!({ "error": error }).to_string();
+                let error = crate::http::classify_status(
                     reqwest::StatusCode::from_u16(status).expect("valid status"),
                     &reqwest::header::HeaderMap::new(),
-                    &error.to_string(),
-                ));
+                    &body,
+                );
+                return Err(LlmError { message: crate::http::provider_message(&body), ..error });
             }
             kind if kind.starts_with("response.web_search_call.") => out.push(E::HostedProgress {
                 call_id: string(&v, "item_id"),

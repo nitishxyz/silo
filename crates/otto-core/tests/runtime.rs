@@ -834,3 +834,80 @@ async fn recover_unknown_without_rerun() {
     assert!(serde_json::to_string(&view.items).unwrap().contains("outcome unknown"));
     assert!(model.requests.lock().unwrap().is_empty());
 }
+
+/// Rules Anthropic `input_schema` and OpenAI function `parameters` both enforce.
+fn schema_problems(name: &str, schema: &serde_json::Value) -> Vec<String> {
+    fn refs<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match v {
+            serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| if k == "$ref" { out.extend(v.as_str()) } else { refs(v, out) }),
+            serde_json::Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+            _ => {}
+        }
+    }
+    let mut problems = vec![];
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        problems.push(format!("{name}: invalid tool name"));
+    }
+    if schema["type"] != "object" {
+        problems.push(format!("{name}: top-level type must be object"));
+    }
+    for key in ["oneOf", "anyOf", "allOf", "not", "enum", "const", "if", "then", "else"] {
+        if schema.get(key).is_some() {
+            problems.push(format!("{name}: top-level {key}"));
+        }
+    }
+    if schema.get("properties").is_some_and(|p| !p.is_object()) {
+        problems.push(format!("{name}: properties must be an object"));
+    }
+    for required in schema["required"].as_array().into_iter().flatten() {
+        if schema["properties"].get(required.as_str().unwrap_or_default()).is_none() {
+            problems.push(format!("{name}: required {required} is not a property"));
+        }
+    }
+    let mut found = vec![];
+    refs(schema, &mut found);
+    for r in found {
+        if !r.strip_prefix('#').is_some_and(|p| p.is_empty() || schema.pointer(p).is_some()) {
+            problems.push(format!("{name}: unresolved $ref {r}"));
+        }
+    }
+    problems
+}
+#[tokio::test]
+async fn every_offered_tool_schema_is_provider_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = ScriptedModel::new(vec![vec![call("load", "load_tools", serde_json::json!({"query":"browser"}))], text("done")]);
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        models: Arc::new(Resolver(model.clone())),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    r.add_tools(otto_silo_tools::tools(otto_silo_tools::Config { home: dir.path().join("silo"), client_name: "otto test".into(), token: None }));
+    let project = r.open_project(dir.path()).await.unwrap();
+    let s = r.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    let requests = model.requests.lock().unwrap().clone();
+    let mut problems = vec![];
+    for def in requests.iter().flat_map(|r| &r.tools) {
+        problems.extend(schema_problems(&def.name, &def.input_schema));
+    }
+    for tool in otto_tools::registry::tools_for_family("openai") {
+        let spec = tool.spec();
+        problems.extend(schema_problems(&spec.name, &spec.input_schema));
+        for p in &spec.presentations {
+            problems.extend(p.input_schema.as_ref().map(|schema| schema_problems(&p.name, schema)).unwrap_or_default());
+        }
+    }
+    let names = |i: usize| requests[i].tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    for name in ["read", "edit", "skill", "subagent", "load_tools", "terminal_run", "notify"] {
+        assert!(names(0).iter().any(|n| n == name), "{name} missing from {:?}", names(0));
+    }
+    assert!(names(1).iter().any(|n| n == "browser_fill_form"), "{:?}", names(1));
+    assert!(problems.is_empty(), "{problems:#?}");
+    r.shutdown().await.unwrap();
+}

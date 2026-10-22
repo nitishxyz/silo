@@ -5527,6 +5527,7 @@ dependencies = [
  "jsonschema",
  "otto-llm",
  "otto-proto",
+ "otto-silo-tools",
  "otto-store",
  "otto-tools",
  "serde_json",

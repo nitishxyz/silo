@@ -134,6 +134,17 @@ pub fn classify_status(status: StatusCode, headers: &HeaderMap, body: &str) -> L
     LlmError::new(class, body).with_status(status.as_u16()).with_retry_after(retry_after(headers))
 }
 
+/// The provider's `message` from an error body (`{"error":{"message"}}`, `{"message"}` or `{"error":"..."}`), else the body.
+#[must_use]
+pub fn provider_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else { return body.trim().to_owned() };
+    let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    text(&value["error"]["message"])
+        .or_else(|| text(&value["message"]))
+        .or_else(|| text(&value["error"]).map(|e| text(&value["error_description"]).map_or_else(|| e.clone(), |d| format!("{e}: {d}"))))
+        .unwrap_or_else(|| body.trim().to_owned())
+}
+
 pub async fn send_with_retry<F>(mut build_request: F, policy: &RetryPolicy, cancel: &CancellationToken) -> Result<Response, LlmError>
 where
     F: FnMut() -> reqwest::RequestBuilder,
@@ -156,7 +167,7 @@ where
                         Err(_) => return Err(LlmError::new(ErrorClass::Timeout, "error response body timed out")),
                     },
                 };
-                classify_status(status, &headers, &body)
+                LlmError { message: provider_message(&body), ..classify_status(status, &headers, &body) }
             }
             Err(error) => network(error),
         };
@@ -215,6 +226,13 @@ mod tests {
         ] {
             assert_eq!(classify_status(StatusCode::from_u16(code).unwrap(), &HeaderMap::new(), body).class, class);
         }
+        let anthropic =
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"tools.24.custom.input_schema: bad"},"request_id":"req_1"}"#;
+        assert_eq!(provider_message(anthropic), "tools.24.custom.input_schema: bad");
+        assert_eq!(provider_message(r#"{"error":{"message":"Invalid schema","type":"invalid_request_error","code":null}}"#), "Invalid schema");
+        assert_eq!(provider_message(r#"{"error":"invalid_grant","error_description":"expired"}"#), "invalid_grant: expired");
+        assert_eq!(provider_message(" upstream down \n"), "upstream down");
+        assert_eq!(provider_message("{}"), "{}");
         let mut headers = HeaderMap::new();
         headers.insert("x-ratelimit-reset-tokens", "1m2.5s".parse().unwrap());
         assert_eq!(retry_after(&headers), Some(Duration::from_millis(62500)));

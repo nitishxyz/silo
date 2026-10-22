@@ -123,7 +123,12 @@ pub(crate) fn walk(input: &Value, cx: &ToolCx, depth: Option<usize>) -> Result<V
         }
     }
     let mut builder = ignore::WalkBuilder::new(root);
-    builder.max_depth(depth).hidden(false).require_git(false).overrides(overrides.build().map_err(|e| ToolError::invalid(e.to_string()))?);
+    builder
+        .max_depth(depth)
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(|e| e.depth() == 0 || e.file_name() != ".git")
+        .overrides(overrides.build().map_err(|e| ToolError::invalid(e.to_string()))?);
     let mut entries = Vec::new();
     for entry in builder.build() {
         if cx.cancel.is_cancelled() {

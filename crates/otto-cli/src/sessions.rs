@@ -316,6 +316,14 @@ impl Renderer {
     fn seed(&mut self, mirror: &SessionMirror) {
         for item in &mirror.items {
             self.text.insert(item.id.clone(), item.text());
+            for part in &item.parts {
+                if let Part::ToolResult { call_id, content, .. } = part {
+                    self.tools.insert(format!("result:{call_id}"), serde_json::to_string(content).unwrap_or_default());
+                }
+            }
+        }
+        for (id, tool) in &mirror.tools {
+            self.tools.insert(id.clone(), format!("{} {:?}", tool.name, tool.status));
         }
     }
     fn render(&mut self, mirror: &SessionMirror, show_reasoning: bool) -> Result<()> {

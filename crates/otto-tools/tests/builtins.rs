@@ -81,6 +81,14 @@ async fn discovery_respects_ignore_and_limits() {
     assert_eq!(out.lines().count(), 2);
     assert!(out.contains("a.rs:1:hello"));
     assert!(search::Search::default().call(json!({"pattern":"["}), cx(d.path())).await.is_err());
+    std::fs::create_dir_all(d.path().join(".git/hooks")).unwrap();
+    std::fs::write(d.path().join(".git/hooks/pre-commit"), "TODO hook\n").unwrap();
+    std::fs::write(d.path().join(".env.example"), "TODO dotfile\n").unwrap();
+    let out = call(&search::Search::default(), json!({"pattern":"TODO"}), d.path()).await.joined_text();
+    assert!(out.contains(".env.example") && !out.contains(".git/"), "{out}");
+    assert!(!call(&ls::Ls::default(), json!({}), d.path()).await.joined_text().contains(".git/"));
+    assert_eq!(call(&search::Search::default(), json!({"pattern":"absent-zz"}), d.path()).await.joined_text(), "No matches\n");
+    assert_eq!(call(&glob::Glob::default(), json!({"pattern":"**/*.zz"}), d.path()).await.joined_text(), "No matches\n");
 }
 #[test]
 fn output_spills_unicode_head_and_tail() {
@@ -146,6 +154,8 @@ async fn shell_output_exit_timeout_cancellation_and_jobs() {
     let out = shell.call(json!({"command":"printf out; printf err >&2; printf \"$OTTO_SILO:$PAGER:$GIT_PAGER\"; exit 7"}), context).await.unwrap();
     assert!(out.is_error);
     assert_eq!(out.metadata["exit_code"], 7);
+    assert!(out.joined_text().ends_with("[exit code 7]"));
+    assert_eq!(call(&shell, json!({"command":"exit 3"}), d.path()).await.joined_text(), "[exit code 3]");
     assert!(out.joined_text().contains("out"));
     assert!(out.joined_text().contains("err"));
     assert!(out.joined_text().contains("1:cat:cat"));
@@ -153,6 +163,7 @@ async fn shell_output_exit_timeout_cancellation_and_jobs() {
     let out = call(&shell, json!({"command":"sleep 10 & wait","timeout_ms":50}), d.path()).await;
     assert!(out.is_error);
     assert_eq!(out.metadata["termination"], "timeout");
+    assert!(out.joined_text().ends_with("[stopped: timeout]"));
     let context = cx(d.path());
     context.cancel.cancel();
     let out = shell.call(json!({"command":"sleep 10"}), context).await.unwrap();

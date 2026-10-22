@@ -4,12 +4,11 @@ use std::{collections::BTreeMap, path::PathBuf};
 fn patch_spec() -> ToolSpec {
     let mut s = spec(
         "apply_patch",
-        "Apply a Codex patch: *** Begin Patch, Add/Update/Delete File sections, and *** End Patch. Update hunks use @@, space-prefixed context, - removals and + additions; optional *** Move to: renames. All hunks are validated before files change. Read files first and provide distinctive context.",
+        "Apply a Codex patch (as input or patch): *** Begin Patch, Add/Update/Delete File sections, and *** End Patch. Update hunks use @@, space-prefixed context, - removals and + additions; optional *** Move to: renames. All hunks are validated before files change. Read files first and provide distinctive context.",
         json!({"input":{"type":"string"},"patch":{"type":"string"}}),
         &[],
         Effects::WRITE,
     );
-    s.input_schema["anyOf"] = json!([{"required":["input"]},{"required":["patch"]}]);
     s.presentations.push(Presentation {
         family: "openai".into(),
         name: "apply_patch".into(),

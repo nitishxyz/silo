@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Tool, ToolErrorKind, ToolOutput, output::Capture};
+use crate::{OutputPart, Tool, ToolErrorKind, ToolOutput, output::Capture};
 use std::{
     collections::BTreeMap,
     process::Stdio,
@@ -260,14 +260,20 @@ async fn run(input: Value, cx: ToolCx, job: Option<Arc<Mutex<JobState>>>) -> Res
     err.abort();
     let mut result = capture.finish(&cx).await?;
     result.metadata["progress_chunks"] = json!(progress_count);
-    if let Some(kind) = stopped {
+    let note = if let Some(kind) = stopped {
         result.is_error = true;
         result.metadata["exit_code"] = Value::Null;
         result.metadata["termination"] = json!(kind);
+        Some(format!("[stopped: {}]", result.metadata["termination"].as_str().unwrap_or("stopped")))
     } else {
         let status = status.ok_or_else(|| ToolError::failed("Missing exit status"))?;
         result.is_error = !status.success();
         result.metadata["exit_code"] = json!(status.code());
+        result.is_error.then(|| status.code().map_or_else(|| "[killed by signal]".into(), |c| format!("[exit code {c}]")))
+    };
+    if let Some(note) = note {
+        result.content.retain(|p| !matches!(p, OutputPart::Text { text } if text.is_empty()));
+        result.content.push(OutputPart::Text { text: note });
     }
     Ok(result)
 }

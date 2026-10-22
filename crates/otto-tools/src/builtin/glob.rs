@@ -19,12 +19,10 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()) && matcher.is_match(e.path().strip_prefix(&root).unwrap_or(e.path())))
         .collect();
     entries.sort_by_cached_key(|e| (std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())), e.path().to_path_buf()));
-    crate::output::limit(
-        entries
-            .into_iter()
-            .take(input.get("max_results").and_then(Value::as_u64).unwrap_or(1000) as usize)
-            .map(|e| format!("{}\n", e.path().display()))
-            .collect(),
-        &cx,
-    )
+    let text: String = entries
+        .into_iter()
+        .take(input.get("max_results").and_then(Value::as_u64).unwrap_or(1000) as usize)
+        .map(|e| format!("{}\n", e.path().display()))
+        .collect();
+    crate::output::limit(if text.is_empty() { "No matches\n".into() } else { text }, &cx)
 }

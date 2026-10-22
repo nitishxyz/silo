@@ -57,5 +57,5 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
             break;
         }
     }
-    crate::output::limit(text, &cx)
+    crate::output::limit(if text.is_empty() { "No matches\n".into() } else { text }, &cx)
 }

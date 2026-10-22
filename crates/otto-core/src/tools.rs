@@ -91,11 +91,19 @@ pub(crate) fn tools(cx: Arc<Context>, loaded: &BTreeSet<String>) -> Vec<Arc<dyn 
         }
         tools.push(Arc::new(SessionTool {
             spec: ToolSpec {
-                name: "load_tools".into(), description,
-                input_schema: json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"}},"query":{"type":"string"}},"anyOf":[{"required":["names"]},{"required":["query"]}]}),
-                output_schema: None, effects: Effects::READ, sensitive: vec![], loading: Loading::Eager,
-                mode: Default::default(), presentations: vec![], source: Default::default(), exclusive: false,
-            }, cx,
+                name: "load_tools".into(),
+                description,
+                input_schema: json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"}},"query":{"type":"string"}}}),
+                output_schema: None,
+                effects: Effects::READ,
+                sensitive: vec![],
+                loading: Loading::Eager,
+                mode: Default::default(),
+                presentations: vec![],
+                source: Default::default(),
+                exclusive: false,
+            },
+            cx,
         }));
     }
     tools
