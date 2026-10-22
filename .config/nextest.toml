@@ -1,0 +1,24 @@
+# cargo nextest: every test in a process of its own, all binaries at once.
+# Doctests do not run here: `cargo test --doc --workspace`.
+
+[profile.default]
+# Report a test as slow after 30 s, kill it after 2 min (e2e's own watchdog
+# aborts at 90 s with a report).
+slow-timeout = { period = "30s", terminate-after = 4 }
+fail-fast = false
+
+[test-groups]
+# Tests asserting wall-clock bounds run one at a time.
+timing = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(silo-latency) | (package(silo-client) & test(/^clipboard::/)) | (package(silo-server) & test(/^status_block::/)) | (package(silo-transport) & test(/^net::/))'
+test-group = 'timing'
+
+# Each starts servers, PTYs and shells: count them as two slots.
+[[profile.default.overrides]]
+filter = 'package(silo-server) | package(silo-client) | package(silo-cli)'
+threads-required = 2
+
+[profile.ci]
+fail-fast = false

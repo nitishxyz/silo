@@ -1,9 +1,7 @@
 //! Differential fuzz: a terminal restored from a snapshot must stay
 //! indistinguishable from its source under the same random VT input.
 
-mod common;
-
-use common::{dump, restore_incrementally, visible};
+use crate::common::{dump, restore_incrementally, visible};
 use silo_vt::{GridSize, KeyEvent, Modifiers, RestoreOptions, TerminalCore, TerminalDefaults, snapshot};
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};

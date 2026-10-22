@@ -2,6 +2,7 @@
 name = "silo-client"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 
 [dependencies]
@@ -23,3 +24,13 @@ sha2 = "0.10"
 [dev-dependencies]
 silo-server.workspace = true
 tracing-subscriber.workspace = true
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"

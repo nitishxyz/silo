@@ -2,6 +2,7 @@
 name = "otto-proto"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 license.workspace = true
 
@@ -16,3 +17,9 @@ serde_json.workspace = true
 schemars.workspace = true
 # Deliberately do not inherit the workspace's native networking features.
 tokio = { version = "1", default-features = false, features = ["io-util", "rt", "sync", "macros"], optional = true }
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"

@@ -2,6 +2,7 @@
 name = "otto-llm"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 license.workspace = true
 
@@ -32,3 +33,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"], option
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"

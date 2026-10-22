@@ -1,10 +1,8 @@
-mod common;
-
 use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 
-use common::TempDir;
+use crate::common::TempDir;
 use silo_transport::{EndpointAddr, Identity, PairTicket, TICKET_PREFIX};
 
 #[test]

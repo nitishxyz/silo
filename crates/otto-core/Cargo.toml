@@ -2,6 +2,7 @@
 name = "otto-core"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 license.workspace = true
 
@@ -23,3 +24,9 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 tempfile.workspace = true
 otto-silo-tools.workspace = true
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"

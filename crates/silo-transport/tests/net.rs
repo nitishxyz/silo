@@ -1,9 +1,7 @@
-mod common;
-
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use common::TempDir;
+use crate::common::TempDir;
 use silo_transport::{Conn, EndpointAddr, Identity, Net, NetOptions, RelayConfig, RemoteConn, TransportAddr, Unreachable};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;

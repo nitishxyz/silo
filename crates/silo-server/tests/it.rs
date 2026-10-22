@@ -1,0 +1,16 @@
+//! The integration tests, one module per file, in one binary.
+
+mod browser;
+mod close_guard;
+mod compat;
+mod handoff_block;
+mod lifecycle;
+mod line_mode;
+mod persist;
+mod remote;
+mod share;
+mod status_api;
+mod status_block;
+mod stream;
+mod tunnel;
+mod upgrade;

@@ -2,6 +2,7 @@
 name = "silo-cli"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 
 [[bin]]
@@ -30,3 +31,9 @@ tracing-subscriber.workspace = true
 rustix.workspace = true
 libc.workspace = true
 clap = { version = "4", features = ["derive"] }
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"

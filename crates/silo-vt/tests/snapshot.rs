@@ -1,6 +1,4 @@
-mod common;
-
-use common::{dump, restore_incrementally, visible};
+use crate::common::{dump, restore_incrementally, visible};
 use silo_vt::{GridSize, RestoreOptions, TerminalCore, snapshot};
 
 fn grid(columns: u16, rows: u16) -> GridSize {

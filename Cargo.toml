@@ -29,7 +29,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs", "process"] }
+# "full": one tokio feature set for every crate, so tokio and everything
+# above it is not rebuilt per feature combination.
+tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
@@ -64,8 +66,14 @@ sha2 = "0.10"
 url = "2"
 tempfile = "3"
 
+# Line tables keep file:line backtraces; full debug info made each test
+# binary link slowly and left gigabytes of objects in target/debug/deps.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.dev.package.gpui]
 opt-level = 3

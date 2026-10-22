@@ -2,6 +2,7 @@
 name = "silo-server"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 
 [dependencies]
@@ -27,3 +28,33 @@ objc2-app-kit = { workspace = true, features = ["NSPasteboard"] }
 [dev-dependencies]
 silo-client.workspace = true
 data-encoding.workspace = true
+
+# One binary for the files in tests/it.rs (one link instead of one
+# per file); files needing a process of their own stay separate.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "sigterm"
+path = "tests/sigterm.rs"
+
+[[test]]
+name = "agent_api"
+path = "tests/agent_api.rs"
+
+[[test]]
+name = "access"
+path = "tests/access.rs"
+
+[[test]]
+name = "agent"
+path = "tests/agent.rs"
+
+[[test]]
+name = "approval"
+path = "tests/approval.rs"
+
+[[test]]
+name = "app_requests"
+path = "tests/app_requests.rs"
