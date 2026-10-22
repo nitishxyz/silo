@@ -1,0 +1,14 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"Check ","reasoning_details":[{"type":"reasoning.text","text":"Check ","format":"anthropic-claude-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-5.5","choices":[{"index":0,"delta":{"content":"","reasoning":"the docs.","reasoning_details":[{"type":"reasoning.text","text":"the docs.","signature":"sig-abc","format":"anthropic-claude-v1","index":0}]},"finish_reason":null}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-5.5","choices":[{"index":0,"delta":{"content":"The answer is 42."},"finish_reason":null}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-5.5","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"end_turn"}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-5.5","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"end_turn"}],"usage":{"prompt_tokens":5000,"completion_tokens":40,"total_tokens":5040,"prompt_tokens_details":{"cached_tokens":4000,"cache_write_tokens":500},"completion_tokens_details":{"reasoning_tokens":10}}}
+
+data: [DONE]
+

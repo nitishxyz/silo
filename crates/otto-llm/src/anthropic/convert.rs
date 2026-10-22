@@ -3,7 +3,14 @@ use crate::{Effort, ErrorClass, LlmError, Media, MediaSource, Part, Reasoning, R
 use serde_json::{Value, json};
 
 pub fn body(req: &Request) -> Result<Value, LlmError> {
-    let native_system = super::supports_mid_system(&req.model);
+    body_for(req, "anthropic")
+}
+/// A Messages body for `provider` (`anthropic`, or an Anthropic-dialect one
+/// such as `minimax`): only its opaque blocks are replayed, and Anthropic
+/// betas (mid-conversation system, compaction) apply to Anthropic only.
+pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
+    let anthropic = provider == "anthropic";
+    let native_system = anthropic && super::supports_mid_system(&req.model);
     let mut messages: Vec<Value> = Vec::new();
     for item in &req.items {
         let role = match item.role {
@@ -22,7 +29,7 @@ pub fn body(req: &Request) -> Result<Value, LlmError> {
                 }
                 continue;
             }
-            if let Some(block) = part_block(part)? {
+            if let Some(block) = part_block(part, provider)? {
                 content.push(block);
             }
         }
@@ -47,9 +54,11 @@ pub fn body(req: &Request) -> Result<Value, LlmError> {
     let mut tools = Vec::new();
     for tool in &req.tools {
         let mut value = match &tool.kind {
-            ToolKind::Hosted { tool: kind, config } => {
+            ToolKind::Hosted { tool: kind, config } | ToolKind::Native { tool: kind, config } => {
                 let mut v = json!({"type":kind,"name":tool.name});
-                deep_merge(&mut v, config.clone());
+                if config.is_object() {
+                    deep_merge(&mut v, config.clone());
+                }
                 v
             }
             ToolKind::Custom { .. } => return Err(LlmError::new(ErrorClass::InvalidRequest, "Anthropic does not support freeform custom tools")),
@@ -148,7 +157,40 @@ pub fn body(req: &Request) -> Result<Value, LlmError> {
         }
     }
     if !req.cache.disabled {
-        cache(&mut body, req);
+        cache(&mut body, req, provider);
+    }
+    match &req.compaction {
+        // On demand: the response is one signed compaction block. The API
+        // rejects these fields on a summarization request.
+        Some(crate::Compaction::Now { instructions }) if anthropic => {
+            let object = body.as_object_mut().expect("object");
+            for key in ["stop_sequences", "context_management"] {
+                object.remove(key);
+            }
+            if let Some(config) = object.get_mut("output_config").and_then(Value::as_object_mut) {
+                config.remove("format");
+            }
+            if matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool")) {
+                body["tool_choice"] = json!({"type":"auto"});
+            }
+            body["compaction"] = json!({"type":"summarize"});
+            if let Some(text) = instructions {
+                body["compaction"]["instructions"] = json!(text);
+            }
+        }
+        Some(crate::Compaction::Auto { threshold, instructions }) if anthropic => {
+            // Paused, so the caller can put the current prompt after the
+            // checkpoint: the API drops everything before it.
+            let mut edit = json!({"type":"compact_20260112","trigger":{"type":"input_tokens","value":threshold},"pause_after_compaction":true});
+            if let Some(text) = instructions {
+                edit["instructions"] = json!(text);
+            }
+            if !body["context_management"]["edits"].is_array() {
+                body["context_management"]["edits"] = json!([]);
+            }
+            body["context_management"]["edits"].as_array_mut().expect("edits").push(edit);
+        }
+        _ => {}
     }
     if let Some(extra) = &req.extra {
         deep_merge(&mut body, extra.clone());
@@ -156,21 +198,46 @@ pub fn body(req: &Request) -> Result<Value, LlmError> {
     Ok(body)
 }
 
-fn part_block(part: &Part) -> Result<Option<Value>, LlmError> {
+/// Betas a request body needs: compaction (requested or a block in the
+/// history; on-demand blocks are signed) and context editing.
+#[must_use]
+pub fn betas_for(body: &Value) -> Vec<&'static str> {
+    let mut betas = Vec::new();
+    let edits = body["context_management"]["edits"].as_array().cloned().unwrap_or_default();
+    let blocks: Vec<&Value> = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "compaction")
+        .collect();
+    if body.get("compaction").is_some() || blocks.iter().any(|b| b.get("signature").is_some()) {
+        betas.push(super::api::Beta::COMPACT);
+    }
+    if edits.iter().any(|e| e["type"] == "compact_20260112") || blocks.iter().any(|b| b.get("signature").is_none()) {
+        betas.push(super::api::Beta::COMPACT_THRESHOLD);
+    }
+    if edits.iter().any(|e| e["type"].as_str().is_some_and(|t| t.starts_with("clear_"))) {
+        betas.push(super::api::Beta::CONTEXT_MANAGEMENT);
+    }
+    betas
+}
+
+fn part_block(part: &Part, provider: &str) -> Result<Option<Value>, LlmError> {
     let opaque = match part {
         Part::Reasoning { opaque, .. } | Part::ToolCall { opaque, .. } | Part::HostedResult { opaque, .. } | Part::Compaction { opaque, .. } => {
             opaque.as_ref()
         }
         _ => None,
     };
-    if let Some(opaque) = opaque.filter(|o| o.matches_provider("anthropic")) {
+    if let Some(opaque) = opaque.filter(|o| o.matches_provider(provider)) {
         return Ok(Some(opaque.data.clone()));
     }
     Ok(match part {
         Part::Text { text, citations } => {
             let mut b = json!({"type":"text","text":text});
             let citations: Vec<_> =
-                citations.iter().filter_map(|c| c.raw.as_ref().filter(|o| o.matches_provider("anthropic")).map(|o| o.data.clone())).collect();
+                citations.iter().filter_map(|c| c.raw.as_ref().filter(|o| o.matches_provider(provider)).map(|o| o.data.clone())).collect();
             if !citations.is_empty() {
                 b["citations"] = json!(citations);
             }
@@ -220,7 +287,7 @@ pub(crate) fn deep_merge(target: &mut Value, value: Value) {
         *target = value;
     }
 }
-fn cache(body: &mut Value, req: &Request) {
+fn cache(body: &mut Value, req: &Request, provider: &str) {
     let control = if req.cache.long_ttl { json!({"type":"ephemeral","ttl":"1h"}) } else { json!({"type":"ephemeral"}) };
     let protected: Vec<_> = req
         .items
@@ -228,7 +295,7 @@ fn cache(body: &mut Value, req: &Request) {
         .flat_map(|i| &i.parts)
         .filter_map(|p| match p {
             Part::Reasoning { opaque, .. } | Part::ToolCall { opaque, .. } | Part::HostedResult { opaque, .. } | Part::Compaction { opaque, .. } => {
-                opaque.as_ref().filter(|o| o.matches_provider("anthropic")).map(|o| &o.data)
+                opaque.as_ref().filter(|o| o.matches_provider(provider)).map(|o| &o.data)
             }
             _ => None,
         })

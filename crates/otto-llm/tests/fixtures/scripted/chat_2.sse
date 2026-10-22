@@ -1,0 +1,8 @@
+data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"README says otto."},"finish_reason":null}]}
+
+data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":2170,"completion_tokens":8,"total_tokens":2178,"prompt_tokens_details":{"cached_tokens":2048}}}
+
+data: [DONE]
+

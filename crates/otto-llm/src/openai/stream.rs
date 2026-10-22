@@ -8,13 +8,11 @@ use std::collections::{HashMap, VecDeque};
 fn string(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().to_owned()
 }
-fn opaque(model: &str, data: Value) -> Opaque {
-    Opaque { provider: "openai".into(), model: model.into(), data }
-}
 fn texts(v: &Value) -> Option<String> {
     v.as_array().map(|a| a.iter().filter_map(|p| p["text"].as_str()).collect())
 }
-fn parts(item: &Value, model: &str) -> Result<Vec<Part>, LlmError> {
+fn parts(item: &Value, model: &str, provider: &str) -> Result<Vec<Part>, LlmError> {
+    let opaque = |model: &str, data: Value| Opaque { provider: provider.into(), model: model.into(), data };
     Ok(match item["type"].as_str().unwrap_or_default() {
         "message" => item["content"]
             .as_array()
@@ -50,14 +48,32 @@ fn parts(item: &Value, model: &str) -> Result<Vec<Part>, LlmError> {
                 serde_json::from_str(item["arguments"].as_str().unwrap_or_default())
                     .map_err(|e| LlmError::new(ErrorClass::Other, format!("invalid function arguments: {e}")))?
             };
+            // Async calls keep their raw item so `async: true` is replayed.
+            let raw = item["async"].as_bool().unwrap_or_default().then(|| opaque(model, item.clone()));
             vec![Part::ToolCall {
                 call_id: string(item, "call_id"),
                 name: string(item, "name"),
                 input,
                 kind: if custom { CallKind::Custom } else { CallKind::Function },
-                opaque: None,
+                opaque: raw,
             }]
         }
+        // Provider-defined client tools: otto runs them like function calls.
+        "apply_patch_call" | "shell_call" => vec![Part::ToolCall {
+            call_id: string(item, "call_id"),
+            name: item["type"].as_str().unwrap_or_default().trim_end_matches("_call").into(),
+            input: item.get("operation").or_else(|| item.get("action")).cloned().unwrap_or(Value::Null),
+            kind: CallKind::Function,
+            opaque: Some(opaque(model, item.clone())),
+        }],
+        // Server-side compaction (`context_management`): opaque, replayed as-is.
+        "compaction" => vec![Part::Compaction { summary: None, opaque: Some(opaque(model, item.clone())) }],
+        kind if kind.ends_with("_call_output") => vec![Part::HostedResult {
+            call_id: string(item, "call_id"),
+            tool: kind.trim_end_matches("_call_output").into(),
+            payload: item.clone(),
+            opaque: Some(opaque(model, item.clone())),
+        }],
         kind if kind.ends_with("_call") => vec![
             Part::ToolCall {
                 call_id: string(item, "id"),
@@ -72,21 +88,33 @@ fn parts(item: &Value, model: &str) -> Result<Vec<Part>, LlmError> {
     })
 }
 #[derive(Default)]
-struct State {
+pub(super) struct State {
     calls: HashMap<String, String>,
     id: Option<String>,
     model: String,
+    provider: String,
     tool: bool,
     refusal: bool,
-    done: bool,
+    pub(super) done: bool,
 }
 impl State {
-    fn event(&mut self, v: Value) -> Result<Vec<E>, LlmError> {
+    pub(super) fn new(model: String) -> Self {
+        Self::for_provider(model, "openai")
+    }
+    pub(super) fn for_provider(model: String, provider: &str) -> Self {
+        Self { model, provider: provider.into(), ..Self::default() }
+    }
+    /// Translate one Responses event. A WebSocket steering successor starts
+    /// with its own `response.created`, so per-response flags reset there.
+    pub(super) fn event(&mut self, v: Value) -> Result<Vec<E>, LlmError> {
         let mut out = Vec::new();
         let kind = v["type"].as_str().unwrap_or_default();
         match kind {
             "response.created" => {
                 self.id = v["response"]["id"].as_str().map(Into::into);
+                self.tool = false;
+                self.refusal = false;
+                self.done = false;
                 if let Some(m) = v["response"]["model"].as_str() {
                     self.model = m.into();
                 }
@@ -104,10 +132,11 @@ impl State {
             }
             "response.output_item.added" => {
                 let item = &v["item"];
-                if matches!(item["type"].as_str(), Some("function_call" | "custom_tool_call")) {
+                if matches!(item["type"].as_str(), Some("function_call" | "custom_tool_call" | "apply_patch_call" | "shell_call")) {
                     let call_id = string(item, "call_id");
                     self.calls.insert(string(item, "id"), call_id.clone());
-                    out.push(E::ToolInputStart { call_id, name: string(item, "name") });
+                    let name = item["name"].as_str().unwrap_or_else(|| item["type"].as_str().unwrap_or_default().trim_end_matches("_call"));
+                    out.push(E::ToolInputStart { call_id, name: name.into() });
                 }
             }
             "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
@@ -117,7 +146,7 @@ impl State {
             }
             "response.output_item.done" => {
                 self.refusal |= v["item"]["content"].as_array().is_some_and(|content| content.iter().any(|c| c["type"] == "refusal"));
-                for part in parts(&v["item"], &self.model)? {
+                for part in parts(&v["item"], &self.model, &self.provider)? {
                     if matches!(part, Part::ToolCall { .. }) {
                         self.tool = true;
                     }
@@ -157,16 +186,17 @@ impl State {
                 self.done = true;
                 let error = if kind == "response.failed" { &v["response"]["error"] } else { v.get("error").unwrap_or(&v) };
                 let code = string(error, "code");
-                let status = match code.as_str() {
+                // WebSocket `error` events carry the HTTP status they stand for.
+                let status = v["status"].as_u64().and_then(|s| u16::try_from(s).ok()).filter(|s| *s >= 400).unwrap_or(match code.as_str() {
                     "rate_limit_exceeded" => 429,
                     "invalid_api_key" => 401,
                     "context_length_exceeded" => 400,
                     "server_error" => 500,
                     _ => 400,
-                };
+                });
                 let body = serde_json::json!({ "error": error }).to_string();
                 let error = crate::http::classify_status(
-                    reqwest::StatusCode::from_u16(status).expect("valid status"),
+                    reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
                     &reqwest::header::HeaderMap::new(),
                     &body,
                 );
@@ -186,7 +216,14 @@ pub fn stream<S>(bytes: S, model: impl Into<String>) -> EventStream
 where
     S: Stream<Item = Result<Bytes, LlmError>> + Send + 'static,
 {
-    let state = State { model: model.into(), ..State::default() };
+    stream_for(bytes, model, "openai")
+}
+/// [`stream`] for a wire-compatible provider (`xai`): opaque items carry its id.
+pub fn stream_for<S>(bytes: S, model: impl Into<String>, provider: &str) -> EventStream
+where
+    S: Stream<Item = Result<Bytes, LlmError>> + Send + 'static,
+{
+    let state = State::for_provider(model.into(), provider);
     Box::pin(futures::stream::unfold(
         (Box::pin(crate::sse::sse_stream(bytes)), state, VecDeque::new()),
         |(mut source, mut state, mut queue)| async move {

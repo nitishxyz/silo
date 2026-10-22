@@ -15,6 +15,7 @@ struct State {
     blocks: BTreeMap<usize, Block>,
     response_id: Option<String>,
     model: String,
+    provider: String,
     usage: Usage,
     reason: Option<FinishReason>,
     stopped: bool,
@@ -24,8 +25,15 @@ pub fn decode<S>(bytes: S, model: impl Into<String>) -> EventStream
 where
     S: Stream<Item = Result<Bytes, LlmError>> + Send + 'static,
 {
+    decode_for(bytes, model, "anthropic")
+}
+/// [`decode`] for an Anthropic-dialect provider (`minimax`): opaque blocks carry its id.
+pub fn decode_for<S>(bytes: S, model: impl Into<String>, provider: &str) -> EventStream
+where
+    S: Stream<Item = Result<Bytes, LlmError>> + Send + 'static,
+{
     let source = Box::pin(crate::sse::sse_stream(bytes));
-    let state = State { model: model.into(), ..State::default() };
+    let state = State { model: model.into(), provider: provider.into(), ..State::default() };
     Box::pin(futures::stream::unfold((source, state, VecDeque::new(), false), |(mut source, mut state, mut queue, mut done)| async move {
         loop {
             if let Some(event) = queue.pop_front() {
@@ -69,7 +77,7 @@ fn string(v: &Value, key: &str) -> String {
 }
 impl State {
     fn opaque(&self, data: Value) -> Opaque {
-        Opaque { provider: "anthropic".into(), model: self.model.clone(), data }
+        Opaque { provider: self.provider.as_str().into(), model: self.model.clone(), data }
     }
     fn usage(&mut self, v: &Value) {
         for (field, target) in [
@@ -81,6 +89,15 @@ impl State {
             if let Some(n) = v[field].as_u64() {
                 *target = n;
             }
+        }
+        // With compaction, top-level counts exclude the compaction pass; the
+        // billed total is the sum over `iterations`.
+        if let Some(iterations) = v["iterations"].as_array().filter(|i| !i.is_empty()) {
+            let sum = |field: &str| iterations.iter().filter_map(|i| i[field].as_u64()).sum::<u64>();
+            self.usage.input = sum("input_tokens");
+            self.usage.output = sum("output_tokens");
+            self.usage.cache_read = self.usage.cache_read.max(sum("cache_read_input_tokens"));
+            self.usage.cache_write = self.usage.cache_write.max(sum("cache_creation_input_tokens"));
         }
     }
     fn event(&mut self, v: Value) -> Result<Vec<StreamEvent>, LlmError> {
@@ -135,6 +152,15 @@ impl State {
                             block.value["citations"] = json!([]);
                         }
                         block.value["citations"].as_array_mut().expect("array").push(delta["citation"].clone());
+                    }
+                    // Threshold compaction sends the whole summary in one delta.
+                    Some("compaction_delta") => {
+                        for (key, value) in delta.as_object().into_iter().flatten().filter(|(key, _)| *key != "type") {
+                            match value.as_str() {
+                                Some(text) => append(&mut block.value, key, text),
+                                None => block.value[key] = value.clone(),
+                            }
+                        }
                     }
                     _ => {}
                 }

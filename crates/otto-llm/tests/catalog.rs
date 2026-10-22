@@ -44,11 +44,11 @@ fn snapshot() -> Value {
 #[test]
 fn snapshot_and_wrappers() {
     let parsed: std::collections::BTreeMap<String, ModelsDevProvider> = serde_json::from_str(SNAPSHOT).unwrap();
-    assert_eq!(parsed.len(), 4);
+    assert_eq!(parsed.len(), otto_llm::catalog::PROVIDERS.len());
     let catalog = Catalog::global();
     let providers = catalog.providers();
-    assert_eq!(providers.iter().filter(|p| p.implemented).count(), 2);
-    for id in ["anthropic", "openai", "google", "xai"] {
+    assert_eq!(providers.iter().filter(|p| p.implemented).count(), otto_llm::catalog::PROVIDERS.len());
+    for id in otto_llm::catalog::PROVIDERS {
         assert!(!catalog.models(id, None).is_empty());
     }
     assert!(catalog.info("anthropic", "claude-sonnet-5-5", None).is_some());
@@ -57,8 +57,28 @@ fn snapshot_and_wrappers() {
     assert!(!otto_llm::openai::models().is_empty());
     assert!(otto_llm::anthropic::models().iter().all(|m| m.caps.tool_family == ToolFamily::Anthropic));
     assert!(otto_llm::openai::models().iter().all(|m| m.caps.tool_family == ToolFamily::Openai));
+    assert!(otto_llm::google::models().iter().all(|m| m.caps.tool_family == ToolFamily::Gemini && m.caps.reasoning_replay == m.caps.reasoning));
+    assert!(catalog.models("deepseek", None).iter().all(|e| e.info.caps.tool_family == ToolFamily::Generic && e.info.caps.prompt_cache));
     assert_eq!(otto_llm::anthropic::model_info("claude-opus-4-7"), catalog.info("anthropic", "claude-opus-4-7", None));
     assert_eq!(otto_llm::openai::model_info("gpt-4o"), catalog.info("openai", "gpt-4o", None));
+}
+
+#[test]
+fn native_client_tools_follow_model_and_auth() {
+    let catalog = Catalog::global();
+    let native = |id: &str, mode| catalog.info("openai", id, Some(mode)).unwrap_or_else(|| panic!("{id}")).caps.native_tools;
+    assert_eq!(native("gpt-5.5", AuthMode::ApiKey), ["apply_patch", "shell"]);
+    assert_eq!(native("gpt-6-astra", AuthMode::ApiKey), ["apply_patch", "shell"]);
+    assert_eq!(native("gpt-5.1", AuthMode::ApiKey), ["apply_patch"]);
+    assert_eq!(native("gpt-5.3-codex", AuthMode::ApiKey), ["shell"]);
+    assert!(native("gpt-5", AuthMode::ApiKey).is_empty());
+    assert!(native("gpt-4.1", AuthMode::ApiKey).is_empty());
+    assert!(native("o3", AuthMode::ApiKey).is_empty());
+    // The ChatGPT/Codex endpoint gets the built-ins.
+    assert!(native("gpt-6-astra", AuthMode::Subscription).is_empty());
+    assert_eq!(otto_llm::openai::native_tools("gpt-5.1-2025-11-13"), ["apply_patch"]);
+    assert!(otto_llm::anthropic::models().iter().all(|m| m.caps.native_tools == ["text_editor_20250728", "bash_20250124"]));
+    assert!(catalog.models("deepseek", None).iter().all(|e| e.info.caps.native_tools.is_empty()));
 }
 
 #[test]
@@ -132,6 +152,27 @@ fn defaults_are_available() {
             assert!(catalog.supports(provider, &id, mode));
         }
     }
+    for provider in ["google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax"] {
+        let id = catalog.default_model(provider, AuthMode::ApiKey).unwrap_or_else(|| panic!("{provider} default"));
+        assert!(catalog.supports(provider, &id, AuthMode::ApiKey), "{provider}/{id}");
+    }
+    assert!(catalog.default_model("lmstudio", AuthMode::ApiKey).is_none());
+}
+
+#[test]
+fn provider_specific_caps() {
+    let catalog = Catalog::global();
+    let api = catalog.info("openai", "gpt-6.1-sol", Some(AuthMode::ApiKey)).unwrap().caps;
+    assert!(api.steering && api.async_tools && api.native_compaction);
+    let sub = catalog.info("openai", "gpt-6.1-sol", Some(AuthMode::Subscription)).unwrap().caps;
+    assert!(!sub.steering && !sub.async_tools && !sub.native_compaction);
+    assert!(!catalog.info("openai", "gpt-5.5", Some(AuthMode::ApiKey)).unwrap().caps.async_tools);
+    assert!(catalog.info("anthropic", "claude-sonnet-5-5", None).unwrap().caps.native_compaction);
+    assert!(!catalog.info("anthropic", "claude-haiku-4-5", None).is_some_and(|i| i.caps.native_compaction));
+    let xai = catalog.info("xai", "grok-4.6", Some(AuthMode::ApiKey)).unwrap().caps;
+    assert!(xai.reasoning_replay && !xai.custom_tools && !xai.steering && xai.hosted_tools.contains(&"x_search".to_owned()));
+    // models.dev marks DeepSeek's interleaved reasoning field; it must be replayed.
+    assert!(catalog.info("deepseek", "deepseek-v4-pro", None).unwrap().caps.reasoning_replay);
 }
 
 #[test]

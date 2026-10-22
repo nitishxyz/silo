@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 pub const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+/// WebSocket mode on the Codex endpoint (`codex-rs/core/src/client.rs`,
+/// `RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE`).
+pub const WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
 pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";

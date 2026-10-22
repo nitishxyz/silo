@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_s2","model":"m"}}
+
+data: {"type":"response.output_text.delta","item_id":"msg_2","delta":"README says otto."}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"README says otto.","annotations":[]}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_s2","status":"completed","usage":{"input_tokens":2170,"input_tokens_details":{"cached_tokens":2048},"output_tokens":8}}}
+

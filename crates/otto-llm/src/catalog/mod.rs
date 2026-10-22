@@ -24,6 +24,11 @@ pub const SOURCE: &str = "https://models.dev/api.json";
 pub const SNAPSHOT: &str = include_str!("../../catalog/snapshot.json");
 const OVERLAY: &str = include_str!("../../catalog/overlay.json");
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// models.dev providers otto has a transport for. Ollama and custom servers
+/// are not in models.dev; their models come from the server itself.
+pub const PROVIDERS: [&str; 10] = ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "lmstudio"];
+/// A refreshed feed must contain at least these.
+const REQUIRED: [&str; 4] = ["anthropic", "openai", "google", "xai"];
 type Providers = BTreeMap<String, ModelsDevProvider>;
 
 /// Source model fields are retained verbatim, including future fields and pricing tiers.
@@ -117,7 +122,7 @@ pub struct Catalog {
 /// Returns an error for malformed provider or model metadata.
 pub fn trim_feed(feed: Value) -> Result<BTreeMap<String, ModelsDevProvider>, serde_json::Error> {
     let mut providers = BTreeMap::new();
-    for id in ["anthropic", "openai", "google", "xai"] {
+    for id in PROVIDERS {
         let Some(value) = feed.get(id) else { continue };
         let mut provider: ModelsDevProvider = serde_json::from_value(value.clone())?;
         provider.id = id.into();
@@ -194,7 +199,7 @@ impl Catalog {
         use std::io::Write;
         let feed = http.get(SOURCE).timeout(Duration::from_secs(60)).send().await?.error_for_status()?.json().await?;
         let providers = trim_feed(feed)?;
-        if providers.len() != 4 || providers.values().any(|p| p.models.is_empty()) {
+        if REQUIRED.iter().any(|id| providers.get(*id).is_none_or(|p| p.models.is_empty())) {
             return Err("models.dev returned an incomplete catalog".into());
         }
         let cache = Cache { refreshed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(), providers };
@@ -219,13 +224,7 @@ impl Catalog {
     pub fn providers(&self) -> Vec<ProviderEntry> {
         self.providers
             .values()
-            .map(|p| ProviderEntry {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                env: p.env.clone(),
-                doc: p.doc.clone(),
-                implemented: matches!(p.id.as_str(), "anthropic" | "openai"),
-            })
+            .map(|p| ProviderEntry { id: p.id.clone(), name: p.name.clone(), env: p.env.clone(), doc: p.doc.clone(), implemented: true })
             .collect()
     }
 
@@ -258,11 +257,7 @@ impl Catalog {
         {
             merge(&mut effective, overrides);
         }
-        let mut caps = match provider {
-            "anthropic" => crate::anthropic::base_caps(),
-            "openai" => crate::openai::base_caps(),
-            _ => Caps::default(),
-        };
+        let mut caps = base_caps(provider);
         let modalities_in = strings(&effective["modalities"]["input"]);
         caps.reasoning = effective["reasoning"].as_bool().unwrap_or_default();
         caps.reasoning_replay &= caps.reasoning;
@@ -276,7 +271,14 @@ impl Catalog {
             caps.mid_system = crate::anthropic::supports_mid_system(id);
             caps.inline_tool_changes = caps.mid_system;
             caps.deferred_tools = !id.contains("haiku-4");
-            caps.native_compaction = !id.contains("haiku-4");
+            caps.native_compaction = crate::anthropic::supports_compaction(id);
+        }
+        if provider == "openai" {
+            openai_caps(&mut caps, id, mode);
+        }
+        if let Some(field) = raw["interleaved"]["field"].as_str() {
+            // models.dev names the field reasoning must be replayed in.
+            caps.reasoning_replay |= caps.reasoning && field == "reasoning_content";
         }
         let status = text(&raw["status"]);
         let efforts = raw["reasoning_options"]
@@ -347,8 +349,32 @@ impl Catalog {
         );
         info.id = id.into();
         info.name = id.into();
+        if provider == "openai" {
+            openai_caps(&mut info.caps, id, mode);
+        }
         Some(info)
     }
+}
+
+/// Provider-level capabilities before the per-model fields.
+#[must_use]
+pub fn base_caps(provider: &str) -> Caps {
+    match provider {
+        "anthropic" => crate::anthropic::base_caps(),
+        "openai" => crate::openai::base_caps(),
+        "xai" => crate::openai::xai_caps(),
+        "google" => crate::google::base_caps(),
+        id => crate::compat::dialect(id).map(crate::compat::base_caps).unwrap_or_default(),
+    }
+}
+/// OpenAI features that depend on the model and the auth mode: steering and
+/// async tools (GPT-6, API key), compaction (API key) and native tools.
+fn openai_caps(caps: &mut Caps, id: &str, mode: Option<AuthMode>) {
+    let api = mode != Some(AuthMode::Subscription);
+    caps.steering = api && crate::openai::supports_steering(id);
+    caps.async_tools = api && crate::openai::supports_async_tools(id);
+    caps.native_compaction = api;
+    caps.native_tools = if api { crate::openai::native_tools(id) } else { Vec::new() };
 }
 
 fn mode_name(mode: AuthMode) -> &'static str {

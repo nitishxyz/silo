@@ -314,6 +314,209 @@ fn oauth_claims_and_rejection() {
     assert!(subscription::is_refresh_rejection(&LlmError::new(ErrorClass::InvalidRequest, "invalid_grant")));
 }
 
+fn steering_events(steering: &mut openai::ws::Steering, events: &[Value]) -> (Vec<StreamEvent>, Vec<String>) {
+    let mut out = (vec![], vec![]);
+    for event in events {
+        let (events, frames) = steering.event(event.clone()).unwrap();
+        out.0.extend(events);
+        out.1.extend(frames);
+    }
+    out
+}
+fn created(id: &str) -> Value {
+    json!({"type":"response.created","response":{"id":id,"model":"gpt-6-astra","status":"in_progress"}})
+}
+fn message(text: &str) -> Value {
+    json!({"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":text,"annotations":[]}]}})
+}
+fn ended(kind: &str, id: &str, extra: Value) -> Value {
+    let mut response = json!({"id":id,"status":"completed","usage":{"input_tokens":10,"output_tokens":3}});
+    convert::merge(&mut response, &extra);
+    json!({"type":kind,"response":response})
+}
+
+#[test]
+fn ws_frames_encode_create_and_steer() {
+    let req = Request { model: "gpt-6-astra".into(), items: vec![Item::user_text("u", "plan")], ..Request::default() };
+    let create: Value = serde_json::from_str(&openai::ws::create_frame(convert::request(&req))).unwrap();
+    assert_eq!(create["type"], "response.create");
+    assert!(create.get("stream").is_none());
+    assert_eq!(create["store"], false);
+    assert_eq!(create["input"][0]["content"][0]["text"], "plan");
+    let image = Part::Image(Media { mime: "image/png".into(), source: MediaSource::Base64 { data: "AAAA".into() }, name: None });
+    let input = convert::steer_input(&[Part::text("smaller scope"), image]);
+    let steer: Value = serde_json::from_str(&openai::ws::steer_frame("resp_1", &input)).unwrap();
+    assert_eq!(
+        steer,
+        json!({"type":"response.steer","previous_response_id":"resp_1","input":[{"type":"message","role":"user","content":[
+            {"type":"input_text","text":"smaller scope"},
+            {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"auto"}
+        ]}]})
+    );
+}
+
+#[test]
+fn ws_steering_commits_at_successor() {
+    let mut s = openai::ws::Steering::new("gpt-6-astra");
+    // Input before the response exists waits for its id.
+    assert!(s.steer("early".into(), json!("first")).is_none());
+    let (events, frames) = steering_events(&mut s, &[created("resp_1")]);
+    assert!(matches!(&events[0], StreamEvent::Start { response_id: Some(id), .. } if id == "resp_1"));
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("\"previous_response_id\":\"resp_1\""));
+    let frame = s.steer("late".into(), json!("second")).unwrap();
+    assert!(frame.contains("second"));
+    let (events, frames) = steering_events(
+        &mut s,
+        &[
+            json!({"type":"response.steer.accepted","steer":{"id":"steer_a","previous_response_id":"resp_1"}}),
+            json!({"type":"response.steer.accepted","steer":{"id":"steer_b","previous_response_id":"resp_1"}}),
+            json!({"type":"response.output_text.delta","delta":"Dra"}),
+            message("Draft"),
+            ended("response.incomplete", "resp_1", json!({"status":"incomplete","incomplete_details":{"reason":"steered"}})),
+        ],
+    );
+    assert!(frames.is_empty());
+    assert!(!s.done(), "a steered response is followed by its successor");
+    assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::Other(r), .. }) if r == "steered"));
+    let (events, _) = steering_events(&mut s, &[created("resp_2"), message("Short plan"), ended("response.completed", "resp_2", json!({}))]);
+    assert_eq!(events[0], StreamEvent::Steered { ids: vec!["early".into(), "late".into()] });
+    assert!(matches!(&events[1], StreamEvent::Start { response_id: Some(id), .. } if id == "resp_2"));
+    assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::Stop, .. })));
+    assert!(s.done());
+    // Nothing is live any more: the caller keeps the input for the next step.
+    assert!(s.steer("after".into(), json!("third")).is_none());
+}
+
+#[test]
+fn ws_steering_pending_and_failed_are_not_committed() {
+    let mut s = openai::ws::Steering::new("gpt-6-astra");
+    steering_events(&mut s, &[created("resp_1")]);
+    s.steer("tool".into(), json!("after the tool")).unwrap();
+    s.steer("rejected".into(), json!("nope")).unwrap();
+    let call = json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"read","arguments":"{}"}});
+    let (events, _) = steering_events(
+        &mut s,
+        &[
+            json!({"type":"response.steer.accepted","steer":{"id":"steer_a","previous_response_id":"resp_1"}}),
+            json!({"type":"response.steer.failed","steer":{"input":"nope","previous_response_id":"resp_1"},"error":{"code":"too_many_pending_steers","message":"wait","type":"invalid_request_error"}}),
+            call,
+            ended("response.completed", "resp_1", json!({})),
+        ],
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::ToolUse, .. })));
+    assert!(!s.done(), "accepted input is still unresolved");
+    let (events, _) = steering_events(
+        &mut s,
+        &[
+            json!({"type":"response.steer.pending","steer":{"id":"steer_a","previous_response_id":"resp_1"},"reason":"waiting_for_required_input","required_input":[{"type":"function_call_output","call_id":"c1","name":"read"}]}),
+        ],
+    );
+    assert!(events.is_empty());
+    assert!(s.done());
+    let error = openai::ws::Steering::new("gpt-6-astra")
+        .event(json!({"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}))
+        .unwrap_err();
+    assert_eq!(error.class, ErrorClass::RateLimited);
+    assert_eq!(error.message, "slow down");
+}
+
+#[test]
+fn ws_and_steering_caps_follow_model_and_mode() {
+    let catalog = catalog::Catalog::global();
+    assert!(catalog.info("openai", "gpt-6-astra", Some(openai::AuthMode::ApiKey)).unwrap().caps.steering);
+    assert!(!catalog.info("openai", "gpt-6-astra", Some(openai::AuthMode::Subscription)).unwrap().caps.steering);
+    assert!(!catalog.info("openai", "gpt-5.6", Some(openai::AuthMode::ApiKey)).unwrap().caps.steering);
+    assert!(catalog.info_or_fallback("openai", "gpt-6-next", Some(openai::AuthMode::ApiKey)).unwrap().caps.steering);
+}
+
+async fn ws_send(ws: &mut tokio_websockets::WebSocketStream<tokio::net::TcpStream>, events: &[Value]) {
+    use futures::SinkExt;
+    for event in events {
+        ws.send(tokio_websockets::Message::text(event.to_string())).await.unwrap();
+    }
+}
+async fn ws_recv(ws: &mut tokio_websockets::WebSocketStream<tokio::net::TcpStream>) -> Value {
+    loop {
+        let message = ws.next().await.unwrap().unwrap();
+        if let Some(text) = message.as_text() {
+            return serde_json::from_str(text).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn ws_model_steers_mid_response_and_reuses_the_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let (request, mut ws) = tokio_websockets::ServerBuilder::new().accept(tcp).await.unwrap();
+        assert_eq!(request.uri().path(), "/v1/responses");
+        assert_eq!(request.headers()["authorization"], "Bearer key");
+        let create = ws_recv(&mut ws).await;
+        assert_eq!(create["type"], "response.create");
+        assert_eq!(create["model"], "gpt-6-astra");
+        ws_send(&mut ws, &[created("resp_1"), json!({"type":"response.output_text.delta","delta":"Draft"})]).await;
+        let steer = ws_recv(&mut ws).await;
+        assert_eq!(steer["type"], "response.steer");
+        assert_eq!(steer["previous_response_id"], "resp_1");
+        assert_eq!(steer["input"][0]["content"][0]["text"], "Keep it short");
+        ws_send(
+            &mut ws,
+            &[
+                json!({"type":"response.steer.accepted","steer":{"id":"steer_1","previous_response_id":"resp_1"}}),
+                message("Draft"),
+                ended("response.incomplete", "resp_1", json!({"status":"incomplete","incomplete_details":{"reason":"steered"}})),
+                created("resp_2"),
+                message("Short"),
+                ended("response.completed", "resp_2", json!({})),
+            ],
+        )
+        .await;
+        // The second call arrives on the same connection.
+        let again = ws_recv(&mut ws).await;
+        assert_eq!(again["type"], "response.create");
+        ws_send(&mut ws, &[created("resp_3"), message("Again"), ended("response.completed", "resp_3", json!({}))]).await;
+        let _ = ws.next().await;
+    });
+    let model = openai::OpenAiModel::new(openai::OpenAiConfig {
+        base_url: format!("http://{address}/v1"),
+        auth: CredentialSource::api_key("key"),
+        mode: openai::AuthMode::ApiKey,
+        model: catalog::Catalog::global().info("openai", "gpt-6-astra", Some(openai::AuthMode::ApiKey)).unwrap(),
+        http: HttpClient::new().unwrap(),
+        retry: RetryPolicy::default(),
+        idle_timeout: Duration::from_secs(5),
+        organization: None,
+        project: None,
+    });
+    let session = model.session().expect("steerable models stream over WebSocket");
+    let req = Request { items: vec![Item::user_text("u", "Plan it")], ..Request::default() };
+    let mut stream = model.stream(req.clone(), CallCx::default()).await.unwrap();
+    let mut events = vec![];
+    while let Some(event) = stream.next().await {
+        let event = event.unwrap();
+        if matches!(event, StreamEvent::TextDelta { .. }) {
+            assert!(session.steer("s1", vec![Part::text("Keep it short")]).await.unwrap());
+        }
+        events.push(event);
+    }
+    let steered = events.iter().position(|e| matches!(e, StreamEvent::Steered { ids } if ids == &["s1".to_owned()])).unwrap();
+    let texts = |events: &[StreamEvent]| {
+        events.iter().filter_map(|e| if let StreamEvent::PartDone { part } = e { Some(part.clone()) } else { None }).collect::<Vec<_>>()
+    };
+    assert_eq!(texts(&events[..steered]), vec![Part::text("Draft")]);
+    assert_eq!(texts(&events[steered..]), vec![Part::text("Short")]);
+    assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::Stop, response_id: Some(id) }) if id == "resp_2"));
+    // Steering outside a live stream is refused, so the caller keeps it.
+    assert!(!session.steer("s2", vec![Part::text("later")]).await.unwrap());
+    let events = testing::collect_events(model.stream(req, CallCx::default()).await.unwrap()).await;
+    assert!(events.contains(&StreamEvent::PartDone { part: Part::text("Again") }));
+    drop(model);
+    server.await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires OTTO_LIVE=1 and OPENAI_API_KEY; incurs API charges"]
 async fn live() {

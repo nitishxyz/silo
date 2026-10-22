@@ -1,5 +1,6 @@
 //! Catalog, credential selection, and login orchestration shared by CLI and server.
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
@@ -9,11 +10,18 @@ use crate::{
     ErrorClass, LlmError, Model, ModelInfo, anthropic,
     auth::{self, AuthMode, Credential, CredentialSource, CredentialStore},
     catalog::{Catalog, CatalogEntry, ProviderEntry},
+    compat::{self, Wire},
+    google,
     http::{HttpClient, RetryPolicy},
     openai,
 };
 
-const IDS: [&str; 2] = ["anthropic", "openai"];
+/// Every provider with a transport, in default-model preference order.
+pub const IDS: [&str; 12] =
+    ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"];
+/// Providers with a subscription sign-in.
+const SUBSCRIPTION: [&str; 2] = ["anthropic", "openai"];
+const XAI_URL: &str = "https://api.x.ai/v1";
 
 #[derive(Clone)]
 pub struct Providers {
@@ -21,6 +29,8 @@ pub struct Providers {
     state_dir: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Models local servers reported at the last [`Providers::discover_local`].
+    local: Arc<RwLock<BTreeMap<String, Vec<String>>>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -31,6 +41,9 @@ pub struct AuthStatus {
     pub expires_at_ms: Option<u64>,
     pub account_id: Option<String>,
     pub error: Option<String>,
+    /// The endpoint for local and custom providers.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +100,102 @@ impl Providers {
             catalog: Arc::new(RwLock::new(Catalog::load(Some(&state_dir)))),
             state_dir,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            local: Arc::default(),
         })
+    }
+
+    /// The endpoint configured for a local or custom provider (`settings.json`
+    /// in the state dir), else its environment override or default.
+    #[must_use]
+    pub fn base_url(&self, provider: &str) -> Option<String> {
+        let configured = self.settings()[provider]["base_url"].as_str().map(str::to_owned);
+        compat::dialect(provider)?.base(configured.as_deref())
+    }
+
+    /// Set or clear the base URL of a local or custom provider.
+    /// # Errors
+    /// Unknown providers, providers with a fixed endpoint, or write failures.
+    pub fn set_base_url(&self, provider: &str, url: Option<&str>) -> Result<(), LlmError> {
+        if !compat::dialect(provider).is_some_and(|d| d.discovery.is_some()) {
+            return Err(LlmError::new(ErrorClass::InvalidRequest, format!("{provider} has a fixed endpoint")));
+        }
+        let url = url.map(str::trim).filter(|u| !u.is_empty());
+        if let Some(url) = url
+            && !(url.starts_with("http://") || url.starts_with("https://"))
+        {
+            return Err(LlmError::new(ErrorClass::InvalidRequest, "base URL must start with http:// or https://"));
+        }
+        let mut settings = self.settings();
+        settings[provider]["base_url"] = url.map_or(serde_json::Value::Null, Into::into);
+        let io = |e: std::io::Error| LlmError::new(ErrorClass::Other, format!("provider settings: {e}"));
+        std::fs::create_dir_all(&self.state_dir).map_err(io)?;
+        let temp = self.state_dir.join(format!(".providers-{}.tmp", rand::random::<u64>()));
+        std::fs::write(&temp, serde_json::to_vec_pretty(&settings).unwrap_or_default()).map_err(io)?;
+        std::fs::rename(&temp, self.state_dir.join("providers.json")).map_err(io)
+    }
+
+    fn settings(&self) -> serde_json::Value {
+        std::fs::read(self.state_dir.join("providers.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    /// Ask local servers (Ollama, LM Studio, custom) for their models, with a
+    /// short timeout each; a server that is not running lists nothing.
+    pub async fn discover_local(&self) {
+        let Ok(http) = HttpClient::new() else { return };
+        let found = futures::future::join_all(compat::DIALECTS.iter().filter(|d| d.discovery.is_some()).map(|dialect| {
+            let base = self.base_url(dialect.id);
+            let key = self.credential(dialect.id).ok().flatten().and_then(|c| match c {
+                Credential::ApiKey { key } => Some(key),
+                Credential::OAuth { .. } => None,
+            });
+            let http = http.clone();
+            async move {
+                let models = match base {
+                    Some(base) => compat::discover(dialect, &base, http.client(), key.as_deref()).await,
+                    None => Vec::new(),
+                };
+                (dialect.id.to_owned(), models)
+            }
+        }))
+        .await;
+        *self.local.write().unwrap_or_else(|e| e.into_inner()) = found.into_iter().collect();
+    }
+
+    fn local_models(&self, provider: &str) -> Vec<String> {
+        self.local.read().unwrap_or_else(|e| e.into_inner()).get(provider).cloned().unwrap_or_default()
+    }
+
+    /// A discovered local model that the catalog does not know.
+    fn local_entry(&self, provider: &str, id: &str) -> CatalogEntry {
+        let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
+        let known = catalog.providers().iter().any(|p| p.id == provider);
+        let mut info = known.then(|| catalog.info_or_fallback(provider, id, Some(AuthMode::ApiKey))).flatten().unwrap_or_else(|| ModelInfo {
+            id: id.into(),
+            provider: provider.into(),
+            name: id.into(),
+            caps: crate::catalog::base_caps(provider),
+            pricing: None,
+        });
+        if info.caps.context_window == 0 {
+            info.caps.context_window = 32_768;
+        }
+        CatalogEntry {
+            info,
+            auth: vec![AuthMode::ApiKey],
+            deprecated: false,
+            status: Some("local".into()),
+            efforts: Vec::new(),
+            release_date: None,
+            knowledge: None,
+            family: None,
+            modalities_in: vec!["text".into()],
+            list_pricing: None,
+            raw: serde_json::Value::Null,
+        }
     }
 
     /// Refresh stale metadata, preserving the loaded catalog on failure.
@@ -118,18 +226,35 @@ impl Providers {
 
     #[must_use]
     pub fn catalog_providers(&self) -> Vec<ProviderEntry> {
-        self.catalog.read().unwrap_or_else(|e| e.into_inner()).providers()
+        let mut providers = self.catalog.read().unwrap_or_else(|e| e.into_inner()).providers();
+        for dialect in compat::DIALECTS {
+            if !providers.iter().any(|p| p.id == dialect.id) {
+                providers.push(ProviderEntry {
+                    id: dialect.id.into(),
+                    name: dialect.name.into(),
+                    env: dialect.env.iter().map(|s| (*s).into()).collect(),
+                    doc: None,
+                    implemented: true,
+                });
+            }
+        }
+        providers
     }
 
+    /// Catalog models, plus whatever local servers reported (they replace
+    /// the bundled list for those providers when reachable).
     #[must_use]
     pub fn catalog_entries(&self, provider: Option<&str>, mode: Option<AuthMode>) -> Vec<CatalogEntry> {
-        let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
-        catalog
-            .providers()
-            .into_iter()
-            .filter(|entry| provider.is_none_or(|id| id == entry.id))
-            .flat_map(|entry| catalog.models(&entry.id, mode))
-            .collect()
+        let mut entries = Vec::new();
+        for entry in self.catalog_providers().into_iter().filter(|entry| provider.is_none_or(|id| id == entry.id)) {
+            let local = self.local_models(&entry.id);
+            if !local.is_empty() && mode != Some(AuthMode::Subscription) {
+                entries.extend(local.iter().map(|id| self.local_entry(&entry.id, id)));
+                continue;
+            }
+            entries.extend(self.catalog.read().unwrap_or_else(|e| e.into_inner()).models(&entry.id, mode));
+        }
+        entries
     }
 
     #[must_use]
@@ -146,9 +271,16 @@ impl Providers {
     /// Catalog metadata, with estimated fallback capabilities for unknown model ids.
     #[must_use]
     pub fn model_info(&self, provider: &str, id: &str) -> Option<ModelInfo> {
+        if !IDS.contains(&provider) {
+            return None;
+        }
+        if self.local_models(provider).iter().any(|m| m == id) {
+            return Some(self.local_entry(provider, id).info);
+        }
         let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
         if !catalog.providers().iter().any(|entry| entry.id == provider) {
-            return None;
+            drop(catalog);
+            return Some(self.local_entry(provider, id).info);
         }
         catalog.info_or_fallback(provider, id, None)
     }
@@ -173,20 +305,29 @@ impl Providers {
     /// Returns provider, model availability, or credential errors.
     pub fn resolve_model(&self, provider: &str, model: &str) -> Result<Arc<dyn Model>, LlmError> {
         if !IDS.contains(&provider) {
-            return Err(LlmError::new(ErrorClass::InvalidRequest, format!("provider {provider:?} is not yet supported; choose anthropic or openai")));
+            return Err(unknown(provider));
         }
         if model.trim().is_empty() {
             return Err(LlmError::new(ErrorClass::InvalidRequest, "model id must not be empty"));
         }
-        let credential = self.credential(provider)?.ok_or_else(|| login_required(provider))?;
+        let dialect = compat::dialect(provider);
+        let credential = match self.credential(provider)? {
+            Some(credential) => credential,
+            // Local and custom servers need no key.
+            None if dialect.is_some_and(|d| !d.key_required) => Credential::ApiKey { key: String::new() },
+            None => return Err(login_required(provider)),
+        };
         let (mode, auth) = match credential {
             Credential::ApiKey { key } => (AuthMode::ApiKey, CredentialSource::api_key(key)),
-            Credential::OAuth { .. } => {
+            Credential::OAuth { .. } if SUBSCRIPTION.contains(&provider) => {
                 let refresh = if provider == "anthropic" { anthropic::subscription::refresh_fn() } else { openai::subscription::refresh_fn() };
                 (AuthMode::Subscription, CredentialSource::store(self.store.clone(), provider, refresh))
             }
+            Credential::OAuth { .. } => return Err(login_required(provider)),
         };
-        let info = {
+        let info = if dialect.is_some() {
+            self.model_info(provider, model).ok_or_else(|| unknown(provider))?
+        } else {
             let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
             if mode == AuthMode::Subscription && !catalog.supports(provider, model, mode) {
                 let available = catalog.models(provider, Some(mode)).into_iter().map(|entry| entry.info.id).collect::<Vec<_>>().join(", ");
@@ -202,28 +343,60 @@ impl Providers {
         let http = HttpClient::new()?;
         let retry = RetryPolicy::default();
         let idle_timeout = Duration::from_secs(120);
-        Ok(match provider {
-            "anthropic" => Arc::new(anthropic::AnthropicModel::new(anthropic::AnthropicConfig {
-                base_url: "https://api.anthropic.com".into(),
+        let messages = |base_url: String, auth, mode, model| {
+            Arc::new(anthropic::AnthropicModel::new(anthropic::AnthropicConfig {
+                base_url,
                 auth,
                 mode,
-                model: info,
+                model,
                 betas: vec![],
-                http,
-                retry,
+                http: http.clone(),
+                retry: retry.clone(),
                 idle_timeout,
-            })),
-            "openai" => Arc::new(openai::OpenAiModel::new(openai::OpenAiConfig {
-                base_url: "https://api.openai.com/v1".into(),
+            })) as Arc<dyn Model>
+        };
+        let responses = |base_url: &str, auth, mode, model| {
+            Arc::new(openai::OpenAiModel::new(openai::OpenAiConfig {
+                base_url: base_url.into(),
                 auth,
                 mode,
-                model: info,
-                http,
-                retry,
+                model,
+                http: http.clone(),
+                retry: retry.clone(),
                 idle_timeout,
                 organization: None,
                 project: None,
+            })) as Arc<dyn Model>
+        };
+        Ok(match (provider, dialect) {
+            ("anthropic", _) => messages("https://api.anthropic.com".into(), auth, mode, info),
+            ("openai", _) => responses("https://api.openai.com/v1", auth, mode, info),
+            ("xai", _) => responses(XAI_URL, auth, mode, info),
+            ("google", _) => Arc::new(google::GoogleModel::new(google::GoogleConfig {
+                base_url: google::BASE_URL.into(),
+                auth,
+                model: info,
+                http: http.clone(),
+                retry: retry.clone(),
+                idle_timeout,
             })),
+            (_, Some(dialect)) => {
+                let base_url = self
+                    .base_url(provider)
+                    .ok_or_else(|| LlmError::new(ErrorClass::InvalidRequest, format!("set a base URL with `otto-silo auth login {provider}`")))?;
+                match dialect.wire {
+                    Wire::Anthropic => messages(base_url, auth, mode, info),
+                    Wire::Chat => Arc::new(compat::CompatModel::new(compat::CompatConfig {
+                        dialect,
+                        base_url,
+                        auth: Some(auth),
+                        model: info,
+                        http: http.clone(),
+                        retry: retry.clone(),
+                        idle_timeout,
+                    })),
+                }
+            }
             _ => return Err(unknown(provider)),
         })
     }
@@ -246,15 +419,25 @@ impl Providers {
             return Some((provider.into(), model.into()));
         }
         let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
-        IDS.into_iter().find_map(|provider| catalog.default_model(provider, signed_in(provider)?).map(|model| (provider.into(), model)))
+        IDS.into_iter().find_map(|provider| {
+            let mode = signed_in(provider)?;
+            catalog.default_model(provider, mode).or_else(|| self.local_models(provider).into_iter().next()).map(|model| (provider.into(), model))
+        })
     }
 
     #[must_use]
     pub fn status(&self) -> Vec<AuthStatus> {
         IDS.into_iter()
             .map(|provider| {
-                let mut status =
-                    AuthStatus { provider: provider.into(), mode: None, signed_in: false, expires_at_ms: None, account_id: None, error: None };
+                let mut status = AuthStatus {
+                    provider: provider.into(),
+                    mode: None,
+                    signed_in: false,
+                    expires_at_ms: None,
+                    account_id: None,
+                    error: None,
+                    base_url: compat::dialect(provider).filter(|d| d.discovery.is_some()).and_then(|_| self.base_url(provider)),
+                };
                 match self.credential(provider) {
                     Ok(Some(Credential::ApiKey { .. })) => {
                         status.mode = Some("api_key".into());
@@ -266,12 +449,30 @@ impl Providers {
                         status.expires_at_ms = Some(expires_at_ms);
                         status.account_id = account_id;
                     }
+                    // A running local server needs no sign-in.
+                    Ok(None) if !self.local_models(provider).is_empty() => {
+                        status.mode = Some("api_key".into());
+                        status.signed_in = true;
+                    }
                     Ok(None) => {}
                     Err(error) => status.error = Some(error.to_string()),
                 }
                 status
             })
             .collect()
+    }
+
+    /// Sign-in modes a provider offers: subscription only where a transport exists.
+    #[must_use]
+    pub fn login_modes(&self, provider: &str) -> Vec<AuthMode> {
+        if !IDS.contains(&provider) {
+            return Vec::new();
+        }
+        let mut modes = vec![AuthMode::ApiKey];
+        if SUBSCRIPTION.contains(&provider) {
+            modes.push(AuthMode::Subscription);
+        }
+        modes
     }
 
     /// # Errors
@@ -319,6 +520,10 @@ impl Providers {
         let credential = match flow.state {
             LoginState::ApiKey => {
                 if input.trim().is_empty() {
+                    // Local and custom servers work without a key.
+                    if compat::dialect(&flow.provider).is_some_and(|d| !d.key_required) {
+                        return self.store.remove(&flow.provider);
+                    }
                     return Err(LlmError::new(ErrorClass::Auth, "API key must not be empty"));
                 }
                 Credential::ApiKey { key: input.trim().into() }
@@ -357,7 +562,7 @@ impl Providers {
 }
 
 fn unknown(provider: &str) -> LlmError {
-    LlmError::new(ErrorClass::InvalidRequest, format!("unknown provider {provider:?}; choose anthropic or openai"))
+    LlmError::new(ErrorClass::InvalidRequest, format!("unknown provider {provider:?}; choose one of {}", IDS.join(", ")))
 }
 fn login_required(provider: &str) -> LlmError {
     LlmError::new(ErrorClass::Auth, format!("run `otto-silo auth login {provider}`"))
@@ -441,7 +646,10 @@ mod tests {
         f.1.store.set("openai", Credential::ApiKey { key: "key".into() }).unwrap();
         assert!(f.1.model("openai", "gpt-5.5").await.is_ok());
         assert!(f.1.model("openai", "gpt-unreleased").await.is_ok());
-        assert!(f.1.model("google", "gemini-3.1-pro-preview").await.err().unwrap().message.contains("not yet supported"));
+        if auth::env_api_key("google").is_none() {
+            assert_eq!(f.1.model("google", "gemini-3.1-pro-preview").await.err().unwrap().class, ErrorClass::Auth);
+        }
+        assert!(f.1.model("nope", "x").await.err().unwrap().message.contains("unknown provider"));
         assert!(!f.1.list_models(Some("openai"), Some(AuthMode::Subscription)).iter().any(|info| info.id == "gpt-5.5"));
         assert_eq!(f.1.model_auth_modes("openai", "gpt-5.5"), vec![AuthMode::ApiKey]);
     }

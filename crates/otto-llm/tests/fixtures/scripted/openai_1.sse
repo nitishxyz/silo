@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"resp_s1","model":"m"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"README.md\"}"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}
+
+data: {"type":"response.completed","response":{"id":"resp_s1","status":"completed","usage":{"input_tokens":2120,"input_tokens_details":{"cached_tokens":0},"output_tokens":20}}}
+

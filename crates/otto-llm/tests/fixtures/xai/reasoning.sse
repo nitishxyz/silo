@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"resp_x","model":"grok-4.6"}}
+
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_x","delta":"Thinking"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_x","summary":[{"type":"summary_text","text":"Thinking"}],"encrypted_content":"xai-enc"}}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hi","annotations":[]}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_x","status":"completed","usage":{"input_tokens":40,"input_tokens_details":{"cached_tokens":32},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":5}}}}
+

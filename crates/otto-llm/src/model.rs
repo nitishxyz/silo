@@ -19,7 +19,8 @@ pub trait Model: Send + Sync {
     async fn count_tokens(&self, _req: &Request) -> Result<Option<u64>, LlmError> {
         Ok(None)
     }
-    /// WebSocket lanes, `previous_response_id` state, steering (O3).
+    /// Live provider session (OpenAI Responses WebSocket), when this model
+    /// streams over one. Only such models can be steered mid-response.
     fn session(&self) -> Option<&dyn ModelSession> {
         None
     }
@@ -27,7 +28,15 @@ pub trait Model: Send + Sync {
 
 /// Provider-side session state (O3); a cache, never the truth (§7.3).
 #[cfg(feature = "client")]
-pub trait ModelSession: Send + Sync {}
+#[async_trait::async_trait]
+pub trait ModelSession: Send + Sync {
+    /// Queue user input into the response that is streaming right now.
+    /// `Ok(false)`: no stream can take it; deliver it at the next step
+    /// boundary instead. `Ok(true)` hands it to the stream, which reports it in
+    /// [`crate::StreamEvent::Steered`] once the provider commits it. Input the
+    /// stream never reports was not applied and still belongs to the caller.
+    async fn steer(&self, id: &str, input: Vec<crate::types::Part>) -> Result<bool, LlmError>;
+}
 
 #[cfg(feature = "client")]
 #[derive(Clone, Debug, Default)]
@@ -96,4 +105,8 @@ pub struct Caps {
     pub context_window: u64,
     pub max_output: u64,
     pub tool_family: ToolFamily,
+    /// Provider-defined client tools this model and auth mode accept
+    /// (`text_editor_20250728`, `bash_20250124`, `apply_patch`, `shell`).
+    #[serde(default)]
+    pub native_tools: Vec<String>,
 }

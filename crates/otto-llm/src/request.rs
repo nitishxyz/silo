@@ -42,9 +42,33 @@ pub struct Request {
     pub user: Option<String>,
     #[serde(default)]
     pub provider: ProviderOptions,
+    /// Native compaction (`caps.native_compaction`); otto's own summarizer
+    /// is used when this is `None`.
+    #[serde(default)]
+    pub compaction: Option<Compaction>,
     /// Raw JSON merged last into the provider's request body.
     #[serde(default)]
     pub extra: Option<Value>,
+}
+
+/// Provider-side compaction. The result arrives as a [`crate::Part::Compaction`]
+/// whose opaque data is replayed only to the same provider.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Compaction {
+    /// Summarize the request's items now instead of answering. The returned
+    /// compaction part replaces those items in later requests.
+    Now {
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// Let the provider compact inside ordinary requests once the input
+    /// passes `threshold` tokens; keep the returned part in the history.
+    Auto {
+        threshold: u64,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -73,6 +97,15 @@ pub enum ToolKind {
     Custom {
         #[serde(default)]
         format: Option<Value>,
+    },
+    /// A provider-defined client tool: the provider fixes the schema and the
+    /// model was trained on it; otto executes it. `tool` is the provider's
+    /// type (`text_editor_20250728`, `bash_20250124`, `apply_patch`, `shell`)
+    /// and `config` its parameters. Calls arrive as ordinary tool calls.
+    Native {
+        tool: String,
+        #[serde(default)]
+        config: Value,
     },
     /// A provider-hosted tool: `tool` is the provider's type
     /// (`web_search_20250305`, `web_search`, `code_execution`, …) and

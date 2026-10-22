@@ -100,11 +100,68 @@ fn media(media: &Media, image: bool) -> Value {
     }
     value
 }
+/// `response.steer` input. Steering accepts only user messages with text,
+/// image and file content.
 #[must_use]
-pub fn request(req: &Request) -> Value {
+pub fn steer_input(parts: &[Part]) -> Value {
+    let content: Vec<_> = parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text { text, .. } | Part::System { text } => Some(json!({"type":"input_text","text":text})),
+            Part::Image(m) => Some(media(m, true)),
+            Part::Document(m) => Some(media(m, false)),
+            _ => None,
+        })
+        .collect();
+    json!([{"type":"message","role":"user","content":content}])
+}
+/// Native client tools: the call item type each tool's calls arrive as.
+const NATIVE_CALLS: [&str; 2] = ["apply_patch_call", "shell_call"];
+/// Stream events for a `/responses/compact` result: the returned window
+/// becomes one compaction part that replaces the summarized items.
+#[must_use]
+pub fn compacted(response: &Value, provider: &str) -> Vec<crate::StreamEvent> {
+    use crate::{FinishReason, StreamEvent as E, Usage};
+    let id = response["id"].as_str().map(String::from);
+    let model = response["model"].as_str().unwrap_or_default().to_owned();
+    let window = json!({"type":"compacted_window","output":response["output"].as_array().cloned().unwrap_or_default()});
+    let mut events = vec![
+        E::Start { response_id: id.clone(), model: Some(model.clone()) },
+        E::PartDone { part: Part::Compaction { summary: None, opaque: Some(crate::Opaque { provider: provider.into(), model, data: window }) } },
+    ];
+    let u = &response["usage"];
+    if u.is_object() {
+        let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+        events.push(E::Usage(Usage {
+            input: u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached),
+            output: u["output_tokens"].as_u64().unwrap_or(0),
+            cache_read: cached,
+            reasoning: u["output_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
+            ..Usage::default()
+        }));
+    }
+    events.push(E::Finish { reason: FinishReason::Other("compaction".into()), response_id: id });
+    events
+}
+/// The output item for a native client call's result.
+fn native_output(kind: &str, call_id: &str, content: &[ResultPart], is_error: bool) -> Value {
+    let text: String = content.iter().filter_map(|p| if let ResultPart::Text { text } = p { Some(text.as_str()) } else { None }).collect();
+    if kind == "shell_call" {
+        // A tool may return the documented output array as JSON; otherwise wrap the text.
+        let output = serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_array)
+            .unwrap_or_else(|| json!([{"stdout":text,"stderr":"","outcome":{"type":"exit","exit_code":i32::from(is_error)}}]));
+        return json!({"type":"shell_call_output","call_id":call_id,"output":output});
+    }
+    json!({"type":"apply_patch_call_output","call_id":call_id,"status":if is_error { "failed" } else { "completed" },"output":text})
+}
+/// Responses input items for `items`, as [`request_for`] sends them.
+#[must_use]
+pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
     let mut input = Vec::new();
-    let mut kinds = HashMap::new();
-    for item in &req.items {
+    let mut kinds: HashMap<&str, (CallKind, Option<&str>)> = HashMap::new();
+    for item in items {
         for part in &item.parts {
             let role = match item.role {
                 Role::System => "developer",
@@ -123,25 +180,35 @@ pub fn request(req: &Request) -> Value {
                 input.push(json!({"type":"message","role":role,"content":[content]}));
                 continue;
             }
+            let own = |o: &Option<crate::Opaque>| o.as_ref().filter(|o| o.matches_provider(provider)).map(|o| o.data.clone());
             match part {
-                Part::Reasoning { opaque: Some(o), .. } | Part::Compaction { opaque: Some(o), .. } if o.matches_provider("openai") => {
-                    input.push(o.data.clone())
-                }
+                Part::Reasoning { opaque, .. } => input.extend(own(opaque)),
+                // A `/responses/compact` window replaces the items it summarized.
+                Part::Compaction { opaque, .. } => match own(opaque) {
+                    Some(data) if data["type"] == "compacted_window" => input.extend(data["output"].as_array().into_iter().flatten().cloned()),
+                    data => input.extend(data),
+                },
                 Part::ToolCall { call_id, name, input: args, kind, opaque } => {
-                    kinds.insert(call_id.as_str(), *kind);
-                    match kind {
-                        CallKind::Function => input.push(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":args.to_string()})),
-                        CallKind::Custom => {
+                    let raw = own(opaque);
+                    let native = raw.as_ref().and_then(|v| v["type"].as_str()).and_then(|t| NATIVE_CALLS.iter().copied().find(|n| *n == t));
+                    kinds.insert(call_id.as_str(), (*kind, native));
+                    match (kind, raw) {
+                        (_, Some(raw)) => input.push(raw),
+                        (CallKind::Function, None) => {
+                            input.push(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":args.to_string()}))
+                        }
+                        (CallKind::Custom, None) => {
                             input.push(json!({"type":"custom_tool_call","call_id":call_id,"name":name,"input":args.as_str().unwrap_or_default()}))
                         }
-                        CallKind::Hosted => {
-                            if let Some(o) = opaque.as_ref().filter(|o| o.matches_provider("openai")) {
-                                input.push(o.data.clone());
-                            }
-                        }
+                        (CallKind::Hosted, None) => {}
                     }
                 }
-                Part::ToolResult { call_id, content, .. } => {
+                Part::ToolResult { call_id, content, is_error } => {
+                    let (kind, native) = kinds.get(call_id.as_str()).copied().unwrap_or_default();
+                    if let Some(native) = native {
+                        input.push(native_output(native, call_id, content, *is_error));
+                        continue;
+                    }
                     let content: Vec<_> = content
                         .iter()
                         .map(|p| match p {
@@ -150,12 +217,25 @@ pub fn request(req: &Request) -> Value {
                             ResultPart::Document(m) => media(m, false),
                         })
                         .collect();
-                    input.push(json!({"type":if kinds.get(call_id.as_str()) == Some(&CallKind::Custom) { "custom_tool_call_output" } else { "function_call_output" }, "call_id":call_id,"output":content}));
+                    let kind = if kind == CallKind::Custom { "custom_tool_call_output" } else { "function_call_output" };
+                    input.push(json!({"type":kind, "call_id":call_id,"output":content}));
                 }
                 _ => {}
             }
         }
     }
+    input
+}
+#[must_use]
+pub fn request(req: &Request) -> Value {
+    request_for(req, "openai")
+}
+/// A Responses body for `provider` (`openai`, or a wire-compatible one such
+/// as `xai`): only that provider's opaque items are replayed.
+#[must_use]
+pub fn request_for(req: &Request, provider: &str) -> Value {
+    let input = input(&req.items, provider);
+    let asynchronous = req.provider.openai.as_ref().map(|o| o.async_tools.as_slice()).unwrap_or_default();
     let tools: Vec<_> = req
         .tools
         .iter()
@@ -175,13 +255,20 @@ pub fn request(req: &Request) -> Value {
                 }
                 value
             }
-            ToolKind::Hosted { tool, config } => {
+            ToolKind::Hosted { tool, config } | ToolKind::Native { tool, config } => {
                 let mut value = json!({"type":tool});
                 if config.is_object() {
                     merge(&mut value, config);
                 }
                 value
             }
+        })
+        .zip(&req.tools)
+        .map(|(mut value, tool)| {
+            if asynchronous.contains(&tool.name) && matches!(value["type"].as_str(), Some("function" | "custom")) {
+                value["async"] = json!(true);
+            }
+            value
         })
         .collect();
     let choice = match &req.tool_choice {
@@ -205,7 +292,12 @@ pub fn request(req: &Request) -> Value {
         }
     }
     if let Some(reasoning) = req.reasoning {
-        body["reasoning"] = json!({"effort":effort(reasoning),"summary":"auto"});
+        let effort = match (provider, effort(reasoning)) {
+            // xAI: low/medium/high/xhigh; reasoning cannot be disabled.
+            ("xai", "none" | "minimal") => "low",
+            (_, effort) => effort,
+        };
+        body["reasoning"] = json!({"effort":effort,"summary":"auto"});
     }
     if !req.cache.disabled
         && let Some(key) = &req.cache.key
@@ -219,6 +311,9 @@ pub fn request(req: &Request) -> Value {
     }
     if let Some(tier) = req.provider.openai.as_ref().and_then(|options| options.service_tier.as_ref()) {
         body["service_tier"] = json!(tier);
+    }
+    if let Some(crate::Compaction::Auto { threshold, .. }) = &req.compaction {
+        body["context_management"] = json!([{"type":"compaction","compact_threshold":threshold}]);
     }
     if let Some(extra) = &req.extra {
         merge(&mut body, extra);

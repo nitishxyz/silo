@@ -50,6 +50,14 @@ pub enum StreamEvent {
     },
     /// Cumulative usage so far; the last one wins.
     Usage(Usage),
+    /// The provider committed steering input (ids from
+    /// [`crate::ModelSession::steer`], in submission order) and continues in a
+    /// new response. Everything before this event belongs to the previous
+    /// assistant item; the steered user input goes between the two. Usage and
+    /// finish events after it describe the new response only.
+    Steered {
+        ids: Vec<String>,
+    },
     Finish {
         reason: FinishReason,
         #[serde(default)]
@@ -75,6 +83,22 @@ impl Usage {
     #[must_use]
     pub fn total_input(&self) -> u64 {
         self.input + self.cache_read + self.cache_write
+    }
+    /// Share of the input served from the provider's prompt cache, `None`
+    /// without input. Every provider reports uncached input in `input` and
+    /// cache hits in `cache_read`, so this is comparable across providers.
+    #[must_use]
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let total = self.total_input();
+        (total > 0).then(|| self.cache_read as f64 / total as f64)
+    }
+    /// Add another call's usage (a turn or session total).
+    pub fn accumulate(&mut self, other: &Usage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.reasoning += other.reasoning;
     }
 }
 

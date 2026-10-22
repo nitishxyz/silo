@@ -1,0 +1,39 @@
+event: interaction.created
+data: {"interaction":{"id":"v1_search","status":"in_progress","object":"interaction","model":"gemini-3.8-flash"},"event_type":"interaction.created"}
+
+event: step.start
+data: {"index":0,"step":{"type":"google_search_call","id":"gs_1","signature":"gs-sig"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"type":"google_search_call","arguments":{"queries":["largest mountain in Europe"]}},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: step.start
+data: {"index":1,"step":{"type":"google_search_result","call_id":"gs_1"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":1,"delta":{"type":"google_search_result","result":[{"title":"Mount Elbrus","url":"https://example.com/elbrus"}]},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":1,"event_type":"step.stop"}
+
+event: step.start
+data: {"index":2,"step":{"type":"model_output"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":2,"delta":{"text":"Mount Elbrus, ","type":"text"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":2,"delta":{"text":"at 5,642 m.","type":"text"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":2,"event_type":"step.stop"}
+
+event: interaction.completed
+data: {"interaction":{"id":"v1_search","status":"completed","usage":{"total_tokens":60,"total_input_tokens":40,"total_cached_tokens":0,"total_output_tokens":20,"total_thought_tokens":0},"object":"interaction","model":"gemini-3.8-flash"},"event_type":"interaction.completed"}
+
+event: done
+data: [DONE]
+

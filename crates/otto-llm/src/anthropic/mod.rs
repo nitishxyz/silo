@@ -40,11 +40,20 @@ pub(crate) fn base_caps() -> Caps {
         hosted_tools: vec!["web_search".into(), "web_fetch".into(), "code_execution".into()],
         prompt_cache: true,
         tool_family: ToolFamily::Anthropic,
+        // Every catalog model is Claude 4.5 or later, which take both.
+        native_tools: vec!["text_editor_20250728".into(), "bash_20250124".into()],
         ..Caps::default()
     }
 }
 pub(crate) fn supports_mid_system(id: &str) -> bool {
     ["fable-5", "mythos-5", "opus-5", "opus-4-8", "sonnet-5-5", "haiku-5-5"].iter().any(|s| id.contains(s))
+}
+/// Server-side compaction (on demand and threshold), per the compaction docs' model lists.
+#[must_use]
+pub fn supports_compaction(id: &str) -> bool {
+    ["fable-5", "mythos-5", "mythos-preview", "opus-5", "opus-4-8", "opus-4-7", "opus-4-6", "sonnet-5", "sonnet-4-6", "haiku-5-5"]
+        .iter()
+        .any(|s| id.contains(s))
 }
 pub(crate) fn supports_adaptive(id: &str) -> bool {
     supports_mid_system(id) || ["4-6", "4-7", "sonnet-5"].iter().any(|s| id.contains(s))
@@ -135,7 +144,8 @@ mod client {
             if req.model.is_empty() {
                 req.model.clone_from(&self.config.model.id);
             }
-            let body = convert::body(&req)?;
+            let provider = self.config.model.provider.as_str();
+            let body = convert::body_for(&req, provider)?;
             let mut betas = self.config.betas.clone();
             if let Some(options) = &req.provider.anthropic {
                 for beta in &options.betas {
@@ -144,12 +154,14 @@ mod client {
                     }
                 }
             }
-            if supports_mid_system(&req.model)
-                && req.items.iter().any(|item| item.parts.iter().any(|p| matches!(p, crate::Part::ToolsChanged { .. })))
-            {
-                let beta = api::Beta::from(api::Beta::INLINE_TOOLS);
-                if !betas.contains(&beta) {
-                    betas.push(beta);
+            if provider == "anthropic" {
+                let inline = supports_mid_system(&req.model)
+                    && req.items.iter().any(|item| item.parts.iter().any(|p| matches!(p, crate::Part::ToolsChanged { .. })));
+                for beta in inline.then_some(api::Beta::INLINE_TOOLS).into_iter().chain(convert::betas_for(&body)) {
+                    let beta = api::Beta::from(beta);
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
                 }
             }
             Ok((body, betas))
@@ -161,7 +173,11 @@ mod client {
             body["stream"] = Value::Bool(true);
             let names = subscription::tool_names(&body);
             let response = self.send("messages", body, &self.config.betas, &cx).await?;
-            let stream = stream::decode(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), model);
+            let stream = stream::decode_for(
+                byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
+                model,
+                self.config.model.provider.as_str(),
+            );
             Ok(if self.config.mode == AuthMode::Subscription { subscription::normalize(stream, names) } else { stream })
         }
     }
@@ -175,7 +191,11 @@ mod client {
             let model = body["model"].as_str().unwrap_or_default().to_owned();
             let names = subscription::tool_names(&body);
             let response = self.send("messages", body, &betas, &cx).await?;
-            let stream = stream::decode(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), model);
+            let stream = stream::decode_for(
+                byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
+                model,
+                self.config.model.provider.as_str(),
+            );
             Ok(if self.config.mode == AuthMode::Subscription { subscription::normalize(stream, names) } else { stream })
         }
         async fn count_tokens(&self, req: &Request) -> Result<Option<u64>, LlmError> {

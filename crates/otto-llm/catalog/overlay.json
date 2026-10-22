@@ -24,14 +24,46 @@
     "manual": {}
   },
   "google": {
-    "comment": "Catalog metadata only; no Google transport is implemented yet.",
+    "comment": "Interactions API transport (API key).",
     "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
     "subscription_overrides": {},
     "defaults": {"api_key": "gemini-3.1-pro-preview"},
     "manual": {}
   },
+  "openrouter": {
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {"api_key": "anthropic/claude-sonnet-5.5"},
+    "manual": {}
+  },
+  "deepseek": {
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {"api_key": "deepseek-v4-pro"},
+    "manual": {}
+  },
+  "moonshotai": {
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {"api_key": "kimi-k3"},
+    "manual": {}
+  },
+  "zai": {
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {"api_key": "glm-5.3"},
+    "manual": {}
+  },
+  "minimax": {
+    "comment": "Anthropic-compatible endpoint.",
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {"api_key": "MiniMax-M3"},
+    "manual": {}
+  },
+  "lmstudio": {
+    "comment": "Local server; the live model list comes from /v1/models when it is running.",
+    "auth": {"default": ["api_key"], "subscription_ids": [], "subscription_prefixes": [], "overrides": {}},
+    "defaults": {},
+    "manual": {}
+  },
   "xai": {
-    "comment": "Subscription ids, manual CLI models and the hidden build alias follow catalog-auth.ts and catalog-manual.ts in the TS reference; transport is not implemented yet. Manual entries omit unknown list prices and output limits.",
+    "comment": "Responses API transport (API key). Subscription ids, manual CLI models and the hidden build alias follow catalog-auth.ts and catalog-manual.ts in the TS reference; there is no xAI subscription transport, so those entries are listed but unusable. Manual entries omit unknown list prices and output limits.",
     "auth": {"default": ["api_key"], "subscription_ids": ["grok-4.5", "grok-4.6"], "subscription_prefixes": [], "overrides": {"grok-build": [], "grok-composer-2.5-fast": ["subscription"]}},
     "subscription_overrides": {},
     "defaults": {"api_key": "grok-4.6", "subscription": "grok-4.6"},

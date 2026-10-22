@@ -11,6 +11,12 @@ impl Beta {
     pub const INTERLEAVED_THINKING: &str = "interleaved-thinking-2025-05-14";
     pub const INLINE_TOOLS: &str = "inline-tools-2026-09-15";
     pub const OAUTH: &str = "oauth-2025-04-20";
+    /// On-demand compaction (`compaction` parameter, signed blocks).
+    pub const COMPACT: &str = "compact-2026-09-04";
+    /// Threshold compaction (`context_management.edits[compact_20260112]`).
+    pub const COMPACT_THRESHOLD: &str = "compact-2026-01-12";
+    /// Context editing (`clear_tool_uses_20250919`, `clear_thinking_20251015`).
+    pub const CONTEXT_MANAGEMENT: &str = "context-management-2025-06-27";
 }
 impl From<&str> for Beta {
     fn from(value: &str) -> Self {

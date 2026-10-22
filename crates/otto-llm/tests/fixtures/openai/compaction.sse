@@ -1,0 +1,8 @@
+data: {"type":"response.created","response":{"id":"resp_cmp","model":"gpt-6-astra"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","id":"cmp_1","encrypted_content":"gAAAA-compacted"}}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Continuing.","annotations":[]}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_cmp","status":"completed","usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":800},"output_tokens":20}}}
+

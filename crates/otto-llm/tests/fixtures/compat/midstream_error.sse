@@ -1,0 +1,4 @@
+data: {"id":"gen-e","object":"chat.completion.chunk","created":1,"model":"openai/gpt-6-astra","choices":[{"index":0,"delta":{"content":"Partial"},"finish_reason":null}]}
+
+data: {"id":"gen-e","object":"chat.completion.chunk","created":1,"model":"openai/gpt-6-astra","provider":"openai","error":{"code":"server_error","message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+

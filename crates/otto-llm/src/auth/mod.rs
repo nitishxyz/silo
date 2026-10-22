@@ -51,9 +51,9 @@ pub fn env_api_key(provider: &str) -> Option<String> {
     let names: &[&str] = match provider {
         "anthropic" => &["ANTHROPIC_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
-        "google" | "gemini" => &["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+        "google" | "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
         "xai" => &["XAI_API_KEY"],
-        _ => &[],
+        id => crate::compat::dialect(id).map(|d| d.env).unwrap_or_default(),
     };
     names.iter().find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
