@@ -1,4 +1,4 @@
-use crate::session::Context;
+use crate::session::{Context, Live};
 use otto_tools::{Effects, Loading, OutputPart, Tool, ToolCx, ToolError, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -30,31 +30,31 @@ pub(crate) fn pattern(pattern: &str, name: &str) -> bool {
 
 /// Built-ins for the model's family, registered extras, and project sources (MCP).
 pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
-    let family =
-        serde_json::to_value(cx.model.info().caps.tool_family).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "generic".into());
-    let mut all = otto_tools::registry::tools_for_family(&family);
+    let mut all = otto_tools::registry::tools_for_family(&cx.live().family());
     all.extend(cx.runtime.extra_tools());
     all.extend(cx.runtime.source_tools(&cx.root).await);
     all
 }
 
-fn allowed(cx: &Context, name: &str) -> bool {
-    let list = |key: &str| cx.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| pattern(p, name)));
+fn allowed(live: &Live, name: &str) -> bool {
+    let list = |key: &str| live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| pattern(p, name)));
     list("tools").unwrap_or(true) && !list("denied_tools").unwrap_or(false)
 }
 
 fn deferred(cx: &Context, all: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
-    all.iter().map(|t| t.spec()).filter(|s| s.loading == Loading::Deferred && allowed(cx, &s.name)).cloned().collect()
+    let live = cx.live();
+    all.iter().map(|t| t.spec()).filter(|s| s.loading == Loading::Deferred && allowed(&live, &s.name)).cloned().collect()
 }
 
 /// `load_tools` only exists while it has something to load, and it only
 /// loads granted tools, so it needs no grant of its own (older sessions lack one).
-pub(crate) fn granted(cx: &Context, spec: &ToolSpec) -> bool {
-    allowed(cx, &spec.name) || (spec.name == "load_tools" && spec.source == otto_tools::Source::Builtin)
+pub(crate) fn granted(live: &Live, spec: &ToolSpec) -> bool {
+    allowed(live, &spec.name) || (spec.name == "load_tools" && spec.source == otto_tools::Source::Builtin)
 }
 
 pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::ToolInfo>> {
-    let family = serde_json::to_value(cx.model.info().caps.tool_family)?.as_str().unwrap_or("generic").to_owned();
+    let live = cx.live();
+    let family = live.family();
     let mut all = available(&cx).await;
     let session = tools(cx.clone(), &all, &loaded(&cx).await?);
     all.extend(session);
@@ -62,10 +62,10 @@ pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::Too
         .into_iter()
         .filter_map(|tool| {
             let spec = tool.spec();
-            if !granted(&cx, spec) {
+            if !granted(&live, spec) {
                 return None;
             }
-            let presentation = spec.presentation(&family, &cx.model.info().caps.native_tools);
+            let presentation = spec.presentation(&family, &live.model.info().caps.native_tools);
             let effects = [
                 ("read", spec.effects.read),
                 ("write", spec.effects.write),

@@ -25,7 +25,9 @@ pub(crate) enum Command {
     Wake,
     QueueRemove(String, oneshot::Sender<Result<()>>),
     QueueUpdate(String, Delivery, oneshot::Sender<Result<()>>),
-    Update(otto_store::SessionUpdate, oneshot::Sender<Result<()>>),
+    /// `true`: only while the title is still empty (automatic titles).
+    Update(otto_store::SessionUpdate, bool, oneshot::Sender<Result<bool>>),
+    Configure(crate::Configure, oneshot::Sender<Result<SessionInfo>>),
     Shutdown(oneshot::Sender<()>),
     View(oneshot::Sender<Result<SessionView>>),
     Approval(String, ApprovalDecision, Option<String>, oneshot::Sender<Result<()>>),
@@ -124,9 +126,10 @@ impl Pending {
 }
 pub(crate) struct Context {
     pub runtime: Runtime,
+    /// The session as opened: identity, cwd and parent. Agent, model and meta
+    /// change through `session.update`; read them from [`Context::live`].
     pub row: otto_store::Session,
-    pub model: Arc<dyn otto_llm::Model>,
-    pub system: Vec<String>,
+    live: Mutex<Arc<Live>>,
     pub events: broadcast::Sender<SequencedEvent>,
     pub deltas: broadcast::Sender<Event>,
     /// Wakes a streaming step when steering input arrives.
@@ -134,6 +137,17 @@ pub(crate) struct Context {
     state: mpsc::Sender<StateOp>,
     journal: mpsc::Sender<Journal>,
     pub root: std::path::PathBuf,
+}
+/// What a model request is built from; a step takes one snapshot.
+pub(crate) struct Live {
+    pub row: otto_store::Session,
+    pub model: Arc<dyn otto_llm::Model>,
+    pub system: Vec<String>,
+}
+impl Live {
+    pub fn family(&self) -> String {
+        family(self.model.as_ref())
+    }
 }
 type StateOp = Box<dyn FnOnce(&mut Pending) + Send>;
 struct Journal {
@@ -144,6 +158,16 @@ struct Journal {
     reply: oneshot::Sender<Result<i64>>,
 }
 impl Context {
+    pub fn live(&self) -> Arc<Live> {
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    fn set_live(&self, live: Live) {
+        *self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(live);
+    }
+    fn set_row(&self, row: otto_store::Session) {
+        let live = self.live();
+        self.set_live(Live { row, model: live.model.clone(), system: live.system.clone() });
+    }
     pub async fn state<T: Send + 'static>(&self, f: impl FnOnce(&mut Pending) -> T + Send + 'static) -> Result<T> {
         let (tx, rx) = oneshot::channel();
         self.state
@@ -243,7 +267,8 @@ pub(crate) async fn spawn(runtime: Runtime, row: otto_store::Session) -> Result<
     let (deltas, _) = broadcast::channel(4096);
     let busy = Arc::new(Mutex::new(false));
     let handle = SessionHandle { id: row.id.clone(), tx, events: events.clone(), deltas: deltas.clone(), busy: busy.clone() };
-    let cx = Arc::new(Context { runtime, row, model, system, events, deltas, steer_wake: tokio::sync::Notify::new(), state, journal, root });
+    let live = Mutex::new(Arc::new(Live { row: row.clone(), model, system }));
+    let cx = Arc::new(Context { runtime, row, live, events, deltas, steer_wake: tokio::sync::Notify::new(), state, journal, root });
     tokio::spawn(actor(cx, rx, journal_rx, state_rx, pending, busy));
     Ok(handle)
 }
@@ -261,6 +286,7 @@ async fn actor(
     let mut wake_pending = false;
     let mut finished_event = None;
     let mut archived = cx.row.archived;
+    let mut titled = false;
     loop {
         {
             let mut flag = busy.lock().expect("busy mutex");
@@ -288,7 +314,8 @@ async fn actor(
             Some(op)=state_rx.recv()=>op(&mut state),
             Some(entry)=journal.recv()=>{let finish=matches!(entry.event,Event::TurnFinished{..}).then(||entry.event.clone());let result=cx.commit(entry.event,entry.projection,entry.turn,entry.step).await;if let (Some(event),Ok(seq))=(finish,&result){finished_event=Some((*seq,event));}let _=entry.reply.send(result);}
             result=async{match &mut active {Some(task)=>Some(task.await),None=>std::future::pending().await}}=>{
-                if let Some(Ok(Err(e)))=result {tracing::error!(session=%cx.row.id,error=%e,"turn failed");}
+                if let Some(Ok(Err(e)))=&result {tracing::error!(session=%cx.row.id,error=%e,"turn failed");}
+                if !titled&&matches!(result,Some(Ok(Ok(()))))&&cx.live().row.title.is_empty()&&cx.runtime.auto_title(){titled=true;let c=cx.clone();tokio::spawn(async move{if let Err(error)=crate::title::name(&c).await{tracing::warn!(session=%c.row.id,%error,"automatic title failed");}});}
                 active=None;state.approvals.clear();state.questions.clear();state.halt=None;state.after_tools.clear();
                 // Steers the turn never reached run next, after any interrupt that ended it.
                 let at=state.queue.iter().take_while(|q|q.delivery==Delivery::Interrupt).count();let leftover:Vec<_>=state.native.drain(..).chain(state.steer.drain(..)).collect();for (i,input) in leftover.into_iter().enumerate(){state.queue.insert(at+i,input);}
@@ -298,35 +325,38 @@ async fn actor(
             command=rx.recv()=>{let Some(command)=command else {cancel.cancel();break};match command {
                 Command::Tools(reply)=>{let _=reply.send(crate::tools::infos(cx.clone()).await);}
                 Command::SetMode(mode,reply)=>{
-                    if cx.row.agent=="plan"&&mode!=ApprovalMode::Plan{let _=reply.send(Err(Error::Invalid("plan agents cannot leave plan mode".into())));continue;}
+                    if cx.live().row.agent=="plan"&&mode!=ApprovalMode::Plan{let _=reply.send(Err(Error::Invalid("plan agents cannot leave plan mode".into())));continue;}
                     let id=cx.row.id.clone();
                     let result=cx.runtime.db(move|s|{
                         let mut row=s.session(&id)?.ok_or(Error::Closed)?;
                         if !row.meta.is_object(){row.meta=serde_json::json!({});}
                         row.meta["approval_mode"]=serde_json::to_value(mode)?;
-                        let meta=row.meta.clone();let mut info=crate::runtime::info(s,row)?;info.last_seq+=1;
+                        let meta=row.meta.clone();let mut info=crate::runtime::info(s,row.clone())?;info.last_seq+=1;
                         let event=Event::SessionChanged{info};
                         let seq=s.append_with_session(&id,crate::runtime::record(&event,turn,0)?,Projection::None,otto_store::SessionUpdate{meta:Some(meta),..Default::default()})?;
-                        Ok((seq,event))
+                        Ok(((seq,event),row))
                     }).await;
-                    let result=result.map(|event|{state.policy.mode=match mode{ApprovalMode::Auto=>otto_tools::policy::ApprovalMode::Auto,ApprovalMode::AskOnEffects=>otto_tools::policy::ApprovalMode::AskOnEffects,ApprovalMode::AskAll=>otto_tools::policy::ApprovalMode::AskAll,ApprovalMode::Plan=>otto_tools::policy::ApprovalMode::Plan};let _=cx.events.send(event);cx.runtime.changed();});
+                    let result=result.map(|(event,row)|{cx.set_row(row);state.policy.mode=match mode{ApprovalMode::Auto=>otto_tools::policy::ApprovalMode::Auto,ApprovalMode::AskOnEffects=>otto_tools::policy::ApprovalMode::AskOnEffects,ApprovalMode::AskAll=>otto_tools::policy::ApprovalMode::AskAll,ApprovalMode::Plan=>otto_tools::policy::ApprovalMode::Plan};let _=cx.events.send(event);cx.runtime.changed();});
                     let _=reply.send(result);
                 }
-                Command::Update(update, reply)=>{
+                Command::Configure(change,reply)=>{let result=configure(&cx,&mut state,turn,change).await;let _=reply.send(result);}
+                Command::Update(update, untitled, reply)=>{
                     if update.archived==Some(true)&&(active.is_some()||!state.queue.is_empty()){let _=reply.send(Err(Error::Invalid("cannot archive a busy session; cancel and wait first".into())));continue;}
                     let archive=update.archived;
                     let state_dir=cx.runtime.0.config.state_dir.clone();
                     let id=cx.row.id.clone();
                     let result=cx.runtime.db(move|s|{
-                        let row=s.session(&id)?.ok_or(Error::Closed)?;let mut info=crate::runtime::info(s,row)?;
-                        if let Some(title)=&update.title{info.title=title.clone();}
-                        if let Some(archived)=update.archived{info.status=if archived{SessionStatus::Archived}else{SessionStatus::Idle};}
+                        let mut row=s.session(&id)?.ok_or(Error::Closed)?;
+                        if untitled&&!row.title.is_empty(){return Ok(None);}
+                        let mut info=crate::runtime::info(s,row.clone())?;
+                        if let Some(title)=&update.title{info.title=title.clone();row.title=title.clone();}
+                        if let Some(archived)=update.archived{info.status=if archived{SessionStatus::Archived}else{SessionStatus::Idle};row.archived=archived;}
                         info.last_seq+=1;let event=Event::SessionChanged{info};
                         if archive==Some(true){crate::spills::remove(&state_dir,&id)?;}
                         let seq=s.append_with_session(&id,crate::runtime::record(&event,0,0)?,Projection::None,update)?;
-                        Ok((seq,event))
+                        Ok(Some(((seq,event),row)))
                     }).await;
-                    let result=result.map(|event|{if let Some(value)=archive{archived=value;}let _=cx.events.send(event);});
+                    let result=result.map(|applied|{let Some((event,row))=applied else{return false};cx.set_row(row);if let Some(value)=archive{archived=value;}let _=cx.events.send(event);true});
                     if archive==Some(false)&&result.is_ok(){let id=cx.row.id.clone();state.wake|=cx.runtime.db(move|s|Ok(!s.outbox_pending(&id)?.is_empty())).await.unwrap_or(false);}
                     if archive==Some(true)&&result.is_ok(){let c=cx.clone();tokio::spawn(async move{let _=crate::hooks::run(&c,"SessionEnd","archive",serde_json::json!({"reason":"archive"})).await;});}
                     let _=reply.send(result);
@@ -344,6 +374,93 @@ async fn actor(
             }}
         }
     }
+}
+/// Apply `session.update`. A running turn picks it up at its next step; a new
+/// model drops the old one's provider-side state (one connection per model).
+async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::Configure) -> Result<SessionInfo> {
+    let live = cx.live();
+    let current = &live.row;
+    let provider = change.provider.unwrap_or_else(|| current.provider.clone());
+    let model_id = change.model.unwrap_or_else(|| current.model.clone());
+    let agent_name = change.agent.unwrap_or_else(|| current.agent.clone());
+    let (model_changed, agent_changed) = (provider != current.provider || model_id != current.model, agent_name != current.agent);
+    let models = &cx.runtime.0.config.models;
+    let model = if model_changed {
+        let listed = models.list();
+        if listed.iter().any(|m| m.provider.0 == provider) && !listed.iter().any(|m| m.provider.0 == provider && m.id == model_id) {
+            return Err(Error::Invalid(format!("unknown model {provider}/{model_id}")));
+        }
+        models.resolve(&provider, &model_id).map_err(|e| Error::Invalid(format!("{provider}/{model_id}: {e}")))?
+    } else {
+        live.model.clone()
+    };
+    let user = &cx.runtime.0.config.user_config_dir;
+    let mut meta = if current.meta.is_object() { current.meta.clone() } else { serde_json::json!({}) };
+    let mut system = live.system.clone();
+    if agent_changed || model_changed || change.reset_effort {
+        let agent = crate::agents::discover(&cx.root, user)
+            .into_iter()
+            .find(|a| a.name == agent_name)
+            .ok_or_else(|| Error::Invalid(format!("unknown agent {agent_name}")))?;
+        if change.reset_effort {
+            meta["effort"] = serde_json::json!(agent.effort);
+        }
+        let family = crate::session::family(model.as_ref());
+        let (grant, denied) = cx.runtime.grants(&agent, &family, current.parent_id.clone()).await?;
+        meta["tools"] = serde_json::json!(grant);
+        meta["denied_tools"] = serde_json::json!(denied);
+        if agent_changed {
+            if let Some(effort) = &agent.effort {
+                meta["effort"] = serde_json::json!(effort);
+            }
+            if let Some(mode) = agent.approval_mode {
+                meta["approval_mode"] = serde_json::to_value(mode)?;
+            } else if current.agent == "plan" && meta["approval_mode"] == "plan" {
+                meta["approval_mode"] = cx.runtime.defaults().approval_mode.map(serde_json::to_value).transpose()?.unwrap_or_default();
+            }
+            system = crate::prompt::assemble(&cx.root, std::path::Path::new(&current.cwd), user, &agent_name);
+        }
+    }
+    if let Some(effort) = change.effort {
+        meta["effort"] = serde_json::to_value(effort)?;
+    }
+    let id = cx.row.id.clone();
+    let update = otto_store::SessionUpdate {
+        agent: Some(agent_name.clone()),
+        provider: Some(provider),
+        model: Some(model_id),
+        meta: Some(meta),
+        ..Default::default()
+    };
+    let (event, row, info) = cx
+        .runtime
+        .db(move |s| {
+            let mut row = s.session(&id)?.ok_or(Error::Closed)?;
+            row.agent = update.agent.clone().unwrap_or_default();
+            row.provider = update.provider.clone().unwrap_or_default();
+            row.model = update.model.clone().unwrap_or_default();
+            row.meta = update.meta.clone().unwrap_or_default();
+            let mut info = crate::runtime::info(s, row.clone())?;
+            info.last_seq += 1;
+            let event = Event::SessionChanged { info: info.clone() };
+            let seq = s.append_with_session(&id, crate::runtime::record(&event, turn, 0)?, Projection::None, update)?;
+            Ok(((seq, event), row, info))
+        })
+        .await?;
+    if agent_changed {
+        state.policy.mode = if agent_name == "plan" {
+            otto_tools::policy::ApprovalMode::Plan
+        } else {
+            serde_json::from_value(row.meta["approval_mode"].clone()).unwrap_or(otto_tools::policy::ApprovalMode::Auto)
+        };
+    }
+    cx.set_live(Live { row, model, system });
+    let _ = cx.events.send(event);
+    cx.runtime.changed();
+    Ok(info)
+}
+pub(crate) fn family(model: &dyn otto_llm::Model) -> String {
+    serde_json::to_value(model.info().caps.tool_family).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "generic".into())
 }
 /// Place an input by its delivery: steer joins the running turn at its next
 /// step boundary, interrupt cancels the turn and runs first, queue waits.

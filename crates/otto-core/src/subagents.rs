@@ -82,6 +82,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                 .ok_or_else(|| Error::Invalid(format!("unknown agent {name}")))?;
             // The agent's own model wins; otherwise the child inherits the parent's.
             let inherit = agent.model.is_none();
+            let live = cx.live();
             let child = cx
                 .runtime
                 .create_session(CreateSession {
@@ -89,8 +90,8 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     cwd: cx.row.cwd.clone().into(),
                     parent_id: Some(cx.row.id.clone()),
                     agent: name.into(),
-                    provider: inherit.then(|| cx.row.provider.clone()),
-                    model: inherit.then(|| cx.row.model.clone()),
+                    provider: inherit.then(|| live.row.provider.clone()),
+                    model: inherit.then(|| live.row.model.clone()),
                     title: task.chars().take(80).collect(),
                     task: Some(task.clone()),
                     ..Default::default()
@@ -160,7 +161,7 @@ pub(crate) async fn completed(cx: &Context, turn: i64, status: &str, error: Opti
         return Ok(());
     }
     let parent = cx.row.parent_id.clone().unwrap_or_default();
-    let payload = payload(&cx.row, &cx.items().await?, turn, status, error);
+    let payload = payload(&cx.live().row, &cx.items().await?, turn, status, error);
     let (child, to) = (cx.row.id.clone(), parent.clone());
     cx.runtime.db(move |s| Ok(s.outbox_push(&to, &child, turn, payload)?)).await?;
     let runtime = cx.runtime.clone();

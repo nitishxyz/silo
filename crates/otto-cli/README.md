@@ -32,6 +32,9 @@ start `otto-silo server --daemon` automatically when needed.
   Ctrl-C. `--once` prints the snapshot and exits.
 - `session rename ID TITLE`, `session archive ID`, `session fork ID [--at-seq N]`,
   `cancel ID`: session operations.
+- `session update ID [--model provider/model|model] [--agent NAME] [--effort default|none|minimal|low|medium|high|xhigh|max]`:
+  change a session's model, agent or reasoning effort from its next model request
+  (`default`: the agent's effort, else the model's).
 
 `--json` on run/watch emits server wire messages as JSONL; `attach --once --json`
 prints the snapshot JSON. Human text goes to stdout, tool activity and reasoning

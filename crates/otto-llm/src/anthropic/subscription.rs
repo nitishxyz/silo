@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ENDPOINT: &str = "https://platform.claude.com/v1/oauth/token";
 const REDIRECT: &str = "https://platform.claude.com/oauth/code/callback";
+const PROFILE: &str = "https://api.anthropic.com/api/oauth/profile";
 pub const USER_AGENT: &str = "claude-cli/1.0.61 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const BETAS: &[&str] = &["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
@@ -61,9 +62,11 @@ pub async fn exchange(code_with_state: &str, verifier: &str) -> Result<Credentia
     if token.refresh.is_none() {
         return Err(LlmError::new(ErrorClass::Auth, "missing OAuth refresh token"));
     }
-    Ok(credential(token, ""))
+    let plan = signed_plan(&token, None).await;
+    Ok(credential(token, "", plan))
 }
-pub async fn refresh(refresh_token: &str) -> Result<Credential, LlmError> {
+/// `previous_plan` is kept when neither the token nor the profile reports one.
+pub async fn refresh(refresh_token: &str, previous_plan: Option<String>) -> Result<Credential, LlmError> {
     let fields = BTreeMap::from([("client_id".into(), CLIENT_ID.into()), ("refresh_token".into(), refresh_token.into())]);
     let token = oauth::refresh_token(&client()?, ENDPOINT, &fields, TokenEncoding::Form).await.map_err(|error| {
         let message = error.message.to_ascii_lowercase();
@@ -79,14 +82,15 @@ pub async fn refresh(refresh_token: &str) -> Result<Credential, LlmError> {
             error
         }
     })?;
-    Ok(credential(token, refresh_token))
+    let plan = signed_plan(&token, previous_plan).await;
+    Ok(credential(token, refresh_token, plan))
 }
 #[must_use]
 pub fn refresh_fn() -> RefreshFn {
     Arc::new(|credential| {
         Box::pin(async move {
             match credential {
-                Credential::OAuth { refresh: token, .. } => refresh(&token).await,
+                Credential::OAuth { refresh: token, extra, .. } => refresh(&token, extra["plan"].as_str().map(String::from)).await,
                 _ => Err(LlmError::new(ErrorClass::Auth, "expected Claude OAuth credential")),
             }
         })
@@ -95,13 +99,42 @@ pub fn refresh_fn() -> RefreshFn {
 fn client() -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder().user_agent(USER_AGENT).build().map_err(crate::http::network)
 }
-fn credential(token: TokenResponse, fallback: &str) -> Credential {
+/// Subscription plan label from a token or `/api/oauth/profile` response:
+/// `organization.organization_type`, else the account's `has_claude_max` / `has_claude_pro`.
+#[must_use]
+pub fn plan(value: &Value) -> Option<String> {
+    let label = match value["organization"]["organization_type"].as_str() {
+        Some("claude_max") => "Max",
+        Some("claude_pro") => "Pro",
+        Some("claude_team") => "Team",
+        Some("claude_enterprise") => "Enterprise",
+        _ if value["account"]["has_claude_max"] == true => "Max",
+        _ if value["account"]["has_claude_pro"] == true => "Pro",
+        _ => return None,
+    };
+    Some(label.into())
+}
+/// The plan the token response reports, else the profile's (best effort).
+async fn signed_plan(token: &TokenResponse, previous: Option<String>) -> Option<String> {
+    if let Some(plan) = plan(&token.raw) {
+        return Some(plan);
+    }
+    let profile = async {
+        let response = client().ok()?.get(PROFILE).bearer_auth(&token.access).header("anthropic-beta", "oauth-2025-04-20").send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        plan(&serde_json::from_str(&response.text().await.ok()?).ok()?)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), profile).await.ok().flatten().or(previous)
+}
+fn credential(token: TokenResponse, fallback: &str, plan: Option<String>) -> Credential {
     Credential::OAuth {
         access: token.access,
         refresh: token.refresh.unwrap_or_else(|| fallback.into()),
         expires_at_ms: now_ms().saturating_add(if token.expires_in == 0 { 3_600_000 } else { token.expires_in.saturating_mul(1000) }),
         account_id: None,
-        extra: Value::Null,
+        extra: plan.map_or(Value::Null, |plan| json!({"plan":plan})),
     }
 }
 /// Required prefix and PascalCase client tool names. Server tool names are fixed by the API.

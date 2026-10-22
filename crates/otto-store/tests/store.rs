@@ -298,3 +298,21 @@ fn coalescing_time_size_boundaries_and_metadata() {
     assert_eq!(c.push(delta("reasoning.delta", "d"), Duration::from_millis(51))[0].payload["text"], "c");
     assert_eq!(c.flush().unwrap().payload["text"], "d");
 }
+#[test]
+fn recent_projects_order_by_latest_session() {
+    let mut store = Store::open_in_memory().unwrap();
+    let idle = store.create_project("/idle").unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let busy = new_session(&mut store);
+    std::thread::sleep(Duration::from_millis(5));
+    let late = store.create_project("/late").unwrap();
+    let recent = store.recent_projects().unwrap();
+    assert_eq!(recent.iter().map(|(p, _)| p.root.as_str()).collect::<Vec<_>>(), ["/late", "/project", "/idle"]);
+    assert_eq!(recent[0].1, late.created_at);
+    assert_eq!(recent[2].1, idle.created_at);
+    std::thread::sleep(Duration::from_millis(5));
+    store.update_session(&busy.id, SessionUpdate { title: Some("touched".into()), ..Default::default() }).unwrap();
+    let recent = store.recent_projects().unwrap();
+    assert_eq!(recent[0].0.id, busy.project_id);
+    assert_eq!(recent[0].1, store.session(&busy.id).unwrap().unwrap().updated_at);
+}

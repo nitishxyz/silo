@@ -22,8 +22,9 @@ pub(crate) fn public(mut value: Value) -> Value {
 }
 pub(crate) async fn prepare(cx: &Context, tool: Arc<dyn Tool>, input: Value, tcx: ToolCx) -> Result<Prepared> {
     let input = public(input);
-    let family = serde_json::to_value(cx.model.info().caps.tool_family)?;
-    let presentation = tool.spec().presentation(family.as_str().unwrap_or("generic"), &cx.model.info().caps.native_tools);
+    let live = cx.live();
+    let family = live.family();
+    let presentation = tool.spec().presentation(&family, &live.model.info().caps.native_tools);
     let schema = presentation.and_then(|p| p.input_schema.as_ref()).unwrap_or(&tool.spec().input_schema);
     // Freeform presentations have a string contract rather than the canonical object schema.
     if presentation.is_some_and(|p| p.freeform.is_some()) && input.is_string() {

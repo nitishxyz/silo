@@ -69,6 +69,59 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
 }
 
 #[tokio::test]
+async fn session_update_and_recent_projects_over_the_wire() {
+    let f = Fixture::new(vec![]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let created = client
+        .session_create(SessionCreateOptions {
+            project_root: Some(f.dir.path().to_string_lossy().into_owned()),
+            effort: Some(Effort::Medium),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.effort, Some(Effort::Medium));
+    let mut events = client.events();
+    client.session_subscribe(&created.id, None).await.unwrap();
+    let update = otto_client::SessionUpdate { agent: Some("plan".into()), effort: Some(Effort::High), ..Default::default() };
+    let info = client.session_update(&created.id, update).await.unwrap();
+    assert_eq!((info.agent.as_str(), info.approval_mode, info.effort), ("plan", ApprovalMode::Plan, Some(Effort::High)));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::Event { event, .. } = events.recv().await.unwrap().unwrap()
+                && let Event::SessionChanged { info } = *event
+                && info.effort == Some(Effort::High)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    for update in [
+        otto_client::SessionUpdate { agent: Some("nope".into()), ..Default::default() },
+        otto_client::SessionUpdate { model: Some("missing".into()), ..Default::default() },
+        otto_client::SessionUpdate { model: Some(" ".into()), ..Default::default() },
+        otto_client::SessionUpdate { effort: Some(Effort::Low), reset_effort: true, ..Default::default() },
+    ] {
+        let error = client.session_update(&created.id, update).await.unwrap_err();
+        assert!(matches!(&error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST), "{error}");
+    }
+    let raw = client
+        .call(Method::SessionUpdate { session_id: created.id.clone(), provider: None, model: None, agent: None, effort: None, reset_effort: false })
+        .await
+        .unwrap();
+    assert_eq!(raw["effort"], "high");
+    let reset = client.session_update(&created.id, otto_client::SessionUpdate { reset_effort: true, ..Default::default() }).await.unwrap();
+    assert_eq!(reset.effort, None);
+    let projects = client.project_list().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    assert!(projects[0].updated_at >= created.updated_at);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn fork_replay_and_follower_match_view_without_gaps() {
     let f = Fixture::new(vec![text("parent"), text("child")]).await;
     let server = Server::start(f.config()).await.unwrap();

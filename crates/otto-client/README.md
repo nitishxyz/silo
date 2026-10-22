@@ -5,6 +5,10 @@ before sending `session.subscribe`, since replay may precede its acknowledgement
 `SessionFollower` maintains a `SessionMirror`, reconnects local transports and
 resumes from the last durable sequence.
 
+Typed helpers include `session_create` (`SessionCreateOptions.effort`),
+`session_update(id, SessionUpdate { provider, model, agent, effort, reset_effort })` and
+`project_list()` (most recent first).
+
 ## Durable events and live overlays
 
 `SessionMirror::apply(seq, event)` accepts only the next journal sequence; duplicate

@@ -1,6 +1,6 @@
 //! Snapshot and input types; timestamps and sequences match the durable journal.
 
-use otto_llm::{Item, Usage};
+use otto_llm::{Effort, Item, Usage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +13,9 @@ pub struct ProjectInfo {
     pub id: ProjectId,
     pub root: String,
     pub created_at: i64,
+    /// Latest `updated_at` among the project's sessions, else `created_at`.
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -52,6 +55,9 @@ pub struct SessionInfo {
     pub approval_mode: ApprovalMode,
     pub provider: String,
     pub model: String,
+    /// Reasoning effort for models that reason; `None` is the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     pub title: String,
     pub cwd: String,
     pub status: SessionStatus,
@@ -176,6 +182,9 @@ pub struct AuthStatus {
     /// The endpoint of a local or custom provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Subscription plan label (`Pro`, `Max`, `Plus`, `Team`, …) when the sign-in reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

@@ -12,7 +12,10 @@ shell runner details (§6.2, §11.2), cross-machine conflicts (§12).
 | O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
 | O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, native client tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Native client tools follow `caps.native_tools`, one rule per model and auth mode: Claude `text_editor_20250728`/`bash_20250124` on every catalog model; OpenAI `apply_patch` and `shell` (local) per each model page's supported tools (`apply_patch`, `hosted_shell`), API key only, since the Codex CLI sends the ChatGPT endpoint only function/custom tools; everything else gets the built-ins | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
 | O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 12 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
-| O5–O8 | Not started | – |
+| Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
+| O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`. Not built: `shell` as a parked command block, per-subagent grants, the `service` tunnel target | `silo-tools`, `otto-silo-tools`, `silo-cli` |
+| O7 agent block | Built: otto sessions as a native chat block in the app (docs/AGENT_BLOCK.md) | `silo-app/src/agent` |
+| O6, O8 | Not started beyond the `browser_*` tools above | – |
 
 **Verified (2026-10-22):** workspace fmt, clippy `-D warnings`, `cargo nextest run --workspace` on macOS (1026 tests),
 the otto and silo server/CLI crates on Linux (`rust:1-bookworm`), `otto-proto` on wasm32, the silo protocol pin.
@@ -35,6 +38,10 @@ subscription refresh; the models.dev catalog refresh.
 - A runtime that was shut down stays closed (outbox wakes cannot reopen actors); a restarted server needs a new one.
 - The model page lists are the only evidence for OpenAI native tools; models missing from `openai::native_tools`
   (new releases) get the built-ins until added.
+- An agent change in `session.update` keeps the session's model (the agent's `model` applies only at creation).
+- Automatic titles are tried once per session actor; a restarted daemon may try a still-untitled session once more.
+  The Claude plan comes from `/api/oauth/profile` at login and refresh (best effort, not verified live); older
+  stored credentials report none until their next refresh.
 
 Each crate's `README.md` lists its own limitations.
 

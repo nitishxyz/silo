@@ -1,6 +1,9 @@
 //! Context management (docs/OTTO.md §7.3): otto's checkpoint summarizer (the
 //! default), opt-in provider-native compaction, and context editing.
-use crate::{Error, Result, session::Context};
+use crate::{
+    Error, Result,
+    session::{Context, Live},
+};
 use futures::StreamExt;
 use otto_llm::{CallCx, Item, Part, Request, ResultPart, Role, StreamEvent};
 use otto_store::Projection;
@@ -119,29 +122,29 @@ pub(crate) fn edit(mut items: Vec<Item>, budget: usize) -> Vec<Item> {
 /// Provider-native compaction is opt-in (session `native_compaction`), needs a
 /// model with `caps.native_compaction`, and a history this provider and model
 /// produced alone, so its opaque checkpoint can be replayed.
-fn native(cx: &Context, items: &[Item]) -> bool {
-    cx.row.meta["native_compaction"] == true
-        && cx.model.info().caps.native_compaction
-        && items.iter().filter_map(|i| i.origin.as_ref()).all(|o| o.provider.0 == cx.row.provider && o.model == cx.row.model)
+fn native(live: &Live, items: &[Item]) -> bool {
+    live.row.meta["native_compaction"] == true
+        && live.model.info().caps.native_compaction
+        && items.iter().filter_map(|i| i.origin.as_ref()).all(|o| o.provider.0 == live.row.provider && o.model == live.row.model)
 }
 
 /// Provider threshold compaction for an ordinary request of an opted-in
 /// session, at 75% of the window (before otto's own 85% trigger).
-pub(crate) fn threshold(cx: &Context, items: &[Item]) -> Option<otto_llm::Compaction> {
-    let window = cx.model.info().caps.context_window;
-    (window > 0 && native(cx, items)).then(|| otto_llm::Compaction::Auto { threshold: window * 3 / 4, instructions: None })
+pub(crate) fn threshold(live: &Live, items: &[Item]) -> Option<otto_llm::Compaction> {
+    let window = live.model.info().caps.context_window;
+    (window > 0 && native(live, items)).then(|| otto_llm::Compaction::Auto { threshold: window * 3 / 4, instructions: None })
 }
 
 /// Ask the provider to compact `items`; its checkpoint replaces them.
-async fn compact_native(cx: &Context, cancel: &CancellationToken, turn: i64, items: Vec<Item>) -> Result<String> {
+async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, turn: i64, items: Vec<Item>) -> Result<String> {
     let request = Request {
-        model: cx.row.model.clone(),
-        system: cx.system.clone(),
+        model: live.row.model.clone(),
+        system: live.system.clone(),
         items,
         compaction: Some(otto_llm::Compaction::Now { instructions: None }),
         ..Default::default()
     };
-    let mut stream = cx.model.stream(request, CallCx { cancel: cancel.clone(), session: Some(cx.row.id.clone()) }).await?;
+    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: Some(cx.row.id.clone()) }).await?;
     let mut checkpoint = None;
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
         if let StreamEvent::PartDone { part: part @ Part::Compaction { .. } } = event? {
@@ -151,7 +154,7 @@ async fn compact_native(cx: &Context, cancel: &CancellationToken, turn: i64, ite
     let Some(part) = checkpoint else { return Err(Error::Invalid("the provider returned no compaction".into())) };
     let summary = if let Part::Compaction { summary, .. } = &part { summary.clone().unwrap_or_default() } else { String::new() };
     let mut item = Item::new(crate::id(), Role::Assistant, vec![part]);
-    item.origin = Some(otto_llm::Origin { provider: cx.row.provider.as_str().into(), model: cx.row.model.clone(), response_id: None });
+    item.origin = Some(otto_llm::Origin { provider: live.row.provider.as_str().into(), model: live.row.model.clone(), response_id: None });
     cx.item(item, turn, 0).await?;
     Ok(summary)
 }
@@ -162,15 +165,16 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
     if let Some(reason) = hook.deny {
         return Err(Error::Invalid(reason));
     }
-    let window = cx.model.info().caps.context_window;
+    let live = cx.live();
+    let window = live.model.info().caps.context_window;
     let items = trim(cx.items().await?, window);
     if items.is_empty() {
         return Ok(());
     }
-    if native(cx, &items) {
+    if native(&live, &items) {
         let id = cx.row.id.clone();
         let through = cx.runtime.db(move |s| Ok(s.session(&id)?.ok_or(Error::Closed)?.last_seq)).await?;
-        let summary = compact_native(cx, cancel, turn, items).await?;
+        let summary = compact_native(cx, &live, cancel, turn, items).await?;
         cx.emit(otto_proto::Event::Compaction { through_seq: through, summary: Some(summary).filter(|s| !s.is_empty()) }, Projection::None, turn, 0)
             .await?;
         return Ok(());
@@ -181,7 +185,7 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
     let id = cx.row.id.clone();
     let through = cx.runtime.db(move |s| Ok(s.session(&id)?.ok_or(Error::Closed)?.last_seq)).await?;
     let request = Request {
-        model: cx.row.model.clone(),
+        model: live.row.model.clone(),
         system: vec![
             "Summarize the conversation so work can continue from the summary alone. Use these sections: Goal, Decisions, Current state, Files touched, Open issues, Next steps. Keep exact filenames, commands, identifiers and error messages. Do not execute tools."
                 .into(),
@@ -190,7 +194,7 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
         max_output: Some((budget / 8).clamp(128, 4096) as u32),
         ..Default::default()
     };
-    let mut stream = cx.model.stream(request, CallCx { cancel: cancel.clone(), session: None }).await?;
+    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: None }).await?;
     let mut summary = String::new();
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
         if let StreamEvent::PartDone { part: Part::Text { text, .. } } = event? {

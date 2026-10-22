@@ -1,4 +1,8 @@
-use crate::{Error, Result, approvals::Bridge, session::Context};
+use crate::{
+    Error, Result,
+    approvals::Bridge,
+    session::{Context, Live},
+};
 use futures::StreamExt;
 use otto_llm::*;
 use otto_proto::{ApprovalDecision, Event, InputPart, QueuedInput};
@@ -140,6 +144,7 @@ async fn requeue_native(cx: &Context) -> Result<()> {
 /// Persist a finished assistant item and its usage.
 async fn settle(
     cx: &Context,
+    live: &Live,
     item: &Item,
     lookup: &std::collections::HashMap<String, Arc<dyn otto_tools::Tool>>,
     usage: &Usage,
@@ -156,7 +161,7 @@ async fn settle(
         }
     }
     cx.item(persisted, turn, step).await?;
-    let cost = cx.model.info().pricing.as_ref().map(|p| {
+    let cost = live.model.info().pricing.as_ref().map(|p| {
         (usage.input as f64 * p.input
             + usage.output as f64 * p.output
             + usage.cache_read as f64 * p.cache_read
@@ -166,8 +171,8 @@ async fn settle(
     cx.emit(
         Event::Usage { turn, step, usage: usage.clone(), cost_usd: cost },
         Projection::Usage(UsageRecord {
-            provider: cx.row.provider.clone(),
-            model: cx.row.model.clone(),
+            provider: live.row.provider.clone(),
+            model: live.row.model.clone(),
             usage: usage.clone(),
             cost_usd: cost.unwrap_or_default(),
         }),
@@ -194,17 +199,18 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         return Ok(());
     }
     let mut stop_continuations = 0;
-    let family = serde_json::to_value(cx.model.info().caps.tool_family)?.as_str().unwrap_or("generic").to_owned();
-    let limit = cx.row.meta["max_steps"].as_u64().filter(|n| *n > 0).unwrap_or(200) as i64;
+    let limit = cx.live().row.meta["max_steps"].as_u64().filter(|n| *n > 0).unwrap_or(200) as i64;
     let mut continuations = 0;
     let mut overflow = false;
-    let mut base_tools = otto_tools::registry::tools_for_family(&family);
-    base_tools.extend(cx.runtime.extra_tools());
     'steps: for step in 1..=limit {
+        // `session.update` takes effect here: one snapshot per model request.
+        let live = cx.live();
+        let family = live.family();
         let loaded = crate::tools::loaded(&cx).await?;
         // Sources (MCP) are listed every step, so list changes apply at once
         // and providers always get the complete current tool list.
-        let mut tools = base_tools.clone();
+        let mut tools = otto_tools::registry::tools_for_family(&family);
+        tools.extend(cx.runtime.extra_tools());
         tools.extend(cx.runtime.source_tools(&cx.root).await);
         let session_tools = crate::tools::tools(cx.clone(), &tools, &loaded);
         tools.extend(session_tools);
@@ -213,10 +219,10 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         let mut asynchronous = Vec::new();
         for tool in tools {
             let spec = tool.spec();
-            if !crate::tools::granted(&cx, spec) {
+            if !crate::tools::granted(&live, spec) {
                 continue;
             }
-            let presentation = spec.presentation(&family, &cx.model.info().caps.native_tools);
+            let presentation = spec.presentation(&family, &live.model.info().caps.native_tools);
             let name = presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone());
             if spec.loading != otto_tools::Loading::Deferred || loaded.contains(&spec.name) {
                 let kind = match (presentation.and_then(|p| p.native.clone()), presentation.and_then(|p| p.freeform.clone())) {
@@ -258,24 +264,25 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         for queued in steer {
             input(&cx, queued, turn, step).await?;
         }
-        let items = crate::compaction::trim(cx.items().await?, cx.model.info().caps.context_window);
-        let compaction = crate::compaction::threshold(&cx, &items);
+        let items = crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window);
+        let compaction = crate::compaction::threshold(&live, &items);
         let mut provider = ProviderOptions::default();
-        if cx.model.info().caps.async_tools && !asynchronous.is_empty() {
+        let caps = &live.model.info().caps;
+        if caps.async_tools && !asynchronous.is_empty() {
             provider.openai = Some(otto_llm::openai::Options { async_tools: asynchronous, ..Default::default() });
         }
         let request = Request {
-            model: cx.row.model.clone(),
-            system: cx.system.clone(),
+            model: live.row.model.clone(),
+            system: live.system.clone(),
             items,
             tools: defs.clone(),
-            parallel_tools: Some(cx.model.info().caps.parallel_tools),
-            reasoning: serde_json::from_value::<Effort>(cx.row.meta["effort"].clone()).ok().map(Reasoning::Effort),
+            parallel_tools: Some(caps.parallel_tools),
+            reasoning: serde_json::from_value::<Effort>(live.row.meta["effort"].clone()).ok().filter(|_| caps.reasoning).map(Reasoning::Effort),
             provider,
             compaction: compaction.clone(),
             ..Default::default()
         };
-        let stream = tokio::select! {_=cancel.cancelled()=>return Ok(()),s=cx.model.stream(request,CallCx{cancel:cancel.clone(),session:Some(cx.row.id.clone())})=>s};
+        let stream = tokio::select! {_=cancel.cancelled()=>return Ok(()),s=live.model.stream(request,CallCx{cancel:cancel.clone(),session:Some(cx.row.id.clone())})=>s};
         let mut stream = match stream {
             Ok(s) => s,
             Err(e) if e.class == ErrorClass::ContextOverflow && !overflow => {
@@ -286,14 +293,14 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             Err(e) => return Err(e.into()),
         };
         let mut item = Item::new(crate::id(), Role::Assistant, vec![]);
-        item.origin = Some(Origin { provider: cx.row.provider.as_str().into(), model: cx.row.model.clone(), response_id: None });
+        item.origin = Some(Origin { provider: live.row.provider.as_str().into(), model: live.row.model.clone(), response_id: None });
         cx.emit(Event::ItemStarted { item_id: item.id.clone(), role: Role::Assistant }, Projection::None, turn, step).await?;
         let mut usage = Usage::default();
         let mut reason = FinishReason::Stop;
         let mut deltas = crate::deltas::Deltas::new(&cx.row.id);
         let mut tick = tokio::time::interval(otto_store::Coalescer::MAX_DELAY);
         // Native steering (§7.2): only models whose live session can take it.
-        let session = cx.model.session().filter(|_| cx.model.info().caps.steering);
+        let session = live.model.session().filter(|_| caps.steering);
         let mut steered = std::collections::HashMap::new();
         loop {
             let event = tokio::select! {
@@ -336,7 +343,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                 // in a new response: close this item, then the user input.
                 StreamEvent::Steered { ids } => {
                     deltas.flush(&cx).await?;
-                    settle(&cx, &item, &lookup, &usage, turn, step).await?;
+                    settle(&cx, &live, &item, &lookup, &usage, turn, step).await?;
                     for id in &ids {
                         if let Some(user) = steered.remove(id) {
                             cx.item(user, turn, step).await?;
@@ -345,7 +352,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                     cx.state(move |s| s.native.retain(|q| !ids.contains(&q.id))).await?;
                     cx.queue_changed(turn, step).await?;
                     item = Item::new(crate::id(), Role::Assistant, vec![]);
-                    item.origin = Some(Origin { provider: cx.row.provider.as_str().into(), model: cx.row.model.clone(), response_id: None });
+                    item.origin = Some(Origin { provider: live.row.provider.as_str().into(), model: live.row.model.clone(), response_id: None });
                     cx.emit(Event::ItemStarted { item_id: item.id.clone(), role: Role::Assistant }, Projection::None, turn, step).await?;
                     usage = Usage::default();
                     reason = FinishReason::Stop;
@@ -362,7 +369,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         deltas.flush(&cx).await?;
         drop(stream);
         requeue_native(&cx).await?;
-        settle(&cx, &item, &lookup, &usage, turn, step).await?;
+        settle(&cx, &live, &item, &lookup, &usage, turn, step).await?;
         let calls = item.tool_calls().map(|(id, name, value)| (id.to_owned(), name.to_owned(), value.clone())).collect::<Vec<_>>();
         if calls.is_empty() {
             if reason == FinishReason::Other("compaction".into()) && item.parts.iter().any(|p| matches!(p, Part::Compaction { .. })) {
@@ -400,7 +407,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         let mut jobs = Vec::new();
         let result_id = crate::id();
         for (call_id, name, value) in calls {
-            jobs.push(execute(cx.clone(), lookup.clone(), call_id, name, value, turn, step, cancel.clone(), result_id.clone()));
+            jobs.push(execute(cx.clone(), live.clone(), lookup.clone(), call_id, name, value, turn, step, cancel.clone(), result_id.clone()));
         }
         let outputs = if exclusive {
             let mut outputs = Vec::new();
@@ -426,7 +433,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             return Ok(());
         }
         // With provider threshold compaction the provider compacts first.
-        let window = cx.model.info().caps.context_window;
+        let window = caps.context_window;
         if compaction.is_none() && window > 0 && usage.total_input() > window * 85 / 100 {
             crate::compaction::compact(&cx, cancel, turn, "auto").await?;
         }
@@ -464,6 +471,7 @@ async fn tool_hook(cx: &Context, event: &str, tool: &str, fields: serde_json::Va
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     cx: Arc<Context>,
+    live: Arc<Live>,
     lookup: Arc<std::collections::HashMap<String, Arc<dyn otto_tools::Tool>>>,
     call_id: String,
     mut name: String,
@@ -483,10 +491,10 @@ async fn execute(
     let mut tool = lookup.get(&name).cloned();
     // A provider-defined tool's call becomes the built-in it maps to; policy,
     // hooks and the journal see the built-in's name and canonical input.
-    let family = serde_json::to_value(cx.model.info().caps.tool_family)?.as_str().unwrap_or("generic").to_owned();
+    let family = live.family();
     let native = tool
         .as_ref()
-        .and_then(|t| t.spec().presentation(&family, &cx.model.info().caps.native_tools).filter(|p| p.name == name).and_then(|p| p.native.clone()));
+        .and_then(|t| t.spec().presentation(&family, &live.model.info().caps.native_tools).filter(|p| p.name == name).and_then(|p| p.native.clone()));
     let mut invalid = None;
     if let Some(native) = &native {
         match otto_tools::native::canonical(&native.tool, &original, &tcx) {

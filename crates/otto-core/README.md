@@ -73,6 +73,17 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
 - `cancel(id)`, `compact(id)`, `answer_approval(id, approval_id, decision)`,
   `answer_question(id, question_id, answer)`, `rename(id, title)`, and
   `archive(id, archived)` return `Result<()>`.
+- `configure(id, Configure { provider, model, agent, effort, reset_effort }) -> Result<SessionInfo>`
+  (`session.update`): each step reads one snapshot of the session's model, agent and
+  meta, so a change applies at the next model request. A new provider/model resolves
+  a new model instance (dropping its provider-side state) and regrants tools for the
+  model's family; a new agent regrants tools, reassembles the prompt and keeps Plan
+  read-only. `CreateSession.effort` / meta `effort` reach requests as
+  `Reasoning::Effort` only for models with `caps.reasoning`.
+- `set_auto_title(true)` (the daemon enables it) names untitled sessions after their
+  first finished turn with one call to the provider's cheapest priced model, else the
+  session's model; it never replaces a title set meanwhile, and a failure is logged.
+- `recent_projects()` lists projects most recently used first, without missing roots.
 - `fork(id, at_seq) -> Result<SessionHandle>` creates a new provider lane.
 - `events() -> broadcast::Receiver<Event>` carries global `SessionsChanged`.
 - `index_events() -> broadcast::Receiver<SequencedEvent>` is the additive sequenced

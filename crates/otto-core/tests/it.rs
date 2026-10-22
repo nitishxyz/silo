@@ -2,3 +2,4 @@
 
 mod harness;
 mod runtime;
+mod update;

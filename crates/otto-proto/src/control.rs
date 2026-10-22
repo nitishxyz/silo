@@ -102,6 +102,8 @@ pub enum Method {
         provider: Option<String>,
         title: Option<String>,
         parent: Option<SessionId>,
+        #[serde(default)]
+        effort: Option<otto_llm::Effort>,
     },
     #[serde(rename = "session.list")]
     SessionList {
@@ -119,6 +121,22 @@ pub enum Method {
     SessionFork { session_id: SessionId, at_seq: Option<i64> },
     #[serde(rename = "session.rename")]
     SessionRename { session_id: SessionId, title: String },
+    /// Change the provider, model, agent or effort; given fields only, from the next model request.
+    #[serde(rename = "session.update")]
+    SessionUpdate {
+        session_id: SessionId,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        effort: Option<otto_llm::Effort>,
+        /// Back to the agent's effort, else the model's default; not with `effort`.
+        #[serde(default)]
+        reset_effort: bool,
+    },
     #[serde(rename = "session.set_mode")]
     SessionSetMode { session_id: SessionId, approval_mode: crate::model::ApprovalMode },
     #[serde(rename = "session.archive")]
@@ -211,6 +229,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.unsubscribe", "Stop receiving this session's events."),
     ("session.fork", "Fork a session at a durable sequence boundary."),
     ("session.rename", "Change a session title."),
+    ("session.update", "Change a session's provider, model, agent or reasoning effort from its next model request."),
     ("session.set_mode", "Change approval mode for subsequent tool calls; plan agents remain read-only."),
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),

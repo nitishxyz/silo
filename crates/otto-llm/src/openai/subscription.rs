@@ -21,24 +21,36 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
 pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
+fn auth_claims(token: &str) -> Option<Value> {
+    let bytes = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?).ok()?;
+    let mut value: Value = serde_json::from_slice(&bytes).ok()?;
+    Some(value["https://api.openai.com/auth"].take())
+}
 #[must_use]
 pub fn account_id(token: &str) -> Option<String> {
-    let bytes = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?).ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value["https://api.openai.com/auth"]["chatgpt_account_id"].as_str().map(Into::into)
+    auth_claims(token)?["chatgpt_account_id"].as_str().map(Into::into)
+}
+/// ChatGPT plan label from an id_token's `chatgpt_plan_type` claim (`Plus`, `Pro`, `Team`, …).
+#[must_use]
+pub fn plan(id_token: &str) -> Option<String> {
+    let kind = auth_claims(id_token)?["chatgpt_plan_type"].as_str()?.trim().to_ascii_lowercase();
+    let mut chars = kind.chars();
+    let first = chars.next()?;
+    Some(first.to_ascii_uppercase().to_string() + chars.as_str())
 }
 fn credential(token: TokenResponse, previous: Option<Credential>) -> Credential {
-    let (old_refresh, old_account) = match previous {
-        Some(Credential::OAuth { refresh, account_id, .. }) => (refresh, account_id),
-        _ => (String::new(), None),
+    let (old_refresh, old_account, old_id) = match previous {
+        Some(Credential::OAuth { refresh, account_id, extra, .. }) => (refresh, account_id, extra["id_token"].as_str().map(String::from)),
+        _ => (String::new(), None, None),
     };
     let account_id = token.id_token.as_deref().and_then(account_id).or_else(|| account_id(&token.access)).or(old_account);
+    let id_token = token.id_token.or(old_id);
     Credential::OAuth {
         access: token.access,
         refresh: token.refresh.unwrap_or(old_refresh),
         expires_at_ms: now_ms().saturating_add(if token.expires_in == 0 { 3600 } else { token.expires_in }.saturating_mul(1000)),
         account_id,
-        extra: json!({"id_token":token.id_token}),
+        extra: json!({"id_token":id_token}),
     }
 }
 pub struct Login {

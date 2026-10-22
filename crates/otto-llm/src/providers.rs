@@ -44,6 +44,9 @@ pub struct AuthStatus {
     /// The endpoint for local and custom providers.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Subscription plan label (`Max`, `Pro`, `Plus`, …) when the sign-in reports it.
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,17 +440,22 @@ impl Providers {
                     account_id: None,
                     error: None,
                     base_url: compat::dialect(provider).filter(|d| d.discovery.is_some()).and_then(|_| self.base_url(provider)),
+                    plan: None,
                 };
                 match self.credential(provider) {
                     Ok(Some(Credential::ApiKey { .. })) => {
                         status.mode = Some("api_key".into());
                         status.signed_in = true;
                     }
-                    Ok(Some(Credential::OAuth { expires_at_ms, account_id, .. })) => {
+                    Ok(Some(Credential::OAuth { expires_at_ms, account_id, extra, .. })) => {
                         status.mode = Some("subscription".into());
                         status.signed_in = true;
                         status.expires_at_ms = Some(expires_at_ms);
                         status.account_id = account_id;
+                        status.plan = match provider {
+                            "openai" => extra["id_token"].as_str().and_then(openai::subscription::plan),
+                            _ => extra["plan"].as_str().map(String::from),
+                        };
                     }
                     // A running local server needs no sign-in.
                     Ok(None) if !self.local_models(provider).is_empty() => {

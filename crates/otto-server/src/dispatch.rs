@@ -34,8 +34,8 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         )),
         Method::ApiDescribe { method } => Ok(json!(api::describe(&method).ok_or_else(|| RpcError::method_not_found(&method))?)),
         Method::ProjectOpen { root } => Ok(json!(runtime.open_project(root).await.map_err(core_error)?)),
-        Method::ProjectList {} => Ok(json!(runtime.list_projects().await.map_err(core_error)?)),
-        Method::SessionCreate { project_root, project_id, agent, approval_mode, model, provider, title, parent } => {
+        Method::ProjectList {} => Ok(json!(runtime.recent_projects().await.map_err(core_error)?)),
+        Method::SessionCreate { project_root, project_id, agent, approval_mode, model, provider, title, parent, effort } => {
             let project = match (project_root, project_id) {
                 (Some(root), None) => runtime.open_project(root).await.map_err(core_error)?,
                 (None, Some(id)) => {
@@ -56,6 +56,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
                     provider,
                     model,
                     title: title.unwrap_or_default(),
+                    effort,
                     ..Default::default()
                 })
                 .await
@@ -99,6 +100,16 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         Method::SessionRename { session_id, title } => {
             runtime.rename(&session_id, title).await.map_err(core_error)?;
             Ok(json!({}))
+        }
+        Method::SessionUpdate { session_id, provider, model, agent, effort, reset_effort } => {
+            if [&provider, &model, &agent].into_iter().flatten().any(|v| v.trim().is_empty()) {
+                return Err(RpcError::bad_request("provider, model and agent must not be empty"));
+            }
+            if reset_effort && effort.is_some() {
+                return Err(RpcError::bad_request("effort and reset_effort are exclusive"));
+            }
+            let change = otto_core::Configure { provider, model, agent, effort, reset_effort };
+            Ok(json!(runtime.configure(&session_id, change).await.map_err(core_error)?))
         }
         Method::SessionArchive { session_id } => {
             runtime.archive(&session_id, true).await.map_err(core_error)?;

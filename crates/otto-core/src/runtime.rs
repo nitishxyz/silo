@@ -47,6 +47,18 @@ pub struct CreateSession {
     pub max_steps: usize,
     /// A delegated child's task, kept for `subagent` status and retry.
     pub task: Option<String>,
+    /// Reasoning effort; `None` keeps the agent's, else the model's default.
+    pub effort: Option<otto_llm::Effort>,
+}
+/// `session.update`: given fields only, from the session's next model request.
+#[derive(Clone, Debug, Default)]
+pub struct Configure {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub agent: Option<String>,
+    pub effort: Option<otto_llm::Effort>,
+    /// Back to the agent's effort, else the model's default.
+    pub reset_effort: bool,
 }
 /// A committed event. Live and replay streams use identical sequence numbers.
 pub type SequencedEvent = (i64, Event);
@@ -80,6 +92,8 @@ pub(crate) struct Inner {
     sources: Mutex<Vec<Arc<dyn otto_tools::ProjectSources>>>,
     /// Set by shutdown: no actor starts afterwards.
     closing: std::sync::atomic::AtomicBool,
+    /// Name untitled sessions after their first turn (`set_auto_title`).
+    auto_title: std::sync::atomic::AtomicBool,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -95,6 +109,7 @@ impl Runtime {
             extra: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
             closing: std::sync::atomic::AtomicBool::new(false),
+            auto_title: std::sync::atomic::AtomicBool::new(false),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -120,9 +135,20 @@ impl Runtime {
         let root = std::fs::canonicalize(root)?.to_string_lossy().into_owned();
         self.db(move |s| {
             let p = s.create_project(&root)?;
-            Ok(ProjectInfo { id: p.id, root: p.root, created_at: p.created_at })
+            Ok(ProjectInfo { id: p.id, root: p.root, updated_at: p.created_at, created_at: p.created_at })
         })
         .await
+    }
+    /// Name sessions whose title is still empty after their first finished
+    /// turn, with one short call to a small model of the session's provider.
+    pub fn set_auto_title(&self, on: bool) {
+        self.0.auto_title.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub(crate) fn auto_title(&self) -> bool {
+        self.0.auto_title.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn defaults(&self) -> SessionDefaults {
+        self.0.defaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
     /// Replace defaults atomically; existing sessions keep their configuration.
     pub fn set_config(&self, config: SessionDefaults) -> Result<()> {
@@ -173,7 +199,17 @@ impl Runtime {
             .collect()
     }
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
-        self.db(|s| Ok(s.list_projects()?.into_iter().map(|p| ProjectInfo { id: p.id, root: p.root, created_at: p.created_at }).collect())).await
+        self.db(|s| {
+            Ok(s.recent_projects()?
+                .into_iter()
+                .map(|(p, updated_at)| ProjectInfo { id: p.id, root: p.root, created_at: p.created_at, updated_at })
+                .collect())
+        })
+        .await
+    }
+    /// Projects most recently used first, without those whose root is gone.
+    pub async fn recent_projects(&self) -> Result<Vec<ProjectInfo>> {
+        Ok(self.list_projects().await?.into_iter().filter(|p| Path::new(&p.root).is_dir()).collect())
     }
     /// Nonblocking conservative idle-exit check, including queued commands.
     pub fn busy(&self) -> bool {
@@ -222,35 +258,9 @@ impl Runtime {
         let provider = options.provider.unwrap_or_else(|| agent_model.and_then(|m| m.0).unwrap_or(&defaults.0).to_owned());
         let model = options.model.unwrap_or_else(|| agent_model.map(|m| m.1).unwrap_or(&defaults.1).to_owned());
         let resolved = self.0.config.models.resolve(&provider, &model)?;
-        let family = serde_json::to_value(resolved.info().caps.tool_family)?.as_str().unwrap_or("generic").to_owned();
-        let mut grant: Vec<String> = if agent.tools.is_empty() {
-            otto_tools::registry::tools_for_family(&family)
-                .iter()
-                .map(|t| t.spec().name.clone())
-                .chain(["skill".into(), "subagent".into(), "mcp__*".into()])
-                .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
-                .collect()
-        } else {
-            agent.tools
-        };
-        let mut denied = agent.disallowed;
-        if let Some(parent) = options.parent_id.clone() {
-            let parent = self.db(move |s| Ok(s.session(&parent)?.ok_or(Error::Closed)?.meta)).await?;
-            if let Some(allowed) = parent["tools"].as_array() {
-                grant.retain(|tool| allowed.iter().filter_map(|v| v.as_str()).any(|p| crate::tools::pattern(p, tool)));
-            }
-            denied.extend(parent["denied_tools"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)));
-        }
-        grant.retain(|tool| !denied.iter().any(|d| crate::tools::pattern(d, tool)));
-        if otto_tools::registry::tools_for_family(&family)
-            .into_iter()
-            .chain(self.extra_tools())
-            .any(|tool| tool.spec().loading == otto_tools::Loading::Deferred && grant.contains(&tool.spec().name))
-            && !grant.iter().any(|name| name == "load_tools")
-        {
-            grant.push("load_tools".into());
-        }
-        let effort = agent.effort;
+        let family = crate::session::family(resolved.as_ref());
+        let (grant, denied) = self.grants(&agent, &family, options.parent_id.clone()).await?;
+        let effort = options.effort.map(serde_json::to_value).transpose()?.or_else(|| agent.effort.clone().map(serde_json::Value::String));
         let approval_mode = options.approval_mode.or(agent.approval_mode).map(|m| serde_json::to_value(m).expect("mode enum"));
         let task = options.task;
         let row = self
@@ -270,6 +280,37 @@ impl Runtime {
         let handle = self.session(&row.id).await?;
         self.changed();
         Ok(handle)
+    }
+    /// The tools `agent` is granted on a model of `family`, narrowed by the parent's grant.
+    pub(crate) async fn grants(&self, agent: &crate::agents::Agent, family: &str, parent: Option<String>) -> Result<(Vec<String>, Vec<String>)> {
+        let mut grant: Vec<String> = if agent.tools.is_empty() {
+            otto_tools::registry::tools_for_family(family)
+                .iter()
+                .map(|t| t.spec().name.clone())
+                .chain(["skill".into(), "subagent".into(), "mcp__*".into()])
+                .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
+                .collect()
+        } else {
+            agent.tools.clone()
+        };
+        let mut denied = agent.disallowed.clone();
+        if let Some(parent) = parent {
+            let parent = self.db(move |s| Ok(s.session(&parent)?.ok_or(Error::Closed)?.meta)).await?;
+            if let Some(allowed) = parent["tools"].as_array() {
+                grant.retain(|tool| allowed.iter().filter_map(|v| v.as_str()).any(|p| crate::tools::pattern(p, tool)));
+            }
+            denied.extend(parent["denied_tools"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)));
+        }
+        grant.retain(|tool| !denied.iter().any(|d| crate::tools::pattern(d, tool)));
+        if otto_tools::registry::tools_for_family(family)
+            .into_iter()
+            .chain(self.extra_tools())
+            .any(|tool| tool.spec().loading == otto_tools::Loading::Deferred && grant.contains(&tool.spec().name))
+            && !grant.iter().any(|name| name == "load_tools")
+        {
+            grant.push("load_tools".into());
+        }
+        Ok((grant, denied))
     }
     pub async fn session(&self, id: &str) -> Result<SessionHandle> {
         let mut actors = self.0.actors.lock().await;
@@ -400,18 +441,33 @@ impl Runtime {
         rx.await.map_err(|_| Error::Closed)?
     }
     pub async fn rename(&self, id: &str, title: String) -> Result<()> {
-        self.update(id, SessionUpdate { title: Some(title), ..Default::default() }).await
+        self.update(id, SessionUpdate { title: Some(title), ..Default::default() }, false).await.map(drop)
+    }
+    /// Set an automatic title unless the session got one meanwhile; `true` when applied.
+    /// Boxed like `wake`: it is reached from inside session actors.
+    pub(crate) fn auto_rename(&self, id: String, title: String) -> futures::future::BoxFuture<'static, Result<bool>> {
+        let runtime = self.clone();
+        Box::pin(async move { runtime.update(&id, SessionUpdate { title: Some(title), ..Default::default() }, true).await })
     }
     pub async fn archive(&self, id: &str, archived: bool) -> Result<()> {
-        self.update(id, SessionUpdate { archived: Some(archived), ..Default::default() }).await
+        self.update(id, SessionUpdate { archived: Some(archived), ..Default::default() }, false).await.map(drop)
     }
-    async fn update(&self, id: &str, update: SessionUpdate) -> Result<()> {
+    /// Change the session's provider, model, agent or effort (`session.update`).
+    pub async fn configure(&self, id: &str, change: Configure) -> Result<SessionInfo> {
         let handle = self.session(id).await?;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        handle.tx.send(crate::session::Command::Update(update, tx)).await.map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)??;
-        self.changed();
-        Ok(())
+        handle.tx.send(crate::session::Command::Configure(change, tx)).await.map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)?
+    }
+    async fn update(&self, id: &str, update: SessionUpdate, untitled: bool) -> Result<bool> {
+        let handle = self.session(id).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle.tx.send(crate::session::Command::Update(update, untitled, tx)).await.map_err(|_| Error::Closed)?;
+        let applied = rx.await.map_err(|_| Error::Closed)??;
+        if applied {
+            self.changed();
+        }
+        Ok(applied)
     }
 }
 pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
@@ -428,6 +484,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         agent: row.agent,
         provider: row.provider,
         model: row.model,
+        effort: serde_json::from_value(row.meta["effort"].clone()).ok(),
         title: row.title,
         cwd: row.cwd,
         status: if row.archived {

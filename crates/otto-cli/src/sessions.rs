@@ -51,6 +51,17 @@ pub enum SessionCommand {
     },
     /// Rename a session.
     Rename { id: String, title: String },
+    /// Change the model (`provider/model` or a model of the current provider), agent or reasoning effort.
+    Update {
+        id: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        /// `default`: back to the agent's effort, else the model's.
+        #[arg(long, value_parser = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"])]
+        effort: Option<String>,
+    },
     /// Archive a session and remove its spilled tool output.
     Archive { id: String },
     /// Fork a session, optionally at an event seq.
@@ -89,6 +100,16 @@ pub async fn mutate(command: SessionCommand) -> Result<()> {
     let method = match command {
         SessionCommand::Mode { id, mode } => Method::SessionSetMode { session_id: id, approval_mode: approval_mode(&mode) },
         SessionCommand::Rename { id, title } => Method::SessionRename { session_id: id, title },
+        SessionCommand::Update { id, model, agent, effort } => {
+            let (provider, model) = match model.as_deref().map(|m| m.split_once('/')) {
+                Some(Some((p, m))) => (Some(p.to_owned()), Some(m.to_owned())),
+                Some(None) => (None, model),
+                None => (None, None),
+            };
+            let reset_effort = effort.as_deref() == Some("default");
+            let effort = effort.filter(|_| !reset_effort).map(|e| serde_json::from_value(serde_json::Value::String(e))).transpose()?;
+            Method::SessionUpdate { session_id: id, provider, model, agent, effort, reset_effort }
+        }
         SessionCommand::Archive { id } => Method::SessionArchive { session_id: id },
         SessionCommand::Fork { id, at_seq } => Method::SessionFork { session_id: id, at_seq },
     };

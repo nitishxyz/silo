@@ -75,6 +75,18 @@
         ],
         "type": "string"
       },
+      "Effort": {
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "type": "string"
+      },
       "InputPart": {
         "oneOf": [
           {
@@ -647,6 +659,16 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -1589,6 +1611,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -1722,6 +1756,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -1842,6 +1888,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -1966,6 +2024,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -2086,6 +2156,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -2224,6 +2306,12 @@
                 },
                 "type": "array"
               },
+              "plan": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "provider": {
                 "type": "string"
               },
@@ -2339,6 +2427,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -2445,6 +2545,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -2569,6 +2681,12 @@
             },
             "type": "array"
           },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "provider": {
             "type": "string"
           },
@@ -2617,6 +2735,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -2729,6 +2859,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -2835,6 +2977,12 @@
                 },
                 "type": "array"
               },
+              "plan": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "provider": {
                 "type": "string"
               },
@@ -2890,6 +3038,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -3028,6 +3188,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -3143,6 +3315,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -3251,6 +3435,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -3552,6 +3748,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -3653,6 +3861,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -3726,6 +3946,11 @@
               },
               "root": {
                 "type": "string"
+              },
+              "updated_at": {
+                "default": 0,
+                "format": "int64",
+                "type": "integer"
               }
             },
             "required": [
@@ -3776,6 +4001,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -3859,6 +4096,11 @@
           },
           "root": {
             "type": "string"
+          },
+          "updated_at": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -3902,6 +4144,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -4019,6 +4273,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -4152,6 +4418,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -4250,6 +4528,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -4362,6 +4652,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -4468,6 +4770,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -4580,6 +4894,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -4655,6 +4981,17 @@
               }
             ]
           },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "model": {
             "type": [
               "string",
@@ -4702,6 +5039,18 @@
               "ask_on_effects",
               "ask_all",
               "plan"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -4784,6 +5133,16 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -4874,6 +5233,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -4960,6 +5331,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "SessionStatus": {
             "enum": [
               "idle",
@@ -5039,6 +5422,16 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -5129,6 +5522,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -5212,6 +5617,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "SessionInfo": {
             "properties": {
               "agent": {
@@ -5227,6 +5644,16 @@
               },
               "cwd": {
                 "type": "string"
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "id": {
                 "type": "string"
@@ -5387,6 +5814,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -5515,6 +5954,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -5625,6 +6076,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -5745,6 +6208,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -5858,6 +6333,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -5968,6 +6455,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -6100,6 +6599,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -6174,6 +6685,324 @@
         "type": "object"
       }
     },
+    "session.update": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "model": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reset_effort": {
+            "default": false,
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "SessionStatus": {
+            "enum": [
+              "idle",
+              "busy",
+              "waiting_approval",
+              "error",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "Usage": {
+            "properties": {
+              "cache_read": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cache_write": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "input": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "output": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reasoning": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "input",
+              "output"
+            ],
+            "type": "object"
+          },
+          "UsageTotals": {
+            "properties": {
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "approval_mode": {
+            "$ref": "#/$defs/ApprovalMode",
+            "default": "auto"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/SessionStatus"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "usage": {
+            "$ref": "#/$defs/UsageTotals"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "agent",
+          "provider",
+          "model",
+          "title",
+          "cwd",
+          "status",
+          "created_at",
+          "updated_at",
+          "last_seq",
+          "usage"
+        ],
+        "title": "SessionInfo",
+        "type": "object"
+      }
+    },
     "session.view": {
       "params": {
         "$defs": {
@@ -6206,6 +7035,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -6342,6 +7183,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -6993,6 +7846,16 @@
               "cwd": {
                 "type": "string"
               },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -7197,6 +8060,18 @@
             ],
             "type": "string"
           },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "InputPart": {
             "oneOf": [
               {
@@ -7323,6 +8198,18 @@
               "queue",
               "steer",
               "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ],
             "type": "string"
           },
@@ -7524,6 +8411,18 @@
           "queue",
           "steer",
           "interrupt"
+        ],
+        "type": "string"
+      },
+      "Effort": {
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -8755,6 +9654,16 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "type": "string"

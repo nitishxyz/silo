@@ -79,6 +79,7 @@ impl Services {
                     account: status.account_id,
                     default_model: None,
                     base_url: status.base_url,
+                    plan: status.plan,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -93,6 +94,7 @@ impl Services {
                 modes: Vec::new(),
                 default_model: None,
                 base_url: None,
+                plan: None,
             });
         }
         if let Some((provider, model)) = otto_core::ModelResolver::default_model(self)

@@ -77,6 +77,18 @@ pub struct SessionCreateOptions {
     pub provider: Option<String>,
     pub title: Option<String>,
     pub parent: Option<String>,
+    pub effort: Option<Effort>,
+}
+
+/// Fields for `session.update`; `None` leaves the field unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct SessionUpdate {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub agent: Option<String>,
+    pub effort: Option<Effort>,
+    /// Back to the agent's effort, else the model's default.
+    pub reset_effort: bool,
 }
 
 impl Connection {
@@ -223,8 +235,16 @@ impl Connection {
             provider: o.provider,
             title: o.title,
             parent: o.parent,
+            effort: o.effort,
         })
         .await
+    }
+    pub async fn session_update(&self, session_id: &str, update: SessionUpdate) -> Result<SessionInfo> {
+        let SessionUpdate { provider, model, agent, effort, reset_effort } = update;
+        self.call_typed(Method::SessionUpdate { session_id: session_id.into(), provider, model, agent, effort, reset_effort }).await
+    }
+    pub async fn project_list(&self) -> Result<Vec<ProjectInfo>> {
+        self.call_typed(Method::ProjectList {}).await
     }
     pub async fn session_list(&self, project_id: Option<String>, include_archived: bool) -> Result<Vec<SessionInfo>> {
         self.call_typed(Method::SessionList { project_id, include_archived }).await

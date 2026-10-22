@@ -96,6 +96,8 @@ sessions for the configured duration, using the runtime's nonblocking busy query
 ## Runtime integration
 
 - `project.list` and cross-project session listing read the durable runtime index.
+  `project.list` orders projects by their latest session `updated_at`
+  (`ProjectInfo.updated_at`, else `created_at`) and omits roots that no longer exist.
   No `projects.json` is read or written; a legacy file can be removed by the user.
 - `tools.list` requires `session_id` and returns that session's effective tools.
   Omitting it returns `bad_request`, because effective grants depend on the session.
@@ -116,6 +118,13 @@ sessions for the configured duration, using the runtime's nonblocking busy query
   and applies the mode at subsequent tool preparation. Wire values are `auto`,
   `ask_on_effects`, `ask_all`, and `plan`; SessionInfo includes the current mode.
   Plan agents reject non-plan mode changes with `bad_request`.
+- `session.create {effort?}` sets the session's reasoning effort (`SessionInfo.effort`).
+  `session.update {session_id, provider?, model?, agent?, effort?, reset_effort?}` changes only
+  the given fields (`reset_effort`: back to the agent's effort, else the model's),
+  journals `session.changed`, emits `sessions.changed` and returns the
+  `SessionInfo`. It applies at the next model request (a running turn's next step);
+  unknown agents or models and signed-out providers are `bad_request`.
+- `AuthStatus.plan` is the subscription plan label when the sign-in reports one.
 - Fork replay uses core's contiguous journal stream, including `ItemDone` for fork
   records and sequenced error events for undecodable records.
 - Startup loads `config.json`; `config.set` updates runtime defaults for new sessions

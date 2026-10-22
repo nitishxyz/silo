@@ -14,6 +14,7 @@ pub mod skills;
 mod spills;
 mod step;
 mod subagents;
+mod title;
 mod tools;
 pub use runtime::*;
 pub use session::SessionHandle;

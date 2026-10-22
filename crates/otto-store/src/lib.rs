@@ -229,6 +229,18 @@ impl Store {
         Ok(stmt.query_map([], |r| Ok(Project { id: r.get(0)?, root: r.get(1)?, created_at: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Projects with their latest session `updated_at` (else `created_at`), most recent first.
+    /// # Errors
+    /// Returns database errors.
+    pub fn recent_projects(&self) -> Result<Vec<(Project, i64)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT p.id,p.root,p.created_at,coalesce(max(s.updated_at),p.created_at) AS used FROM projects p LEFT JOIN sessions s ON s.project_id=p.id GROUP BY p.id ORDER BY used DESC,p.root,p.id",
+        )?;
+        Ok(stmt
+            .query_map([], |r| Ok((Project { id: r.get(0)?, root: r.get(1)?, created_at: r.get(2)? }, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// # Errors
     /// Returns database errors.
     pub fn project_by_root(&self, root: &str) -> Result<Option<Project>> {
