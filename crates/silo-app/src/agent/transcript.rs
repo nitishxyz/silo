@@ -20,6 +20,8 @@ pub enum Status {
     Error,
     /// Called but not started (awaiting approval or queued).
     Pending,
+    /// Waiting for the user: an approval (`false`) or an answer (`true`).
+    Waiting(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,10 @@ pub struct Times {
     spans: HashMap<String, Span>,
     seq: u64,
     primed: bool,
+    /// Calls waiting for an approval (`false`) or an answer (`true`).
+    waiting: HashMap<String, bool>,
+    /// Calls that stopped waiting in the latest observation.
+    released: HashSet<String>,
 }
 
 impl Times {
@@ -157,11 +163,22 @@ impl Times {
         Some(span.end.unwrap_or(now).saturating_sub(span.start?))
     }
 
+    /// Whether call `key` waits for an approval (`Some(false)`) or an answer (`Some(true)`).
+    #[must_use]
+    pub fn waiting(&self, key: &str) -> Option<bool> {
+        self.waiting.get(key).copied()
+    }
+
     fn see(&mut self, key: &str, known: bool, done: bool, now: u64) {
         let seq = self.seq;
+        let restart = self.waiting.contains_key(key) || self.released.contains(key);
         let span = self.spans.entry(key.to_owned()).or_insert(Span { start: known.then_some(now), end: None, seq });
         if span.seq == seq {
             self.seq += 1;
+        }
+        // A call is timed from when it may run, not from when it asked.
+        if restart && span.end.is_none() && span.start.is_some() {
+            span.start = Some(now);
         }
         if done && span.end.is_none() && span.start.is_some() {
             span.end = Some(now);
@@ -169,9 +186,12 @@ impl Times {
     }
 
     /// Record what is new or finished since the last observation. The
-    /// first observation (a loaded session) records no times.
-    pub fn observe(&mut self, items: &[Item], tools: &HashMap<String, ToolState>, running: bool, now: u64) {
+    /// first observation (a loaded session) records no times. `waiting`:
+    /// calls with a pending approval (`false`) or question (`true`).
+    pub fn observe(&mut self, items: &[Item], tools: &HashMap<String, ToolState>, running: bool, waiting: HashMap<String, bool>, now: u64) {
         let known = std::mem::replace(&mut self.primed, true);
+        self.released = self.waiting.keys().filter(|k| !waiting.contains_key(*k)).cloned().collect();
+        self.waiting = waiting;
         let results = results(items);
         let pending = pending_tools(items, tools);
         let last = items.len().checked_sub(1);
@@ -467,6 +487,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     let mut status = match (&out, live.map(|t| t.status)) {
         (Some(o), _) if o.error => Status::Error,
         (Some(_), _) => Status::Done,
+        (None, _) if cx.running && cx.times.waiting(call_id).is_some() => Status::Waiting(cx.times.waiting(call_id) == Some(true)),
         (None, Some(ToolStatus::Running | ToolStatus::Input)) if cx.running => Status::Running,
         (None, _) if cx.running => Status::Pending,
         (None, _) => Status::Error,
@@ -495,7 +516,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             line.desc = match status {
                 Status::Error => meta["exit_code"].as_i64().map(|c| format!("exit {c}")).or_else(|| elapsed.map(short)),
                 Status::Running | Status::Done => elapsed.map(short),
-                Status::Pending => None,
+                Status::Pending | Status::Waiting(_) => None,
             };
             let progress: String = live.map(|t| t.progress.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
             if status == Status::Running && !progress.trim().is_empty() {
@@ -514,7 +535,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             let took = json["duration_ms"].as_u64().or(elapsed);
             line.desc = match status {
                 Status::Error => exit.map(|c| format!("exit {c}")).or_else(|| took.map(short)),
-                Status::Pending => None,
+                Status::Pending | Status::Waiting(_) => None,
                 _ => took.map(short),
             };
             if let Some(output) = json["output"].as_str().filter(|o| !o.trim().is_empty()) {
@@ -593,6 +614,11 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     line.status = status;
     line.title = match (status, failed) {
         (Status::Error, Some(failed)) => failed,
+        // The card above the composer asks; the line says what waits.
+        (Status::Waiting(question), _) => {
+            line.desc = (!subject.is_empty()).then(|| clip(&subject, 60));
+            (if question { "Needs your answer" } else { "Needs approval" }).to_owned()
+        }
         (Status::Running | Status::Pending, _) => title(run, &subject),
         _ => title(done, &subject),
     };
@@ -1260,16 +1286,42 @@ mod tests {
     fn times_skip_the_loaded_history() {
         let items = vec![user("u", "go"), assistant("a", vec![call("c1", "read", json!({}))]), tool_item("t", vec![result("c1", "x", false)])];
         let mut times = Times::default();
-        times.observe(&items, &HashMap::new(), true, 100);
+        times.observe(&items, &HashMap::new(), true, HashMap::new(), 100);
         assert_eq!(times.get("c1").and_then(|s| s.start), None, "already there when loaded");
         let mut items = items;
         items.push(assistant("b", vec![call("c2", "read", json!({}))]));
-        times.observe(&items, &HashMap::new(), true, 200);
+        times.observe(&items, &HashMap::new(), true, HashMap::new(), 200);
         assert_eq!(times.get("c2").map(|s| (s.start, s.end)), Some((Some(200), None)));
         items.push(tool_item("t2", vec![result("c2", "x", false)]));
-        times.observe(&items, &HashMap::new(), true, 900);
+        times.observe(&items, &HashMap::new(), true, HashMap::new(), 900);
         assert_eq!(times.elapsed("c2", 5_000), Some(700));
         assert_eq!(times.elapsed("c1", 5_000), None);
+    }
+
+    #[test]
+    fn calls_waiting_for_the_user_say_so_and_are_timed_once_allowed() {
+        let mut items = vec![user("u", "go")];
+        let mut times = Times::default();
+        times.observe(&items, &HashMap::new(), true, HashMap::new(), 0);
+        items
+            .push(assistant("a", vec![call("c", "shell", json!({"command": "rm -rf build"})), call("q", "ask_user", json!({"question": "Which?"}))]));
+        let waiting = HashMap::from([("c".to_owned(), false), ("q".to_owned(), true)]);
+        times.observe(&items, &HashMap::new(), true, waiting.clone(), 100);
+        times.observe(&items, &HashMap::new(), true, waiting, 5_000);
+        let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Running), &times, 5_000);
+        let lines = &group_of(&rows[1]).lines;
+        assert_eq!(
+            (lines[0].title.as_str(), lines[0].desc.as_deref(), lines[0].status),
+            ("Needs approval", Some("rm -rf build"), Status::Waiting(false))
+        );
+        assert_eq!((lines[1].title.as_str(), lines[1].status), ("Needs your answer", Status::Waiting(true)));
+        // Allowed: running again, timed from the approval.
+        let mut tools = HashMap::new();
+        tools.insert("c".to_owned(), ToolState { name: "shell".into(), status: ToolStatus::Running, ..ToolState::default() });
+        times.observe(&items, &tools, true, HashMap::new(), 5_200);
+        let rows = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 6_000);
+        let line = &group_of(&rows[1]).lines[0];
+        assert_eq!((line.title.as_str(), line.status, line.desc.as_deref()), ("Running rm -rf build", Status::Running, Some("0.8s")));
     }
 
     #[test]

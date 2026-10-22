@@ -1232,9 +1232,9 @@ impl Registry {
         Ok(())
     }
 
-    /// `agent.set`: the shown otto session and its title.
-    pub fn agent_set(&mut self, block_id: &str, session_id: Option<String>, title: Option<String>) -> Result<(), RpcError> {
-        if self.agent(block_id)?.set(session_id, title)? {
+    /// `agent.set`: the shown otto session and its title, or the block's folder.
+    pub fn agent_set(&mut self, block_id: &str, session_id: Option<String>, title: Option<String>, cwd: Option<String>) -> Result<(), RpcError> {
+        if self.agent(block_id)?.set(session_id, title, cwd)? {
             self.block_changed(block_id);
             if let Ok((si, _)) = self.locate(block_id) {
                 self.session_changed(si);

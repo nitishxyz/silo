@@ -459,7 +459,8 @@ pub enum Method {
         index: usize,
     },
 
-    /// Agent blocks: the shown otto session and its title.
+    /// Agent blocks: the shown otto session and its title, or the block's
+    /// folder (`cwd`; a new folder clears the session unless one is given).
     #[serde(rename = "agent.set")]
     AgentSet {
         block_id: BlockId,
@@ -467,6 +468,8 @@ pub enum Method {
         session_id: Option<String>,
         #[serde(default)]
         title: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
     },
 
     /// Ask attached UI clients (the app) to show a session.
@@ -778,7 +781,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.reload", "Reload a browser block, optionally bypassing the cache."),
     ("browser.zoom", "Set a browser block's zoom level (0 = 100%)."),
     ("browser.report", "Report a browser block's engine state (owner only)."),
-    ("agent.set", "Set an agent block's shown otto session and title."),
+    ("agent.set", "Set an agent block's shown otto session and title, or its folder."),
     ("ui.open_session", "Ask subscribed UI clients to show a session."),
     ("pair.create", "Create a single-use device-pairing or join invite (owner only)."),
     ("pair.list", "List paired devices (owner only)."),

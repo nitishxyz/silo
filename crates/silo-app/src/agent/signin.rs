@@ -152,12 +152,12 @@ fn url_valid(url: &str) -> bool {
 }
 
 /// The row's second line when connected.
-fn connection_label(status: &AuthStatus) -> &'static str {
+fn connection_label(status: &AuthStatus) -> String {
     match status.provider.as_str() {
-        "ollama" | "lmstudio" => "Connected · local",
-        "custom" => "Connected",
-        _ if status.mode == AuthMode::Subscription => "Connected · subscription",
-        _ => "Connected · API key",
+        "ollama" | "lmstudio" => "Connected · local".into(),
+        "custom" => "Connected".into(),
+        _ if status.mode == AuthMode::Subscription => format!("Connected · {}", status.plan.as_deref().unwrap_or("subscription")),
+        _ => "Connected · API key".into(),
     }
 }
 
@@ -1150,6 +1150,7 @@ mod tests {
             modes,
             default_model: None,
             base_url: None,
+            plan: None,
         }
     }
 
@@ -1205,6 +1206,8 @@ mod tests {
         let mut sub = status("openai", vec![]);
         sub.mode = AuthMode::Subscription;
         assert_eq!(connection_label(&sub), "Connected · subscription");
+        sub.plan = Some("Max".into());
+        assert_eq!(connection_label(&sub), "Connected · Max");
         assert_eq!(connection_label(&status("openai", vec![])), "Connected · API key");
     }
 }

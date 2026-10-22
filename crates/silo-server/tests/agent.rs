@@ -78,7 +78,11 @@ async fn info(control: &Control, created: &Created) -> BlockInfo {
 }
 
 fn set(created: &Created, session_id: &str, title: &str) -> Method {
-    Method::AgentSet { block_id: created.block_id.clone(), session_id: Some(session_id.into()), title: Some(title.into()) }
+    Method::AgentSet { block_id: created.block_id.clone(), session_id: Some(session_id.into()), title: Some(title.into()), cwd: None }
+}
+
+fn move_to(created: &Created, cwd: &str) -> Method {
+    Method::AgentSet { block_id: created.block_id.clone(), session_id: None, title: None, cwd: Some(cwd.into()) }
 }
 
 fn report(created: &Created, state: StatusState, kind: Option<StatusKind>) -> Method {
@@ -116,11 +120,11 @@ async fn split_creates_agent_and_set_updates_it() {
     assert_eq!(block.title, "Fix the lockfile");
     assert_eq!(block.agent, Some(AgentState { session_id: Some("ses_1".into()), title: "Fix the lockfile".into() }));
 
-    let empty = Method::AgentSet { block_id: created.block_id.clone(), session_id: Some(String::new()), title: None };
+    let empty = Method::AgentSet { block_id: created.block_id.clone(), session_id: Some(String::new()), title: None, cwd: None };
     assert_eq!(code(&control.call_value(empty).await.unwrap_err()), "bad_request");
     let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     let terminal = view.blocks.iter().find(|b| b.kind == BlockKind::Terminal).unwrap();
-    let wrong = Method::AgentSet { block_id: terminal.id.clone(), session_id: Some("ses_1".into()), title: None };
+    let wrong = Method::AgentSet { block_id: terminal.id.clone(), session_id: Some("ses_1".into()), title: None, cwd: None };
     assert_eq!(code(&control.call_value(wrong).await.unwrap_err()), "bad_request");
     let send = Method::TerminalSend { block_id: created.block_id.clone(), text: "x".into() };
     assert_eq!(code(&control.call_value(send).await.unwrap_err()), "bad_request");
@@ -128,6 +132,56 @@ async fn split_creates_agent_and_set_updates_it() {
     control.call_value(Method::BlockClose { block_id: created.block_id.clone(), force: false }).await.unwrap();
     let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     assert!(view.blocks.iter().all(|b| b.kind == BlockKind::Terminal));
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn set_cwd_moves_the_block_and_persists() {
+    let home = temp_home("cwd");
+    let task = start(&home).await;
+    let (control, mut events) = connect(&home).await;
+    control.call_value(Method::EventsSubscribe {}).await.unwrap();
+    let created = agent(&control).await;
+    control.call_value(set(&created, "ses_6", "Old project")).await.unwrap();
+
+    // A new folder: the block shows a new session there.
+    control.call_value(move_to(&created, "/usr")).await.unwrap();
+    let changed = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let (_, Event::BlockChanged { block }) = events.recv().await.expect("events")
+                && block.id == created.block_id
+                && block.cwd.as_deref() == Some("/usr")
+            {
+                return block;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!((changed.title.as_str(), changed.agent), ("Agent", Some(AgentState::default())));
+    let block = info(&control, &created).await;
+    assert_eq!((block.cwd.as_deref(), block.agent), (Some("/usr"), Some(AgentState::default())));
+
+    // The same folder keeps the session; a folder with a session sets both.
+    control.call_value(set(&created, "ses_7", "New project")).await.unwrap();
+    control.call_value(move_to(&created, "/usr")).await.unwrap();
+    assert_eq!(info(&control, &created).await.agent.and_then(|a| a.session_id).as_deref(), Some("ses_7"));
+    let both = Method::AgentSet { block_id: created.block_id.clone(), session_id: Some("ses_8".into()), title: None, cwd: Some("/tmp".into()) };
+    control.call_value(both).await.unwrap();
+    let block = info(&control, &created).await;
+    assert_eq!((block.cwd.as_deref(), block.agent.and_then(|a| a.session_id).as_deref()), (Some("/tmp"), Some("ses_8")));
+
+    for bad in ["", "relative/dir", "/tmp/a\nb"] {
+        assert_eq!(code(&control.call_value(move_to(&created, bad)).await.unwrap_err()), "bad_request", "{bad:?}");
+    }
+
+    control.call_value(move_to(&created, "/usr")).await.unwrap();
+    stop(control, task).await;
+    let task = start(&home).await;
+    let (control, _) = connect(&home).await;
+    let after = info(&control, &created).await;
+    assert_eq!((after.cwd.as_deref(), after.title.as_str(), after.agent), (Some("/usr"), "Agent", Some(AgentState::default())));
     stop(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }

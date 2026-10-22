@@ -9,8 +9,10 @@ See §8 for status.
   `BlockInfo.agent: Option<AgentState>`, `AgentState { session_id: Option<String>, title: String }`, `Some` exactly
   when `kind == Agent`. Persisted, restored and handed off like browser state. `title` mirrors the otto session
   title (empty before the first prompt); the block title is `title`, else `"Agent"`.
-- `agent.set {block_id, session_id?, title?}` (access: interact) updates it and emits the usual session change. The
-  app calls it when the user picks or starts a session, and when the session title changes.
+- `agent.set {block_id, session_id?, title?, cwd?}` (access: interact) updates it and emits the usual session change.
+  The app calls it when the user picks or starts a session, when the session title changes, and with `cwd` (absolute)
+  when the user moves the block to another project: a new `cwd` clears the session and title unless `session_id` is
+  given too. `cwd` is the block's, persisted and broadcast with it.
 - Status: the app reports the turn state of the shown session with the existing `block.report` (`working` while a
   turn runs, `blocked --kind permission|question` on a pending approval/question, `done` when a turn finishes,
   `error`). `block.report` must work on agent blocks (attention, tab marks, notifications), not only terminals.
@@ -127,8 +129,11 @@ Units are points.
   provider logo 13 + `/` + model id + ` (pro)`/` (max)` dimmer when on a subscription, the whole thing the model
   picker button; right `brain` 14 (reasoning, tinted violet when on) and `image` 14 (attach, tinted green when the
   model accepts images), each a 22×22 button. Context % and cost move into the model picker header and tooltip.
-  As built: the subscription marker reads ` (sub)` (auth status has no plan tier), and `brain` is hidden because otto
-  has no per-session reasoning control (effort comes only from the agent definition).
+  As built: the subscription marker is the plan otto reports (` (Max)`, ` (Pro)`), ` (sub)` when it reports none.
+  `brain` shows only when the model has `caps.reasoning`: violet when the session's effort is set (`high`), muted when
+  off or at the default; a click toggles between `high` and the default, the agent's effort else the model's
+  (`session.update` with `effort` / `reset_effort`, or the create options before the session exists); the tooltip
+  names the effort.
 - **Popovers** (agent picker, model picker, ⋮ menu, switcher): anchored above their trigger, radius 12, fill one step
   above background, 1 border ~12% foreground, soft shadow, 6 padding, rows 30 tall with 8 radius hover fill;
   model picker 320 wide with a search field and provider groups (logo + name headers), current model checked.
@@ -285,9 +290,21 @@ Units are points.
 ## 5. Session switcher
 
 Click the title or `history` in the pane header, `/sessions`, or ⌘J with the agent block focused. A popover under the
-header: search pill, then one row per session of the block's project (git toplevel of `cwd`), newest first: status
-dot, title (the shown session falls back to its first prompt until otto names it, others to `Untitled`), `model ·
-running · 2h`, check on the shown one; `New session` last. Picking one calls `agent.set`; other sessions keep running.
+header: the project row (`folder` · project folder name · `Project` · `chevron-right`), search pill, then one row per
+session of the block's project (git toplevel of `cwd`), newest first: status dot, title (otto names a session after
+its first turn and the title arrives live; the shown one falls back to its first prompt until then, others to
+`Untitled`), `model · running · 2h`, check on the shown one; `New session` last. The selection starts on the first
+session. Picking one calls `agent.set`; other sessions keep running.
+
+The project row (⏎ or click) swaps the popover for the recent projects (`project.list`, most recent first): folder
+name, the parent folder's name only when two share a name, `2h`, check on the current one; `Open folder…` last (the
+native folder picker). Picking one moves the block there (`agent.set {cwd}`): it shows that project's sessions and a
+new session, in every window. Paths are never shown.
+
+Model, agent and brain picks apply to the shown session with `session.update` (from its next model request; the
+pickers say `Applies from the next step` while a turn runs), shown at once and confirmed by `session.changed`; a
+refusal drops the pick and shows otto's reason in the notice slot. Before the first prompt they go into the create
+options.
 
 ## 6. Motion
 
@@ -320,9 +337,10 @@ Known gaps:
   with `no_app` until that tab is opened.
 - New session (`/new`, header button) only clears the pane; the server keeps the previous `session_id` until the
   next prompt creates the new session, so a restart in between shows the previous session.
-- A tool waiting for approval shows as `Running …` and its duration includes the wait.
+- A tool waiting for approval reads `Needs approval` (a question `Needs your answer`) with a lock (question) icon and
+  its subject muted on the right, no timer; once allowed it runs and is timed from then.
 - A running tool line's duration only advances when the session sends an event (the `Working for` header ticks).
-- Until otto names a session the header shows its first prompt (other sessions in the switcher say `Untitled`); no
-  remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app can
-  show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
+- Effort has no menu: the brain toggles `high` / the default; other efforts are CLI-only (`otto-silo session update`).
+- No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
+  can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
   and attachment chips disappear at once.

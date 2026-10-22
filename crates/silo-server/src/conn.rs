@@ -678,8 +678,8 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().browser_report(client_id, &block_id, report)?;
             Ok(json!({}))
         }
-        Method::AgentSet { block_id, session_id, title } => {
-            server.registry.lock().unwrap().agent_set(&block_id, session_id, title)?;
+        Method::AgentSet { block_id, session_id, title, cwd } => {
+            server.registry.lock().unwrap().agent_set(&block_id, session_id, title, cwd)?;
             Ok(json!({}))
         }
         Method::UiOpenSession { session_id } => {

@@ -2335,6 +2335,13 @@
           "block_id": {
             "type": "string"
           },
+          "cwd": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "session_id": {
             "default": null,
             "type": [

@@ -307,7 +307,7 @@ pub fn examples() -> Vec<Method> {
             history: vec![HistoryEntry { url: "https://example.com/".into(), title: "Example Domain".into() }],
             index: 0,
         },
-        M::AgentSet { block_id: b(), session_id: Some("ses_01".into()), title: Some("Fix the lockfile".into()) },
+        M::AgentSet { block_id: b(), session_id: Some("ses_01".into()), title: Some("Fix the lockfile".into()), cwd: None },
         M::UiOpenSession { session_id: s() },
         M::PairCreate { ttl_secs: 600, purpose: InvitePurpose::Device },
         M::PairList {},

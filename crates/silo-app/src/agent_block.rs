@@ -56,7 +56,10 @@ impl crate::workspace::Workspace {
             match event {
                 AgentPaneEvent::Activated => this.pane_activated(block),
                 AgentPaneEvent::Session { session_id, title } => {
-                    this.call(Method::AgentSet { block_id: block, session_id: Some(session_id.clone()), title: Some(title.clone()) });
+                    this.call(Method::AgentSet { block_id: block, session_id: Some(session_id.clone()), title: Some(title.clone()), cwd: None });
+                }
+                AgentPaneEvent::Project { cwd } => {
+                    this.call(Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
                 }
                 AgentPaneEvent::Status(status) => this.call(report(block, *status)),
                 AgentPaneEvent::Reveal(target) => this.reveal_agent_target(target.clone(), window, cx),

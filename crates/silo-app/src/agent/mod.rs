@@ -26,7 +26,7 @@ use gpui::{
     Subscription, Task, Window, px,
 };
 use otto_client::{ClientError, Connection, FollowerState, SessionCreateOptions, SessionFollower};
-use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, InputPart, Method, ProjectInfo, SessionInfo, TurnStatus};
+use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, InputPart, Method, ProjectInfo, SessionInfo, TurnStatus};
 
 use crate::text_field::{FieldEvent, TextField};
 use client::Catalog;
@@ -55,6 +55,10 @@ pub enum AgentPaneEvent {
         session_id: String,
         title: String,
     },
+    /// The user moved the block to another folder (`agent.set` `cwd`): it shows a new session there.
+    Project {
+        cwd: String,
+    },
     Status(AgentStatus),
     /// Jump to a silo block named by a tool call.
     Reveal(String),
@@ -73,6 +77,8 @@ const FADE: Duration = Duration::from_millis(320);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Overlay {
     Sessions,
+    /// Recent projects, opened from the switcher's project row.
+    Projects,
     Models,
     Agents,
     Menu,
@@ -147,13 +153,32 @@ impl Card {
     }
 }
 
-/// Choices for sessions this pane creates (otto has no method to change an
-/// existing session's agent or model; approval mode applies to both).
+/// Choices for the session this pane creates next (the shown session
+/// changes with `session.update` / `session.set_mode` instead).
 #[derive(Clone, Debug, Default)]
 struct Choice {
     agent: Option<String>,
     model: Option<(String, String)>,
     mode: ApprovalMode,
+    effort: Option<Effort>,
+}
+
+/// `session.update`s of the shown session not yet reflected by otto (shown meanwhile).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Update {
+    agent: Option<String>,
+    model: Option<(String, String)>,
+    /// `Some(None)`: back to the default.
+    effort: Option<Option<Effort>>,
+}
+
+impl Update {
+    /// Drop what `info` already shows.
+    fn reconcile(&mut self, info: &SessionInfo) {
+        self.agent.take_if(|a| *a == info.agent);
+        self.model.take_if(|(p, m)| *p == info.provider && *m == info.model);
+        self.effort.take_if(|e| *e == info.effort);
+    }
 }
 
 enum Conn {
@@ -167,11 +192,15 @@ pub struct AgentPane {
     pub focus: FocusHandle,
     session_id: Option<String>,
     cwd: Option<String>,
+    /// A folder this pane moved to that the server hasn't echoed yet.
+    moving: Option<String>,
     rt: tokio::runtime::Handle,
     epoch: Instant,
     conn: Conn,
     catalog: Option<Catalog>,
     project: Option<ProjectInfo>,
+    /// Recent otto projects, most recent first (the project list).
+    projects: Vec<ProjectInfo>,
     sessions: Vec<SessionInfo>,
     follower: Option<SessionFollower>,
     pump: Option<Task<()>>,
@@ -204,6 +233,7 @@ pub struct AgentPane {
     /// A local or custom provider's address (the connect dialog).
     url_field: Entity<pill_input::PillInput>,
     choice: Choice,
+    update: Update,
     overlay: Option<Overlay>,
     /// The overlay drawn while it fades out, and its open/close motion.
     overlay_shown: Option<Overlay>,
@@ -304,11 +334,13 @@ impl AgentPane {
             focus,
             session_id,
             cwd,
+            moving: None,
             rt,
             epoch: Instant::now(),
             conn: Conn::Connecting,
             catalog: None,
             project: None,
+            projects: Vec::new(),
             sessions: Vec::new(),
             follower: None,
             pump: None,
@@ -332,6 +364,7 @@ impl AgentPane {
             code_field,
             url_field,
             choice: Choice::default(),
+            update: Update::default(),
             overlay: None,
             overlay_shown: None,
             overlay_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
@@ -377,13 +410,23 @@ impl AgentPane {
 
     /// The server's state changed (another window or device switched sessions).
     pub fn show(&mut self, session_id: Option<String>, cwd: Option<String>, cx: &mut Context<Self>) {
-        let cwd_changed = self.cwd != cwd;
-        self.cwd = cwd;
-        if cwd_changed {
-            self.load(cx);
-            if self.session_id == session_id {
-                return;
+        // State from before this pane's own move.
+        if self.moving.is_some() && self.moving != cwd {
+            return;
+        }
+        self.moving = None;
+        if self.cwd != cwd {
+            // Moved to another folder: its project, and the session the server names (none: a new one).
+            self.cwd = cwd;
+            self.project = None;
+            self.sessions.clear();
+            if self.session_id != session_id {
+                self.forget_sends();
+                self.session_id = session_id;
+                self.follow(cx);
             }
+            self.load(cx);
+            return;
         }
         // A session this pane is about to create is not on the server yet.
         if self.session_id != session_id && session_id.is_some() {
@@ -419,6 +462,37 @@ impl AgentPane {
     pub fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_session(window, cx);
         cx.notify();
+    }
+
+    /// Move the block to `cwd` (a project root or a picked folder): a new session there.
+    fn switch_project(&mut self, cwd: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_overlay(None, cx);
+        // The current project (picked from the list) stays as it is.
+        if self.cwd.as_deref() != Some(cwd.as_str()) && self.project.as_ref().is_none_or(|p| p.root != cwd) {
+            self.forget_sends();
+            self.cwd = Some(cwd.clone());
+            self.moving = Some(cwd.clone());
+            self.project = None;
+            self.sessions.clear();
+            self.session_id = None;
+            self.follow(cx);
+            self.load(cx);
+            cx.emit(AgentPaneEvent::Project { cwd });
+        }
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// "Open folder…": the native folder picker, then [`Self::switch_project`].
+    fn open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlay(window, cx);
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(dir) = paths.into_iter().next().and_then(|p| p.to_str().map(str::to_owned)) else { return };
+            let _ = this.update_in(cx, |this, window, cx| this.switch_project(dir, window, cx));
+        })
+        .detach();
     }
 
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -470,6 +544,7 @@ impl AgentPane {
     /// Connect, then load providers, the project and its sessions.
     fn load(&mut self, cx: &mut Context<Self>) {
         let cwd = self.cwd.clone();
+        let asked = cwd.clone();
         self.run(
             cx,
             move |c| async move {
@@ -478,7 +553,9 @@ impl AgentPane {
                 let sessions = c.session_list(Some(project.id.clone()), false).await?;
                 Ok((catalog, project, sessions))
             },
-            |this, result, cx| match result {
+            move |this, result, cx| match result {
+                // Moved again meanwhile: the newer load wins.
+                _ if this.cwd != asked => {}
                 Ok((catalog, project, sessions)) => {
                     let first = matches!(this.conn, Conn::Connecting | Conn::Failed(_));
                     this.conn = Conn::Ready;
@@ -508,11 +585,14 @@ impl AgentPane {
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.project.as_ref().map(|p| p.id.clone()) else { return };
+        let asked = project.clone();
         self.run(
             cx,
             move |c| async move { c.session_list(Some(project), false).await },
-            |this, result, _| {
-                if let Ok(mut sessions) = result {
+            move |this, result, _| {
+                if let Ok(mut sessions) = result
+                    && this.project.as_ref().is_some_and(|p| p.id == asked)
+                {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
                     this.sessions = sessions;
                 }
@@ -552,6 +632,7 @@ impl AgentPane {
         self.usage_seen = None;
         self.context = None;
         self.title.clear();
+        self.update = Update::default();
         self.set_running(false);
         // A prompt that is creating this session keeps its bubble.
         self.show_rows();
@@ -635,7 +716,9 @@ impl AgentPane {
         let m = &state.mirror;
         let turn = transcript::effective_turn(m.turn.map(|t| t.1), m.info.status);
         let running = turn == Some(TurnStatus::Running);
-        self.times.observe(&m.items, &m.tools, running, now);
+        let waiting =
+            m.pending_approvals.iter().map(|a| (a.call_id.clone(), false)).chain(m.pending_questions.iter().map(|q| (q.call_id.clone(), true)));
+        self.times.observe(&m.items, &m.tools, running, waiting.collect(), now);
         let cwd = if m.info.cwd.is_empty() { self.cwd.clone() } else { Some(m.info.cwd.clone()) };
         let rows = transcript::build(&transcript::Input {
             items: &m.items,
@@ -667,8 +750,13 @@ impl AgentPane {
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
         self.set_status(status, cx);
         self.set_running(running);
+        self.update.reconcile(&m.info);
         if !m.info.title.is_empty() && m.info.title != self.title {
             self.title.clone_from(&m.info.title);
+            // otto names a session after its first turn: the switcher's row follows at once.
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == m.info.id) {
+                s.title.clone_from(&m.info.title);
+            }
             cx.emit(AgentPaneEvent::Session { session_id: m.info.id.clone(), title: self.title.clone() });
         }
         let used = m.info.usage.usage.input + m.info.usage.usage.cache_read + m.info.usage.usage.cache_write;
@@ -826,7 +914,8 @@ impl AgentPane {
     /// Rows of the open overlay, for keyboard selection.
     fn overlay_count(&self, cx: &gpui::App) -> usize {
         match self.overlay {
-            Some(Overlay::Sessions) => self.session_choices(cx).len() + 1,
+            Some(Overlay::Sessions) => self.session_choices(cx).len() + 2,
+            Some(Overlay::Projects) => self.project_choices(cx).len() + 1,
             Some(Overlay::Models) => self.model_choices(cx).len(),
             Some(Overlay::Agents) => self.agent_choices().len(),
             Some(Overlay::Menu) => MENU_ROWS,
@@ -963,6 +1052,10 @@ impl AgentPane {
         if !self.catalog.as_ref().is_some_and(Catalog::any_signed_in) {
             return;
         }
+        // A new session needs its project (still loading after a move): the text stays.
+        if (self.session_id.is_none() || self.error.is_some()) && self.project.is_none() {
+            return;
+        }
         self.editor.update(cx, |e, cx| e.set_text("", cx));
         self.list.set_follow_mode(gpui::FollowMode::Tail);
         self.unseen = false;
@@ -1016,6 +1109,7 @@ impl AgentPane {
             approval_mode: Some(self.choice.mode),
             provider: self.choice.model.as_ref().map(|m| m.0.clone()),
             model: self.choice.model.as_ref().map(|m| m.1.clone()),
+            effort: self.choice.effort,
             ..SessionCreateOptions::default()
         };
         self.run(
@@ -1127,6 +1221,106 @@ impl AgentPane {
         );
     }
 
+    /// The shown session, when the pane can change it (else picks go to the next new session).
+    fn updatable(&self) -> Option<String> {
+        self.session_id.clone().filter(|_| self.error.is_none() && self.state.is_some())
+    }
+
+    fn set_model(&mut self, model: (String, String), cx: &mut Context<Self>) {
+        if self.updatable().is_none() {
+            self.choice.model = Some(model);
+            return;
+        }
+        let (provider, id) = model.clone();
+        self.update.model = Some(model);
+        self.update_session(otto_client::SessionUpdate { provider: Some(provider), model: Some(id), ..Default::default() }, cx);
+    }
+
+    fn set_agent(&mut self, agent: String, cx: &mut Context<Self>) {
+        if self.updatable().is_none() {
+            self.choice.agent = Some(agent);
+            return;
+        }
+        self.update.agent = Some(agent.clone());
+        self.update_session(otto_client::SessionUpdate { agent: Some(agent), ..Default::default() }, cx);
+    }
+
+    /// The brain button: high effort, or `None` for the default (the agent's, else the model's).
+    pub(super) fn set_effort(&mut self, effort: Option<Effort>, cx: &mut Context<Self>) {
+        if self.updatable().is_none() {
+            self.choice.effort = effort;
+            cx.notify();
+            return;
+        }
+        self.update.effort = Some(effort);
+        self.update_session(otto_client::SessionUpdate { effort, reset_effort: effort.is_none(), ..Default::default() }, cx);
+    }
+
+    /// `session.update` of the shown session; it shows at once, and otto's
+    /// `session.changed` confirms it. A refusal drops it and says why.
+    fn update_session(&mut self, update: otto_client::SessionUpdate, cx: &mut Context<Self>) {
+        let Some(id) = self.updatable() else { return };
+        let generation = self.generation;
+        let sent = update.clone();
+        self.run(
+            cx,
+            move |c| async move { c.session_update(&id, update).await },
+            move |this, result, _| {
+                if this.generation != generation {
+                    return;
+                }
+                match result {
+                    // Shown as otto has it until the session's own state catches up.
+                    Ok(info) => {
+                        if sent.agent.is_some() {
+                            this.update.agent = Some(info.agent.clone());
+                        }
+                        if sent.model.is_some() {
+                            this.update.model = Some((info.provider.clone(), info.model.clone()));
+                        }
+                        if sent.effort.is_some() || sent.reset_effort {
+                            this.update.effort = Some(info.effort);
+                        }
+                        if let Some(state) = &this.state {
+                            this.update.reconcile(&state.mirror.info);
+                        }
+                    }
+                    Err(error) => {
+                        this.notice = Some(error);
+                        if sent.agent.is_some() {
+                            this.update.agent = None;
+                        }
+                        if sent.model.is_some() {
+                            this.update.model = None;
+                        }
+                        if sent.effort.is_some() || sent.reset_effort {
+                            this.update.effort = None;
+                        }
+                    }
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// The shown session's effort (with an update in flight), else the next session's.
+    pub(super) fn effort(&self) -> Option<Effort> {
+        match self.mirror() {
+            Some(m) => self.update.effort.unwrap_or(m.info.effort),
+            None => self.choice.effort,
+        }
+    }
+
+    /// The agent the next prompt runs with.
+    pub(super) fn agent_name(&self) -> String {
+        self.update
+            .agent
+            .clone()
+            .or_else(|| self.mirror().map(|m| m.info.agent.clone()))
+            .or_else(|| self.choice.agent.clone())
+            .unwrap_or_else(|| "build".into())
+    }
+
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_overlay(None, cx);
         self.forget_sends();
@@ -1174,12 +1368,25 @@ impl AgentPane {
             return;
         }
         self.set_overlay(Some(overlay), cx);
-        self.selected = 0;
+        self.selected = first_choice(overlay);
         self.filter.update(cx, |f, cx| f.replace_text("", cx));
         match overlay {
             Overlay::Sessions => {
                 self.refresh_sessions(cx);
                 self.filter.update(cx, |f, cx| f.set_placeholder("Filter sessions", cx));
+                let focus = self.filter.read(cx).focus.clone();
+                window.focus(&focus, cx);
+            }
+            Overlay::Projects => {
+                self.run(
+                    cx,
+                    |c| async move { c.project_list().await },
+                    |this, result, _| match result {
+                        Ok(projects) => this.projects = projects,
+                        Err(error) => this.notice = Some(error),
+                    },
+                );
+                self.filter.update(cx, |f, cx| f.set_placeholder("Filter projects", cx));
                 let focus = self.filter.read(cx).focus.clone();
                 window.focus(&focus, cx);
             }
@@ -1204,12 +1411,12 @@ impl AgentPane {
     }
 
     fn filter_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.overlay, Some(Overlay::Sessions | Overlay::Models)) {
+        let Some(overlay) = self.overlay.filter(|o| matches!(o, Overlay::Sessions | Overlay::Projects | Overlay::Models)) else {
             return;
-        }
+        };
         let count = self.overlay_count(cx);
         match event {
-            FieldEvent::Changed(_) => self.selected = 0,
+            FieldEvent::Changed(_) => self.selected = first_choice(overlay),
             FieldEvent::Up => self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1)),
             FieldEvent::Down => self.selected = if count == 0 { 0 } else { (self.selected + 1) % count },
             FieldEvent::Cancel => return self.close_overlay(window, cx),
@@ -1220,22 +1427,35 @@ impl AgentPane {
 
     fn activate_choice(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         match self.overlay {
-            Some(Overlay::Sessions) => match self.session_choices(cx).get(index) {
-                Some(s) => {
-                    let id = s.id.clone();
-                    self.pick_session(id, window, cx);
+            // The project row, the sessions, then New session.
+            Some(Overlay::Sessions) => match index.checked_sub(1) {
+                None => self.open_overlay(Overlay::Projects, window, cx),
+                Some(i) => match self.session_choices(cx).get(i) {
+                    Some(s) => {
+                        let id = s.id.clone();
+                        self.pick_session(id, window, cx);
+                    }
+                    None => self.new_session(window, cx),
+                },
+            },
+            // Recent projects, then Open folder….
+            Some(Overlay::Projects) => match self.project_choices(cx).get(index) {
+                Some(p) => {
+                    let root = p.root.clone();
+                    self.switch_project(root, window, cx);
                 }
-                None => self.new_session(window, cx),
+                None => self.open_folder(window, cx),
             },
             Some(Overlay::Models) => {
                 if let Some(m) = self.model_choices(cx).get(index) {
-                    self.choice.model = Some((m.provider.as_str().to_owned(), m.id.clone()));
+                    let model = (m.provider.as_str().to_owned(), m.id.clone());
+                    self.set_model(model, cx);
                 }
                 self.close_overlay(window, cx);
             }
             Some(Overlay::Agents) => {
                 if let Some((name, _)) = self.agent_choices().into_iter().nth(index) {
-                    self.choice.agent = Some(name);
+                    self.set_agent(name, cx);
                 }
                 self.close_overlay(window, cx);
             }
@@ -1271,6 +1491,25 @@ impl AgentPane {
             list.sort_by_key(|(score, s)| (std::cmp::Reverse(*score), std::cmp::Reverse(s.updated_at)));
         }
         list.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Recent projects matching the filter (most recent first), the current one included.
+    fn project_choices(&self, cx: &gpui::App) -> Vec<&ProjectInfo> {
+        let query = self.filter.read(cx).text.clone();
+        let names = project_names(self.projects.iter().map(|p| p.root.as_str()));
+        let mut list: Vec<(i32, usize, &ProjectInfo)> = self
+            .projects
+            .iter()
+            .zip(&names)
+            .enumerate()
+            .filter_map(|(i, (p, (name, parent)))| {
+                crate::commands::fuzzy(&query, &format!("{name} {}", parent.as_deref().unwrap_or(""))).map(|(score, _)| (score, i, p))
+            })
+            .collect();
+        if !query.trim().is_empty() {
+            list.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        }
+        list.into_iter().map(|(_, _, p)| p).collect()
     }
 
     /// Models matching the filter, grouped by provider (catalog order), best match first within a group.
@@ -1389,6 +1628,30 @@ fn session_label(s: &SessionInfo) -> String {
     if s.title.trim().is_empty() { "Untitled".to_owned() } else { s.title.clone() }
 }
 
+/// The row an overlay opens on: the switcher skips its project row.
+fn first_choice(overlay: Overlay) -> usize {
+    usize::from(overlay == Overlay::Sessions)
+}
+
+/// A project's folder name (the UI never shows paths).
+fn project_name(root: &str) -> String {
+    let root = root.trim_end_matches('/');
+    root.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("/").to_owned()
+}
+
+/// Folder names of `roots`, each with its parent folder's name when another root has the same name.
+fn project_names<'a>(roots: impl Iterator<Item = &'a str> + Clone) -> Vec<(String, Option<String>)> {
+    let names: Vec<String> = roots.clone().map(project_name).collect();
+    roots
+        .zip(&names)
+        .map(|(root, name)| {
+            let shared = names.iter().filter(|n| *n == name).count() > 1;
+            let parent = root.trim_end_matches('/').rsplit_once('/').map(|(parent, _)| project_name(parent));
+            (name.clone(), parent.filter(|_| shared))
+        })
+        .collect()
+}
+
 /// A short, user-facing reason.
 fn describe(error: &ClientError) -> String {
     match error {
@@ -1436,5 +1699,24 @@ mod tests {
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
         }
+    }
+
+    #[test]
+    fn projects_show_folder_names_and_parents_only_for_duplicates() {
+        assert_eq!(project_name("/Users/me/dev/term"), "term");
+        assert_eq!(project_name("/Users/me/dev/term/"), "term");
+        assert_eq!(project_name("/"), "/");
+        let roots = ["/Users/me/dev/term", "/Users/me/work/app", "/Users/me/old/app", "/srv"];
+        assert_eq!(
+            project_names(roots.iter().copied()),
+            [
+                ("term".to_owned(), None),
+                ("app".to_owned(), Some("work".to_owned())),
+                ("app".to_owned(), Some("old".to_owned())),
+                ("srv".to_owned(), None)
+            ]
+        );
+        // The switcher opens on its first session (the project row is above it); other lists on their first row.
+        assert_eq!((first_choice(Overlay::Sessions), first_choice(Overlay::Projects), first_choice(Overlay::Models)), (1, 0, 0));
     }
 }

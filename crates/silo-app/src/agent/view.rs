@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, MouseButton, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle, Window, div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb,
 };
-use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, SessionStatus};
+use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, SessionStatus};
 
 use super::{
     AgentPane, AgentPaneEvent, Card, Conn, ENTER, FADE, FOLD, Overlay,
@@ -153,6 +153,23 @@ fn footnote(text: &'static str) -> gpui::Div {
         .text_size(px(11.5))
         .text_color(rgb(theme::muted()))
         .child(text)
+}
+
+/// The brain glyph while reasoning is on.
+fn violet() -> u32 {
+    if theme::is_light() { 0x007c_3aed } else { 0x00a7_8bfa }
+}
+
+fn effort_label(effort: Effort) -> &'static str {
+    match effort {
+        Effort::None => "off",
+        Effort::Minimal => "minimal",
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+        Effort::Xhigh => "extra high",
+        Effort::Max => "max",
+    }
 }
 
 thread_local! {
@@ -388,6 +405,7 @@ impl AgentPane {
             })
             .children(self.render_backdrop(cx))
             .children(self.popover(Overlay::Sessions, window, cx))
+            .children(self.popover(Overlay::Projects, window, cx))
             .children(self.render_signin_dialog(window, cx))
             .into_any_element();
         keep_moving(window);
@@ -787,6 +805,7 @@ impl AgentPane {
             Status::Running => crate::browser_pane::spinner(&key, 13.0, muted, cx),
             Status::Error => icon("x-circle", 14.0, theme::danger()).into_any_element(),
             Status::Pending => div().opacity(0.5).child(icon(line.kind.icon(), 14.0, muted)).into_any_element(),
+            Status::Waiting(question) => icon(if question { "question" } else { "lock" }, 14.0, theme::foreground()).into_any_element(),
             Status::Done => icon(line.kind.icon(), 14.0, muted).into_any_element(),
         };
         let glyph = div().flex().opacity(swap).scale(0.8 + 0.2 * swap).child(glyph);
@@ -1428,6 +1447,9 @@ impl AgentPane {
 
     /// The model the next prompt goes to: the session's, else the pick, else the daemon's default.
     fn model(&self) -> Option<(String, String)> {
+        if let Some(update) = self.update.model.clone().filter(|_| self.mirror().is_some()) {
+            return Some(update);
+        }
         match (self.mirror(), &self.choice.model) {
             (Some(m), _) if !m.info.model.is_empty() => Some((m.info.provider.clone(), m.info.model.clone())),
             (_, Some(pick)) => Some(pick.clone()),
@@ -1452,10 +1474,16 @@ impl AgentPane {
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
-        let agent = self.mirror().map(|m| m.info.agent.clone()).or_else(|| self.choice.agent.clone()).unwrap_or_else(|| "build".into());
+        let agent = self.agent_name();
         let model = self.model();
         let catalog = self.catalog.as_ref();
-        let sub = model.as_ref().is_some_and(|(p, _)| catalog.is_some_and(|c| c.subscription(p)));
+        let plan = model.as_ref().and_then(|(p, _)| catalog.and_then(|c| c.subscription(p)));
+        let reasons = model
+            .as_ref()
+            .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.reasoning)));
+        // Reasoning is on when the session asks for some effort (the provider's default reads as off).
+        let effort = self.effort();
+        let thinking = effort.is_some_and(|e| e != Effort::None);
         let vision = model
             .as_ref()
             .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.vision)));
@@ -1493,10 +1521,33 @@ impl AgentPane {
                     })
                     .child(div().flex_none().text_color(rgb(ink(0.35))).child("/"))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(ink(0.72))).child(id.clone()))
-                    .when(sub, |el| el.child(div().flex_none().text_color(rgb(ink(0.38))).child("(sub)"))),
+                    .when_some(plan, |el, plan| el.child(div().flex_none().text_color(rgb(ink(0.38))).child(format!("({plan})")))),
                 None => el.child("No model"),
             })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Models, window, cx)));
+        // Reasoning on (high effort) or off; only for models that reason.
+        let brain = reasons.then(|| {
+            let tip = match effort {
+                Some(Effort::None) => "Reasoning off".to_owned(),
+                Some(e) => format!("Reasoning: {}", effort_label(e)),
+                None => "Reasoning: model default".to_owned(),
+            };
+            div()
+                .id("agent-brain")
+                .size(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .continuous(6.0)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover_fill()))
+                .active(|s| s.scale(0.92))
+                .tooltip(Tooltip::text(tip))
+                .child(icon("brain", 14.0, if thinking { violet() } else { muted }))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_effort((!thinking).then_some(Effort::High), cx);
+                }))
+        });
         let image = div()
             .id("agent-image")
             .size(px(22.0))
@@ -1529,7 +1580,18 @@ impl AgentPane {
             .text_color(rgb(muted))
             .child(div().flex_1().min_w_0().flex().items_center().pl(px(pill_input::HALO + pill_input::INSET - 6.0)).child(agent_button))
             .child(div().flex_none().max_w(relative(0.5)).min_w_0().flex().justify_center().child(model_button))
-            .child(div().flex_1().min_w_0().flex().items_center().justify_end().pr(px(pill_input::HALO + pill_input::INSET - 4.0)).child(image))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(2.0))
+                    .pr(px(pill_input::HALO + pill_input::INSET - 4.0))
+                    .children(brain)
+                    .child(image),
+            )
             .into_any_element()
     }
 
@@ -1564,17 +1626,18 @@ impl AgentPane {
         let t = toggled(&self.overlay_anim, now, cx);
         let body = match which {
             Overlay::Sessions => self.render_sessions(window, cx),
+            Overlay::Projects => self.render_projects(window, cx),
             Overlay::Models => self.render_models(window, cx),
             Overlay::Agents => self.render_agents(cx),
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),
         };
         let width = match which {
-            Overlay::Sessions => 440.0,
+            Overlay::Sessions | Overlay::Projects => 440.0,
             Overlay::Models => 340.0,
             Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
         };
-        let below = which == Overlay::Sessions;
+        let below = matches!(which, Overlay::Sessions | Overlay::Projects);
         let card = div()
             .id("agent-popover")
             .occlude()
@@ -1608,7 +1671,7 @@ impl AgentPane {
             .flex()
             .map(|el| match which {
                 Overlay::Models => el.justify_center(),
-                Overlay::Sessions => el,
+                Overlay::Sessions | Overlay::Projects => el,
                 _ => el.pl(px(pill_input::HALO)),
             })
             .map(|el| if below { el.top(px(4.0)).px(px(6.0)) } else { el.bottom(relative(1.0)).pb(px(8.0)) })
@@ -1640,15 +1703,29 @@ impl AgentPane {
             .into_iter()
             .map(|s| {
                 let title = match &shown {
-                    Some(t) if s.title.trim().is_empty() && current.as_deref() == Some(s.id.as_str()) => t.clone(),
+                    Some(t) if current.as_deref() == Some(s.id.as_str()) => t.clone(),
                     _ => super::session_label(s),
                 };
                 (s.id.clone(), title, s.model.clone(), s.status, s.updated_at)
             })
             .collect();
         let count = choices.len();
+        // The block's project on top: opens the recent projects.
+        let project = self.project.as_ref().map_or_else(|| "Project".to_owned(), |p| super::project_name(&p.root));
+        let project_row = rows::row(
+            "agent-project",
+            self.selected == 0,
+            Some(rows::lead("folder", false)),
+            project,
+            Some(div().child("Project").into_any_element()),
+            Some(icon("chevron-right", 12.0, theme::muted()).into_any_element()),
+        );
+        let project_row = self
+            .pick_row(project_row, 0, self.selected == 0, cx)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Projects, window, cx)));
         let mut list = div().id("agent-sessions").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
         for (i, (id, title, model, status, updated)) in choices.into_iter().enumerate() {
+            let i = i + 1;
             let checked = current.as_deref() == Some(id.as_str());
             let state = match status {
                 SessionStatus::Busy => Some("running"),
@@ -1679,11 +1756,62 @@ impl AgentPane {
             let empty = if self.filter.read(cx).text.trim().is_empty() { "No sessions yet" } else { "No matching sessions" };
             list = list.child(rows::row("agent-sessions-empty", false, None, div().text_color(rgb(theme::muted())).child(empty), None, None));
         }
-        let new = rows::row("agent-new-session", self.selected == count, Some(rows::lead("new-session", false)), "New session", None, None);
+        let new = rows::row("agent-new-session", self.selected == count + 1, Some(rows::lead("new-session", false)), "New session", None, None);
         let new = self
-            .pick_row(new, count, self.selected == count, cx)
+            .pick_row(new, count + 1, self.selected == count + 1, cx)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_session(window, cx)));
-        div().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(new).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .child(project_row)
+            .child(rows::divider())
+            .child(self.search_field(window, cx))
+            .child(list)
+            .child(rows::divider())
+            .child(new)
+            .into_any_element()
+    }
+
+    /// Recent otto projects by folder name, then Open folder…; picking one moves the block there.
+    fn render_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.project.as_ref().map(|p| p.id.clone());
+        let names: std::collections::HashMap<String, (String, Option<String>)> =
+            self.projects.iter().map(|p| p.id.clone()).zip(super::project_names(self.projects.iter().map(|p| p.root.as_str()))).collect();
+        let choices: Vec<(String, String, Option<String>, i64)> = self
+            .project_choices(cx)
+            .into_iter()
+            .map(|p| {
+                let (name, parent) = names.get(&p.id).cloned().unwrap_or_else(|| (super::project_name(&p.root), None));
+                (p.id.clone(), name, parent, p.updated_at)
+            })
+            .collect();
+        let count = choices.len();
+        let mut list = div().id("agent-projects").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        for (i, (id, name, parent, updated)) in choices.into_iter().enumerate() {
+            let checked = current.as_deref() == Some(id.as_str());
+            let subtitle = [parent.as_deref(), Some(ago(updated).as_str())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            let row = rows::row(
+                gpui::ElementId::Name(format!("project-{id}").into()),
+                i == self.selected,
+                Some(rows::lead("folder", checked)),
+                div().when(checked, |el| el.font_weight(FontWeight::MEDIUM)).child(name),
+                Some(div().child(subtitle).into_any_element()),
+                checked.then(rows::check),
+            );
+            list = list.child(
+                self.pick_row(row, i, i == self.selected, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
+            );
+        }
+        if count == 0 {
+            let empty = if self.filter.read(cx).text.trim().is_empty() { "No recent projects" } else { "No matching projects" };
+            list = list.child(rows::row("agent-projects-empty", false, None, div().text_color(rgb(theme::muted())).child(empty), None, None));
+        }
+        let open = rows::row("agent-open-folder", self.selected == count, Some(rows::lead("plus", false)), "Open folder…", None, None);
+        let open = self
+            .pick_row(open, count, self.selected == count, cx)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(count, window, cx)));
+        div().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(open).into_any_element()
     }
 
     fn render_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1699,8 +1827,11 @@ impl AgentPane {
         let mut group: Option<String> = None;
         for (i, (provider, id, name)) in choices.into_iter().enumerate() {
             if group.as_deref() != Some(provider.as_str()) {
-                let label =
-                    if catalog.subscription(&provider) { format!("{} · subscription", provider_name(&provider)) } else { provider_name(&provider) };
+                let label = match catalog.subscription(&provider) {
+                    Some(plan) if plan != "sub" => format!("{} · {plan}", provider_name(&provider)),
+                    Some(_) => format!("{} · subscription", provider_name(&provider)),
+                    None => provider_name(&provider),
+                };
                 list = list.child(rows::section(label, provider_logo(&provider).map(|logo| icon(logo, 13.0, muted).into_any_element())));
                 group = Some(provider.clone());
             }
@@ -1739,12 +1870,12 @@ impl AgentPane {
             })
             .child(self.search_field(window, cx))
             .child(list)
-            .when(self.session_id.is_some(), |el| el.child(footnote("Applies to new sessions")))
+            .when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step")))
             .into_any_element()
     }
 
     fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.mirror().map(|m| m.info.agent.clone()).or_else(|| self.choice.agent.clone()).unwrap_or_else(|| "build".into());
+        let current = self.agent_name();
         let mut list = div().id("agent-agents").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
         for (i, (name, description)) in self.agent_choices().into_iter().enumerate() {
             let checked = name == current;
@@ -1762,7 +1893,12 @@ impl AgentPane {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
-        div().flex().flex_col().child(list).when(self.session_id.is_some(), |el| el.child(footnote("Applies to new sessions"))).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .child(list)
+            .when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step")))
+            .into_any_element()
     }
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {

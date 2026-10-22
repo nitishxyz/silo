@@ -61,10 +61,13 @@ impl Catalog {
         self.auth.iter().any(|a| a.signed_in)
     }
 
-    /// Signed in with a subscription (shown as a marker by the model).
+    /// Signed in with a subscription: its plan (`Max`), else `sub`; shown as a marker by the model.
     #[must_use]
-    pub fn subscription(&self, provider: &str) -> bool {
-        self.auth.iter().any(|a| a.provider == provider && a.signed_in && a.mode == otto_proto::AuthMode::Subscription)
+    pub fn subscription(&self, provider: &str) -> Option<String> {
+        self.auth
+            .iter()
+            .find(|a| a.provider == provider && a.signed_in && a.mode == otto_proto::AuthMode::Subscription)
+            .map(|a| a.plan.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "sub".into()))
     }
 
     /// Models of signed-in providers.
@@ -123,6 +126,7 @@ mod tests {
             modes: vec![AuthMode::ApiKey, AuthMode::Subscription],
             default_model: default_model.map(Into::into),
             base_url: None,
+            plan: None,
         }
     }
 
@@ -136,5 +140,16 @@ mod tests {
             vec![AgentInfo { name: "plan".into(), description: String::new(), model: Some("anthropic/claude-z".into()), provider: None }];
         assert_eq!(catalog.default_model("plan"), Some(("anthropic".into(), "claude-z".into())));
         assert_eq!(Catalog::default().default_model("build"), None);
+    }
+
+    #[test]
+    fn subscription_marker_names_the_plan() {
+        let mut sub = status("anthropic", Some("claude-z"));
+        sub.mode = AuthMode::Subscription;
+        let mut catalog = Catalog { auth: vec![sub, status("openai", Some("gpt-x"))], ..Catalog::default() };
+        assert_eq!(catalog.subscription("anthropic").as_deref(), Some("sub"));
+        catalog.auth[0].plan = Some("Max".into());
+        assert_eq!(catalog.subscription("anthropic").as_deref(), Some("Max"));
+        assert_eq!(catalog.subscription("openai"), None);
     }
 }

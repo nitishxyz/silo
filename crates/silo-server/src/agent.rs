@@ -11,6 +11,8 @@ use crate::status::{Pacer, Records, Report};
 
 /// Longest otto session id accepted.
 pub const SESSION_MAX: usize = 128;
+/// Longest folder accepted.
+pub const CWD_MAX: usize = 4096;
 
 pub struct AgentBlock {
     /// Block metadata; `agent` is `None` here and filled from `state`.
@@ -49,15 +51,26 @@ impl AgentBlock {
         BlockStatus { block_id: self.base.id.clone(), records: self.records.published(), progress: None, busy: None }
     }
 
-    /// Change the shown session and/or its title; true if anything changed.
+    /// Change the shown session, its title and/or the block's folder; true if
+    /// anything changed. A new folder clears the session unless one is given.
     ///
     /// # Errors
-    /// `bad_request` for an empty or oversized session id.
-    pub fn set(&mut self, session_id: Option<String>, title: Option<String>) -> Result<bool, RpcError> {
+    /// `bad_request` for an empty or oversized session id, or a folder that is
+    /// not an absolute path.
+    pub fn set(&mut self, session_id: Option<String>, title: Option<String>, cwd: Option<String>) -> Result<bool, RpcError> {
         if session_id.as_ref().is_some_and(|s| s.is_empty() || s.len() > SESSION_MAX || s.chars().any(char::is_control)) {
             return Err(RpcError::bad_request(format!("session_id must be 1 to {SESSION_MAX} printable bytes")));
         }
-        let before = self.state.clone();
+        if cwd.as_ref().is_some_and(|c| !c.starts_with('/') || c.len() > CWD_MAX || c.chars().any(char::is_control)) {
+            return Err(RpcError::bad_request(format!("cwd must be an absolute path of at most {CWD_MAX} printable bytes")));
+        }
+        let before = (self.state.clone(), self.base.cwd.clone());
+        if let Some(cwd) = cwd
+            && self.base.cwd.as_ref() != Some(&cwd)
+        {
+            self.base.cwd = Some(cwd);
+            self.state = AgentState::default();
+        }
         if let Some(session_id) = session_id {
             if self.state.session_id.as_ref() != Some(&session_id) {
                 self.state.title.clear();
@@ -67,7 +80,7 @@ impl AgentBlock {
         if let Some(title) = title {
             self.state.title = untrusted(&title, MAX_TITLE);
         }
-        Ok(self.state != before)
+        Ok((&self.state, &self.base.cwd) != (&before.0, &before.1))
     }
 
     /// Apply a `block.report`: the attention it raises, if the pace allows,
