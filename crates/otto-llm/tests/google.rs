@@ -94,6 +94,25 @@ async fn error_events_are_terminal() {
 }
 
 #[test]
+fn thinking_levels_clamp_to_what_the_model_takes() {
+    for (model, effort, expected) in [
+        ("gemini-3.1-pro-preview", Effort::Minimal, "low"),
+        ("gemini-3.1-pro-preview", Effort::None, "low"),
+        ("gemini-3-flash-preview", Effort::Minimal, "minimal"),
+        ("gemini-3-flash-preview", Effort::Max, "high"),
+        ("gemini-unlisted", Effort::None, "minimal"),
+    ] {
+        let req = Request {
+            model: model.into(),
+            items: vec![Item::user_text("u", "hi")],
+            reasoning: Some(Reasoning::Effort(effort)),
+            ..Request::default()
+        };
+        assert_eq!(convert::request(&req).unwrap()["generation_config"]["thinking_level"], expected, "{model} {effort:?}");
+    }
+}
+
+#[test]
 fn request_shaping() {
     let tool =
         |name: &str, kind| ToolDef { name: name.into(), description: "d".into(), input_schema: json!({"type":"object"}), kind, defer_loading: false };

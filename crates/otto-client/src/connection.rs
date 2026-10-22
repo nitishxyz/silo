@@ -201,6 +201,11 @@ impl Connection {
     pub fn close(&self) {
         self.inner.shutdown.send_replace(true);
     }
+    /// The transport has ended: every call fails from now on.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.pending.lock().unwrap().is_none()
+    }
     /// # Errors
     /// No local transport, or reconnect failure. Tunnels supply a new connection to the follower.
     pub async fn reconnect(&self) -> Result<Self> {

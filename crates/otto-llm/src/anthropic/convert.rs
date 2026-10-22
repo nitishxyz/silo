@@ -13,6 +13,8 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
     let native_system = anthropic && super::supports_mid_system(&req.model);
     let mut messages: Vec<Value> = Vec::new();
     for item in &req.items {
+        // A system message must follow a user one (a subagent report waking an idle parent follows its reply).
+        let native_system = native_system && messages.last().is_some_and(|m| m["role"] != "assistant");
         let role = match item.role {
             Role::Assistant => "assistant",
             Role::System if native_system => "system",
@@ -117,11 +119,11 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
                 body["thinking"] = json!({"type":"disabled"});
             } else if super::supports_adaptive(&req.model) {
                 body["thinking"] = json!({"type":"adaptive"});
-                let effort = match effort {
+                // An effort the model doesn't list goes to the nearest it does (Opus 4.5 has no `max`, 4.6 no `xhigh`).
+                let effort = match effort.nearest(&crate::catalog::efforts(provider, &req.model)) {
                     Effort::None | Effort::Minimal | Effort::Low => "low",
                     Effort::Medium => "medium",
                     Effort::High => "high",
-                    Effort::Xhigh if req.model.contains("4-6") => "max",
                     Effort::Xhigh => "xhigh",
                     Effort::Max => "max",
                 };

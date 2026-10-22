@@ -34,6 +34,19 @@ pub fn thinking_level(reasoning: Reasoning) -> &'static str {
     }
 }
 
+/// `reasoning` as `model` takes it: an effort the catalog doesn't list for it
+/// becomes the nearest listed one (Gemini 3 Pro has no `minimal`); unlisted
+/// models get the four thinking levels.
+#[must_use]
+pub fn accepted(reasoning: Reasoning, model: &str) -> Reasoning {
+    let Reasoning::Effort(effort) = reasoning else { return reasoning };
+    let mut known = crate::catalog::efforts(PROVIDER, model);
+    if known.is_empty() {
+        known = vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High];
+    }
+    Reasoning::Effort(effort.nearest(&known))
+}
+
 /// Interactions input steps for `items`.
 ///
 /// # Errors
@@ -151,7 +164,7 @@ pub fn request(req: &Request) -> Result<Value, LlmError> {
         config["stop_sequences"] = json!(req.stop);
     }
     if let Some(reasoning) = req.reasoning {
-        config["thinking_level"] = json!(thinking_level(reasoning));
+        config["thinking_level"] = json!(thinking_level(accepted(reasoning, &req.model)));
         config["thinking_summaries"] = json!("auto");
     }
     if config.as_object().is_some_and(|c| !c.is_empty()) {

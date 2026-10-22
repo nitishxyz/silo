@@ -128,7 +128,7 @@ pub enum ToolChoice {
     Tool(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     None,
@@ -138,6 +138,15 @@ pub enum Effort {
     High,
     Xhigh,
     Max,
+}
+
+impl Effort {
+    /// The effort in `supported` nearest to this one, the higher on a tie;
+    /// itself when `supported` is empty (nothing known to clamp to).
+    #[must_use]
+    pub fn nearest(self, supported: &[Effort]) -> Effort {
+        supported.iter().copied().min_by_key(|e| ((*e as i8 - self as i8).unsigned_abs(), std::cmp::Reverse(*e))).unwrap_or(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

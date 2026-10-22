@@ -93,9 +93,11 @@ async fn matching_events_and_loss() {
     let (a, b) = tokio::join!(c.call(Method::Ping {}), c.call(Method::ServerInfo {}));
     assert_eq!(a.unwrap(), json!("a"));
     assert_eq!(b.unwrap(), json!("b"));
+    assert!(!c.is_closed());
     assert!(matches!(events.recv().await.unwrap().unwrap(), ServerMessage::Event { seq: 1, .. }));
     assert!(c.call(Method::Ping {}).await.is_err());
     assert!(events.recv().await.unwrap().is_err());
+    assert!(c.is_closed(), "a dead transport reads as closed");
     assert!(c.call(Method::Ping {}).await.is_err());
     task.await.unwrap();
 }

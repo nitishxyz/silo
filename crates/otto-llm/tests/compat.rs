@@ -134,6 +134,27 @@ async fn errors_and_truncation() {
 }
 
 #[test]
+fn efforts_clamp_to_what_the_model_takes() {
+    let req = |model: &str, effort| Request {
+        model: model.into(),
+        items: vec![Item::user_text("u", "hi")],
+        reasoning: Some(Reasoning::Effort(effort)),
+        ..Request::default()
+    };
+    // DeepSeek V4 takes low / high / max: medium goes up, off still turns thinking off.
+    let body = convert::request(&req("deepseek-v4-pro", Effort::Medium), dialect("deepseek")).unwrap();
+    assert_eq!((&body["thinking"], &body["reasoning_effort"]), (&json!({"type":"enabled"}), &json!("high")));
+    let off = convert::request(&req("deepseek-v4-pro", Effort::None), dialect("deepseek")).unwrap();
+    assert_eq!(off["thinking"], json!({"type":"disabled"}));
+    assert!(off.get("reasoning_effort").is_none());
+    // OpenRouter's GPT-5.5 has no max; Kimi K3 no medium; an unlisted model is sent as asked.
+    let body = convert::request(&req("openai/gpt-5.5", Effort::Max), dialect("openrouter")).unwrap();
+    assert_eq!(body["reasoning"], json!({"effort":"xhigh"}));
+    assert_eq!(convert::request(&req("kimi-k3", Effort::Medium), dialect("moonshotai")).unwrap()["reasoning_effort"], "high");
+    assert_eq!(convert::request(&req("m", Effort::Max), dialect("ollama")).unwrap()["reasoning_effort"], "max");
+}
+
+#[test]
 fn dialect_request_shapes() {
     let req = |reasoning| Request {
         model: "m".into(),

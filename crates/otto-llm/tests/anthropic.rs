@@ -37,6 +37,24 @@ fn parts(events: &[StreamEvent]) -> Vec<Part> {
 fn request() -> Request {
     Request { model: "claude-sonnet-4-6".into(), items: vec![Item::user_text("u", "Hello")], ..Request::default() }
 }
+#[test]
+fn adaptive_efforts_clamp_to_what_the_model_takes() {
+    for (model, effort, expected) in [
+        ("claude-sonnet-4-6", Effort::Xhigh, "max"),
+        ("claude-opus-4-6", Effort::Max, "max"),
+        ("claude-opus-4-7", Effort::Xhigh, "xhigh"),
+        ("claude-opus-4-7", Effort::Max, "max"),
+        ("claude-opus-5-5", Effort::Minimal, "low"),
+    ] {
+        let req = Request { model: model.into(), reasoning: Some(Reasoning::Effort(effort)), ..request() };
+        let body = convert::body(&req).unwrap();
+        assert_eq!(
+            (body["thinking"]["type"].as_str(), body["output_config"]["effort"].as_str()),
+            (Some("adaptive"), Some(expected)),
+            "{model} {effort:?}"
+        );
+    }
+}
 #[tokio::test]
 async fn fixtures_are_chunk_independent() {
     for raw in [TEXT, THINKING, REDACTED, PARALLEL, SEARCH, MAX] {
@@ -125,6 +143,16 @@ fn alternation_cache_tools_and_effort() {
     let body = convert::body(&req).unwrap();
     assert_eq!(body["messages"][1]["role"], "system");
     assert!(body.to_string().matches("cache_control").count() <= 4);
+    // A system item right after a reply (a subagent report waking the parent) can't be a system message.
+    let mut woken = req.clone();
+    woken.items = vec![
+        Item::user_text("u", "go"),
+        Item::new("a", Role::Assistant, vec![Part::text("delegated")]),
+        Item::new("s", Role::System, vec![Part::System { text: "Subagent completion".into() }]),
+    ];
+    let body = convert::body(&woken).unwrap();
+    assert_eq!(body["messages"][2]["role"], "user");
+    assert!(body["messages"][2]["content"][0]["text"].as_str().unwrap().contains("<system-reminder>\nSubagent completion"));
     req.model = "claude-haiku-4-5-20251001".into();
     assert_eq!(convert::body(&req).unwrap()["thinking"]["budget_tokens"], 8192);
     req.cache.disabled = true;

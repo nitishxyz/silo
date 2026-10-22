@@ -368,6 +368,21 @@ pub fn base_caps(provider: &str) -> Caps {
         id => crate::compat::dialect(id).map(crate::compat::base_caps).unwrap_or_default(),
     }
 }
+
+/// The efforts `id` takes per the bundled catalog: its own entry, else the
+/// longest catalog id it extends (a dated snapshot); empty when unknown.
+#[must_use]
+pub fn efforts(provider: &str, id: &str) -> Vec<Effort> {
+    let catalog = Catalog::global();
+    let Some(provider_models) = catalog.providers.get(provider) else { return Vec::new() };
+    let known = provider_models
+        .models
+        .keys()
+        .filter(|k| id == k.as_str() || id.strip_prefix(k.as_str()).is_some_and(|rest| rest.starts_with('-')))
+        .max_by_key(|k| k.len());
+    known.and_then(|k| catalog.entry(provider, k, None)).map(|e| e.efforts).unwrap_or_default()
+}
+
 /// OpenAI features that depend on the model and the auth mode: steering and
 /// async tools (GPT-6, API key), compaction (API key) and native tools.
 fn openai_caps(caps: &mut Caps, id: &str, mode: Option<AuthMode>) {

@@ -178,7 +178,45 @@ fn strict_schema_and_effort() {
     for (n, expected) in [(0, "none"), (512, "minimal"), (2000, "low"), (8000, "medium"), (20000, "high"), (50000, "xhigh")] {
         assert_eq!(convert::effort(Reasoning::Budget(n)), expected);
     }
-    assert_eq!(convert::effort(Reasoning::Effort(Effort::Max)), "xhigh");
+    assert_eq!(convert::effort(Reasoning::Effort(Effort::Max)), "max");
+}
+#[test]
+fn efforts_clamp_to_what_the_model_takes() {
+    for (provider, model, effort, expected) in [
+        ("openai", "gpt-5.2", Effort::Max, "xhigh"),
+        ("openai", "gpt-5.3-codex", Effort::Max, "xhigh"),
+        ("openai", "gpt-5.1", Effort::Max, "high"),
+        ("openai", "gpt-5.1", Effort::Minimal, "low"),
+        ("openai", "gpt-5", Effort::None, "minimal"),
+        ("openai", "gpt-5.2-pro", Effort::Low, "medium"),
+        ("openai", "gpt-6-sol", Effort::Max, "max"),
+        ("openai", "gpt-5.2-2025-12-11", Effort::Max, "xhigh"),
+        ("openai", "gpt-unlisted", Effort::Max, "xhigh"),
+        ("openai", "gpt-unlisted", Effort::Medium, "medium"),
+        ("xai", "grok-4.6", Effort::Max, "xhigh"),
+        ("xai", "grok-unlisted", Effort::None, "low"),
+    ] {
+        let got = convert::effort(convert::accepted(Reasoning::Effort(effort), provider, model));
+        assert_eq!(got, expected, "{provider} {model} {effort:?}");
+    }
+    let budget = Reasoning::Budget(50_000);
+    assert_eq!(convert::accepted(budget, "openai", "gpt-5.1"), budget);
+    let req = Request { model: "gpt-5.1".into(), reasoning: Some(Reasoning::Effort(Effort::Max)), ..Request::default() };
+    assert_eq!(convert::request(&req)["reasoning"]["effort"], "high");
+    assert_eq!(convert::request_for(&Request { model: "grok-4.6".into(), ..req }, "xai")["reasoning"]["effort"], "xhigh");
+}
+#[test]
+fn nearest_effort_prefers_the_higher_on_a_tie() {
+    use Effort::*;
+    assert_eq!(Max.nearest(&[Low, Medium, High]), High);
+    assert_eq!(Max.nearest(&[None, Low, Medium, High, Xhigh]), Xhigh);
+    assert_eq!(Medium.nearest(&[Low, High, Max]), High);
+    assert_eq!(None.nearest(&[Low, Medium, High]), Low);
+    assert_eq!(Xhigh.nearest(&[Low, Medium, High, Max]), Max);
+    assert_eq!(Max.nearest(&[]), Max);
+    assert_eq!(catalog::efforts("openai", "gpt-5.1"), [None, Low, Medium, High]);
+    assert_eq!(catalog::efforts("openai", "gpt-5.1-2025-11-13"), [None, Low, Medium, High], "a dated snapshot takes its model's");
+    assert!(catalog::efforts("openai", "gpt-unlisted").is_empty());
 }
 #[test]
 fn conversion_and_subscription() {

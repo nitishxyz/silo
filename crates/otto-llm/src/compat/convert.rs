@@ -192,6 +192,13 @@ pub fn request(req: &Request, dialect: &Dialect) -> Result<Value, LlmError> {
         body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"response","strict":true,"schema":schema}});
     }
     if let Some(reasoning) = req.reasoning {
+        // An effort the model doesn't list goes to the nearest it does; off
+        // stays off where the dialect turns thinking off with it.
+        let reasoning = match reasoning {
+            Reasoning::Effort(Effort::None) if matches!(dialect.reasoning, ReasoningParam::Thinking | ReasoningParam::ThinkingEffort) => reasoning,
+            Reasoning::Effort(e) => Reasoning::Effort(e.nearest(&crate::catalog::efforts(dialect.id, &req.model))),
+            Reasoning::Budget(_) => reasoning,
+        };
         let effort = effort(reasoning);
         match dialect.reasoning {
             ReasoningParam::Effort => body["reasoning_effort"] = json!(effort),

@@ -68,7 +68,8 @@ pub fn effort(reasoning: Reasoning) -> &'static str {
             Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
-            Effort::Xhigh | Effort::Max => "xhigh",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
         },
         Reasoning::Budget(n) => match n {
             0 => "none",
@@ -79,6 +80,23 @@ pub fn effort(reasoning: Reasoning) -> &'static str {
             _ => "xhigh",
         },
     }
+}
+/// `reasoning` as `provider`'s `model` takes it: an effort the catalog doesn't
+/// list for it becomes the nearest listed one (no `max` before GPT-5.6, no
+/// `xhigh` before GPT-5.2, …). Unlisted models get the common set: no `max`,
+/// and xAI can't turn reasoning off.
+#[must_use]
+pub fn accepted(reasoning: Reasoning, provider: &str, model: &str) -> Reasoning {
+    let Reasoning::Effort(effort) = reasoning else { return reasoning };
+    let mut known = crate::catalog::efforts(provider, model);
+    if known.is_empty() {
+        known = if provider == "xai" {
+            vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh]
+        } else {
+            vec![Effort::None, Effort::Minimal, Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh]
+        };
+    }
+    Reasoning::Effort(effort.nearest(&known))
 }
 fn media(media: &Media, image: bool) -> Value {
     let mut value = json!({"type": if image { "input_image" } else { "input_file" }});
@@ -292,12 +310,7 @@ pub fn request_for(req: &Request, provider: &str) -> Value {
         }
     }
     if let Some(reasoning) = req.reasoning {
-        let effort = match (provider, effort(reasoning)) {
-            // xAI: low/medium/high/xhigh; reasoning cannot be disabled.
-            ("xai", "none" | "minimal") => "low",
-            (_, effort) => effort,
-        };
-        body["reasoning"] = json!({"effort":effort,"summary":"auto"});
+        body["reasoning"] = json!({"effort":effort(accepted(reasoning, provider, &req.model)),"summary":"auto"});
     }
     if !req.cache.disabled
         && let Some(key) = &req.cache.key
