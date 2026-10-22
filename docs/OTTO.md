@@ -10,21 +10,31 @@ shell runner details (§6.2, §11.2), cross-machine conflicts (§12).
 | O0 providers | Anthropic Messages + OpenAI Responses (SSE), each with API key and subscription sign-in (Claude Pro/Max code paste; ChatGPT/Codex browser loopback + device code). Recorded-fixture tests. models.dev catalog with per-model auth availability | `otto-llm` |
 | O1 loop + tools | Turn engine (one actor per session), approvals (default `auto`, per-session modes), `Policy::prepare` path binding, tool journal + crash recovery, compaction, subagents, agents/skills/hooks/commands, built-in tools | `otto-core`, `otto-tools`, `otto-store` |
 | O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
-| O3–O8 | Not started | – |
+| O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, native client tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Native client tools follow `caps.native_tools`, one rule per model and auth mode: Claude `text_editor_20250728`/`bash_20250124` on every catalog model; OpenAI `apply_patch` and `shell` (local) per each model page's supported tools (`apply_patch`, `hosted_shell`), API key only, since the Codex CLI sends the ChatGPT endpoint only function/custom tools; everything else gets the built-ins | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
+| O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 12 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
+| O5–O8 | Not started | – |
 
-**Verified:** workspace fmt, clippy `-D warnings`, all tests (no network), `otto-proto` on wasm32, the silo protocol pin.
-Daemon integration tests cover a tool turn followed by a second client, kill -9 mid-tool → "outcome unknown", Ctrl-C,
-SIGTERM and approval denial without a tty.
+**Verified (2026-10-22):** workspace fmt, clippy `-D warnings`, `cargo nextest run --workspace` on macOS (1026 tests),
+the otto and silo server/CLI crates on Linux (`rust:1-bookworm`), `otto-proto` on wasm32, the silo protocol pin.
+Live with the Anthropic subscription (`claude-haiku-4-5`, `otto-silo run --json`): plain chat; ls/search/read/write/
+native `bash` with `update_todos`; an MCP tool from a stdio server in the project's `.mcp.json`; a `subagent`
+delegation whose completion reached the parent; a follow-up turn in the same session. Through the app
+(`claude-sonnet-5-5`): a turn steered mid-run with ⏎, the steer applied at the next step.
 
-**Not yet verified live:** real provider calls, both subscription sign-ins and refresh, the catalog refresh from
-models.dev. Run the ignored live tests with `OTTO_LIVE=1` and real credentials.
+**Not yet verified live:** OpenAI (API key and subscription), Gemini, xAI and the compat providers (no credentials
+here); provider-native compaction and context editing (offline tests only; `otto-silo` has no compact command);
+subscription refresh; the models.dev catalog refresh.
 
 **Known gaps:**
-- Hooks are a command-only subset of Claude Code's format.
+- Hooks run `type: "command"` handlers only (no prompt/HTTP hooks, no async handlers); `SessionEnd` fires on archive.
+- The MCP client is hand-written (stdio, streamable HTTP without the GET notification stream or OAuth); `rmcp` was
+  not used because builds here are offline. Resources and prompts are not exposed.
 - Path guards are revalidation, not a sandbox (§5.2 "later").
 - Global index event seqs reset when the daemon restarts.
-- A child's completion reaches its parent only while the parent's actor is open.
-- Gemini and xAI are catalog-only.
+- Native tool search (`defer_loading`) is not used.
+- A runtime that was shut down stays closed (outbox wakes cannot reopen actors); a restarted server needs a new one.
+- The model page lists are the only evidence for OpenAI native tools; models missing from `openai::native_tools`
+  (new releases) get the built-ins until added.
 
 Each crate's `README.md` lists its own limitations.
 
@@ -227,16 +237,16 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
 |---|---|---|
 | Anthropic | Messages (SSE); caching, thinking, compaction, inline tools, server tools, Files | O0 |
 | OpenAI | Responses (SSE, then WebSocket with `stream_id`, steering, async tools, compaction) | O0 / O3 |
-| Google | Interactions API (`generateContent` only if needed) | O3 |
+| Google | Interactions API (`POST /v1beta/interactions`, SSE, `store=false`) | O3 |
 | Claude subscription (Pro/Max) | Same Messages client, OAuth bearer auth plus the request shaping the subscription endpoint expects | O0 |
 | ChatGPT subscription (Codex) | Same Responses client against `chatgpt.com/backend-api/codex/responses` (HTTP and `wss://`) | O0 (HTTP), O3 (WS) |
-| xAI | Responses-style API | O3 |
+| xAI | Same Responses client, `https://api.x.ai/v1` | O3 |
 | Compat family | Chat Completions dialect table: OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax (Anthropic dialect), Ollama, LM Studio, custom base URLs | O3 |
 | Bedrock / Vertex / Azure | auth + endpoint variants of the above | later |
 
 ### 4.6 Transport and auth
 
-- `reqwest` + rustls, an SSE parser, `tokio-tungstenite` for OpenAI WS. Retries with jitter, honoring
+- `reqwest` + rustls, an SSE parser, `tokio-websockets` (already in the tree via iroh) for OpenAI WS. Retries with jitter, honoring
   `retry-after` and rate-limit headers, an idle timeout between events (not the total time), overload handling, and
   cancellation that closes the stream.
 - Credentials: env vars, sealed store (`silo-store`-style), macOS Keychain. OAuth: device and loopback flows, a
@@ -251,6 +261,131 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   cache. Pricing feeds usage and cost events.
 - Tests: **recorded stream fixtures** (raw SSE/WS bytes in, canonical events out) per provider feature, with
   `OTTO_RECORD=1` to refresh them against live APIs.
+
+### 4.7 OpenAI WebSocket mode and steering (checked 2026-10-22)
+
+**What the API offers.**
+- Public API (API key): `wss://api.openai.com/v1/responses`, `Authorization: Bearer`. Client events are
+  `response.create` (the HTTP body without `stream`/`background`, plus an optional WS-only `stream_id`) and
+  `response.steer`. Server events are the usual Responses stream events plus `error` (with `status`, and
+  `stream_id` on named lanes) and `response.steer.accepted|pending|failed`. Limits: 60 minutes per connection,
+  16 in-flight responses and 32 named lanes per connection, FIFO within a lane. `previous_response_id`
+  continues from a connection-local cache; with `store=false` an uncached id fails with
+  `previous_response_not_found` (no persisted fallback).
+  ([WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode),
+  [events reference](https://developers.openai.com/api/reference/resources/responses/websocket-events))
+- **Steering:** `{"type":"response.steer","previous_response_id":<active response>,"input":...}` after that
+  response's `response.created`. Only user messages with text/image/file content. GPT-6 family only ("GPT-5.6 and
+  earlier models do not support steering"); not for responses bound to a `conversation` or using automatic
+  compaction. `accepted` only queues the input; the commit point is the successor's `response.created`. The active
+  response may end with `response.incomplete` (`reason: "steered"`), or complete normally, and is followed by an
+  automatic successor that inherits its settings. If it stops for client tool output, `response.steer.pending`
+  follows `response.completed` and the input stays queued *on that connection* until a `response.create` with
+  `previous_response_id` and the tool results. `failed` returns the input (`response_not_found`,
+  `steering_not_supported`, `too_many_pending_steers`, `response_already_completed`, …).
+  ([Mid-turn steering](https://developers.openai.com/api/docs/guides/steering))
+- **ChatGPT/Codex subscription** (`chatgpt.com/backend-api/codex/responses`): the Codex CLI does use WebSockets
+  there (`wss://…/codex/responses`, header `OpenAI-Beta: responses_websockets=2026-02-06`,
+  `codex-rs/core/src/client.rs`, `codex-api/src/endpoint/responses_websocket.rs` in
+  [openai/codex](https://github.com/openai/codex)), but only sends `response.create`. Its steering
+  (`start_or_steer_turn`) is client-side, at the next sampling request. No documentation says the backend
+  accepts `response.steer`. The documented "Sign in with ChatGPT" flow
+  ([preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations))
+  targets `api.openai.com/v1` instead, not the endpoint otto uses.
+
+**What otto does.**
+- `caps.steering` is true only for GPT-6 family ids with API-key auth (`openai::supports_steering`, catalog).
+  Those models and every ChatGPT/Codex subscription model stream over WebSocket (Codex: `wss://…/codex/responses`
+  with the subscription headers plus `OpenAI-Beta: responses_websockets=2026-02-06`, no steering). Other API-key
+  models stay on HTTP + SSE with step-boundary steering.
+- One connection per session (a model is resolved per session), on the default lane; named lanes are not used
+  (one session never runs two responses at once). It is parked after a clean call and reused, reconnecting once
+  if a parked connection turns out closed, and it is dropped on cancel, error or a `steer.pending`.
+- **Continuation** (the Codex CLI's `get_incremental_items` rule): the parked connection remembers its last
+  response id, the request without `input`, and that input plus the response's output as we would resend it.
+  The next call sends `previous_response_id` and only the new items when every other field is equal and the
+  input extends that baseline; otherwise, after steering, after a reconnect, or on `previous_response_not_found`
+  it sends the full input (`store=false` stays; our log is the truth).
+- `ModelSession::steer` hands input to the live stream, which sends `response.steer` once the response id is
+  known. On the successor's `response.created` the stream emits `StreamEvent::Steered{ids}`. The turn engine then
+  closes the current assistant item, records the steered user item, and opens a new assistant item, so the log
+  reads exactly as the model saw it. Input that is not committed (failed, pending behind tool results, or sent
+  after the response ended) goes back to the step-boundary queue. Pending input is delivered by us with the tool
+  results, and the connection that held it is discarded so it cannot be applied twice.
+
+### 4.8 O3 provider depth and breadth (checked 2026-10-22)
+
+**OpenAI.**
+- Compaction: `context_management: [{type:"compaction", compact_threshold}]` on create emits an opaque
+  `compaction` output item (replayed as-is); `POST /responses/compact` returns a compacted window (`output`) that
+  replaces the input and starts a new chain. Not compatible with steering. Exposed as `caps.native_compaction`
+  (API key) and `Request.compaction` (`Auto{threshold}` → `context_management`, `Now` → `/responses/compact`, the
+  window becomes one `Part::Compaction` with `{type:"compacted_window", output}`).
+  ([Compaction](https://developers.openai.com/api/docs/guides/compaction),
+  [compact](https://developers.openai.com/api/reference/resources/responses/methods/compact))
+- Async tools: `async: true` on function/custom tools, calls carry `async: true`, results arrive in a later request
+  on the original `call_id`; GPT-6 Astra and later. `caps.async_tools` + `openai::Options.async_tools`; async call
+  items are kept raw so the flag replays. ([Async tool calling](https://developers.openai.com/api/docs/guides/async-tool-calling))
+- Native client tools: `{type:"apply_patch"}` → `apply_patch_call{call_id, operation}` /
+  `apply_patch_call_output{status, output}`; `{type:"shell", environment:{type:"local"}}` → `shell_call{action}` /
+  `shell_call_output{output:[{stdout, stderr, outcome}]}`. Calls become ordinary tool calls (name `apply_patch` /
+  `shell`); a shell result that is the documented JSON array is sent as-is, plain text is wrapped.
+  ([Apply patch](https://developers.openai.com/api/docs/guides/tools-apply-patch),
+  [Shell](https://developers.openai.com/api/docs/guides/tools-shell))
+
+**Anthropic.**
+- Compaction on demand: beta `compact-2026-09-04`, `compaction:{type:"summarize", instructions?}`, the response is
+  one signed `compaction` block (`stop_reason:"compaction"`, whole in `content_block_start`) that goes first in
+  later requests, with the beta on each; no `stop_sequences`, `output_config.format` or forced `tool_choice`, and
+  not together with `context_management`. Threshold: beta `compact-2026-01-12`,
+  `context_management.edits:[{type:"compact_20260112", trigger:{type:"input_tokens", value≥50000}}]`, summary in
+  one `compaction_delta`. Billed usage is the sum of `usage.iterations`. Context editing:
+  `clear_tool_uses_20250919` / `clear_thinking_20251015` with beta `context-management-2025-06-27`.
+  ([Compaction](https://platform.claude.com/docs/en/build-with-claude/compaction),
+  [on demand](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),
+  [threshold](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold),
+  [context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing))
+  otto: `Request.compaction` maps to both, betas follow the body (`anthropic::convert::betas_for`),
+  `caps.native_compaction` per the docs' model list. Otto's summarizer stays the default.
+- Server tools (`web_search_*`, `web_fetch_*`, `code_execution_20250825`; no beta needed): `server_tool_use` and
+  `*_tool_result` blocks become hosted call/result parts and replay byte-exact (encrypted content included).
+  Client tools with Anthropic schemas (`text_editor_20250728` named `str_replace_based_edit_tool`,
+  `bash_20250124` named `bash`) are `ToolKind::Native`; their calls are ordinary `tool_use`.
+
+**Breadth.**
+- Gemini: the Interactions API is GA and the recommended API (`generateContent` is legacy), so it is used.
+  `x-goog-api-key`, `store:false` with full history as steps (`user_input`, `model_output`, `thought` with
+  `signature`, `function_call`, `function_result{call_id, name, result}`, server tool steps), SSE `step.start /
+  step.delta / step.stop`, `interaction.completed` with `requires_action` and `total_*_tokens` usage.
+  ([Interactions](https://ai.google.dev/gemini-api/docs/interactions-overview),
+  [streaming](https://ai.google.dev/gemini-api/docs/streaming), [reference](https://ai.google.dev/api/interactions-api))
+- xAI: wire-compatible Responses (`https://api.x.ai/v1/responses`, Bearer `XAI_API_KEY`, efforts
+  low/medium/high/xhigh, encrypted reasoning), so the OpenAI client runs it with provider id `xai` (opaque items
+  never cross providers). No xAI subscription transport. ([Responses](https://docs.x.ai/developers/rest-api-reference/inference/responses),
+  [Reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning))
+- Compat (`otto_llm::compat`, one Chat Completions parser, a dialect table): OpenRouter (`reasoning:{effort}`,
+  `reasoning_details` replay, usage chunk repeats the finish), DeepSeek (`thinking` + `reasoning_effort`;
+  `reasoning_content` must be passed back with tools), Kimi and Z.ai (`reasoning_content` replay, Z.ai
+  `clear_thinking:false` + `tool_stream`), Ollama / LM Studio / custom (key optional, models from `/api/tags` or
+  `/v1/models` with a 1.5 s timeout), MiniMax on the Anthropic client (`api.minimax.io/anthropic`). Usage maps
+  `cached_tokens`, `prompt_cache_hit_tokens`, choice-level usage (Kimi) and `cache_write_tokens`.
+  ([DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode),
+  [OpenRouter streaming](https://openrouter.ai/docs/api/reference/streaming),
+  [OpenRouter reasoning](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens),
+  [Z.ai thinking](https://docs.z.ai/guides/capabilities/thinking-mode),
+  [Kimi thinking](https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model))
+- Catalog: models.dev for all of the above except Ollama/custom (local discovery only); base URLs for local and
+  custom providers live in `<state>/providers.json` or `OLLAMA_HOST` / `LMSTUDIO_BASE_URL` /
+  `OTTO_SILO_CUSTOM_BASE_URL`. `Usage::cache_hit_rate` is comparable across providers
+  (`tests/cross_provider.rs` runs one scripted tool task through every provider offline).
+
+**Harness hooks (otto-core, done):** opted-in sessions send `Request.compaction` (`Auto` at 75% of the window on
+ordinary requests, `Now` for manual/overflow compaction; a `compaction` finish re-sends the turn's prompt after the
+checkpoint and continues the turn); a tool's presentation for `caps.tool_family` maps to `ToolKind::Native` only when
+`caps.native_tools` lists its provider type (Claude: `str_replace_based_edit_tool`/`bash`; GPT: `apply_patch`/`shell`,
+else the freeform Codex patch and the function shell), with calls mapped onto `read`/`ls`/`write`/`edit`/`shell`/`apply_patch` by
+`otto_tools::native` and OpenAI shell results returned as the documented output array; tools with
+`CallMode::Async` (`web_fetch`, MCP tools) go into `openai::Options.async_tools` when `caps.async_tools`.
 
 ---
 
@@ -281,13 +416,27 @@ pub struct ToolSpec {
 - **Presentations**: one executor, several model-facing shapes. Claude gets a `str_replace`-style editor and its
   trained bash shape; GPT gets `apply_patch` (custom/freeform tool) and its shell shape; others get generic JSON
   tools. The engine picks the shape from `tool_family`.
-- **Sources**: `ToolSource` trait (`list`, `call`, change notifications). Builtin, silo (§6), MCP via the official
-  Rust SDK (`rmcp`, verify version: stdio + streamable HTTP + OAuth), and extensions (subprocess JSON protocol like
-  the TS native host; WASM later).
-- **Deferred tools**: portable `load_tools` accepts names or a case-insensitive name/description query. Only granted,
-  not-yet-loaded tools appear in its compact index; schemas enter the next model request. Loaded names persist in
-  session metadata (`loaded_tools`), independently for each child. Direct calls to granted unloaded tools still run,
-  and `tools.list` includes deferred tools. Native Anthropic/OpenAI tool search with `defer_loading` is future work.
+- **Sources**: builtin, silo (§6, `Runtime::add_tools`), project sources (`ProjectSources`, `Runtime::add_source`)
+  and extensions later (subprocess JSON protocol like the TS native host; WASM later). Project sources are listed
+  again before every model request, so a changed list reaches the next step and every provider gets the full
+  current list.
+- **MCP** (`otto-mcp`): a hand-written JSON-RPC client (protocol `2025-06-18`) for stdio and streamable HTTP servers
+  (POST with JSON or SSE replies, `Mcp-Session-Id`; no GET stream, no OAuth: put tokens in `headers` with
+  `${VAR}`). `rmcp` 3.x exists but needs crates this offline build cannot fetch. Config is Claude Code's
+  `{"mcpServers": …}`, merged by name from user `mcp.json`, project `.mcp.json` and `.otto/mcp.json`, with
+  `${VAR}`/`${VAR:-default}` expansion, `disabled`, `deferred`, `timeout`, `startupTimeout`. Servers start on the
+  first request of a session in their project, relist on `tools/list_changed`, restart after a crash (3 starts a
+  minute, 30 s backoff after a failed start), get `notifications/cancelled` on cancel, and stop with the runtime.
+  Tools are `mcp__<server>__<tool>` (64 chars max), granted by the `mcp__*` pattern, `external` (+`write` unless
+  `destructiveHint: false`) unless `readOnlyHint`, deferred when a server has more than 10. Schemas are sanitized:
+  top-level object, combinators folded, `required` limited to properties, dangling `$ref`s dropped, `items` on
+  every array.
+- **Deferred tools**: portable `load_tools` takes names (a trailing `*` loads a prefix, e.g. `mcp__github__*`) or a
+  query: every word must match the name or description, name hits rank first, 12 at most. Only granted,
+  not-yet-loaded tools appear in its index (60 lines, then a count). Schemas enter the next model request. Loaded
+  names persist in session metadata (`loaded_tools`), independently for each child. Direct calls to granted
+  unloaded tools still run, and `tools.list` includes deferred tools. Native tool search with `defer_loading` is
+  not used yet.
 - **Async tools**: native `async: true` on OpenAI. Elsewhere the call returns a job handle; the result is injected
   later as a system item, plus a `wait` tool.
 
@@ -398,13 +547,24 @@ memory per 50 parked blocks, short read-only commands go through pipes and the r
 
 - **Project** (root, config, instructions from `AGENTS.md`/`CLAUDE.md`), **Session** (agent, model, parent, cwd),
   **Turn** (one user input until the model stops), **Step** (one model call + its tool calls).
-- **Agents** as markdown with frontmatter (`name, description, model, tools, effort`) in `.otto/agents/` and
-  `~/.config/otto/agents/`. Built-ins: `build`, `plan`, `general`, `research`.
-- **Skills**: `SKILL.md` folders (`.otto/skills`, `.agents/skills`, user dirs), loaded on demand by the `skill`
-  tool; names and descriptions only in the prompt.
-- **Commands**: slash commands from markdown templates.
-- **Hooks**: `session_start`, `pre_tool`, `post_tool`, `stop`, `pre_compact` as commands with JSON stdin/stdout
-  (allow/deny/modify). A format close to Claude Code's lets existing hooks port.
+- **Agents** as markdown with frontmatter (`name, description, model, tools, disallowedTools, effort,
+  approval_mode`/`permissionMode`) in user `agents/`, `.claude/agents/` and `.otto/agents/` (later wins).
+  Claude Code tool names map to otto's (`Read`→`read`, `Bash`→`shell`, …), `model: inherit` keeps the session's
+  model, `*` suffixes grant prefixes. Built-ins: `build`, `plan`, `general`, `research`.
+- **Skills**: `SKILL.md` folders (user `skills/`, `.claude/skills`, `.agents/skills`, `.otto/skills`), loaded on
+  demand by the `skill` tool with their folder path; names and descriptions only in the prompt;
+  `disable-model-invocation` hides one from the model. `skills.list` lists them.
+- **Commands**: `/name args` from markdown templates (user `commands/`, `.claude/commands`, `.otto/commands`;
+  subfolders give `folder:name`), with `$ARGUMENTS`, `$1`…`$9`, or the arguments appended; `description` and
+  `argument-hint` frontmatter; `commands.list` lists them.
+- **Hooks**: Claude Code's format from user `hooks.json`, `.claude/settings{,.local}.json` and `.otto/hooks.json`:
+  `SessionStart`, `SessionEnd` (archive), `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
+  `SubagentStop`, `PreCompact`. Matchers are anchored regexes over the tool name (Claude Code names too), the
+  SessionStart source or the PreCompact trigger. JSON stdin with the documented fields; exit 2 blocks with stderr,
+  other failures only warn; stdout JSON `continue`/`stopReason`, `decision`/`reason`, `systemMessage`, and
+  `hookSpecificOutput` `permissionDecision` (`allow` never overrides policy, `ask` forces approval),
+  `updatedInput`, `additionalContext`; plain stdout is context for SessionStart and UserPromptSubmit. A Stop
+  block continues the turn (3 times at most). Timeout 60 s default, 600 s max.
 
 ### 7.2 Turn engine (single owner per session)
 
@@ -420,8 +580,11 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 - Tools in one step run in parallel unless one is marked exclusive (writes to the same path, interactive
   terminal). Results return in call order.
 - **Queue vs steer**: `prompt` on a busy session queues by default. `steer` uses `response.steer` where the model
-  supports it; otherwise the input lands at the next step boundary as a user item, and in-flight tools finish.
-  `interrupt` cancels the current step and then continues with the new input.
+  supports it (OpenAI GPT-6 family with an API key, §4.7) and a response is streaming; otherwise the input lands
+  at the next step boundary as a user item, and in-flight tools finish.
+  `interrupt` cancels the current step and then continues with the new input. Pending inputs can be withdrawn
+  (`session.queue_remove`) or moved between steer, queue and interrupt (`session.queue_update`) until the model has
+  them; `queue.changed` lists steers first (`delivery: steer`), then the queue.
 - Errors: classified (`overloaded`, `rate_limited`, `context_overflow`, `auth`, `invalid_request`, `network`).
   Retries happen inside the step; context overflow compacts and then retries once; auth asks the client to sign in.
 - Output-limit continuation: when the model hits `max_output` in the middle of text, continue automatically
@@ -434,19 +597,29 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   inline tools, and as developer/system items elsewhere.
 - Caching: automatic Anthropic breakpoints (system, tools, last stable item), OpenAI `prompt_cache_key` per
   session, Gemini implicit caching. Cache hit rates are reported in usage events.
-- **Compaction**: native when the session's model has it and the history is single-provider; otherwise otto's
-  checkpoint summarizer (TS design: bounded, instructions reserved, head+tail, validated, `through` boundary).
-  Plus context editing: clear old tool results above a budget, keeping the call/result pairs valid.
+- **Compaction**: otto's checkpoint summarizer by default (bounded, sectioned, instructions reserved, the last items
+  verbatim, `through` boundary). Native compaction is opt-in (`native_compaction` config): used when the model has
+  `caps.native_compaction` and the history is that provider and model's alone: ordinary requests ask for provider
+  threshold compaction at 75% of the window, manual and overflow compaction ask for it now, and the opaque
+  checkpoint is replayed. Otherwise otto compacts at 85% of the window and on context overflow; `PreCompact` sees
+  `manual`/`auto`.
+- **Context editing** (every request): orphaned results dropped, missing results filled with an error, and above a
+  budget (a quarter of the window, 32–400 KB) older tool results cleared newest-first, the last 3 always kept, so
+  call/result pairs stay valid. Hook context produced while tools run is committed after their results.
 - Provider state (`previous_response_id`, WS lane, `previous_interaction_id`) is a cache keyed by
   `(session, provider, model, last item seq)`. On a miss we replay full history; after a fork we open a new lane.
 
 ### 7.4 Subagents
 
-- A child is a session with `parent`, `agent`, `task`. `delegate` returns right away; the result goes to the
-  parent's **outbox** as a versioned record. Delivery: injected at the parent's next step boundary, or, if the
-  parent is idle, a new turn wakes it.
-- `list`, `status`, `message{queue|interrupt}`, `stop`, `retry`, `reuse_session`; depth and concurrency limits;
-  parent cancel stops its children; per-agent model; tool set = the agent's set ∩ the parent's grant.
+- A child is a session with `parent`, `agent`, `task`. `delegate` returns right away; each finished child turn
+  (done, error, or interrupted by a restart) goes to the parent's **outbox** as a record versioned by the child's
+  turn, written once. The parent is then woken, its actor opened if needed: entries are injected at its next step
+  boundary, or a new turn starts when it is idle. The item and its acknowledgement commit in one transaction, so
+  each entry is delivered exactly once. `Runtime::deliver_pending` (daemon start) wakes parents whose children
+  finished while they were closed. This is the record remote delegation (§12.2) will reuse.
+- `delegate {task, agent?, session_id?}` (reuse), `list`, `status`, `message{queue|steer|interrupt}`, `stop`,
+  `retry`; depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
+  tool set = the agent's set ∩ the parent's grant, minus both deny lists.
 - With silo: each subagent can get its own scoped grant and its own panes.
 
 ### 7.5 Persistence (`otto-store`)

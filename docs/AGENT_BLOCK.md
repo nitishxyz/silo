@@ -79,14 +79,14 @@ See §8 for status.
         ╰─┬────────────────────────────────────────────┬─╯
   ╭───────┴────────────────────────────────────────────┴───────╮
   │  ⋮    th▍                                         ╭─────╮  │
-  │                                                   │  ↑  │  │   round send button; becomes ■ stop while running
+  │                                                   │  ↑  │  │   round send button (always send; never stop)
   │                                                   ╰─────╯  │
   ╰────────────────────────────────────────────────────────────╯   rounded, soft focus ring
     BUILD ⌃              A\ / claude-opus-5-5 (pro)    12% · $0.42
 ```
 
-- Multi-line, grows to ~8 lines then scrolls. ⏎ sends, ⇧⏎ newline. While a turn runs, ⏎ queues
-  (`Delivery::Queue`); queued inputs appear as chips in the tray. ■ cancels the turn.
+- Multi-line, grows to ~8 lines then scrolls. ⏎ sends, ⇧⏎ newline. While a turn runs, ⏎ steers
+  (`Delivery::Steer`, see §4f); queued inputs appear as chips in the tray. Stop lives on the activity row (§4f).
 - `⋮` menu: approval mode (auto / ask / plan), new session.
 - Footer: agent (`BUILD`/`PLAN`) picker; provider glyph / model id (subscription marker) → searchable model picker
   from `model.list` limited to signed-in providers; right side: context used % and session cost when known.
@@ -161,7 +161,8 @@ Units are points.
     pill, empty → transcript, sign-in → composer): fade + 6–8 px slide from the side they come from;
   - things pushed up/down by others (transcript when the composer grows, tray/cards inserting above the composer,
     lines pushed by a new line): their position animates instead of jumping;
-  - send ↔ stop morph, status icon swaps (scale 0.8→1 + fade), shimmer on running titles, button hover/press fills.
+  - send circle dark ↔ light, status icon swaps (scale 0.8→1 + fade), shimmer on running titles, button
+    hover/press fills; the activity row (§4f) fades + slides 6 in/out and eases its height.
   - Nothing snaps; nothing animates longer than ~350 ms; streaming text never waits for an animation.
 - **Inputs that aren't the composer go in dialogs** (API key, paste code, device code, rename…): a pane-scoped
   dialog in the app's sheet style, never inline rows that push other content.
@@ -193,7 +194,7 @@ Units are points.
   sparkles. Every element of a view shares the content column's left edge.
 - **Composer = the pill input primitive.** Same metrics and states as §4c: height 52, soft halo, 1–1.5 border at
   ~25% fg (~40% focused), leading `more-vertical` centered on the text line, 40 circle 6 inset; empty → dark circle
-  + muted arrow, has text → light circle + dark arrow (animated), running → stop. Equal vertical and right inset
+  + muted arrow, has text → light circle + dark arrow (animated); running → stays send (§4f). Equal vertical and right inset
   around the circle; nothing touches the border.
 - **Footer insets symmetric:** left item starts at the composer's text start (aligned with the placeholder), right
   icon ends at the send circle's center line mirrored (same inset as the left); model exactly centered. Image icon
@@ -209,12 +210,16 @@ Units are points.
   `chevron-down` (switcher) and adds `history` + `new-session` before split/zoom/close, same buttons and hover. On
   sign-in / Providers the header shows the block title (`Agent`) and no session controls.
 - **Pill primitive** (`agent/pill_input.rs`): `halo`, `pill`, `circle`, `circle_colors`, `lead_button` and metrics
-  (`HEIGHT` 52, `HALO` 5, `CIRCLE` 40, `INSET` 6, `LEAD` = circle center mirrored, `TEXT_X` 52) are shared by the
-  dialog field and the composer. Fills are opaque (the tray tucks behind). Single-line fields scroll sideways.
-- **Composer:** mono 14/20, `⋮` on the first line, circle bottom-right; dark → light when there is text (180 ms),
-  `stop` while running with an empty input. Height eases between line counts (editor `animate_growth`), pushing the
-  transcript smoothly. Footer: agent label starts at the text start, image glyph ends as far from the right, model
-  centered; image muted, 40% and inert when the model takes no images.
+  (`HEIGHT` 46, `HALO` 3, `CIRCLE` 36, `INSET` 5, `BORDER` 1, `LEAD` = circle center mirrored, `TEXT_X` 51) are
+  shared by the dialog field and the composer (supersedes the 52/40 of §4c/§4d). Border 1 at 20% fg (30% focused),
+  halo a faint 3-wide ring (3–3.5% fg); glyphs 16. Fills are opaque (bars tuck behind). Single-line fields scroll
+  sideways.
+- **Composer:** mono 14/20; the `⋮` is a circle mirroring the send circle (bottom-left, same size and inset, no fill
+  at rest), text at `TEXT_X` = inset + circle + 10. Send circle bottom-right; dark → light when there is text (180 ms);
+  it never turns into stop. Height eases between line counts (editor `animate_growth`), pushing the transcript
+  smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the image glyph ends under
+  the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
+  image muted, 40% and inert when the model takes no images.
 - **Slash menu:** `/new /sessions /model /agent /mode auto|ask|plan /providers /clear` (`/clear` also drops
   attachments); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
@@ -226,10 +231,56 @@ Units are points.
   unfold and `›` details (height + opacity, chevrons turn), tray expand (chevron turns) and rise from behind the
   composer, approval/question cards rise in and sink away, new trace lines push older ones up, status icons swap in,
   attachment chips, `↓ New activity`, body switches (connecting / sign-in / empty / transcript), composer rise after
-  sign-in, send↔stop. Opening a group or detail stops tail-follow so the clicked line stays put.
+  sign-in, the activity row. Opening a group or detail stops tail-follow so the clicked line stays put.
 - **Errors:** a session that can't be opened says so with a `New session` action (sending starts one); otto's auth
   hints (`run otto-silo auth login …`) become "connect it with /providers"; a turn's `Auth:` error reads "The
   provider didn't accept the sign-in · /providers" (full text in its details).
+
+## 4f. Running turn (review round 3)
+
+- **Instant feedback:** ⏎ shows the user's bubble and the activity row at once, before otto confirms. The bubble
+  (`optimistic-user`) is replaced in place, without fading in again, when the session has one more user item with that
+  text; a failed send removes it and puts the text back in the composer.
+- **Activity indicator:** while a turn runs (or a send waits up to 15 s for it to start) the transcript always ends in
+  one. If the last row is a live group, its header is it; otherwise the list's last item is a slim row: shimmering
+  `Thinking…` (nothing after the prompt yet) or `Working for 12s` (after text or a folded group). Both carry
+  `· N queued` muted when inputs are pending, and a quiet `Stop  esc` text button right-aligned (text on the column
+  edge, hover fill past it). The row fades + slides 6 in/out and eases its height. esc in the composer stops the turn
+  when the composer is empty and nothing is open (an open popover, slash menu or approval card takes esc first).
+- **Steer:** ⏎ while a turn runs sends with `Delivery::Steer`: otto injects it at the next step boundary and the
+  agent continues without stopping. Placeholder `Message the agent`, send tooltip `Steer  ⏎`. ⌘⏎ stays New Pane.
+- **Bars above the composer** (InputQueueBar/TodosBar/SubagentsBar of the otto web app): one chrome for all, top to
+  bottom Sub-agents, Todos, Queue. The bottom-most bar tucks under the composer (top radius 12, open bottom); bars
+  above it float (radius 12, full border, 6 gap). Each has a 34 header that crossfades between collapsed
+  (`icon · Label | current item … note ⌃`) and expanded (`icon Title … note ⌄`, divider) with its 28 rows below
+  (height + opacity, chevron turns), and rises from behind what's below (a bottom-anchored clip) when it appears.
+  Wrappers must not carry negative margins: taffy then sizes the composer column wrong and the composer slides out.
+  - **Queue:** `clock · Queued | first … N queued`; expanded `Queued messages · N waiting`, numbered rows from otto's
+    queue (`queue.changed` / `session.view`, empty subagent wake-ups hidden): pending steers first, noted `Next step`,
+    then inputs waiting for the turn, `After turn`. A steer just sent shows from the pane until otto lists it (matched
+    by its `input_id`, or its text before that arrives), so it appears at once and only once. On hover the note gives
+    way (opacity, no layout shift: the note reserves the actions' width) to `Steer now` / `Send later`
+    (`session.queue_update` to `steer` / `queue`) and `×` (`session.queue_remove`). Edits show at once and are dropped
+    if otto refuses (an input already handed to the model can't be withdrawn; the notice says so). Leaving rows
+    disappear without an exit animation (as other removed rows), and so does the bar when the queue empties.
+  - **Todos:** current item and `n/m done`; expanded, every item with its status icon.
+  - **Sub-agents:** child sessions (`parent_id` = the shown session) that are busy or waiting, from `session.list`
+    (refreshed when subagent calls change, the turn starts/ends, and every 3 s while any may run): `bot · N running`,
+    rows spinner (or lock when waiting) · agent · title · status.
+- **Group header (Trace-style):** the summary (`Worked for 1s · ran 1 command`) starts at the column's left edge,
+  the same x as reply text and every other row; the chevron follows it (8 gap) and turns when opened. Live: shimmer
+  text, then a 12 spinner. Lines nest 12 under the header with their own 16 icon column. Opening a header or a `›`
+  detail keeps the clicked row and everything above it still (the list stops following and keeps its top anchor);
+  only what's below moves. Header rows are 24 in every state.
+- **Composer `⋮`:** a circle the size of send (36), no fill at rest, hover/press fill only.
+- **Provider-defined tools** (Claude `bash` / `str_replace_based_edit_tool`, GPT `apply_patch` operations and `shell`
+  commands) read like the built-ins they run as: `Ran …`, `Read …`, `Wrote …`, `Edited …`.
+- **Providers view:** all 12 otto providers, each with a monochrome logo (`provider-*.svg`; Custom uses `plug`):
+  Anthropic and OpenAI `API key` + `Sign in`; Google, xAI, OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax `API key`;
+  Ollama and LM Studio (`Local, no key needed`) and Custom (`OpenAI-compatible server`) `Connect` / `Change`. Connect
+  opens the dialog with an address pill (prefilled with the current or default address, `http(s)://` required) and,
+  for Custom only, an optional key pill below; it saves with `auth.login {base_url}` (no key needed). A local
+  provider shows Connected once its server answers; otherwise the dialog says `Saved, but no server answers there`.
 
 ## 5. Session switcher
 
@@ -257,9 +308,11 @@ See §4e. Rows and lines enter with opacity 0→1 and y +6→0 over 320 ms; ever
 
 Implemented on branch `otto` and driven in the GUI against an offline otto daemon (`OTTO_SILO_TEST_SCRIPT`, which also
 reports the `test` provider as signed in with its `test/script` model): New Agent / New Tab row, composer (⏎, ⇧⏎,
-send↔stop, queue), live group and fold, `›` details, markdown, approval and question cards, todos tray, header
+steer while running, esc stop, activity row), live group and fold, `›` details, markdown, approval and question cards, todos tray, header
 session controls, slash commands, ⌘J switcher, tab marks via `block.report`, sign-in and API-key dialog, restore after
-an app restart, dark and light, `SILO_MOTION_SLOWDOWN=12` frames.
+an app restart, dark and light, `SILO_MOTION_SLOWDOWN=12` frames; queue rows (next step / after turn, switch,
+remove), the 12-provider view and the endpoint dialog (dark and light, 2026-10-22, `/tmp/final4-*.png`). Live with the
+Anthropic subscription: a turn steered mid-run with ⏎, the steer applied at the next step.
 
 Known gaps:
 - The app creates panes (agent and browser) only for the shown tab. An agent block in another tab reports no status
@@ -268,6 +321,7 @@ Known gaps:
 - New session (`/new`, header button) only clears the pane; the server keeps the previous `session_id` until the
   next prompt creates the new session, so a restart in between shows the previous session.
 - A tool waiting for approval shows as `Running …` and its duration includes the wait.
+- A running tool line's duration only advances when the session sends an event (the `Working for` header ticks).
 - Until otto names a session the header shows its first prompt (other sessions in the switcher say `Untitled`); no
   remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app can
   show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
