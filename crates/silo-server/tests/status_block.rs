@@ -252,7 +252,7 @@ async fn progress_ticks_and_busy_changes_emit_status_without_changing_revision()
     reg.subscribe(client, Sink::new(tx));
     let script = "printf '\\033]9;4;1;10\\007'; read a; printf '\\033]9;4;1;60\\007'; read b; exec sleep 30";
     let spawn = SpawnSpec { command: vec!["/bin/sh".into(), "-c".into(), script.into()], ..SpawnSpec::default() };
-    let created = reg.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None }).unwrap();
+    let created = reg.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None, agent: None }).unwrap();
     let revision = reg.view(&created.session_id).unwrap().session.revision;
     let mut seen = Vec::new();
     events(&mut frames, &mut seen);

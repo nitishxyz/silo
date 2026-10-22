@@ -29,6 +29,7 @@ struct Fields {
     place: String,
     session: String,
     exec: bool,
+    visible: bool,
     text: String,
     keys: Vec<String>,
     submit: bool,
@@ -81,8 +82,8 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
     let entries = [
         (
             "terminal_open",
-            "Open an ordinary shell block. Drive claude, codex, opencode or otto: open with command, send text with submit:true, wait for done/blocked, then read. On blocked, answer with send. The same pattern works on remote hosts.",
-            "block_id command cwd place session exec",
+            "Open a shell block for long-lived or stateful work: dev servers, watchers, REPLs, ssh, anything the user may take over; read it with terminal_read/terminal_wait. visible:false parks it next to your block, out of every layout (the user can reveal it; it closes with your block). Drive claude, codex, opencode or otto: open with command, send text with submit:true, wait for done/blocked, then read. On blocked, answer with send. The same pattern works on remote hosts.",
+            "block_id command cwd place session exec visible",
             "",
             false,
         ),

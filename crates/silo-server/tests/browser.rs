@@ -72,6 +72,7 @@ async fn browser(control: &Control, url: &str) -> Created {
         spawn: SpawnSpec::default(),
         kind: BlockKind::Browser,
         url: Some(url.into()),
+        agent: None,
     };
     control.call(split).await.unwrap()
 }
@@ -148,6 +149,7 @@ async fn split_creates_browser_and_commands_edit_history() {
         spawn: SpawnSpec::default(),
         kind: BlockKind::Browser,
         url: Some("file:///".into()),
+        agent: None,
     };
     assert_eq!(code(&control.call_value(split).await.unwrap_err()), "bad_request");
     assert_eq!(state(&control, &created).await.url, "https://example.com", "rejected urls change nothing");

@@ -11,12 +11,12 @@ use silo_proto::{
     Frame,
     access::{Rights, Scope},
     compat::feature,
-    control::{BrowserCommand, ClientRole, Created, DataTicket, Dock, Event, OwnMode, RpcError, ServerMessage, SpawnSpec},
+    control::{BrowserCommand, Capture, ClientRole, Created, DataTicket, Dock, Event, OwnMode, Reveal, RpcError, ServerMessage, SpawnSpec},
     data::ticket_hex,
     kind,
     model::{
         AgentState, AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, Float, FloatRect, Layout, Lifecycle,
-        SessionId, SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
+        Parked, SessionId, SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url, short_client_name,
     },
     text::{MAX_TITLE, untrusted},
 };
@@ -34,6 +34,12 @@ use crate::{
 /// the client reconnects and re-reads state (events are never dropped).
 const EVENT_BACKLOG: usize = 8 * 1024 * 1024;
 const TICKET_TTL: Duration = Duration::from_secs(60);
+/// How long a closed command block's final capture stays readable.
+const ENDED_TTL: Duration = Duration::from_secs(300);
+/// Most final captures kept.
+const ENDED_MAX: usize = 64;
+/// A parked block's size when the caller gives none: wide, so few lines wrap.
+const PARKED_SIZE: TermSize = TermSize { columns: 200, rows: 50, cell_width: 0, cell_height: 0 };
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Window {
@@ -115,6 +121,9 @@ pub struct Session {
     pub active_window: WindowId,
     pub revision: u64,
     pub created_at: u64,
+    /// Blocks in no layout, oldest first.
+    #[serde(default)]
+    pub parked: Vec<Parked>,
 }
 
 impl Session {
@@ -137,11 +146,17 @@ impl Session {
             active_window: self.active_window.clone(),
             revision: self.revision,
             created_at: self.created_at,
+            parked: self.parked.clone(),
         }
     }
 
+    /// Every block: windows in order, then parked ones.
     pub fn blocks(&self) -> Vec<BlockId> {
-        self.windows.iter().flat_map(Window::blocks).collect()
+        self.windows.iter().flat_map(Window::blocks).chain(self.parked.iter().map(|p| p.id.clone())).collect()
+    }
+
+    pub fn is_parked(&self, block: &str) -> bool {
+        self.parked.iter().any(|p| p.id == block)
     }
 }
 
@@ -294,6 +309,9 @@ pub struct Registry {
     pub gone: Vec<Scope>,
     /// Attention counts per session as last sent in `sessions.changed`.
     attention: HashMap<SessionId, AttentionCounts>,
+    /// Final captures of command blocks that exited, for `terminal.capture`
+    /// after a parked one closed.
+    ended: HashMap<BlockId, (Capture, Instant)>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -306,6 +324,8 @@ pub struct New<'a> {
     pub spawn: &'a SpawnSpec,
     pub kind: BlockKind,
     pub url: Option<&'a str>,
+    /// Agent blocks: the otto session shown from the start.
+    pub agent: Option<&'a AgentState>,
 }
 
 impl Registry {
@@ -325,6 +345,7 @@ impl Registry {
             keep_session: false,
             gone: Vec::new(),
             attention: HashMap::new(),
+            ended: HashMap::new(),
         }
     }
 
@@ -353,7 +374,7 @@ impl Registry {
             return;
         }
         let spawn = SpawnSpec::default();
-        if let Err(error) = self.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None }) {
+        if let Err(error) = self.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None, agent: None }) {
             tracing::error!("start default session: {}", error.message);
         }
     }
@@ -450,9 +471,9 @@ impl Registry {
         self.locate_window(window).ok().map(|(si, _)| self.sessions[si].id.clone())
     }
 
-    /// The session holding block `block` in its tree.
+    /// The session holding block `block`, in its tree or parked.
     pub fn block_session(&self, block: &str) -> Option<SessionId> {
-        self.locate(block).ok().map(|(si, _)| self.sessions[si].id.clone())
+        self.session_index(block).map(|si| self.sessions[si].id.clone())
     }
 
     /// Who sees `event`.
@@ -648,7 +669,7 @@ impl Registry {
     fn status_changed(&mut self, id: &str) {
         let Some(status) = self.blocks.get(id).and_then(Block::status) else { return };
         self.emit(Event::BlockStatus { status });
-        let Ok((si, _)) = self.locate(id) else { return };
+        let Some(si) = self.session_index(id) else { return };
         let counts = self.attention_counts(&self.sessions[si]);
         let session = self.sessions[si].id.clone();
         if self.attention.get(&session).copied().unwrap_or_default() != counts {
@@ -771,8 +792,11 @@ impl Registry {
             agent: None,
         };
         if new.kind == BlockKind::Agent {
+            if new.agent.is_some_and(|a| a.session_id.as_deref() == Some("")) {
+                return Err(RpcError::bad_request("empty agent session_id"));
+            }
             let info = BlockInfo { size: TermSize::default(), ..info };
-            self.blocks.insert(id.clone(), Block::Agent(Box::new(AgentBlock::new(info, AgentState::default()))));
+            self.blocks.insert(id.clone(), Block::Agent(Box::new(AgentBlock::new(info, new.agent.cloned().unwrap_or_default()))));
             return Ok(id);
         }
         if new.kind == BlockKind::Browser {
@@ -819,6 +843,7 @@ impl Registry {
             active_window: window_id.clone(),
             revision: 1,
             created_at: now_ms(),
+            parked: Vec::new(),
         });
         self.sessions_changed();
         let si = self.sessions.len() - 1;
@@ -880,6 +905,133 @@ impl Registry {
         let window_id = window.id.clone();
         self.session_changed(si);
         Ok(Created { session_id: sid, window_id, block_id: new })
+    }
+
+    /// `block.spawn`: a parked terminal block in the session of `owner`,
+    /// owned by it; a `command` makes it a command block.
+    pub fn spawn_parked(
+        &mut self,
+        owner: &str,
+        command: &[String],
+        cwd: Option<String>,
+        env: impl IntoIterator<Item = (String, String)>,
+        size: Option<TermSize>,
+    ) -> Result<Created, RpcError> {
+        let si = self.session_index(owner).ok_or_else(|| RpcError::not_found(format!("block {owner}")))?;
+        let session_id = self.sessions[si].id.clone();
+        let id = self.fresh_id('b');
+        let cwd = cwd.or_else(|| self.block_info(owner).and_then(|i| i.cwd));
+        let info = BlockInfo {
+            id: id.clone(),
+            session_id: session_id.clone(),
+            kind: BlockKind::Terminal,
+            title: "shell".into(),
+            cwd: cwd.clone(),
+            exited: None,
+            lifecycle: Lifecycle::Running,
+            size: size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(PARKED_SIZE),
+            owner: None,
+            owner_name: None,
+            pid: None,
+            browser: None,
+            agent: None,
+        };
+        let mut config = spawn_config(&id, command, cwd.as_deref());
+        config.env.extend(env.into_iter().map(|(k, v)| (k.into(), v.into())));
+        let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
+        self.blocks.insert(id.clone(), Block::Terminal(handle));
+        self.sessions[si].parked.push(Parked { id: id.clone(), owner: Some(owner.to_owned()) });
+        self.session_changed(si);
+        self.sessions_changed();
+        Ok(Created { session_id, window_id: String::new(), block_id: id })
+    }
+
+    /// `block.park`: take a block out of its window; it keeps running. The
+    /// only block of a window stays.
+    pub fn park(&mut self, block_id: &str) -> Result<(), RpcError> {
+        let (si, wi) = self.locate(block_id)?;
+        if self.sessions[si].windows[wi].blocks().len() == 1 {
+            return Err(RpcError::new("conflict", "the only block of a window cannot be parked"));
+        }
+        self.sessions[si].parked.push(Parked { id: block_id.to_owned(), owner: None });
+        self.detach(si, wi, block_id);
+        Ok(())
+    }
+
+    /// `block.reveal`: show a parked block in its owner's window (else the
+    /// active one), floating or split next to the owner (else the focused
+    /// tiled block), focused.
+    pub fn reveal(&mut self, block_id: &str, reveal: Reveal) -> Result<(), RpcError> {
+        let si = self
+            .sessions
+            .iter()
+            .position(|s| s.is_parked(block_id))
+            .ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not parked")))?;
+        let session = &mut self.sessions[si];
+        let index = session.parked.iter().position(|p| p.id == block_id).expect("parked");
+        let owner = session.parked.remove(index).owner;
+        let wi = owner
+            .as_deref()
+            .and_then(|o| session.windows.iter().position(|w| w.contains(o)))
+            .or_else(|| session.windows.iter().position(|w| w.id == session.active_window))
+            .unwrap_or(0);
+        let window = &mut session.windows[wi];
+        match reveal {
+            Reveal::Float => window.floats.push(Float { id: block_id.to_owned(), rect: FloatRect::default() }),
+            Reveal::Split => {
+                let tiled = window.layout.blocks();
+                let target = owner
+                    .filter(|o| tiled.contains(o))
+                    .or_else(|| tiled.contains(&window.focused).then(|| window.focused.clone()))
+                    .unwrap_or_else(|| tiled[0].clone());
+                window.layout.split(&target, block_id.to_owned(), Axis::Vertical);
+                window.zoomed = false;
+            }
+        }
+        window.focus(block_id);
+        session.active_window = window.id.clone();
+        self.session_changed(si);
+        Ok(())
+    }
+
+    /// Index of the session holding `block`, in a window or parked.
+    fn session_index(&self, block: &str) -> Option<usize> {
+        self.locate(block).ok().map(|(si, _)| si).or_else(|| self.sessions.iter().position(|s| s.is_parked(block)))
+    }
+
+    /// Close the parked blocks `owner` owns.
+    fn close_owned(&mut self, owner: &str) {
+        let owned: Vec<BlockId> =
+            self.sessions.iter().flat_map(|s| &s.parked).filter(|p| p.owner.as_deref() == Some(owner)).map(|p| p.id.clone()).collect();
+        for id in owned {
+            self.kill_block(&id);
+            self.remove_block(&id);
+        }
+    }
+
+    /// Keep the final capture of exited block `id`, if it has one; true when
+    /// the block is parked.
+    fn keep_ended(&mut self, id: &str) -> bool {
+        let capture = match self.blocks.get(id) {
+            Some(Block::Terminal(handle)) => handle.ended.lock().unwrap().take(),
+            _ => None,
+        };
+        if let Some(capture) = capture {
+            self.ended.retain(|_, (_, at)| at.elapsed() < ENDED_TTL);
+            if self.ended.len() >= ENDED_MAX
+                && let Some(oldest) = self.ended.iter().min_by_key(|(_, (_, at))| *at).map(|(id, _)| id.clone())
+            {
+                self.ended.remove(&oldest);
+            }
+            self.ended.insert(id.to_owned(), (capture, Instant::now()));
+        }
+        self.sessions.iter().any(|s| s.is_parked(id))
+    }
+
+    /// The final capture of a command block that exited.
+    pub fn ended(&mut self, block_id: &str) -> Option<Capture> {
+        self.ended.retain(|_, (_, at)| at.elapsed() < ENDED_TTL);
+        self.ended.get(block_id).map(|(capture, _)| capture.clone())
     }
 
     pub fn focus(&mut self, block_id: &str) -> Result<(), RpcError> {
@@ -1023,7 +1175,12 @@ impl Registry {
 
     pub fn close_window(&mut self, window_id: &str) -> Result<(), RpcError> {
         let (si, wi) = self.locate_window(window_id)?;
-        for block in self.sessions[si].windows[wi].blocks() {
+        let blocks = self.sessions[si].windows[wi].blocks();
+        for block in &blocks {
+            self.close_owned(block);
+        }
+        let (si, wi) = self.locate_window(window_id)?;
+        for block in blocks {
             self.kill_block(&block);
         }
         self.drop_window(si, wi);
@@ -1045,7 +1202,8 @@ impl Registry {
     }
 
     pub fn close_block(&mut self, block_id: &str) -> Result<(), RpcError> {
-        self.locate(block_id)?;
+        self.session_index(block_id).ok_or_else(|| RpcError::not_found(format!("block {block_id}")))?;
+        self.close_owned(block_id);
         self.kill_block(block_id);
         self.remove_block(block_id);
         Ok(())
@@ -1060,19 +1218,31 @@ impl Registry {
         }
     }
 
-    /// Remove a closed block from the layout or floats, collapsing empty
-    /// windows and sessions. A tree emptied while floats remain takes the
-    /// topmost float as its root. Focus returns to the most recently focused
-    /// remaining block, else the block taking over the closed one's space.
+    /// Remove a closed block from its session's parked blocks, or from the
+    /// layout or floats (see [`Self::detach`]).
     pub fn remove_block(&mut self, block_id: &str) {
         self.blocks.remove(block_id);
         let scope = Scope::Block { block_id: block_id.to_owned() };
         if !self.gone.contains(&scope) {
             self.gone.push(scope);
         }
+        if let Some(si) = self.sessions.iter().position(|s| s.is_parked(block_id)) {
+            self.sessions[si].parked.retain(|p| p.id != block_id);
+            self.session_changed(si);
+            self.sessions_changed();
+            return;
+        }
         let Ok((si, wi)) = self.locate(block_id) else {
             return;
         };
+        self.detach(si, wi, block_id);
+    }
+
+    /// Take `block_id` out of window `wi` of session `si`, collapsing empty
+    /// windows and sessions. A tree emptied while floats remain takes the
+    /// topmost float as its root. Focus returns to the most recently focused
+    /// remaining block, else the block taking over the closed one's space.
+    fn detach(&mut self, si: usize, wi: usize, block_id: &str) {
         let window = &mut self.sessions[si].windows[wi];
         let sibling = sibling(&window.layout, block_id);
         if let Some(i) = window.floating(block_id) {
@@ -1110,6 +1280,10 @@ impl Registry {
         let removed = session.windows.remove(wi);
         if session.windows.is_empty() {
             let sid = session.id.clone();
+            let parked = std::mem::take(&mut session.parked);
+            for parked in parked {
+                self.kill_block(&parked.id);
+            }
             self.sessions.remove(si);
             self.gone.push(Scope::Session { session_id: sid.clone() });
             self.emit(Event::SessionClosed { session_id: sid });
@@ -1167,6 +1341,14 @@ impl Registry {
             }
             Note::Offer(offer) => self.emit_owner(Event::HostOffered { offer }),
             Note::Dirty(id) => self.mark_block_dirty(&id),
+            Note::Exited(id) if self.keep_ended(&id) => {
+                // Nobody sees a parked block: it closes when its program
+                // ends, after its exit went out.
+                if let Some(block) = self.block_info(&id) {
+                    self.emit(Event::BlockChanged { block });
+                }
+                let _ = self.close_block(&id);
+            }
             Note::Exited(id) if self.blocks.get(&id).is_some_and(exited_cleanly) => {
                 let _ = self.close_block(&id);
             }
@@ -1314,6 +1496,7 @@ mod tests {
             active_window: "w1".into(),
             revision: 1,
             created_at: 0,
+            parked: Vec::new(),
         });
         let client = reg.add_client("test".into(), false);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1403,7 +1586,7 @@ mod tests {
         assert_eq!(reg.float("b", None).unwrap_err().code, "bad_request", "already floating");
         assert_eq!(reg.zoom("b", true).unwrap_err().code, "bad_request");
         assert_eq!(reg.swap("a", "b").unwrap_err().code, "bad_request");
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Terminal, url: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Terminal, url: None, agent: None };
         assert_eq!(reg.split("b", Axis::Vertical, &new).unwrap_err().code, "bad_request");
         assert_eq!(reg.sessions[0].blocks(), ["a", "b", "c", "d", "e"], "floats count as session blocks");
         changed(&mut rx);
@@ -1436,7 +1619,7 @@ mod tests {
     #[test]
     fn closing_focus_returns_to_the_previous_block() {
         let (mut reg, _rx) = registry();
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url: None, agent: None };
         let mut chain = vec!["d".to_owned()];
         for _ in 0..3 {
             let last = chain.last().unwrap().clone();
@@ -1467,7 +1650,7 @@ mod tests {
     #[test]
     fn unknown_block_kinds_are_rejected() {
         let (mut reg, _rx) = registry();
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None, agent: None };
         let blocks = reg.blocks.len();
         assert_eq!(reg.split("a", Axis::Horizontal, &new).unwrap_err().code, "bad_request");
         assert_eq!(reg.create_session(None, &new).unwrap_err().code, "bad_request");

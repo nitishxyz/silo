@@ -759,6 +759,24 @@
           }
         ]
       },
+      "Parked": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "owner": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "ProgramStatus": {
         "properties": {
           "app": {
@@ -957,6 +975,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "parked": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Parked"
+            },
+            "type": "array"
           },
           "revision": {
             "format": "uint64",
@@ -3795,6 +3820,25 @@
         "type": "object"
       }
     },
+    "block.park": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "block.report": {
       "params": {
         "$defs": {
@@ -3886,9 +3930,166 @@
         "type": "object"
       }
     },
+    "block.reveal": {
+      "params": {
+        "$defs": {
+          "Reveal": {
+            "oneOf": [
+              {
+                "const": "float",
+                "type": "string"
+              },
+              {
+                "const": "split",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "as": {
+            "$ref": "#/$defs/Reveal",
+            "default": "float"
+          },
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "block.spawn": {
+      "params": {
+        "$defs": {
+          "TermSize": {
+            "properties": {
+              "cell_height": {
+                "default": 0,
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cell_width": {
+                "default": 0,
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "columns": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rows": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "columns",
+              "rows"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "command": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cwd": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TermSize"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "window_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "window_id",
+          "block_id"
+        ],
+        "title": "Created",
+        "type": "object"
+      }
+    },
     "block.split": {
       "params": {
         "$defs": {
+          "AgentState": {
+            "properties": {
+              "session_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "Axis": {
             "enum": [
               "horizontal",
@@ -3983,6 +4184,16 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "axis": {
             "$ref": "#/$defs/Axis"
           },
@@ -8021,6 +8232,24 @@
               }
             ]
           },
+          "Parked": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "owner": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
           "ProgramStatus": {
             "properties": {
               "app": {
@@ -8141,6 +8370,13 @@
               },
               "name": {
                 "type": "string"
+              },
+              "parked": {
+                "default": [],
+                "items": {
+                  "$ref": "#/$defs/Parked"
+                },
+                "type": "array"
               },
               "revision": {
                 "format": "uint64",
@@ -8352,6 +8588,26 @@
       },
       "result": {
         "$defs": {
+          "Lifecycle": {
+            "oneOf": [
+              {
+                "const": "running",
+                "type": "string"
+              },
+              {
+                "const": "exited",
+                "type": "string"
+              },
+              {
+                "const": "restored",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
           "TermSize": {
             "properties": {
               "cell_height": {
@@ -8390,6 +8646,22 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "exited": {
+            "default": null,
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "lifecycle": {
+            "$ref": "#/$defs/Lifecycle",
+            "default": "running"
+          },
+          "line_prompt": {
+            "default": false,
+            "type": "boolean"
+          },
           "size": {
             "$ref": "#/$defs/TermSize"
           },

@@ -174,7 +174,7 @@ mod tests {
         let (notes, _) = tokio::sync::mpsc::unbounded_channel();
         let mut reg = Registry::new(notes);
         let spawn = SpawnSpec::default();
-        let created = reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Browser, url: None }).unwrap();
+        let created = reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Browser, url: None, agent: None }).unwrap();
         let remote = client(&mut reg, ClientRole::App, true, &[feature::BROWSER_ACTIONS]);
         reg.own(remote, std::slice::from_ref(&created.block_id), Some(silo_proto::control::OwnMode::Take)).unwrap();
         assert_eq!(browser_target(&reg, &created.block_id).unwrap(), remote);

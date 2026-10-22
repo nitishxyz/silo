@@ -42,7 +42,8 @@ async fn float_and_describe() {
     let (control, _events) = Control::connect(&paths::socket(&home), "test").await.unwrap();
     let spawn = || SpawnSpec { command: vec!["sleep".into(), "100".into()], ..SpawnSpec::default() };
     let created: Created = control.call(Method::SessionCreate { name: None, spawn: spawn(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split = Method::BlockSplit { block_id: created.block_id, axis: Axis::Vertical, spawn: spawn(), kind: BlockKind::Terminal, url: None };
+    let split =
+        Method::BlockSplit { block_id: created.block_id, axis: Axis::Vertical, spawn: spawn(), kind: BlockKind::Terminal, url: None, agent: None };
     let second: Created = control.call(split).await.unwrap();
 
     tokio::task::spawn_blocking({

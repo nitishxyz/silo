@@ -6,6 +6,7 @@ mod compat;
 mod handoff_block;
 mod lifecycle;
 mod line_mode;
+mod parked;
 mod persist;
 mod remote;
 mod share;

@@ -283,6 +283,9 @@ pub fn need(method: &Method) -> Need {
             rights(Window(WINDOW), Control)
         }
         M::BlockSplit { .. }
+        | M::BlockSpawn { .. }
+        | M::BlockPark { .. }
+        | M::BlockReveal { .. }
         | M::BlockClose { .. }
         | M::BlockZoom { .. }
         | M::BlockSwap { .. }

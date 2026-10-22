@@ -248,6 +248,7 @@ mod tests {
             windows: vec![window],
             revision: 1,
             created_at: 0,
+            parked: Vec::new(),
         };
         reg.sessions.push(session("s", Window { layout, ..Window::new("w".into(), "a") }));
         reg.sessions.push(session("t", Window::new("x".into(), "c")));

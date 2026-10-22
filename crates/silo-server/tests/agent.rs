@@ -68,7 +68,7 @@ async fn agent(control: &Control) -> Created {
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
     let main: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
     let spawn = SpawnSpec { cwd: Some("/tmp".into()), ..SpawnSpec::default() };
-    let split = Method::BlockSplit { block_id: main.block_id, axis: Axis::Horizontal, spawn, kind: BlockKind::Agent, url: None };
+    let split = Method::BlockSplit { block_id: main.block_id, axis: Axis::Horizontal, spawn, kind: BlockKind::Agent, url: None, agent: None };
     control.call(split).await.unwrap()
 }
 
@@ -132,6 +132,30 @@ async fn split_creates_agent_and_set_updates_it() {
     control.call_value(Method::BlockClose { block_id: created.block_id.clone(), force: false }).await.unwrap();
     let view: SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     assert!(view.blocks.iter().all(|b| b.kind == BlockKind::Terminal));
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn split_can_start_an_agent_block_on_a_session() {
+    let home = temp_home("split-session");
+    let task = start(&home).await;
+    let (control, _) = connect(&home).await;
+    let parent = agent(&control).await;
+    let state = AgentState { session_id: Some("ses_child".into()), title: "Review the diff".into() };
+    let split = |agent| Method::BlockSplit {
+        block_id: parent.block_id.clone(),
+        axis: Axis::Vertical,
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Agent,
+        url: None,
+        agent: Some(agent),
+    };
+    let created: Created = control.call(split(state.clone())).await.unwrap();
+    let block = info(&control, &created).await;
+    assert_eq!((block.agent, block.cwd.as_deref()), (Some(state), Some("/tmp")), "shown from the start, in the parent's folder");
+    let empty = AgentState { session_id: Some(String::new()), title: String::new() };
+    assert_eq!(code(&control.call_value(split(empty)).await.unwrap_err()), "bad_request");
     stop(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }

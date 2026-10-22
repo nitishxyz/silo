@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use silo_client::{Control, transport::RelayConfig};
 use silo_proto::{control::Method, paths};
 use silo_tools::{Context, Part, Tools};
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const SHELL: &str = r#"printf '\033]133;A\007$ '; while IFS= read -r l; do printf '\033]133;C\007'; sh -c "$l"; s=$?; printf '\033]133;D;%d\007\033]133;A\007$ ' "$s"; done"#;
@@ -24,6 +24,66 @@ async fn terminal_tools_against_server() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_status_waits() {
     scenario(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_blocks_and_hidden_terminals() {
+    use silo_proto::{
+        control::{Created, SpawnSpec},
+        model::{Axis, BlockKind, SessionView},
+    };
+    use silo_tools::Watch;
+    let home = tempfile::Builder::new().prefix("silo-tools-cmd-").tempdir_in("/tmp").unwrap();
+    let config = silo_server::Config { home: home.path().into(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let server = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
+    while !silo_client::server_running(home.path()).await {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (control, events) = Control::connect(&paths::socket(home.path()), "tools-test").await.unwrap();
+    let tools = Tools::new(control.clone(), events, Context { agent_block: None, ..Default::default() });
+    let main: Created =
+        control.call(Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split = Method::BlockSplit {
+        block_id: main.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Agent,
+        url: None,
+        agent: None,
+    };
+    let agent: Created = control.call(split).await.unwrap();
+    let set = Method::AgentSet { block_id: agent.block_id.clone(), session_id: Some("ses_parent".into()), title: None, cwd: None };
+    control.call_value(set).await.unwrap();
+    assert_eq!(tools.agent_block(&["ses_child".into(), "ses_parent".into()]).await.unwrap().as_deref(), Some(agent.block_id.as_str()));
+    assert_eq!(tools.agent_block(&["ses_other".into()]).await.unwrap(), None);
+
+    // A prompt is reported once quiet; answered, the command exits.
+    let script = "echo \"$PAGER\"; printf 'continue? '; read a; echo \"got $a\"; exit 5";
+    let env = [("PAGER".to_owned(), "cat".to_owned())].into();
+    let block = tools.spawn_command(&agent.block_id, "/bin/sh", script, Some("/tmp".into()), env).await.unwrap();
+    let watch = |prompt| tokio::time::timeout(Duration::from_secs(15), tools.watch(&block, prompt, |_| {}));
+    let Watch::Waiting { screen } = watch(true).await.unwrap().unwrap() else { panic!("expected a prompt") };
+    assert!(screen.contains("cat") && screen.ends_with("continue?"), "{screen}");
+    call(&tools, "terminal_send", json!({"block_id":block,"text":"yes","submit":true})).await;
+    assert_eq!(watch(true).await.unwrap().unwrap(), Watch::Exited { code: Some(5), text: "cat\ncontinue? yes\ngot yes".into() });
+    let view: SessionView = control.call(Method::SessionView { session_id: main.session_id.clone() }).await.unwrap();
+    assert!(view.session.parked.is_empty(), "a command block closes on exit");
+
+    // Stopped mid-run: its text so far, then gone.
+    let block = tools.spawn_command(&agent.block_id, "/bin/sh", "echo started; sleep 30", None, BTreeMap::new()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), tools.watch(&block, false, |_| {})).await.unwrap_err();
+    assert_eq!(tools.stop(&block).await.unwrap(), "started");
+
+    // A hidden terminal is parked next to the anchor and closes with it.
+    let hidden = tools.call_in("terminal_open", json!({"visible":false}), CancellationToken::new(), Some(agent.block_id.clone())).await.unwrap();
+    let Part::Json(hidden) = &hidden.content[0] else { panic!() };
+    let view: SessionView = control.call(Method::SessionView { session_id: main.session_id.clone() }).await.unwrap();
+    assert_eq!(view.session.parked.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [hidden["block_id"].as_str().unwrap()]);
+    control.call_value(Method::BlockClose { block_id: agent.block_id.clone(), force: true }).await.unwrap();
+    let view: SessionView = control.call(Method::SessionView { session_id: main.session_id.clone() }).await.unwrap();
+    assert!(view.session.parked.is_empty());
+    control.call_value(Method::ServerShutdown { force: true }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
 }
 
 async fn scenario(report_status: bool) {

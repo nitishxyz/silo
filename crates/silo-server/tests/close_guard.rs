@@ -187,8 +187,14 @@ async fn window_close_with_one_busy_pane_closes_neither() {
     let (control, _events) = Control::connect(&paths::socket(&home), "owner").await.unwrap();
     let mut raw = Raw::guarded(&home).await;
     let created = session(&control, SLEEP).await;
-    let split =
-        Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: command(IDLE), kind: BlockKind::Terminal, url: None };
+    let split = Method::BlockSplit {
+        block_id: created.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: command(IDLE),
+        kind: BlockKind::Terminal,
+        url: None,
+        agent: None,
+    };
     let idle: Created = control.call(split).await.unwrap();
     until_busy(&mut raw, &created.session_id, &[&created.block_id]).await;
 
@@ -403,4 +409,34 @@ async fn a_program_started_during_the_approval_is_refused_after_it() {
     app.call(Method::ServerShutdown { force: false }).await.unwrap();
     timeout(T, task).await.expect("the server stopped").unwrap();
     let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_an_owner_counts_its_running_parked_blocks() {
+    let home = temp_home("parked");
+    let task = start(&home).await;
+    let (control, _events) = Control::connect(&paths::socket(&home), "owner").await.unwrap();
+    let mut raw = Raw::guarded(&home).await;
+    let created = session(&control, IDLE).await;
+    let split = Method::BlockSplit {
+        block_id: created.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: command(IDLE),
+        kind: BlockKind::Agent,
+        url: None,
+        agent: None,
+    };
+    let agent: Created = control.call(split).await.unwrap();
+    let spawn =
+        Method::BlockSpawn { block_id: agent.block_id.clone(), command: command(SLEEP).command, cwd: None, env: Default::default(), size: None };
+    let run: Created = control.call(spawn).await.unwrap();
+    until_busy(&mut raw, &created.session_id, &[&run.block_id]).await;
+
+    let busy = refused(raw.call(Method::BlockClose { block_id: agent.block_id.clone(), force: false }).await);
+    assert_eq!(busy.iter().map(|b| (b.block_id.as_str(), b.busy.process.as_str())).collect::<Vec<_>>(), [(run.block_id.as_str(), "sleep")]);
+    assert_eq!(busy[0].window_id, created.window_id, "shown in its owner's window");
+    assert!(exists(&control, &run.block_id).await, "nothing closed");
+    raw.call(Method::BlockClose { block_id: agent.block_id.clone(), force: true }).await.unwrap();
+    assert!(!exists(&control, &run.block_id).await, "closed with its owner");
+    stop(&control, task, home).await;
 }

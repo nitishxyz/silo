@@ -188,6 +188,7 @@ mod tests {
             windows: vec![w, Window::new("x".into(), "e")],
             revision: 1,
             created_at: 0,
+            parked: Vec::new(),
         });
         reg
     }

@@ -143,13 +143,26 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
         };
         blocks.insert(id, Block::Terminal(handle));
     }
-    for session in &manifest.sessions {
+    let mut sessions = manifest.sessions;
+    // A block an owner spawned parked lived as long as its program: nothing
+    // waits for it after a restart.
+    for session in &mut sessions {
+        session.parked.retain(|p| {
+            if p.owner.is_some()
+                && let Some(Block::Terminal(handle)) = blocks.remove(&p.id)
+            {
+                handle.send(block::BlockMsg::Shutdown);
+            }
+            p.owner.is_none()
+        });
+    }
+    for session in &sessions {
         if let Some(missing) = session.blocks().into_iter().find(|b| !blocks.contains_key(b)) {
             anyhow::bail!("manifest: session {} references unknown block {missing}", session.id);
         }
     }
     let persist = Persist { store: Arc::new(store), server_id: manifest.server_id, generations };
-    Ok((persist, Restored { sessions: manifest.sessions, blocks }))
+    Ok((persist, Restored { sessions, blocks }))
 }
 
 /// A block whose program exited stays exited; any other gets a fresh shell
@@ -223,7 +236,13 @@ impl Persist {
                 if dirty.contains(id) || !self.generations.contains_key(id) || (full && running) {
                     targets.push((
                         id.clone(),
-                        BlockHandle { tx: handle.tx.clone(), info: handle.info.clone(), status: handle.status.clone(), command: handle.command },
+                        BlockHandle {
+                            tx: handle.tx.clone(),
+                            info: handle.info.clone(),
+                            status: handle.status.clone(),
+                            command: handle.command,
+                            ended: handle.ended.clone(),
+                        },
                     ));
                 }
             }

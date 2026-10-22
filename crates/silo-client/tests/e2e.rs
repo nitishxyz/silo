@@ -375,9 +375,11 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     assert_eq!(a.screen_text(), b.screen_text());
 
     // Splits and windows.
-    let split: Created =
-        call(&control, Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
-            .await;
+    let split: Created = call(
+        &control,
+        Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+    )
+    .await;
     let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
     assert_eq!(view.session.windows[0].layout.blocks(), [block.clone(), split.block_id.clone()]);
     assert_eq!(view.blocks.len(), 2);
@@ -455,12 +457,14 @@ async fn block_swap_and_window_move_body() {
     let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
     let sid = created.session_id.clone();
     let a = created.block_id.clone();
-    let b: Created =
-        call(&control, Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
-            .await;
+    let b: Created = call(
+        &control,
+        Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+    )
+    .await;
     let c: Created = call(
         &control,
-        Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None },
+        Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
     )
     .await;
     let (b, c) = (b.block_id, c.block_id);

@@ -121,8 +121,14 @@ async fn reconnect(home: &Path) -> Control {
 async fn populate(control: &Control) -> (Created, SessionView, DataStream, Tail) {
     let created: Created =
         control.call(Method::SessionCreate { name: Some("main".into()), spawn: counter(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split =
-        Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: counter(), kind: BlockKind::Terminal, url: None };
+    let split = Method::BlockSplit {
+        block_id: created.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: counter(),
+        kind: BlockKind::Terminal,
+        url: None,
+        agent: None,
+    };
     let _: Created = control.call(split).await.unwrap();
     let before = view(control, &created.session_id).await;
     let mut stream = DataStream::open(control, &created.block_id, None).await.unwrap();
@@ -219,7 +225,15 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
         cell_height: s.cell_height,
     };
     let window = Window::new("w1".into(), "b1");
-    let session = Session { id: "s1".into(), name: "main".into(), windows: vec![window], active_window: "w1".into(), revision: 1, created_at: 0 };
+    let session = Session {
+        id: "s1".into(),
+        name: "main".into(),
+        windows: vec![window],
+        active_window: "w1".into(),
+        revision: 1,
+        created_at: 0,
+        parked: Vec::new(),
+    };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
     let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new() };
     let checkpoint = silo_server::persist::encode(released.checkpoint).unwrap();
@@ -374,8 +388,14 @@ async fn takeover_keeps_exit_status() {
     let exiting = SpawnSpec { command: vec!["/bin/sh".into(), "-c".into(), "read code; exit $code".into()], ..login.clone() };
     let created: Created =
         control.call(Method::SessionCreate { name: Some("main".into()), spawn: login, kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split =
-        Method::BlockSplit { block_id: created.block_id.clone(), axis: Axis::Horizontal, spawn: exiting, kind: BlockKind::Terminal, url: None };
+    let split = Method::BlockSplit {
+        block_id: created.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: exiting,
+        kind: BlockKind::Terminal,
+        url: None,
+        agent: None,
+    };
     let failing: Created = control.call(split).await.unwrap();
 
     let new = tokio::spawn(silo_server::takeover(config(&home), false));

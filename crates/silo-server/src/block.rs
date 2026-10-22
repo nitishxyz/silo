@@ -426,6 +426,9 @@ pub struct BlockHandle {
     pub status: Arc<Mutex<BlockStatus>>,
     /// Runs an explicit command rather than the login shell.
     pub command: bool,
+    /// A command block's final screen and scrollback, set as it exits
+    /// (taken by the registry).
+    pub ended: Arc<Mutex<Option<Capture>>>,
 }
 
 impl BlockHandle {
@@ -729,6 +732,8 @@ struct Actor {
     status: Status,
     /// What `status` last published.
     shared_status: Arc<Mutex<BlockStatus>>,
+    /// A command block's final capture, taken as it exits.
+    ended: Arc<Mutex<Option<Capture>>>,
 }
 
 /// Block status and command records (Phase 7 §5, §7.3).
@@ -1177,8 +1182,9 @@ fn start(mut actor: Actor, id: &str, tx: mpsc::Sender<BlockMsg>, rx: mpsc::Recei
         *status = actor.status_now();
     }
     let status = actor.shared_status.clone();
+    let ended = actor.ended.clone();
     std::thread::Builder::new().name(format!("silo-block-{id}")).spawn(move || actor.run(&rx))?;
-    Ok(BlockHandle { tx, info: shared, status, command })
+    Ok(BlockHandle { tx, info: shared, status, command, ended })
 }
 
 impl Drop for Actor {
@@ -1237,6 +1243,7 @@ impl Actor {
             clip_held: None,
             status: Status::default(),
             shared_status: Arc::new(Mutex::new(BlockStatus { block_id: info.id.clone(), records: Vec::new(), progress: None, busy: None })),
+            ended: Arc::default(),
         }
     }
 
@@ -2386,7 +2393,17 @@ impl Actor {
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
-        Capture { text: lines.join("\n"), size: self.size }
+        let running = self.lifecycle.is_running() && !self.child_exited;
+        let line_prompt = running
+            && self.pty.as_ref().and_then(|pty| pty.line_mode().ok()).is_some_and(|(_, icanon)| icanon)
+            && self.vt.frame().is_ok_and(|frame| frame.cursor.column > 0);
+        Capture {
+            text: lines.join("\n"),
+            size: self.size,
+            lifecycle: self.lifecycle,
+            exited: (self.lifecycle == Lifecycle::Exited).then_some(self.exit_code).flatten(),
+            line_prompt,
+        }
     }
 
     /// Refresh title and cwd from OSC state and the foreground process.
@@ -2445,6 +2462,12 @@ impl Actor {
         if let Ok(mut info) = self.info.lock() {
             info.exited = code;
             info.lifecycle = Lifecycle::Exited;
+        }
+        if self.command {
+            let capture = self.capture(true);
+            if let Ok(mut ended) = self.ended.lock() {
+                *ended = Some(capture);
+            }
         }
         // The exit rule: running work is over, results stay until seen.
         self.status.records.settle();

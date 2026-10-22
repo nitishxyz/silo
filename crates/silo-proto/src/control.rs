@@ -1,5 +1,7 @@
 //! JSON control plane: requests, responses and sequenced events.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,8 +12,8 @@ use crate::{
     access::{Grant, Granted, Rights, Scope},
     data::{Clip, ClipKind, ClipboardLocation},
     model::{
-        Axis, BlockId, BlockInfo, BlockKind, BlockStatus, Busy, ClientId, CommandRecord, FloatRect, HistoryEntry, SessionId, SessionSummary,
-        SessionView, TermSize, Watcher, WindowId,
+        AgentState, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, Busy, ClientId, CommandRecord, FloatRect, HistoryEntry, Lifecycle, SessionId,
+        SessionSummary, SessionView, TermSize, Watcher, WindowId,
     },
 };
 
@@ -317,6 +319,42 @@ pub enum Method {
         /// Browser blocks: the start URL (default `about:blank`).
         #[serde(default)]
         url: Option<String>,
+        /// Agent blocks: the otto session it shows from the start (a sub-agent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentState>,
+    },
+    /// A parked terminal block in the session of `block_id`, its owner
+    /// (e.g. an agent block): in no layout until revealed, closed with its
+    /// owner. With a `command` it is a command block: it ends when the
+    /// command does, closing at once unless revealed (`terminal.capture`
+    /// still answers with its final screen and scrollback for a while).
+    /// Without one it runs the login shell. `window_id` of the result is
+    /// empty.
+    #[serde(rename = "block.spawn")]
+    BlockSpawn {
+        block_id: BlockId,
+        /// Program and arguments; empty means the user's login shell.
+        #[serde(default)]
+        command: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Extra environment for the program.
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default)]
+        size: Option<TermSize>,
+    },
+    /// Take a block out of its layout into its session's parked blocks; it
+    /// keeps running.
+    #[serde(rename = "block.park")]
+    BlockPark { block_id: BlockId },
+    /// Show a parked block: floating over (default) or split next to its
+    /// owner's window, else the session's active window.
+    #[serde(rename = "block.reveal")]
+    BlockReveal {
+        block_id: BlockId,
+        #[serde(default, rename = "as")]
+        reveal: Reveal,
     },
     #[serde(rename = "block.close")]
     BlockClose {
@@ -748,6 +786,9 @@ pub const METHODS: &[(&str, &str)] = &[
     ("window.move", "Move a window to a new index."),
     ("block.view", "One block's metadata and status."),
     ("block.split", "Split a block, starting a new terminal or browser next to it."),
+    ("block.spawn", "Start a parked terminal or command block owned by a block."),
+    ("block.park", "Take a block out of its layout; it keeps running, parked."),
+    ("block.reveal", "Show a parked block as a float or a split."),
     ("block.close", "Close a block and terminate its process."),
     ("block.focus", "Focus a block within its window."),
     ("block.focus_step", "Focus the block delta places from a block in reading order, wrapping."),
@@ -1179,6 +1220,17 @@ pub enum BrowserCommand {
 
 // Typed results.
 
+/// How `block.reveal` shows a parked block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Reveal {
+    /// Over the window, centred.
+    #[default]
+    Float,
+    /// Split next to the owner (or the focused block).
+    Split,
+}
+
 /// `block.move` docking target: split `target` along `axis`, the docked
 /// block second.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1244,6 +1296,17 @@ pub struct SizeInfo {
 pub struct Capture {
     pub text: String,
     pub size: TermSize,
+    /// Whether the program still runs; a parked block that exited and
+    /// closed answers from its final capture for a while.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
+    /// Exit code once exited (`None` while running or when killed).
+    #[serde(default)]
+    pub exited: Option<i32>,
+    /// A running program reads a line: the tty is canonical and the cursor
+    /// ends a non-empty line (`Password:`, `[y/N] `).
+    #[serde(default)]
+    pub line_prompt: bool,
 }
 
 /// Result of `clipboard.read`.
@@ -1362,8 +1425,14 @@ mod tests {
 
     #[test]
     fn request_and_messages_round_trip() {
-        let method =
-            Method::BlockSplit { block_id: "b".into(), axis: Axis::Vertical, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+        let method = Method::BlockSplit {
+            block_id: "b".into(),
+            axis: Axis::Vertical,
+            spawn: SpawnSpec::default(),
+            kind: BlockKind::Browser,
+            url: None,
+            agent: None,
+        };
         let request = Request { id: 3, method };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"method\":\"block.split\""), "{json}");

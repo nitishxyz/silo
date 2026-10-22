@@ -8,7 +8,7 @@ use crate::access::{Rights, Scope};
 use crate::agent::*;
 use crate::control::{
     ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
-    GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted,
+    GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted, Reveal,
     ServerInfo, SizeInfo, SpawnSpec,
 };
 use crate::data::{ClipKind, ClipboardLocation};
@@ -121,7 +121,7 @@ fn result_schema(method: &Method) -> Schema {
         M::ApiList {} => schema_for!(Vec<ApiMethod>),
         M::ApiDescribe { .. } => schema_for!(MethodDescription),
         M::SessionList {} => schema_for!(Vec<SessionSummary>),
-        M::SessionCreate { .. } | M::WindowCreate { .. } | M::BlockSplit { .. } => {
+        M::SessionCreate { .. } | M::WindowCreate { .. } | M::BlockSplit { .. } | M::BlockSpawn { .. } => {
             schema_for!(Created)
         }
         M::SessionView { .. } => schema_for!(SessionView),
@@ -157,6 +157,8 @@ fn result_schema(method: &Method) -> Schema {
             schema_for!(Empty)
         }
         M::BlockFloat { .. }
+        | M::BlockPark { .. }
+        | M::BlockReveal { .. }
         | M::BlockMove { .. }
         | M::LayoutRatio { .. }
         | M::LayoutGrow { .. }
@@ -265,7 +267,16 @@ pub fn examples() -> Vec<Method> {
         M::WindowRename { window_id: w(), name: Some("logs".into()) },
         M::WindowMove { window_id: w(), index: 0 },
         M::BlockView { block_id: b() },
-        M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None },
+        M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+        M::BlockSpawn {
+            block_id: b(),
+            command: vec!["/bin/zsh".into(), "-lc".into(), "cargo test".into()],
+            cwd: Some("~/src".into()),
+            env: [("PAGER".to_owned(), "cat".to_owned())].into(),
+            size: Some(TermSize::new(200, 50)),
+        },
+        M::BlockPark { block_id: b() },
+        M::BlockReveal { block_id: b(), reveal: Reveal::Float },
         M::BlockClose { block_id: b(), force: false },
         M::BlockFocus { block_id: b() },
         M::BlockFocusStep { block_id: b(), delta: -1 },

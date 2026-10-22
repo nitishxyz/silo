@@ -321,6 +321,20 @@ pub struct SessionInfo {
     pub active_window: WindowId,
     pub revision: u64,
     pub created_at: u64,
+    /// Blocks of the session in no layout (`block.spawn`, `block.park`),
+    /// oldest first; `block.reveal` shows one.
+    #[serde(default)]
+    pub parked: Vec<Parked>,
+}
+
+/// A parked block and the block that owns it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Parked {
+    pub id: BlockId,
+    /// The block that started it (e.g. an agent block): closing that block
+    /// closes this one.
+    #[serde(default)]
+    pub owner: Option<BlockId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

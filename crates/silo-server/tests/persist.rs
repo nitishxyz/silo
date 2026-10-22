@@ -112,7 +112,14 @@ async fn populate(control: &Control) -> (Created, Created, Created) {
     let main: Created =
         control.call(Method::SessionCreate { name: Some("main".into()), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit {
+            block_id: main.block_id.clone(),
+            axis: Axis::Horizontal,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        })
         .await
         .unwrap();
     let window: Created = control
@@ -180,7 +187,14 @@ async fn clean_shutdown_restores_tree_and_screens() {
     send(&control, &main.block_id, "echo again-$((1+1))\n").await;
     wait_output(&control, &main.block_id, "\nagain-2").await;
     let fresh: Created = control
-        .call(Method::BlockSplit { block_id: split.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit {
+            block_id: split.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        })
         .await
         .unwrap();
     assert!(before.blocks.iter().all(|b| b.id != fresh.block_id));
@@ -253,7 +267,7 @@ async fn restored_block_gets_a_shell_in_its_cwd() {
     let spawn = SpawnSpec { cwd: Some(work.clone()), ..shell() };
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: spawn.clone(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn, kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn, kind: BlockKind::Terminal, url: None, agent: None })
         .await
         .unwrap();
     send(&control, &main.block_id, "echo old-$((2*3))\n").await;
@@ -290,7 +304,14 @@ async fn closed_block_snapshots_are_collected() {
     let control = connect(&home).await;
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit {
+            block_id: main.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        })
         .await
         .unwrap();
     send(&control, &split.block_id, "echo doomed\n").await;
@@ -326,7 +347,14 @@ async fn a_clean_exit_closes_the_block_and_its_session() {
     let control = connect(&home).await;
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: login(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: login(), kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit {
+            block_id: main.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn: login(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        })
         .await
         .unwrap();
     let command: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
@@ -406,7 +434,14 @@ async fn floats_survive_restart() {
     let control = connect(&home).await;
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .call(Method::BlockSplit {
+            block_id: main.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        })
         .await
         .unwrap();
     send(&control, &split.block_id, "echo float-$((4*5))\n").await;
@@ -424,6 +459,41 @@ async fn floats_survive_restart() {
     assert_eq!(after.session.windows, before.session.windows);
     assert_eq!(block(&after, &split.block_id).lifecycle, Lifecycle::Running);
     wait_output(&control, &split.block_id, "\nfloat-20").await;
+    shutdown(control, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_command_blocks_are_dropped_on_restart() {
+    let home = temp_home("parked");
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let split = |kind| Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind, url: None, agent: None };
+    let agent: Created = control.call(split(BlockKind::Agent)).await.unwrap();
+    let parked: Created = control.call(split(BlockKind::Terminal)).await.unwrap();
+    control.call_value(Method::BlockPark { block_id: parked.block_id.clone() }).await.unwrap();
+    let spawn = Method::BlockSpawn {
+        block_id: agent.block_id.clone(),
+        command: ["sleep", "30"].map(str::to_owned).to_vec(),
+        cwd: Some("/tmp".into()),
+        env: Default::default(),
+        size: None,
+    };
+    let run: Created = control.call(spawn).await.unwrap();
+    let before = view(&control, &main.session_id).await;
+    assert_eq!(before.session.parked.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [parked.block_id.as_str(), run.block_id.as_str()]);
+    control.call_value(Method::ServerShutdown { force: true }).await.unwrap();
+    drop(control);
+    tokio::time::timeout(TIMEOUT, task).await.unwrap().unwrap();
+
+    // The command block ended with the server; a parked shell comes back.
+    let task = start(&home).await;
+    let control = connect(&home).await;
+    let after = view(&control, &main.session_id).await;
+    assert_eq!(after.session.parked.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [parked.block_id.as_str()]);
+    assert!(after.blocks.iter().all(|b| b.id != run.block_id));
+    assert_eq!(block(&after, &parked.block_id).lifecycle, Lifecycle::Running);
     shutdown(control, task).await;
     let _ = std::fs::remove_dir_all(&home);
 }

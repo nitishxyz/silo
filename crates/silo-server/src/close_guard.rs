@@ -31,6 +31,8 @@ struct Target {
     session_id: SessionId,
     window_id: WindowId,
     session_name: String,
+    /// A parked block's owner: closing the owner ends it.
+    owner: Option<BlockId>,
 }
 
 /// Whether `method` is one of the closes the guard checks.
@@ -58,7 +60,9 @@ pub async fn check(server: &Server, client_id: u64, method: &Method) -> Result<(
             return Ok(());
         }
         match method {
-            Method::BlockClose { force: false, block_id } => tree(&reg).into_iter().filter(|t| &t.block_id == block_id).collect(),
+            Method::BlockClose { force: false, block_id } => {
+                tree(&reg).into_iter().filter(|t| &t.block_id == block_id || t.owner.as_ref() == Some(block_id)).collect()
+            }
             Method::WindowClose { force: false, window_id } => tree(&reg).into_iter().filter(|t| &t.window_id == window_id).collect(),
             Method::SessionClose { force: false, session_id } => {
                 // Unknown sessions are the handler's to report.
@@ -123,19 +127,25 @@ pub async fn busy_blocks(
     Ok(BusyBlocks { busy: probe(server, targets).await })
 }
 
-/// Every block in the tree, sessions and windows in order.
+/// Every block in the tree, sessions and windows in order, then each
+/// session's parked blocks in their owner's window (else the active one).
 fn tree(reg: &Registry) -> Vec<Target> {
     reg.sessions
         .iter()
         .flat_map(|s| {
-            s.windows.iter().flat_map(move |w| {
-                w.blocks().into_iter().map(move |block_id| Target {
-                    block_id,
-                    session_id: s.id.clone(),
-                    window_id: w.id.clone(),
-                    session_name: s.name.clone(),
-                })
-            })
+            let target = |block_id: BlockId, window_id: WindowId, owner: Option<BlockId>| Target {
+                block_id,
+                session_id: s.id.clone(),
+                window_id,
+                session_name: s.name.clone(),
+                owner,
+            };
+            let tiled = s.windows.iter().flat_map(move |w| w.blocks().into_iter().map(move |b| target(b, w.id.clone(), None)));
+            let parked = s.parked.iter().map(move |p| {
+                let window = p.owner.as_deref().and_then(|o| s.windows.iter().find(|w| w.contains(o))).map_or(&s.active_window, |w| &w.id);
+                target(p.id.clone(), window.clone(), p.owner.clone())
+            });
+            tiled.chain(parked).collect::<Vec<_>>()
         })
         .collect()
 }

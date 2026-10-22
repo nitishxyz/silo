@@ -521,7 +521,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         Method::EventsSubscribe {} => Ok(json!({})),
         Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries_for(&ctx.principal)),
         Method::SessionCreate { name, spawn, kind, url } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None };
             to_value(server.registry.lock().unwrap().create_session(name, &new)?)
         }
         Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view(&session_id)?),
@@ -534,7 +534,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             Ok(json!({}))
         }
         Method::WindowCreate { session_id, spawn, kind, url } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None };
             to_value(server.registry.lock().unwrap().create_window(&session_id, &new)?)
         }
         Method::WindowSelect { session_id, window_id } => {
@@ -553,9 +553,22 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().move_window(&window_id, index)?;
             Ok(json!({}))
         }
-        Method::BlockSplit { block_id, axis, spawn, kind, url } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref() };
+        Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref() };
             to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
+        }
+        Method::BlockSpawn { block_id, command, cwd, env, size } => {
+            to_value(server.registry.lock().unwrap().spawn_parked(&block_id, &command, cwd, env, size)?)
+        }
+        Method::BlockPark { block_id } => {
+            server.registry.lock().unwrap().park(&block_id)?;
+            Ok(json!({}))
+        }
+        Method::BlockReveal { block_id, reveal } => {
+            let mut reg = server.registry.lock().unwrap();
+            reg.reveal(&block_id, reveal)?;
+            crate::app_bridge::active(&mut reg, client_id);
+            Ok(json!({}))
         }
         Method::BlockClose { block_id, force: _ } => {
             server.registry.lock().unwrap().close_block(&block_id)?;
@@ -593,7 +606,21 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         }
         Method::TerminalCapture { block_id, history } => {
             let (reply, rx) = tokio::sync::oneshot::channel();
-            server.registry.lock().unwrap().block(&block_id)?.send(BlockMsg::Capture { history, reply });
+            {
+                let mut reg = server.registry.lock().unwrap();
+                match reg.block(&block_id) {
+                    Ok(block) => block.send(BlockMsg::Capture { history, reply }),
+                    // A closed command block answers from its final capture.
+                    Err(error) => {
+                        let mut capture = reg.ended(&block_id).ok_or(error)?;
+                        if !history {
+                            let lines: Vec<&str> = capture.text.lines().collect();
+                            capture.text = lines[lines.len().saturating_sub(usize::from(capture.size.rows))..].join("\n");
+                        }
+                        return to_value(capture);
+                    }
+                }
+            }
             to_value(rx.await.map_err(|_| RpcError::not_found(format!("block {block_id}")))?)
         }
         Method::TerminalClear { block_id } => {

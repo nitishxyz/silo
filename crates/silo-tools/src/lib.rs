@@ -3,6 +3,7 @@
 mod descriptors;
 
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -120,23 +121,33 @@ impl Tools {
     /// # Errors
     /// Invalid input, cancellation, or a control failure.
     pub async fn call(&self, name: &str, input: Value, cancel: CancellationToken) -> Result<ToolResult, ToolError> {
+        self.call_in(name, input, cancel, None).await
+    }
+
+    /// [`Self::call`] for the agent whose block is `anchor` (default: the
+    /// context's `agent_block`): new blocks open next to it.
+    ///
+    /// # Errors
+    /// Invalid input, cancellation, or a control failure.
+    pub async fn call_in(&self, name: &str, input: Value, cancel: CancellationToken, anchor: Option<String>) -> Result<ToolResult, ToolError> {
+        let anchor = anchor.or_else(|| self.cx.agent_block.clone());
         tokio::select! {
             biased;
             () = cancel.cancelled() => bail!("tool cancelled; the block's program was not stopped"),
-            result = self.execute(name, input) => result,
+            result = self.execute(name, input, anchor.as_deref()) => result,
         }
     }
 
-    async fn execute(&self, name: &str, mut input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, name: &str, mut input: Value, anchor: Option<&str>) -> Result<ToolResult, ToolError> {
         if !input.is_object() {
             bail!("tool input must be an object");
         }
         self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
         let value = match name {
-            "terminal_open" | "browser_open" => serde_json::to_value(self.open(&input, name == "browser_open").await?)?,
-            "terminal_run" => self.run(&input).await?,
+            "terminal_open" | "browser_open" => serde_json::to_value(self.open(&input, name == "browser_open", anchor).await?)?,
+            "terminal_run" => self.run(&input, anchor).await?,
             "terminal_send" => {
-                let block = self.block(&input)?;
+                let block = self.block(&input, anchor)?;
                 let mut text = input["text"].as_str().unwrap_or_default().to_owned();
                 if let Some(keys) = input.get("keys") {
                     for key in keys.as_array().context("keys must be an array")? {
@@ -153,33 +164,28 @@ impl Tools {
                 json!({})
             }
             "terminal_read" => {
-                let block = self.block(&input)?;
+                let block = self.block(&input, anchor)?;
                 let history = input["history"].as_bool().unwrap_or(false) || input["lines"].is_number();
                 let capture = self.capture(&block, history).await?;
                 let text = input["lines"].as_u64().map_or(capture.text.clone(), |n| tail(&capture.text, usize::try_from(n).unwrap_or(usize::MAX)));
                 let (text, truncated) = cap(&text);
                 json!({"text": text, "truncated": truncated})
             }
-            "terminal_wait" => self.wait(&input).await?,
+            "terminal_wait" => self.wait(&input, anchor).await?,
             "terminal_list" => self.list().await?,
             "terminal_close" => {
                 self.control
-                    .call_value(Method::BlockClose { block_id: self.block(&input)?, force: input["force"].as_bool().unwrap_or(false) })
+                    .call_value(Method::BlockClose { block_id: self.block(&input, anchor)?, force: input["force"].as_bool().unwrap_or(false) })
                     .await?
             }
             "session_list" => self.control.call_value(Method::SessionList {}).await?,
             "notify" => {
-                input["block_id"] = json!(
-                    self.cx
-                        .agent_block
-                        .clone()
-                        .or_else(|| input["block_id"].as_str().map(str::to_owned))
-                        .context("notify requires block_id outside a block")?
-                );
+                input["block_id"] =
+                    json!(anchor.or_else(|| input["block_id"].as_str()).map(str::to_owned).context("notify requires block_id outside a block")?);
                 self.control.call_raw("block.notify", input).await?
             }
             "browser_navigate" => {
-                let block_id = self.block(&input)?;
+                let block_id = self.block(&input, anchor)?;
                 let choices = [
                     input["url"].is_string(),
                     input["back"].as_bool() == Some(true),
@@ -212,7 +218,7 @@ impl Tools {
                 }
             }
             name if descriptors::BROWSER.contains(&name) => {
-                input["block_id"] = json!(self.block(&input)?);
+                input["block_id"] = json!(self.block(&input, anchor)?);
                 let value = self.control.call_raw(&name.replacen('_', ".", 1), input).await?;
                 if name == "browser_screenshot" {
                     return Ok(ToolResult {
@@ -228,11 +234,11 @@ impl Tools {
         Ok(ToolResult::json(value))
     }
 
-    fn block(&self, input: &Value) -> anyhow::Result<String> {
-        input["block_id"].as_str().map(str::to_owned).or_else(|| self.cx.agent_block.clone()).context("block_id is required outside a block")
+    fn block(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<String> {
+        input["block_id"].as_str().or(anchor).map(str::to_owned).context("block_id is required outside a block")
     }
 
-    async fn open(&self, input: &Value, browser: bool) -> anyhow::Result<Created> {
+    async fn open(&self, input: &Value, browser: bool, anchor: Option<&str>) -> anyhow::Result<Created> {
         let kind = if browser { BlockKind::Browser } else { BlockKind::Terminal };
         let url = input["url"].as_str().map(str::to_owned);
         let command = input["command"].as_str();
@@ -242,12 +248,27 @@ impl Tools {
             command: if exec { command.map(|c| vec!["/bin/sh".into(), "-lc".into(), c.into()]).unwrap_or_default() } else { vec![] },
             ..Default::default()
         };
-        let anchor = input["block_id"].as_str().map(str::to_owned).or_else(|| self.cx.agent_block.clone());
+        let anchor = input["block_id"].as_str().or(anchor).map(str::to_owned);
+        // Parked: in the anchor's session, in no layout, closed with it.
+        if !browser && input["visible"].as_bool() == Some(false) {
+            let owner = anchor.context("visible:false requires block_id or SILO_BLOCK")?;
+            let created: Created = self
+                .control
+                .call(Method::BlockSpawn { block_id: owner, command: spawn.command, cwd: spawn.cwd, env: BTreeMap::new(), size: None })
+                .await?;
+            self.type_command(&created.block_id, command.filter(|_| !exec)).await?;
+            return Ok(created);
+        }
         let place = input["place"].as_str().unwrap_or(if anchor.is_some() { "split" } else { "tab" });
         let method = match place {
-            "split" => {
-                Method::BlockSplit { block_id: anchor.context("split requires block_id or SILO_BLOCK")?, axis: Axis::Vertical, spawn, kind, url }
-            }
+            "split" => Method::BlockSplit {
+                block_id: anchor.context("split requires block_id or SILO_BLOCK")?,
+                axis: Axis::Vertical,
+                spawn,
+                kind,
+                url,
+                agent: None,
+            },
             "tab" => {
                 let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                 let session = input["session"].as_str().unwrap_or(&self.cx.default_session);
@@ -261,16 +282,21 @@ impl Tools {
             _ => bail!("place must be split, tab or session"),
         };
         let created: Created = self.control.call(method).await?;
-        if !exec
-            && !browser
-            && let Some(command) = command
-        {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            self.send(&created.block_id, command.into()).await?;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            self.send(&created.block_id, "\r".into()).await?;
+        if !browser {
+            self.type_command(&created.block_id, command.filter(|_| !exec)).await?;
         }
         Ok(created)
+    }
+
+    /// Type `command` and Enter into a fresh shell block.
+    async fn type_command(&self, block: &str, command: Option<&str>) -> anyhow::Result<()> {
+        if let Some(command) = command {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            self.send(block, command.into()).await?;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            self.send(block, "\r".into()).await?;
+        }
+        Ok(())
     }
 
     async fn send(&self, block: &str, text: String) -> anyhow::Result<()> {
@@ -282,7 +308,7 @@ impl Tools {
         self.control.call(Method::TerminalCapture { block_id: block.into(), history }).await
     }
 
-    async fn run(&self, input: &Value) -> anyhow::Result<Value> {
+    async fn run(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<Value> {
         let command = required(input, "command")?;
         let _lock = self.run_lock.lock().await;
         let block = if let Some(block) = input["block_id"].as_str() {
@@ -290,7 +316,7 @@ impl Tools {
         } else {
             let mut shell = self.shell.lock().await;
             if shell.is_none() {
-                let created = self.open(&json!({"cwd": input["cwd"]}), false).await?;
+                let created = self.open(&json!({"cwd": input["cwd"]}), false, anchor).await?;
                 *shell = Some(created.block_id);
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
@@ -323,10 +349,10 @@ impl Tools {
         )
     }
 
-    async fn wait(&self, input: &Value) -> anyhow::Result<Value> {
+    async fn wait(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<Value> {
         let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
         let mut events = self.events.subscribe();
-        let block = self.block(input)?;
+        let block = self.block(input, anchor)?;
         let regex = input["text"].as_str().map(regex::Regex::new).transpose()?;
         let states: Vec<String> = input
             .get("status")
@@ -407,6 +433,141 @@ impl Tools {
         }
         Ok(json!({"blocks": blocks, "busy": busy}))
     }
+}
+
+/// How long a command reading a line must be quiet before it counts as
+/// waiting for input.
+pub const PROMPT_QUIET: Duration = Duration::from_secs(2);
+/// Columns of a command block: wide, so few lines wrap.
+pub const COMMAND_COLUMNS: u16 = 200;
+
+/// Where a watched command block got to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Watch {
+    /// The command exited (`code` is `None` when a signal killed it); its
+    /// final screen and scrollback as plain text, wrapped lines joined.
+    Exited { code: Option<i32>, text: String },
+    /// It reads a line (a password, `y/N`) and has been quiet for
+    /// [`PROMPT_QUIET`]; the last screen.
+    Waiting { screen: String },
+    /// Its block was closed before the command ended.
+    Closed,
+}
+
+impl Tools {
+    /// Run `command` through `shell -lc` in a parked command block owned by
+    /// `owner` (`block.spawn`); returns the block.
+    ///
+    /// # Errors
+    /// A control failure, or `owner` is gone.
+    pub async fn spawn_command(
+        &self,
+        owner: &str,
+        shell: &str,
+        command: &str,
+        cwd: Option<String>,
+        env: BTreeMap<String, String>,
+    ) -> anyhow::Result<String> {
+        self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
+        let command = vec![shell.to_owned(), "-lc".to_owned(), command.to_owned()];
+        let size = Some(silo_proto::model::TermSize::new(COMMAND_COLUMNS, 50));
+        let created: Created = self.control.call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size }).await?;
+        Ok(created.block_id)
+    }
+
+    /// Wait until command block `block` exits or, with `prompt`, waits for
+    /// input. `screen` gets the screen each time it changes.
+    ///
+    /// # Errors
+    /// A control failure.
+    pub async fn watch(&self, block: &str, prompt: bool, mut screen: impl FnMut(&str) + Send) -> anyhow::Result<Watch> {
+        self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
+        let mut events = self.events.subscribe();
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        let (mut last, mut changed) = (String::new(), tokio::time::Instant::now());
+        loop {
+            tokio::select! {
+                () = self.control.closed() => bail!("server connection closed"),
+                _ = poll.tick() => {
+                    let capture = match self.capture(block, false).await {
+                        Ok(capture) => capture,
+                        Err(error) if not_found(&error) => return Ok(Watch::Closed),
+                        Err(error) => return Err(error),
+                    };
+                    if capture.lifecycle != Lifecycle::Running {
+                        return self.finished(block).await;
+                    }
+                    if capture.text != last {
+                        (last, changed) = (capture.text, tokio::time::Instant::now());
+                        screen(&last);
+                    }
+                    if prompt && capture.line_prompt && changed.elapsed() >= PROMPT_QUIET {
+                        return Ok(Watch::Waiting { screen: tail(&last, 40) });
+                    }
+                }
+                event = events.recv() => match event {
+                    Ok(Event::BlockChanged { block: info }) if info.id == block && info.lifecycle != Lifecycle::Running => return self.finished(block).await,
+                    Err(broadcast::error::RecvError::Closed) => bail!("event stream closed"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    async fn finished(&self, block: &str) -> anyhow::Result<Watch> {
+        let capture = self.capture(block, true).await?;
+        Ok(Watch::Exited { code: capture.exited, text: unwrap(&capture.text, capture.size.columns) })
+    }
+
+    /// Stop command block `block`: its text so far, then close it, hanging
+    /// up its programs.
+    ///
+    /// # Errors
+    /// A control failure other than the block being gone.
+    pub async fn stop(&self, block: &str) -> anyhow::Result<String> {
+        let text = match self.capture(block, true).await {
+            Ok(capture) => unwrap(&capture.text, capture.size.columns),
+            Err(error) if not_found(&error) => String::new(),
+            Err(error) => return Err(error),
+        };
+        match self.control.call_value(Method::BlockClose { block_id: block.into(), force: true }).await {
+            Err(error) if !not_found(&error) => Err(error),
+            _ => Ok(text),
+        }
+    }
+
+    /// The agent block showing one of the otto `sessions`, the first found
+    /// in their order.
+    ///
+    /// # Errors
+    /// A control failure.
+    pub async fn agent_block(&self, sessions: &[String]) -> anyhow::Result<Option<String>> {
+        let summaries: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
+        let mut found: Vec<(usize, String)> = Vec::new();
+        for summary in summaries {
+            let view: SessionView = self.control.call(Method::SessionView { session_id: summary.id }).await?;
+            for block in view.blocks {
+                let shown = block.agent.and_then(|a| a.session_id).and_then(|s| sessions.iter().position(|x| *x == s));
+                found.extend(shown.map(|rank| (rank, block.id)));
+            }
+        }
+        Ok(found.into_iter().min_by_key(|(rank, _)| *rank).map(|(_, id)| id))
+    }
+}
+
+/// Join lines a terminal `columns` wide soft-wrapped: a line filling the
+/// width continues on the next.
+fn unwrap(text: &str, columns: u16) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut full = false;
+    for line in text.lines() {
+        if !out.is_empty() && !full {
+            out.push('\n');
+        }
+        out.push_str(line);
+        full = columns > 0 && line.chars().count() >= usize::from(columns);
+    }
+    out
 }
 
 fn not_found(error: &anyhow::Error) -> bool {
