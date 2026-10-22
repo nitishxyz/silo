@@ -37,21 +37,35 @@ const COMPOSER_LINE: f32 = 20.0;
 const NEST: f32 = 12.0;
 /// A bar's header and row heights (bars above the composer).
 const BAR_HEADER: f32 = 34.0;
-const BAR_ROW: f32 = 28.0;
+pub(super) const BAR_ROW: f32 = 28.0;
 /// Width of a queue row's hover actions (`Send later` + `×`).
 const QUEUE_ACTIONS: f32 = 112.0;
 
+/// Streaming reasoning under a `Thinking` line: its last text (kept while it
+/// collapses after the stream ends) and its height, eased to what it measured.
+pub(super) struct Stream {
+    text: String,
+    live: bool,
+    height: motion::Glide,
+    measured: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+/// Tabular figures: ticking durations keep their width.
+fn tabular() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
 /// One bar above the composer (see `render_bars`).
-struct Bar {
-    key: &'static str,
-    icon: AnyElement,
-    label: &'static str,
+pub(super) struct Bar {
+    pub key: &'static str,
+    pub icon: AnyElement,
+    pub label: &'static str,
     /// Collapsed: the current item, after a divider.
-    summary: Option<AnyElement>,
-    note: String,
-    open_label: String,
-    open_note: String,
-    rows: Vec<AnyElement>,
+    pub summary: Option<AnyElement>,
+    pub note: String,
+    pub open_label: String,
+    pub open_note: String,
+    pub rows: Vec<AnyElement>,
 }
 
 /// A todo with its status icon; finished ones struck through and muted.
@@ -92,7 +106,7 @@ fn mono() -> SharedString {
 }
 
 /// The foreground over the background at `amount`.
-fn ink(amount: f32) -> u32 {
+pub(super) fn ink(amount: f32) -> u32 {
     theme::mix(theme::background(), theme::foreground(), amount)
 }
 
@@ -160,15 +174,27 @@ fn violet() -> u32 {
     if theme::is_light() { 0x007c_3aed } else { 0x00a7_8bfa }
 }
 
-fn effort_label(effort: Effort) -> &'static str {
+/// A reasoning effort as the menu and tooltip name it; `None` is the default.
+fn effort_label(effort: Option<Effort>) -> &'static str {
     match effort {
-        Effort::None => "off",
-        Effort::Minimal => "minimal",
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-        Effort::Xhigh => "extra high",
-        Effort::Max => "max",
+        None => "Default",
+        Some(Effort::None) => "Off",
+        Some(Effort::Minimal) => "Minimal",
+        Some(Effort::Low) => "Low",
+        Some(Effort::Medium) => "Medium",
+        Some(Effort::High) => "High",
+        Some(Effort::Xhigh) => "Extra high",
+        Some(Effort::Max) => "Max",
+    }
+}
+
+fn effort_about(effort: Option<Effort>) -> &'static str {
+    match effort {
+        None => "The agent's or the model's",
+        Some(Effort::None | Effort::Minimal | Effort::Low) => "Quick answers",
+        Some(Effort::Medium) => "Balanced",
+        Some(Effort::High) => "Thinks things through",
+        Some(Effort::Xhigh | Effort::Max) => "Most thorough, slowest",
     }
 }
 
@@ -332,9 +358,13 @@ impl AgentPane {
         if self.animating(now, cx) && !cx.reduce_motion() {
             window.request_animation_frame();
         }
-        // Folding groups change height every frame; a finished fold is measured once more.
+        // Folding groups change height every frame; a finished fold is measured once more. Live groups too:
+        // their window opens as lines arrive and streaming reasoning glides.
         let mut settled = Vec::new();
         for (ix, row) in self.rows.iter().enumerate() {
+            if matches!(row, Row::Group(g) if g.live) {
+                self.list.remeasure_items(ix..ix + 1);
+            }
             if let Row::Group(g) = row
                 && let Some(at) = self.fold_at.get(&g.key)
                 && now >= *at
@@ -398,6 +428,7 @@ impl AgentPane {
                     }
                 }),
             )
+            .children(visible.then(|| self.render_subagent_strip(cx)).flatten())
             .child(self.render_body(window, cx))
             .when(visible, |el| {
                 let bottom = self.render_bottom(window, cx);
@@ -565,8 +596,8 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Group(_)) => 12.0,
-            Some(Row::Text { .. }) | None => 4.0,
+            // The gaps a live group would have in its place, so the handoff doesn't shift.
+            Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
         let label = match (self.rows.last(), self.running_since) {
             (Some(Row::Text { .. } | Row::Group(_)), Some(since)) => format!("Working for {}", transcript::dur(self.now().saturating_sub(since))),
@@ -577,7 +608,15 @@ impl AgentPane {
             .flex()
             .items_center()
             .text_size(px(13.0))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(shimmer(&label, now, self.epoch, cx)))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_features(tabular())
+                    .child(shimmer(&label, now, self.epoch, cx)),
+            )
             .children(self.queued_note())
             .child(div().flex_1())
             .child(self.stop_button(cx));
@@ -653,7 +692,8 @@ impl AgentPane {
 
     fn render_group(&mut self, g: &Group, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let key = g.key.clone();
-        let fold = if g.live {
+        // A command waiting for the user stays in sight.
+        let fold = if g.live || g.lines.iter().any(|l| l.status == Status::Input) {
             0.0
         } else {
             match self.fold_at.get(&key) {
@@ -665,8 +705,9 @@ impl AgentPane {
         let open = self.toggled.contains(&key);
         let openness = self.openness(&format!("grp:{key}"), open, now, cx);
         let muted = theme::muted();
+        // Live: the turn's clock, as the activity row it replaces showed; folded: the group's own wall time.
         let header_text = if g.live {
-            match self.group_started(g) {
+            match self.running_since.or_else(|| self.group_started(g)) {
                 Some(start) => format!("Working for {}", transcript::dur(self.now().saturating_sub(start))),
                 None => "Working".to_owned(),
             }
@@ -694,7 +735,7 @@ impl AgentPane {
                     this.flip(format!("grp:{toggle_key}"), toggle_key.clone(), open, cx);
                     cx.notify();
                 }))
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| {
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_features(tabular()).map(|el| {
                     if g.live { el.child(shimmer(&header_text, now, self.epoch, cx)) } else { el.text_color(rgb(muted)).child(header_text) }
                 }))
                 .child(div().flex_none().flex().map(|el| {
@@ -732,19 +773,30 @@ impl AgentPane {
         let frozen = self.frozen.as_ref().filter(|(k, _)| *k == key).map(|(_, n)| *n);
         let shown = &g.lines[..frozen.unwrap_or(g.lines.len()).min(g.lines.len())];
         let n = shown.len();
+        // How much of each line has arrived (0 → 1 while it enters, from its own `entered`).
+        let arrived: Vec<f32> = shown
+            .iter()
+            .map(|l| if g.live { self.entered.get(&l.key).and_then(|at| eased(*at, ENTER, now, cx)).unwrap_or(1.0) } else { 1.0 })
+            .collect();
+        // An entering line opens to its height as it arrives: the window grows by that much, so the header and
+        // older lines stay put while it opens (once full, they slide up together). Arrivals in a row add up.
         let lines: Vec<AnyElement> = shown
             .iter()
             .enumerate()
             .map(|(i, l)| {
-                let dim = if n - i <= 2 { 1.0 } else { 0.55 };
-                self.render_line(&key, l, g.live && i + 1 == n, dim, now, window, cx)
+                // The two newest lines are bright; one pushed past them dims as the newcomer arrives.
+                let below: f32 = arrived[i + 1..].iter().sum();
+                let dim = 1.0 - 0.45 * (below - 1.0).clamp(0.0, 1.0);
+                let line = self.render_line(&key, l, g.live && i + 1 == n, dim, now, window, cx);
+                div().flex_none().when(arrived[i] < 1.0, |el| el.max_h(px(LINE_H * arrived[i])).overflow_hidden()).child(line).into_any_element()
             })
             .collect();
-        // A new line pushes the others up: the whole list slides one line.
-        let push = if g.live && n > 1 { shown.last().and_then(|l| self.entered.get(&l.key)).and_then(|at| eased(*at, ENTER, now, cx)) } else { None };
+        // The top fade comes in with the line that fills the window.
+        let fade = (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0);
         let max = LINE_H * LIVE_LINES;
         let hover_key = key.clone();
         let count = g.lines.len();
+        let keys: Vec<String> = g.lines.iter().map(|l| l.key.clone()).collect();
         let window_el = div()
             .id(gpui::ElementId::Name(format!("live-{key}").into()))
             .relative()
@@ -756,20 +808,20 @@ impl AgentPane {
             .flex_col()
             .justify_end()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                // Lines held back while hovered ease in once the pointer leaves.
+                if !*hovered && let Some((_, held)) = this.frozen.take_if(|(k, _)| *k == hover_key) {
+                    let now = Instant::now();
+                    for k in keys.iter().skip(held) {
+                        this.entered.insert(k.clone(), now);
+                    }
+                }
                 this.frozen = hovered.then(|| (hover_key.clone(), count));
                 cx.notify();
             }))
-            .child(
-                div()
-                    .relative()
-                    .top(px(push.map_or(0.0, |p| (1.0 - p) * LINE_H)))
-                    .flex()
-                    .flex_col()
-                    .children(lines.into_iter().map(|l| div().flex_none().child(l))),
-            )
-            .when(f32::from(window.line_height()) > 0.0 && n as f32 > LIVE_LINES - 0.5, |el| {
+            .child(div().flex_none().flex().flex_col().children(lines))
+            .when(f32::from(window.line_height()) > 0.0 && fade > 0.0, |el| {
                 let bg = theme::background();
-                el.child(div().absolute().top_0().left_0().right_0().h(px(28.0)).bg(linear_gradient(
+                el.child(div().absolute().top_0().left_0().right_0().h(px(28.0)).opacity(fade).bg(linear_gradient(
                     180.0,
                     linear_color_stop(hsla(bg, 1.0), 0.0),
                     linear_color_stop(hsla(bg, 0.0), 1.0),
@@ -793,25 +845,33 @@ impl AgentPane {
         let key = line.key.clone();
         let open = self.details.contains(&key);
         let openness = self.openness(&format!("det:{key}"), open, now, cx);
-        // A status change swaps the icon in (scale 0.8 → 1, fade).
-        let since = match self.line_status.get(&key) {
-            Some((status, at)) if *status == line.status => *at,
-            Some(_) => now,
-            None => now.checked_sub(std::time::Duration::from_secs(60)).unwrap_or(now),
+        // A status change crossfades the icons: the new one swaps in (scale 0.8 → 1), the old one fades out.
+        let (since, before) = match self.line_status.get(&key) {
+            Some((status, at, before)) if *status == line.status => (*at, *before),
+            Some((status, ..)) => (now, Some(*status)),
+            None => (now.checked_sub(std::time::Duration::from_secs(60)).unwrap_or(now), None),
         };
-        self.line_status.insert(key.clone(), (line.status, since));
-        let swap = eased(since, motion::UI_FAST, now, cx).unwrap_or(1.0);
-        let glyph: AnyElement = match line.status {
-            Status::Running => crate::browser_pane::spinner(&key, 13.0, muted, cx),
-            Status::Error => icon("x-circle", 14.0, theme::danger()).into_any_element(),
-            Status::Pending => div().opacity(0.5).child(icon(line.kind.icon(), 14.0, muted)).into_any_element(),
-            Status::Waiting(question) => icon(if question { "question" } else { "lock" }, 14.0, theme::foreground()).into_any_element(),
-            Status::Done => icon(line.kind.icon(), 14.0, muted).into_any_element(),
+        self.line_status.insert(key.clone(), (line.status, since, before));
+        let swap = eased(since, motion::UI_FAST, now, cx);
+        let glyph_of = |status: Status| -> AnyElement {
+            match status {
+                Status::Running => crate::browser_pane::spinner(&key, 13.0, muted, cx),
+                Status::Error => icon("x-circle", 14.0, theme::danger()).into_any_element(),
+                Status::Pending => div().opacity(0.5).child(icon(line.kind.icon(), 14.0, muted)).into_any_element(),
+                Status::Waiting(question) => icon(if question { "question" } else { "lock" }, 14.0, theme::foreground()).into_any_element(),
+                Status::Input => icon("terminal", 14.0, theme::warning()).into_any_element(),
+                Status::Done => icon(line.kind.icon(), 14.0, muted).into_any_element(),
+            }
         };
-        let glyph = div().flex().opacity(swap).scale(0.8 + 0.2 * swap).child(glyph);
+        let old = swap.zip(before).map(|(t, status)| {
+            div().absolute().top_0().left_0().right_0().bottom_0().flex().items_center().justify_center().opacity(1.0 - t).child(glyph_of(status))
+        });
+        let t = swap.unwrap_or(1.0);
+        let glyph = div().flex().opacity(t).scale(0.8 + 0.2 * t).child(glyph_of(line.status));
         let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| match line.status {
             Status::Running if newest => el.child(shimmer(&line.title, now, self.epoch, cx)),
             Status::Error => el.text_color(rgb(theme::danger())).child(line.title.clone()),
+            Status::Input => el.text_color(rgb(theme::warning())).child(line.title.clone()),
             Status::Pending => el.text_color(rgb(muted)).child(line.title.clone()),
             _ => el.child(line.title.clone()),
         });
@@ -837,34 +897,95 @@ impl AgentPane {
                 this.flip(format!("det:{detail_key}"), group.clone(), open, cx);
                 cx.notify();
             }))
-            .child(div().w(px(16.0)).flex_none().flex().justify_center().child(glyph))
+            .child(div().relative().w(px(16.0)).flex_none().flex().justify_center().children(old).child(glyph))
             .child(title)
             .child(div().flex_1())
-            .children(line.desc.clone().map(|d| {
-                div()
-                    .flex_none()
-                    .max_w(relative(0.5))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(12.0))
-                    .text_color(rgb(muted))
-                    .child(d)
-            }))
+            .children(line.desc.clone().map(|d| if line.clock { self.times.elapsed(&key, self.now()).map_or(d, transcript::short) } else { d }).map(
+                |d| {
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.5))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.0))
+                        .font_features(tabular())
+                        .text_color(rgb(muted))
+                        .child(d)
+                },
+            ))
             .when(has_detail, |el| el.child(chevron(openness, 12.0, muted)))
             .children(reveal.map(|block| {
                 icon_button(gpui::ElementId::Name(format!("reveal-{key}").into()), "arrow-up-right", 12.0, 20.0, muted)
-                    .tooltip(Tooltip::text("Show block"))
+                    .tooltip(Tooltip::text("Open"))
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         cx.emit(AgentPaneEvent::Reveal(block.clone()));
                     }))
+            }))
+            .children(line.stop.clone().map(|block| {
+                icon_button(gpui::ElementId::Name(format!("stop-{key}").into()), "stop", 12.0, 20.0, muted).tooltip(Tooltip::text("Stop")).on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(AgentPaneEvent::Stop(block.clone()));
+                    }),
+                )
+            }))
+            .children(line.session.clone().map(|session| {
+                icon_button(gpui::ElementId::Name(format!("open-{key}").into()), "arrow-up-right", 12.0, 20.0, muted)
+                    .tooltip(Tooltip::text("Open sub-agent"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_session_block(session.clone(), cx);
+                    }))
             }));
-        let stream = line.stream.as_ref().filter(|s| !s.trim().is_empty()).map(|s| {
+        // Streaming reasoning eases its height to what it measured as it grows, and folds away once it ends.
+        let tail = line.stream.as_ref().filter(|s| !s.trim().is_empty()).map(|s| {
             let tail: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-            let tail = tail[tail.len().saturating_sub(4)..].join("\n");
-            div().pl(px(24.0)).pb(px(4.0)).text_size(px(12.0)).line_height(px(18.0)).text_color(rgb(muted)).opacity(0.8).child(tail)
+            tail[tail.len().saturating_sub(4)..].join("\n")
         });
+        if let Some(text) = tail {
+            let s = self.streams.entry(key.clone()).or_insert_with(|| Stream {
+                text: String::new(),
+                live: true,
+                height: motion::Glide::new(motion::UI),
+                measured: std::rc::Rc::default(),
+            });
+            (s.text, s.live) = (text, true);
+        } else if let Some(s) = self.streams.get_mut(&key) {
+            s.live = false;
+        }
+        let reduce = cx.reduce_motion();
+        let stream = self.streams.get_mut(&key).map(|s| {
+            let natural = s.measured.get();
+            s.height.target(if s.live { natural } else { 0.0 }, now, reduce);
+            let h = s.height.value(now, reduce);
+            let moving = s.height.moving(now, reduce);
+            if moving {
+                MOVING.set(true);
+            }
+            let fade = if s.live { 1.0 } else { (h / natural.max(1.0)).clamp(0.0, 1.0) };
+            let measured = s.measured.clone();
+            let body = div()
+                .flex_none()
+                .relative()
+                .pl(px(24.0))
+                .pb(px(4.0))
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(rgb(muted))
+                .child(s.text.clone())
+                .child(gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+            let el = div().h(px(h)).overflow_hidden().flex().flex_col().opacity(0.8 * fade).child(body);
+            (el, !s.live && !moving)
+        });
+        let stream = match stream {
+            Some((_, true)) => {
+                self.streams.remove(&key);
+                None
+            }
+            other => other.map(|(el, _)| el),
+        };
         let detail = (openness > 0.0)
             .then(|| line.detail.as_ref().map(|d| render_detail(&key, d)))
             .flatten()
@@ -944,8 +1065,10 @@ impl AgentPane {
             .notice
             .clone()
             .map(|n| div().pb(px(8.0)).px(px(pill_input::HALO + pill_input::TEXT_X)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
-        let popovers: Vec<AnyElement> =
-            [Overlay::Agents, Overlay::Models, Overlay::Menu, Overlay::Slash].into_iter().filter_map(|o| self.popover(o, window, cx)).collect();
+        let popovers: Vec<AnyElement> = [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Menu, Overlay::Slash]
+            .into_iter()
+            .filter_map(|o| self.popover(o, window, cx))
+            .collect();
         div()
             .flex_none()
             .w_full()
@@ -1085,42 +1208,7 @@ impl AgentPane {
         let mut bars: Vec<Bar> = Vec::new();
         let text = |s: String| div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(fg)).child(s);
 
-        let subagents: Vec<(String, String, bool)> =
-            self.subagents().into_iter().map(|s| (s.agent.clone(), s.title.clone(), s.status == SessionStatus::WaitingApproval)).collect();
-        if !subagents.is_empty() {
-            let n = subagents.len();
-            let first = subagents[0].1.clone();
-            bars.push(Bar {
-                key: "subagents",
-                icon: icon("bot", 14.0, theme::accent()).into_any_element(),
-                label: "Sub-agents",
-                summary: (!first.is_empty()).then(|| text(first).into_any_element()),
-                note: format!("{n} running"),
-                open_label: "Sub-agents".into(),
-                open_note: format!("{n} running"),
-                rows: subagents
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (agent, title, waiting))| {
-                        div()
-                            .h(px(BAR_ROW))
-                            .px(px(14.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(div().w(px(14.0)).flex_none().flex().justify_center().child(if waiting {
-                                icon("lock", 13.0, theme::warning()).into_any_element()
-                            } else {
-                                crate::browser_pane::spinner(&format!("sub-{i}"), 12.0, muted, cx)
-                            }))
-                            .child(div().flex_none().text_color(rgb(muted)).child(agent.to_uppercase()))
-                            .child(text(if title.is_empty() { "Working".into() } else { title }))
-                            .child(div().flex_none().text_color(rgb(muted)).child(if waiting { "needs approval" } else { "running" }))
-                            .into_any_element()
-                    })
-                    .collect(),
-            });
-        }
+        bars.extend(self.subagent_bar(cx));
 
         if !self.todos.is_empty() {
             let (done, total) = transcript::progress(&self.todos);
@@ -1525,13 +1613,14 @@ impl AgentPane {
                 None => el.child("No model"),
             })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Models, window, cx)));
-        // Reasoning on (high effort) or off; only for models that reason.
+        // The effort menu; lit at any level but the default. Only for models that reason.
         let brain = reasons.then(|| {
-            let tip = match effort {
-                Some(Effort::None) => "Reasoning off".to_owned(),
-                Some(e) => format!("Reasoning: {}", effort_label(e)),
-                None => "Reasoning: model default".to_owned(),
-            };
+            // Read when drawn, so it follows a change made while the pointer stays on it.
+            let pane = cx.entity().downgrade();
+            let tip = Tooltip::live(move |cx| {
+                let effort = pane.upgrade().and_then(|p| p.read(cx).effort());
+                format!("Effort: {}", effort_label(effort)).into()
+            });
             div()
                 .id("agent-brain")
                 .size(px(22.0))
@@ -1542,11 +1631,10 @@ impl AgentPane {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover_fill()))
                 .active(|s| s.scale(0.92))
-                .tooltip(Tooltip::text(tip))
+                .when(self.overlay == Some(Overlay::Effort), |el| el.bg(theme::hover_fill()))
+                .tooltip(tip)
                 .child(icon("brain", 14.0, if thinking { violet() } else { muted }))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_effort((!thinking).then_some(Effort::High), cx);
-                }))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Effort, window, cx)))
         });
         let image = div()
             .id("agent-image")
@@ -1629,12 +1717,14 @@ impl AgentPane {
             Overlay::Projects => self.render_projects(window, cx),
             Overlay::Models => self.render_models(window, cx),
             Overlay::Agents => self.render_agents(cx),
+            Overlay::Effort => self.render_efforts(cx),
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),
         };
         let width = match which {
             Overlay::Sessions | Overlay::Projects => 440.0,
             Overlay::Models => 340.0,
+            Overlay::Effort => 260.0,
             Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
         };
         let below = matches!(which, Overlay::Sessions | Overlay::Projects);
@@ -1671,6 +1761,8 @@ impl AgentPane {
             .flex()
             .map(|el| match which {
                 Overlay::Models => el.justify_center(),
+                // Above the brain, at the composer's right.
+                Overlay::Effort => el.justify_end().pr(px(pill_input::HALO)),
                 Overlay::Sessions | Overlay::Projects => el,
                 _ => el.pl(px(pill_input::HALO)),
             })
@@ -1899,6 +1991,26 @@ impl AgentPane {
             .child(list)
             .when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step")))
             .into_any_element()
+    }
+
+    fn render_efforts(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.effort();
+        let mut list = div().id("agent-efforts").flex().flex_col();
+        for (i, effort) in super::EFFORTS.into_iter().enumerate() {
+            let checked = effort == current;
+            let row = rows::row(
+                ("agent-effort", i),
+                i == self.selected,
+                Some(rows::lead("brain", checked)),
+                effort_label(effort),
+                Some(div().child(effort_about(effort)).into_any_element()),
+                checked.then(rows::check),
+            );
+            list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.activate_choice(i, window, cx);
+            })));
+        }
+        list.when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step"))).into_any_element()
     }
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {

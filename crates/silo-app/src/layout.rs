@@ -443,7 +443,8 @@ impl Workspace {
         let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
         let glyph = self.block_icon(id);
         // An agent on its chat screen: the session title opens the switcher,
-        // and History / New Session join the pane buttons.
+        // and History / New Session join the pane buttons (not on a sub-agent:
+        // its strip leads back to the main agent instead).
         let agent = self.agents.get(id).map(|(p, _)| p.clone());
         let session = agent.as_ref().and_then(|p| p.read(cx).header_title());
         let (name, cwd) = match browser {
@@ -493,7 +494,7 @@ impl Workspace {
                 this.close_block_id(block.clone(), window, cx);
             })
         };
-        let session_controls = session.is_some().then(|| agent.clone()).flatten().map(|pane| {
+        let session_controls = session.is_some().then(|| agent.clone()).flatten().filter(|p| !p.read(cx).is_subagent()).map(|pane| {
             let (p1, p2, p3) = (pane.clone(), pane.clone(), pane);
             let title = div()
                 .id(gpui::ElementId::Name(format!("pane-agent-title-{id}").into()))

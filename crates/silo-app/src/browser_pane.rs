@@ -1849,7 +1849,7 @@ impl crate::workspace::Workspace {
 
 fn browser_split(block: String, axis: silo_proto::model::Axis, url: Option<String>) -> Method {
     let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url }
+    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url, agent: None }
 }
 
 /// Page chords ([`page_chord`]), intercepted ahead of the keymap and the page.

@@ -116,6 +116,48 @@ impl Toggle {
     }
 }
 
+/// A height easing toward a target that changes over time (a measured
+/// content height): each new target starts from the current value, so it
+/// never jumps. The first target is taken as is.
+#[derive(Clone, Copy, Debug)]
+pub struct Glide {
+    from: f32,
+    to: Option<f32>,
+    at: Option<Instant>,
+    duration: Duration,
+}
+
+impl Glide {
+    pub const fn new(duration: Duration) -> Self {
+        Self { from: 0.0, to: None, at: None, duration }
+    }
+
+    /// Ease toward `to` from wherever it is; sub-pixel changes are ignored.
+    pub fn target(&mut self, to: f32, now: Instant, reduce: bool) {
+        match self.to {
+            None => (self.from, self.to) = (to, Some(to)),
+            Some(old) if (old - to).abs() >= 0.5 => {
+                self.from = self.value(now, reduce);
+                self.to = Some(to);
+                self.at = Some(now);
+            }
+            Some(_) => {}
+        }
+    }
+
+    pub fn value(&self, now: Instant, reduce: bool) -> f32 {
+        let to = self.to.unwrap_or(self.from);
+        match self.at.and_then(|at| enter(at, self.duration, now, reduce)) {
+            Some(p) => self.from + (to - self.from) * p,
+            None => to,
+        }
+    }
+
+    pub fn moving(&self, now: Instant, reduce: bool) -> bool {
+        self.at.is_some_and(|at| enter(at, self.duration, now, reduce).is_some())
+    }
+}
+
 /// `SILO_MOTION_SLOWDOWN=10` stretches every animation, for inspecting
 /// intermediate frames in UI tests.
 fn slowdown() -> f32 {
@@ -439,6 +481,27 @@ mod tests {
         assert!(t.value(now, false) < 0.01 && t.moving(now, false));
         assert!((t.value(now + Duration::from_secs(60), false) - 1.0).abs() < 1e-6);
         assert!((t.value(now, true) - 1.0).abs() < 1e-6, "reduce motion: instant");
+    }
+
+    #[test]
+    fn glide_eases_from_where_it_is() {
+        let now = Instant::now();
+        let mut g = Glide::new(UI);
+        g.target(18.0, now, false);
+        assert!((g.value(now, false) - 18.0).abs() < 1e-6 && !g.moving(now, false), "first target: no motion");
+        g.target(36.0, now, false);
+        assert!((g.value(now, false) - 18.0).abs() < 1e-3 && g.moving(now, false), "starts from the old height");
+        let mid = now + UI / 2;
+        let at_mid = g.value(mid, false);
+        assert!(at_mid > 18.0 && at_mid < 36.0);
+        // A new target mid-way continues from the current value.
+        g.target(0.0, mid, false);
+        assert!((g.value(mid, false) - at_mid).abs() < 1e-3);
+        assert!(g.value(mid + UI, false).abs() < 1e-6);
+        g.target(0.2, mid + UI, false);
+        assert!(!g.moving(mid + UI, false), "sub-pixel changes do not move");
+        g.target(50.0, mid + UI, true);
+        assert!((g.value(mid + UI, true) - 50.0).abs() < 1e-6, "reduce motion: instant");
     }
 
     #[test]

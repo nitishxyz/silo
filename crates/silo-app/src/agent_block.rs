@@ -4,8 +4,8 @@
 use gpui::AppContext as _;
 use silo_proto::{
     agent::BlockReportParams,
-    control::{BlockView, Created, Method, SpawnSpec},
-    model::{BlockKind, StatusKind, StatusState},
+    control::{BlockView, Created, Method, Reveal, SpawnSpec},
+    model::{AgentState, BlockInfo, BlockKind, StatusKind, StatusState},
 };
 
 use crate::agent::{AgentPane, AgentPaneEvent, AgentStatus};
@@ -63,6 +63,10 @@ impl crate::workspace::Workspace {
                 }
                 AgentPaneEvent::Status(status) => this.call(report(block, *status)),
                 AgentPaneEvent::Reveal(target) => this.reveal_agent_target(target.clone(), window, cx),
+                AgentPaneEvent::Stop(target) => this.call(Method::BlockClose { block_id: target.clone(), force: true }),
+                AgentPaneEvent::OpenSession { session_id, title } => {
+                    this.open_agent_session(block, session_id.clone(), title.clone(), window, cx);
+                }
                 AgentPaneEvent::Header => {}
             }
             cx.notify();
@@ -74,18 +78,27 @@ impl crate::workspace::Workspace {
         self.agents.iter().find(|(_, (p, _))| p.read(cx).focus.contains_focused(window, cx)).map(|(id, _)| id.clone())
     }
 
-    /// Jump to `block` named by a tool call, in whichever session holds it.
+    /// Jump to `block` named by a tool call, in whichever session holds it;
+    /// a parked block (a command, a hidden terminal) floats in first.
     fn reveal_agent_target(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let host = self.active_host;
-        if let Some(view) = self.view.as_ref().filter(|v| v.blocks.iter().any(|b| b.id == block)) {
+        let parked = self.view.as_ref().is_some_and(|v| v.session.parked.iter().any(|p| p.id == block));
+        if !parked && let Some(view) = self.view.as_ref().filter(|v| v.blocks.iter().any(|b| b.id == block)) {
             let session = view.session.id.clone();
             return self.reveal_block(host, Some(session), Some(block), window, cx);
         }
         let Some(control) = self.control() else { return };
         let id = block.clone();
-        let task = self.rt.spawn(async move { control.call::<BlockView>(Method::BlockView { block_id: id }).await });
+        let task = self.rt.spawn(async move {
+            // Not parked (or no longer): `bad_request`, and it is shown where it is.
+            let _ = control.call_value(Method::BlockReveal { block_id: id.clone(), reveal: Reveal::Float }).await;
+            control.call::<BlockView>(Method::BlockView { block_id: id }).await
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(view)) = task.await else { return };
+            let Ok(Ok(view)) = task.await else {
+                let _ = this.update(cx, |this, cx| this.flash(crate::status::Status::warning("That block has closed"), cx));
+                return;
+            };
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.active_host == host {
                     this.reveal_block(host, Some(view.block.session_id), Some(block), window, cx);
@@ -95,11 +108,29 @@ impl crate::workspace::Workspace {
         .detach();
     }
 
+    /// Show otto session `session` (a sub-agent, or its parent): focus the
+    /// block already showing it, else split a new agent block beside `block`
+    /// in its folder, showing it.
+    fn open_agent_session(&mut self, block: String, session: String, title: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let host = self.active_host;
+        if let Some(view) = &self.view
+            && let Some(shown) = showing(&view.blocks, &session)
+        {
+            let silo_session = view.session.id.clone();
+            return self.reveal_block(host, Some(silo_session), Some(shown), window, cx);
+        }
+        let spawn = SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
+        let axis = self.auto_axis(&block);
+        // The block shows the session from its first frame.
+        let agent = Some(AgentState { session_id: Some(session), title });
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent }, cx);
+    }
+
     /// New Agent: an agent block beside `block` in its cwd, composer focused.
     pub(crate) fn new_agent(&mut self, block: String, cx: &mut gpui::Context<Self>) {
         let spawn = SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(&block);
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent: None }, cx);
     }
 
     /// New Agent Tab: a tab holding an agent block in the focused block's cwd.
@@ -135,6 +166,14 @@ impl crate::workspace::Workspace {
     }
 }
 
+/// The agent block showing otto session `session`, if any.
+fn showing(blocks: &[BlockInfo], session: &str) -> Option<String> {
+    blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::Agent && b.agent.as_ref().and_then(|a| a.session_id.as_deref()) == Some(session))
+        .map(|b| b.id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +190,21 @@ mod tests {
         assert_eq!(kinds(AgentStatus::Blocked { question: true }), (StatusState::Blocked, Some(StatusKind::Question)));
         assert_eq!(kinds(AgentStatus::Done), (StatusState::Done, None));
         assert_eq!(kinds(AgentStatus::Error), (StatusState::Error, None));
+    }
+
+    #[test]
+    fn an_open_session_is_found_by_its_agent_block() {
+        let block = |id: &str, kind: &str, session: Option<&str>| -> BlockInfo {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "session_id": "s", "kind": kind, "title": "", "size": {"columns": 80, "rows": 24},
+                "agent": (kind == "agent").then(|| serde_json::json!({"session_id": session, "title": ""})),
+            }))
+            .unwrap()
+        };
+        let blocks =
+            [block("b1", "terminal", None), block("b2", "agent", None), block("b3", "agent", Some("child")), block("b4", "agent", Some("main"))];
+        assert_eq!(showing(&blocks, "child").as_deref(), Some("b3"));
+        assert_eq!(showing(&blocks, "main").as_deref(), Some("b4"));
+        assert_eq!(showing(&blocks, "other"), None);
     }
 }

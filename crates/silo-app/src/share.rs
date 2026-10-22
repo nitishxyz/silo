@@ -132,6 +132,7 @@ pub async fn block_view(control: &Control, block: String) -> anyhow::Result<Sess
         windows: vec![window],
         revision: 0,
         created_at: 0,
+        parked: Vec::new(),
     };
     Ok(SessionView { session, blocks: vec![view.block], status: view.status.into_iter().collect(), watchers: Vec::new() })
 }

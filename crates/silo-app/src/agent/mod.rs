@@ -12,6 +12,7 @@ mod markdown;
 mod pill_input;
 mod rows;
 mod signin;
+mod subagents;
 mod transcript;
 mod view;
 
@@ -60,8 +61,16 @@ pub enum AgentPaneEvent {
         cwd: String,
     },
     Status(AgentStatus),
-    /// Jump to a silo block named by a tool call.
+    /// Jump to a silo block named by a tool call; a parked one is revealed as a float.
     Reveal(String),
+    /// Stop a command by closing its block.
+    Stop(String),
+    /// Show this otto session in its own agent block: the one already showing
+    /// it, else a new one split beside this pane (a sub-agent, or its parent).
+    OpenSession {
+        session_id: String,
+        title: String,
+    },
     /// [`AgentPane::header_title`] changed: redraw the pane header.
     Header,
 }
@@ -81,6 +90,8 @@ enum Overlay {
     Projects,
     Models,
     Agents,
+    /// Reasoning effort, from the brain.
+    Effort,
     Menu,
     /// Slash commands, typed into the composer.
     Slash,
@@ -92,6 +103,7 @@ enum SlashAct {
     Sessions,
     Model,
     Agent,
+    Effort,
     Mode(ApprovalMode),
     Providers,
     Clear,
@@ -104,10 +116,11 @@ struct SlashCommand {
     act: SlashAct,
 }
 
-const SLASH: [SlashCommand; 9] = [
+const SLASH: [SlashCommand; 10] = [
     SlashCommand { name: "new", about: "Start a new session", icon: "new-session", act: SlashAct::New },
     SlashCommand { name: "sessions", about: "Switch to another session", icon: "history", act: SlashAct::Sessions },
     SlashCommand { name: "model", about: "Choose the model", icon: "bot", act: SlashAct::Model },
+    SlashCommand { name: "effort", about: "Choose the reasoning effort", icon: "brain", act: SlashAct::Effort },
     SlashCommand { name: "agent", about: "Choose the agent", icon: "agent", act: SlashAct::Agent },
     SlashCommand { name: "mode auto", about: "Run tools without asking", icon: "lock-off", act: SlashAct::Mode(ApprovalMode::Auto) },
     SlashCommand { name: "mode ask", about: "Ask before changes", icon: "lock", act: SlashAct::Mode(ApprovalMode::AskOnEffects) },
@@ -135,6 +148,9 @@ fn slash_matches(query: &str) -> Vec<&'static SlashCommand> {
 
 /// The ⋮ menu's rows, in order.
 const MENU_ROWS: usize = 6;
+
+/// The effort menu's rows; `None` is the default (the agent's, else the model's).
+const EFFORTS: [Option<Effort>; 5] = [None, Some(Effort::Low), Some(Effort::Medium), Some(Effort::High), Some(Effort::Max)];
 
 /// The card above the composer (kept while it animates away).
 #[derive(Clone)]
@@ -210,6 +226,8 @@ pub struct AgentPane {
     error: Option<String>,
     /// A request failed (prompt, approval, …); shown above the composer.
     notice: Option<String>,
+    /// The composer's text was just put back after a failed send (its change keeps the notice).
+    restored: bool,
     rows: Vec<Row>,
     /// The transcript as otto has it (`rows` adds the optimistic bubble).
     built: Vec<Row>,
@@ -264,9 +282,9 @@ pub struct AgentPane {
     /// Bars above the composer by key: expanded motion, and when each appeared.
     bars: HashMap<&'static str, crate::motion::Toggle>,
     bar_shown: HashMap<&'static str, Instant>,
-    /// Subagent calls seen, and when the session list was last refreshed for them.
+    /// Subagent calls seen (the session list is refreshed when they change).
     subagent_calls: usize,
-    sessions_at: Option<Instant>,
+    subs: subagents::Subs,
     /// The send circle lights up when there is something to send.
     send_ready: crate::motion::Toggle,
     /// The activity row at the transcript's end (`Thinking…` + Stop).
@@ -279,8 +297,10 @@ pub struct AgentPane {
     anims: HashMap<String, (String, crate::motion::Toggle)>,
     /// The `↓ New activity` pill.
     unseen_anim: crate::motion::Toggle,
-    /// Last status of each line and when it changed (the icon swaps in).
-    line_status: HashMap<String, (transcript::Status, Instant)>,
+    /// Last status of each line, when it changed and the one before it (the icons crossfade).
+    line_status: HashMap<String, (transcript::Status, Instant, Option<transcript::Status>)>,
+    /// Streaming reasoning under a `Thinking` line: eases its height as it grows and when it ends.
+    streams: HashMap<String, view::Stream>,
     /// What the body shows (connecting, sign-in, empty, transcript…) and since when.
     body_mode: (u8, Option<Instant>),
     /// When the running turn was first seen (pane ms).
@@ -348,6 +368,7 @@ impl AgentPane {
             state: None,
             error: None,
             notice: None,
+            restored: false,
             rows: Vec::new(),
             built: Vec::new(),
             optimistic: None,
@@ -386,7 +407,7 @@ impl AgentPane {
             bars: HashMap::new(),
             bar_shown: HashMap::new(),
             subagent_calls: 0,
-            sessions_at: None,
+            subs: subagents::Subs::default(),
             send_ready: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             activity: crate::motion::Toggle::new(false, crate::motion::UI),
             bottom_shown: crate::motion::Toggle::new(false, crate::motion::UI),
@@ -395,6 +416,7 @@ impl AgentPane {
             anims: HashMap::new(),
             unseen_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             line_status: HashMap::new(),
+            streams: HashMap::new(),
             body_mode: (0, None),
             running_since: None,
             running: false,
@@ -522,11 +544,7 @@ impl AgentPane {
     {
         let task = self.rt.spawn(async move {
             let connection = client::connection().await?;
-            let result = work(connection).await;
-            if let Err(error) = &result {
-                client::forget(error).await;
-            }
-            result
+            work(connection).await
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -562,6 +580,7 @@ impl AgentPane {
                     this.catalog = Some(catalog);
                     this.project = Some(project);
                     this.sessions = sessions;
+                    this.watch_sessions(cx);
                     if first || this.follower.is_none() {
                         this.follow(cx);
                     }
@@ -589,12 +608,13 @@ impl AgentPane {
         self.run(
             cx,
             move |c| async move { c.session_list(Some(project), false).await },
-            move |this, result, _| {
+            move |this, result, cx| {
                 if let Ok(mut sessions) = result
                     && this.project.as_ref().is_some_and(|p| p.id == asked)
                 {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
                     this.sessions = sessions;
+                    this.track_subagents(cx);
                 }
             },
         );
@@ -625,6 +645,7 @@ impl AgentPane {
         self.details.clear();
         self.anims.clear();
         self.line_status.clear();
+        self.streams.clear();
         self.card = None;
         self.card_anim = crate::motion::Toggle::new(false, crate::motion::UI);
         self.marks = None;
@@ -632,6 +653,7 @@ impl AgentPane {
         self.usage_seen = None;
         self.context = None;
         self.title.clear();
+        self.reset_subagents();
         self.update = Update::default();
         self.set_running(false);
         // A prompt that is creating this session keeps its bubble.
@@ -730,13 +752,11 @@ impl AgentPane {
             now,
         });
         let todos = transcript::todos(&m.items, &m.tools, &self.times);
-        // Subagents are child sessions: their status comes from the session list.
+        // Subagents are child sessions: their status comes from the session list
+        // (refreshed on otto's `sessions.changed` too).
         let calls = m.tools.values().filter(|t| t.name == "subagent").count();
-        let stale = self.sessions_at.is_none_or(|at| at.elapsed() > SUBAGENT_POLL);
-        let busy = self.running != running || (stale && (running && calls > 0 || !self.subagents().is_empty()));
-        if calls != self.subagent_calls || busy {
+        if calls != self.subagent_calls || self.running != running {
             self.subagent_calls = calls;
-            self.sessions_at = Some(Instant::now());
             self.refresh_sessions(cx);
         }
         self.todos = todos;
@@ -747,6 +767,10 @@ impl AgentPane {
             self.sent_at = None;
         }
         let status = transcript::agent_status(m.turn.map(|t| t.1), m.info.status, !m.pending_approvals.is_empty(), !m.pending_questions.is_empty());
+        // A command waiting for input in its block needs the user once the turn is over.
+        let input = || self.built.iter().any(|r| matches!(r, Row::Group(g) if g.lines.iter().any(|l| l.status == transcript::Status::Input)));
+        let status =
+            if matches!(status, AgentStatus::Done | AgentStatus::Idle) && input() { AgentStatus::Blocked { question: false } } else { status };
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
         self.set_status(status, cx);
         self.set_running(running);
@@ -774,31 +798,48 @@ impl AgentPane {
     fn sync_rows(&mut self, rows: Vec<Row>) {
         let now = Instant::now();
         let old = std::mem::replace(&mut self.rows, rows);
-        let same = old.iter().zip(&self.rows).take_while(|(a, b)| a == b).count();
-        if same < old.len() || same < self.rows.len() {
-            self.list.splice(same..old.len(), self.rows.len() - same);
-            if !self.list.is_following_tail() && self.primed {
-                self.unseen = true;
-            }
+        // A row that changed in place (a live group's new line) is remeasured: a splice would drop the scroll anchor.
+        let change = transcript::list_change(&old, &self.rows);
+        let changed = !change.remeasure.is_empty() || change.splice.is_some();
+        if !change.remeasure.is_empty() {
+            self.list.remeasure_items(change.remeasure);
+        }
+        if let Some((range, count)) = change.splice {
+            self.list.splice(range, count);
+        }
+        if changed && !self.list.is_following_tail() && self.primed {
+            self.unseen = true;
         }
         let primed = self.primed;
+        // A live group taking the activity row's place keeps its header where the row was: it doesn't
+        // enter, the row hides at once and only the group's lines ease in below it.
+        let handoff = (primed && self.activity.on())
+            .then(|| match self.rows.last() {
+                Some(Row::Group(g)) if g.live && !old.iter().any(|o| o.key() == g.key) => Some(g.key.clone()),
+                _ => None,
+            })
+            .flatten();
+        if primed {
+            for key in transcript::arrivals(&old, &self.rows, |k| self.entered.contains_key(k)) {
+                if handoff.as_ref() != Some(&key) {
+                    self.entered.insert(key, now);
+                }
+            }
+        }
+        if handoff.is_some() {
+            self.activity = crate::motion::Toggle::new(false, crate::motion::UI);
+        }
         let mut stream = None;
         for row in &self.rows {
-            if primed && !self.entered.contains_key(row.key()) && !old.iter().any(|o| o.key() == row.key()) {
-                self.entered.insert(row.key().to_owned(), now);
-            }
             match row {
                 Row::Group(g) if g.live => {
                     self.live_groups.insert(g.key.clone());
-                    for line in &g.lines {
-                        if primed && !self.entered.contains_key(&line.key) {
-                            self.entered.insert(line.key.clone(), now);
-                        }
-                    }
                 }
                 Row::Group(g) => {
                     if self.live_groups.remove(&g.key) {
                         self.fold_at.insert(g.key.clone(), now + FOLD_DELAY);
+                        // Folded lines never stream again.
+                        self.streams.retain(|k, _| !g.lines.iter().any(|l| l.key == *k));
                     }
                 }
                 Row::Text { key, text, streaming: true } => stream = Some((key.clone(), text.len())),
@@ -827,7 +868,7 @@ impl AgentPane {
     fn editor_event(&mut self, event: &EditorEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             EditorEvent::Submit => {
-                if matches!(self.overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Menu)) && self.overlay_count(cx) > 0 {
+                if matches!(self.overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Effort | Overlay::Menu)) && self.overlay_count(cx) > 0 {
                     self.activate_choice(self.selected, window, cx);
                 } else {
                     self.set_overlay(None, cx);
@@ -847,7 +888,10 @@ impl AgentPane {
                 }
             }
             EditorEvent::Changed => {
-                self.notice = None;
+                // A draft put back after a failed send keeps the notice saying why.
+                if !std::mem::take(&mut self.restored) {
+                    self.notice = None;
+                }
                 self.sync_slash(cx);
             }
             EditorEvent::Nav(nav) => {
@@ -898,6 +942,7 @@ impl AgentPane {
             SlashAct::Sessions => self.open_overlay(Overlay::Sessions, window, cx),
             SlashAct::Model => self.open_overlay(Overlay::Models, window, cx),
             SlashAct::Agent => self.open_overlay(Overlay::Agents, window, cx),
+            SlashAct::Effort => self.open_overlay(Overlay::Effort, window, cx),
             SlashAct::Mode(mode) => self.set_mode(mode, cx),
             SlashAct::Providers => self.open_signin(window, cx),
         }
@@ -918,6 +963,7 @@ impl AgentPane {
             Some(Overlay::Projects) => self.project_choices(cx).len() + 1,
             Some(Overlay::Models) => self.model_choices(cx).len(),
             Some(Overlay::Agents) => self.agent_choices().len(),
+            Some(Overlay::Effort) => EFFORTS.len(),
             Some(Overlay::Menu) => MENU_ROWS,
             Some(Overlay::Slash) => self.slash_choices(cx).len(),
             None => 0,
@@ -938,7 +984,7 @@ impl AgentPane {
             self.overlay_anim.set(false, now, reduce);
         }
         self.overlay = overlay;
-        let nav = matches!(overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Menu));
+        let nav = matches!(overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Effort | Overlay::Menu));
         self.editor.update(cx, |e, _| e.nav = nav);
         cx.notify();
     }
@@ -1093,11 +1139,7 @@ impl AgentPane {
                         this.show_rows();
                     }
                     Ok(_) => {}
-                    Err(error) => {
-                        this.notice = Some(error);
-                        this.unsend(&text);
-                        this.editor.update(cx, |e, cx| e.set_text(text, cx));
-                    }
+                    Err(error) => this.unsend(text, error, cx),
                 },
             );
             return;
@@ -1127,23 +1169,23 @@ impl AgentPane {
                     this.follow(cx);
                     this.refresh_sessions(cx);
                 }
-                Err(error) => {
-                    this.notice = Some(error);
-                    this.unsend(&text);
-                    this.editor.update(cx, |e, cx| e.set_text(text, cx));
-                }
+                Err(error) => this.unsend(text, error, cx),
             },
         );
     }
 
-    /// A send failed: its optimistic feedback goes.
-    fn unsend(&mut self, text: &str) {
+    /// A send failed: its optimistic feedback goes, the draft returns to the
+    /// composer and the notice says why.
+    fn unsend(&mut self, text: String, error: String, cx: &mut Context<Self>) {
         self.steers.retain(|s| s.text != text);
         if self.optimistic.as_ref().is_some_and(|p| p.text == text) {
             self.optimistic = None;
             self.sent_at = None;
             self.show_rows();
         }
+        self.notice = Some(error);
+        self.restored = true;
+        self.editor.update(cx, |e, cx| e.set_text(text, cx));
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
@@ -1245,7 +1287,7 @@ impl AgentPane {
         self.update_session(otto_client::SessionUpdate { agent: Some(agent), ..Default::default() }, cx);
     }
 
-    /// The brain button: high effort, or `None` for the default (the agent's, else the model's).
+    /// The effort menu: a level, or `None` for the default (the agent's, else the model's).
     pub(super) fn set_effort(&mut self, effort: Option<Effort>, cx: &mut Context<Self>) {
         if self.updatable().is_none() {
             self.choice.effort = effort;
@@ -1343,17 +1385,6 @@ impl AgentPane {
         self.focus_composer(window, cx);
     }
 
-    /// Running subagents of the shown session (child sessions still busy).
-    fn subagents(&self) -> Vec<&SessionInfo> {
-        let Some(id) = self.session_id.as_deref() else { return Vec::new() };
-        self.sessions
-            .iter()
-            .filter(|s| {
-                s.parent_id.as_deref() == Some(id) && matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)
-            })
-            .collect()
-    }
-
     /// Leaving the shown session: its in-flight feedback stays with it.
     fn forget_sends(&mut self) {
         self.optimistic = None;
@@ -1368,7 +1399,9 @@ impl AgentPane {
             return;
         }
         self.set_overlay(Some(overlay), cx);
-        self.selected = first_choice(overlay);
+        // The effort menu opens on the current level.
+        self.selected =
+            if overlay == Overlay::Effort { EFFORTS.iter().position(|e| *e == self.effort()).unwrap_or(0) } else { first_choice(overlay) };
         self.filter.update(cx, |f, cx| f.replace_text("", cx));
         match overlay {
             Overlay::Sessions => {
@@ -1396,7 +1429,7 @@ impl AgentPane {
                 let focus = self.filter.read(cx).focus.clone();
                 window.focus(&focus, cx);
             }
-            Overlay::Agents | Overlay::Menu | Overlay::Slash => self.focus_composer(window, cx),
+            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash => self.focus_composer(window, cx),
         }
         cx.notify();
     }
@@ -1456,6 +1489,12 @@ impl AgentPane {
             Some(Overlay::Agents) => {
                 if let Some((name, _)) = self.agent_choices().into_iter().nth(index) {
                     self.set_agent(name, cx);
+                }
+                self.close_overlay(window, cx);
+            }
+            Some(Overlay::Effort) => {
+                if let Some(effort) = EFFORTS.get(index) {
+                    self.set_effort(*effort, cx);
                 }
                 self.close_overlay(window, cx);
             }
@@ -1570,9 +1609,6 @@ impl AgentPane {
 const OPTIMISTIC: &str = "optimistic-user";
 /// How long a send shows activity without otto confirming the turn.
 const AWAIT: Duration = Duration::from_secs(15);
-/// How often the session list is refreshed while subagents may run.
-const SUBAGENT_POLL: Duration = Duration::from_secs(3);
-
 /// An input sent but not yet in the transcript.
 struct Pending {
     text: String,

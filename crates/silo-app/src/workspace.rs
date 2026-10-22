@@ -1171,6 +1171,7 @@ impl Workspace {
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
             kind: BlockKind::Terminal,
             url: None,
+            agent: None,
         });
     }
 
@@ -1204,8 +1205,9 @@ impl Workspace {
         let cwd = self.cwd_of(&block, cx);
         let task = self.rt.spawn(async move {
             let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-            let created: Created =
-                control.call(Method::BlockSplit { block_id: anchor, axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None }).await?;
+            let created: Created = control
+                .call(Method::BlockSplit { block_id: anchor, axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None, agent: None })
+                .await?;
             if let Some(rect) = float {
                 control.call_value(Method::BlockFloat { block_id: created.block_id, rect: Some(rect) }).await?;
             }

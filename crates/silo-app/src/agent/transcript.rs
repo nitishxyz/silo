@@ -22,6 +22,8 @@ pub enum Status {
     Pending,
     /// Waiting for the user: an approval (`false`) or an answer (`true`).
     Waiting(bool),
+    /// A command waits for input in its terminal block ("Needs you").
+    Input,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,10 +86,16 @@ pub struct Line {
     pub detail: Option<Detail>,
     /// A silo block this tool call names (`↗`).
     pub reveal: Option<String>,
+    /// A running command's block: closing it stops the command.
+    pub stop: Option<String>,
+    /// The child session a subagent call names (`↗` opens it).
+    pub session: Option<String>,
     /// Streaming reasoning text, while it streams.
     pub stream: Option<String>,
     /// Files an edit touched (for the fold summary).
     pub files: Vec<String>,
+    /// `desc` is the call's running time: kept current while it shows.
+    pub clock: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,9 +126,47 @@ impl Row {
     }
 }
 
+/// How the transcript list changes from `old` to `new`: rows that kept their
+/// key and place are remeasured (the scroll stays anchored in them), only
+/// the rest is spliced.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ListChange {
+    pub remeasure: std::ops::Range<usize>,
+    /// The old range replaced, and how many rows replace it.
+    pub splice: Option<(std::ops::Range<usize>, usize)>,
+}
+
+#[must_use]
+pub fn list_change(old: &[Row], new: &[Row]) -> ListChange {
+    let same = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let at = same + old[same..].iter().zip(&new[same..]).take_while(|(a, b)| a.key() == b.key()).count();
+    let splice = (at < old.len() || at < new.len()).then(|| (at..old.len(), new.len() - at));
+    ListChange { remeasure: same..at, splice }
+}
+
+/// Keys showing for the first time: new rows and new lines of live groups.
+/// Whatever was `seen` keeps its entry time, so nothing enters twice.
+#[must_use]
+pub fn arrivals(old: &[Row], new: &[Row], seen: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in new {
+        if !seen(row.key()) && !old.iter().any(|o| o.key() == row.key()) {
+            out.push(row.key().to_owned());
+        }
+        if let Row::Group(g) = row
+            && g.live
+        {
+            out.extend(g.lines.iter().filter(|l| !seen(&l.key)).map(|l| l.key.clone()));
+        }
+    }
+    out
+}
+
 /// When the client saw a step start and finish, in ms since the pane's
 /// epoch. Items carry no timestamps, so durations exist only for steps
-/// seen live; a reloaded session has none.
+/// seen live; a reloaded session has none. Wall time: a call waiting for an
+/// approval or an answer is timed from when it was called, and a group's
+/// `Worked for` spans its steps (its live header shows the turn's clock).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     pub start: Option<u64>,
@@ -136,8 +182,6 @@ pub struct Times {
     primed: bool,
     /// Calls waiting for an approval (`false`) or an answer (`true`).
     waiting: HashMap<String, bool>,
-    /// Calls that stopped waiting in the latest observation.
-    released: HashSet<String>,
 }
 
 impl Times {
@@ -171,14 +215,9 @@ impl Times {
 
     fn see(&mut self, key: &str, known: bool, done: bool, now: u64) {
         let seq = self.seq;
-        let restart = self.waiting.contains_key(key) || self.released.contains(key);
         let span = self.spans.entry(key.to_owned()).or_insert(Span { start: known.then_some(now), end: None, seq });
         if span.seq == seq {
             self.seq += 1;
-        }
-        // A call is timed from when it may run, not from when it asked.
-        if restart && span.end.is_none() && span.start.is_some() {
-            span.start = Some(now);
         }
         if done && span.end.is_none() && span.start.is_some() {
             span.end = Some(now);
@@ -190,7 +229,6 @@ impl Times {
     /// calls with a pending approval (`false`) or question (`true`).
     pub fn observe(&mut self, items: &[Item], tools: &HashMap<String, ToolState>, running: bool, waiting: HashMap<String, bool>, now: u64) {
         let known = std::mem::replace(&mut self.primed, true);
-        self.released = self.waiting.keys().filter(|k| !waiting.contains_key(*k)).cloned().collect();
         self.waiting = waiting;
         let results = results(items);
         let pending = pending_tools(items, tools);
@@ -263,12 +301,65 @@ struct Ctx<'a> {
     times: &'a Times,
     now: u64,
     running: bool,
+    /// Background shell jobs that reported, by job id.
+    jobs: &'a HashMap<String, (JobEnd, String)>,
+}
+
+/// How a shell job (background, or answered after waiting for input) ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum JobEnd {
+    Exit(i64),
+    Stopped,
+    Failed,
+}
+
+/// Job reports delivered as system items (`Background shell <id> (…) exited
+/// with code N.` then its output): how each ended and the output.
+fn job_reports(items: &[Item]) -> HashMap<String, (JobEnd, String)> {
+    let mut jobs = HashMap::new();
+    for part in items.iter().filter(|i| i.role == Role::System).flat_map(|i| &i.parts) {
+        let Part::System { text } = part else { continue };
+        let (first, body) = text.split_once('\n').unwrap_or((text, ""));
+        let Some(id) = first.strip_prefix("Background shell ").and_then(|r| r.split_whitespace().next()) else { continue };
+        let end = match first.rfind(" exited with code ") {
+            Some(at) => first[at + 18..].trim_end_matches('.').parse().map_or(JobEnd::Failed, JobEnd::Exit),
+            None if first.contains(" was stopped") || first.contains(" was killed") => JobEnd::Stopped,
+            None => JobEnd::Failed,
+        };
+        jobs.insert(id.to_owned(), (end, body.to_owned()));
+    }
+    jobs
+}
+
+/// A shell call that became a job: its id, block and whether it waited for
+/// input, from the result's metadata or (loaded from history) its text.
+struct ShellJob {
+    id: String,
+    block: Option<String>,
+    waiting: bool,
+}
+
+fn shell_job(text: &str, meta: &Value) -> Option<ShellJob> {
+    if let Some(id) = meta["job_id"].as_str() {
+        let block = meta["block_id"].as_str().map(str::to_owned);
+        return Some(ShellJob { id: id.to_owned(), block, waiting: meta["status"] == "waiting_for_input" });
+    }
+    let word_after = |key: &str| text.split_once(key).and_then(|(_, r)| r.split([' ', ')', ',', ';']).next()).map(str::to_owned);
+    if text.starts_with("waiting_for_input:") {
+        return Some(ShellJob { id: word_after("(job ")?, block: word_after("to block "), waiting: true });
+    }
+    text.strip_prefix("Started ").map(|_| ShellJob {
+        id: word_after("Started ").unwrap_or_default(),
+        block: word_after(" in block "),
+        waiting: false,
+    })
 }
 
 #[must_use]
 pub fn build(input: &Input<'_>) -> Vec<Row> {
     let running = input.turn == Some(TurnStatus::Running);
-    let cx = Ctx { cwd: input.cwd, times: input.times, now: input.now, running };
+    let jobs = job_reports(input.items);
+    let cx = Ctx { cwd: input.cwd, times: input.times, now: input.now, running, jobs: &jobs };
     let results = results(input.items);
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
@@ -343,8 +434,11 @@ impl Line {
             status: Status::Done,
             detail: None,
             reveal: None,
+            stop: None,
+            session: None,
             stream: None,
             files: Vec::new(),
+            clock: false,
         }
     }
 }
@@ -497,6 +591,8 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     let meta = out.as_ref().map_or(&Value::Null, |o| &o.meta);
     let mut line = Line::new(call_id, Kind::Other);
     let mut failed = None;
+    // No detail from the result text (it only says where the result goes).
+    let mut quiet = false;
     let path = |key: &str| str_at(input, key).map(|p| rel(p, cx.cwd));
     let (kind, run, done, subject): (Kind, &str, &str, String) = match name {
         "read" => (Kind::Read, "Reading", "Read", path("path").unwrap_or_default()),
@@ -513,14 +609,61 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         "shell" => {
             let cmd = clip(str_at(input, "command").unwrap_or(""), 80);
             failed = Some(title("Failed to run", &cmd));
-            line.desc = match status {
-                Status::Error => meta["exit_code"].as_i64().map(|c| format!("exit {c}")).or_else(|| elapsed.map(short)),
-                Status::Running | Status::Done => elapsed.map(short),
-                Status::Pending | Status::Waiting(_) => None,
-            };
-            let progress: String = live.map(|t| t.progress.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-            if status == Status::Running && !progress.trim().is_empty() {
-                line.detail = Some(Detail::Mono(tail(&progress)));
+            let job = if status == Status::Done { shell_job(text, meta) } else { None };
+            let end = job.as_ref().and_then(|j| cx.jobs.get(&j.id));
+            match (job, end) {
+                // It ran on and reported (a background command, or one that waited for input).
+                (Some(_), Some((end, body))) => {
+                    status = if *end == JobEnd::Exit(0) { Status::Done } else { Status::Error };
+                    if *end == JobEnd::Stopped {
+                        failed = None;
+                    }
+                    line.desc = Some(match end {
+                        JobEnd::Exit(code) => format!("exit {code}"),
+                        JobEnd::Stopped => "stopped".into(),
+                        JobEnd::Failed => "failed".into(),
+                    });
+                    quiet = true;
+                    line.detail = (!body.trim().is_empty()).then(|| Detail::Mono(tail(body)));
+                }
+                (Some(job), None) => {
+                    status = if job.waiting { Status::Input } else { Status::Running };
+                    line.desc = Some(if job.waiting { cmd.clone() } else { "background".into() });
+                    // The screen it waits on, after the note for the model.
+                    let screen = text.split_once('\n').map_or("", |(_, s)| s);
+                    quiet = true;
+                    line.detail = (job.waiting && !screen.trim().is_empty()).then(|| Detail::Mono(tail(screen)));
+                    line.reveal.clone_from(&job.block);
+                    line.stop = job.block;
+                }
+                (None, _) => {
+                    // Stopped by the user (its block closed, or the turn stopped) or by its timeout.
+                    let marked = text.trim_end().rsplit('\n').next().and_then(|l| l.strip_prefix("[stopped: ")).map(|l| l.trim_end_matches(']'));
+                    let stop = match meta["termination"].as_str().or(marked) {
+                        Some("closed" | "cancelled") => Some("stopped"),
+                        Some(_) => Some("timed out"),
+                        None => None,
+                    };
+                    if stop == Some("stopped") {
+                        failed = None;
+                    }
+                    line.desc = match status {
+                        Status::Error => {
+                            stop.map(str::to_owned).or_else(|| meta["exit_code"].as_i64().map(|c| format!("exit {c}"))).or_else(|| elapsed.map(short))
+                        }
+                        Status::Running | Status::Done => elapsed.map(short),
+                        Status::Pending | Status::Waiting(_) | Status::Input => None,
+                    };
+                    let progress: String = live.map(|t| t.progress.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    if status == Status::Running && !progress.trim().is_empty() {
+                        line.detail = Some(Detail::Mono(tail(&progress)));
+                    }
+                    // A command block while it runs (it closes when the command ends).
+                    if status == Status::Running {
+                        line.reveal = live.and_then(|t| t.messages.iter().rev().find_map(|m| m.strip_prefix("block:"))).map(str::to_owned);
+                        line.stop.clone_from(&line.reveal);
+                    }
+                }
             }
             (Kind::Shell, "Running", "Ran", cmd)
         }
@@ -610,10 +753,14 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     if name.starts_with("terminal_") || name.starts_with("browser_") || name == "notify" {
         line.reveal = str_at(input, "block_id").map(str::to_owned).or_else(|| json_of(text)["block_id"].as_str().map(str::to_owned));
     }
+    if name == "subagent" {
+        line.session = str_at(input, "session_id").map(str::to_owned).or_else(|| json_of(text)["session_id"].as_str().map(str::to_owned));
+    }
     line.kind = kind;
     line.status = status;
     line.title = match (status, failed) {
         (Status::Error, Some(failed)) => failed,
+        (Status::Input, _) => "Needs you".to_owned(),
         // The card above the composer asks; the line says what waits.
         (Status::Waiting(question), _) => {
             line.desc = (!subject.is_empty()).then(|| clip(&subject, 60));
@@ -625,7 +772,8 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     if status == Status::Error && out.is_none() {
         line.desc = Some("interrupted".into());
     }
-    if line.detail.is_none() && !text.trim().is_empty() {
+    line.clock = status == Status::Running && line.desc.is_some() && line.desc == elapsed.map(short);
+    if !quiet && line.detail.is_none() && !text.trim().is_empty() {
         line.detail = Some(if status == Status::Error { Detail::Text(tail(text)) } else { Detail::Mono(tail(text)) });
     }
     line
@@ -1128,6 +1276,47 @@ mod tests {
     }
 
     #[test]
+    fn a_new_line_keeps_the_group_and_its_lines() {
+        let reason = Part::Reasoning { summary: None, text: Some("look".into()), opaque: None };
+        let mut items = vec![
+            user("u", "go"),
+            assistant("a", vec![reason, call("c1", "read", json!({"path": "/work/app/a.rs"}))]),
+            tool_item("t", vec![result("c1", "x", false)]),
+        ];
+        let mut times = Times::default();
+        span(&mut times, "a#0", 0, Some(900));
+        span(&mut times, "c1", 900, Some(1_000));
+        let before = build_rows(&items, &HashMap::new(), Some(TurnStatus::Running), &times, 1_000);
+        let mut entered: HashMap<String, u64> = HashMap::new();
+        for key in arrivals(&[], &before, |k| entered.contains_key(k)) {
+            entered.insert(key, 1);
+        }
+        assert_eq!(entered.len(), 4, "u, the group and its two lines");
+
+        items.push(assistant("b", vec![call("c2", "shell", json!({"command": "ls"}))]));
+        let mut tools = HashMap::new();
+        tools.insert(
+            "c2".to_owned(),
+            ToolState { name: "shell".into(), input: json!({"command": "ls"}), status: ToolStatus::Running, ..ToolState::default() },
+        );
+        span(&mut times, "c2", 1_100, None);
+        let after = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 1_200);
+        let (g0, g1) = (group_of(&before[1]), group_of(&after[1]));
+        assert_eq!(g0.key, g1.key, "the group stays one element");
+        assert_eq!(g1.lines[..2], g0.lines[..], "earlier lines are unchanged");
+        assert_eq!(arrivals(&before, &after, |k| entered.contains_key(k)), ["c2"], "only the new line enters");
+        // The group is remeasured in place, never spliced (which drops the scroll anchor).
+        assert_eq!(list_change(&before, &after), ListChange { remeasure: 1..2, splice: None });
+        assert_eq!(list_change(&after, &after), ListChange { remeasure: 2..2, splice: None });
+
+        // Text after the group: the group folds in place, the text is new.
+        items.push(assistant("c", vec![Part::text("Done.")]));
+        let done = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 1_300);
+        assert_eq!(list_change(&after, &done), ListChange { remeasure: 1..2, splice: Some((2..2, 1)) });
+        assert_eq!(arrivals(&after, &done, |k| entered.contains_key(k)), ["c#0"]);
+    }
+
+    #[test]
     fn fold_summary_counts_kinds() {
         let line = |kind, status, files: &[&str]| Line { status, files: files.iter().map(|f| (*f).to_owned()).collect(), ..Line::new("k", kind) };
         let lines = vec![
@@ -1148,7 +1337,7 @@ mod tests {
 
     #[test]
     fn tool_titles_and_descriptions() {
-        let cx = Ctx { cwd: Some("/work/app"), times: &Times::default(), now: 0, running: false };
+        let cx = Ctx { cwd: Some("/work/app"), times: &Times::default(), now: 0, running: false, jobs: &HashMap::new() };
         let ok = |text: &str| (text.to_owned(), false);
         let line = tool("s", "search", &json!({"pattern": "frozen-lockfile"}), None, Some(&ok("a.rs:1: x\nb.rs:2: y\n\n")), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Searched for frozen-lockfile", Some("2 results")));
@@ -1175,13 +1364,20 @@ mod tests {
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Asked Which branch?", Some("main")));
         let line = tool("d", "subagent", &json!({"action": "delegate", "task": "Review the diff", "agent": "plan"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Delegated Review the diff", Some("interrupted"), Status::Error));
+        // A subagent line names its child: from the delegate result, or the input of other actions.
+        let line =
+            tool("d", "subagent", &json!({"action": "delegate", "task": "t"}), None, Some(&ok(r#"{"session_id":"s9","status":"started"}"#)), &cx);
+        assert_eq!(line.session.as_deref(), Some("s9"));
+        let line = tool("m", "subagent", &json!({"action": "message", "session_id": "s7", "message": "faster"}), None, Some(&ok("sent")), &cx);
+        assert_eq!(line.session.as_deref(), Some("s7"));
+        assert_eq!(tool("l", "subagent", &json!({"action": "list"}), None, Some(&ok("[]")), &cx).session, None);
     }
 
     #[test]
     fn shell_lines_report_exit_and_duration() {
         let mut times = Times::default();
         span(&mut times, "c", 0, Some(1_234));
-        let cx = Ctx { cwd: None, times: &times, now: 5_000, running: true };
+        let cx = Ctx { cwd: None, times: &times, now: 5_000, running: true, jobs: &HashMap::new() };
         let live = ToolState {
             name: "shell".into(),
             status: ToolStatus::Error,
@@ -1200,7 +1396,7 @@ mod tests {
 
     #[test]
     fn silo_tools_reveal_blocks() {
-        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false };
+        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, jobs: &HashMap::new() };
         let out = (r#"{"block_id":"b42","url":"http://localhost:3000/"}"#.to_owned(), false);
         let line = tool("b", "browser_open", &json!({"url": "http://localhost:3000/"}), None, Some(&out), &cx);
         assert_eq!((line.title.as_str(), line.kind, line.reveal.as_deref()), ("Opened browser localhost:3000", Kind::Browser, Some("b42")));
@@ -1215,8 +1411,52 @@ mod tests {
     }
 
     #[test]
+    fn command_block_shells_open_wait_and_report() {
+        let reports = |text: &str| job_reports(&[Item::new("s", Role::System, vec![Part::System { text: text.into() }])]);
+        let jobs = reports("Background shell job-a1 (`cargo test`) in block b9 exited with code 101.\nFAILED");
+        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, jobs: &jobs };
+        // Running in its block: open and stop it.
+        let live = ToolState { name: "shell".into(), status: ToolStatus::Running, messages: vec!["block:b3".into()], ..ToolState::default() };
+        let none = HashMap::new();
+        let cx_live = Ctx { running: true, jobs: &none, ..cx };
+        let line = tool("r", "shell", &json!({"command": "cargo build"}), Some(&live), None, &cx_live);
+        assert_eq!((line.status, line.reveal.as_deref(), line.stop.as_deref()), (Status::Running, Some("b3"), Some("b3")));
+        // Waiting for input (from history text): needs the user.
+        let waiting =
+            "waiting_for_input: the command waits for input (job job-w2). Answer with terminal_send to block b5, or ask the user.\nPassword:";
+        let line = tool("w", "shell", &json!({"command": "sudo true"}), None, Some(&(waiting.into(), false)), &cx);
+        assert_eq!(
+            (line.title.as_str(), line.desc.as_deref(), line.status, line.reveal.as_deref(), line.detail),
+            ("Needs you", Some("sudo true"), Status::Input, Some("b5"), Some(Detail::Mono("Password:".into())))
+        );
+        // Background: running until its report, then done with the exit code.
+        let started = ("Started job-b4 in block b8; its result arrives as a message when it exits.".to_owned(), false);
+        let line = tool("b", "shell", &json!({"command": "cargo test", "background": true}), None, Some(&started), &cx);
+        assert_eq!(
+            (line.title.as_str(), line.desc.as_deref(), line.status, line.stop.as_deref()),
+            ("Running cargo test", Some("background"), Status::Running, Some("b8"))
+        );
+        assert!(line.detail.is_none());
+        let started = ("Started job-a1 in block b9; its result arrives as a message when it exits.".to_owned(), false);
+        let line = tool("d", "shell", &json!({"command": "cargo test", "background": true}), None, Some(&started), &cx);
+        assert_eq!(
+            (line.title.as_str(), line.desc.as_deref(), line.status, line.stop, line.detail),
+            ("Failed to run cargo test", Some("exit 101"), Status::Error, None, Some(Detail::Mono("FAILED".into())))
+        );
+        assert_eq!(reports("Background shell job-1 (`x`) was stopped (closed).\n")["job-1"].0, JobEnd::Stopped);
+        assert_eq!(reports("Background shell job-2 (`x`) in block b exited with code 0.\nok")["job-2"], (JobEnd::Exit(0), "ok".into()));
+        // Stopped by the user: from the metadata, or (loaded) the result's last line.
+        let stopped = ("partial\n[stopped: closed]".to_owned(), true);
+        let line = tool("s", "shell", &json!({"command": "sleep 60"}), None, Some(&stopped), &cx);
+        assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Ran sleep 60", Some("stopped"), Status::Error));
+        let timed = ("[stopped: timeout]".to_owned(), true);
+        let line = tool("t", "shell", &json!({"command": "sleep 60"}), None, Some(&timed), &cx);
+        assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Failed to run sleep 60", Some("timed out")));
+    }
+
+    #[test]
     fn edits_count_lines_from_metadata_input_or_patch() {
-        let cx = Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false };
+        let cx = Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, jobs: &HashMap::new() };
         let live = ToolState {
             name: "edit".into(),
             status: ToolStatus::Done,
@@ -1299,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn calls_waiting_for_the_user_say_so_and_are_timed_once_allowed() {
+    fn calls_waiting_for_the_user_say_so_and_count_the_wait() {
         let mut items = vec![user("u", "go")];
         let mut times = Times::default();
         times.observe(&items, &HashMap::new(), true, HashMap::new(), 0);
@@ -1315,13 +1555,21 @@ mod tests {
             ("Needs approval", Some("rm -rf build"), Status::Waiting(false))
         );
         assert_eq!((lines[1].title.as_str(), lines[1].status), ("Needs your answer", Status::Waiting(true)));
-        // Allowed: running again, timed from the approval.
+        // Allowed: running, timed from the call (the wait counts).
         let mut tools = HashMap::new();
         tools.insert("c".to_owned(), ToolState { name: "shell".into(), status: ToolStatus::Running, ..ToolState::default() });
-        times.observe(&items, &tools, true, HashMap::new(), 5_200);
-        let rows = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 6_000);
+        times.observe(&items, &tools, true, HashMap::from([("q".to_owned(), true)]), 14_000);
+        let rows = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 14_800);
         let line = &group_of(&rows[1]).lines[0];
-        assert_eq!((line.title.as_str(), line.status, line.desc.as_deref()), ("Running rm -rf build", Status::Running, Some("0.8s")));
+        assert_eq!((line.title.as_str(), line.status, line.desc.as_deref()), ("Running rm -rf build", Status::Running, Some("15s")));
+        // Done after a 14 s wait and a short run: the fold reads the full wall time.
+        items.push(tool_item("t", vec![result("c", "ok", false), result("q", "main", false)]));
+        items.push(assistant("b", vec![Part::text("Done.")]));
+        times.observe(&items, &HashMap::new(), false, HashMap::new(), 15_100);
+        let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Done), &times, 20_000);
+        let g = group_of(&rows[1]);
+        assert!(g.summary.starts_with("Worked for 15s"), "{}", g.summary);
+        assert_eq!(g.lines[0].desc.as_deref(), Some("15s"));
     }
 
     #[test]
@@ -1352,7 +1600,7 @@ mod tests {
             &items[1].parts.iter().find_map(|p| if let Part::ToolCall { input, .. } = p { Some(input.clone()) } else { None }).unwrap(),
             None,
             Some(&("ok".into(), false)),
-            &Ctx { cwd: None, times: &Times::default(), now: 0, running: false },
+            &Ctx { cwd: None, times: &Times::default(), now: 0, running: false, jobs: &HashMap::new() },
         );
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Updated todos", Some("1/3 done")));
     }

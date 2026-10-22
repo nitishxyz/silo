@@ -197,6 +197,7 @@ mod tests {
                 active_window: "w".into(),
                 revision: 1,
                 created_at: 0,
+                parked: Vec::new(),
             },
             blocks: Vec::new(),
             status: Vec::new(),

@@ -8,10 +8,11 @@ use tokio::sync::Mutex;
 static CONNECTION: Mutex<Option<Connection>> = Mutex::const_new(None);
 
 /// The shared connection, starting `otto-silo` (next to the app executable)
-/// when no daemon runs.
+/// when no daemon runs. A cached connection whose daemon went away is
+/// dropped here, so the next call reconnects (or starts the daemon again).
 pub async fn connection() -> Result<Connection, ClientError> {
     let mut slot = CONNECTION.lock().await;
-    if let Some(connection) = slot.as_ref() {
+    if let Some(connection) = slot.as_ref().filter(|c| !c.is_closed()) {
         return Ok(connection.clone());
     }
     let exe = std::env::current_exe()?;
@@ -19,13 +20,6 @@ pub async fn connection() -> Result<Connection, ClientError> {
     let connection = otto_client::connect_or_start(&otto_proto::paths::home(), &binary, &["server", "--daemon"]).await?;
     *slot = Some(connection.clone());
     Ok(connection)
-}
-
-/// Drop a connection that failed at the transport level; the next call reconnects.
-pub async fn forget(error: &ClientError) {
-    if matches!(error, ClientError::Closed | ClientError::Io { .. } | ClientError::Timeout) {
-        *CONNECTION.lock().await = None;
-    }
 }
 
 /// The project of `cwd`: its git toplevel, like `otto-silo sessions`.

@@ -1,7 +1,12 @@
 //! Session switcher popover (opened from the titlebar pill): filter or
-//! create, sessions grouped by host, new session, add remote host.
+//! create, sessions grouped by host, the current session's parked blocks
+//! (revealed on choice), new session, add remote host.
 
 use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
+use silo_proto::{
+    control::{Method, Reveal},
+    model::Lifecycle,
+};
 
 use crate::theme::Continuous as _;
 use crate::{
@@ -25,6 +30,7 @@ pub struct Switcher {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Session { host: usize, id: String },
+    Parked(String),
     Create(String),
     Connect(usize),
     NewSession,
@@ -107,6 +113,10 @@ impl Workspace {
                 }
                 if filter.is_empty() || s.name.to_lowercase().contains(&filter) {
                     rows.push(Row::Item(Item::Session { host: index, id: s.id.clone() }));
+                }
+                // The current session's parked blocks, under it.
+                if let Some(view) = self.view.as_ref().filter(|v| filter.is_empty() && index == self.active_host && v.session.id == s.id) {
+                    rows.extend(view.session.parked.iter().map(|p| Row::Item(Item::Parked(p.id.clone()))));
                 }
             }
         }
@@ -195,6 +205,7 @@ impl Workspace {
         self.close_switcher(window, cx);
         match item {
             Item::Session { host, id } => self.open_session(host, id, window, cx),
+            Item::Parked(block_id) => self.call(Method::BlockReveal { block_id, reveal: Reveal::Float }),
             Item::Create(name) => self.create_session(Some(name), window, cx),
             Item::NewSession => self.create_session(None, window, cx),
             Item::AddHost => self.open_add_host(None, None, window, cx),
@@ -317,6 +328,17 @@ impl Workspace {
                 let hint = number.map(|n| format!("⌘{}", n + 1));
                 (None, name, hint, checked)
             }
+            Item::Parked(id) => {
+                let info = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| &b.id == id));
+                let busy = self.view.as_ref().and_then(|v| v.status.iter().find(|s| &s.block_id == id)).and_then(|s| s.busy.as_ref());
+                let hint = match info.map(|i| (i.lifecycle, i.exited)) {
+                    Some((Lifecycle::Running, _)) if busy.is_some() => "running".to_owned(),
+                    Some((Lifecycle::Running, _)) => "idle".to_owned(),
+                    Some((_, Some(code))) => format!("exit {code}"),
+                    _ => "exited".to_owned(),
+                };
+                (Some("terminal"), info.map(crate::pane::block_title).unwrap_or_default(), Some(hint), false)
+            }
             Item::Create(name) => (Some("plus"), format!("Create “{name}”"), Some("↩".into()), false),
             Item::Connect(_) => (Some("globe"), "Pair again…".into(), None, false),
             Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
@@ -329,6 +351,7 @@ impl Workspace {
         let tip = counts.map(crate::block_status::counts_text).filter(|t| !t.is_empty());
         let badges = counts.map(|c| crate::block_status::count_badges(c, theme::overlay())).unwrap_or_default();
         let is_session = matches!(item, Item::Session { .. });
+        let parked = matches!(item, Item::Parked(_));
         let rename_id = if let Item::Session { id, .. } = &item { Some(id.clone()) } else { None };
         let muted = matches!(item, Item::Connect(_));
         div()
@@ -341,6 +364,7 @@ impl Workspace {
             .h(px(26.0))
             .mx(px(4.0))
             .px(px(8.0))
+            .when(parked, |el| el.pl(px(22.0)))
             .continuous(crate::radius::MENU_ROW)
             .when(selected, |el| el.bg(theme::row_fill()))
             .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
