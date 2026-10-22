@@ -101,6 +101,15 @@ sessions for the configured duration, using the runtime's nonblocking busy query
   Omitting it returns `bad_request`, because effective grants depend on the session.
 - `agents.list` uses `Runtime::agents(None)` for built-ins and the runtime's user
   configuration directory. The current RPC has no project-root parameter.
+- `skills.list {project_root?}` and `commands.list {project_root?}` list the user's
+  and, with a root, the project's skills and slash commands.
+- `session.queue_remove {session_id, input_id}` withdraws a pending input;
+  `session.queue_update {session_id, input_id, delivery}` moves it between `steer`,
+  `queue` and `interrupt`. Both journal `queue.changed` and fail with `bad_request`
+  once the input was handed to the model or is not pending.
+- `auth.login {base_url?}` stores the endpoint of a local or custom provider
+  (`<state>/providers.json`) before signing in; `AuthStatus.base_url` reports it.
+  Non-HTTP(S) URLs and providers with a fixed endpoint are `bad_request`.
 - `approval.answer` forwards optional notes to the runtime for persistence.
 - `session.create.approval_mode` optionally overrides defaults for that session.
   `session.set_mode {session_id, approval_mode}` journals a SessionChanged event
@@ -111,9 +120,10 @@ sessions for the configured duration, using the runtime's nonblocking busy query
   records and sequenced error events for undecodable records.
 - Startup loads `config.json`; `config.set` updates runtime defaults for new sessions
   and saves the file. Existing sessions retain their configuration. Recognized keys
-  are `agent`, `provider`, `model` (nonempty strings or null), and `approval_mode`
-  (the core approval-mode enum or null). Other JSON keys remain stored but do not
-  affect runtime defaults. Invalid defaults are rejected before persistence.
+  are `agent`, `provider`, `model` (nonempty strings or null), `approval_mode`
+  (the core approval-mode enum or null) and `native_compaction` (boolean or null).
+  Other JSON keys remain stored but do not affect runtime defaults. Invalid
+  defaults are rejected before persistence.
 
 
 Tests run entirely in-process with temporary homes, Unix sockets, scripted models,

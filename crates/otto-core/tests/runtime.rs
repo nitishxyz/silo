@@ -579,6 +579,148 @@ async fn question_and_steer_at_boundary() {
     assert_eq!(requests[1].items.last().unwrap().text(), "steering instruction");
 }
 
+/// Streams "draft", waits for steering (native) or a go signal (boundary),
+/// then finishes. Natively steered input continues the same call in "revised".
+struct SteerModel {
+    info: ModelInfo,
+    native: bool,
+    started: tokio::sync::Notify,
+    signal: tokio::sync::mpsc::UnboundedSender<String>,
+    inbox: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    steered: Mutex<Vec<(String, Vec<Part>)>>,
+    requests: Mutex<Vec<Request>>,
+}
+#[async_trait::async_trait]
+impl Model for SteerModel {
+    fn info(&self) -> &ModelInfo {
+        &self.info
+    }
+    async fn stream(&self, request: Request, _cx: CallCx) -> std::result::Result<EventStream, LlmError> {
+        use futures::StreamExt;
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len() == 1
+        };
+        if !first {
+            return Ok(Box::pin(futures::stream::iter(text("revised").into_iter().map(Ok))));
+        }
+        self.started.notify_one();
+        let (inbox, native) = (self.inbox.clone(), self.native);
+        let rest = futures::stream::once(async move { inbox.lock().await.recv().await.unwrap() }).flat_map(move |id| {
+            let mut events =
+                vec![StreamEvent::PartDone { part: Part::text("draft") }, StreamEvent::Finish { reason: FinishReason::Stop, response_id: None }];
+            if native {
+                events.push(StreamEvent::Steered { ids: vec![id] });
+                events.extend(text("revised"));
+            }
+            futures::stream::iter(events)
+        });
+        Ok(Box::pin(futures::stream::once(async { StreamEvent::TextDelta { text: "dra".into() } }).chain(rest).map(Ok)))
+    }
+    fn session(&self) -> Option<&dyn ModelSession> {
+        self.native.then_some(self as &dyn ModelSession)
+    }
+}
+#[async_trait::async_trait]
+impl ModelSession for SteerModel {
+    async fn steer(&self, id: &str, input: Vec<Part>) -> std::result::Result<bool, LlmError> {
+        self.steered.lock().unwrap().push((id.into(), input));
+        Ok(self.signal.send(id.into()).is_ok())
+    }
+}
+struct AnyResolver(Arc<dyn Model>);
+impl ModelResolver for AnyResolver {
+    fn resolve(&self, _: &str, _: &str) -> Result<Arc<dyn Model>> {
+        Ok(self.0.clone())
+    }
+    fn default_model(&self) -> Option<(String, String)> {
+        Some(("test".into(), "test".into()))
+    }
+    fn list(&self) -> Vec<ModelInfo> {
+        vec![self.0.info().clone()]
+    }
+}
+async fn steer_mid_stream(native: bool) -> (Arc<SteerModel>, Vec<Item>) {
+    let (signal, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let mut info = ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None };
+    info.caps.steering = native;
+    let model = Arc::new(SteerModel {
+        info,
+        native,
+        started: tokio::sync::Notify::new(),
+        signal,
+        inbox: Arc::new(tokio::sync::Mutex::new(inbox)),
+        steered: Mutex::new(vec![]),
+        requests: Mutex::new(vec![]),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        models: Arc::new(AnyResolver(model.clone())),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    let project = r.open_project(dir.path()).await.unwrap();
+    let s = r
+        .create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), agent: "build".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), model.started.notified()).await.unwrap();
+    let steer = s.prompt(vec![InputPart::Text { text: "steering instruction".into() }], Delivery::Steer).await.unwrap();
+    if !native {
+        while s.view().await.unwrap().queue.iter().all(|q| q.id != steer) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        model.signal.send("go".into()).unwrap();
+    }
+    finish(&mut live).await;
+    let items = s.view().await.unwrap().items;
+    r.shutdown().await.unwrap();
+    (model, items)
+}
+#[tokio::test]
+async fn steer_goes_native_when_the_model_session_supports_it() {
+    let (model, items) = steer_mid_stream(true).await;
+    let texts: Vec<_> = items.iter().map(|i| (i.role, i.text())).collect();
+    assert_eq!(
+        texts,
+        [
+            (Role::User, "hello".into()),
+            (Role::Assistant, "draft".into()),
+            (Role::User, "steering instruction".into()),
+            (Role::Assistant, "revised".into())
+        ]
+    );
+    assert_eq!(model.requests.lock().unwrap().len(), 1, "the steer continued the same model call");
+    let steered = model.steered.lock().unwrap();
+    assert_eq!(steered.len(), 1);
+    assert_eq!(steered[0].0, items[2].id);
+    assert_eq!(steered[0].1, vec![Part::text("steering instruction")]);
+}
+#[tokio::test]
+async fn steer_waits_for_the_step_boundary_without_native_steering() {
+    let (model, items) = steer_mid_stream(false).await;
+    let texts: Vec<_> = items.iter().map(|i| (i.role, i.text())).collect();
+    assert_eq!(
+        texts,
+        [
+            (Role::User, "hello".into()),
+            (Role::Assistant, "draft".into()),
+            (Role::User, "steering instruction".into()),
+            (Role::Assistant, "revised".into())
+        ]
+    );
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "the steer went into a new step");
+    assert_eq!(requests[1].items.last().unwrap().text(), "steering instruction");
+    assert!(model.steered.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn ephemeral_deltas_and_durable_coalescing() {
     let mut script = vec![];

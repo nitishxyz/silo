@@ -24,6 +24,7 @@ otto-client.workspace = true
 otto-server.workspace = true
 otto-store.workspace = true
 otto-silo-tools.workspace = true
+otto-mcp.workspace = true
 uuid.workspace = true
 serde.workspace = true
 rustix.workspace = true

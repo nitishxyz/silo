@@ -42,7 +42,17 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
 - Synchronous `busy() -> bool` conservatively reports active/queued session work
   without database IO; it returns true on contention.
 - Synchronous `agents(project_root: Option<&Path>) -> Vec<AgentInfo>` applies the
-  configured user directory and optional project overrides.
+  configured user directory and optional project overrides; `skills(..)` and
+  `commands(..)` list skills and slash commands the same way.
+- `add_source(Arc<dyn otto_tools::ProjectSources>)` adds project-dependent tools
+  (MCP via `otto-mcp`), listed again before every model request and granted by
+  pattern (`mcp__*` by default). `shutdown` stops them.
+- `deliver_pending() -> Result<usize>` wakes sessions with undelivered outbox
+  entries; call it once after registering tools and sources.
+- `queue_remove(id, input_id)` and `queue_update(id, input_id, Delivery)` (also on
+  `SessionHandle`) withdraw or move a pending input until the model has it.
+- `CreateSession.task` records a delegated child's task; `SessionDefaults.native_compaction`
+  opts new sessions into provider-native compaction.
 - Synchronous `set_config(SessionDefaults) -> Result<()>` replaces new-session
   defaults (`agent`, `provider`, `model`, `approval_mode`, all optional). Explicit
   creation options and agent model overrides take priority; plan agents remain
@@ -117,21 +127,44 @@ without intents, and terminal outcomes whose result items were not committed.
 Nothing recovered is executed. Project instructions, agents, skills, hooks, and
 policy resolve from the opened project's root; tool execution uses session cwd.
 
-## Hooks and commands
+## Hooks, commands, skills, agents
 
-Project `.otto/hooks.json` and user `hooks.json` accept Claude Code-style `hooks`
-objects. Supported events are `SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`,
-and `PreCompact`, with snake-case aliases. A group has a `matcher` and `hooks`
-array; handlers have `type: "command"`, `command`, and optional `timeout` seconds.
-Matchers support exact names, `|` alternatives, and `*` (not full regex).
-Commands receive JSON on stdin. `hookSpecificOutput.permissionDecision: "deny"`,
-`updatedInput`, and `additionalContext` are understood; `decision: "block"`,
-`continue: false`, and `systemMessage` are also recognized. Exit 2 blocks. A hook
-allow does not override tool policy. Timeout defaults to 30 seconds (maximum 300),
-and stdout is capped at 64 KiB. Hooks execute trusted local shell configuration:
-opening an untrusted project with hooks permits its commands to execute.
-`/name arguments` expands project `.otto/commands/name.md`, falling back to user
-`commands/name.md`, replacing `$ARGUMENTS` and stripping frontmatter.
+Hooks use Claude Code's `hooks` object from user `hooks.json`, project
+`.claude/settings.json`, `.claude/settings.local.json` and `.otto/hooks.json` (all
+run). Events: `SessionStart` (source `startup`/`resume`), `SessionEnd` (archive),
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification` (approvals and
+questions), `Stop`, `SubagentStop`, `PreCompact` (`manual`/`auto`), plus snake-case
+aliases. Matchers are anchored regexes (`""`/`*` match all) and also match Claude
+Code's names for built-ins (`Bash` = `shell`). Handlers are `type: "command"` with
+`timeout` seconds (default 60, max 600) and get `CLAUDE_PROJECT_DIR`,
+`OTTO_PROJECT_DIR`, `OTTO_SESSION_ID`. Exit 2 blocks with stderr as the reason;
+other non-zero exits are reported as `error` events of class `hook` and ignored.
+Stdout (64 KiB max) JSON: `continue: false` + `stopReason` stops the turn after the
+step; `decision: "block"` + `reason` blocks a prompt or tool, sends a PostToolUse
+reason to the model, and makes Stop continue (3 times per turn);
+`hookSpecificOutput.permissionDecision` `deny`/`ask` (an `allow` never overrides
+policy), `updatedInput`, `additionalContext`; `systemMessage` becomes a `hook`
+error event. Plain stdout is context for SessionStart and UserPromptSubmit.
+Context produced while tools run is committed after the tool results. Hooks
+execute trusted local shell configuration: opening an untrusted project with
+hooks permits its commands to execute.
+
+`/name arguments` expands the first matching template from `.otto/commands`,
+`.claude/commands`, then user `commands` (subfolders: `folder:name`), with
+`$ARGUMENTS`, `$1`…`$9`, or the arguments appended. Skills come from user
+`skills/`, `.claude/skills`, `.agents/skills`, `.otto/skills`. Agents come from user
+`agents/`, `.claude/agents`, `.otto/agents` with `tools`/`disallowedTools` (Claude
+Code names mapped, `prefix*` patterns), `model` (`inherit`), `effort`, and
+`approval_mode`/`permissionMode`.
+
+## Subagents and outbox
+
+A finished child turn (`done`, `error`, or `interrupted` by a restart) is pushed
+once to the parent's outbox, versioned by the child's turn, then the parent is
+woken; its actor is opened when it is not running. Delivery commits the system
+item and its acknowledgement in one transaction (`Store::append_delivering`), so
+an entry is never delivered twice. Forks are not subagents. Limits: depth 2, four
+running children per parent.
 
 ## Hardening status
 
@@ -158,16 +191,17 @@ opening an untrusted project with hooks permits its commands to execute.
 
 ## Current limitations
 
-Native provider compaction is not used. Summary input and output are bounded;
-oversized user instructions retain verbatim head/tail excerpts, not their complete
-text. Stable prompts are rebuilt on reopen. Hook support is a command-only subset
-of Claude Code (no regex matcher engine, HTTP/prompt hooks, async handlers, or
-Stop continuation decisions). SessionStart runs at the first turn of each actor,
-including resumed sessions. Hook process timeouts kill the shell but do
-not guarantee termination of detached descendants. Hooks are trusted local
-commands and are not sandboxed; approval policy does not gate hook commands.
-Outbox delivery acknowledgment follows the item commit and is idempotent by item
-ID; it is not yet a single transaction. Child completion requires its parent actor
-to be open; restarting a child alone does not wake an unopened parent.
+Native compaction is opt-in (threshold `Auto` at 75% of the window on ordinary
+requests, `Now` for manual/overflow). Native tool presentations (Claude
+`text_editor`/`bash`, GPT `apply_patch`/`shell`) are mapped onto built-ins by
+`otto_tools::native`; the editor's `undo_edit` is refused, and an OpenAI shell call
+with several commands runs them as one script with one combined result. Summary input and output are bounded; oversized user instructions retain
+verbatim head/tail excerpts, not their complete text. Stable prompts are rebuilt on
+reopen. Hooks have no prompt/HTTP handler types or async handlers; `transcript_path`
+is null. SessionStart runs at the first turn of each actor, including resumed
+sessions. Hook process timeouts kill the shell but do not guarantee termination of
+detached descendants. Hooks are trusted local commands and are not sandboxed;
+approval policy does not gate hook commands. `load_tools` writes `loaded_tools`
+outside the actor journal.
 Call `runtime.shutdown().await` before dropping it to cancel/join actors and
 release store references; do not submit commands concurrently with shutdown.

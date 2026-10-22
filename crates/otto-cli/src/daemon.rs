@@ -56,6 +56,9 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         .await?,
     );
     runtime.add_tools(otto_silo_tools::tools(otto_silo_tools::Config::default()));
+    runtime.add_source(otto_mcp::Mcp::new(paths::user_config()));
+    // Children that finished while their parent was closed, or before a restart.
+    runtime.deliver_pending().await?;
     let server = otto_server::Server::start(otto_server::ServerConfig {
         home: home.clone(),
         runtime,

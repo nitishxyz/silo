@@ -16,7 +16,7 @@ impl AuthService for BlockingAuth {
             std::future::pending().await
         })
     }
-    fn login(&self, _: String, _: AuthMode, _: Option<String>, _: bool) -> AuthFuture<'_, LoginResult> {
+    fn login(&self, _: String, _: AuthMode, _: Option<String>, _: bool, _: Option<String>) -> AuthFuture<'_, LoginResult> {
         Box::pin(std::future::pending())
     }
     fn login_complete(&self, _: String, _: Option<String>) -> AuthFuture<'_, AuthStatus> {

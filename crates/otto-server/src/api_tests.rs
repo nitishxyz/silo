@@ -2,7 +2,7 @@ use crate::tests::*;
 
 #[tokio::test]
 async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
-    let f = Fixture::new(vec![]).await;
+    let mut f = Fixture::new(vec![]).await;
     let project = f.runtime.open_project(f.dir.path()).await.unwrap();
     std::fs::create_dir_all(f.dir.path().join("agents")).unwrap();
     std::fs::write(f.dir.path().join("agents/custom.md"), "---\nname: custom\ndescription: custom runtime agent\n---\nHelp.").unwrap();
@@ -35,18 +35,33 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
     assert_eq!(second.model, "changed");
     assert_eq!(second.agent, "build");
     assert_eq!(client.session_view(&first.id).await.unwrap().info.model, "startup");
-    let pending =
-        client.call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true }).await.unwrap();
+    let pending = client
+        .call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None })
+        .await
+        .unwrap();
     assert_eq!(pending["user_code"], "ABCD");
     assert_eq!(pending["interval_secs"], 5);
     assert_eq!(pending["verification_uri"], "https://example.test/device");
     assert!(
         client
-            .call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::ApiKey, api_key: Some("test".into()), device: true })
+            .call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::ApiKey, api_key: Some("test".into()), device: true, base_url: None })
             .await
             .is_err()
     );
+    // Keyless API-key logins are for local and custom endpoints only.
+    let keyless = |base_url: Option<&str>| Method::AuthLogin {
+        provider: "ollama".into(),
+        mode: AuthMode::ApiKey,
+        api_key: None,
+        device: false,
+        base_url: base_url.map(String::from),
+    };
+    let error = client.call(keyless(None)).await.unwrap_err().to_string();
+    assert!(error.contains("bad_request"), "{error}");
+    let error = client.call(keyless(Some("http://127.0.0.1:9"))).await.unwrap_err().to_string();
+    assert!(!error.contains("bad_request"), "{error}");
     server.shutdown().await.unwrap();
+    f.reopen().await;
     let restarted = Server::start(f.config()).await.unwrap();
     let client = f.connect().await;
     assert_eq!(f.session(&client).await.model, "changed");

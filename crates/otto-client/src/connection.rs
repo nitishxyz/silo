@@ -241,6 +241,20 @@ impl Connection {
     pub async fn cancel(&self, session_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionCancel { session_id: session_id.into() }).await
     }
+    /// Withdraw a pending input (queued, or a steer the model has not taken yet).
+    pub async fn queue_remove(&self, session_id: &str, input_id: &str) -> Result<Empty> {
+        self.call_typed(Method::SessionQueueRemove { session_id: session_id.into(), input_id: input_id.into() }).await
+    }
+    /// Move a pending input to `Steer` (next step), `Queue` (after the turn) or `Interrupt` (now).
+    pub async fn queue_update(&self, session_id: &str, input_id: &str, delivery: Delivery) -> Result<Empty> {
+        self.call_typed(Method::SessionQueueUpdate { session_id: session_id.into(), input_id: input_id.into(), delivery }).await
+    }
+    pub async fn skills_list(&self, project_root: Option<String>) -> Result<Vec<SkillInfo>> {
+        self.call_typed(Method::SkillsList { project_root }).await
+    }
+    pub async fn commands_list(&self, project_root: Option<String>) -> Result<Vec<CommandInfo>> {
+        self.call_typed(Method::CommandsList { project_root }).await
+    }
     pub async fn approval_answer(&self, session_id: &str, approval_id: &str, decision: ApprovalDecision, note: Option<String>) -> Result<Empty> {
         self.call_typed(Method::ApprovalAnswer { session_id: session_id.into(), approval_id: approval_id.into(), decision, note }).await
     }

@@ -4,7 +4,16 @@ use otto_proto::Event;
 use otto_store::{Projection, SessionUpdate, Store, ToolStatus};
 
 pub(crate) fn recover(store: &mut Store) -> Result<()> {
-    store.recover_all()?;
+    let recovered = store.recover_all()?;
+    // A child stopped by the restart still reports to its parent (§7.4); the
+    // daemon delivers it through `Runtime::deliver_pending`.
+    for (id, turn) in &recovered.interrupted_turns {
+        if let Some(row) = store.session(id)?.filter(crate::subagents::subagent) {
+            let payload =
+                crate::subagents::payload(&row, &store.items(id)?, *turn, "interrupted", Some("the otto server stopped during this turn".into()));
+            store.outbox_push(row.parent_id.as_deref().unwrap_or_default(), id, *turn, payload)?;
+        }
+    }
     for session in store.all_sessions()? {
         let items = store.items(&session.id)?;
         let calls = store.tool_calls(&session.id)?;

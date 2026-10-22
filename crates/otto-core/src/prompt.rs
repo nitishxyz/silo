@@ -21,7 +21,7 @@ pub(crate) fn assemble(root: &Path, cwd: &Path, user: &Path, agent: &str) -> Vec
             prompt.push(format!("Instructions from {}:\n{text}", path.display()));
         }
     }
-    let skills = crate::skills::discover(root, user);
+    let skills: Vec<_> = crate::skills::discover(root, user).into_iter().filter(|s| !s.user_only).collect();
     if !skills.is_empty() {
         prompt.push(format!(
             "Available skills (load with skill):\n{}",

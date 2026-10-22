@@ -29,6 +29,9 @@ pub struct SessionDefaults {
     pub model: Option<String>,
     /// None selects Auto; plan agents always use Plan.
     pub approval_mode: Option<otto_tools::policy::ApprovalMode>,
+    /// Let new sessions use the provider's native compaction when their model
+    /// has it and the history is its own; otto's summarizer otherwise.
+    pub native_compaction: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct CreateSession {
@@ -42,6 +45,8 @@ pub struct CreateSession {
     pub title: String,
     /// Zero selects the default limit of 200.
     pub max_steps: usize,
+    /// A delegated child's task, kept for `subagent` status and retry.
+    pub task: Option<String>,
 }
 /// A committed event. Live and replay streams use identical sequence numbers.
 pub type SequencedEvent = (i64, Event);
@@ -69,8 +74,12 @@ pub(crate) struct Inner {
     pub global: broadcast::Sender<Event>,
     index: Mutex<(i64, broadcast::Sender<SequencedEvent>)>,
     defaults: Mutex<SessionDefaults>,
-    /// Tools beyond the built-ins (silo, MCP), offered to every session.
+    /// Tools beyond the built-ins (silo), offered to every session.
     extra: Mutex<Vec<Arc<dyn otto_tools::Tool>>>,
+    /// Project-dependent tools (MCP), listed again before each model request.
+    sources: Mutex<Vec<Arc<dyn otto_tools::ProjectSources>>>,
+    /// Set by shutdown: no actor starts afterwards.
+    closing: std::sync::atomic::AtomicBool,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -84,6 +93,8 @@ impl Runtime {
             index: Mutex::new((0, index)),
             defaults: Mutex::new(SessionDefaults::default()),
             extra: Mutex::new(Vec::new()),
+            sources: Mutex::new(Vec::new()),
+            closing: std::sync::atomic::AtomicBool::new(false),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -134,6 +145,32 @@ impl Runtime {
     }
     pub(crate) fn extra_tools(&self) -> Vec<Arc<dyn otto_tools::Tool>> {
         self.0.extra.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    /// Add project-dependent tools (MCP servers). Their tools are granted by
+    /// pattern (`mcp__*` by default) and listed again before every request,
+    /// so list changes reach the next step. Stopped by `shutdown`.
+    pub fn add_source(&self, source: Arc<dyn otto_tools::ProjectSources>) {
+        self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(source);
+    }
+    pub(crate) async fn source_tools(&self, root: &Path) -> Vec<Arc<dyn otto_tools::Tool>> {
+        let sources = self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let mut tools = Vec::new();
+        for source in sources {
+            tools.extend(source.tools(root).await);
+        }
+        tools
+    }
+    pub fn skills(&self, project_root: Option<&Path>) -> Vec<otto_proto::SkillInfo> {
+        crate::skills::discover(project_root.unwrap_or(&self.0.config.user_config_dir.join("__no_project__")), &self.0.config.user_config_dir)
+            .into_iter()
+            .map(|s| otto_proto::SkillInfo { name: s.name, description: s.description })
+            .collect()
+    }
+    pub fn commands(&self, project_root: Option<&Path>) -> Vec<otto_proto::CommandInfo> {
+        crate::commands::discover(project_root.unwrap_or(&self.0.config.user_config_dir.join("__no_project__")), &self.0.config.user_config_dir)
+            .into_iter()
+            .map(|c| otto_proto::CommandInfo { name: c.name, description: c.description, argument_hint: c.argument_hint })
+            .collect()
     }
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         self.db(|s| Ok(s.list_projects()?.into_iter().map(|p| ProjectInfo { id: p.id, root: p.root, created_at: p.created_at }).collect())).await
@@ -190,18 +227,21 @@ impl Runtime {
             otto_tools::registry::tools_for_family(&family)
                 .iter()
                 .map(|t| t.spec().name.clone())
-                .chain(["skill".into(), "subagent".into()])
+                .chain(["skill".into(), "subagent".into(), "mcp__*".into()])
                 .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
                 .collect()
         } else {
             agent.tools
         };
+        let mut denied = agent.disallowed;
         if let Some(parent) = options.parent_id.clone() {
-            let parent_grant = self.db(move |s| Ok(s.session(&parent)?.ok_or(Error::Closed)?.meta["tools"].clone())).await?;
-            if let Some(allowed) = parent_grant.as_array() {
-                grant.retain(|tool| allowed.iter().any(|v| v.as_str() == Some(tool)));
+            let parent = self.db(move |s| Ok(s.session(&parent)?.ok_or(Error::Closed)?.meta)).await?;
+            if let Some(allowed) = parent["tools"].as_array() {
+                grant.retain(|tool| allowed.iter().filter_map(|v| v.as_str()).any(|p| crate::tools::pattern(p, tool)));
             }
+            denied.extend(parent["denied_tools"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)));
         }
+        grant.retain(|tool| !denied.iter().any(|d| crate::tools::pattern(d, tool)));
         if otto_tools::registry::tools_for_family(&family)
             .into_iter()
             .chain(self.extra_tools())
@@ -211,6 +251,8 @@ impl Runtime {
             grant.push("load_tools".into());
         }
         let effort = agent.effort;
+        let approval_mode = options.approval_mode.or(agent.approval_mode).map(|m| serde_json::to_value(m).expect("mode enum"));
+        let task = options.task;
         let row = self
             .db(move |s| {
                 Ok(s.create_session(NewSession {
@@ -221,7 +263,7 @@ impl Runtime {
                     model,
                     title: options.title,
                     cwd: options.cwd.to_string_lossy().into_owned(),
-                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"effort":effort,"approval_mode":options.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")).or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")))}),
+                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")))}),
                 })?)
             })
             .await?;
@@ -233,6 +275,9 @@ impl Runtime {
         let mut actors = self.0.actors.lock().await;
         if let Some(handle) = actors.get(id) {
             return Ok(handle.clone());
+        }
+        if self.0.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Closed);
         }
         let owned = id.to_owned();
         let row = self
@@ -264,6 +309,7 @@ impl Runtime {
     /// Cancel and join all actors. Stop submitting commands before calling this.
     /// Call before dropping the last runtime to release actor-held store references.
     pub async fn shutdown(&self) -> Result<()> {
+        self.0.closing.store(true, std::sync::atomic::Ordering::SeqCst);
         let actors = std::mem::take(&mut *self.0.actors.lock().await);
         let mut replies = Vec::new();
         for handle in actors.into_values() {
@@ -275,7 +321,40 @@ impl Runtime {
         for reply in replies {
             reply.await.map_err(|_| Error::Closed)?;
         }
+        let sources = std::mem::take(&mut *self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for source in sources {
+            source.shutdown().await;
+        }
         Ok(())
+    }
+    /// Nudge a session that has undelivered outbox entries, opening its actor
+    /// if needed. Entries are durable; a failed wake only delays delivery.
+    /// Boxed with a named type: it is reached from inside session actors, whose
+    /// future types would otherwise be defined in terms of themselves.
+    pub(crate) fn wake(&self, id: String) -> futures::future::BoxFuture<'static, Result<()>> {
+        let runtime = self.clone();
+        Box::pin(async move {
+            let handle = runtime.session(&id).await?;
+            handle.tx.send(crate::session::Command::Wake).await.map_err(|_| Error::Closed)
+        })
+    }
+    /// Wake every session whose children finished while it was not running
+    /// (including before a restart). Call once after registering tools and
+    /// sources; returns how many sessions were woken.
+    pub async fn deliver_pending(&self) -> Result<usize> {
+        let ids = self.db(|s| Ok(s.outbox_pending_sessions()?)).await?;
+        for id in &ids {
+            self.wake(id.clone()).await?;
+        }
+        Ok(ids.len())
+    }
+    /// Withdraw a pending input; see `SessionHandle::queue_remove`.
+    pub async fn queue_remove(&self, id: &str, input_id: &str) -> Result<()> {
+        self.session(id).await?.queue_remove(input_id).await
+    }
+    /// Change a pending input's delivery; see `SessionHandle::queue_update`.
+    pub async fn queue_update(&self, id: &str, input_id: &str, delivery: Delivery) -> Result<()> {
+        self.session(id).await?.queue_update(input_id, delivery).await
     }
     /// Sequenced global notifications; the sequence is scoped to this runtime lifetime.
     pub fn index_events(&self) -> broadcast::Receiver<SequencedEvent> {

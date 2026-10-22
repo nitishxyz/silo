@@ -110,6 +110,14 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             }
             Ok(json!(PromptAccepted { input_id: runtime.prompt(&session_id, input, delivery).await.map_err(core_error)? }))
         }
+        Method::SessionQueueRemove { session_id, input_id } => {
+            runtime.queue_remove(&session_id, &input_id).await.map_err(core_error)?;
+            Ok(json!({}))
+        }
+        Method::SessionQueueUpdate { session_id, input_id, delivery } => {
+            runtime.queue_update(&session_id, &input_id, delivery).await.map_err(core_error)?;
+            Ok(json!({}))
+        }
         Method::SessionCancel { session_id } => {
             runtime.cancel(&session_id).await.map_err(core_error)?;
             Ok(json!({}))
@@ -128,15 +136,19 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         }
         Method::ModelList { provider } => Ok(json!(state.config.auth.list_models(provider).await?)),
         Method::AuthStatus {} => Ok(json!(state.config.auth.status().await?)),
-        Method::AuthLogin { provider, mode, api_key, device } => {
+        Method::AuthLogin { provider, mode, api_key, device, base_url } => {
             if provider.is_empty()
-                || (mode == AuthMode::ApiKey && api_key.as_deref().is_none_or(str::is_empty))
+                // Local and custom servers (a `base_url`) may need no key.
+                || (mode == AuthMode::ApiKey && base_url.is_none() && api_key.as_deref().is_none_or(str::is_empty))
                 || (mode == AuthMode::Subscription && api_key.is_some())
                 || (device && mode != AuthMode::Subscription)
             {
                 return Err(RpcError::bad_request("login requires a provider and credentials matching its mode"));
             }
-            Ok(json!(state.config.auth.login(provider, mode, api_key, device).await?))
+            if base_url.as_deref().is_some_and(|url| !(url.starts_with("http://") || url.starts_with("https://"))) {
+                return Err(RpcError::bad_request("base_url must start with http:// or https://"));
+            }
+            Ok(json!(state.config.auth.login(provider, mode, api_key, device, base_url).await?))
         }
         Method::AuthLoginComplete { login_id, code } => Ok(json!(state.config.auth.login_complete(login_id, code).await?)),
         Method::AuthLoginCancel { login_id } => {
@@ -152,6 +164,8 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!(runtime.tools(&id).await.map_err(core_error)?))
         }
         Method::AgentsList {} => Ok(json!(runtime.agents(None))),
+        Method::SkillsList { project_root } => Ok(json!(runtime.skills(project_root.as_deref().map(std::path::Path::new)))),
+        Method::CommandsList { project_root } => Ok(json!(runtime.commands(project_root.as_deref().map(std::path::Path::new)))),
         Method::ConfigGet { key } => {
             let settings = state.settings.lock().await;
             Ok(json!(ConfigValue { value: key.map_or_else(|| settings.clone(), |key| settings.get(key).cloned().unwrap_or(Value::Null)) }))
@@ -192,6 +206,11 @@ pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcE
         approval_mode: match value.get("approval_mode") {
             None | Some(Value::Null) => Some(Default::default()),
             Some(mode) => Some(serde_json::from_value(mode.clone()).map_err(|e| RpcError::bad_request(format!("approval_mode: {e}")))?),
+        },
+        native_compaction: match value.get("native_compaction") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(on)) => *on,
+            _ => return Err(RpcError::bad_request("native_compaction must be a boolean or null")),
         },
     })
 }

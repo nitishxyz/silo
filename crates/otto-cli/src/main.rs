@@ -47,7 +47,7 @@ enum Command {
     },
     /// List available model capabilities and pricing.
     Models {
-        #[arg(long, value_parser = ["anthropic", "openai", "google", "xai"])]
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(otto_llm::providers::IDS))]
         provider: Option<String>,
         /// Include models for providers and auth modes not currently signed in.
         #[arg(long)]
@@ -68,7 +68,7 @@ enum Command {
 enum AuthCommand {
     Login(LoginArgs),
     Logout {
-        #[arg(value_parser = ["anthropic", "openai"])]
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(otto_llm::providers::IDS))]
         provider: String,
     },
     Status,
@@ -76,8 +76,11 @@ enum AuthCommand {
 
 #[derive(Args)]
 struct LoginArgs {
-    #[arg(value_parser = ["anthropic", "openai"])]
+    #[arg(value_parser = clap::builder::PossibleValuesParser::new(otto_llm::providers::IDS))]
     provider: Option<String>,
+    /// Endpoint of a local or custom provider (ollama, lmstudio, custom).
+    #[arg(long)]
+    base_url: Option<String>,
     /// Read a key without echo, or pass it explicitly (visible in shell history).
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "", conflicts_with_all = ["subscription", "max", "console", "device"])]
     api_key: Option<String>,
@@ -192,7 +195,7 @@ async fn run(cli: Cli, cancel: CancellationToken) -> Result<()> {
                     .spawn();
             }
             let requested_mode = mode.as_deref().map(|mode| if mode == "subscription" { AuthMode::Subscription } else { AuthMode::ApiKey });
-            let models = if all || provider.as_deref().is_some_and(|id| matches!(id, "google" | "xai")) {
+            let models = if all {
                 providers.catalog_entries(provider.as_deref(), requested_mode).into_iter().map(|entry| (entry, requested_mode)).collect()
             } else {
                 let mut models = Vec::new();
@@ -318,6 +321,12 @@ mod tests {
         assert!(matches!(cli.command, Command::Auth { command: AuthCommand::Login(LoginArgs { api_key: Some(key), .. }) } if key.is_empty()));
         assert!(Cli::try_parse_from(["otto-silo", "auth", "login", "--api-key=secret", "--subscription"]).is_err());
         assert!(Cli::try_parse_from(["otto-silo", "auth", "login", "--max", "--device"]).is_err());
+        for provider in otto_llm::providers::IDS {
+            assert!(Cli::try_parse_from(["otto-silo", "auth", "login", provider, "--api-key=k"]).is_ok(), "{provider}");
+            assert!(Cli::try_parse_from(["otto-silo", "models", "--provider", provider]).is_ok(), "{provider}");
+        }
+        assert!(Cli::try_parse_from(["otto-silo", "auth", "login", "nowhere"]).is_err());
+        assert!(Cli::try_parse_from(["otto-silo", "auth", "login", "ollama", "--base-url", "http://127.0.0.1:11434"]).is_ok());
         assert!(Cli::try_parse_from(["otto-silo", "ask", "--effort", "xhigh", "--tools", "hello"]).is_ok());
         assert!(Cli::try_parse_from(["otto-silo", "ask", "--effort", "invalid"]).is_err());
     }

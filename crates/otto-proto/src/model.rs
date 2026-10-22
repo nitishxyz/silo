@@ -115,6 +115,9 @@ pub struct PendingQuestion {
     pub options: Vec<String>,
 }
 
+/// A pending input. `queue.changed` and `SessionView.queue` list pending steers
+/// first (`delivery: steer`, delivered at the next step boundary), then inputs
+/// waiting for the turn to end (`queue`, `interrupt`).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueuedInput {
     pub id: String,
@@ -170,6 +173,24 @@ pub struct AuthStatus {
     /// Set on the provider new sessions default to: the model they use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// The endpoint of a local or custom provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CommandInfo {
+    /// Typed as `/name arguments`.
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

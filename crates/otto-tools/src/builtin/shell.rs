@@ -47,16 +47,27 @@ impl Default for Shell {
 }
 impl Shell {
     pub fn new(jobs: Arc<Jobs>) -> Self {
-        Self {
-            jobs,
-            spec: spec(
-                "shell",
-                "Run a non-interactive command through $SHELL -lc (fallback /bin/sh -c), with stdin closed. Supports cwd, timeout_ms (default 120000), and background jobs. Cancellation kills the process group. Full output streams to a spill file; only bounded head/tail text is retained. Progress is sampled and capped.",
-                json!({"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1},"background":{"type":"boolean"}}),
-                &["command"],
-                Effects::PROCESS,
-            ),
+        let mut spec = spec(
+            "shell",
+            "Run a non-interactive command through $SHELL -lc (fallback /bin/sh -c), with stdin closed. Supports cwd, timeout_ms (default 120000), and background jobs. Cancellation kills the process group. Full output streams to a spill file; only bounded head/tail text is retained. Progress is sampled and capped.",
+            json!({"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1},"background":{"type":"boolean"}}),
+            &["command"],
+            Effects::PROCESS,
+        );
+        // The shells Claude and GPT were trained on; each call runs one fresh process.
+        for (family, name, tool, config) in
+            [("anthropic", "bash", crate::native::BASH, Value::Null), ("openai", "shell", "shell", json!({"environment":{"type":"local"}}))]
+        {
+            spec.presentations.push(crate::Presentation {
+                family: family.into(),
+                name: name.into(),
+                description: None,
+                input_schema: None,
+                freeform: None,
+                native: Some(crate::NativeTool { tool: tool.into(), config }),
+            });
         }
+        Self { jobs, spec }
     }
 }
 impl Job {

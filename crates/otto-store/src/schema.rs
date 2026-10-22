@@ -1,6 +1,7 @@
-pub(crate) const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    r#"
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        r#"
 CREATE TABLE projects (id TEXT PRIMARY KEY, root TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
 CREATE TABLE sessions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES sessions(id),
@@ -46,4 +47,13 @@ CREATE TABLE turns (
 CREATE INDEX sessions_project ON sessions(project_id,updated_at);
 CREATE INDEX outbox_pending ON outbox(session_id,delivered_at);
 "#,
-)];
+    ),
+    (
+        2,
+        r#"
+DELETE FROM outbox WHERE rowid NOT IN (SELECT min(rowid) FROM outbox GROUP BY session_id,from_session,version);
+CREATE UNIQUE INDEX outbox_version ON outbox(session_id,from_session,version);
+CREATE INDEX sessions_parent ON sessions(parent_id);
+"#,
+    ),
+];

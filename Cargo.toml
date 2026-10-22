@@ -54,6 +54,7 @@ otto-proto = { path = "crates/otto-proto" }
 otto-server = { path = "crates/otto-server" }
 otto-client = { path = "crates/otto-client" }
 otto-silo-tools = { path = "crates/otto-silo-tools" }
+otto-mcp = { path = "crates/otto-mcp" }
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"

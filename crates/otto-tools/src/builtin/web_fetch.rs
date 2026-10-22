@@ -1,16 +1,18 @@
 use super::*;
 use crate::ToolOutput;
-tool!(
-    WebFetch,
-    spec(
+fn fetch_spec() -> crate::ToolSpec {
+    let mut s = spec(
         "web_fetch",
         "Fetch an HTTP(S) URL as readable text. HTML tags, scripts and styles are removed. Requests time out after 30 seconds; responses over 5 MiB are rejected. Does not execute JavaScript.",
         json!({"url":{"type":"string","format":"uri"}}),
         &["url"],
-        Effects::NETWORK
-    ),
-    run
-);
+        Effects::NETWORK,
+    );
+    // Slow and independent: models with async tool calling keep working meanwhile.
+    s.mode = crate::CallMode::Async;
+    s
+}
+tool!(WebFetch, fetch_spec(), run);
 pub(crate) fn readable(html: &str) -> String {
     let suppressed = regex::Regex::new(r"(?is)<(script|style)\b[^>]*>.*?</(?:script|style)\s*>").expect("static regex");
     let text = suppressed.replace_all(html, "");

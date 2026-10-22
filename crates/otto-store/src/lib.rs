@@ -410,14 +410,71 @@ impl Store {
         Ok(Recovery { tool_calls, interrupted_turns })
     }
 
+    /// Records a versioned outbox entry once: pushing the same
+    /// `(session, from_session, version)` again returns the existing id.
     /// # Errors
     /// Returns database errors, including missing session references.
     pub fn outbox_push(&mut self, session_id: &str, from_session: &str, version: i64, payload: Value) -> Result<String> {
-        Ok(self.connection.query_row(
-            "INSERT INTO outbox VALUES(lower(hex(randomblob(16))),?1,?2,?3,?4,NULL) RETURNING id",
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO outbox VALUES(lower(hex(randomblob(16))),?1,?2,?3,?4,NULL) ON CONFLICT(session_id,from_session,version) DO NOTHING",
             params![session_id, from_session, version, serde_json::to_string(&payload)?],
+        )?;
+        let id = tx.query_row(
+            "SELECT id FROM outbox WHERE session_id=?1 AND from_session=?2 AND version=?3",
+            params![session_id, from_session, version],
             |r| r.get(0),
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Unarchived sessions with undelivered outbox entries, oldest entry first.
+    /// # Errors
+    /// Returns database errors.
+    pub fn outbox_pending_sessions(&self) -> Result<Vec<String>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT o.session_id FROM outbox o JOIN sessions s ON s.id=o.session_id WHERE o.delivered_at IS NULL AND NOT s.archived GROUP BY o.session_id ORDER BY min(o.rowid)",
+        )?;
+        Ok(stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Appends the event that delivers outbox entry `outbox_id` and acknowledges
+    /// it in the same transaction. An entry delivers exactly once: a second
+    /// attempt fails with `InvalidTransition` and appends nothing.
+    /// # Errors
+    /// Returns database, encoding, missing-row, or invalid-transition errors.
+    pub fn append_delivering(
+        &mut self,
+        session_id: &str,
+        event: EventRecord,
+        projection: Projection,
+        update: SessionUpdate,
+        outbox_id: &str,
+    ) -> Result<i64> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let delivered: Option<i64> = tx
+            .query_row("SELECT delivered_at FROM outbox WHERE id=?1 AND session_id=?2", params![outbox_id, session_id], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| Error::NotFound(outbox_id.into()))?;
+        if delivered.is_some() {
+            return Err(Error::InvalidTransition(format!("outbox {outbox_id} already delivered")));
+        }
+        let seq = append_tx(&tx, session_id, &event, &projection)?;
+        let meta = update.meta.map(|v| serde_json::to_string(&v)).transpose()?;
+        tx.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta) WHERE id=?1",
+            params![session_id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta])?;
+        tx.execute("UPDATE outbox SET delivered_at=?2 WHERE id=?1", params![outbox_id, now()])?;
+        tx.commit()?;
+        Ok(seq)
+    }
+
+    /// Direct children of `parent`, oldest first.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn children(&self, parent: &str) -> Result<Vec<Session>> {
+        let mut stmt = self.connection.prepare("SELECT * FROM sessions WHERE parent_id=? ORDER BY created_at,id")?;
+        Ok(stmt.query_map([parent], session_row)?.collect::<rusqlite::Result<_>>()?)
     }
 
     /// # Errors

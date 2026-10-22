@@ -54,8 +54,12 @@ impl Services {
     pub fn new(providers: Providers) -> anyhow::Result<Self> {
         Ok(Self { providers, logins: Default::default(), script: crate::script::load()? })
     }
+    /// Modes the provider has a sign-in for that at least one of its models accepts
+    /// (local servers list models only once reachable, so they keep API key).
     fn modes(&self, provider: &str) -> Vec<AuthMode> {
-        supported_modes(self.providers.catalog_entries(Some(provider), None).into_iter().flat_map(|entry| entry.auth))
+        let offered = self.providers.login_modes(provider);
+        let models: Vec<Mode> = self.providers.catalog_entries(Some(provider), None).into_iter().flat_map(|entry| entry.auth).collect();
+        supported_modes(offered.into_iter().filter(|mode| models.is_empty() || models.contains(mode)))
     }
     fn statuses(&self) -> Result<Vec<AuthStatus>, RpcError> {
         let mut statuses = self
@@ -74,6 +78,7 @@ impl Services {
                     expires_at: status.expires_at_ms.map(|ms| ms.min(i64::MAX as u64) as i64),
                     account: status.account_id,
                     default_model: None,
+                    base_url: status.base_url,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -87,6 +92,7 @@ impl Services {
                 account: None,
                 modes: Vec::new(),
                 default_model: None,
+                base_url: None,
             });
         }
         if let Some((provider, model)) = otto_core::ModelResolver::default_model(self)
@@ -139,12 +145,26 @@ impl otto_core::ModelResolver for Services {
 
 impl AuthService for Services {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>> {
-        Box::pin(async { self.statuses() })
+        Box::pin(async {
+            self.providers.discover_local().await;
+            self.statuses()
+        })
     }
-    fn login(&self, provider: String, mode: AuthMode, api_key: Option<String>, device: bool) -> AuthFuture<'_, LoginResult> {
+    fn login(
+        &self,
+        provider: String,
+        mode: AuthMode,
+        api_key: Option<String>,
+        device: bool,
+        base_url: Option<String>,
+    ) -> AuthFuture<'_, LoginResult> {
         Box::pin(async move {
             if device && mode != AuthMode::Subscription {
                 return Err(RpcError::bad_request("device login requires subscription mode"));
+            }
+            // Written to <state>/providers.json, where provider resolution reads it.
+            if let Some(url) = &base_url {
+                self.providers.set_base_url(&provider, Some(url)).map_err(rpc)?;
             }
             let mode = match mode {
                 AuthMode::ApiKey => LoginMode::ApiKey,
@@ -228,7 +248,10 @@ impl AuthService for Services {
         })
     }
     fn list_models(&self, provider: Option<String>) -> AuthFuture<'_, Vec<ModelInfo>> {
-        Box::pin(async move { Ok(self.models(provider.as_deref())) })
+        Box::pin(async move {
+            self.providers.discover_local().await;
+            Ok(self.models(provider.as_deref()))
+        })
     }
 }
 
@@ -236,13 +259,28 @@ impl AuthService for Services {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn login_base_url_persists_for_local_providers_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
+        let url = "http://127.0.0.1:9";
+        services.login("custom".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into())).await.unwrap();
+        assert!(std::fs::read_to_string(dir.path().join("providers.json")).unwrap().contains(url));
+        assert!(services.statuses().unwrap().iter().any(|s| s.provider == "custom" && s.base_url.as_deref() == Some(url)));
+        assert!(services.login("openai".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into())).await.is_err());
+        // A local server needs no key; with none answering it stays signed out.
+        let LoginResult::SignedIn { auth } = services.login("ollama".into(), AuthMode::ApiKey, None, false, Some(url.into())).await.unwrap() else {
+            panic!("expected a saved endpoint");
+        };
+        assert!(!auth.signed_in && auth.base_url.is_some());
+    }
+    #[tokio::test]
     async fn auth_adapter_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
-        assert!(services.login("openai".into(), AuthMode::ApiKey, None, true).await.is_err());
-        assert!(services.login("anthropic".into(), AuthMode::Subscription, None, true).await.is_err());
+        assert!(services.login("openai".into(), AuthMode::ApiKey, None, true, None).await.is_err());
+        assert!(services.login("anthropic".into(), AuthMode::Subscription, None, true, None).await.is_err());
         assert!(matches!(
-            services.login("openai".into(), AuthMode::ApiKey, Some("test-key".into()), false).await.unwrap(),
+            services.login("openai".into(), AuthMode::ApiKey, Some("test-key".into()), false, None).await.unwrap(),
             LoginResult::SignedIn { .. }
         ));
         assert!(
@@ -250,7 +288,7 @@ mod tests {
         );
         assert!(!services.list_models(Some("openai".into())).await.unwrap().is_empty());
         services.logout("openai".into()).await.unwrap();
-        let login = services.login("anthropic".into(), AuthMode::Subscription, None, false).await.unwrap();
+        let login = services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap();
         let LoginResult::Pending { login_id, url, user_code, verification_uri, interval_secs, needs_code } = login else {
             panic!("expected OAuth flow");
         };
@@ -277,23 +315,31 @@ mod tests {
             assert!(!status.signed_in);
             assert_eq!(status.modes, vec![AuthMode::ApiKey, AuthMode::Subscription], "{provider}");
         }
+        // Every other provider signs in with an API key (optional for local servers).
+        for provider in ["google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"] {
+            let status = statuses.iter().find(|s| s.provider == provider).unwrap_or_else(|| panic!("{provider} listed"));
+            assert_eq!(status.modes, vec![AuthMode::ApiKey], "{provider}");
+        }
     }
 
     #[tokio::test]
     async fn cancel_and_supersede_drop_pending_logins() {
         let dir = tempfile::tempdir().unwrap();
         let services = Arc::new(Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap());
-        let LoginResult::Pending { login_id, .. } = services.login("anthropic".into(), AuthMode::Subscription, None, false).await.unwrap() else {
+        let LoginResult::Pending { login_id, .. } = services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
+        else {
             panic!("expected OAuth flow");
         };
         services.login_cancel(login_id.clone()).await.unwrap();
         assert!(services.login_complete(login_id, Some("x#y".into())).await.is_err());
         // A second login for the same provider supersedes the first.
-        let LoginResult::Pending { login_id: first, .. } = services.login("anthropic".into(), AuthMode::Subscription, None, false).await.unwrap()
+        let LoginResult::Pending { login_id: first, .. } =
+            services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
         else {
             panic!("expected OAuth flow");
         };
-        let LoginResult::Pending { login_id: second, .. } = services.login("anthropic".into(), AuthMode::Subscription, None, false).await.unwrap()
+        let LoginResult::Pending { login_id: second, .. } =
+            services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
         else {
             panic!("expected OAuth flow");
         };

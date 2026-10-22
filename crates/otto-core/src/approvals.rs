@@ -11,6 +11,13 @@ pub(crate) struct Bridge {
     pub step: i64,
 }
 impl Bridge {
+    /// Fire Notification hooks without holding up the call.
+    fn notify(&self, message: String, kind: &'static str) {
+        let cx = self.cx.clone();
+        tokio::spawn(async move {
+            let _ = crate::hooks::run(&cx, "Notification", kind, serde_json::json!({"message":message,"notification_type":kind})).await;
+        });
+    }
     pub async fn gate(&self, call_id: &str, tool: &str, summary: &str, input: serde_json::Value) -> Result<ApprovalDecision> {
         let id = crate::id();
         let (tx, rx) = oneshot::channel();
@@ -28,6 +35,7 @@ impl Bridge {
                 s.approvals.insert(key, (pending, tx));
             })
             .await?;
+        self.notify(format!("otto needs your permission to use {tool}"), "permission_prompt");
         self.cx
             .emit(
                 Event::ApprovalRequested {
@@ -68,6 +76,7 @@ impl otto_tools::Approver for Bridge {
             })
             .await
             .ok()?;
+        self.notify(format!("otto asks: {question}"), "question");
         self.cx
             .emit(
                 Event::QuestionAsked { question_id: id.clone(), call_id: call_id.into(), question: question.into(), options: options.to_vec() },

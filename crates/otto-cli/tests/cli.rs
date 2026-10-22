@@ -8,6 +8,9 @@ fn command(home: &std::path::Path) -> Command {
         .env("OTTO_SILO_OFFLINE", "1")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("XAI_API_KEY")
         .env_remove("OTTO_SILO_MODEL")
         .stdin(Stdio::null());
     command
@@ -57,9 +60,19 @@ fn catalog_modes_and_unsupported_providers() {
     for id in ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"] {
         assert!(!text.contains(&format!("openai/{id}\t")));
     }
+    // Every provider is implemented: google lists nothing until signed in, and is supported with --all.
     let models = command(home.path()).args(["models", "--provider", "google"]).output().unwrap();
     assert!(models.status.success());
-    assert!(String::from_utf8_lossy(&models.stdout).contains("not yet supported"));
+    assert_eq!(String::from_utf8(models.stdout).unwrap().lines().count(), 1);
+    for provider in ["google", "xai"] {
+        let models = command(home.path()).args(["models", "--all", "--provider", provider]).output().unwrap();
+        assert!(models.status.success());
+        let text = String::from_utf8(models.stdout).unwrap();
+        assert!(text.contains(&format!("\n{provider}/")), "{text}");
+        assert!(!text.contains("not yet supported"), "{text}");
+    }
+    let unknown = command(home.path()).args(["models", "--provider", "nowhere"]).output().unwrap();
+    assert!(!unknown.status.success());
     let models = command(home.path()).env("OPENAI_API_KEY", "test-key").args(["models", "--mode", "subscription"]).output().unwrap();
     assert!(models.status.success());
     assert_eq!(String::from_utf8(models.stdout).unwrap().lines().count(), 1);

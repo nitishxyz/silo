@@ -2154,6 +2154,13 @@
               "null"
             ]
           },
+          "base_url": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "device": {
             "default": false,
             "type": "boolean"
@@ -2183,6 +2190,12 @@
           "AuthStatus": {
             "properties": {
               "account": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "base_url": {
                 "type": [
                   "string",
                   "null"
@@ -2527,6 +2540,12 @@
               "null"
             ]
           },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "default_model": {
             "type": [
               "string",
@@ -2787,6 +2806,12 @@
                   "null"
                 ]
               },
+              "base_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "default_model": {
                 "type": [
                   "string",
@@ -2830,6 +2855,141 @@
           "$ref": "#/$defs/AuthStatus"
         },
         "title": "Array_of_AuthStatus",
+        "type": "array"
+      }
+    },
+    "commands.list": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "CommandInfo": {
+            "properties": {
+              "argument_hint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/CommandInfo"
+        },
+        "title": "Array_of_CommandInfo",
         "type": "array"
       }
     },
@@ -3203,6 +3363,13 @@
               },
               "native_compaction": {
                 "type": "boolean"
+              },
+              "native_tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "parallel_tools": {
                 "type": "boolean"
@@ -5313,6 +5480,236 @@
         "type": "object"
       }
     },
+    "session.queue_remove": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "input_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "session.queue_update": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/Delivery"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id",
+          "delivery"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "session.rename": {
       "params": {
         "$defs": {
@@ -6763,6 +7160,135 @@
         ],
         "title": "SessionView",
         "type": "object"
+      }
+    },
+    "skills.list": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "SkillInfo": {
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/SkillInfo"
+        },
+        "title": "Array_of_SkillInfo",
+        "type": "array"
       }
     },
     "tools.list": {

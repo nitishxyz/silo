@@ -77,7 +77,7 @@ fn projects_sessions_and_settings() {
     assert!(store.update_session("missing", SessionUpdate::default()).is_err());
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(), "wal");
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
     drop(store);
     assert!(Store::open(&path).unwrap().session(&first.id).unwrap().is_some());
 }
@@ -204,6 +204,40 @@ fn outbox_and_historical_fork() {
     assert!(store.outbox_pending(&id).unwrap().is_empty());
     assert!(store.outbox_mark_delivered("missing").is_err());
     assert!(store.outbox_push(&id, "missing", 1, json!(null)).is_err());
+}
+
+#[test]
+fn outbox_versions_push_once_and_deliver_once() {
+    let mut store = Store::open_in_memory().unwrap();
+    let parent = new_session(&mut store);
+    let child = store
+        .create_session(NewSession {
+            project_id: parent.project_id.clone(),
+            parent_id: Some(parent.id.clone()),
+            agent: "general".into(),
+            model: "model".into(),
+            provider: "test".into(),
+            title: "child".into(),
+            cwd: "/project".into(),
+            meta: json!({}),
+        })
+        .unwrap();
+    assert_eq!(store.children(&parent.id).unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&child.id));
+    let first = store.outbox_push(&parent.id, &child.id, 3, json!({"status":"done"})).unwrap();
+    assert_eq!(store.outbox_push(&parent.id, &child.id, 3, json!({"status":"again"})).unwrap(), first);
+    let second = store.outbox_push(&parent.id, &child.id, 4, json!({"status":"done"})).unwrap();
+    assert_eq!(store.outbox_pending(&parent.id).unwrap().iter().map(|e| e.id.clone()).collect::<Vec<_>>(), [first.clone(), second.clone()]);
+    assert_eq!(store.outbox_pending_sessions().unwrap(), std::slice::from_ref(&parent.id));
+    let item = |id: &str| Projection::PutItem(Item::user_text(format!("outbox-{id}"), "delivered"));
+    let seq = store.append_delivering(&parent.id, event("item.done"), item(&first), SessionUpdate::default(), &first).unwrap();
+    assert!(matches!(
+        store.append_delivering(&parent.id, event("item.done"), item(&first), SessionUpdate::default(), &first),
+        Err(Error::InvalidTransition(_))
+    ));
+    assert_eq!(store.session(&parent.id).unwrap().unwrap().last_seq, seq, "a refused delivery appends nothing");
+    assert!(store.append_delivering(&child.id, event("item.done"), item(&second), SessionUpdate::default(), &second).is_err());
+    store.append_delivering(&parent.id, event("item.done"), item(&second), SessionUpdate::default(), &second).unwrap();
+    assert!(store.outbox_pending_sessions().unwrap().is_empty());
 }
 
 #[test]

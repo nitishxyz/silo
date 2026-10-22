@@ -4,7 +4,13 @@ use serde_json::json;
 #[test]
 fn debug_redacts_credentials_without_changing_serialization() {
     let methods = [
-        Method::AuthLogin { provider: "openai".into(), mode: AuthMode::ApiKey, api_key: Some("secret-api-key".into()), device: false },
+        Method::AuthLogin {
+            provider: "openai".into(),
+            mode: AuthMode::ApiKey,
+            api_key: Some("secret-api-key".into()),
+            device: false,
+            base_url: None,
+        },
         Method::AuthLoginComplete { login_id: "login".into(), code: Some("secret-login-code".into()) },
     ];
     for (method, secret) in methods.into_iter().zip(["secret-api-key", "secret-login-code"]) {

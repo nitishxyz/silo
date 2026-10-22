@@ -41,6 +41,15 @@ pub struct ToolSpec {
     pub exclusive: bool,
 }
 
+impl ToolSpec {
+    /// The shape `family` sees: the first of its presentations whose native
+    /// tool (if any) is in `native` (the model's `caps.native_tools`).
+    #[must_use]
+    pub fn presentation(&self, family: &str, native: &[String]) -> Option<&Presentation> {
+        self.presentations.iter().find(|p| p.family == family && p.native.as_ref().is_none_or(|n| native.contains(&n.tool)))
+    }
+}
+
 /// What a call may do; drives approval policy (§5.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -107,6 +116,18 @@ pub struct Presentation {
     /// Freeform tool format (e.g. a Lark grammar); input arrives as a string.
     #[serde(default)]
     pub freeform: Option<Value>,
+    /// A provider-defined tool (`ToolKind::Native`): the provider fixes the
+    /// schema; calls are mapped with [`crate::native::canonical`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeTool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NativeTool {
+    /// The provider's tool type (`text_editor_20250728`, `bash_20250124`, `apply_patch`, `shell`).
+    pub tool: String,
+    #[serde(default)]
+    pub config: Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,4 +304,15 @@ pub trait ToolSource: Send + Sync {
     fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         None
     }
+}
+
+/// Tools whose set depends on the project (MCP servers from `.mcp.json`).
+/// Listed again before every model request, so changes apply at the next step.
+#[async_trait]
+pub trait ProjectSources: Send + Sync {
+    /// The tools of every healthy source for `project_root`, starting sources
+    /// lazily. Failing sources are skipped, not fatal.
+    async fn tools(&self, project_root: &std::path::Path) -> Vec<Arc<dyn Tool>>;
+    /// Stop every started source (child processes, connections).
+    async fn shutdown(&self) {}
 }

@@ -130,6 +130,13 @@ pub enum Method {
         #[serde(default)]
         delivery: Delivery,
     },
+    /// Withdraw a pending input (queued or a steer not yet handed to the model).
+    #[serde(rename = "session.queue_remove")]
+    SessionQueueRemove { session_id: SessionId, input_id: String },
+    /// Change a pending input's delivery: `steer` sends it at the next step,
+    /// `queue` waits for the turn to end, `interrupt` cancels the turn and runs it now.
+    #[serde(rename = "session.queue_update")]
+    SessionQueueUpdate { session_id: SessionId, input_id: String, delivery: Delivery },
     #[serde(rename = "session.cancel")]
     SessionCancel { session_id: SessionId },
     #[serde(rename = "session.compact")]
@@ -150,6 +157,10 @@ pub enum Method {
         /// Request subscription device authorization instead of browser OAuth.
         #[serde(default)]
         device: bool,
+        /// Endpoint of a local or custom provider (`ollama`, `lmstudio`, `custom`);
+        /// stored before signing in. Providers with a fixed endpoint reject it.
+        #[serde(default)]
+        base_url: Option<String>,
     },
     #[serde(rename = "auth.login_complete")]
     AuthLoginComplete { login_id: String, code: Option<String> },
@@ -161,6 +172,12 @@ pub enum Method {
     ToolsList { session_id: Option<SessionId> },
     #[serde(rename = "agents.list")]
     AgentsList {},
+    /// Skills the `skill` tool can load; project skills need `project_root`.
+    #[serde(rename = "skills.list")]
+    SkillsList { project_root: Option<String> },
+    /// Slash commands (`/name arguments`); project commands need `project_root`.
+    #[serde(rename = "commands.list")]
+    CommandsList { project_root: Option<String> },
     #[serde(rename = "config.get")]
     ConfigGet { key: Option<String> },
     #[serde(rename = "config.set")]
@@ -197,6 +214,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.set_mode", "Change approval mode for subsequent tool calls; plan agents remain read-only."),
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),
+    ("session.queue_remove", "Withdraw a queued input or a pending steer."),
+    ("session.queue_update", "Change a pending input's delivery: steer, queue, or interrupt."),
     ("session.cancel", "Cancel the current turn and its children."),
     ("session.compact", "Compact session history."),
     ("approval.answer", "Resolve a pending tool approval."),
@@ -209,6 +228,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("auth.logout", "Remove provider credentials."),
     ("tools.list", "List tools available to a session."),
     ("agents.list", "List agent definitions."),
+    ("skills.list", "List skills."),
+    ("commands.list", "List slash commands."),
     ("config.get", "Read a configuration key, or all configuration."),
     ("config.set", "Set a configuration key."),
 ];

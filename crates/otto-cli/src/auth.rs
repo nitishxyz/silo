@@ -4,7 +4,10 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use otto_llm::providers::{LoginMode, Providers};
+use otto_llm::{
+    auth::AuthMode,
+    providers::{IDS, LoginMode, Providers},
+};
 
 use crate::{AuthCommand, LoginArgs, prompt};
 
@@ -17,18 +20,20 @@ pub async fn run(command: AuthCommand, providers: &Providers) -> Result<()> {
             Ok(())
         }
         AuthCommand::Status => {
-            println!("PROVIDER\tMODE\tSIGNED IN\tEXPIRES (unix ms)\tACCOUNT");
+            providers.discover_local().await;
+            println!("PROVIDER\tMODE\tSIGNED IN\tEXPIRES (unix ms)\tACCOUNT\tENDPOINT");
             for status in providers.status() {
                 if let Some(error) = status.error {
                     bail!("{error}");
                 }
                 println!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     status.provider,
                     status.mode.as_deref().unwrap_or("-"),
                     if status.signed_in { "yes" } else { "no" },
                     status.expires_at_ms.map_or_else(|| "-".into(), |v| v.to_string()),
-                    status.account_id.as_deref().unwrap_or("-")
+                    status.account_id.as_deref().unwrap_or("-"),
+                    status.base_url.as_deref().unwrap_or("-")
                 );
             }
             Ok(())
@@ -39,8 +44,26 @@ pub async fn run(command: AuthCommand, providers: &Providers) -> Result<()> {
 async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
     let provider = match args.provider {
         Some(provider) => provider,
-        None => prompt("Provider (anthropic/openai)", false).await?,
+        None => prompt(&format!("Provider ({})", IDS.join("/")), false).await?,
     };
+    if !otto_llm::providers::IDS.contains(&provider.as_str()) {
+        bail!("unknown provider {provider}; choose one of {}", otto_llm::providers::IDS.join(", "));
+    }
+    let subscription = providers.login_modes(&provider).contains(&AuthMode::Subscription);
+    // Local and custom servers: where they listen. The environment override wins when set.
+    if let Some(url) = &args.base_url {
+        providers.set_base_url(&provider, Some(url))?;
+    } else if let Some(default) = providers.base_url(&provider).or_else(|| (provider == "custom").then(String::new))
+        && otto_llm::compat::dialect(&provider).is_some_and(|d| d.discovery.is_some())
+        && args.api_key.is_none()
+    {
+        let url = prompt(&format!("Base URL [{default}]"), false).await?;
+        if !url.is_empty() {
+            providers.set_base_url(&provider, Some(&url))?;
+        } else if default.is_empty() {
+            bail!("{provider} needs a base URL");
+        }
+    }
     let mut mode = if args.api_key.is_some() {
         LoginMode::ApiKey
     } else if args.device {
@@ -51,6 +74,8 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
         LoginMode::Console
     } else if args.subscription {
         LoginMode::Subscription
+    } else if !subscription {
+        LoginMode::ApiKey
     } else {
         match prompt("Mode (subscription/api-key)", false).await?.as_str() {
             "subscription" | "" => LoginMode::Subscription,
@@ -78,6 +103,7 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
     let input = if mode == LoginMode::ApiKey {
         match args.api_key.filter(|key| !key.is_empty()) {
             Some(key) => key,
+            None if otto_llm::compat::dialect(&provider).is_some_and(|d| !d.key_required) => prompt("API key (optional)", true).await?,
             None => prompt("API key", true).await?,
         }
     } else if flow.needs_input() {

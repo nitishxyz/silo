@@ -67,6 +67,8 @@ fn result_schema(method: &Method) -> Schema {
         M::AuthLoginComplete { .. } => schema_for!(AuthStatus),
         M::ToolsList { .. } => schema_for!(Vec<ToolInfo>),
         M::AgentsList {} => schema_for!(Vec<AgentInfo>),
+        M::SkillsList { .. } => schema_for!(Vec<SkillInfo>),
+        M::CommandsList { .. } => schema_for!(Vec<CommandInfo>),
         M::ConfigGet { .. } => schema_for!(ConfigValue),
         M::ServerShutdown {}
         | M::Ping {}
@@ -74,6 +76,8 @@ fn result_schema(method: &Method) -> Schema {
         | M::SessionRename { .. }
         | M::SessionSetMode { .. }
         | M::SessionArchive { .. }
+        | M::SessionQueueRemove { .. }
+        | M::SessionQueueUpdate { .. }
         | M::SessionCancel { .. }
         | M::SessionCompact { .. }
         | M::ApprovalAnswer { .. }
@@ -115,18 +119,22 @@ pub fn examples() -> Vec<Method> {
         M::SessionSetMode { session_id: "s1".into(), approval_mode: crate::model::ApprovalMode::Plan },
         M::SessionArchive { session_id: "s1".into() },
         M::SessionPrompt { session_id: "s1".into(), input: vec![InputPart::Text { text: "Review this project".into() }], delivery: Delivery::Queue },
+        M::SessionQueueRemove { session_id: "s1".into(), input_id: "i1".into() },
+        M::SessionQueueUpdate { session_id: "s1".into(), input_id: "i1".into(), delivery: Delivery::Steer },
         M::SessionCancel { session_id: "s1".into() },
         M::SessionCompact { session_id: "s1".into() },
         M::ApprovalAnswer { session_id: "s1".into(), approval_id: "a1".into(), decision: ApprovalDecision::Allow, note: None },
         M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into() },
         M::ModelList { provider: None },
         M::AuthStatus {},
-        M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true },
+        M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None },
         M::AuthLoginComplete { login_id: "login1".into(), code: None },
         M::AuthLoginCancel { login_id: "login1".into() },
         M::AuthLogout { provider: "openai".into() },
         M::ToolsList { session_id: Some("s1".into()) },
         M::AgentsList {},
+        M::SkillsList { project_root: Some("/work/project".into()) },
+        M::CommandsList { project_root: Some("/work/project".into()) },
         M::ConfigGet { key: None },
         M::ConfigSet { key: "model".into(), value: json!("example-model") },
     ]

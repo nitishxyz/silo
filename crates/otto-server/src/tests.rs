@@ -50,7 +50,7 @@ impl AuthService for NoAuth {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>> {
         Box::pin(async { Ok(vec![]) })
     }
-    fn login(&self, _: String, _: AuthMode, _: Option<String>, device: bool) -> AuthFuture<'_, LoginResult> {
+    fn login(&self, _: String, _: AuthMode, _: Option<String>, device: bool, _: Option<String>) -> AuthFuture<'_, LoginResult> {
         Box::pin(async move {
             if !device {
                 return Err(RpcError::auth_required("test"));
@@ -83,6 +83,18 @@ struct Fixture {
     runtime: Arc<otto_core::Runtime>,
     models: Arc<dyn ModelResolver>,
 }
+async fn runtime(dir: &tempfile::TempDir, models: &Arc<dyn ModelResolver>) -> Arc<otto_core::Runtime> {
+    Arc::new(
+        otto_core::Runtime::new(RuntimeConfig {
+            store: Arc::new(StdMutex::new(otto_store::Store::open_in_memory().unwrap())),
+            models: models.clone(),
+            state_dir: dir.path().to_owned(),
+            user_config_dir: dir.path().to_owned(),
+        })
+        .await
+        .unwrap(),
+    )
+}
 impl Fixture {
     async fn new(scripts: Vec<Vec<StreamEvent>>) -> Self {
         let dir = tempfile::Builder::new().prefix("otto-server-").tempdir_in("/tmp").unwrap();
@@ -91,17 +103,12 @@ impl Fixture {
             scripts: StdMutex::new(scripts.into()),
         });
         let models: Arc<dyn ModelResolver> = Arc::new(Resolver(model));
-        let runtime = Arc::new(
-            otto_core::Runtime::new(RuntimeConfig {
-                store: Arc::new(StdMutex::new(otto_store::Store::open_in_memory().unwrap())),
-                models: models.clone(),
-                state_dir: dir.path().to_owned(),
-                user_config_dir: dir.path().to_owned(),
-            })
-            .await
-            .unwrap(),
-        );
+        let runtime = runtime(&dir, &models).await;
         Self { dir, runtime, models }
+    }
+    /// A shut-down runtime stays closed; a restarted server needs a new one.
+    async fn reopen(&mut self) {
+        self.runtime = runtime(&self.dir, &self.models).await;
     }
     fn config(&self) -> ServerConfig {
         ServerConfig {
