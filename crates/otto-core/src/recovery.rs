@@ -15,14 +15,14 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
         }
     }
     // A turn the user stopped held its report; the hold ends with the daemon
-    // (an interrupted later turn already reported instead).
+    // (an interrupted later turn already reported instead), so nothing is lost.
     for session in store.all_sessions()?.into_iter().filter(|s| crate::subagents::subagent(s) && !s.meta["held"].is_null()) {
         if recovered.interrupted_turns.iter().any(|(id, _)| *id == session.id) {
             let mut meta = session.meta.clone();
             crate::subagents::clear(&mut meta);
             store.update_session(&session.id, SessionUpdate { meta: Some(meta), ..Default::default() })?;
         } else {
-            crate::subagents::release_held(store, &session.id)?;
+            crate::subagents::release_held(store, &session.id, false)?;
         }
     }
     for session in store.all_sessions()? {

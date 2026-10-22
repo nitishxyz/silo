@@ -5492,6 +5492,127 @@
         "type": "object"
       }
     },
+    "session.hand_back": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "session.list": {
       "params": {
         "$defs": {
@@ -7678,6 +7799,35 @@
               }
             ]
           },
+          "PartTime": {
+            "properties": {
+              "finished_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "part": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "started_at": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "item_id",
+              "part",
+              "started_at"
+            ],
+            "type": "object"
+          },
           "PendingApproval": {
             "properties": {
               "approval_id": {
@@ -8004,6 +8154,12 @@
           "items": {
             "items": {
               "$ref": "#/$defs/Item"
+            },
+            "type": "array"
+          },
+          "part_times": {
+            "items": {
+              "$ref": "#/$defs/PartTime"
             },
             "type": "array"
           },

@@ -4,3 +4,4 @@ mod control;
 mod device;
 mod protocol;
 mod redaction;
+mod timing;

@@ -133,6 +133,10 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             runtime.cancel(&session_id).await.map_err(core_error)?;
             Ok(json!({}))
         }
+        Method::SessionHandBack { session_id } => {
+            runtime.hand_back(&session_id).await.map_err(core_error)?;
+            Ok(json!({}))
+        }
         Method::SessionCompact { session_id } => {
             runtime.compact(&session_id).await.map_err(core_error)?;
             Ok(json!({}))

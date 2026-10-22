@@ -41,6 +41,8 @@ pub struct SessionMirror {
     pub turn: Option<(i64, TurnStatus)>,
     /// When the turn running in the loaded view started (ms since the Unix epoch); a later turn is seen live.
     pub turn_started_at: Option<i64>,
+    /// When the loaded items' timed parts ran (the view's journal times); later parts are seen live.
+    pub part_times: Vec<PartTime>,
     pub last_error: Option<(String, String, bool)>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
@@ -67,6 +69,7 @@ impl SessionMirror {
             last_seq: view.seq,
             turn: None,
             turn_started_at: view.turn_started_at,
+            part_times: view.part_times,
             last_error: None,
             indices,
             durable: None,

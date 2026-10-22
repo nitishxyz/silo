@@ -359,6 +359,19 @@ impl Store {
         tool_rows(&self.connection, Some(session_id), false)
     }
 
+    /// The session's events of `kinds` in order, without payloads: kind, time,
+    /// item id (`item_id`, else `item.id`) and call id.
+    /// # Errors
+    /// Returns database errors.
+    #[allow(clippy::type_complexity)]
+    pub fn marks(&self, session_id: &str, kinds: &[&str]) -> Result<Vec<(String, i64, Option<String>, Option<String>)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT kind,at,coalesce(json_extract(payload,'$.item_id'),json_extract(payload,'$.item.id')),json_extract(payload,'$.call_id') FROM events WHERE session_id=? AND kind IN (SELECT value FROM json_each(?)) ORDER BY seq",
+        )?;
+        let kinds = serde_json::to_string(kinds)?;
+        Ok(stmt.query_map(params![session_id, kinds], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// When the session's running turn started, if one runs.
     /// # Errors
     /// Returns database errors.

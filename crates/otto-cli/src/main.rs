@@ -40,6 +40,8 @@ enum Command {
     },
     /// Cancel a session's running turn.
     Cancel { id: String },
+    /// Hand a stopped sub-agent back: its held report goes to the parent now.
+    HandBack { id: String },
     /// Sign in, sign out, or inspect credentials.
     Auth {
         #[command(subcommand)]
@@ -176,6 +178,7 @@ async fn run(cli: Cli, cancel: CancellationToken) -> Result<()> {
         Command::Attach(args) => sessions::attach(args).await,
         Command::Session { command } => sessions::mutate(command).await,
         Command::Cancel { id } => sessions::cancel(&id).await,
+        Command::HandBack { id } => sessions::hand_back(&id).await,
         Command::Auth { command } => auth::run(command, &providers).await,
         Command::CatalogRefresh => {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), providers.refresh_catalog()).await;

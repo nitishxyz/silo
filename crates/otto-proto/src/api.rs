@@ -79,6 +79,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::SessionQueueRemove { .. }
         | M::SessionQueueUpdate { .. }
         | M::SessionCancel { .. }
+        | M::SessionHandBack { .. }
         | M::SessionCompact { .. }
         | M::ApprovalAnswer { .. }
         | M::QuestionAnswer { .. }
@@ -131,6 +132,7 @@ pub fn examples() -> Vec<Method> {
         M::SessionQueueRemove { session_id: "s1".into(), input_id: "i1".into() },
         M::SessionQueueUpdate { session_id: "s1".into(), input_id: "i1".into(), delivery: Delivery::Steer },
         M::SessionCancel { session_id: "s1".into() },
+        M::SessionHandBack { session_id: "s1".into() },
         M::SessionCompact { session_id: "s1".into() },
         M::ApprovalAnswer { session_id: "s1".into(), approval_id: "a1".into(), decision: ApprovalDecision::Allow, note: None },
         M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into() },

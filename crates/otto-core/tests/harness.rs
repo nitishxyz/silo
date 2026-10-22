@@ -34,6 +34,11 @@ impl Model for Scripted {
         self.requests.lock().unwrap().push(request);
         let script = self.scripts.lock().unwrap().pop_front();
         Ok(match script {
+            // A reply that streams, then never ends.
+            Some(mut events) if matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::Other(r), .. }) if r == "hang") => {
+                events.pop();
+                Box::pin(futures::StreamExt::chain(futures::stream::iter(events.into_iter().map(Ok)), futures::stream::pending()))
+            }
             Some(events) => Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
             None => Box::pin(futures::stream::pending()),
         })
@@ -211,6 +216,18 @@ async fn user_stops(runtime: &Runtime, child: &str) {
     runtime.cancel(child).await.unwrap();
     finish(&mut live).await;
 }
+/// The child starts replying (`text` streams), then the user stops it.
+async fn user_stops_mid_reply(runtime: &Runtime, model: &Scripted, child: &str, text: &str) {
+    model.scripts.lock().unwrap().push_back(vec![
+        StreamEvent::TextDelta { text: text.into() },
+        StreamEvent::Finish { reason: FinishReason::Other("hang".into()), response_id: None },
+    ]);
+    let (_, mut live) = runtime.subscribe(child, 0).await.unwrap();
+    runtime.prompt(child, vec![InputPart::Text { text: "inspect".into() }], Delivery::Queue).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async { while !matches!(live.recv().await.unwrap().1, Event::TextDelta { .. }) {} }).await.unwrap();
+    runtime.cancel(child).await.unwrap();
+    finish(&mut live).await;
+}
 fn outbox_texts(view: &otto_proto::SessionView) -> Vec<String> {
     view.items.iter().filter(|i| i.id.starts_with("outbox-")).map(|i| serde_json::to_string(&i.parts).unwrap()).collect()
 }
@@ -250,18 +267,83 @@ async fn user_takeover_holds_the_report_until_a_finished_turn_and_notes_it() {
 }
 
 #[tokio::test]
-async fn a_user_stopped_child_left_idle_reports_once_after_the_hold() {
+async fn a_held_report_waits_for_the_hand_back_and_goes_once() {
     let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
     let model = Scripted::new(vec![]);
-    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
-    runtime.set_subagent_hold(Duration::from_millis(50));
+    let runtime = Runtime::new(config(dir.path(), Store::open(&path).unwrap(), model.clone())).await.unwrap();
     let (parent, child) = family(&runtime, dir.path()).await;
-    user_stops(&runtime, &child).await;
+    user_stops_mid_reply(&runtime, &model, &child, "half of the findings").await;
+    // No timer: it holds while the user keeps it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(deliveries(&runtime.view(&parent).await.unwrap()), 0, "held, not released by time");
+    assert!(runtime.view(&child).await.unwrap().info.report_held);
+    // Only a held sub-agent can be handed back.
+    assert!(runtime.hand_back(&parent).await.is_err());
     model.scripts.lock().unwrap().push_back(text("parent ack"));
+    runtime.hand_back(&child).await.unwrap();
+    assert!(runtime.hand_back(&child).await.is_err(), "a second hand-back has nothing to send");
+    assert!(!runtime.view(&child).await.unwrap().info.report_held);
     let view = until(&runtime, &parent, |v| v.items.last().is_some_and(|i| i.text() == "parent ack")).await;
     let texts = outbox_texts(&view);
     assert_eq!(texts.len(), 1);
-    assert!(texts[0].contains("status stopped") && texts[0].contains("The user stopped this sub-agent"));
+    assert!(texts[0].contains("status stopped") && texts[0].contains("The user stopped this sub-agent and handed it back."));
+    assert!(texts[0].contains("half of the findings"), "carries what it produced so far");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(deliveries(&runtime.view(&parent).await.unwrap()), 1);
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+    // A restart sends nothing more.
+    let model = Scripted::new(vec![]);
+    let runtime = Runtime::new(config(dir.path(), Store::open(&path).unwrap(), model.clone())).await.unwrap();
+    assert_eq!(runtime.deliver_pending().await.unwrap(), 0);
+    assert_eq!(deliveries(&runtime.view(&parent).await.unwrap()), 1);
+    assert!(model.requests.lock().unwrap().is_empty());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_view_times_reasoning_and_tool_calls_from_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = Scripted::new(vec![
+        vec![
+            StreamEvent::ReasoningDelta { text: "thinking".into(), summary: false },
+            StreamEvent::PartDone { part: Part::Reasoning { summary: None, text: Some("thinking".into()), opaque: None } },
+            call("c1", "no_such_tool", serde_json::json!({})),
+            StreamEvent::Finish { reason: FinishReason::ToolUse, response_id: None },
+        ],
+        text("done"),
+    ]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let session = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let (_, mut live) = runtime.subscribe(&session.id, 0).await.unwrap();
+    say(&session, "go", Delivery::Queue).await;
+    finish(&mut live).await;
+    let view = runtime.view(&session.id).await.unwrap();
+    let asked = view.items.iter().find(|i| i.tool_calls().next().is_some()).unwrap();
+    let time = |part: u32| view.part_times.iter().find(|t| t.item_id == asked.id && t.part == part).cloned().unwrap();
+    let (reasoning, call) = (time(0), time(1));
+    assert!(reasoning.finished_at.is_some_and(|end| end >= reasoning.started_at));
+    assert!(call.started_at >= reasoning.started_at && call.finished_at.is_some_and(|end| end >= call.started_at));
+    assert_eq!(view.part_times.len(), 2, "text parts are not timed");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_a_child_that_holds_nothing_changes_nothing() {
+    // Closing a sub-agent's block hands it back only while its report is held:
+    // a child that already reported, or never stopped, has nothing to send.
+    let dir = tempfile::tempdir().unwrap();
+    let model = Scripted::new(vec![text("child result"), text("parent incorporated")]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let (parent, child) = family(&runtime, dir.path()).await;
+    assert!(runtime.hand_back(&child).await.is_err(), "never stopped");
+    runtime.prompt(&child, vec![InputPart::Text { text: "inspect".into() }], Delivery::Queue).await.unwrap();
+    let view = until(&runtime, &parent, |v| v.items.last().is_some_and(|i| i.text() == "parent incorporated")).await;
+    assert_eq!(deliveries(&view), 1);
+    assert!(!runtime.view(&child).await.unwrap().info.report_held);
+    assert!(runtime.hand_back(&child).await.is_err(), "already reported");
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(deliveries(&runtime.view(&parent).await.unwrap()), 1);
     runtime.shutdown().await.unwrap();
@@ -288,6 +370,7 @@ async fn a_held_report_is_delivered_once_at_the_next_start() {
         };
         assert_eq!(deliveries(&view), delivered);
         assert!(outbox_texts(&view)[0].contains(&child));
+        assert!(outbox_texts(&view)[0].contains("the otto server restarted before they handed it back"));
         runtime.shutdown().await.unwrap();
     }
 }

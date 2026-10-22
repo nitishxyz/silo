@@ -157,6 +157,9 @@ pub enum Method {
     SessionQueueUpdate { session_id: SessionId, input_id: String, delivery: Delivery },
     #[serde(rename = "session.cancel")]
     SessionCancel { session_id: SessionId },
+    /// Send a stopped sub-agent's held report to its parent now (`SessionInfo.report_held`).
+    #[serde(rename = "session.hand_back")]
+    SessionHandBack { session_id: SessionId },
     #[serde(rename = "session.compact")]
     SessionCompact { session_id: SessionId },
     #[serde(rename = "approval.answer")]
@@ -236,6 +239,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.queue_remove", "Withdraw a queued input or a pending steer."),
     ("session.queue_update", "Change a pending input's delivery: steer, queue, or interrupt."),
     ("session.cancel", "Cancel the current turn and its children."),
+    ("session.hand_back", "Hand a stopped sub-agent back: its held report goes to the parent now."),
     ("session.compact", "Compact session history."),
     ("approval.answer", "Resolve a pending tool approval."),
     ("question.answer", "Answer a pending question."),

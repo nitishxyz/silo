@@ -695,10 +695,14 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `took_over` once the user stopped or interrupted a running turn); the next report adds one line, `The user steered
   this sub-agent; …` / `The user took over this sub-agent; …`, and clears the mark.
   - A turn the user stopped or interrupted does not report (no `cancelled` result for the parent to act on). It
-    holds (`meta.held` = that turn) until a later child turn finishes and reports instead.
-  - If the child then stays idle for `Runtime::subagent_hold` (2 min), or the daemon restarts first, the held turn
-    reports as status `stopped` (`The user stopped this sub-agent.`). Both go through the same versioned outbox
-    record, so it is still exactly once.
+    holds (`meta.held` = that turn, `SessionInfo.report_held`) for as long as the user keeps it; there is no timer.
+    A later child turn that finishes reports instead.
+  - **Hand-back:** `session.hand_back {session_id}` (`otto-silo hand-back <id>`) sends the held turn now, as status
+    `stopped` (`The user stopped this sub-agent and handed it back.`), with the child's last assistant text, or the
+    reply the stop cut off (its streamed deltas). `bad_request` when nothing is held or the child runs again. The
+    agent block calls it from `Hand back`; `silo server` calls it when the last agent block showing the child closes.
+  - A daemon restart still releases a held turn, so nothing is lost (`…; the otto server restarted before they
+    handed it back.`). All of these go through the same versioned outbox record: exactly once, also across restarts.
   - A user message to a finished child starts a new turn, which reports again and wakes the parent as usual.
   - The parent's own `stop` still reports nothing.
 - With silo: each subagent can get its own scoped grant and its own panes; the agent block opens a child in its own

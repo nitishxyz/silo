@@ -9,6 +9,7 @@ pub mod control;
 pub mod frame;
 pub mod model;
 pub mod paths;
+pub mod timing;
 
 pub use control::*;
 pub use frame::Frame;
@@ -16,6 +17,7 @@ pub use frame::Frame;
 pub use frame::{read_frame, spawn_reader, write_frame};
 pub use model::*;
 pub use otto_llm::{Effort, Item, ModelInfo, Part, StreamEvent, Usage};
+pub use timing::PartTime;
 
 /// Bump for incompatible wire changes; additive changes update `protocol.json`.
 pub const PROTOCOL: u32 = 1;

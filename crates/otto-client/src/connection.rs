@@ -266,6 +266,10 @@ impl Connection {
     pub async fn cancel(&self, session_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionCancel { session_id: session_id.into() }).await
     }
+    /// Send a stopped sub-agent's held report to its parent now.
+    pub async fn hand_back(&self, session_id: &str) -> Result<Empty> {
+        self.call_typed(Method::SessionHandBack { session_id: session_id.into() }).await
+    }
     /// Withdraw a pending input (queued, or a steer the model has not taken yet).
     pub async fn queue_remove(&self, session_id: &str, input_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionQueueRemove { session_id: session_id.into(), input_id: input_id.into() }).await

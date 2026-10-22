@@ -120,6 +120,10 @@ pub async fn cancel(id: &str) -> Result<()> {
     crate::daemon::connect().await?.cancel(id).await?;
     Ok(())
 }
+pub async fn hand_back(id: &str) -> Result<()> {
+    crate::daemon::connect().await?.hand_back(id).await?;
+    Ok(())
+}
 
 pub async fn run(args: RunArgs) -> Result<()> {
     let c = crate::daemon::connect().await?;

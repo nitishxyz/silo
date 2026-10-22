@@ -66,7 +66,7 @@ pub struct SessionInfo {
     pub last_seq: i64,
     pub usage: UsageTotals,
     /// A sub-agent the user stopped holds its report for the parent until it
-    /// reports (a later turn, or as `stopped` after `subagent_hold`).
+    /// reports: a later turn, `session.hand_back`, or the next otto start.
     #[serde(default)]
     pub report_held: bool,
 }
@@ -159,6 +159,10 @@ pub struct SessionView {
     /// When the running turn started (ms since the Unix epoch); `None` when idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_started_at: Option<i64>,
+    /// When the items' reasoning parts and tool calls ran, from the journal
+    /// (`timing::part_times`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub part_times: Vec<crate::timing::PartTime>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

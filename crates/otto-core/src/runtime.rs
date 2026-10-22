@@ -97,8 +97,6 @@ pub(crate) struct Inner {
     closing: std::sync::atomic::AtomicBool,
     /// Name untitled sessions after their first turn (`set_auto_title`).
     auto_title: std::sync::atomic::AtomicBool,
-    /// How long a child the user stopped holds its report (`set_subagent_hold`), in ms.
-    hold: std::sync::atomic::AtomicU64,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -116,7 +114,6 @@ impl Runtime {
             shell: Mutex::new(otto_tools::builtin::shell::Host::default()),
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
-            hold: std::sync::atomic::AtomicU64::new(120_000),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -153,14 +150,6 @@ impl Runtime {
     }
     pub(crate) fn auto_title(&self) -> bool {
         self.0.auto_title.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    /// A child turn the user stopped reports to the parent only after the
-    /// child stays idle this long (default 2 min); a new turn reports instead.
-    pub fn set_subagent_hold(&self, hold: std::time::Duration) {
-        self.0.hold.store(hold.as_millis().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
-    }
-    pub(crate) fn subagent_hold(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.0.hold.load(std::sync::atomic::Ordering::Relaxed))
     }
     pub(crate) fn defaults(&self) -> SessionDefaults {
         self.0.defaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
@@ -449,6 +438,11 @@ impl Runtime {
     pub(crate) async fn cancel_child(&self, id: &str) -> Result<()> {
         self.session(id).await?.stop(false).await
     }
+    /// The user hands a stopped sub-agent back: its held report goes to the
+    /// parent now, once (§7.4). Refused when nothing is held or it runs again.
+    pub async fn hand_back(&self, id: &str) -> Result<()> {
+        self.session(id).await?.hand_back().await
+    }
     pub async fn answer_approval(&self, id: &str, approval: &str, decision: ApprovalDecision) -> Result<()> {
         self.session(id).await?.answer_approval(approval, decision).await
     }
@@ -537,6 +531,15 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         last_seq: row.last_seq,
         usage: UsageTotals { usage: usage.usage, cost_usd: usage.cost_usd },
     })
+}
+/// When the items' timed parts ran, from the journal (`SessionView.part_times`).
+pub(crate) fn part_times(s: &Store, id: &str, items: &[otto_llm::Item]) -> Result<Vec<otto_proto::PartTime>> {
+    let marks: Vec<_> = s
+        .marks(id, otto_proto::timing::MARKS)?
+        .into_iter()
+        .map(|(kind, at, item_id, call_id)| otto_proto::timing::Mark { kind, at, item_id, call_id })
+        .collect();
+    Ok(otto_proto::timing::part_times(items, &marks))
 }
 pub(crate) fn record(event: &Event, turn: i64, step: i64) -> Result<EventRecord> {
     let value = serde_json::to_value(event)?;
