@@ -359,6 +359,16 @@ impl Store {
         tool_rows(&self.connection, Some(session_id), false)
     }
 
+    /// When the session's running turn started, if one runs.
+    /// # Errors
+    /// Returns database errors.
+    pub fn turn_started(&self, session_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .connection
+            .query_row("SELECT started_at FROM turns WHERE session_id=? AND status='running' ORDER BY turn DESC LIMIT 1", [session_id], |r| r.get(0))
+            .optional()?)
+    }
+
     /// # Errors
     /// Returns database errors, including integer overflow.
     pub fn usage_totals(&self, session_id: &str) -> Result<UsageTotals> {

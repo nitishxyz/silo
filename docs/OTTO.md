@@ -10,7 +10,7 @@ cross-machine conflicts (§12).
 | O0 providers | Anthropic Messages + OpenAI Responses (SSE), each with API key and subscription sign-in (Claude Pro/Max code paste; ChatGPT/Codex browser loopback + device code). Recorded-fixture tests. models.dev catalog with per-model auth availability | `otto-llm` |
 | O1 loop + tools | Turn engine (one actor per session), approvals (default `auto`, per-session modes), `Policy::prepare` path binding, tool journal + crash recovery, compaction, subagents, agents/skills/hooks/commands, built-in tools | `otto-core`, `otto-tools`, `otto-store` |
 | O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
-| O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, native client tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Native client tools follow `caps.native_tools`, one rule per model and auth mode: Claude `text_editor_20250728`/`bash_20250124` on every catalog model; OpenAI `apply_patch` and `shell` (local) per each model page's supported tools (`apply_patch`, `hosted_shell`), API key only, since the Codex CLI sends the ChatGPT endpoint only function/custom tools; everything else gets the built-ins | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
+| O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Every provider gets otto's own tools (name, description, JSON schema; GPT's `apply_patch` as our freeform patch tool); provider-predefined client tools (Claude `bash`/`text_editor`, OpenAI `shell`/`apply_patch` types) are not used, and old sessions' calls to them replay as calls to ours (§5) | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
 | O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 12 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
 | Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
 | O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`; parked blocks (`block.spawn`/`park`/`reveal`) and `shell` in parked command blocks with background results delivered to the session (§6.2). Not built: per-subagent grants, the `service` tunnel target | `silo-proto`, `silo-server`, `silo-tools`, `otto-silo-tools`, `otto-tools`, `silo-cli` |
@@ -20,7 +20,7 @@ cross-machine conflicts (§12).
 **Verified (2026-10-22):** workspace fmt, clippy `-D warnings`, `cargo nextest run --workspace` on macOS (1026 tests),
 the otto and silo server/CLI crates on Linux (`rust:1-bookworm`), `otto-proto` on wasm32, the silo protocol pin.
 Live with the Anthropic subscription (`claude-haiku-4-5`, `otto-silo run --json`): plain chat; ls/search/read/write/
-native `bash` with `update_todos`; an MCP tool from a stdio server in the project's `.mcp.json`; a `subagent`
+`bash` (then Claude's predefined tool, since removed) with `update_todos`; an MCP tool from a stdio server in the project's `.mcp.json`; a `subagent`
 delegation whose completion reached the parent; a follow-up turn in the same session. Through the app
 (`claude-sonnet-5-5`): a turn steered mid-run with ⏎, the steer applied at the next step.
 
@@ -36,15 +36,11 @@ subscription refresh; the models.dev catalog refresh.
 - Global index event seqs reset when the daemon restarts.
 - Native tool search (`defer_loading`) is not used.
 - A runtime that was shut down stays closed (outbox wakes cannot reopen actors); a restarted server needs a new one.
-- The model page lists are the only evidence for OpenAI native tools; models missing from `openai::native_tools`
-  (new releases) get the built-ins until added.
 - An agent change in `session.update` keeps the session's model (the agent's `model` applies only at creation).
 - Automatic titles are tried once per session actor; a restarted daemon may try a still-untitled session once more.
   The Claude plan comes from `/api/oauth/profile` at login and refresh (best effort, not verified live); older
   stored credentials report none until their next refresh.
-- O5 shell: `background: true` is a field of the built-in `shell`; models given a native shell (Claude's
-  `bash_20250124`, OpenAI's local `shell`) can't set it, so they get no background jobs (they use `terminal_open`).
-  Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
+- O5 shell: every model gets the full `shell` (`command`, `cwd`, `timeout_ms`, `background`). Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
   restarted)` system item at startup (no turn starts). `waiting_for_input` is a heuristic (`line_prompt`: canonical
   tty, cursor ending a non-empty line, 2 s quiet); a prompt that ends with a newline, or a raw-mode one, isn't seen
   and the call runs to its timeout. The agent block recognises job reports by their system text
@@ -271,6 +267,9 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   tool default, the TS text guard) lives in one module per provider, so it can be fixed or removed in one place
   (decision 2). The TS flows are the reference for behavior: `packages/sdk/src/auth/src/{oauth,openai-oauth}.ts`,
   `packages/sdk/src/providers/src/{anthropic-oauth-client,openai-oauth-client,openai-oauth-websocket}.ts`.
+  The Claude subscription takes otto's snake_case tool names as they are (checked live 2026-10-23 on
+  `claude-sonnet-5-5`: `shell`/`read` accepted, 200 with a `shell` call, also with a history call to a `Bash` not in
+  the list), so its shaping is only the `SYSTEM_PREFIX` block and the headers; every provider gets the same names.
 - Catalog: generated at build from a models.dev-style source plus a manual overlay, refreshed at runtime with a
   cache. Pricing feeds usage and cost events.
 - Tests: **recorded stream fixtures** (raw SSE/WS bytes in, canonical events out) per provider feature, with
@@ -363,8 +362,8 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   `caps.native_compaction` per the docs' model list. Otto's summarizer stays the default.
 - Server tools (`web_search_*`, `web_fetch_*`, `code_execution_20250825`; no beta needed): `server_tool_use` and
   `*_tool_result` blocks become hosted call/result parts and replay byte-exact (encrypted content included).
-  Client tools with Anthropic schemas (`text_editor_20250728` named `str_replace_based_edit_tool`,
-  `bash_20250124` named `bash`) are `ToolKind::Native`; their calls are ordinary `tool_use`.
+  Anthropic's predefined client tools (`bash_20250124`, `text_editor_*`) are not used: their fixed schemas lack
+  our parameters (`background`, `cwd`, `timeout_ms`) and the model never sees our descriptions.
 
 **Breadth.**
 - Gemini: the Interactions API is GA and the recommended API (`generateContent` is legacy), so it is used.
@@ -395,10 +394,9 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
 
 **Harness hooks (otto-core, done):** opted-in sessions send `Request.compaction` (`Auto` at 75% of the window on
 ordinary requests, `Now` for manual/overflow compaction; a `compaction` finish re-sends the turn's prompt after the
-checkpoint and continues the turn); a tool's presentation for `caps.tool_family` maps to `ToolKind::Native` only when
-`caps.native_tools` lists its provider type (Claude: `str_replace_based_edit_tool`/`bash`; GPT: `apply_patch`/`shell`,
-else the freeform Codex patch and the function shell), with calls mapped onto `read`/`ls`/`write`/`edit`/`shell`/`apply_patch` by
-`otto_tools::native` and OpenAI shell results returned as the documented output array; tools with
+checkpoint and continues the turn); every provider gets otto's own tools: the spec's name, description and JSON
+schema as a function, or a family presentation of ours (GPT: `apply_patch` as the freeform Codex patch tool, with
+`edit`/`multiedit` for every other family); no provider-predefined tool types; tools with
 `CallMode::Async` (`web_fetch`, MCP tools) go into `openai::Options.async_tools` when `caps.async_tools`.
 
 ---
@@ -427,9 +425,14 @@ pub struct ToolSpec {
   and an `Arc` to the session for subagent tools.
 - `ToolOutput`: text, JSON, images, and file references, with truncation metadata. Large outputs spill to a file
   and the model gets a head/tail plus the path.
-- **Presentations**: one executor, several model-facing shapes. Claude gets a `str_replace`-style editor and its
-  trained bash shape; GPT gets `apply_patch` (custom/freeform tool) and its shell shape; others get generic JSON
-  tools. The engine picks the shape from `tool_family`.
+- **Own tools, every provider**: each model gets our tools as we define them (name, description, JSON schema), never a
+  provider-predefined tool type (Claude `bash_*`/`text_editor_*`, OpenAI `shell`/`apply_patch`), whose fixed
+  schemas would drop our parameters and descriptions. The only per-family differences are our own: GPT gets
+  `apply_patch` as a freeform tool (`Presentation.freeform`, the Codex patch grammar) instead of `edit`/`multiedit`;
+  the registry picks the set from `tool_family`. Everyone gets the full `shell` (`command`, `cwd`, `timeout_ms`,
+  `background`). Paths are relative to the working directory, and the prompt and `shell` say not to `cd` into it.
+  History from before this (calls named `bash` / `str_replace_based_edit_tool`, or OpenAI `shell_call` /
+  `apply_patch_call` items) is read as calls to ours (`otto-core/src/legacy.rs`) for requests and session views.
 - **Sources**: builtin, silo (§6, `Runtime::add_tools`), project sources (`ProjectSources`, `Runtime::add_source`)
   and extensions later (subprocess JSON protocol like the TS native host; WASM later). Project sources are listed
   again before every model request, so a changed list reaches the next step and every provider gets the full

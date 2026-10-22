@@ -40,8 +40,6 @@ pub(crate) fn base_caps() -> Caps {
         hosted_tools: vec!["web_search".into(), "web_fetch".into(), "code_execution".into()],
         prompt_cache: true,
         tool_family: ToolFamily::Anthropic,
-        // Every catalog model is Claude 4.5 or later, which take both.
-        native_tools: vec!["text_editor_20250728".into(), "bash_20250124".into()],
         ..Caps::default()
     }
 }
@@ -171,14 +169,12 @@ mod client {
             let model = request.model.clone();
             let mut body = serde_json::to_value(request).map_err(|e| LlmError::new(ErrorClass::InvalidRequest, e.to_string()))?;
             body["stream"] = Value::Bool(true);
-            let names = subscription::tool_names(&body);
             let response = self.send("messages", body, &self.config.betas, &cx).await?;
-            let stream = stream::decode_for(
+            Ok(stream::decode_for(
                 byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
                 model,
                 self.config.model.provider.as_str(),
-            );
-            Ok(if self.config.mode == AuthMode::Subscription { subscription::normalize(stream, names) } else { stream })
+            ))
         }
     }
     #[async_trait::async_trait]
@@ -189,14 +185,12 @@ mod client {
         async fn stream(&self, req: Request, cx: CallCx) -> Result<EventStream, LlmError> {
             let (body, betas) = self.prepare(&req)?;
             let model = body["model"].as_str().unwrap_or_default().to_owned();
-            let names = subscription::tool_names(&body);
             let response = self.send("messages", body, &betas, &cx).await?;
-            let stream = stream::decode_for(
+            Ok(stream::decode_for(
                 byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
                 model,
                 self.config.model.provider.as_str(),
-            );
-            Ok(if self.config.mode == AuthMode::Subscription { subscription::normalize(stream, names) } else { stream })
+            ))
         }
         async fn count_tokens(&self, req: &Request) -> Result<Option<u64>, LlmError> {
             let (mut body, betas) = self.prepare(req)?;

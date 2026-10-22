@@ -44,30 +44,6 @@ pub fn supports_steering(id: &str) -> bool {
 pub fn supports_async_tools(id: &str) -> bool {
     id.starts_with("gpt-6")
 }
-/// Provider-defined `apply_patch` and `shell` (local environment), per each
-/// model page's supported tools (`apply_patch`, `hosted_shell`), API key only:
-/// the ChatGPT/Codex endpoint is only used (by the Codex CLI) with function and
-/// custom tools.
-#[must_use]
-pub fn native_tools(id: &str) -> Vec<String> {
-    // Dated snapshots (`gpt-5.1-2025-11-13`) share their model's tools.
-    let base = id
-        .get(..id.len().saturating_sub(11))
-        .filter(|base| {
-            let date = &id[base.len()..];
-            date.len() == 11 && date.starts_with('-') && date[1..].bytes().all(|b| b.is_ascii_digit() || b == b'-')
-        })
-        .unwrap_or(id);
-    let current = ["gpt-5.6", "gpt-6", "gpt-daybreak"].iter().any(|p| base.starts_with(p));
-    let mut tools = Vec::new();
-    if current || ["gpt-5.1", "gpt-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro", "gpt-5.5"].contains(&base) {
-        tools.push("apply_patch".into());
-    }
-    if current || ["gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5", "gpt-5.5-pro"].contains(&base) {
-        tools.push("shell".into());
-    }
-    tools
-}
 pub(crate) fn base_caps() -> crate::Caps {
     crate::Caps {
         reasoning_replay: true,

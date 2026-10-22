@@ -113,26 +113,13 @@ impl Shell {
         Self::with(Host { jobs, terminals: None })
     }
     pub fn with(host: Host) -> Self {
-        let mut spec = spec(
+        let spec = spec(
             "shell",
-            "Run a command through $SHELL -lc (fallback /bin/sh -c) and return its exit code and output. With Silo it runs in its own hidden terminal the user can open: a prompt for input (password, y/N) returns waiting_for_input with the screen and a job_id; answer with terminal_send to its block_id or let the user type, and the result arrives when it exits. Without Silo stdin is closed. cwd, timeout_ms (default 120000; a timeout or cancellation kills it). background:true is for finite work that reports later (tests, a build): it returns a job_id at once and its result arrives as a message when it exits; check or stop it with job. Use terminal_open for servers and watchers. Long output keeps its head and tail; the full text goes to a file.",
-            json!({"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1},"background":{"type":"boolean"}}),
+            "Run a command through $SHELL -lc (fallback /bin/sh -c) and return its exit code and output. It starts in the working directory (or cwd): use paths relative to it and don't cd into it. With Silo it runs in its own hidden terminal the user can open: a prompt for input (password, y/N) returns waiting_for_input with the screen and a job_id; answer with terminal_send to its block_id or let the user type, and the result arrives when it exits. Without Silo stdin is closed. timeout_ms defaults to 120000; a timeout or cancellation kills it. background:true is for finite work that reports later (tests, a build): it returns a job_id at once and its result arrives as a message when it exits; check or stop it with job. Use terminal_open for servers and watchers, not background or nohup. Long output keeps its head and tail; the full text goes to a file.",
+            json!({"command":{"type":"string"},"cwd":{"type":"string","description":"Relative to the working directory; default: the working directory"},"timeout_ms":{"type":"integer","minimum":1},"background":{"type":"boolean"}}),
             &["command"],
             Effects::PROCESS,
         );
-        // The shells Claude and GPT were trained on; each call runs one fresh process.
-        for (family, name, tool, config) in
-            [("anthropic", "bash", crate::native::BASH, Value::Null), ("openai", "shell", "shell", json!({"environment":{"type":"local"}}))]
-        {
-            spec.presentations.push(crate::Presentation {
-                family: family.into(),
-                name: name.into(),
-                description: None,
-                input_schema: None,
-                freeform: None,
-                native: Some(crate::NativeTool { tool: tool.into(), config }),
-            });
-        }
         Self { host, spec }
     }
 }

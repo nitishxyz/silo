@@ -208,10 +208,10 @@ running children per parent.
 ## Current limitations
 
 Native compaction is opt-in (threshold `Auto` at 75% of the window on ordinary
-requests, `Now` for manual/overflow). Native tool presentations (Claude
-`text_editor`/`bash`, GPT `apply_patch`/`shell`) are mapped onto built-ins by
-`otto_tools::native`; the editor's `undo_edit` is refused, and an OpenAI shell call
-with several commands runs them as one script with one combined result. Summary input and output are bounded; oversized user instructions retain
+requests, `Now` for manual/overflow). Every provider gets otto's own tool specs
+(no provider-predefined tools); old sessions' calls to Claude `bash` /
+`str_replace_based_edit_tool` or OpenAI `shell_call` / `apply_patch_call` are read
+as calls to ours (`legacy.rs`) for requests and views. Summary input and output are bounded; oversized user instructions retain
 verbatim head/tail excerpts, not their complete text. Stable prompts are rebuilt on
 reopen. Hooks have no prompt/HTTP handler types or async handlers; `transcript_path`
 is null. SessionStart runs at the first turn of each actor, including resumed

@@ -65,6 +65,10 @@ pub struct SessionInfo {
     pub updated_at: i64,
     pub last_seq: i64,
     pub usage: UsageTotals,
+    /// A sub-agent the user stopped holds its report for the parent until it
+    /// reports (a later turn, or as `stopped` after `subagent_hold`).
+    #[serde(default)]
+    pub report_held: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +141,9 @@ pub struct RunningToolCall {
     pub name: String,
     /// Redacted before crossing the wire.
     pub input: Value,
+    /// When the call started (ms since the Unix epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
 }
 
 /// Snapshot at `seq`; subscribe with `after_seq = seq` to continue it.
@@ -149,6 +156,9 @@ pub struct SessionView {
     pub queue: Vec<QueuedInput>,
     pub running_tool_calls: Vec<RunningToolCall>,
     pub seq: i64,
+    /// When the running turn started (ms since the Unix epoch); `None` when idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

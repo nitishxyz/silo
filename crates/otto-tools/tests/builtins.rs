@@ -214,6 +214,12 @@ async fn ask_and_registry() {
         assert_eq!(registry.lookup("edit").is_some(), family != "openai");
         assert!(registry.lookup("update_todos").is_some());
         assert!(!registry.list_specs().is_empty());
+        // Every family gets our full shell, under our name.
+        let shell = registry.lookup("shell").unwrap();
+        assert!(shell.spec().presentation(family).is_none());
+        let properties = &shell.spec().input_schema["properties"];
+        assert!(["command", "cwd", "timeout_ms", "background"].iter().all(|k| properties.get(k).is_some()));
+        assert!(shell.spec().description.contains("don't cd into it"));
     }
     assert!(web_fetch::WebFetch::default().call(json!({"url":"file:///etc/passwd"}), cx(d.path())).await.is_err());
 }

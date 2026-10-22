@@ -133,7 +133,7 @@ pub fn request(req: &Request) -> Result<Value, LlmError> {
             ToolKind::Function | ToolKind::Strict => {
                 Ok(json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema}))
             }
-            ToolKind::Hosted { tool, config } | ToolKind::Native { tool, config } => {
+            ToolKind::Hosted { tool, config } => {
                 let mut value = json!({"type":tool});
                 if config.is_object() {
                     crate::openai::convert::merge(&mut value, config);

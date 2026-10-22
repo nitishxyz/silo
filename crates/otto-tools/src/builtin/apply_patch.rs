@@ -9,23 +9,13 @@ fn patch_spec() -> ToolSpec {
         &[],
         Effects::WRITE,
     );
-    // OpenAI's provider-defined apply_patch where the model takes it (its
-    // operations become Codex patches), else the freeform Codex patch tool.
-    s.presentations.push(Presentation {
-        family: "openai".into(),
-        name: "apply_patch".into(),
-        description: None,
-        input_schema: None,
-        freeform: None,
-        native: Some(crate::NativeTool { tool: "apply_patch".into(), config: Value::Null }),
-    });
+    // GPT models write Codex patches as freeform text.
     s.presentations.push(Presentation {
         family: "openai".into(),
         name: "apply_patch".into(),
         description: None,
         input_schema: None,
         freeform: Some(json!({"type":"text"})),
-        native: None,
     });
     s
 }

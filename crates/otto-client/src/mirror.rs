@@ -26,6 +26,8 @@ pub struct ToolState {
     pub progress: Vec<Value>,
     pub output: Option<Value>,
     pub item_id: Option<String>,
+    /// When a call already running in the loaded view started (ms since the Unix epoch).
+    pub started_at: Option<i64>,
 }
 #[derive(Clone, Debug)]
 pub struct SessionMirror {
@@ -37,6 +39,8 @@ pub struct SessionMirror {
     pub queue: Vec<QueuedInput>,
     pub last_seq: i64,
     pub turn: Option<(i64, TurnStatus)>,
+    /// When the turn running in the loaded view started (ms since the Unix epoch); a later turn is seen live.
+    pub turn_started_at: Option<i64>,
     pub last_error: Option<(String, String, bool)>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
@@ -49,7 +53,9 @@ impl SessionMirror {
         let tools = view
             .running_tool_calls
             .into_iter()
-            .map(|c| (c.call_id, ToolState { name: c.name, input: c.input, status: ToolStatus::Running, ..ToolState::default() }))
+            .map(|c| {
+                (c.call_id, ToolState { name: c.name, input: c.input, status: ToolStatus::Running, started_at: c.started_at, ..ToolState::default() })
+            })
             .collect();
         Self {
             info: view.info,
@@ -60,6 +66,7 @@ impl SessionMirror {
             queue: view.queue,
             last_seq: view.seq,
             turn: None,
+            turn_started_at: view.turn_started_at,
             last_error: None,
             indices,
             durable: None,
@@ -129,11 +136,13 @@ impl SessionMirror {
             Event::SessionChanged { info } => self.info = info.clone(),
             Event::TurnStarted { turn } => {
                 self.turn = Some((*turn, TurnStatus::Running));
+                self.turn_started_at = None;
                 self.info.status = SessionStatus::Busy;
                 self.last_error = None;
             }
             Event::TurnFinished { turn, status, .. } => {
                 self.turn = Some((*turn, *status));
+                self.turn_started_at = None;
                 self.info.status = if *status == TurnStatus::Error { SessionStatus::Error } else { SessionStatus::Idle };
             }
             Event::ItemStarted { item_id, role } => {

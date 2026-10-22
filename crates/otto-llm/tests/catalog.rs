@@ -64,24 +64,6 @@ fn snapshot_and_wrappers() {
 }
 
 #[test]
-fn native_client_tools_follow_model_and_auth() {
-    let catalog = Catalog::global();
-    let native = |id: &str, mode| catalog.info("openai", id, Some(mode)).unwrap_or_else(|| panic!("{id}")).caps.native_tools;
-    assert_eq!(native("gpt-5.5", AuthMode::ApiKey), ["apply_patch", "shell"]);
-    assert_eq!(native("gpt-6-astra", AuthMode::ApiKey), ["apply_patch", "shell"]);
-    assert_eq!(native("gpt-5.1", AuthMode::ApiKey), ["apply_patch"]);
-    assert_eq!(native("gpt-5.3-codex", AuthMode::ApiKey), ["shell"]);
-    assert!(native("gpt-5", AuthMode::ApiKey).is_empty());
-    assert!(native("gpt-4.1", AuthMode::ApiKey).is_empty());
-    assert!(native("o3", AuthMode::ApiKey).is_empty());
-    // The ChatGPT/Codex endpoint gets the built-ins.
-    assert!(native("gpt-6-astra", AuthMode::Subscription).is_empty());
-    assert_eq!(otto_llm::openai::native_tools("gpt-5.1-2025-11-13"), ["apply_patch"]);
-    assert!(otto_llm::anthropic::models().iter().all(|m| m.caps.native_tools == ["text_editor_20250728", "bash_20250124"]));
-    assert!(catalog.models("deepseek", None).iter().all(|e| e.info.caps.native_tools.is_empty()));
-}
-
-#[test]
 fn trims_non_chat_but_keeps_unknown_fields_and_deprecated() {
     let mut feed = snapshot();
     let template = feed["openai"]["models"]["gpt-5.5"].clone();

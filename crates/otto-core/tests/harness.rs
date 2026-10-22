@@ -573,90 +573,74 @@ fn results(items: &[Item]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn claude_native_editor_and_bash_map_onto_builtins() {
+async fn every_family_gets_our_own_tools() {
+    for (family, patch) in [(ToolFamily::Anthropic, false), (ToolFamily::Openai, true), (ToolFamily::Generic, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let model = with_caps(Caps { tool_family: family, custom_tools: true, ..Default::default() }, vec![text("done")]);
+        let (runtime, _, _) = turn(dir.path(), model.clone(), SessionDefaults::default()).await;
+        let first = model.requests.lock().unwrap()[0].clone();
+        let tool = |name: &str| first.tools.iter().find(|t| t.name == name).cloned();
+        let shell = tool("shell").unwrap();
+        assert_eq!(shell.kind, ToolKind::Function);
+        assert!(["command", "cwd", "timeout_ms", "background"].iter().all(|k| shell.input_schema["properties"].get(k).is_some()));
+        assert!(shell.description.contains("waiting_for_input") && shell.description.contains("terminal_open"));
+        assert!(tool("bash").is_none() && tool("str_replace_based_edit_tool").is_none());
+        if patch {
+            assert_eq!(tool("apply_patch").unwrap().kind, ToolKind::Custom { format: Some(serde_json::json!({"type":"text"})) });
+            assert!(tool("edit").is_none());
+        } else {
+            assert_eq!(tool("edit").unwrap().kind, ToolKind::Function);
+            assert!(tool("apply_patch").is_none());
+        }
+        assert!(first.system[0].contains("don't cd into it"));
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn old_provider_defined_calls_replay_as_our_tools() {
+    let raw = |kind: &str| Some(Opaque { provider: "test".into(), model: "test".into(), data: serde_json::json!({"type":kind}) });
+    let old = |id: &str, name: &str, input: serde_json::Value, opaque| StreamEvent::PartDone {
+        part: Part::ToolCall { call_id: id.into(), name: name.into(), input, kind: CallKind::Function, opaque },
+    };
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
-    let caps =
-        Caps { tool_family: ToolFamily::Anthropic, native_tools: vec!["text_editor_20250728".into(), "bash_20250124".into()], ..Default::default() };
     let model = with_caps(
-        caps,
+        Caps { tool_family: ToolFamily::Openai, custom_tools: true, ..Default::default() },
         vec![
-            vec![call("v", "str_replace_based_edit_tool", serde_json::json!({"command":"view","path":"a.txt","view_range":[2,2]}))],
-            vec![call("c", "str_replace_based_edit_tool", serde_json::json!({"command":"create","path":"new.txt","file_text":"hi\n"}))],
-            vec![call(
-                "i",
-                "str_replace_based_edit_tool",
-                serde_json::json!({"command":"insert","path":"a.txt","insert_line":1,"insert_text":"mid"}),
-            )],
-            vec![call(
-                "s",
-                "str_replace_based_edit_tool",
-                serde_json::json!({"command":"str_replace","path":"a.txt","old_str":"two","new_str":"TWO"}),
-            )],
-            vec![call("b", "bash", serde_json::json!({"command":"echo native-bash"}))],
-            vec![call("u", "str_replace_based_edit_tool", serde_json::json!({"command":"undo_edit","path":"a.txt"}))],
+            vec![
+                old("b", "bash", serde_json::json!({"command":"echo hi"}), None),
+                old("v", "str_replace_based_edit_tool", serde_json::json!({"command":"view","path":"a.txt","view_range":[2,3]}), None),
+                old("s", "shell", serde_json::json!({"commands":["ls","pwd"]}), raw("shell_call")),
+                old("p", "apply_patch", serde_json::json!({"type":"update_file","path":"a.py","diff":"@@\n-x\n+y\n"}), raw("apply_patch_call")),
+                StreamEvent::Finish { reason: FinishReason::ToolUse, response_id: None },
+            ],
             text("done"),
         ],
     );
     let (runtime, s, events) = turn(dir.path(), model.clone(), SessionDefaults::default()).await;
-    let first = model.requests.lock().unwrap()[0].clone();
-    let kind = |name: &str| first.tools.iter().find(|t| t.name == name).map(|t| t.kind.clone());
-    assert_eq!(kind("str_replace_based_edit_tool"), Some(ToolKind::Native { tool: "text_editor_20250728".into(), config: serde_json::Value::Null }));
-    assert_eq!(kind("bash"), Some(ToolKind::Native { tool: "bash_20250124".into(), config: serde_json::Value::Null }));
-    assert!(kind("edit").is_none() && kind("shell").is_none());
-    // An unmappable call keeps its native name and fails without running anything.
-    assert_eq!(tool_calls(&events), ["read", "write", "write", "edit", "shell", "str_replace_based_edit_tool"]);
-    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one\nmid\nTWO\n");
-    assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "hi\n");
-    let results = results(&s.view().await.unwrap().items);
-    assert!(results[0].contains("2: two"));
-    assert!(results[4].contains("native-bash"));
-    assert!(results[5].contains("undo_edit is not supported"));
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn gpt_native_patch_and_shell_and_async_tools() {
-    let dir = tempfile::tempdir().unwrap();
-    let caps =
-        Caps { tool_family: ToolFamily::Openai, async_tools: true, native_tools: vec!["apply_patch".into(), "shell".into()], ..Default::default() };
-    let model = with_caps(
-        caps,
-        vec![
-            vec![call("p", "apply_patch", serde_json::json!({"type":"create_file","path":"n.py","diff":"+x = 1\n"}))],
-            vec![call("sh", "shell", serde_json::json!({"commands":["echo out; exit 3"],"timeout_ms":5000}))],
-            text("done"),
-        ],
-    );
-    let (runtime, s, events) = turn(dir.path(), model.clone(), SessionDefaults::default()).await;
-    let first = model.requests.lock().unwrap()[0].clone();
-    let kind = |name: &str| first.tools.iter().find(|t| t.name == name).map(|t| t.kind.clone());
-    assert_eq!(kind("apply_patch"), Some(ToolKind::Native { tool: "apply_patch".into(), config: serde_json::Value::Null }));
-    assert_eq!(kind("shell"), Some(ToolKind::Native { tool: "shell".into(), config: serde_json::json!({"environment":{"type":"local"}}) }));
-    assert_eq!(first.provider.openai.as_ref().unwrap().async_tools, ["web_fetch"]);
-    assert_eq!(tool_calls(&events), ["apply_patch", "shell"]);
-    assert_eq!(std::fs::read_to_string(dir.path().join("n.py")).unwrap(), "x = 1\n");
-    let items = s.view().await.unwrap().items;
-    let shell = items.iter().flat_map(|i| &i.parts).find_map(|p| match p {
-        Part::ToolResult { call_id, content, .. } if call_id == "sh" => Some(content.clone()),
-        _ => None,
-    });
-    let Some(ResultPart::Text { text }) = shell.unwrap().into_iter().next() else { panic!("text result") };
-    let array: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(array[0]["outcome"], serde_json::json!({"type":"exit","exit_code":3}));
-    assert!(array[0]["stdout"].as_str().unwrap().contains("out"));
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn gpt_without_native_caps_gets_the_builtin_shapes() {
-    let dir = tempfile::tempdir().unwrap();
-    let model = with_caps(Caps { tool_family: ToolFamily::Openai, custom_tools: true, ..Default::default() }, vec![text("done")]);
-    let (runtime, _, _) = turn(dir.path(), model.clone(), SessionDefaults::default()).await;
-    let first = model.requests.lock().unwrap()[0].clone();
-    let kind = |name: &str| first.tools.iter().find(|t| t.name == name).map(|t| t.kind.clone());
-    assert_eq!(kind("apply_patch"), Some(ToolKind::Custom { format: Some(serde_json::json!({"type":"text"})) }));
-    assert_eq!(kind("shell"), Some(ToolKind::Function));
+    // Nothing runs under an old name; the history then shows our calls.
+    assert!(!dir.path().join("a.py").exists());
+    assert_eq!(tool_calls(&events), ["bash", "str_replace_based_edit_tool", "shell", "apply_patch"]);
+    let unknown = &results(&s.view().await.unwrap().items)[0];
+    assert!(unknown.contains("unknown tool: bash. Available tools: ") && unknown.contains("shell"), "{unknown}");
+    let calls = |items: &[Item]| -> Vec<(String, serde_json::Value, CallKind, bool)> {
+        items
+            .iter()
+            .flat_map(|i| &i.parts)
+            .filter_map(|p| match p {
+                Part::ToolCall { name, input, kind, opaque, .. } => Some((name.clone(), input.clone(), *kind, opaque.is_some())),
+                _ => None,
+            })
+            .collect()
+    };
+    let expected = vec![
+        ("shell".to_owned(), serde_json::json!({"command":"echo hi"}), CallKind::Function, false),
+        ("read".to_owned(), serde_json::json!({"path":"a.txt","offset":2,"limit":2}), CallKind::Function, false),
+        ("shell".to_owned(), serde_json::json!({"command":"ls\npwd"}), CallKind::Function, false),
+        ("apply_patch".to_owned(), serde_json::json!("*** Begin Patch\n*** Update File: a.py\n@@\n-x\n+y\n*** End Patch"), CallKind::Custom, false),
+    ];
+    assert_eq!(calls(&model.requests.lock().unwrap()[1].items), expected);
+    assert_eq!(calls(&s.view().await.unwrap().items), expected);
     runtime.shutdown().await.unwrap();
 }
 

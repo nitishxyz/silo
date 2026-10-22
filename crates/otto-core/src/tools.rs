@@ -65,7 +65,7 @@ pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::Too
             if !granted(&live, spec) {
                 return None;
             }
-            let presentation = spec.presentation(&family, &live.model.info().caps.native_tools);
+            let presentation = spec.presentation(&family);
             let effects = [
                 ("read", spec.effects.read),
                 ("write", spec.effects.write),

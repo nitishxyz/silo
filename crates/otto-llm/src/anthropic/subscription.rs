@@ -137,7 +137,7 @@ fn credential(token: TokenResponse, fallback: &str, plan: Option<String>) -> Cre
         extra: plan.map_or(Value::Null, |plan| json!({"plan":plan})),
     }
 }
-/// Required prefix and PascalCase client tool names. Server tool names are fixed by the API.
+/// The required system prefix. Client tool names are sent as they are.
 pub fn shape(body: &mut Value) {
     if !body["system"].is_array() {
         body["system"] = json!([]);
@@ -146,79 +146,6 @@ pub fn shape(body: &mut Value) {
     if system.first().and_then(|b| b["text"].as_str()) != Some(SYSTEM_PREFIX) {
         system.insert(0, json!({"type":"text","text":SYSTEM_PREFIX}));
     }
-    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
-        for tool in tools {
-            if tool.get("input_schema").is_some() {
-                rename(tool);
-            }
-        }
-    }
-    if body["tool_choice"]["type"] == "tool" {
-        rename(&mut body["tool_choice"]);
-    }
-    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        for message in messages {
-            if let Some(blocks) = message["content"].as_array_mut() {
-                for block in blocks {
-                    if block["type"] == "tool_use" || block["type"] == "tool_result" {
-                        rename(block);
-                    }
-                    if block["tool"]["type"] == "tool_reference" {
-                        rename(&mut block["tool"]);
-                    }
-                }
-            }
-        }
-    }
-}
-fn rename(value: &mut Value) {
-    if let Some(name) = value["name"].as_str() {
-        value["name"] = json!(tool_name(name));
-    }
-}
-fn tool_name(name: &str) -> String {
-    match name {
-        "multiedit" => "MultiEdit".into(),
-        "websearch" => "WebSearch".into(),
-        "bash" => "Shell".into(),
-        _ => name
-            .split(|c: char| c == '_' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let mut chars = s.chars();
-                let first = chars.next().expect("nonempty");
-                format!("{}{}", first.to_uppercase(), chars.as_str())
-            })
-            .collect(),
-    }
-}
-pub(crate) fn tool_names(body: &Value) -> BTreeMap<String, String> {
-    body["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|t| t.get("input_schema").is_some())
-        .filter_map(|t| t["name"].as_str())
-        .map(|n| (tool_name(n), n.to_owned()))
-        .collect()
-}
-pub(crate) fn normalize(stream: crate::EventStream, names: BTreeMap<String, String>) -> crate::EventStream {
-    use futures::StreamExt;
-    Box::pin(stream.map(move |event| {
-        event.map(|mut event| {
-            let name = match &mut event {
-                crate::StreamEvent::ToolInputStart { name, .. }
-                | crate::StreamEvent::PartDone { part: crate::Part::ToolCall { name, kind: crate::CallKind::Function, .. } } => Some(name),
-                _ => None,
-            };
-            if let Some(name) = name
-                && let Some(original) = names.get(name)
-            {
-                name.clone_from(original);
-            }
-            event
-        })
-    }))
 }
 pub(crate) fn headers(request: reqwest::RequestBuilder, token: &str, betas: &[super::api::Beta]) -> reqwest::RequestBuilder {
     let mut all = BETAS.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -276,18 +203,5 @@ mod tests {
         assert!(request.headers().get("x-api-key").is_none());
         assert_eq!(request.headers()["authorization"], "Bearer token");
         assert!(request.headers()["anthropic-beta"].to_str().unwrap().contains("oauth-2025-04-20"));
-    }
-    #[tokio::test]
-    async fn tool_names_round_trip() {
-        let mut body = json!({"tools":[{"name":"apply_patch","input_schema":{}},{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"apply_patch"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"apply_patch","id":"c","input":{}}]}]});
-        let names = tool_names(&body);
-        shape(&mut body);
-        assert_eq!(body["tools"][0]["name"], "ApplyPatch");
-        assert_eq!(body["tools"][1]["name"], "web_search");
-        assert_eq!(body["tool_choice"]["name"], "ApplyPatch");
-        assert_eq!(body["messages"][0]["content"][0]["name"], "ApplyPatch");
-        let stream = Box::pin(futures::stream::iter(vec![Ok(crate::StreamEvent::ToolInputStart { call_id: "c".into(), name: "ApplyPatch".into() })]));
-        let events = crate::testing::collect_events(normalize(stream, names)).await;
-        assert!(matches!(&events[0], crate::StreamEvent::ToolInputStart { name, .. } if name == "apply_patch"));
     }
 }

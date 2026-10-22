@@ -1,6 +1,6 @@
 #![cfg(feature = "client")]
 //! O3 OpenAI depth: `previous_response_id` continuation on WebSocket,
-//! compaction, async tools, native client tools, Codex WebSocket, xAI.
+//! compaction, async tools, our own tools, Codex WebSocket, xAI.
 use futures::StreamExt;
 use otto_llm::{
     auth::{Credential, CredentialSource},
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const COMPACTION: &str = include_str!("fixtures/openai/compaction.sse");
-const NATIVE: &str = include_str!("fixtures/openai/native.sse");
+const TOOLS: &str = include_str!("fixtures/openai/tools.sse");
 const XAI: &str = include_str!("fixtures/xai/reasoning.sse");
 
 fn parts(events: &[StreamEvent]) -> Vec<Part> {
@@ -65,8 +65,8 @@ fn compact_endpoint_window_replaces_the_summarized_items() {
 }
 
 #[tokio::test]
-async fn native_client_tools_and_async_calls() {
-    let events = testing::collect_events(stream::stream(testing::chunked(NATIVE.as_bytes(), 3), "gpt-6-astra")).await;
+async fn our_tools_and_async_calls() {
+    let events = testing::collect_events(stream::stream(testing::chunked(TOOLS.as_bytes(), 3), "gpt-6-astra")).await;
     assert!(events.contains(&StreamEvent::ToolInputStart { call_id: "call_patch".into(), name: "apply_patch".into() }));
     let parts = parts(&events);
     let calls: Vec<_> = parts
@@ -74,13 +74,13 @@ async fn native_client_tools_and_async_calls() {
         .filter_map(|p| if let Part::ToolCall { name, input, kind, .. } = p { Some((name.as_str(), input, *kind)) } else { None })
         .collect();
     assert_eq!(calls[0].0, "apply_patch");
-    assert_eq!(calls[0].1["path"], "lib/fib.py");
-    assert_eq!(calls[1].0, "shell");
-    assert_eq!(calls[1].1["commands"], json!(["ls -l"]));
+    assert_eq!(calls[0].2, CallKind::Custom);
+    assert!(calls[0].1.as_str().unwrap().starts_with("*** Begin Patch\n*** Update File: lib/fib.py"));
+    assert_eq!(calls[1], ("shell", &json!({"command":"cargo test","background":true}), CallKind::Function));
     assert_eq!(calls[2], ("lookup", &json!({"sku":"W"}), CallKind::Function));
-    assert!(calls.iter().all(|c| c.2 == CallKind::Function), "otto runs native calls itself");
     assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::ToolUse, .. })));
     let result = |id: &str, text: &str, is_error| Part::ToolResult { call_id: id.into(), content: vec![ResultPart::text(text)], is_error };
+    let shell = json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"background":{"type":"boolean"}},"required":["command"]});
     let req = Request {
         model: "gpt-6-astra".into(),
         items: vec![
@@ -89,22 +89,22 @@ async fn native_client_tools_and_async_calls() {
             Item::new(
                 "t",
                 Role::Tool,
-                vec![result("call_patch", "patched", false), result("call_shell", "total 0", true), result("call_async", "{\"price\":12}", false)],
+                vec![result("call_patch", "patched", false), result("call_shell", "job j1", false), result("call_async", "{\"price\":12}", false)],
             ),
         ],
         tools: vec![
             ToolDef {
                 name: "apply_patch".into(),
-                description: String::new(),
+                description: "Apply a Codex patch".into(),
                 input_schema: Value::Null,
-                kind: ToolKind::Native { tool: "apply_patch".into(), config: Value::Null },
+                kind: ToolKind::Custom { format: Some(json!({"type":"text"})) },
                 defer_loading: false,
             },
             ToolDef {
                 name: "shell".into(),
-                description: String::new(),
-                input_schema: Value::Null,
-                kind: ToolKind::Native { tool: "shell".into(), config: json!({"environment":{"type":"local"}}) },
+                description: "Run a command".into(),
+                input_schema: shell.clone(),
+                kind: ToolKind::Function,
                 defer_loading: false,
             },
             ToolDef {
@@ -122,17 +122,19 @@ async fn native_client_tools_and_async_calls() {
         ..Request::default()
     };
     let body = convert::request(&req);
-    assert_eq!(body["tools"][0], json!({"type":"apply_patch"}));
-    assert_eq!(body["tools"][1], json!({"type":"shell","environment":{"type":"local"}}));
+    // Our own tools: the freeform patch tool and our full shell schema.
+    assert_eq!(body["tools"][0], json!({"type":"custom","name":"apply_patch","description":"Apply a Codex patch","format":{"type":"text"}}));
+    assert_eq!(body["tools"][1]["type"], "function");
+    assert_eq!(body["tools"][1]["name"], "shell");
+    assert_eq!(body["tools"][1]["parameters"]["properties"]["background"], json!({"type":"boolean"}));
     assert_eq!(body["tools"][2]["async"], true);
     let input = body["input"].as_array().unwrap();
-    // Raw call items replay byte-exact, async flag included.
-    assert_eq!(input[1]["type"], "apply_patch_call");
-    assert_eq!(input[2]["action"]["max_output_length"], 4096);
+    assert_eq!(input[1]["type"], "custom_tool_call");
+    assert_eq!(input[2]["type"], "function_call");
+    // Raw async call items replay byte-exact.
     assert_eq!(input[3]["async"], true);
-    assert_eq!(input[4], json!({"type":"apply_patch_call_output","call_id":"call_patch","status":"completed","output":"patched"}));
-    assert_eq!(input[5]["type"], "shell_call_output");
-    assert_eq!(input[5]["output"][0], json!({"stdout":"total 0","stderr":"","outcome":{"type":"exit","exit_code":1}}));
+    assert_eq!(input[4]["type"], "custom_tool_call_output");
+    assert_eq!(input[5]["type"], "function_call_output");
     assert_eq!(input[6]["type"], "function_call_output");
 }
 

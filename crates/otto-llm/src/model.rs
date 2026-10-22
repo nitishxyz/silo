@@ -105,8 +105,4 @@ pub struct Caps {
     pub context_window: u64,
     pub max_output: u64,
     pub tool_family: ToolFamily,
-    /// Provider-defined client tools this model and auth mode accept
-    /// (`text_editor_20250728`, `bash_20250124`, `apply_patch`, `shell`).
-    #[serde(default)]
-    pub native_tools: Vec<String>,
 }

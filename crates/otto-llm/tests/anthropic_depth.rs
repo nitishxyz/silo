@@ -1,11 +1,11 @@
 #![cfg(feature = "client")]
 //! O3 Anthropic depth: compaction (on demand and threshold), context editing
-//! betas, server tool blocks, native client tools, the MiniMax dialect.
+//! betas, server tool blocks, our own client tools, the MiniMax dialect.
 use otto_llm::{
     anthropic::{api::Beta, convert, stream},
     *,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 const NOW: &str = include_str!("fixtures/anthropic/compaction_now.sse");
 const THRESHOLD: &str = include_str!("fixtures/anthropic/compaction_threshold.sse");
@@ -84,34 +84,26 @@ async fn compaction_threshold_delta_and_usage() {
 }
 
 #[test]
-fn context_editing_beta_and_native_tools() {
+fn context_editing_beta_and_our_shell() {
     let mut req = request(vec![Item::user_text("u", "edit")]);
     req.provider.anthropic = Some(anthropic::Options {
         context_management: Some(json!({"edits":[{"type":"clear_tool_uses_20250919","keep":{"type":"tool_uses","value":3}}]})),
         ..Default::default()
     });
-    req.tools = vec![
-        ToolDef {
-            name: "str_replace_based_edit_tool".into(),
-            description: String::new(),
-            input_schema: Value::Null,
-            kind: ToolKind::Native { tool: "text_editor_20250728".into(), config: json!({"max_characters":10000}) },
-            defer_loading: false,
-        },
-        ToolDef {
-            name: "bash".into(),
-            description: String::new(),
-            input_schema: Value::Null,
-            kind: ToolKind::Native { tool: "bash_20250124".into(), config: Value::Null },
-            defer_loading: false,
-        },
-    ];
+    let shell = json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"background":{"type":"boolean"}},"required":["command"]});
+    req.tools = vec![ToolDef {
+        name: "shell".into(),
+        description: "Run a command".into(),
+        input_schema: shell.clone(),
+        kind: ToolKind::Function,
+        defer_loading: false,
+    }];
     let body = convert::body(&req).unwrap();
     assert_eq!(convert::betas_for(&body), vec![Beta::CONTEXT_MANAGEMENT]);
-    assert_eq!(body["tools"][0]["type"], "text_editor_20250728");
-    assert_eq!(body["tools"][0]["name"], "str_replace_based_edit_tool");
-    assert_eq!(body["tools"][0]["max_characters"], 10000);
-    assert_eq!(body["tools"][1]["type"], "bash_20250124");
+    // Claude gets our shell (with background), not a predefined bash.
+    let tool = &body["tools"][0];
+    assert_eq!((&tool["name"], &tool["description"], &tool["input_schema"]), (&json!("shell"), &json!("Run a command"), &shell));
+    assert!(tool.get("type").is_none());
 }
 
 #[tokio::test]

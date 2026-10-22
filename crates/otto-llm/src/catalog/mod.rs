@@ -384,13 +384,12 @@ pub fn efforts(provider: &str, id: &str) -> Vec<Effort> {
 }
 
 /// OpenAI features that depend on the model and the auth mode: steering and
-/// async tools (GPT-6, API key), compaction (API key) and native tools.
+/// async tools (GPT-6, API key) and compaction (API key).
 fn openai_caps(caps: &mut Caps, id: &str, mode: Option<AuthMode>) {
     let api = mode != Some(AuthMode::Subscription);
     caps.steering = api && crate::openai::supports_steering(id);
     caps.async_tools = api && crate::openai::supports_async_tools(id);
     caps.native_compaction = api;
-    caps.native_tools = if api { crate::openai::native_tools(id) } else { Vec::new() };
 }
 
 fn mode_name(mode: AuthMode) -> &'static str {

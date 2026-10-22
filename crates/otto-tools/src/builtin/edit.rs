@@ -4,23 +4,13 @@ pub(crate) fn properties() -> Value {
     json!({"path":{"type":"string"},"old_string":{"type":"string","minLength":1},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}})
 }
 fn edit_spec() -> crate::ToolSpec {
-    let mut s = spec(
+    spec(
         "edit",
         "Replace an exact string in an existing UTF-8 file. Supply enough context for a unique match, or set replace_all. If exact text is absent, a unique whole-line whitespace-normalized match is accepted; non-whitespace differences are never guessed.",
         properties(),
         &["path", "old_string", "new_string"],
         Effects::WRITE,
-    );
-    // Claude's trained editor; view/create/insert calls map to read/ls/write.
-    s.presentations.push(crate::Presentation {
-        family: "anthropic".into(),
-        name: "str_replace_based_edit_tool".into(),
-        description: None,
-        input_schema: None,
-        freeform: None,
-        native: Some(crate::NativeTool { tool: crate::native::TEXT_EDITOR.into(), config: Value::Null }),
-    });
-    s
+    )
 }
 tool!(Edit, edit_spec(), run);
 pub(crate) fn replace(text: &str, input: &Value) -> Result<String, ToolError> {

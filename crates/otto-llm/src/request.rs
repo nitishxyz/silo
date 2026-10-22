@@ -98,15 +98,6 @@ pub enum ToolKind {
         #[serde(default)]
         format: Option<Value>,
     },
-    /// A provider-defined client tool: the provider fixes the schema and the
-    /// model was trained on it; otto executes it. `tool` is the provider's
-    /// type (`text_editor_20250728`, `bash_20250124`, `apply_patch`, `shell`)
-    /// and `config` its parameters. Calls arrive as ordinary tool calls.
-    Native {
-        tool: String,
-        #[serde(default)]
-        config: Value,
-    },
     /// A provider-hosted tool: `tool` is the provider's type
     /// (`web_search_20250305`, `web_search`, `code_execution`, …) and
     /// `config` its parameters, merged into the tool object.

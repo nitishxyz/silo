@@ -692,6 +692,10 @@
           "provider": {
             "type": "string"
           },
+          "report_held": {
+            "default": false,
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/$defs/SessionStatus"
           },
@@ -3560,13 +3564,6 @@
               "native_compaction": {
                 "type": "boolean"
               },
-              "native_tools": {
-                "default": [],
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "parallel_tools": {
                 "type": "boolean"
               },
@@ -5166,6 +5163,10 @@
           "provider": {
             "type": "string"
           },
+          "report_held": {
+            "default": false,
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/$defs/SessionStatus"
           },
@@ -5455,6 +5456,10 @@
           "provider": {
             "type": "string"
           },
+          "report_held": {
+            "default": false,
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/$defs/SessionStatus"
           },
@@ -5676,6 +5681,10 @@
               },
               "provider": {
                 "type": "string"
+              },
+              "report_held": {
+                "default": false,
+                "type": "boolean"
               },
               "status": {
                 "$ref": "#/$defs/SessionStatus"
@@ -6971,6 +6980,10 @@
           "provider": {
             "type": "string"
           },
+          "report_held": {
+            "default": false,
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/$defs/SessionStatus"
           },
@@ -7821,6 +7834,13 @@
               "input": {},
               "name": {
                 "type": "string"
+              },
+              "started_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -7877,6 +7897,10 @@
               },
               "provider": {
                 "type": "string"
+              },
+              "report_held": {
+                "default": false,
+                "type": "boolean"
               },
               "status": {
                 "$ref": "#/$defs/SessionStatus"
@@ -8010,6 +8034,13 @@
           "seq": {
             "format": "int64",
             "type": "integer"
+          },
+          "turn_started_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -9686,6 +9717,10 @@
           },
           "provider": {
             "type": "string"
+          },
+          "report_held": {
+            "default": false,
+            "type": "boolean"
           },
           "status": {
             "$ref": "#/$defs/SessionStatus"

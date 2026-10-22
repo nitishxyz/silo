@@ -524,6 +524,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         provider: row.provider,
         model: row.model,
         effort: serde_json::from_value(row.meta["effort"].clone()).ok(),
+        report_held: crate::subagents::held(&row.meta),
         title: row.title,
         cwd: row.cwd,
         status: if row.archived {

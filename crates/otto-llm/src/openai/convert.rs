@@ -133,8 +133,6 @@ pub fn steer_input(parts: &[Part]) -> Value {
         .collect();
     json!([{"type":"message","role":"user","content":content}])
 }
-/// Native client tools: the call item type each tool's calls arrive as.
-const NATIVE_CALLS: [&str; 2] = ["apply_patch_call", "shell_call"];
 /// Stream events for a `/responses/compact` result: the returned window
 /// becomes one compaction part that replaces the summarized items.
 #[must_use]
@@ -161,24 +159,11 @@ pub fn compacted(response: &Value, provider: &str) -> Vec<crate::StreamEvent> {
     events.push(E::Finish { reason: FinishReason::Other("compaction".into()), response_id: id });
     events
 }
-/// The output item for a native client call's result.
-fn native_output(kind: &str, call_id: &str, content: &[ResultPart], is_error: bool) -> Value {
-    let text: String = content.iter().filter_map(|p| if let ResultPart::Text { text } = p { Some(text.as_str()) } else { None }).collect();
-    if kind == "shell_call" {
-        // A tool may return the documented output array as JSON; otherwise wrap the text.
-        let output = serde_json::from_str::<Value>(&text)
-            .ok()
-            .filter(Value::is_array)
-            .unwrap_or_else(|| json!([{"stdout":text,"stderr":"","outcome":{"type":"exit","exit_code":i32::from(is_error)}}]));
-        return json!({"type":"shell_call_output","call_id":call_id,"output":output});
-    }
-    json!({"type":"apply_patch_call_output","call_id":call_id,"status":if is_error { "failed" } else { "completed" },"output":text})
-}
 /// Responses input items for `items`, as [`request_for`] sends them.
 #[must_use]
 pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
     let mut input = Vec::new();
-    let mut kinds: HashMap<&str, (CallKind, Option<&str>)> = HashMap::new();
+    let mut kinds: HashMap<&str, CallKind> = HashMap::new();
     for item in items {
         for part in &item.parts {
             let role = match item.role {
@@ -207,10 +192,8 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                     data => input.extend(data),
                 },
                 Part::ToolCall { call_id, name, input: args, kind, opaque } => {
-                    let raw = own(opaque);
-                    let native = raw.as_ref().and_then(|v| v["type"].as_str()).and_then(|t| NATIVE_CALLS.iter().copied().find(|n| *n == t));
-                    kinds.insert(call_id.as_str(), (*kind, native));
-                    match (kind, raw) {
+                    kinds.insert(call_id.as_str(), *kind);
+                    match (kind, own(opaque)) {
                         (_, Some(raw)) => input.push(raw),
                         (CallKind::Function, None) => {
                             input.push(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":args.to_string()}))
@@ -221,12 +204,8 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                         (CallKind::Hosted, None) => {}
                     }
                 }
-                Part::ToolResult { call_id, content, is_error } => {
-                    let (kind, native) = kinds.get(call_id.as_str()).copied().unwrap_or_default();
-                    if let Some(native) = native {
-                        input.push(native_output(native, call_id, content, *is_error));
-                        continue;
-                    }
+                Part::ToolResult { call_id, content, .. } => {
+                    let kind = kinds.get(call_id.as_str()).copied().unwrap_or_default();
                     let content: Vec<_> = content
                         .iter()
                         .map(|p| match p {
@@ -273,7 +252,7 @@ pub fn request_for(req: &Request, provider: &str) -> Value {
                 }
                 value
             }
-            ToolKind::Hosted { tool, config } | ToolKind::Native { tool, config } => {
+            ToolKind::Hosted { tool, config } => {
                 let mut value = json!({"type":tool});
                 if config.is_object() {
                     merge(&mut value, config);

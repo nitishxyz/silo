@@ -56,7 +56,7 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
     let mut tools = Vec::new();
     for tool in &req.tools {
         let mut value = match &tool.kind {
-            ToolKind::Hosted { tool: kind, config } | ToolKind::Native { tool: kind, config } => {
+            ToolKind::Hosted { tool: kind, config } => {
                 let mut v = json!({"type":kind,"name":tool.name});
                 if config.is_object() {
                     deep_merge(&mut v, config.clone());

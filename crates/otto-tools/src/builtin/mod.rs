@@ -14,7 +14,10 @@ pub mod write;
 use crate::{Effects, ToolCx, ToolError, ToolSpec};
 use serde_json::{Value, json};
 
-pub(crate) fn spec(name: &str, description: &str, properties: Value, required: &[&str], effects: Effects) -> ToolSpec {
+pub(crate) fn spec(name: &str, description: &str, mut properties: Value, required: &[&str], effects: Effects) -> ToolSpec {
+    if let Some(path) = properties.get_mut("path").and_then(Value::as_object_mut) {
+        path.entry("description").or_insert_with(|| "Relative to the working directory (absolute also works)".into());
+    }
     ToolSpec {
         name: name.into(),
         description: description.into(),

@@ -222,37 +222,30 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             if !crate::tools::granted(&live, spec) {
                 continue;
             }
-            let presentation = spec.presentation(&family, &live.model.info().caps.native_tools);
+            let presentation = spec.presentation(&family);
             let name = presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone());
             if spec.loading != otto_tools::Loading::Deferred || loaded.contains(&spec.name) {
-                let kind = match (presentation.and_then(|p| p.native.clone()), presentation.and_then(|p| p.freeform.clone())) {
-                    (Some(native), _) => ToolKind::Native { tool: native.tool, config: native.config },
-                    (None, Some(format)) => ToolKind::Custom { format: Some(format) },
-                    (None, None) => ToolKind::Function,
-                };
+                let kind =
+                    presentation.and_then(|p| p.freeform.clone()).map_or(ToolKind::Function, |format| ToolKind::Custom { format: Some(format) });
                 if spec.mode == otto_tools::CallMode::Async && matches!(kind, ToolKind::Function | ToolKind::Custom { .. }) {
                     asynchronous.push(name.clone());
                 }
                 defs.push(ToolDef {
                     name: name.clone(),
                     description: presentation.and_then(|p| p.description.clone()).unwrap_or_else(|| spec.description.clone()),
-                    // Native tools' schemas are the provider's; this one is never sent.
-                    input_schema: if matches!(kind, ToolKind::Native { .. }) {
-                        serde_json::json!({"type":"object","properties":{}})
-                    } else {
-                        presentation.and_then(|p| p.input_schema.clone()).unwrap_or_else(|| spec.input_schema.clone())
-                    },
+                    input_schema: presentation.and_then(|p| p.input_schema.clone()).unwrap_or_else(|| spec.input_schema.clone()),
                     kind,
                     defer_loading: false,
                 });
             }
-            // Native calls are mapped onto built-ins by their own name.
-            if name != spec.name {
-                lookup.entry(spec.name.clone()).or_insert_with(|| tool.clone());
-            }
             lookup.insert(name, tool);
         }
         let lookup = Arc::new(lookup);
+        let offered: Arc<str> = {
+            let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+            names.sort_unstable();
+            names.join(", ").into()
+        };
         if cancel.is_cancelled() {
             return Ok(());
         }
@@ -407,7 +400,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         let mut jobs = Vec::new();
         let result_id = crate::id();
         for (call_id, name, value) in calls {
-            jobs.push(execute(cx.clone(), live.clone(), lookup.clone(), call_id, name, value, turn, step, cancel.clone(), result_id.clone()));
+            jobs.push(execute(cx.clone(), lookup.clone(), offered.clone(), call_id, name, value, turn, step, cancel.clone(), result_id.clone()));
         }
         let outputs = if exclusive {
             let mut outputs = Vec::new();
@@ -471,17 +464,17 @@ async fn tool_hook(cx: &Context, event: &str, tool: &str, fields: serde_json::Va
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     cx: Arc<Context>,
-    live: Arc<Live>,
     lookup: Arc<std::collections::HashMap<String, Arc<dyn otto_tools::Tool>>>,
+    offered: Arc<str>,
     call_id: String,
-    mut name: String,
+    name: String,
     value: serde_json::Value,
     turn: i64,
     step: i64,
     cancel: CancellationToken,
     result_id: String,
 ) -> Result<Part> {
-    let mut original = crate::prepared::public(value);
+    let original = crate::prepared::public(value);
     let bridge = Arc::new(Bridge { cx: cx.clone(), cancel: cancel.clone(), turn, step });
     let mut tcx = ToolCx::new(&call_id, &cx.row.cwd);
     tcx.cancel = cancel.clone();
@@ -490,29 +483,10 @@ async fn execute(
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
     tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
     tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
-    let mut tool = lookup.get(&name).cloned();
-    // A provider-defined tool's call becomes the built-in it maps to; policy,
-    // hooks and the journal see the built-in's name and canonical input.
-    let family = live.family();
-    let native = tool
-        .as_ref()
-        .and_then(|t| t.spec().presentation(&family, &live.model.info().caps.native_tools).filter(|p| p.name == name).and_then(|p| p.native.clone()));
-    let mut invalid = None;
-    if let Some(native) = &native {
-        match otto_tools::native::canonical(&native.tool, &original, &tcx) {
-            Ok((base, input)) => {
-                tool = lookup.get(&base).cloned();
-                name = base;
-                original = input;
-            }
-            Err(error) => invalid = Some(error.to_string()),
-        }
-    }
+    let tool = lookup.get(&name).cloned();
     let mut effective = original.clone();
     let mut prepared = None;
-    let decision = if let Some(reason) = invalid {
-        Decision::Deny { reason }
-    } else if let Some(tool) = &tool {
+    let decision = if let Some(tool) = &tool {
         match crate::prepared::prepare(&cx, tool.clone(), original.clone(), tcx.clone()).await {
             Err(error) => Decision::Deny { reason: error.to_string() },
             Ok(initial) => match tool_hook(
@@ -552,7 +526,7 @@ async fn execute(
             },
         }
     } else {
-        Decision::Deny { reason: format!("unknown tool: {name}") }
+        Decision::Deny { reason: format!("unknown tool: {name}. Available tools: {offered}") }
     };
     let redacted = crate::prepared::card(tool.as_ref(), &original, &effective, prepared.as_ref());
     cx.emit(
@@ -604,8 +578,7 @@ async fn execute(
     let mut limited = otto_tools::output::limit(output.joined_text(), &tcx).map_err(|e| Error::Invalid(e.to_string()))?;
     limited.is_error = output.is_error;
     limited.metadata = output.metadata;
-    let text = native.as_ref().and_then(|n| otto_tools::native::result_text(&n.tool, &limited)).unwrap_or_else(|| limited.joined_text());
-    let mut content = vec![ResultPart::text(text)];
+    let mut content = vec![ResultPart::text(limited.joined_text())];
     for part in output.content {
         match part {
             otto_tools::OutputPart::Image { mime, data_base64 } => {

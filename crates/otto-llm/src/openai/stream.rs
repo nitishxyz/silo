@@ -58,14 +58,6 @@ fn parts(item: &Value, model: &str, provider: &str) -> Result<Vec<Part>, LlmErro
                 opaque: raw,
             }]
         }
-        // Provider-defined client tools: otto runs them like function calls.
-        "apply_patch_call" | "shell_call" => vec![Part::ToolCall {
-            call_id: string(item, "call_id"),
-            name: item["type"].as_str().unwrap_or_default().trim_end_matches("_call").into(),
-            input: item.get("operation").or_else(|| item.get("action")).cloned().unwrap_or(Value::Null),
-            kind: CallKind::Function,
-            opaque: Some(opaque(model, item.clone())),
-        }],
         // Server-side compaction (`context_management`): opaque, replayed as-is.
         "compaction" => vec![Part::Compaction { summary: None, opaque: Some(opaque(model, item.clone())) }],
         kind if kind.ends_with("_call_output") => vec![Part::HostedResult {
@@ -132,11 +124,10 @@ impl State {
             }
             "response.output_item.added" => {
                 let item = &v["item"];
-                if matches!(item["type"].as_str(), Some("function_call" | "custom_tool_call" | "apply_patch_call" | "shell_call")) {
+                if matches!(item["type"].as_str(), Some("function_call" | "custom_tool_call")) {
                     let call_id = string(item, "call_id");
                     self.calls.insert(string(item, "id"), call_id.clone());
-                    let name = item["name"].as_str().unwrap_or_else(|| item["type"].as_str().unwrap_or_default().trim_end_matches("_call"));
-                    out.push(E::ToolInputStart { call_id, name: name.into() });
+                    out.push(E::ToolInputStart { call_id, name: string(item, "name") });
                 }
             }
             "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {

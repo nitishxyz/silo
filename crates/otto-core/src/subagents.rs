@@ -161,23 +161,46 @@ pub(crate) fn payload(row: &otto_store::Session, items: &[otto_llm::Item], turn:
     json!({"child":row.id,"agent":row.agent,"title":row.title,"turn":turn,"status":status,"result":last_text(items, RESULT_LIMIT),"error":error,"user":row.meta["user"]})
 }
 
-/// Change the child's meta in the store and in its live row (actor only).
+/// Change the child's meta in the store and in its live row (actor only). A
+/// held report starting or ending (`SessionInfo.report_held`) is announced.
 async fn set_meta(cx: &Context, f: impl FnOnce(&mut Value) + Send + 'static) -> Result<()> {
     let id = cx.row.id.clone();
-    let row = cx
+    let (row, event) = cx
         .runtime
         .db(move |s| {
             let mut row = s.session(&id)?.ok_or(Error::Closed)?;
             if !row.meta.is_object() {
                 row.meta = json!({});
             }
+            let was = held(&row.meta);
             f(&mut row.meta);
-            s.update_session(&id, otto_store::SessionUpdate { meta: Some(row.meta.clone()), ..Default::default() })?;
-            Ok(row)
+            let update = otto_store::SessionUpdate { meta: Some(row.meta.clone()), ..Default::default() };
+            if was == held(&row.meta) {
+                s.update_session(&id, update)?;
+                return Ok((row, None));
+            }
+            let event = held_changed(s, &row)?;
+            let seq = s.append_with_session(&id, crate::runtime::record(&event, 0, 0)?, Projection::None, update)?;
+            Ok((row, Some((seq, event))))
         })
         .await?;
     cx.set_row(row);
+    if let Some(event) = event {
+        let _ = cx.events.send(event);
+        cx.runtime.changed();
+    }
     Ok(())
+}
+
+/// The child holds the report of a turn the user stopped.
+pub(crate) fn held(meta: &Value) -> bool {
+    meta["held"].is_i64()
+}
+
+fn held_changed(s: &otto_store::Store, row: &otto_store::Session) -> Result<Event> {
+    let mut info = crate::runtime::info(s, row.clone())?;
+    info.last_seq += 1;
+    Ok(Event::SessionChanged { info })
 }
 
 /// The user steered the child, or stopped / interrupted it (`took_over`).
@@ -232,8 +255,19 @@ pub(crate) async fn release(cx: &Context, held: i64) {
     }
     let result = async {
         let id = cx.row.id.clone();
-        let Some(row) = cx.runtime.db(move |s| release_held(s, &id)).await? else { return Ok(()) };
+        let released = cx
+            .runtime
+            .db(move |s| {
+                let Some(row) = release_held(s, &id)? else { return Ok(None) };
+                let event = held_changed(s, &row)?;
+                let seq = s.append_with_session(&id, crate::runtime::record(&event, 0, 0)?, Projection::None, Default::default())?;
+                Ok(Some((row, (seq, event))))
+            })
+            .await?;
+        let Some((row, event)) = released else { return Ok(()) };
         cx.set_row(row);
+        let _ = cx.events.send(event);
+        cx.runtime.changed();
         let (runtime, parent) = (cx.runtime.clone(), cx.row.parent_id.clone().unwrap_or_default());
         tokio::spawn(async move {
             if let Err(error) = runtime.wake(parent.clone()).await {

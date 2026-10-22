@@ -17,7 +17,9 @@ async fn add_update_move_delete_and_freeform() {
     let out = tool.call(json!({"patch":"*** Begin Patch\n*** Delete File: b\n*** End Patch"}), cx()).await.unwrap();
     assert_eq!(out.metadata["files"][0]["removed"], 3);
     assert!(!d.path().join("b").exists());
-    assert_eq!(tool.spec().presentations[0].native.as_ref().unwrap().tool, "apply_patch");
+    let openai = tool.spec().presentation("openai").unwrap();
+    assert_eq!((openai.name.as_str(), &openai.freeform), ("apply_patch", &Some(json!({"type":"text"}))));
+    assert!(tool.spec().presentation("anthropic").is_none());
 }
 #[tokio::test]
 async fn validation_is_atomic_across_files() {

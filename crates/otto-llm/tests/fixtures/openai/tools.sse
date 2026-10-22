@@ -1,0 +1,12 @@
+data: {"type":"response.created","response":{"id":"resp_tools","model":"gpt-6-astra"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** Update File: lib/fib.py\n@@\n-def fib(n):\n+def fibonacci(n):\n*** End Patch"}}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_0","call_id":"call_shell","name":"shell","arguments":"{\"command\":\"cargo test\",\"background\":true}"}}
+
+data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_async","name":"lookup","arguments":"{\"sku\":\"W\"}","async":true}}
+
+data: {"type":"response.completed","response":{"id":"resp_tools","status":"completed","usage":{"input_tokens":50,"output_tokens":30}}}
+
