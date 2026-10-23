@@ -23,8 +23,14 @@ use crate::{
 /// How long a forwarded request waits for the app's reply.
 pub const APP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A browser action with no engine: no app shows the block's session.
-pub const NO_BROWSER_APP: &str = "No Silo app is showing this browser block: its page runs only while the block's session is open in a Silo app (open one next to your own block instead)";
+/// A browser action with no engine: no app runs the block's page.
+pub const NO_BROWSER_APP: &str = "No Silo app is running this browser block: its page runs only while the Silo app is open on this Mac";
+
+/// `browser.fetch` without an app to load the page.
+pub const NO_FETCH_APP: &str = "No Silo app is running on this Mac to load pages";
+
+/// How long a forwarded `browser.fetch` may take, queue included.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Pending {
     /// The app the request went to: only it may reply.
@@ -59,6 +65,12 @@ pub fn owner_app(client: &ClientEntry) -> bool {
 /// subscribed, speaking them.
 fn eligible(client: &ClientEntry) -> bool {
     owner_app(client) && client.events.is_some() && client.supports(Some(feature::APP_REQUESTS))
+}
+
+/// The [`target`] app that also hosts browsers no pane shows.
+fn browser_host(reg: &Registry) -> Option<ClientId> {
+    let id = target(reg, None).ok()?;
+    reg.clients.get(&id).filter(|c| c.supports(Some(feature::BROWSER_HOST))).map(|_| id)
 }
 
 /// The app a request goes to: `explicit` if given (it must be eligible),
@@ -102,8 +114,11 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
     let mut params = serde_json::to_value(&method).map_err(RpcError::internal)?.get_mut("params").map(Value::take).unwrap_or_else(|| json!({}));
     // `client_id` only routes the request.
     let explicit = params.as_object_mut().and_then(|p| p.remove("client_id")).and_then(|v| v.as_u64());
-    let browser = name.starts_with("browser.");
-    let timeout = if browser {
+    let fetch = matches!(method, Method::BrowserFetch(_));
+    let browser = name.starts_with("browser.") && !fetch;
+    let timeout = if fetch {
+        FETCH_TIMEOUT
+    } else if browser {
         params.get("timeout_ms").and_then(Value::as_u64).map_or(APP_TIMEOUT, |ms| Duration::from_millis(ms.saturating_add(5000).min(120_000)))
     } else {
         APP_TIMEOUT
@@ -112,7 +127,9 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
     let (reply, answer) = oneshot::channel();
     {
         let mut reg = server.registry.lock().unwrap();
-        let app = if browser {
+        let app = if fetch {
+            browser_host(&reg).ok_or_else(|| RpcError::new(RpcError::NO_APP, NO_FETCH_APP))?
+        } else if browser {
             let block_id = params["block_id"].as_str().ok_or_else(|| RpcError::bad_request("block_id is required"))?;
             browser_target(&reg, block_id)?
         } else {
@@ -132,7 +149,8 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
     }
 }
 
-/// The subscribed owner executing a browser block's actions, local or remote.
+/// The subscribed owner executing a browser block's actions, local or
+/// remote; a block nobody owns goes to the local app's off-screen host.
 pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcError> {
     let block = match reg.blocks.get(block_id) {
         Some(crate::browser::Block::Browser(block)) => block,
@@ -140,9 +158,10 @@ pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcErr
         Some(crate::browser::Block::Agent(_)) => return Err(RpcError::bad_request(format!("block {block_id} is an agent"))),
         None => return Err(RpcError::not_found(format!("block {block_id}"))),
     };
-    block
-        .info()
-        .owner
+    let Some(owner) = block.info().owner else {
+        return browser_host(reg).ok_or_else(|| RpcError::new(RpcError::NO_APP, NO_BROWSER_APP));
+    };
+    Some(owner)
         .filter(|id| {
             reg.clients.get(id).is_some_and(|c| c.role == ClientRole::App && c.events.is_some() && c.supports(Some(feature::BROWSER_ACTIONS)))
         })
@@ -181,6 +200,27 @@ mod tests {
         assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP);
         reg.clients.get_mut(&remote).unwrap().features.clear();
         assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP);
+    }
+
+    #[test]
+    fn unowned_browsers_and_fetches_go_to_the_local_browser_host() {
+        use silo_proto::{control::SpawnSpec, model::BlockKind};
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let spawn = SpawnSpec::default();
+        let created = reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Browser, url: None, agent: None }).unwrap();
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP);
+        let _plain = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS]);
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP, "an app without a host");
+        assert_eq!(browser_host(&reg), None);
+        let remote = client(&mut reg, ClientRole::App, true, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
+        assert_eq!(browser_host(&reg), None, "never a remote app");
+        let host = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap(), host);
+        assert_eq!(browser_host(&reg), Some(host));
+        // An owned block stays with its owner.
+        reg.own(remote, std::slice::from_ref(&created.block_id), Some(silo_proto::control::OwnMode::Take)).unwrap();
+        assert_eq!(browser_target(&reg, &created.block_id).unwrap(), remote);
     }
 
     #[test]

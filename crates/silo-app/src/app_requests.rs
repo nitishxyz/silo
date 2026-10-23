@@ -69,8 +69,11 @@ impl Workspace {
 
     fn browser_request(&mut self, host: usize, request_id: &str, call: &AppCall, window: &Window, cx: &mut Context<Self>) {
         let Some(block) = call.params.get("block_id").and_then(Value::as_str) else { return };
-        let owns =
-            |workspace: &Workspace| workspace.active_host == host && workspace.browsers.get(block).is_some_and(|(pane, _)| pane.read(cx).is_owner());
+        // A block nobody owns comes to this app; a window with its pane runs it.
+        let owns = |workspace: &Workspace| {
+            workspace.active_host == host
+                && workspace.browsers.get(block).is_some_and(|(pane, _)| pane.read(cx).is_owner() || pane.read(cx).unowned())
+        };
         if !owns(self) {
             return;
         }
@@ -87,7 +90,13 @@ impl Workspace {
         }
         let Some(control) = self.hosts.get(host).and_then(|host| host.control.clone()) else { return };
         let Some((pane, _)) = self.browsers.get(block) else { return };
-        let executor = pane.update(cx, |pane, cx| pane.agent_executor(cx));
+        let executor = pane.update(cx, |pane, cx| {
+            if pane.unowned() {
+                pane.claim();
+                return pane.executor(cx);
+            }
+            pane.agent_executor(cx)
+        });
         let request_id = request_id.to_owned();
         let method = call.method.clone();
         let params = call.params.clone();

@@ -180,6 +180,8 @@ impl Workspace {
         });
         // A window closed mid theme preview must not leave it installed.
         cx.on_release(|this, cx| this.release_preview(cx)).detach();
+        // A closed window's browsers run on off screen.
+        cx.on_release(|this, cx| _ = this.hand_back_browsers(cx)).detach();
         let hosts_changed = cx.observe(&shared, |this, _, cx| {
             this.sync_hosts(cx);
             cx.notify();
@@ -668,7 +670,7 @@ impl Workspace {
         if host != self.active_host {
             self.leave_host(cx);
         }
-        self.detach_view();
+        self.detach_view(cx);
         self.active_host = host;
         if self.control().is_none() {
             let cached = self.shared.read(cx).tree(host).is_some_and(|t| t.view.session.id == session_id);
@@ -692,7 +694,7 @@ impl Workspace {
             return;
         }
         self.leave_host(cx);
-        self.detach_view();
+        self.detach_view(cx);
         self.active_host = host;
         self.wanted_session = self.shared.read(cx).tree(host).map(|t| t.view.session.id.clone());
         self.status = Some(Status::progress(format!("Connecting to {}…", self.hosts[host].info.name)));
@@ -715,11 +717,12 @@ impl Workspace {
         self.shared.update(cx, |shared, _| shared.put_restored(host, mirrors));
     }
 
-    /// Drop every pane (closing its data stream) and give up ownership.
-    pub(crate) fn detach_view(&mut self) {
-        let blocks: Vec<String> = self.panes.keys().chain(self.browsers.keys()).cloned().collect();
+    /// Drop every pane (closing its data stream) and give up ownership; this
+    /// Mac's browsers go on in the off-screen host.
+    pub(crate) fn detach_view(&mut self, cx: &mut Context<Self>) {
+        let mut blocks: Vec<String> = self.panes.keys().cloned().collect();
         self.panes.clear();
-        self.browsers.clear();
+        blocks.extend(self.hand_back_browsers(cx));
         self.agents.clear();
         self.view = None;
         self.server_focus = None;
@@ -729,6 +732,13 @@ impl Workspace {
         if !blocks.is_empty() {
             self.call(Method::DisownBlock { block_ids: blocks });
         }
+    }
+
+    /// Give the browser panes to the off-screen host; the blocks it does not
+    /// take (remote hosts').
+    fn hand_back_browsers(&mut self, cx: &mut App) -> Vec<String> {
+        let panes = self.browsers.drain().map(|(_, (pane, _))| pane).collect();
+        crate::browser_host::BrowserHost::keep(panes, cx)
     }
 
     /// Create a session on this window's host (named, or numbered by the
@@ -812,7 +822,7 @@ impl Workspace {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.view.as_ref().is_some_and(|v| v.session.id != view.session.id) {
-                    this.detach_view();
+                    this.detach_view(cx);
                 }
                 this.server_focus = None;
                 this.clear_status();

@@ -241,6 +241,8 @@ pub fn need(method: &Method) -> Need {
         | M::BrowserScroll(_)
         | M::BrowserDialog(_) => rights(Block(BLOCK), Interact),
         M::BrowserEval(_) => rights(Block(BLOCK), Control),
+        // Runs pages on the user's Mac with the agent profile's cookies.
+        M::BrowserFetch(_) => rights(Server, Control),
         M::ServerInfo {}
         | M::ApiList {}
         | M::ApiDescribe { .. }

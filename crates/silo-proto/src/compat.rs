@@ -27,6 +27,9 @@ pub mod feature {
     pub const APP_REQUESTS: &str = "app_requests";
     /// The owner runs forwarded browser actions.
     pub const BROWSER_ACTIONS: &str = "browser_actions";
+    /// The app hosts browsers no pane shows: actions on unowned browser
+    /// blocks and `browser.fetch` (opt-in).
+    pub const BROWSER_HOST: &str = "browser_host";
     /// Block status events (`block.status`, `block.attention`,
     /// `block.command_finished`).
     pub const STATUS: &str = "status";
@@ -44,7 +47,7 @@ pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature:
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this
 /// build gets them by default.
-pub const OPT_IN: &[&str] = &[feature::CLOSE_GUARD, feature::BROWSER_ACTIONS];
+pub const OPT_IN: &[&str] = &[feature::CLOSE_GUARD, feature::BROWSER_ACTIONS, feature::BROWSER_HOST];
 
 /// [`FEATURES`] as sent in a hello.
 #[must_use]

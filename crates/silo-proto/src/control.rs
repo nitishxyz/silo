@@ -218,6 +218,8 @@ pub enum Method {
     BrowserNetwork(BrowserNetworkParams),
     #[serde(rename = "browser.screenshot")]
     BrowserScreenshot(BrowserScreenshotParams),
+    #[serde(rename = "browser.fetch")]
+    BrowserFetch(BrowserFetchParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -765,6 +767,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.console", "Read captured console messages."),
     ("browser.network", "Read captured network requests."),
     ("browser.screenshot", "Capture the page or an element as an image."),
+    ("browser.fetch", "Load a URL in a hidden page of the app (agent profile) and return its rendered HTML."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),
@@ -953,6 +956,8 @@ impl RpcError {
     pub const NO_APP: &str = "no_app";
     /// Nobody answered in time.
     pub const TIMEOUT: &str = "timeout";
+    /// A page did not load: DNS, TLS or connection failure.
+    pub const NAVIGATION: &str = "navigation";
     /// No Silo app can approve the call, but this caller may confirm it on
     /// its own terminal: `data.approval` is the id to answer with
     /// `approval.answer`, then repeat the call.

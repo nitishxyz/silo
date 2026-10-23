@@ -1,7 +1,7 @@
 #[test]
 fn descriptors_need_no_connection_or_runtime() {
     let descriptors = silo_tools::descriptors();
-    assert_eq!(descriptors.len(), 26);
+    assert_eq!(descriptors.len(), 27);
     assert!(descriptors.iter().any(|tool| tool.name == "terminal_run"));
     assert!(descriptors.iter().any(|tool| tool.name == "browser_snapshot" && tool.deferred));
     for tool in descriptors {

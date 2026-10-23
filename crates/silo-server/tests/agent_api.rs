@@ -226,6 +226,23 @@ async fn reports_notifications_and_browser_actions() {
     assert_eq!(code(timeout(T, call).await.unwrap().unwrap()), RpcError::TIMEOUT);
     assert_eq!(code(app.call_value(Method::AppReply { request_id: id, result: None, error: None }).await), "not_found");
 
+    // browser.fetch: only an app hosting off-screen browsers loads pages.
+    let fetch = || method("browser.fetch", json!({"url": "https://example.com", "selector": "main"}));
+    let error = owner.call_value(fetch()).await.unwrap_err().downcast::<RpcError>().unwrap();
+    assert_eq!((error.code.as_str(), error.message.as_str()), (RpcError::NO_APP, silo_server::app_bridge::NO_FETCH_APP));
+    silo_client::advertise(feature::BROWSER_HOST);
+    let (host, mut host_events) = connect(&home, ClientRole::App, None).await;
+    host.subscribe().await.unwrap();
+    let call = tokio::spawn({
+        let owner = owner.clone();
+        async move { owner.call_value(fetch()).await }
+    });
+    let (id, request) = request(&mut host_events).await;
+    assert_eq!((request.method.as_str(), &request.params["selector"]), ("browser.fetch", &json!("main")));
+    let result = json!({"url": "https://example.com/", "title": "Example", "html": "<main></main>", "timed_out": false, "truncated": false});
+    host.call_value(Method::AppReply { request_id: id, result: Some(result.clone()), error: None }).await.unwrap();
+    assert_eq!(timeout(T, call).await.unwrap().unwrap().unwrap(), result);
+
     owner.call_value(Method::ServerShutdown { force: true }).await.unwrap();
     timeout(T, server).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(home);

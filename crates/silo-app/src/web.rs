@@ -30,7 +30,8 @@ static DUE: Mutex<Option<Instant>> = Mutex::new(None);
 struct Live {
     browser: Rc<Browser>,
     dirty: Arc<AtomicBool>,
-    pane: WeakEntity<BrowserPane>,
+    /// `None`: a fetch page (`browser_host.rs`), read through CDP only.
+    pane: Option<WeakEntity<BrowserPane>>,
 }
 
 thread_local! {
@@ -82,7 +83,7 @@ pub fn runtime(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Runtime>> {
             last = now;
             runtime.pump();
             let dirty: Vec<WeakEntity<BrowserPane>> =
-                LIVE.with_borrow(|live| live.iter().filter(|l| l.dirty.swap(false, Ordering::AcqRel)).map(|l| l.pane.clone()).collect());
+                LIVE.with_borrow(|live| live.iter().filter(|l| l.dirty.swap(false, Ordering::AcqRel)).filter_map(|l| l.pane.clone()).collect());
             cx.update(|cx| {
                 for pane in dirty {
                     let _ = pane.update(cx, |pane, cx| pane.engine_changed(cx));
@@ -95,7 +96,7 @@ pub fn runtime(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Runtime>> {
 }
 
 /// Track a page so quitting can close it; `dirty` is set by its notify.
-pub fn register(browser: Rc<Browser>, dirty: Arc<AtomicBool>, pane: WeakEntity<BrowserPane>) {
+pub fn register(browser: Rc<Browser>, dirty: Arc<AtomicBool>, pane: Option<WeakEntity<BrowserPane>>) {
     LIVE.with_borrow_mut(|live| live.push(Live { browser, dirty, pane }));
 }
 

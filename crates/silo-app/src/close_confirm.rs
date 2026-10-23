@@ -295,7 +295,7 @@ impl Workspace {
                 }
             });
         }
-        self.detach_view();
+        self.detach_view(cx);
         if self.settings.is_none() {
             self.focus.focus(window, cx);
         }

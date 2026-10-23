@@ -109,6 +109,7 @@ fn result_schema(method: &Method) -> Schema {
         M::BrowserConsole(_) => schema_for!(BrowserConsoleResult),
         M::BrowserNetwork(_) => schema_for!(BrowserNetworkResult),
         M::BrowserScreenshot(_) => schema_for!(BrowserScreenshotResult),
+        M::BrowserFetch(_) => schema_for!(BrowserFetchResult),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -247,6 +248,7 @@ pub fn examples() -> Vec<Method> {
             format: Some(ScreenshotFormat::Png),
             quality: None,
         }),
+        M::BrowserFetch(BrowserFetchParams { url: "https://example.com".into(), timeout_ms: None, screenshot: None, selector: Some("main".into()) }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

@@ -5227,6 +5227,120 @@
         "type": "object"
       }
     },
+    "browser.fetch": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "screenshot": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "selector": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BrowserScreenshotResult": {
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "height": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mime": {
+                "type": "string"
+              },
+              "width": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mime",
+              "data_base64",
+              "width",
+              "height"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "html": {
+            "type": "string"
+          },
+          "screenshot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BrowserScreenshotResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timed_out": {
+            "default": false,
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "html"
+        ],
+        "title": "BrowserFetchResult",
+        "type": "object"
+      }
+    },
     "browser.fill": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -105,6 +105,11 @@ impl Browser {
         self.shared.devtools.generation.load(Ordering::Relaxed)
     }
 
+    /// CEF has created the page and it has not closed: CDP calls work.
+    pub fn ready(&self) -> bool {
+        self.host().is_some()
+    }
+
     /// `None` until CEF has created the page (`on_after_created`) and after it closed.
     fn page(&self) -> Option<cef::Browser> {
         lock(&self.shared.browser).clone()

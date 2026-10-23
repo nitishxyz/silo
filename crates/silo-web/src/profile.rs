@@ -14,6 +14,8 @@ use cef::*;
 use crate::shared::lock;
 
 pub const DEFAULT: &str = "default";
+/// The profile agents' own page loads use (`browser.fetch`): never the user's.
+pub const AGENT: &str = "agent";
 
 /// A tunnel's local HTTP proxy at `127.0.0.1:<port>` and its Basic proxy-auth credentials.
 #[derive(Clone, PartialEq, Eq)]

@@ -2,4 +2,5 @@
 
 mod cost;
 mod descriptors;
+mod fetch;
 mod terminal;

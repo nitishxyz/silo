@@ -25,7 +25,7 @@ pub use devtools::DevToolsEvent;
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;
-pub use profile::{Profile, Tunnel};
+pub use profile::{AGENT, Profile, Tunnel};
 pub use runtime::{Config, Runtime, Schedule};
 pub use shared::{Cursor, Event, Security, ViewSize, is_blank};
 

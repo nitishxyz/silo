@@ -206,6 +206,45 @@ pub struct BrowserScreenshotParams {
     pub quality: Option<u8>,
 }
 
+/// `browser.fetch`: a hidden page in the local app, never in a layout.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserFetchParams {
+    /// http(s) only.
+    pub url: String,
+    /// Load and network-quiet deadline; default 15000, at most 60000.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Also capture the viewport.
+    #[serde(default)]
+    pub screenshot: Option<bool>,
+    /// Return this element's `outerHTML` instead of the document's.
+    #[serde(default)]
+    pub selector: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserFetchResult {
+    /// The final URL.
+    pub url: String,
+    pub title: String,
+    /// The main document's HTTP status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub html: String,
+    /// The deadline passed before the page settled.
+    #[serde(default)]
+    pub timed_out: bool,
+    /// `html` was cut to [`BrowserFetchResult::HTML_MAX`] bytes.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<BrowserScreenshotResult>,
+}
+
+impl BrowserFetchResult {
+    pub const HTML_MAX: usize = 8 * 1024 * 1024;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserSnapshotResult {
     pub url: String,

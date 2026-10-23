@@ -12,6 +12,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use silo_client::{Control, Events};
+pub use silo_proto::agent::{BrowserFetchParams, BrowserFetchResult};
 use silo_proto::{
     control::{BlockView, Capture, CommandOutput, CommandRecords, Created, Event, Method, SpawnSpec},
     model::{Axis, BlockKind, BlockStatus, Lifecycle, SessionSummary, SessionView},
@@ -217,6 +218,15 @@ impl Tools {
                     result => result?,
                 }
             }
+            "browser_fetch" => {
+                let mut fetched = self.fetch(&input).await?;
+                let screenshot = fetched.screenshot.take();
+                let mut result = ToolResult::json(serde_json::to_value(fetched)?);
+                if let Some(shot) = screenshot {
+                    result.content.push(Part::Image { mime: shot.mime, data_base64: shot.data_base64 });
+                }
+                return Ok(result);
+            }
             name if descriptors::BROWSER.contains(&name) => {
                 input["block_id"] = json!(self.block(&input, anchor)?);
                 let value = self.control.call_raw(&name.replacen('_', ".", 1), input).await?;
@@ -232,6 +242,18 @@ impl Tools {
             _ => bail!("unknown tool: {name}"),
         };
         Ok(ToolResult::json(value))
+    }
+
+    /// `browser_fetch`: `input`'s URL loaded in a hidden page of the local
+    /// app. Failures are [`silo_proto::control::RpcError`]s: `no_app`,
+    /// `timeout` (nothing rendered in time), `navigation` (DNS, TLS,
+    /// connection), `bad_request`.
+    ///
+    /// # Errors
+    /// Invalid input ([`fetch_params`]), or the failures above.
+    pub async fn fetch(&self, input: &Value) -> anyhow::Result<BrowserFetchResult> {
+        let params = fetch_params(input)?;
+        self.control.call(Method::BrowserFetch(params)).await
     }
 
     fn block(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<String> {
@@ -581,6 +603,35 @@ fn matches_status(status: Option<&BlockStatus>, started: u128, states: &[String]
                 && serde_json::to_value(r.state).ok().and_then(|s| s.as_str().map(str::to_owned)).is_some_and(|s| states.contains(&s))
         })
     })
+}
+
+/// Longest `browser_fetch` wait.
+pub const FETCH_TIMEOUT_MAX: u64 = 60_000;
+
+/// `browser_fetch` input as `browser.fetch` params: an http(s) `url`,
+/// `timeout_ms` capped at [`FETCH_TIMEOUT_MAX`], a non-empty `selector`.
+///
+/// # Errors
+/// A missing or non-web URL, a wrongly typed field, an empty selector.
+pub fn fetch_params(input: &Value) -> anyhow::Result<BrowserFetchParams> {
+    let url = required(input, "url")?.trim();
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    if !matches!(scheme.as_deref(), Some("http" | "https")) || url.len() <= "https://".len() {
+        bail!("url must be an http or https URL");
+    }
+    let timeout_ms = match &input["timeout_ms"] {
+        Value::Null => None,
+        v => Some(v.as_u64().context("timeout_ms must be a non-negative integer")?.min(FETCH_TIMEOUT_MAX)),
+    };
+    let screenshot = match &input["screenshot"] {
+        Value::Null => None,
+        v => Some(v.as_bool().context("screenshot must be a boolean")?),
+    };
+    let selector = match &input["selector"] {
+        Value::Null => None,
+        v => Some(v.as_str().map(str::trim).filter(|s| !s.is_empty()).context("selector must be a non-empty string")?.to_owned()),
+    };
+    Ok(BrowserFetchParams { url: url.to_owned(), timeout_ms, screenshot, selector })
 }
 
 fn required<'a>(input: &'a Value, key: &str) -> anyhow::Result<&'a str> {

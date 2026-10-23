@@ -14,6 +14,7 @@ mod blink;
 mod block_status;
 mod browser_actions;
 mod browser_home;
+mod browser_host;
 mod browser_pane;
 mod cache;
 mod cli_link;
@@ -76,6 +77,8 @@ fn main() {
     // Closes that would end running programs are asked about here.
     silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     silo_client::advertise(silo_proto::compat::feature::BROWSER_ACTIONS);
+    // Browsers no window shows run off screen (`browser_host.rs`).
+    silo_client::advertise(silo_proto::compat::feature::BROWSER_HOST);
     let home = silo_proto::paths::home();
     let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
     {
@@ -178,6 +181,7 @@ fn main() {
         })
         .detach();
         let hosts = hosts_state::HostsState::install(rt.clone(), home.clone(), service.clone(), cx);
+        browser_host::BrowserHost::install(&hosts, cx);
         updater::Updater::install(rt.clone(), hosts, &exe, cx);
         if let Err(error) = open_window(None, cx) {
             eprintln!("silo: cannot open window: {error:#}");

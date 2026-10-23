@@ -332,7 +332,12 @@ pub struct BrowserPane {
     smart_zoom: Option<gpui::Task<()>>,
     /// The page scale as pinched here, reset by navigation.
     page_scale: f32,
+    /// In the off-screen host (`browser_host.rs`): the page opens without
+    /// a layout, at the last (or a default) size.
+    offscreen: bool,
     _subs: Vec<gpui::Subscription>,
+    /// Focus subscriptions of the window showing the pane.
+    window_subs: Vec<gpui::Subscription>,
 }
 
 /// The back/forward arrow a navigation swipe pulls in from the page's edge.
@@ -343,36 +348,19 @@ struct SwipeArrow {
 }
 
 impl BrowserPane {
-    #[allow(clippy::too_many_arguments)]
+    /// A pane in no window yet: [`Self::attach`] shows it in one, the
+    /// off-screen host runs it without one.
     pub fn new(
         block_id: String,
         rt: tokio::runtime::Handle,
         control: Option<silo_client::Control>,
         route: Route,
         home: std::path::PathBuf,
-        window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         let address = cx.new(|cx| crate::text_field::TextField::new("Search or enter address", cx));
-        let mut subs = vec![
-            cx.on_focus(&focus, window, |this, _, cx| this.focused(true, cx)),
-            cx.on_blur(&focus, window, |this, _, cx| this.focused(false, cx)),
-        ];
-        subs.push(cx.subscribe_in(&address, window, |this, _, event, window, cx| this.address_event(event, window, cx)));
-        let address_focus = address.read(cx).focus.clone();
-        subs.push(intercept(cx.weak_entity(), cx));
-        subs.push(cx.on_blur(&address_focus, window, |this, _, cx| {
-            this.editing = false;
-            this.sync_address(cx);
-        }));
-        subs.push(cx.on_focus(&address_focus, window, |this, _, cx| {
-            this.editing = true;
-            this.security_open = false;
-            this.address.update(cx, |field, cx| field.select_all(cx));
-            this.own(silo_proto::control::OwnMode::Take);
-            cx.emit(BrowserPaneEvent::Activated);
-        }));
+        let mut subs = vec![intercept(cx.weak_entity(), cx)];
         subs.push(cx.observe(&crate::hosts_state::HostsState::global(cx), |this, _, cx| {
             if this.empty {
                 cx.notify();
@@ -424,8 +412,65 @@ impl BrowserPane {
             pinch: None,
             smart_zoom: None,
             page_scale: 1.0,
+            offscreen: false,
             _subs: subs,
+            window_subs: Vec::new(),
         }
+    }
+
+    /// Show the pane in `window` (on creation, or adopted from the host).
+    pub fn attach(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let address_focus = self.address.read(cx).focus.clone();
+        self.window_subs = vec![
+            cx.on_focus(&self.focus, window, |this, _, cx| this.focused(true, cx)),
+            cx.on_blur(&self.focus, window, |this, _, cx| this.focused(false, cx)),
+            cx.subscribe_in(&self.address, window, |this, _, event, window, cx| this.address_event(event, window, cx)),
+            cx.on_blur(&address_focus, window, |this, _, cx| {
+                this.editing = false;
+                this.sync_address(cx);
+            }),
+            cx.on_focus(&address_focus, window, |this, _, cx| {
+                this.editing = true;
+                this.security_open = false;
+                this.address.update(cx, |field, cx| field.select_all(cx));
+                this.own(silo_proto::control::OwnMode::Take);
+                cx.emit(BrowserPaneEvent::Activated);
+            }),
+        ];
+        self.offscreen = false;
+    }
+
+    /// Run in the off-screen host: no window; a page not open yet opens on
+    /// the next server state or [`Self::open_offscreen`].
+    pub(crate) fn detach(&mut self) {
+        self.window_subs.clear();
+        self.held.clear();
+        self.editing = false;
+        if let Some(page) = &self.page {
+            page.set_focus(false);
+        }
+        self.offscreen = true;
+    }
+
+    /// Open the page without a layout (an agent acts on it).
+    pub(crate) fn open_offscreen(&mut self, cx: &mut gpui::Context<Self>) {
+        self.offscreen = true;
+        self.ensure_page(cx);
+    }
+
+    /// Whether the page exists and answers CDP.
+    pub(crate) fn page_ready(&self) -> bool {
+        self.page.as_ref().is_some_and(|p| p.ready())
+    }
+
+    /// The page could not open (bad address, engine failure).
+    pub(crate) fn page_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// A block of this Mac's server (only those are hosted off screen).
+    pub(crate) fn is_local(&self) -> bool {
+        matches!(self.route, Route::Local) && self.control.is_some()
     }
 }
 
@@ -482,6 +527,12 @@ impl BrowserPane {
         if !self.is_owner() {
             anyhow::bail!("this app does not own the browser block");
         }
+        self.executor(cx)
+    }
+
+    /// The page's executor, whoever owns the block (the off-screen host
+    /// has just claimed it).
+    pub(crate) fn executor(&mut self, cx: &mut gpui::Context<Self>) -> anyhow::Result<std::rc::Rc<crate::browser_actions::Executor>> {
         if let Some(actions) = &self.actions {
             return Ok(actions.clone());
         }
@@ -489,6 +540,16 @@ impl BrowserPane {
         let actions = crate::browser_actions::Executor::new(page, cx);
         self.actions = Some(actions.clone());
         Ok(actions)
+    }
+
+    /// Nobody owns the block (its last owner left).
+    pub(crate) fn unowned(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.owner.is_none())
+    }
+
+    /// Own the block if nobody does.
+    pub(crate) fn claim(&self) {
+        self.own(silo_proto::control::OwnMode::Request);
     }
 
     /// Take the engine state (`Take`), or claim it only if nobody holds it
@@ -617,7 +678,7 @@ impl BrowserPane {
 impl BrowserPane {
     /// Open the page once both the server state and the layout are known.
     fn ensure_page(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.page.is_some() || self.starting || self.error.is_some() || self.state.is_none() || self.bounds.is_none() {
+        if self.page.is_some() || self.starting || self.error.is_some() || self.state.is_none() || (self.bounds.is_none() && !self.offscreen) {
             return;
         }
         self.starting = true;
@@ -676,7 +737,7 @@ impl BrowserPane {
         match opened {
             Ok((page, dirty)) => {
                 let page = std::rc::Rc::new(page);
-                crate::web::register(page.clone(), dirty, cx.weak_entity());
+                crate::web::register(page.clone(), dirty, Some(cx.weak_entity()));
                 self.page = Some(page);
                 self.span = Span::at(state.index);
                 self.engine_url = state.url.clone();
@@ -1778,8 +1839,13 @@ impl crate::workspace::Workspace {
                 Route::Remote { host_id: ticket.addr.id.to_string(), home: home.clone(), addr: ticket.addr.clone() }
             }
         };
-        let (id, rt, control, home) = (block.to_owned(), self.rt.clone(), self.control(), self.home.clone());
-        let pane = cx.new(|cx| BrowserPane::new(id, rt, control, route, home, window, cx));
+        // A page the off-screen host runs is shown as it is: no reload.
+        let adopted = host.local.then(|| crate::browser_host::BrowserHost::take(block, cx)).flatten();
+        let pane = adopted.unwrap_or_else(|| {
+            let (id, rt, control, home) = (block.to_owned(), self.rt.clone(), self.control(), self.home.clone());
+            cx.new(|cx| BrowserPane::new(id, rt, control, route, home, cx))
+        });
+        pane.update(cx, |pane, cx| pane.attach(window, cx));
         let sub = cx.subscribe_in(&pane, window, |this, pane, event: &BrowserPaneEvent, _, cx| {
             let block = pane.read(cx).block_id.clone();
             match event {
