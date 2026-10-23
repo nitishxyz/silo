@@ -664,8 +664,8 @@ feature `browser_host`): a browser block no window shows runs there for every `b
 it adopts the same page (no reload) and hands it back when it stops; the page closes with its block. The persistent
 `agent` profile. Silo's deferred `browser_fetch` (`browser.fetch`: load, then network quiet, ≤ 60 s; `selector`,
 `screenshot`; 3 pages at once, the rest queued; a challenge that doesn't clear in 6 s returns `blocked`; `no_app`,
-`timeout`, `navigation`). Pages no window shows render at 5 fps (60 once adopted). The `Renderer` contract
-(`otto_silo_tools::connect(..).renderer`).
+`timeout`, `navigation`). Pages no window shows, and tabs a window doesn't show, render at 5 fps until shown. The
+`Renderer` contract (`otto_silo_tools::connect(..).renderer`).
 
 **As built (otto side):** both tools reach silo's `browser_fetch` (docs/AGENTS.md) through
 `otto_tools::builtin::render::Renderer` (`Runtime::set_renderer`; shared with the engine as `web_fetch::Web`);

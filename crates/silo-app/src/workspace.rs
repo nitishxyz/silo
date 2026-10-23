@@ -921,6 +921,11 @@ impl Workspace {
                 }
             }
         }
+        // Browsers in tabs not shown render slowly (still painting: screenshots and timers work).
+        let shown: Vec<String> = active.as_ref().map(crate::floats::window_blocks).unwrap_or_default();
+        for (id, (pane, _)) in &self.browsers {
+            pane.update(cx, |pane, _| pane.set_hidden(!shown.contains(id)));
+        }
         let infos = view.blocks.clone();
         for info in infos {
             if let Some((pane, _)) = self.browsers.get(&info.id) {

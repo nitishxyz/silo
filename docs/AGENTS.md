@@ -177,8 +177,8 @@ The app (feature `browser_host`) hosts the browsers no pane shows, on the local 
   the window) hands it back instead of closing the page. A hosted page closes when its block closes, its session
   closes or the local server disconnects. A window whose pane's block lost its owner runs the request itself and
   claims the block. Hosted and fetch pages render at 5 fps (`set_windowless_frame_rate`, not `was_hidden`, so
-  timers, rAF and CDP screenshots keep working); a window adopting one restores 60 fps. Screenshots `invalidate`
-  first, so they capture a fresh frame.
+  timers, rAF and CDP screenshots keep working); a window adopting one restores 60 fps, and a browser tab its
+  window doesn't show drops to 5 fps until shown. Screenshots `invalidate` first, so they capture a fresh frame.
 - **Fetches.** `browser.fetch` opens a page in the persistent `agent` profile (`<home>/web/profiles/agent`, made
   like a server profile: own cookies and storage, never the user's `default`), loads the URL, waits for the load
   event and then network quiet (≤ 2 requests in flight for 500 ms), bounded by `timeout_ms` (default 15 s, max

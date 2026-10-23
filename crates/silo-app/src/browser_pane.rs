@@ -335,6 +335,8 @@ pub struct BrowserPane {
     /// In the off-screen host (`browser_host.rs`): the page opens without
     /// a layout, at the last (or a default) size.
     offscreen: bool,
+    /// In a window, but in a tab it doesn't show: rendered slowly like the host's.
+    hidden: bool,
     /// The page's first document committed (or its first load ended):
     /// actions before it would act on the engine's blank start page.
     committed: bool,
@@ -416,6 +418,7 @@ impl BrowserPane {
             smart_zoom: None,
             page_scale: 1.0,
             offscreen: false,
+            hidden: false,
             committed: false,
             _subs: subs,
             window_subs: Vec::new(),
@@ -443,7 +446,17 @@ impl BrowserPane {
         ];
         self.offscreen = false;
         if let Some(page) = &self.page {
-            page.set_offscreen(false);
+            page.set_offscreen(self.hidden);
+        }
+    }
+
+    /// Whether the window's shown tab has this pane (a page in another tab renders slowly).
+    pub(crate) fn set_hidden(&mut self, hidden: bool) {
+        if self.hidden != hidden {
+            self.hidden = hidden;
+            if let Some(page) = self.page.as_ref().filter(|_| !self.offscreen) {
+                page.set_offscreen(hidden);
+            }
         }
     }
 
@@ -738,7 +751,8 @@ impl BrowserPane {
             let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let flag = dirty.clone();
             let notify = std::sync::Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Release));
-            let options = silo_web::BrowserOptions { url: &url, profile: &profile, size: self.view_size(), offscreen: self.offscreen, notify };
+            let options =
+                silo_web::BrowserOptions { url: &url, profile: &profile, size: self.view_size(), offscreen: self.offscreen || self.hidden, notify };
             anyhow::Ok((runtime.create_browser(options)?, dirty))
         })();
         self.starting = false;
