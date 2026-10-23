@@ -319,8 +319,9 @@ pub struct AppState {
     pub last_session: Option<String>,
     #[serde(default)]
     pub density: Density,
-    #[serde(default = "yes")]
-    pub show_pane_headers: bool,
+    /// Which block types show their header.
+    #[serde(default)]
+    pub pane_headers: crate::pane_header::PaneHeaders,
     /// UI (chrome) font: an exact installed family, or empty for Automatic
     /// (the macOS system font). Separate from the terminal font in
     /// `terminal.json`. Absent in older files, which keeps the default.
@@ -359,7 +360,7 @@ impl Default for AppState {
         Self {
             last_session: None,
             density: Density::default(),
-            show_pane_headers: true,
+            pane_headers: crate::pane_header::PaneHeaders::default(),
             ui_font_family: String::new(),
             match_running_app: true,
             material: crate::material::Material::Solid,
@@ -492,7 +493,7 @@ pub(crate) mod tests {
         // Older files without settings get the reference design.
         let old: AppState = serde_json::from_str(r#"{"last_session":"s1"}"#).unwrap();
         assert_eq!(old.density, Density::Comfortable);
-        assert!(old.show_pane_headers);
+        assert_eq!(old.pane_headers, crate::pane_header::PaneHeaders::all(true));
         assert_eq!(old.ui_font_family, "", "Automatic UI font");
         assert!(old.match_running_app);
         assert_eq!((old.material, old.tint_with_app, old.translucent_apps), (crate::material::Material::Solid, true, false));
@@ -503,7 +504,7 @@ pub(crate) mod tests {
         let state = AppState {
             last_session: None,
             density: Density::Compact,
-            show_pane_headers: false,
+            pane_headers: crate::pane_header::PaneHeaders { terminal: false, agent: true },
             ui_font_family: String::new(),
             match_running_app: false,
             material: crate::material::Material::Frosted,
@@ -519,7 +520,7 @@ pub(crate) mod tests {
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
         assert!(!text.contains("ui_font_family"), "Automatic is not written: {text}");
         let back = load_state(&dir);
-        assert_eq!((back.density, back.show_pane_headers, back.match_running_app), (Density::Compact, false, false));
+        assert_eq!((back.density, back.pane_headers, back.match_running_app), (Density::Compact, state.pane_headers, false));
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         assert!(!back.check_updates);
         assert!(!back.confirm_close);

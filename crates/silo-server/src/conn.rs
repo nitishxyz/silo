@@ -226,7 +226,10 @@ where
         Principal::Grant(grant) if matches!(grant.who, Who::Secret { .. }) => Some(silo_proto::access::Granted::from(grant.as_ref())),
         _ => None,
     };
-    let reply = ServerHello { granted, ..ServerHello::ours(client_id, server.info_now().await) };
+    let mut reply = ServerHello { granted, ..ServerHello::ours(client_id, server.info_now().await) };
+    if server.services.contains_key(silo_proto::compat::feature::OTTO) {
+        reply.features.push(silo_proto::compat::feature::OTTO.to_owned());
+    }
     tx.send(Frame::json(kind::CONTROL_HELLO, &reply)?);
     server.touch();
     // Join connections get no data streams.

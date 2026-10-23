@@ -1,8 +1,10 @@
-//! Browser-block tunnels, client side: one loopback HTTP proxy per remote
-//! server, used as the fixed proxy of that server's browser profiles.
-//! Server-private hosts go through one `silo/tunnel/1` stream per proxied
-//! connection on a cached TUNNEL_ALPN connection; every other host is
-//! dialed directly from the client.
+//! Tunnels, client side. [`TunnelDialer`] opens `silo/tunnel/1` streams
+//! (TCP or a named service) on one cached TUNNEL_ALPN connection per remote
+//! server. On it run one loopback HTTP proxy per remote server, used as the
+//! fixed proxy of that server's browser profiles (server-private hosts go
+//! through one tunnel stream per proxied connection; every other host is
+//! dialed directly from the client), otto service streams, and
+//! [`crate::callback::CallbackForward`].
 
 use std::{
     io,
@@ -36,6 +38,7 @@ pub const PROXY_USER: &str = "silo";
 pub struct TunnelProxy {
     port: u16,
     password: String,
+    dialer: Arc<TunnelDialer>,
     task: JoinHandle<()>,
 }
 
@@ -60,29 +63,34 @@ impl TunnelProxy {
     where
         N: Deref<Target = Net> + Send + Sync + 'static,
     {
-        Self::start_with(net, addr, POLICY).await
+        Self::start_with(Arc::new(TunnelDialer::new(net, addr)), POLICY).await
     }
 
-    async fn start_with<N>(net: N, addr: EndpointAddr, policy: Policy) -> anyhow::Result<TunnelProxy>
-    where
-        N: Deref<Target = Net> + Send + Sync + 'static,
-    {
+    /// [`Self::start`] on an existing dialer, sharing its connection.
+    ///
+    /// # Errors
+    /// The listener could not be bound.
+    pub async fn with_dialer(dialer: Arc<TunnelDialer>) -> anyhow::Result<TunnelProxy> {
+        Self::start_with(dialer, POLICY).await
+    }
+
+    async fn start_with(dialer: Arc<TunnelDialer>, policy: Policy) -> anyhow::Result<TunnelProxy> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("bind tunnel proxy")?;
         let port = listener.local_addr()?.port();
         let password = HEXLOWER.encode(&rand::random::<[u8; 32]>());
         let expected = BASE64.encode(format!("{PROXY_USER}:{password}").as_bytes());
-        let dialer = Arc::new(Dialer { net, addr, conn: Mutex::new(None), policy, expected });
+        let ctx = Arc::new(Proxy { dialer: dialer.clone(), policy, expected });
         let task = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
-                let dialer = dialer.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = proxy(&*dialer, tcp).await {
+                    if let Err(error) = proxy(&ctx, tcp).await {
                         tracing::debug!("tunnel proxy: {error:#}");
                     }
                 });
             }
         });
-        Ok(TunnelProxy { port, password, task })
+        Ok(TunnelProxy { port, password, dialer, task })
     }
 
     #[must_use]
@@ -95,6 +103,12 @@ impl TunnelProxy {
     pub fn credentials(&self) -> (&str, &str) {
         (PROXY_USER, &self.password)
     }
+
+    /// The dialer this proxy tunnels through.
+    #[must_use]
+    pub fn dialer(&self) -> &Arc<TunnelDialer> {
+        &self.dialer
+    }
 }
 
 impl Drop for TunnelProxy {
@@ -103,19 +117,57 @@ impl Drop for TunnelProxy {
     }
 }
 
-struct Dialer<N> {
-    net: N,
-    addr: EndpointAddr,
-    conn: Mutex<Option<RemoteConn>>,
+struct Proxy {
+    dialer: Arc<TunnelDialer>,
     policy: Policy,
     /// Base64 of `user:password`, as sent after `Basic `.
     expected: String,
 }
 
-impl<N: Deref<Target = Net>> Dialer<N> {
-    /// A handshaken tunnel to `host:port` on the cached connection. Any
-    /// transport failure drops the cache so the next tunnel redials.
-    async fn open(&self, host: &str, port: u16) -> io::Result<BiStream> {
+/// Opens tunnel streams to one remote server on a cached TUNNEL_ALPN
+/// connection, dialed on first use and redialed after a transport failure.
+pub struct TunnelDialer {
+    net: Box<dyn Deref<Target = Net> + Send + Sync>,
+    addr: EndpointAddr,
+    conn: Mutex<Option<RemoteConn>>,
+}
+
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    Tcp(&'a str, u16),
+    Service(&'a str),
+}
+
+impl TunnelDialer {
+    /// Nothing is dialed until the first stream.
+    pub fn new<N>(net: N, addr: EndpointAddr) -> TunnelDialer
+    where
+        N: Deref<Target = Net> + Send + Sync + 'static,
+    {
+        TunnelDialer { net: Box::new(net), addr, conn: Mutex::new(None) }
+    }
+
+    /// A handshaken tunnel to the server-private `host:port`. A refusal is
+    /// a [`TunnelErr`] inside the error (`get_ref`).
+    ///
+    /// # Errors
+    /// Dialing, the stream, or the server's refusal.
+    pub async fn open(&self, host: &str, port: u16) -> io::Result<BiStream> {
+        self.stream(Target::Tcp(host, port)).await
+    }
+
+    /// A handshaken tunnel to the server's service `name` (e.g. `otto`),
+    /// refused `not_found` / `unavailable` as a [`TunnelErr`].
+    ///
+    /// # Errors
+    /// Dialing, the stream, or the server's refusal.
+    pub async fn open_service(&self, name: &str) -> io::Result<BiStream> {
+        self.stream(Target::Service(name)).await
+    }
+
+    /// Any transport failure drops the cached connection so the next
+    /// stream redials; a refusal keeps it.
+    async fn stream(&self, target: Target<'_>) -> io::Result<BiStream> {
         let rc = {
             let mut cached = self.conn.lock().await;
             match &*cached {
@@ -128,7 +180,10 @@ impl<N: Deref<Target = Net>> Dialer<N> {
         };
         let result = async {
             let mut stream = rc.open_stream().await.map_err(io::Error::other)?;
-            tunnel::open(&mut stream, host, port).await?;
+            match target {
+                Target::Tcp(host, port) => tunnel::open(&mut stream, host, port).await?,
+                Target::Service(name) => tunnel::open_service(&mut stream, name).await?,
+            }
             Ok(stream)
         }
         .await;
@@ -144,7 +199,9 @@ impl<N: Deref<Target = Net>> Dialer<N> {
     }
 }
 
-fn refusal(e: &io::Error) -> Option<TunnelErrCode> {
+/// The server's refusal code carried by a tunnel open error, if any.
+#[must_use]
+pub fn refusal(e: &io::Error) -> Option<TunnelErrCode> {
     e.get_ref().and_then(|e| e.downcast_ref::<TunnelErr>()).map(|e| e.code)
 }
 
@@ -156,16 +213,16 @@ fn status_for(e: &io::Error) -> &'static str {
     }
 }
 
-async fn proxy<N: Deref<Target = Net>>(dialer: &Dialer<N>, mut tcp: TcpStream) -> anyhow::Result<()> {
+async fn proxy(ctx: &Proxy, mut tcp: TcpStream) -> anyhow::Result<()> {
     let (head, rest) = read_head(&mut tcp).await?;
-    if !authorized(&head, &dialer.expected) {
+    if !authorized(&head, &ctx.expected) {
         let reply = "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"silo\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         tcp.write_all(reply.as_bytes()).await?;
         anyhow::bail!("missing or wrong proxy credentials");
     }
     let req = Request::parse(&head).context("bad proxy request")?;
-    if !(dialer.policy.tunneled)(&req.host) {
-        let connect = direct(&req.host, req.port, dialer.policy.direct_ok);
+    if !(ctx.policy.tunneled)(&req.host) {
+        let connect = direct(&req.host, req.port, ctx.policy.direct_ok);
         let direct = match tokio::time::timeout(DIRECT_CONNECT_TIMEOUT, connect).await {
             Ok(Ok(direct)) => direct,
             Ok(Err((status, e))) => return refuse(tcp, status, e).await,
@@ -176,7 +233,7 @@ async fn proxy<N: Deref<Target = Net>>(dialer: &Dialer<N>, mut tcp: TcpStream) -
         };
         return relay(tcp, direct, &req, &rest).await;
     }
-    let stream = match dialer.open(&req.host, req.port).await {
+    let stream = match ctx.dialer.open(&req.host, req.port).await {
         Ok(stream) => stream,
         Err(e) => return refuse(tcp, status_for(&e), e.into()).await,
     };
@@ -245,7 +302,7 @@ where
         Some(head) => upstream.write_all(head.as_bytes()).await?,
     }
     upstream.write_all(rest).await?;
-    tunnel::splice(tcp, upstream, IDLE).await;
+    tunnel::splice(tcp, upstream, Some(IDLE)).await;
     Ok(())
 }
 
@@ -367,7 +424,7 @@ mod tests {
         let net = Net::bind(&id, silo_transport::RelayConfig::Disabled, false).await.unwrap();
         let server = EndpointAddr::new(silo_transport::Identity::load_or_create(dir.join("srv")).unwrap().id());
         let policy = Policy { tunneled: |_| false, direct_ok };
-        let proxy = TunnelProxy::start_with(Arc::new(net), server, policy).await.unwrap();
+        let proxy = TunnelProxy::start_with(Arc::new(TunnelDialer::new(Arc::new(net), server)), policy).await.unwrap();
         let (user, pass) = proxy.credentials();
         let auth = format!("Proxy-Authorization: Basic {}\r\n", BASE64.encode(format!("{user}:{pass}").as_bytes()));
         let _ = std::fs::remove_dir_all(&dir);

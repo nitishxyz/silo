@@ -32,6 +32,7 @@ pub fn random_state() -> String {
 
 pub struct LoopbackCallback {
     listener: TcpListener,
+    port: u16,
     path: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,10 +47,20 @@ impl LoopbackCallback {
         if !path.starts_with('/') || path.contains(['?', '#']) {
             return Err(LlmError::new(ErrorClass::InvalidRequest, "invalid callback path"));
         }
-        Ok(Self { listener, path })
+        let port = listener.local_addr().map_err(io_error)?.port();
+        Ok(Self { listener, port, path })
     }
     pub fn redirect_uri(&self) -> Result<String, LlmError> {
-        Ok(format!("http://127.0.0.1:{}{}", self.listener.local_addr().map_err(io_error)?.port(), self.path))
+        Ok(format!("http://127.0.0.1:{}{}", self.port, self.path))
+    }
+    /// The bound loopback port (the requested one, or the system's pick for 0).
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
     }
     pub async fn wait(self, expected_state: &str, timeout: Duration) -> Result<AuthorizationCode, LlmError> {
         tokio::time::timeout(timeout, async {
@@ -222,6 +233,13 @@ mod tests {
         assert!(parse_callback(valid, "/other", "abc").is_err());
         assert!(parse_callback(valid, "/callback", "wrong").is_err());
         assert!(parse_callback("GET /callback?code=a&state=x&state=x HTTP/1.1", "/callback", "x").is_err());
+    }
+    #[tokio::test]
+    async fn loopback_reports_its_port_and_path() {
+        let callback = LoopbackCallback::bind(0, "/auth/callback").await.unwrap();
+        assert_ne!(callback.port(), 0);
+        assert_eq!(callback.path(), "/auth/callback");
+        assert_eq!(callback.redirect_uri().unwrap(), format!("http://127.0.0.1:{}/auth/callback", callback.port()));
     }
     #[test]
     fn token_fields() {

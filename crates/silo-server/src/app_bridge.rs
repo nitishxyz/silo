@@ -67,14 +67,40 @@ fn eligible(client: &ClientEntry) -> bool {
     owner_app(client) && client.events.is_some() && client.supports(Some(feature::APP_REQUESTS))
 }
 
-/// The most recently active [`eligible`] app that also hosts browsers no
-/// pane shows.
+/// Whether `client` is the user's app on another machine: `role: app` over
+/// a remote connection as a paired device with control at server scope
+/// (the grant a tunnel runs under), never a shared link's holder.
+pub fn trusted_remote_app(client: &ClientEntry) -> bool {
+    let Principal::Grant(grant) = &client.principal else { return false };
+    client.role == ClientRole::App
+        && client.origin.is_some()
+        && client.pane.is_none()
+        && matches!(grant.who, silo_proto::access::Who::Device { .. })
+        && grant.scope == silo_proto::access::Scope::Server
+        && grant.rights >= silo_proto::access::Rights::Control
+        && !grant.expired(crate::grants::unix_secs())
+}
+
+/// The app that hosts browsers no pane shows (and `browser.fetch`): a
+/// subscribed local [`owner_app`] always wins over a [`trusted_remote_app`];
+/// within each, the most recently active. Picked per request, so when the
+/// host leaves the next one takes over.
 fn browser_host(reg: &Registry) -> Option<ClientId> {
     reg.clients
         .iter()
-        .filter(|(_, c)| eligible(c) && c.supports(Some(feature::BROWSER_HOST)))
-        .max_by_key(|(id, c)| (c.active_at, **id))
-        .map(|(id, _)| *id)
+        .filter(|(_, c)| c.events.is_some() && c.supports(Some(feature::APP_REQUESTS)) && c.supports(Some(feature::BROWSER_HOST)))
+        .filter_map(|(id, c)| {
+            let local = if owner_app(c) {
+                true
+            } else if trusted_remote_app(c) {
+                false
+            } else {
+                return None;
+            };
+            Some((local, c.active_at, *id))
+        })
+        .max()
+        .map(|(_, _, id)| id)
 }
 
 /// The app a request goes to: `explicit` if given (it must be eligible),
@@ -154,7 +180,7 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
 }
 
 /// The subscribed owner executing a browser block's actions, local or
-/// remote; a block nobody owns goes to the local app's off-screen host.
+/// remote; a block nobody owns goes to the [`browser_host`].
 pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcError> {
     let block = match reg.blocks.get(block_id) {
         Some(crate::browser::Block::Browser(block)) => block,
@@ -191,6 +217,30 @@ mod tests {
         id
     }
 
+    /// A grant for `who` with `rights` at server scope.
+    fn grant(who: silo_proto::access::Who, rights: silo_proto::access::Rights) -> Principal {
+        Principal::Grant(Box::new(silo_proto::access::Grant {
+            id: "g".into(),
+            who,
+            scope: silo_proto::access::Scope::Server,
+            rights,
+            label: String::new(),
+            created_at: 0,
+            created_by: String::new(),
+            created_by_grant: None,
+            expires_at: None,
+            last_seen: 0,
+        }))
+    }
+
+    /// A remote app of the user's (a paired device with control) hosting browsers.
+    fn remote_host(reg: &mut Registry) -> ClientId {
+        let id = client(reg, ClientRole::App, true, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
+        reg.clients.get_mut(&id).unwrap().principal =
+            grant(silo_proto::access::Who::Device { id: "device".into() }, silo_proto::access::Rights::Control);
+        id
+    }
+
     #[test]
     fn browser_owner_may_be_remote_without_app_requests() {
         use silo_proto::{control::SpawnSpec, model::BlockKind};
@@ -218,7 +268,9 @@ mod tests {
         assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP, "an app without a host");
         assert_eq!(browser_host(&reg), None);
         let remote = client(&mut reg, ClientRole::App, true, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
-        assert_eq!(browser_host(&reg), None, "never a remote app");
+        assert_eq!(browser_host(&reg), None, "a remote app that is no paired device of the owner's");
+        let paired = remote_host(&mut reg);
+        assert_eq!(browser_host(&reg), Some(paired), "the owner's remote app hosts until a local one connects");
         let host = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
         assert_eq!(browser_target(&reg, &created.block_id).unwrap(), host);
         assert_eq!(browser_host(&reg), Some(host));
@@ -227,6 +279,61 @@ mod tests {
         // An owned block stays with its owner.
         reg.own(remote, std::slice::from_ref(&created.block_id), Some(silo_proto::control::OwnMode::Take)).unwrap();
         assert_eq!(browser_target(&reg, &created.block_id).unwrap(), remote);
+    }
+
+    #[test]
+    fn an_owner_remote_app_hosts_browsers_and_fetches() {
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let remote = remote_host(&mut reg);
+        assert_eq!(browser_host(&reg), Some(remote));
+        assert_eq!(target(&reg, None).unwrap_err().code, RpcError::NO_APP, "other app.* requests stay local-only");
+        // A view-only or expired device grant hosts nothing.
+        reg.clients.get_mut(&remote).unwrap().principal =
+            grant(silo_proto::access::Who::Device { id: "device".into() }, silo_proto::access::Rights::View);
+        assert_eq!(browser_host(&reg), None, "view only");
+        if let Principal::Grant(g) = &mut reg.clients.get_mut(&remote).unwrap().principal {
+            g.rights = silo_proto::access::Rights::Control;
+            g.expires_at = Some(1);
+        }
+        assert_eq!(browser_host(&reg), None, "expired");
+    }
+
+    #[test]
+    fn a_local_app_wins_over_a_more_active_remote_one() {
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let local = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_HOST]);
+        let remote = remote_host(&mut reg);
+        active(&mut reg, remote);
+        assert_eq!(browser_host(&reg), Some(local));
+    }
+
+    #[test]
+    fn a_shared_link_never_hosts() {
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let link = remote_host(&mut reg);
+        let secret = silo_proto::access::Who::Secret { kind: silo_proto::access::SecretKind::Link, hash: "h".into() };
+        reg.clients.get_mut(&link).unwrap().principal = grant(secret, silo_proto::access::Rights::Owner);
+        assert_eq!(browser_host(&reg), None);
+    }
+
+    #[test]
+    fn the_host_hands_over_when_it_leaves() {
+        let (notes, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut reg = Registry::new(notes);
+        let first = remote_host(&mut reg);
+        let second = remote_host(&mut reg);
+        active(&mut reg, first);
+        let local = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_HOST]);
+        assert_eq!(browser_host(&reg), Some(local));
+        reg.clients.remove(&local);
+        assert_eq!(browser_host(&reg), Some(first), "the most recently active remote app");
+        reg.clients.remove(&first);
+        assert_eq!(browser_host(&reg), Some(second));
+        reg.clients.remove(&second);
+        assert_eq!(browser_host(&reg), None, "no app: plain HTTP");
     }
 
     #[test]

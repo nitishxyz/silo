@@ -79,6 +79,10 @@ impl Login {
         ]);
         Ok(Self { url: url.into(), verifier: pair.verifier, state, callback })
     }
+    #[must_use]
+    pub fn callback(&self) -> &LoopbackCallback {
+        &self.callback
+    }
     pub async fn finish(self, client: &reqwest::Client) -> Result<Credential, LlmError> {
         let code = self.callback.wait(&self.state, Duration::from_secs(300)).await?;
         exchange(client, &code.code, &self.verifier, REDIRECT_URI).await

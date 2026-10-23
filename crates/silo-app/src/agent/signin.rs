@@ -12,10 +12,12 @@ use gpui::{
     AnyElement, BoxShadow, ClipboardItem, Context, Div, FocusHandle, FontWeight, Hsla, SharedString, Stateful, Window, div, point, prelude::*, px,
     rgb,
 };
-use otto_proto::{AuthMode, AuthStatus, LoginResult, Method};
+use otto_proto::{AuthMode, AuthStatus, LoginCallback, LoginResult, Method};
+use silo_client::callback::{CallbackForward, ForwardError};
 
 use super::{
     AgentPane,
+    client::{self, Otto},
     pill_input::{self, PillInputEvent},
     rows,
     view::eased,
@@ -36,6 +38,8 @@ const DIALOG_ENTER: Duration = Duration::from_millis(200);
 const DIALOG_EXIT: Duration = Duration::from_millis(160);
 /// A row settling into its Connected state.
 const LAND: Duration = Duration::from_millis(260);
+/// How long a remote login's callback forward listens.
+const FORWARD_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 pub(super) struct SignIn {
@@ -79,6 +83,10 @@ struct Dialog {
     /// Move focus into the dialog on the next frame.
     focus_pending: bool,
     copied: bool,
+    /// The login behind `step` asked for a device code (`Use a code`); a retry asks again.
+    device: bool,
+    /// A remote browser login's callback forward on this Mac.
+    forward: Option<Held<CallbackForward>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +99,8 @@ enum Step {
         url: String,
         flow: Flow,
     },
+    /// A remote browser login couldn't listen here; it was cancelled.
+    Blocked(Blocked),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +120,82 @@ impl Flow {
             None if needs_code => Self::Code,
             None => Self::Browser,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Blocked {
+    /// The callback's port is taken on this Mac: a device code still works.
+    PortBusy(u16),
+    Bind,
+}
+
+impl Blocked {
+    fn of(error: &ForwardError) -> Self {
+        match error {
+            ForwardError::PortBusy(port) => Self::PortBusy(*port),
+            ForwardError::Bind(_) => Self::Bind,
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::PortBusy(port) => format!("Port {port} is in use on this Mac."),
+            Self::Bind => "Couldn't listen for the sign-in.".into(),
+        }
+    }
+
+    /// `Use a code`: only a busy port has a way around it.
+    fn use_code(self) -> bool {
+        matches!(self, Self::PortBusy(_))
+    }
+}
+
+/// A callback forward, held while its login waits.
+struct Held<F> {
+    login_id: String,
+    until: Instant,
+    _forward: F,
+}
+
+#[derive(Clone, Copy)]
+enum Release<'a> {
+    /// `auth.login_complete` of this login finished or failed.
+    Completed(&'a str),
+    /// Cancelled, superseded, or the dialog closed.
+    Cancelled,
+    /// The ttl may have passed.
+    Tick(Instant),
+}
+
+fn release<F>(held: &mut Option<Held<F>>, event: Release<'_>) {
+    let ends = |h: &Held<F>| match event {
+        Release::Completed(id) => h.login_id == id,
+        Release::Cancelled => true,
+        Release::Tick(now) => now >= h.until,
+    };
+    if held.as_ref().is_some_and(ends) {
+        *held = None;
+    }
+}
+
+/// The remote host and the callback to forward: only a remote target's browser login has one.
+fn forward_route<'a>(target: &'a Otto, result: &'a LoginResult) -> Option<(&'a str, &'a LoginCallback)> {
+    match (target, result) {
+        (Otto::Remote { id }, LoginResult::Pending { callback: Some(callback), .. }) => Some((id, callback)),
+        _ => None,
+    }
+}
+
+fn subscription_login(provider: String, device: bool) -> Method {
+    Method::AuthLogin { provider, mode: AuthMode::Subscription, api_key: None, device, base_url: None }
+}
+
+/// The sign-in screen's and dialog's note on a remote target.
+fn signs_in_on(target: &Otto, host: Option<&str>) -> Option<String> {
+    match target {
+        Otto::Remote { .. } => host.map(|host| format!("Signs in on {host}")),
+        Otto::Local => None,
     }
 }
 
@@ -382,7 +468,7 @@ impl AgentPane {
                 Step::ApiKey => self.key_field.read(cx).focus_handle(cx),
                 Step::Endpoint => self.url_field.read(cx).focus_handle(cx),
                 Step::Login { flow: Flow::Code, .. } => self.code_field.read(cx).focus_handle(cx),
-                Step::Login { .. } => dialog.focus.clone(),
+                Step::Login { .. } | Step::Blocked(_) => dialog.focus.clone(),
             };
             window.focus(&target, cx);
         }
@@ -469,15 +555,51 @@ impl AgentPane {
             focus: cx.focus_handle(),
             focus_pending: true,
             copied: false,
+            device: false,
+            forward: None,
         });
         cx.notify();
     }
 
     fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        self.release_forward(Release::Cancelled);
         if let Some(dialog) = self.signin.dialog.as_mut().filter(|d| d.closing.is_none()) {
             dialog.closing = Some(Instant::now());
         }
         cx.notify();
+    }
+
+    fn release_forward(&mut self, event: Release<'_>) {
+        if let Some(dialog) = self.signin.dialog.as_mut() {
+            release(&mut dialog.forward, event);
+        }
+    }
+
+    /// Drop the forward once its ttl passes (a newer forward's later ttl keeps it).
+    fn expire_forward(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FORWARD_TTL).await;
+            let _ = this.update(cx, |this, _| this.release_forward(Release::Tick(Instant::now())));
+        })
+        .detach();
+    }
+
+    /// Show `step` in the dialog (opening it if needed), holding `forward` for it.
+    fn show_step(&mut self, provider: String, step: Step, device: bool, forward: Option<Held<CallbackForward>>, cx: &mut Context<Self>) {
+        match self.signin.dialog.as_mut().filter(|d| d.closing.is_none()) {
+            Some(dialog) => {
+                dialog.step = step;
+                dialog.busy = false;
+                dialog.spent = false;
+                dialog.error = None;
+                dialog.focus_pending = true;
+            }
+            None => self.open_dialog(provider, step, cx),
+        }
+        if let Some(dialog) = self.signin.dialog.as_mut() {
+            dialog.device = device;
+            dialog.forward = forward;
+        }
     }
 
     /// Cancel: the login (if any) is dropped on the daemon too.
@@ -510,7 +632,15 @@ impl AgentPane {
         let Some(dialog) = self.signin.dialog.as_ref().filter(|d| d.closing.is_none() && !d.busy) else { return };
         let provider = dialog.provider.clone();
         match (&dialog.step, dialog.spent) {
-            (Step::Login { .. }, true) => self.start_subscription(provider, cx),
+            (Step::Login { .. }, true) => {
+                let device = dialog.device;
+                self.start_subscription(provider, device, cx);
+            }
+            (Step::Blocked(blocked), _) => {
+                if blocked.use_code() {
+                    self.start_subscription(provider, true, cx);
+                }
+            }
             // Either field's ⏎: the address must be valid; the key is optional.
             (Step::Endpoint, _) => {
                 let url = self.url_field.read(cx).text(cx);
@@ -628,8 +758,10 @@ impl AgentPane {
         );
     }
 
-    /// `Sign in`: start the subscription login; its next step opens in the dialog.
-    fn start_subscription(&mut self, provider: String, cx: &mut Context<Self>) {
+    /// `Sign in`: start the subscription login (`device`: ask for a device
+    /// code); its next step opens in the dialog. A remote target's browser
+    /// login first forwards its callback port here, before the page opens.
+    fn start_subscription(&mut self, provider: String, device: bool, cx: &mut Context<Self>) {
         self.cancel_login(cx);
         let attempt = self.signin.attempt;
         self.signin.error = None;
@@ -640,29 +772,47 @@ impl AgentPane {
             self.signin.busy = Some((provider.clone(), Act::Subscribe));
         }
         let p = provider.clone();
+        let target = self.target.clone();
         self.run(
             cx,
             move |c| async move {
-                c.call_typed::<LoginResult>(Method::AuthLogin {
-                    provider: p,
-                    mode: AuthMode::Subscription,
-                    api_key: None,
-                    device: false,
-                    base_url: None,
-                })
-                .await
+                let result = c.call_typed::<LoginResult>(subscription_login(p, device)).await?;
+                let forward = match forward_route(&target, &result) {
+                    Some((id, callback)) => {
+                        let started = match client::dialer(id).await {
+                            Ok(dialer) => CallbackForward::start(dialer, callback.port, callback.port, callback.path.clone(), FORWARD_TTL),
+                            Err(e) => Err(ForwardError::Bind(e)),
+                        };
+                        if let (Err(_), LoginResult::Pending { login_id, .. }) = (&started, &result) {
+                            let _ = c.call_typed::<serde_json::Value>(Method::AuthLoginCancel { login_id: login_id.clone() }).await;
+                        }
+                        Some(started.map_err(|e| Blocked::of(&e)))
+                    }
+                    None => None,
+                };
+                Ok((result, forward))
             },
             move |this, result, cx| {
                 if this.signin.attempt != attempt {
-                    if let Ok(LoginResult::Pending { login_id, .. }) = result {
+                    if let Ok((LoginResult::Pending { login_id, .. }, None | Some(Ok(_)))) = result {
                         this.send_cancel(login_id, cx);
                     }
                     return;
                 }
                 this.signin.busy = None;
                 match result {
-                    Ok(LoginResult::SignedIn { .. }) => this.signed_in(provider, Act::Subscribe, cx),
-                    Ok(LoginResult::Pending { url, login_id, user_code, verification_uri, needs_code, .. }) => {
+                    Ok((LoginResult::SignedIn { .. }, _)) => this.signed_in(provider, Act::Subscribe, cx),
+                    // Already cancelled on the remote; the page isn't opened.
+                    Ok((LoginResult::Pending { .. }, Some(Err(blocked)))) => this.show_step(provider, Step::Blocked(blocked), device, None, cx),
+                    Ok((LoginResult::Pending { url, login_id, user_code, verification_uri, needs_code, .. }, forward)) => {
+                        let held = forward.and_then(Result::ok).map(|f| Held {
+                            login_id: login_id.clone(),
+                            until: Instant::now() + FORWARD_TTL,
+                            _forward: f,
+                        });
+                        if held.is_some() {
+                            this.expire_forward(cx);
+                        }
                         let flow = Flow::of(user_code, needs_code);
                         let url = match &flow {
                             Flow::Device { .. } => verification_uri.unwrap_or(url),
@@ -672,16 +822,7 @@ impl AgentPane {
                         this.code_field.update(cx, |e, cx| e.clear(cx));
                         let waits = flow != Flow::Code;
                         let step = Step::Login { login_id: login_id.clone(), url, flow };
-                        match this.signin.dialog.as_mut().filter(|d| d.closing.is_none()) {
-                            Some(dialog) => {
-                                dialog.step = step;
-                                dialog.busy = false;
-                                dialog.spent = false;
-                                dialog.error = None;
-                                dialog.focus_pending = true;
-                            }
-                            None => this.open_dialog(provider, step, cx),
-                        }
+                        this.show_step(provider, step, device, held, cx);
                         if waits {
                             this.finish_login(login_id, None, cx);
                         }
@@ -706,6 +847,8 @@ impl AgentPane {
             cx,
             move |c| async move { c.call_typed::<AuthStatus>(Method::AuthLoginComplete { login_id, code }).await },
             move |this, result, cx| {
+                // Done either way (or the host went away): the callback forward goes.
+                this.release_forward(Release::Completed(&id));
                 let Some(dialog) = this.signin.dialog.as_ref().filter(|d| d.closing.is_none()) else { return };
                 if !matches!(&dialog.step, Step::Login { login_id, .. } if *login_id == id) {
                     return;
@@ -727,6 +870,7 @@ impl AgentPane {
         if let Some(Dialog { step: Step::Login { login_id, .. }, spent: false, closing: None, .. }) = &self.signin.dialog {
             self.send_cancel(login_id.clone(), cx);
         }
+        self.release_forward(Release::Cancelled);
         cx.notify();
     }
 
@@ -769,6 +913,7 @@ impl AgentPane {
         let managing = auth.iter().any(|a| a.signed_in);
         let (title, subtitle) =
             if managing { ("Providers", "Connect the models otto can use") } else { ("Sign in to start", "Choose a model provider") };
+        let subtitle = signs_in_on(&self.target, self.host.as_deref()).unwrap_or_else(|| subtitle.to_owned());
         let shown = providers(&auth);
         let count = shown.len();
         let mut list = div().w_full().mt(px(22.0)).flex().flex_col();
@@ -913,7 +1058,7 @@ impl AgentPane {
                         ROW_BUTTON,
                         state(Act::Subscribe),
                         cx,
-                        move |this, _, cx| this.start_subscription(p2.clone(), cx),
+                        move |this, _, cx| this.start_subscription(p2.clone(), false, cx),
                     ))
                 })
         };
@@ -964,17 +1109,24 @@ impl AgentPane {
             Step::Login { flow: Flow::Device { .. }, .. } => {
                 ("Finish signing in".to_owned(), "Enter this code on the page that opened".to_owned(), "Open again")
             }
+            Step::Blocked(blocked) => ("Finish signing in".to_owned(), blocked.message(), "Use a code"),
         };
+        let blocked = match step {
+            Step::Blocked(blocked) => Some(blocked),
+            _ => None,
+        };
+        let on_host = signs_in_on(&self.target, self.host.as_deref());
         let primary = if spent { "Try again" } else { primary };
         let pill = match &step {
             Step::ApiKey => Some(self.key_field.clone()),
             Step::Endpoint => Some(self.url_field.clone()),
             Step::Login { flow: Flow::Code, .. } => Some(self.code_field.clone()),
-            Step::Login { .. } => None,
+            Step::Login { .. } | Step::Blocked(_) => None,
         };
         // Every body is one pill tall, so the dialog is the same size for each step.
         let body_h = pill_input::HEIGHT + 10.0;
-        let body: AnyElement = match (&step, pill) {
+        let body: Option<AnyElement> = match (&step, pill) {
+            (Step::Blocked(_), _) => None,
             (_, Some(pill)) => {
                 let error = error.clone().map(SharedString::from);
                 pill.update(cx, |p, cx| {
@@ -987,51 +1139,55 @@ impl AgentPane {
                     self.key_field.update(cx, |p, cx| p.set_loading(busy, cx));
                     div().mt(px(6.0)).child(self.key_field.clone())
                 });
-                div().child(pill).children(key).into_any_element()
+                Some(div().child(pill).children(key).into_any_element())
             }
             (Step::Login { flow: Flow::Device { code }, .. }, None) => {
                 let copy = code.clone();
+                Some(
+                    div()
+                        .h(px(body_h))
+                        .pl(px(20.0))
+                        .pr(px(10.0))
+                        .flex()
+                        .items_center()
+                        .capsule()
+                        .bg(theme::well_fill())
+                        .when(spent, |el| el.opacity(0.5))
+                        .child(div().flex_1().text_size(px(20.0)).font_weight(FontWeight::MEDIUM).font_family(theme::summary().1).child(code.clone()))
+                        .child(self.button(
+                            "signin-copy",
+                            Kind::Outline,
+                            if copied { "Copied" } else { "Copy" },
+                            ROW_BUTTON,
+                            State { enabled: !spent, loading: false },
+                            cx,
+                            move |this, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                                if let Some(d) = this.signin.dialog.as_mut() {
+                                    d.copied = true;
+                                }
+                                cx.notify();
+                            },
+                        ))
+                        .into_any_element(),
+                )
+            }
+            _ => Some(
                 div()
                     .h(px(body_h))
-                    .pl(px(20.0))
-                    .pr(px(10.0))
+                    .px(px(20.0))
                     .flex()
                     .items_center()
+                    .gap(px(10.0))
                     .capsule()
                     .bg(theme::well_fill())
-                    .when(spent, |el| el.opacity(0.5))
-                    .child(div().flex_1().text_size(px(20.0)).font_weight(FontWeight::MEDIUM).font_family(theme::summary().1).child(code.clone()))
-                    .child(self.button(
-                        "signin-copy",
-                        Kind::Outline,
-                        if copied { "Copied" } else { "Copy" },
-                        ROW_BUTTON,
-                        State { enabled: !spent, loading: false },
-                        cx,
-                        move |this, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                            if let Some(d) = this.signin.dialog.as_mut() {
-                                d.copied = true;
-                            }
-                            cx.notify();
-                        },
-                    ))
-                    .into_any_element()
-            }
-            _ => div()
-                .h(px(body_h))
-                .px(px(20.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .capsule()
-                .bg(theme::well_fill())
-                .text_size(px(13.0))
-                .text_color(rgb(muted))
-                .when(!spent, |el| el.child(crate::browser_pane::spinner("signin-wait", 16.0, muted, cx)).child("Waiting for the browser…"))
-                .into_any_element(),
+                    .text_size(px(13.0))
+                    .text_color(rgb(muted))
+                    .when(!spent, |el| el.child(crate::browser_pane::spinner("signin-wait", 16.0, muted, cx)).child("Waiting for the browser…"))
+                    .into_any_element(),
+            ),
         };
-        let has_pill = matches!(&step, Step::ApiKey | Step::Endpoint | Step::Login { flow: Flow::Code, .. });
+        let has_pill = matches!(&step, Step::ApiKey | Step::Endpoint | Step::Login { flow: Flow::Code, .. } | Step::Blocked(_));
         // The pill carries its own error line; other steps reserve one here.
         let error_line = (!has_pill).then(|| {
             div()
@@ -1047,18 +1203,28 @@ impl AgentPane {
         });
         let waiting = matches!(&step, Step::Login { flow: Flow::Browser | Flow::Device { .. }, .. }) && !spent;
         // The pill is the primary action; a footer only for reopening the page or restarting.
-        let footer = (spent || waiting).then(|| {
-            let kind = if spent { Kind::Primary } else { Kind::Quiet };
-            div().mt(px(10.0)).flex().justify_end().child(self.button(
-                "signin-dialog-ok",
-                kind,
-                primary,
-                DIALOG_BUTTON,
-                State { enabled: true, loading: busy },
-                cx,
-                |this, _, cx| this.dialog_submit(None, cx),
-            ))
-        });
+        let footer = if let Some(blocked) = blocked {
+            let cancel = self.button("signin-dialog-cancel", Kind::Quiet, "Cancel", DIALOG_BUTTON, READY, cx, |this, _, cx| this.dialog_cancel(cx));
+            let code = blocked.use_code().then(|| {
+                self.button("signin-dialog-ok", Kind::Primary, primary, DIALOG_BUTTON, State { enabled: true, loading: busy }, cx, |this, _, cx| {
+                    this.dialog_submit(None, cx);
+                })
+            });
+            Some(div().mt(px(16.0)).flex().justify_end().gap(px(6.0)).child(cancel).children(code))
+        } else {
+            (spent || waiting).then(|| {
+                let kind = if spent { Kind::Primary } else { Kind::Quiet };
+                div().mt(px(10.0)).flex().justify_end().child(self.button(
+                    "signin-dialog-ok",
+                    kind,
+                    primary,
+                    DIALOG_BUTTON,
+                    State { enabled: true, loading: busy },
+                    cx,
+                    |this, _, cx| this.dialog_submit(None, cx),
+                ))
+            })
+        };
         let close = div()
             .id("signin-dialog-close")
             .flex_none()
@@ -1112,8 +1278,9 @@ impl AgentPane {
                     .child(div().flex_1().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(close.mr(px(-6.0))),
             )
+            .children(on_host.map(|on| div().text_size(px(12.0)).text_color(rgb(muted)).child(on)))
             .child(div().mt(px(4.0)).text_size(px(12.5)).text_color(rgb(muted)).child(line))
-            .child(div().mt(px(16.0)).child(body))
+            .children(body.map(|body| div().mt(px(16.0)).child(body)))
             .children(error_line)
             .children(footer);
         let closing = dialog.closing.is_some();
@@ -1191,6 +1358,89 @@ mod tests {
         assert_eq!(Flow::of(None, true), Flow::Code);
         assert_eq!(Flow::of(None, false), Flow::Browser);
         assert_eq!(Flow::of(Some("AB-CD".into()), false), Flow::Device { code: "AB-CD".into() });
+    }
+
+    fn pending(callback: Option<LoginCallback>) -> LoginResult {
+        LoginResult::Pending {
+            url: "https://auth.example/authorize".into(),
+            login_id: "login-1".into(),
+            user_code: None,
+            verification_uri: None,
+            interval_secs: None,
+            needs_code: false,
+            callback,
+        }
+    }
+
+    #[test]
+    fn only_remote_browser_logins_forward_their_callback() {
+        let callback = LoginCallback { port: 1455, path: "/auth/callback".into() };
+        let remote = Otto::Remote { id: "host-1".into() };
+        let browser = pending(Some(callback.clone()));
+        assert_eq!(forward_route(&remote, &browser), Some(("host-1", &callback)));
+        assert_eq!(forward_route(&Otto::Local, &browser), None, "a local login listens here itself");
+        assert_eq!(forward_route(&remote, &pending(None)), None, "paste-code and device logins have no callback");
+    }
+
+    struct Counted(Rc<std::cell::Cell<u32>>);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn forwards_go_on_complete_cancel_supersede_and_ttl() {
+        let drops = Rc::new(std::cell::Cell::new(0));
+        let now = Instant::now();
+        let held = |id: &str| Some(Held { login_id: id.into(), until: now + FORWARD_TTL, _forward: Counted(drops.clone()) });
+
+        let mut slot = held("a");
+        release(&mut slot, Release::Completed("b"));
+        assert!(slot.is_some(), "another login's completion keeps it");
+        release(&mut slot, Release::Completed("a"));
+        assert!(slot.is_none());
+        assert_eq!(drops.get(), 1);
+
+        slot = held("a");
+        release(&mut slot, Release::Cancelled);
+        assert!(slot.is_none());
+        assert_eq!(drops.get(), 2);
+
+        slot = held("a");
+        assert!(slot.as_ref().is_some_and(|h| h.login_id == "a"));
+        slot = held("b");
+        assert_eq!(drops.get(), 3, "a new login replaces the old forward");
+
+        release(&mut slot, Release::Tick(now + FORWARD_TTL - Duration::from_secs(1)));
+        assert!(slot.is_some(), "still within its ttl");
+        release(&mut slot, Release::Tick(now + FORWARD_TTL));
+        assert!(slot.is_none());
+        assert_eq!(drops.get(), 4);
+    }
+
+    #[test]
+    fn busy_port_offers_a_device_code() {
+        let busy = Blocked::of(&ForwardError::PortBusy(1455));
+        assert_eq!(busy, Blocked::PortBusy(1455));
+        assert_eq!(busy.message(), "Port 1455 is in use on this Mac.");
+        assert!(busy.use_code());
+        assert!(matches!(
+            subscription_login("openai".into(), busy.use_code()),
+            Method::AuthLogin { ref provider, mode: AuthMode::Subscription, device: true, api_key: None, base_url: None } if provider == "openai"
+        ));
+        assert!(matches!(subscription_login("openai".into(), false), Method::AuthLogin { device: false, .. }));
+        let bind = Blocked::of(&ForwardError::Bind(std::io::Error::other("denied")));
+        assert_eq!(bind, Blocked::Bind);
+        assert_eq!(bind.message(), "Couldn't listen for the sign-in.");
+        assert!(!bind.use_code(), "only Cancel");
+    }
+
+    #[test]
+    fn remote_targets_name_their_host() {
+        assert_eq!(signs_in_on(&Otto::Remote { id: "host-1".into() }, Some("mini")).as_deref(), Some("Signs in on mini"));
+        assert_eq!(signs_in_on(&Otto::Local, None), None);
     }
 
     #[test]

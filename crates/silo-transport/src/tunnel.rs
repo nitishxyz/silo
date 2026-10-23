@@ -1,10 +1,11 @@
 //! `silo/tunnel/1` wire format and destination policy.
 //!
-//! Every TUNNEL_ALPN bi stream is one TCP connection. The client writes one
-//! frame `u32 len (LE, kind + payload) | u8 kind | JSON payload` with
-//! [`kind::OPEN`] / [`TunnelOpen`]; the server answers [`kind::OK`] (empty
-//! JSON object) or [`kind::ERR`] / [`TunnelErr`]. After `OK` the stream
-//! carries raw bytes both ways.
+//! Every TUNNEL_ALPN bi stream is one TCP connection, or one connection to
+//! a named service's unix socket. The client writes one frame `u32 len (LE,
+//! kind + payload) | u8 kind | JSON payload` with [`kind::OPEN`] /
+//! [`TunnelOpen`]; the server answers [`kind::OK`] (empty JSON object) or
+//! [`kind::ERR`] / [`TunnelErr`]. After `OK` the stream carries raw bytes
+//! both ways.
 
 use std::io;
 use std::net::IpAddr;
@@ -22,10 +23,16 @@ pub mod kind {
     pub const ERR: u8 = 0x03;
 }
 
+/// `host:port`, or (when `service` is set) a service the server
+/// registered by name; `host` and `port` are then unused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelOpen {
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +48,13 @@ pub enum TunnelErrCode {
     Busy,
     /// Malformed handshake.
     BadRequest,
+    /// No service of that name on this server.
+    NotFound,
+    /// The service is registered but could not be reached.
+    Unavailable,
+    /// A code from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +101,17 @@ fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error 
 /// Client side: request `host:port` and wait for the verdict. A
 /// [`TunnelErr`] is returned inside the `io::Error` (`get_ref`).
 pub async fn open<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, host: &str, port: u16) -> io::Result<()> {
-    write_json(s, kind::OPEN, &TunnelOpen { host: host.to_owned(), port }).await?;
+    handshake(s, &TunnelOpen { host: host.to_owned(), port, service: None }).await
+}
+
+/// Client side: request the server's service `name` (e.g. `otto`), like
+/// [`open`].
+pub async fn open_service<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, name: &str) -> io::Result<()> {
+    handshake(s, &TunnelOpen { host: String::new(), port: 0, service: Some(name.to_owned()) }).await
+}
+
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, open: &TunnelOpen) -> io::Result<()> {
+    write_json(s, kind::OPEN, open).await?;
     match read_raw(s).await? {
         (kind::OK, _) => Ok(()),
         (kind::ERR, payload) => {
@@ -115,8 +139,8 @@ pub async fn reply<W: AsyncWrite + Unpin>(w: &mut W, verdict: Result<(), TunnelE
 }
 
 /// Copy bytes both ways until both sides reach EOF (each EOF is forwarded
-/// as a write shutdown), an error, or `idle` passes with no data.
-pub async fn splice<A, B>(a: A, b: B, idle: Duration)
+/// as a write shutdown), an error, or `idle` (if any) passes with no data.
+pub async fn splice<A, B>(a: A, b: B, idle: Option<Duration>)
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -126,14 +150,18 @@ where
     let (mut abuf, mut bbuf) = (vec![0u8; 16 * 1024], vec![0u8; 16 * 1024]);
     let (mut a_open, mut b_open) = (true, true);
     while a_open || b_open {
-        let step = tokio::time::timeout(idle, async {
+        let step = async {
             tokio::select! {
                 r = ar.read(&mut abuf), if a_open => (true, r),
                 r = br.read(&mut bbuf), if b_open => (false, r),
             }
-        });
-        let Ok((from_a, read)) = step.await else {
-            return;
+        };
+        let (from_a, read) = match idle {
+            Some(idle) => match tokio::time::timeout(idle, step).await {
+                Ok(step) => step,
+                Err(_) => return,
+            },
+            None => step.await,
         };
         let done = if from_a { forward(read, &abuf, &mut a_open, &mut bw).await } else { forward(read, &bbuf, &mut b_open, &mut aw).await };
         if done.is_err() {
@@ -247,12 +275,47 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(256);
         let srv = tokio::spawn(async move {
             let open = read_open(&mut server).await.unwrap();
-            assert_eq!(open, TunnelOpen { host: "localhost".into(), port: 80 });
+            assert_eq!(open, TunnelOpen { host: "localhost".into(), port: 80, service: None });
             reply(&mut server, Err(TunnelErrCode::Forbidden)).await.unwrap();
         });
         let err = open(&mut client, "localhost", 80).await.unwrap_err();
         let err = err.get_ref().and_then(|e| e.downcast_ref::<TunnelErr>()).copied();
         assert_eq!(err, Some(TunnelErr { code: TunnelErrCode::Forbidden }));
         srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_handshake_round_trip() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let srv = tokio::spawn(async move {
+            let open = read_open(&mut server).await.unwrap();
+            assert_eq!(open.service.as_deref(), Some("otto"));
+            reply(&mut server, Ok(())).await.unwrap();
+            let open = read_open(&mut server).await.unwrap();
+            assert_eq!(open.service.as_deref(), Some("nope"));
+            reply(&mut server, Err(TunnelErrCode::NotFound)).await.unwrap();
+        });
+        open_service(&mut client, "otto").await.unwrap();
+        let err = open_service(&mut client, "nope").await.unwrap_err();
+        let err = err.get_ref().and_then(|e| e.downcast_ref::<TunnelErr>()).copied();
+        assert_eq!(err, Some(TunnelErr { code: TunnelErrCode::NotFound }));
+        srv.await.unwrap();
+    }
+
+    #[test]
+    fn old_open_json_still_parses_and_tcp_opens_omit_service() {
+        let old: TunnelOpen = serde_json::from_str(r#"{"host":"localhost","port":80}"#).unwrap();
+        assert_eq!(old, TunnelOpen { host: "localhost".into(), port: 80, service: None });
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"host":"localhost","port":80}"#);
+        let svc: TunnelOpen = serde_json::from_str(r#"{"service":"otto"}"#).unwrap();
+        assert_eq!(svc, TunnelOpen { host: String::new(), port: 0, service: Some("otto".into()) });
+    }
+
+    #[test]
+    fn unknown_error_code_decodes_to_unknown() {
+        let err: TunnelErr = serde_json::from_str(r#"{"code":"from_the_future"}"#).unwrap();
+        assert_eq!(err.code, TunnelErrCode::Unknown);
+        let err: TunnelErr = serde_json::from_str(r#"{"code":"unavailable"}"#).unwrap();
+        assert_eq!(err.code, TunnelErrCode::Unavailable);
     }
 }

@@ -281,6 +281,9 @@ impl HostsState {
     /// Add a host, open its cache and start its connection; its index.
     pub fn add(&mut self, info: HostInfo, cx: &mut Context<Self>) -> usize {
         let index = self.entries.len();
+        if let hosts::Transport::Iroh { home, addr } = &info.transport {
+            crate::agent::client::set_route(&addr.id.to_string(), home.clone(), addr.clone());
+        }
         let opened = cache::open_host(&cache::root(), &info.transport.cache_identity());
         let (cache, tree, restored) = opened.map_or((None, None, HashMap::new()), |c| (Some(c.writer), c.tree, c.restored));
         let paused = Arc::new(AtomicBool::new(false));
@@ -300,10 +303,11 @@ impl HostsState {
         index
     }
 
-    /// Disconnect a removed (or re-paired) host and close its tunnel.
+    /// Disconnect a removed (or re-paired) host and close its tunnel and otto connection.
     pub fn forget(&mut self, host: usize, cx: &mut Context<Self>) {
         let entry = &mut self.entries[host];
         if let Some(id) = entry.info.transport.remote_id() {
+            crate::agent::client::forget(&id);
             self.rt.spawn(crate::web::close_tunnel(id));
         }
         entry.removed = true;
@@ -495,8 +499,9 @@ impl HostsState {
 
     /// A remote server's new route (already in hosts.json): used now.
     fn save_addr(&mut self, host: usize, addr: &silo_client::transport::EndpointAddr) {
-        if let hosts::Transport::Iroh { addr: current, .. } = &mut self.entries[host].info.transport {
+        if let hosts::Transport::Iroh { addr: current, home } = &mut self.entries[host].info.transport {
             current.clone_from(addr);
+            crate::agent::client::set_route(&addr.id.to_string(), home.clone(), addr.clone());
         }
     }
 

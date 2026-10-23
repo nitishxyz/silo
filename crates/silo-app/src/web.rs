@@ -124,7 +124,8 @@ pub fn shutdown() {
 
 static TUNNELS: tokio::sync::Mutex<Option<HashMap<String, silo_client::tunnel::TunnelProxy>>> = tokio::sync::Mutex::const_new(None);
 
-/// The loopback proxy of the remote host at `addr`, started once.
+/// The loopback proxy of the remote host at `addr`, started once on the
+/// host's shared tunnel dialer (`agent::client::dialer`).
 pub async fn tunnel(home: &Path, addr: silo_client::transport::EndpointAddr) -> anyhow::Result<silo_web::Tunnel> {
     let id = addr.id.to_string();
     let mut tunnels = TUNNELS.lock().await;
@@ -132,8 +133,8 @@ pub async fn tunnel(home: &Path, addr: silo_client::transport::EndpointAddr) -> 
     if let Some(proxy) = tunnels.get(&id) {
         return Ok(web_tunnel(proxy));
     }
-    let net = crate::remote::net(home).await?;
-    let proxy = silo_client::tunnel::TunnelProxy::start(net, addr).await?;
+    crate::agent::client::ensure_route(&id, home.to_owned(), addr);
+    let proxy = silo_client::tunnel::TunnelProxy::with_dialer(crate::agent::client::dialer(&id).await?).await?;
     tracing::info!(host = %id, port = proxy.port(), "browser tunnel");
     let tunnel = web_tunnel(&proxy);
     tunnels.insert(id, proxy);

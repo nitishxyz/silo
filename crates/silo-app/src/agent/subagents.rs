@@ -214,9 +214,10 @@ impl AgentPane {
             return;
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let target = self.target.clone();
         self.rt.spawn(async move {
             loop {
-                if let Ok(connection) = super::client::connection().await {
+                if let Ok(connection) = super::client::connection(&target).await {
                     let mut events = connection.events();
                     loop {
                         let changed = match events.recv().await {

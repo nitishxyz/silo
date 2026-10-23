@@ -280,6 +280,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// The embedded otto harness (`otto-silo`): `silo otto server --daemon`, …
+    #[command(hide = true, disable_help_flag = true)]
+    Otto {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -418,8 +424,12 @@ impl BrowserCmd {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    // otto runs as itself: its own runtime, logging and exit code.
+    if let Some(Command::Otto { args }) = cli.command {
+        return otto_cli::main_from(std::iter::once("otto".into()).chain(args).collect());
+    }
     // An agent token limits this process to its grant (unix socket only).
     silo_client::set_token(std::env::var("SILO_TOKEN").ok().filter(|t| !t.trim().is_empty()));
     // Closes that would end running programs are refused unless forced
@@ -628,6 +638,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             control.call_raw("block.notify", params).await?;
             Ok(0)
         }
+        Command::Otto { .. } => unreachable!("dispatched in main"),
         Command::Hooks { command: HooksCommand::Install { harness, print } } => {
             let home = std::env::var_os("HOME").context("HOME is not set")?;
             silo_cli::hooks::install(&PathBuf::from(home), &harness, print)?;
@@ -648,7 +659,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             if daemon || takeover || adopt {
                 start_menubar();
             }
-            let config = silo_server::Config {
+            let mut config = silo_server::Config {
                 home,
                 idle_exit,
                 keep_session: idle_exit.is_none(),
@@ -660,6 +671,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 agent_closed: Some(std::sync::Arc::new(hand_back)),
                 ..Default::default()
             };
+            config.services.insert("otto".into(), otto_service(config.home.clone()));
             if takeover {
                 if let Err(error) = takeover_reporting(config, status).await {
                     if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
@@ -1352,6 +1364,60 @@ fn hand_back(session: String) {
     });
 }
 
+/// The `otto` tunnel service: this silo's own otto daemon (`silo otto server
+/// --daemon`, told this server's home), started on demand. A compatible older
+/// daemon is stopped and replaced once none of its sessions is busy; until
+/// then it keeps serving.
+fn otto_service(silo_home: PathBuf) -> silo_server::ServiceFn {
+    std::sync::Arc::new(move || {
+        let silo_home = silo_home.clone();
+        Box::pin(async move { otto_socket(&silo_home).await.map_err(|e| std::io::Error::other(format!("otto: {e:#}"))) })
+    })
+}
+
+async fn otto_socket(silo_home: &std::path::Path) -> anyhow::Result<PathBuf> {
+    use otto_client::{ClientError, Connection};
+    let home = otto_proto::paths::home();
+    match Connection::connect(&home).await {
+        Ok(otto) if older(&otto.hello().version, env!("CARGO_PKG_VERSION")) => {
+            let sessions = otto.session_list(None, false).await?;
+            let busy = sessions.iter().any(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval));
+            if busy {
+                return Ok(otto_proto::paths::socket(&home));
+            }
+            tracing::info!(old = %otto.hello().version, "restarting an older otto daemon");
+            let _ = otto.call(otto_proto::Method::ServerShutdown {}).await;
+            drop(otto);
+            otto_released(&home).await?;
+        }
+        Ok(_) => return Ok(otto_proto::paths::socket(&home)),
+        Err(ClientError::Incompatible { .. }) => bail!("an incompatible otto is running; it stops when idle"),
+        Err(_) => {}
+    }
+    let exe = std::env::current_exe().context("locate silo executable")?;
+    otto_client::ensure_started(&home, &exe, &["otto", "server", "--daemon"], &[("SILO_HOME", silo_home.as_os_str())]).await?;
+    Ok(otto_proto::paths::socket(&home))
+}
+
+/// `theirs` is an older `major.minor.patch` than `ours` (pre-release suffixes ignored).
+fn older(theirs: &str, ours: &str) -> bool {
+    let parse = |v: &str| v.split(['-', '+']).next().unwrap_or_default().split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    parse(theirs) < parse(ours)
+}
+
+/// Wait (up to five seconds) until a stopping otto daemon has let go of its lock.
+async fn otto_released(home: &std::path::Path) -> anyhow::Result<()> {
+    let lock = otto_proto::paths::server_lock(home);
+    for _ in 0..100 {
+        let free = std::fs::OpenOptions::new().write(true).open(&lock).map_or(true, |file| file.try_lock().is_ok());
+        if free {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    bail!("the old otto did not stop")
+}
+
 /// Launch the menu-bar agent next to this binary when it runs from its
 /// runtime directory (it exits at once if one already runs for this state dir).
 #[cfg(target_os = "macos")]
@@ -1453,6 +1519,25 @@ mod tests {
         let cli = Cli::parse_from(["silo", "server", "--relay", "https://relay.example.com"]);
         assert!(matches!(cli.command, Some(Command::Server { relay: RelayConfig::Custom(_), .. })));
         assert!(Cli::try_parse_from(["silo", "server", "--relay", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn otto_is_embedded_and_hidden() {
+        let Some(Command::Otto { args }) = Cli::parse_from(["silo", "otto", "server", "--daemon"]).command else { panic!() };
+        assert_eq!(args, ["server", "--daemon"]);
+        let Some(Command::Otto { args }) = Cli::parse_from(["silo", "otto", "--help"]).command else { panic!() };
+        assert_eq!(args, ["--help"], "otto prints its own help");
+        let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
+        assert!(!help.lines().any(|l| l.trim_start().starts_with("otto")), "{help}");
+    }
+
+    #[test]
+    fn older_compares_release_numbers() {
+        assert!(older("0.1.6", "0.1.7"));
+        assert!(older("0.9.9", "0.10.0"));
+        assert!(!older("0.1.7", "0.1.7"));
+        assert!(!older("0.2.0", "0.1.7"));
+        assert!(!older("0.1.7-dev", "0.1.7"));
     }
 
     #[test]

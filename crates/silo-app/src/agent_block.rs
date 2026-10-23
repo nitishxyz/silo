@@ -1,17 +1,71 @@
-//! Workspace wiring of agent blocks: an [`AgentPane`] per agent block of
-//! the local host, its events sent to the server (`docs/AGENT_BLOCK.md`).
+//! Workspace wiring of agent blocks: an [`AgentPane`] per agent block of a
+//! host with otto, its events sent to the server (`docs/AGENT_BLOCK.md`).
 
 use gpui::AppContext as _;
 use silo_proto::{
     agent::BlockReportParams,
+    compat::feature,
     control::{BlockView, Created, Method, Reveal, SpawnSpec},
     model::{AgentState, BlockInfo, BlockKind, StatusKind, StatusState},
 };
 
-use crate::agent::{AgentPane, AgentPaneEvent, AgentStatus};
+use crate::{
+    agent::{AgentPane, AgentPaneEvent, AgentStatus, client::Otto},
+    hosts::Transport,
+    settings_agents::Place,
+};
 
 /// The block's glyph (pane header, tab, New Tab row).
 pub const ICON: &str = "agent";
+
+/// How a host is reached, as far as agents care.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reach {
+    Local,
+    Iroh,
+    Shared,
+}
+
+impl Reach {
+    pub(crate) fn of(transport: &Transport) -> Self {
+        match transport {
+            Transport::Local { .. } => Self::Local,
+            Transport::Iroh { .. } => Self::Iroh,
+            Transport::Shared { .. } => Self::Shared,
+        }
+    }
+}
+
+/// Whether a host runs agent blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Agents {
+    Run,
+    /// A paired remote not connected yet: its blocks wait for it, nothing new is offered.
+    Unknown,
+    No,
+}
+
+/// Agents on a host reached by `reach` whose server advertised `features`
+/// (`None`: not connected): this Mac always, a paired remote once its
+/// server says it tunnels to otto, a shared link never.
+pub(crate) fn agents_supported(reach: Reach, features: Option<&[String]>) -> Agents {
+    match (reach, features) {
+        (Reach::Local, _) => Agents::Run,
+        (Reach::Iroh, None) => Agents::Unknown,
+        (Reach::Iroh, Some(f)) if f.iter().any(|f| f == feature::OTTO) => Agents::Run,
+        (Reach::Iroh | Reach::Shared, _) => Agents::No,
+    }
+}
+
+/// Settings › Agents for a host named `host` whose daemon is `otto`.
+pub(crate) fn settings_place(agents: Agents, otto: Option<Otto>, host: &str) -> Place {
+    match (agents, otto) {
+        (Agents::Run, Some(Otto::Local)) => Place::Local,
+        (Agents::Run, Some(Otto::Remote { id })) => Place::Remote { id, host: host.to_owned() },
+        (Agents::Unknown, Some(_)) => Place::Offline { host: host.to_owned() },
+        _ => Place::Unsupported { host: host.to_owned() },
+    }
+}
 
 /// `block.report` for a turn state.
 #[must_use]
@@ -37,9 +91,53 @@ pub fn report(block_id: String, status: AgentStatus) -> Method {
 }
 
 impl crate::workspace::Workspace {
-    /// Agent blocks run on this Mac only: elsewhere they show as unsupported.
-    pub(crate) fn agents_here(&self) -> bool {
-        self.hosts.get(self.active_host).is_some_and(|h| h.info.local)
+    /// [`agents_supported`] for `host`.
+    fn agents(&self, host: usize) -> Agents {
+        self.hosts
+            .get(host)
+            .map_or(Agents::No, |h| agents_supported(Reach::of(&h.info.transport), h.control.as_ref().map(|c| c.hello().features.as_slice())))
+    }
+
+    /// Whether `host`'s agent blocks show as agents (an unconnected remote's
+    /// wait for it); elsewhere they show as unsupported.
+    pub(crate) fn agents_on(&self, host: usize) -> bool {
+        self.agents(host) != Agents::No
+    }
+
+    /// Whether New Agent is offered on `host`: it runs agents, as far as is known now.
+    pub(crate) fn agents_offered(&self, host: usize) -> bool {
+        self.agents(host) == Agents::Run
+    }
+
+    /// Why New Agent isn't offered on the active host, if it isn't.
+    pub(crate) fn agents_not_offered(&self) -> Option<String> {
+        match self.agents(self.active_host) {
+            Agents::Run => None,
+            Agents::Unknown => Some(format!("{} is not connected", self.hosts[self.active_host].info.name)),
+            Agents::No => Some(self.not_supported()),
+        }
+    }
+
+    /// The otto daemon of `host`'s agent blocks, if it runs them.
+    pub(crate) fn agent_target(&self, host: usize) -> Option<Otto> {
+        self.agents_on(host).then(|| Otto::of(&self.hosts[host].info.transport)).flatten()
+    }
+
+    /// Settings › Agents for the active host.
+    pub(crate) fn agents_place(&self) -> Place {
+        let host = &self.hosts[self.active_host].info;
+        settings_place(self.agents(self.active_host), Otto::of(&host.transport), &host.name)
+    }
+
+    /// `host`'s connection came or went: its agent panes show or drop the
+    /// reconnect strip, and reconnect at once when it is back.
+    pub(crate) fn agents_host_up(&mut self, host: usize, up: bool, cx: &mut gpui::Context<Self>) {
+        if host != self.active_host {
+            return;
+        }
+        for (pane, _) in self.agents.values() {
+            pane.update(cx, |pane, cx| pane.set_host_up(up, cx));
+        }
     }
 
     /// The agent pane of `block`, created on first sight.
@@ -47,10 +145,13 @@ impl crate::workspace::Workspace {
         if self.agents.contains_key(block) {
             return;
         }
+        let Some(target) = self.agent_target(self.active_host) else { return };
+        let host = Some(&self.hosts[self.active_host].info).filter(|h| !h.local).map(|h| h.name.clone());
+        let up = self.control().is_some();
         let info = self.block_info(block);
         let (session, cwd) = (info.and_then(|i| i.agent.as_ref()).and_then(|a| a.session_id.clone()), info.and_then(|i| i.cwd.clone()));
         let (id, rt) = (block.to_owned(), self.rt.clone());
-        let pane = cx.new(|cx| AgentPane::new(id, session, cwd, rt, window, cx));
+        let pane = cx.new(|cx| AgentPane::new(id, session, cwd, rt, target, host, up, window, cx));
         let sub = cx.subscribe_in(&pane, window, |this, pane, event: &AgentPaneEvent, window, cx| {
             let block = pane.read(cx).block_id.clone();
             match event {
@@ -190,6 +291,46 @@ mod tests {
         assert_eq!(kinds(AgentStatus::Blocked { question: true }), (StatusState::Blocked, Some(StatusKind::Question)));
         assert_eq!(kinds(AgentStatus::Done), (StatusState::Done, None));
         assert_eq!(kinds(AgentStatus::Error), (StatusState::Error, None));
+    }
+
+    #[test]
+    fn new_agent_is_offered_on_this_mac_and_connected_remotes_with_otto() {
+        let otto = vec![feature::STATUS.to_owned(), feature::OTTO.to_owned()];
+        let older = vec![feature::STATUS.to_owned()];
+        for (reach, features, agents) in [
+            (Reach::Local, None, Agents::Run),
+            (Reach::Local, Some(&older), Agents::Run),
+            (Reach::Iroh, Some(&otto), Agents::Run),
+            (Reach::Iroh, Some(&older), Agents::No),
+            (Reach::Iroh, None, Agents::Unknown),
+            (Reach::Shared, Some(&otto), Agents::No),
+            (Reach::Shared, None, Agents::No),
+        ] {
+            assert_eq!(agents_supported(reach, features.map(Vec::as_slice)), agents, "{reach:?} {features:?}");
+        }
+        // Offered only where they surely run; an unconnected remote's blocks still wait for it.
+        let offered = |reach, features: Option<&Vec<String>>| agents_supported(reach, features.map(Vec::as_slice)) == Agents::Run;
+        assert!(offered(Reach::Local, None) && offered(Reach::Iroh, Some(&otto)));
+        assert!(!offered(Reach::Iroh, None) && !offered(Reach::Iroh, Some(&older)) && !offered(Reach::Shared, Some(&otto)));
+    }
+
+    #[test]
+    fn settings_agents_go_to_the_hosts_otto_or_say_why_not() {
+        let remote = || Some(Otto::Remote { id: "abc".into() });
+        assert_eq!(settings_place(Agents::Run, Some(Otto::Local), "This Mac"), Place::Local);
+        let mini = settings_place(Agents::Run, remote(), "mini");
+        assert_eq!(mini, Place::Remote { id: "abc".into(), host: "mini".into() });
+        assert_eq!(mini.title(), "Agents on mini");
+        assert_eq!(Place::Local.title(), "Agents");
+        // Never this Mac's otto in their place.
+        let old = settings_place(Agents::No, remote(), "mini");
+        assert_eq!((old.target(), old.blocked().as_deref()), (None, Some("Not supported by mini")));
+        let shared = settings_place(Agents::No, None, "Ana's link");
+        assert_eq!((shared.target(), shared.blocked().as_deref()), (None, Some("Not supported by Ana's link")));
+        let offline = settings_place(Agents::Unknown, remote(), "mini");
+        assert_eq!((offline.target(), offline.blocked().as_deref()), (None, Some("mini is not connected")));
+        assert_eq!(mini.target(), remote());
+        assert_eq!(Place::Local.target(), Some(Otto::Local));
     }
 
     #[test]

@@ -2,9 +2,11 @@
 //! next to the silo server, unpaired devices and public destinations are
 //! refused, and the client proxy handles CONNECT, absolute-form GET and a
 //! websocket upgrade (public hosts going direct is a silo-client unit test).
-//! Relays and mDNS are disabled.
+//! Service tunnels reach a registered unix socket, and the login callback
+//! forward reaches a remote loopback port. Relays and mDNS are disabled.
 
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,19 +16,22 @@ use std::{
 use data_encoding::BASE64;
 use silo_client::{
     Control,
+    callback::CallbackForward,
     transport::{
         EndpointAddr, Net, PairTicket, RelayConfig,
         tunnel::{self, TunnelErr, TunnelErrCode},
     },
-    tunnel::TunnelProxy,
+    tunnel::{TunnelDialer, TunnelProxy},
 };
 use silo_proto::{
+    compat::feature,
     control::{Method, PairInvite},
     paths,
 };
+use silo_server::ServiceFn;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UnixListener},
     task::JoinHandle,
     time::timeout,
 };
@@ -40,7 +45,12 @@ fn temp_home(name: &str) -> PathBuf {
 }
 
 async fn start(home: &Path) -> (JoinHandle<()>, Control) {
-    let config = silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
+    start_with(home, HashMap::new()).await
+}
+
+async fn start_with(home: &Path, services: HashMap<String, ServiceFn>) -> (JoinHandle<()>, Control) {
+    let config =
+        silo_server::Config { home: home.to_owned(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, services, ..Default::default() };
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     for _ in 0..500 {
         if silo_client::server_running(home).await {
@@ -245,5 +255,172 @@ async fn proxy_connect_get_and_websocket() {
     }
 
     drop(proxy);
+    shutdown(control, task).await;
+}
+
+/// A service answering with `path`, or failing.
+fn service(path: Option<PathBuf>) -> ServiceFn {
+    Arc::new(move || -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<PathBuf>> + Send>> {
+        let path = path.clone();
+        Box::pin(async move { path.ok_or_else(|| std::io::Error::other("not running")) })
+    })
+}
+
+/// A unix socket echoing whatever it reads.
+fn echo_socket(home: &Path) -> PathBuf {
+    std::fs::create_dir_all(home).unwrap();
+    let path = home.join("echo.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut unix, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = unix.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_tunnel_reaches_a_unix_socket() {
+    let home = temp_home("service");
+    let socket = echo_socket(&home.join("svc"));
+    let (task, control) = start_with(&home, HashMap::from([("echo".to_owned(), service(Some(socket)))])).await;
+    let (net, addr) = paired_device(&home, &control).await;
+    let dialer = TunnelDialer::new(Arc::new(net), addr);
+
+    for _ in 0..2 {
+        let mut s = timeout(T, dialer.open_service("echo")).await.unwrap().unwrap();
+        for msg in [&b"hello"[..], b"second"] {
+            s.write_all(msg).await.unwrap();
+            let mut back = vec![0u8; msg.len()];
+            timeout(T, s.read_exact(&mut back)).await.unwrap().unwrap();
+            assert_eq!(back, msg);
+        }
+    }
+
+    drop(dialer);
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_service_is_not_found() {
+    let home = temp_home("svc-unknown");
+    let (task, control) = start(&home).await;
+    let (net, addr) = paired_device(&home, &control).await;
+    let dialer = TunnelDialer::new(Arc::new(net), addr);
+    let err = timeout(T, dialer.open_service("otto")).await.unwrap().unwrap_err();
+    assert_eq!(refusal(&err), Some(TunnelErrCode::NotFound), "{err}");
+    drop(dialer);
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failing_service_is_unavailable() {
+    let home = temp_home("svc-failing");
+    let services = HashMap::from([("down".to_owned(), service(None)), ("gone".to_owned(), service(Some(home.join("nothing.sock"))))]);
+    let (task, control) = start_with(&home, services).await;
+    let (net, addr) = paired_device(&home, &control).await;
+    let dialer = TunnelDialer::new(Arc::new(net), addr);
+    for name in ["down", "gone"] {
+        let err = timeout(T, dialer.open_service(name)).await.unwrap().unwrap_err();
+        assert_eq!(refusal(&err), Some(TunnelErrCode::Unavailable), "{name}: {err}");
+    }
+    drop(dialer);
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unpaired_device_cannot_open_a_service() {
+    let home = temp_home("svc-unpaired");
+    let socket = echo_socket(&home.join("svc"));
+    let (task, control) = start_with(&home, HashMap::from([("echo".to_owned(), service(Some(socket)))])).await;
+    let addr = invite(&control).await.addr;
+    let net = device(&home, "stranger").await;
+    let rc = timeout(T, net.dial_tunnel(addr)).await.unwrap().unwrap();
+
+    let mut s = rc.open_stream().await.unwrap();
+    let err = timeout(T, tunnel::open_service(&mut s, "echo")).await.unwrap().unwrap_err();
+    assert_eq!(refusal(&err), None, "closed, not answered: {err}");
+    timeout(T, rc.closed()).await.unwrap();
+
+    net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hello_advertises_otto_only_with_the_service() {
+    let home = temp_home("svc-hello");
+    let (task, control) = start_with(&home, HashMap::from([(feature::OTTO.to_owned(), service(None))])).await;
+    assert!(control.hello().features.iter().any(|f| f == feature::OTTO), "{:?}", control.hello().features);
+    shutdown(control, task).await;
+
+    let home = temp_home("svc-hello-none");
+    let (task, control) = start_with(&home, HashMap::from([("other".to_owned(), service(None))])).await;
+    assert!(!control.hello().features.iter().any(|f| f == feature::OTTO), "{:?}", control.hello().features);
+    shutdown(control, task).await;
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port()
+}
+
+async fn get(port: u16, ip: std::net::IpAddr, target: &str) -> String {
+    let mut tcp = TcpStream::connect((ip, port)).await.unwrap();
+    tcp.write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut out = String::new();
+    timeout(T, tcp.read_to_string(&mut out)).await.unwrap().unwrap();
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_forward_reaches_the_remote_port() {
+    let home = temp_home("callback");
+    let (task, control) = start(&home).await;
+    let remote = http_server().await;
+    let (net, addr) = paired_device(&home, &control).await;
+    let dialer = Arc::new(TunnelDialer::new(Arc::new(net), addr));
+    let local = free_port();
+    assert_ne!(local, remote);
+    let forward = CallbackForward::start(dialer, local, remote, "/auth/callback".into(), Duration::from_secs(60)).unwrap();
+
+    let out = get(local, Ipv4Addr::LOCALHOST.into(), "/auth/callback?code=abc&state=xyz").await;
+    assert!(out.starts_with("HTTP/1.1 200") && out.ends_with("GET /auth/callback?code=abc&state=xyz HTTP/1.1"), "{out}");
+    let out = get(local, Ipv4Addr::LOCALHOST.into(), "/auth/callback").await;
+    assert!(out.ends_with("GET /auth/callback HTTP/1.1"), "{out}");
+    // `localhost` may resolve to ::1 first.
+    if TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, local)).await.is_ok() {
+        let out = get(local, std::net::Ipv6Addr::LOCALHOST.into(), "/auth/callback?code=v6").await;
+        assert!(out.ends_with("GET /auth/callback?code=v6 HTTP/1.1"), "{out}");
+    }
+
+    drop(forward);
+    shutdown(control, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_forward_refuses_other_paths() {
+    let home = temp_home("callback-paths");
+    let (task, control) = start(&home).await;
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let remote = upstream.local_addr().unwrap().port();
+    let (net, addr) = paired_device(&home, &control).await;
+    let dialer = Arc::new(TunnelDialer::new(Arc::new(net), addr));
+    let local = free_port();
+    let forward = CallbackForward::start(dialer, local, remote, "/auth/callback".into(), Duration::from_secs(60)).unwrap();
+
+    for target in ["/", "/auth/callbackx", "/auth/callback/../admin", "/other?code=1"] {
+        let out = get(local, Ipv4Addr::LOCALHOST.into(), target).await;
+        assert!(out.starts_with("HTTP/1.1 404 "), "{target}: {out}");
+    }
+    let mut tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, local)).await.unwrap();
+    tcp.write_all(b"POST /auth/callback HTTP/1.1\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+    let mut out = String::new();
+    timeout(T, tcp.read_to_string(&mut out)).await.unwrap().unwrap();
+    assert!(out.starts_with("HTTP/1.1 404 "), "{out}");
+    assert!(timeout(Duration::from_millis(300), upstream.accept()).await.is_err(), "a refused request reached the remote");
+
+    drop(forward);
     shutdown(control, task).await;
 }

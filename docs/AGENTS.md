@@ -68,7 +68,7 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 - The owner must have advertised feature `browser_actions` (`silo_proto::compat::feature::BROWSER_ACTIONS`). It may
   be local or remote: remote hosts' browser blocks run in per-host profiles (`silo-web/src/profile.rs`), so an
   agent on host X only reaches pages of host X's blocks.
-- No owner: the local app that advertised `browser_host` (§4.1) runs it off screen. An owner without the feature,
+- No owner: the app that advertised `browser_host` (§4.1) runs it off screen. An owner without the feature,
   or no owner and no such app: `no_app` ("No Silo app is running this browser block: …"). An app claims a browser
   block (`own_block` `request`) as soon as it runs its page.
 - Timeout: `APP_TIMEOUT`, or the call's `timeout_ms + 5 s` when it has one (max 120 s).
@@ -168,7 +168,12 @@ network, dialog handling and `evaluate` with element args. We follow that design
 
 ### 4.1 Off-screen host (`silo-app/src/browser_host.rs`)
 
-The app (feature `browser_host`) hosts the browsers no pane shows, on the local server only:
+The app (feature `browser_host`) hosts the browsers no pane shows. The server picks its host per request
+(`app_bridge::browser_host`): a local owner app always wins; else the most recently active **remote** app of the
+owner's (a paired device with control at server scope, the grant a tunnel runs under; never a shared link). When the
+host leaves the next one takes over, and with none `browser.fetch` is `no_app` (otto falls back to plain HTTP). A
+remote server's hosted and fetch pages open in that host's per-host profile, whose proxy runs through its tunnel:
+the page sees what the host sees, never this Mac's cookies.
 
 - **Blocks.** A `browser.*` request for a block no window has a pane for (an unshown tab, a session no window
   shows, a block nobody owns) runs in the host: it makes a windowless `BrowserPane` (same entity a window uses,
@@ -285,6 +290,12 @@ pub enum RenderError { NoApp(String), Timeout(String), Navigation(String), Faile
 `NoApp`: silo not running, no `browser_host` app, or a server without `browser.fetch`. It calls `browser.fetch`
 directly (not through otto's policy: the calling tool's own policy applies).
 
+**Remote agents.** A paired host's `silo server` runs its own otto (`silo otto server --daemon`, `SILO_HOME` = that
+server's home) and offers it as the tunnel service `otto` (hello feature `otto`). An agent block for that host
+talks to it over `open_service("otto")`, so the agent, its silo tools and its terminals all run on the host, and
+its sign-ins are stored there. Browser tools and rendered fetches on the host use the connected Mac's app as their
+browser host (§4.1). `docs/OTTO.md` §9 has the flow; `silo-cli/tests/remote_agent.rs` tests it end to end.
+
 ## 8. Phases
 
 | Phase | Scope | Status |
@@ -298,8 +309,9 @@ directly (not through otto's policy: the calling tool's own policy applies).
 Otto honours `Loading::Deferred` through `load_tools` (names or query), with loaded names persisted per session;
 browser schemas stay out of prompts until loaded. Native provider tool search is not yet used.
 Known gaps:
-- Browser tools and `browser_fetch` need the Silo app running on the server's Mac (a remote host's browser blocks
-  run only in an app that shows them).
+- Browser tools and `browser_fetch` need a Silo app on the server's Mac, or the owner's app connected to it (§4.1).
+  A remote server's hosted page that a window stops showing is not handed back to the host: it closes, and the next
+  action reopens it.
 - `browser_navigate` back/forward retries once after 1.1 s, because a followed link reaches the block's history only
   after the engine's report.
 - `wait_for` defaults to 10 s.

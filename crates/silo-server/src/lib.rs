@@ -83,10 +83,16 @@ pub struct Config {
     /// server` hands a stopped sub-agent back to its parent with it
     /// (docs/AGENT_BLOCK.md §4f). Must not block: it runs under the registry lock.
     pub agent_closed: Option<AgentClosed>,
+    /// Unix-socket services reachable over `silo/tunnel/1` by name (`"otto"`
+    /// also adds the `otto` hello feature). Empty by default.
+    pub services: std::collections::HashMap<String, ServiceFn>,
 }
 
 /// See [`Config::agent_closed`].
 pub type AgentClosed = Arc<dyn Fn(String) + Send + Sync>;
+
+/// See [`Config::services`]: the socket to connect to, looked up per tunnel.
+pub type ServiceFn = Arc<dyn Fn() -> futures::future::BoxFuture<'static, std::io::Result<PathBuf>> + Send + Sync>;
 
 impl Default for Config {
     fn default() -> Self {
@@ -105,6 +111,7 @@ impl Default for Config {
             grant_sweep_ahead: Arc::default(),
             ready_fault: None,
             agent_closed: None,
+            services: std::collections::HashMap::new(),
         }
     }
 }
@@ -141,6 +148,8 @@ pub struct Server {
     grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
     /// Data stream writers still running (see [`DataWriter`]).
     data_writers: tokio::sync::watch::Sender<usize>,
+    /// See [`Config::services`].
+    pub services: std::collections::HashMap<String, ServiceFn>,
 }
 
 /// Counts a data stream's writer task while it runs, so a server handing
@@ -499,6 +508,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         app_requests: app_bridge::Requests::default(),
         grant_sweep_ahead: config.grant_sweep_ahead.clone(),
         data_writers: tokio::sync::watch::channel(0).0,
+        services: config.services.clone(),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();

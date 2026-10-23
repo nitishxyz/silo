@@ -20,10 +20,20 @@ See §8 for status.
   from the block. A session is created lazily on the first prompt (no empty sessions), in the block's `cwd`.
 - The otto daemon is the app's local one: `otto_client::connect_or_start(otto_proto::paths::home(), <otto-silo next
   to the app executable>, &["server", "--daemon"])`. One shared connection per app. `otto-silo` ships in the
-  bundle (`scripts/dev-bundle.sh`, `scripts/bundle-macos.sh`, release workflow) next to `silo`; not in the `silo`
-  tarballs (no app there).
-- Agent blocks of a remote host: not supported yet; the app shows the "Not supported" card and does not offer
-  creating them on remote hosts.
+  bundle (`scripts/dev-bundle.sh`, `scripts/bundle-macos.sh`, release workflow) next to `silo`. `silo` itself also
+  embeds otto (`silo otto …`, OTTO.md §9), which is how tarball-only hosts run it; the bundle still ships
+  `otto-silo` for the app.
+- Agent blocks of a remote host run on that host's otto: when its server advertises feature `otto` (it registered
+  the tunnel service), the pane connects with `Connection::connect_dial` over `open_service("otto")` on the host's
+  `TunnelDialer` (shared with its browser tunnel proxy; `agent/client.rs`, one connection per `Otto` target). The
+  project is `project.open {cwd}` (the daemon resolves the git root) and paths shorten with its `hello.home`.
+  Older remotes and shared links show the "Not supported" card and don't offer creating them
+  (`agent_block::agents_supported`).
+- A remote agent block runs entirely on the host: sessions, tools, shell commands and credentials live in the
+  host's otto home. Signing in from a remote block signs the *host* in (the Mac stores nothing). For a browser
+  login the pane opens the URL here and forwards the provider's redirect to the host's loopback
+  (`LoginResult::Pending.callback` → `CallbackForward`, only while the login is pending). While the app is
+  connected, it is also the host's browser host: the host's browser tools and rendered fetches run in this Mac's app.
 
 ## 2. Creating
 
@@ -151,8 +161,8 @@ See §8 for status.
 
 - Multi-line, grows to ~8 lines then scrolls. ⏎ sends, ⇧⏎ newline. While a turn runs, ⏎ steers
   (`Delivery::Steer`, see §4f); queued inputs appear as chips in the tray. Stop lives on the activity row (§4f).
-- `⋮` menu: approval mode (auto / ask / plan), new session.
-- Footer: agent (`BUILD`/`PLAN`) picker; provider glyph / model id (subscription marker) → searchable model picker
+- `⋮` menu: approval mode (auto / ask), new session.
+- Footer: agent (`BUILD`, …) picker; provider glyph / model id (subscription marker) → searchable model picker
   from `model.list` limited to signed-in providers; right side: context used % and session cost when known.
 - Todos tray: from the latest `update_todos` call of the session (new otto builtin `update_todos {todos: [{step,
   status: pending|in_progress|completed|cancelled}]}`); collapsed shows the current item and `n/m done`; `⌃`
@@ -233,7 +243,7 @@ Units are points.
 
 - **No global chord overrides.** ⌘N stays New Window everywhere. Agent actions live in the composer as slash
   commands: typing `/` at the start opens a filtered menu above the composer (↑/↓, ⏎/Tab pick, esc close):
-  `/new` (new session), `/sessions` (switcher; ⌘J also), `/model`, `/effort`, `/agent`, `/mode auto|ask|plan`,
+  `/new` (new session), `/sessions` (switcher; ⌘J also), `/model`, `/effort`, `/agent`, `/mode auto|ask`,
   `/providers`, `/clear`. Menus show no ⌘N hint.
 - **Every state change animates** (silo `motion.rs`, `SILO_MOTION_SLOWDOWN`, reduce-motion → none), ~200–320 ms
   ease-out `cubic-bezier(0.25,1,0.5,1)`:
@@ -291,6 +301,10 @@ Units are points.
 - **Header:** `AgentPane::header_title()` (chat screen with a provider only) → the pane header shows it with a
   `chevron-down` (switcher) and adds `history` + `new-session` before split/zoom/close, same buttons and hover. On
   sign-in / Providers the header shows the block title (`Agent`) and no session controls.
+  Since 2026-10 the agent fills the header through `BlockHeader` (`pane_header.rs`, parts in `agent/header.rs`): the
+  title + switcher is its middle, History / New Session its actions; the workspace keeps icon, status, pane
+  buttons, drag and focus. Headers show per block type (Settings › Appearance › Block headers: Terminal, Agent;
+  `app.json` `pane_headers`); browsers always show theirs (shrunk to nav + address when the others are off).
 - **Pill primitive** (`agent/pill_input.rs`): `halo`, `pill`, `circle`, `circle_colors`, `lead_button` and metrics
   (`HEIGHT` 46, `HALO` 3, `CIRCLE` 36, `INSET` 5, `BORDER` 1, `LEAD` = circle center mirrored, `TEXT_X` 51) are
   shared by the dialog field and the composer (supersedes the 52/40 of §4c/§4d). Border 1 at 20% fg (30% focused),
@@ -302,7 +316,7 @@ Units are points.
   smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the attach glyph ends under
   the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
   attach muted, always on (§4g).
-- **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask|plan /providers /clear` (`/clear` also drops
+- **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask /providers /clear` (`/clear` also drops
   attachments); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
 - **Rows** (`agent/rows.rs`): one 44 tall row (28 icon column, title + muted subtitle, trailing check/note/buttons,
@@ -430,6 +444,54 @@ Units are points.
   (otto puts a `not sent` line in their place at request time; `read` answers with name, size and dimensions), but
   the image stays in the message, so its chip keeps the thumbnail.
 
+## 4g2. Mentions
+
+- **`@` popup** (`agent/mention.rs`): `@` at a word start opens a menu built like the slash menu (↑/↓, ⏎/⇥,
+  esc keeps the text and stays closed until that `@` goes). Agents first (the pane's catalog, `bot`, at most 8,
+  fuzzy on the name), then the project's files and folders from otto's `files.complete` (at most 50; ranked by
+  otto, basename first; `.gitignore` respected). Queries wait 60 ms of quiet; older replies are dropped. A query
+  naming a folder (`src/ma`) lists inside it. Until otto's first reply the agents show with a quiet, unpickable
+  `Finding files…` row (never `No matches`). Moving the caret (keys, a click) reopens, refilters or closes it as
+  typing does.
+- **Chips:** a pick becomes an inline token in the editor (`@build`, `@src/main.rs`): a rounded fill, its icon
+  (`bot`, `file-text`, `folder`) in place of the `@`. The caret skips over it, backspace removes it whole, an edit
+  inside it makes it text. A folder chip gets no trailing space: typing on reopens it as a query (drilling in).
+  A plain `@word` typed without picking stays text.
+- **Sent:** the draft goes as text and `InputPart::Mention`s; the optimistic bubble, the transcript and replay show
+  them inline as chips (from the user item's `mentions`); one otto couldn't find is struck through. A failed send
+  puts the chips back. Retry re-sends the message's text with its mentions rebuilt from the item's `mentions`
+  (its files aren't sent again). A `/command` message shows no chips (its expansion changes the text the ranges
+  point into); otto still gets the note.
+
+## 4h. Settings › Agents
+
+Plan mode is gone (otto has no `plan` approval mode): no `/mode plan`, no Plan row in `⋮`, the agent picker's
+fallback is just `build`. The pickers reload when an agent is saved or deleted (`client::AgentsChanged`).
+
+Settings has an **Agents** page (`settings_agents.rs`, its own view inside the panel; it calls otto only once the
+page shows). It works on the project of the pane that was active when Settings opened (git toplevel of its folder),
+named by folder only.
+- **List** (`agents.list`): name, scope badge (`Built-in`, `Yours`, `Project`), `Edited` for a definition named like
+  a built-in (`overrides_builtin` from `agents.get`), the description on one muted line, a model chip (`Session
+  model` when it inherits). Actions: `New`; Clone (`copy`, `agents.get` then a new agent `<name>-copy`, numbered when
+  taken, its name focused and selected); Delete (`close`) or, for an override, Reset (`rotate-ccw`), each confirmed
+  inline. Built-ins have no delete: editing one saves an override.
+- **Editor** (`agents.get`): back, the name as title, Save (disabled while unchanged). Name, description, `Saved in`
+  (`Yours` | `Project · <folder>`), model (`Session model` + the signed-in providers' models), effort (Default, Low,
+  Medium, High, Max), approvals (`Session default`, Auto, Ask, Ask all). The prompt is a multi-line editor that grows
+  to 28 lines then scrolls (⏎ newline, ⌘⏎ saves).
+- **Tools** (`tools.catalog`): Default, Loadable, Off columns and a filter over all three. A tool is Default if it
+  matches `tools`, Loadable if it matches `loadable`, else Off (`disallowed` is Off too); with both empty every tool
+  sits in its own `loading` (`Defaults`). Chips: name, source glyph (built-in `bot`, silo `laptop`, MCP `plug`,
+  extension `agent`), tooltip with description and effects. An MCP server is one `mcp__<server>__*` chip with its
+  count; its menu shows its tools, each movable alone (the lists then name them; a server whose tools share a column
+  is its pattern again). Drag chips between columns, or click one for `Move to …` (the keyboard path). Any move makes
+  the lists explicit; `Use defaults` empties both. Patterns naming no listed tool (a server not running) are kept.
+- **Saving:** `agents.save` with `previous_name` on a rename; moving an agent to the other scope saves it there and
+  deletes the old definition. Problems show inline in a few words (`Name the agent`, `That name is taken`, `Grant a
+  tool, or use defaults`, otto's reason without paths). Leaving with changes (back, another page, closing Settings)
+  asks `Discard your changes?`; asking again discards. Esc closes a menu, then leaves the editor.
+
 ## 5. Session switcher
 
 Click the title or `history` in the pane header, `/sessions`, or ⌘J with the agent block focused. A popover under the
@@ -485,7 +547,7 @@ Known gaps:
 - The effort clamp knows only models in the bundled catalog; an unlisted one gets its provider's common set.
 - Web tool lines match `web_search`/`web_fetch` on their metadata (`results`, `rendered`) and notes; a change to
   those shapes needs `transcript::tool` to follow.
-- No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
+- Remote-host agent blocks have no reconnect strip or host label yet; hover actions are copy and retry only; jump `↗` needs the block in a session this app
   can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
   and attachment chips disappear at once.
 - Sub-agents: an already-open child is found only in the shown silo session (otherwise a new block opens);

@@ -92,6 +92,15 @@ impl LoginFlow {
     pub fn needs_input(&self) -> bool {
         matches!(self.state, LoginState::ApiKey | LoginState::Anthropic { .. })
     }
+
+    /// The loopback `(port, path)` the browser is redirected to, for flows that listen on one.
+    #[must_use]
+    pub fn callback(&self) -> Option<(u16, String)> {
+        match &self.state {
+            LoginState::OpenAi(login) => Some((login.callback().port(), login.callback().path().to_owned())),
+            _ => None,
+        }
+    }
 }
 
 impl Providers {

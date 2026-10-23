@@ -27,7 +27,9 @@ pub enum ServerCommand {
 }
 
 pub async fn connect() -> Result<Connection> {
-    Ok(otto_client::connect_or_start(&paths::home(), &std::env::current_exe()?, &["server", "--daemon"]).await?)
+    let args = crate::self_args(&["server", "--daemon"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(otto_client::connect_or_start(&paths::home(), &std::env::current_exe()?, &args).await?)
 }
 pub async fn run(args: ServerArgs) -> Result<()> {
     let home = paths::home();

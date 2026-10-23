@@ -183,6 +183,7 @@ impl AuthService for Services {
             let verification_uri = flow.verification_uri().map(str::to_owned);
             let interval_secs = flow.interval_secs();
             let needs_code = flow.needs_input();
+            let callback = flow.callback().map(|(port, path)| otto_proto::LoginCallback { port, path });
             let login_id = uuid::Uuid::new_v4().to_string();
             let mut logins = self.logins.lock().await;
             // A new login supersedes older ones for the same provider (and frees their loopback port).
@@ -200,7 +201,7 @@ impl AuthService for Services {
                 return Err(RpcError::new(RpcError::BUSY, "too many pending logins"));
             }
             logins.insert(login_id.clone(), PendingLogin { provider, at: Instant::now(), flow: Some(flow), cancel: Arc::new(Notify::new()) });
-            Ok(LoginResult::Pending { url, login_id, user_code, verification_uri, interval_secs, needs_code })
+            Ok(LoginResult::Pending { url, login_id, user_code, verification_uri, interval_secs, needs_code, callback })
         })
     }
     fn login_complete(&self, login_id: String, code: Option<String>) -> AuthFuture<'_, AuthStatus> {
@@ -291,10 +292,10 @@ mod tests {
         assert!(!services.list_models(Some("openai".into())).await.unwrap().is_empty());
         services.logout("openai".into()).await.unwrap();
         let login = services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap();
-        let LoginResult::Pending { login_id, url, user_code, verification_uri, interval_secs, needs_code } = login else {
+        let LoginResult::Pending { login_id, url, user_code, verification_uri, interval_secs, needs_code, callback } = login else {
             panic!("expected OAuth flow");
         };
-        assert!(url.starts_with("https://claude.ai/") && needs_code);
+        assert!(url.starts_with("https://claude.ai/") && needs_code && callback.is_none());
         assert!(user_code.is_none() && verification_uri.is_none() && interval_secs.is_none());
         assert!(services.login_complete(login_id.clone(), Some("code#wrong-state".into())).await.is_err());
         assert!(services.login_complete(login_id, None).await.is_err());

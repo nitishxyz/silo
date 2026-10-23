@@ -1,5 +1,7 @@
-//! Browser-block tunnels (`silo/tunnel/1`): each bi stream from the owner or
-//! a peer holding control at server scope becomes one TCP connection to a server-private address.
+//! Tunnels (`silo/tunnel/1`): each bi stream from the owner or a peer
+//! holding control at server scope becomes one TCP connection to a
+//! server-private address (browser blocks), or one connection to a
+//! registered service's unix socket ([`crate::Config::services`]).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,7 +14,10 @@ use silo_transport::{
     BiStream, EndpointId, RemoteConn, TunnelIncoming,
     tunnel::{self, TunnelErrCode},
 };
-use tokio::{net::TcpStream, sync::Semaphore};
+use tokio::{
+    net::{TcpStream, UnixStream},
+    sync::Semaphore,
+};
 
 use crate::Server;
 
@@ -21,6 +26,8 @@ pub const MAX_STREAMS_PER_PEER: usize = 256;
 pub const IDLE: Duration = Duration::from_secs(10 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a service may take to name (and start) its socket.
+const SERVICE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Whether `peer` may tunnel, and the grant it tunnels under (`None`:
 /// this server's own endpoint). Tunnels need control at server scope.
@@ -45,13 +52,14 @@ pub async fn accept_loop(server: Arc<Server>, mut incoming: TunnelIncoming) {
         track(&server, &live, &rc, grant.as_deref());
         let limit = limits.entry(peer).or_insert_with(|| Arc::new(Semaphore::new(MAX_STREAMS_PER_PEER)));
         let permit = limit.clone().try_acquire_owned().ok();
+        let server = server.clone();
         tokio::spawn(async move {
             let Some(_permit) = permit else {
                 let mut stream = stream;
                 let _ = tunnel::reply(&mut stream, Err(TunnelErrCode::Busy)).await;
                 return;
             };
-            handle(stream).await;
+            handle(&server, stream).await;
         });
     }
 }
@@ -76,11 +84,26 @@ fn track(server: &Arc<Server>, live: &Arc<Mutex<HashSet<u64>>>, rc: &RemoteConn,
     });
 }
 
-async fn handle(mut stream: BiStream) {
+async fn handle(server: &Server, mut stream: BiStream) {
     let Ok(Ok(open)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, tunnel::read_open(&mut stream)).await else {
         let _ = tunnel::reply(&mut stream, Err(TunnelErrCode::BadRequest)).await;
         return;
     };
+    if let Some(name) = &open.service {
+        let unix = match service(server, name).await {
+            Ok(unix) => unix,
+            Err(code) => {
+                tracing::debug!(service = name, ?code, "service tunnel refused");
+                let _ = tunnel::reply(&mut stream, Err(code)).await;
+                return;
+            }
+        };
+        if tunnel::reply(&mut stream, Ok(())).await.is_ok() {
+            // No idle limit: an agent block may sit quiet for hours.
+            tunnel::splice(stream, unix, None).await;
+        }
+        return;
+    }
     let tcp = match connect(&open.host, open.port).await {
         Ok(tcp) => tcp,
         Err(code) => {
@@ -92,7 +115,18 @@ async fn handle(mut stream: BiStream) {
     if tunnel::reply(&mut stream, Ok(())).await.is_err() {
         return;
     }
-    tunnel::splice(stream, tcp, IDLE).await;
+    tunnel::splice(stream, tcp, Some(IDLE)).await;
+}
+
+/// Ask the service `name` for its socket and connect to it, all within
+/// [`SERVICE_TIMEOUT`].
+async fn service(server: &Server, name: &str) -> Result<UnixStream, TunnelErrCode> {
+    let socket = server.services.get(name).ok_or(TunnelErrCode::NotFound)?.clone();
+    let attempt = async {
+        let path = socket().await.map_err(|_| TunnelErrCode::Unavailable)?;
+        UnixStream::connect(path).await.map_err(|_| TunnelErrCode::Unavailable)
+    };
+    tokio::time::timeout(SERVICE_TIMEOUT, attempt).await.unwrap_or(Err(TunnelErrCode::Unavailable))
 }
 
 /// Resolve `host`, keep only server-private addresses, and connect to the

@@ -154,6 +154,8 @@ pub(crate) fn runner(call: &AppCall, shown: impl Fn(&str) -> bool) -> Option<Run
 
 pub struct BrowserHost {
     hosted: Hosted<Entity<BrowserPane>>,
+    /// Remote servers that picked this app as their browser host: their hosted panes, by host index.
+    remote: HashMap<usize, Hosted<Entity<BrowserPane>>>,
     slots: Rc<Semaphore>,
     _events: Subscription,
 }
@@ -166,6 +168,7 @@ impl BrowserHost {
     pub fn install(hosts: &Entity<HostsState>, cx: &mut App) {
         let host = cx.new(|cx: &mut Context<Self>| Self {
             hosted: Hosted::default(),
+            remote: HashMap::new(),
             slots: Rc::new(Semaphore::new(FETCH_PAGES)),
             _events: cx.subscribe(hosts, |this, _, event: &HostEvent, cx| this.host_event(event, cx)),
         });
@@ -206,15 +209,18 @@ impl BrowserHost {
 
     fn host_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
         let hosts = HostsState::global(cx);
-        let Some(entry) = hosts.read(cx).entries().get(event.host).filter(|h| h.info.local) else { return };
+        let Some(entry) = hosts.read(cx).entries().get(event.host) else { return };
+        if !entry.info.local {
+            return self.remote_event(event, cx);
+        }
         let control = entry.control.clone();
         self.hosted.apply(&event.event, |pane| pane.read(cx).info.as_ref().map(|i| i.session_id.clone()));
         match &event.event {
             ConnEvent::Event(Event::AppRequest { request_id, request, .. }) => {
                 let Some(control) = control else { return };
                 match runner(request, |block| shown(block, cx)) {
-                    Some(Runner::Fetch) => self.fetch(control, request_id.clone(), request.params.clone(), cx),
-                    Some(Runner::Host(block)) => self.run(control, block, request_id.clone(), request.clone(), cx),
+                    Some(Runner::Fetch) => self.fetch(control, Route::Local, request_id.clone(), request.params.clone(), cx),
+                    Some(Runner::Host(block)) => self.run(control, None, Route::Local, block, request_id.clone(), request.clone(), cx),
                     Some(Runner::Window) | None => {}
                 }
             }
@@ -232,21 +238,66 @@ impl BrowserHost {
         }
     }
 
+    /// A paired remote server's event (it may pick this app as its browser
+    /// host, `app_bridge::browser_host`): its fetches and unshown blocks run
+    /// here in that host's profile, through its tunnel. A window showing such
+    /// a block uses its own pane; the hosted copy goes. Shared links: nothing.
+    fn remote_event(&mut self, event: &HostEvent, cx: &mut Context<Self>) {
+        let hosts = HostsState::global(cx);
+        let Some(entry) = hosts.read(cx).entries().get(event.host) else { return };
+        let crate::hosts::Transport::Iroh { home, addr } = &entry.info.transport else { return };
+        let route = Route::Remote { host_id: addr.id.to_string(), home: home.clone(), addr: addr.clone() };
+        let (host, control) = (event.host, entry.control.clone());
+        let on_host = |block: &str, cx: &App| {
+            cx.windows()
+                .iter()
+                .filter_map(|w| w.downcast::<Workspace>())
+                .filter_map(|w| w.read(cx).ok())
+                .any(|w| w.active_host == host && w.browsers.contains_key(block))
+        };
+        if let Some(hosted) = self.remote.get_mut(&host) {
+            hosted.apply(&event.event, |pane| pane.read(cx).info.as_ref().map(|i| i.session_id.clone()));
+            hosted.retain_unshown(|block| on_host(block, cx));
+        }
+        if let (ConnEvent::Event(Event::AppRequest { request_id, request, .. }), Some(control)) = (&event.event, control) {
+            match runner(request, |block| on_host(block, cx)) {
+                Some(Runner::Fetch) => self.fetch(control, route, request_id.clone(), request.params.clone(), cx),
+                Some(Runner::Host(block)) => self.run(control, Some(host), route, block, request_id.clone(), request.clone(), cx),
+                Some(Runner::Window) | None => {}
+            }
+        }
+    }
+
     /// A browser action on `block`, which no window shows: run its page
-    /// here (opening it first), claim it, execute.
-    fn run(&mut self, control: Control, block: String, request_id: String, call: AppCall, cx: &mut Context<Self>) {
+    /// here (opening it first), claim it, execute. `remote`: the remote
+    /// host it belongs to, its page opened on `route`.
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &mut self,
+        control: Control,
+        remote: Option<usize>,
+        route: Route,
+        block: String,
+        request_id: String,
+        call: AppCall,
+        cx: &mut Context<Self>,
+    ) {
         let (rt, home) = {
             let hosts = HostsState::global(cx);
             let hosts = hosts.read(cx);
             (hosts.rt.clone(), hosts.home.clone())
         };
-        let fresh = self.hosted.get(&block).is_none();
+        let hosted = match remote {
+            Some(host) => self.remote.entry(host).or_default(),
+            None => &mut self.hosted,
+        };
+        let fresh = hosted.get(&block).is_none();
         if fresh {
-            let pane = cx.new(|cx| BrowserPane::new(block.clone(), rt.clone(), Some(control.clone()), Route::Local, home, cx));
+            let pane = cx.new(|cx| BrowserPane::new(block.clone(), rt.clone(), Some(control.clone()), route, home, cx));
             pane.update(cx, |pane, _| pane.detach());
-            self.hosted.keep(block.clone(), pane);
+            hosted.keep(block.clone(), pane);
         }
-        let Some(pane) = self.hosted.get(&block).cloned() else { return };
+        let Some(pane) = hosted.get(&block).cloned() else { return };
         pane.update(cx, |pane, cx| pane.open_offscreen(cx));
         let timeout = call.params.get("timeout_ms").and_then(Value::as_u64).map_or(30_000, |ms| ms.saturating_add(5_000)).min(120_000);
         let host = cx.weak_entity();
@@ -257,7 +308,10 @@ impl BrowserHost {
                     match rt.spawn(async move { c.call::<BlockView>(Method::BlockView { block_id: b }).await }).await? {
                         Ok(view) => pane.update(cx, |pane, cx| pane.set_info(view.block, cx)),
                         Err(error) => {
-                            _ = host.update(cx, |this, _| this.hosted.take(&block));
+                            _ = host.update(cx, |this, _| match remote {
+                                Some(r) => this.remote.get_mut(&r).and_then(|h| h.take(&block)),
+                                None => this.hosted.take(&block),
+                            });
                             return Err(error);
                         }
                     }
@@ -286,9 +340,10 @@ impl BrowserHost {
         .detach();
     }
 
-    /// `browser.fetch`: a hidden page in the agent profile, at most
+    /// `browser.fetch`: a hidden page in the agent profile (a remote
+    /// server's: its host profile, through its tunnel), at most
     /// [`FETCH_PAGES`] at once.
-    fn fetch(&mut self, control: Control, request_id: String, params: Value, cx: &mut Context<Self>) {
+    fn fetch(&mut self, control: Control, route: Route, request_id: String, params: Value, cx: &mut Context<Self>) {
         let (rt, home) = {
             let hosts = HostsState::global(cx);
             let hosts = hosts.read(cx);
@@ -304,7 +359,14 @@ impl BrowserHost {
                     slot = slots.acquire() => slot.map_err(RpcError::internal)?,
                     () = timers.timer(QUEUE_MAX) => return Err(RpcError::new(RpcError::TIMEOUT, "too many pages are loading; try again")),
                 };
-                let page = cx.update(|cx| open_page(&home, cx)).map_err(|e| RpcError::internal(format!("{e:#}")))?;
+                let (profile, tunnel) = match route {
+                    Route::Local => (silo_web::AGENT.to_owned(), None),
+                    Route::Remote { host_id, home, addr } => {
+                        let tunnel = rt.spawn(async move { crate::web::tunnel(&home, addr).await }).await.map_err(RpcError::internal)?;
+                        (host_id, Some(tunnel.map_err(|e| RpcError::internal(format!("{e:#}")))?))
+                    }
+                };
+                let page = cx.update(|cx| open_page(&home, &profile, tunnel, cx)).map_err(|e| RpcError::internal(format!("{e:#}")))?;
                 let result = load(&page, &params, &timers).await;
                 crate::web::close(&page);
                 result
@@ -342,10 +404,10 @@ fn web_url(url: &str) -> Option<String> {
     (matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") && !rest.is_empty()).then(|| url.to_owned())
 }
 
-/// A hidden page in the agent profile, blank until navigated.
-fn open_page(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Browser>> {
+/// A hidden page in `profile` (a remote host's with its tunnel), blank until navigated.
+fn open_page(home: &Path, profile: &str, tunnel: Option<silo_web::Tunnel>, cx: &mut App) -> anyhow::Result<Rc<Browser>> {
     let runtime = crate::web::runtime(home, cx)?;
-    let profile = runtime.profile(silo_web::AGENT, None)?;
+    let profile = runtime.profile(profile, tunnel)?;
     let options = silo_web::BrowserOptions { url: "about:blank", profile: &profile, size: FETCH_VIEW, offscreen: true, notify: Arc::new(|| {}) };
     let page = Rc::new(runtime.create_browser(options)?);
     crate::web::register(page.clone(), Arc::new(AtomicBool::new(false)), None);

@@ -3,14 +3,17 @@ use otto_proto::ServerMessage;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 
+const RETRY_MIN: Duration = Duration::from_millis(250);
+const RETRY_MAX: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug)]
 pub struct FollowerState {
     pub mirror: SessionMirror,
     pub connected: bool,
     pub error: Option<ClientError>,
 }
-/// A watch value always contains the latest complete projection. Local connections
-/// reconnect automatically; tunnels can replace their transport with `reconnect`.
+/// A watch value always contains the latest complete projection. Connections from a
+/// home or a dialer reconnect automatically; others can be replaced with `reconnect`.
 pub struct SessionFollower {
     state: watch::Receiver<FollowerState>,
     replace: mpsc::Sender<Connection>,
@@ -57,24 +60,27 @@ async fn run(
     mut replacements: mpsc::Receiver<Connection>,
 ) {
     let mut state = tx.borrow().clone();
+    // Reconnect attempts back off from 250 ms to 5 s, and start over once connected.
+    let mut retry = RETRY_MIN;
     loop {
         let incoming = tokio::select! {
             replacement = replacements.recv() => {
                 let Some(c) = replacement else { return; };
                 connection = c; events = connection.events(); state.mirror.clear_live();
                 match connection.session_subscribe(&id, Some(state.mirror.last_seq)).await {
-                    Ok(_) => { state.connected = true; state.error = None; tx.send_replace(state.clone()); }
+                    Ok(_) => { state.connected = true; state.error = None; retry = RETRY_MIN; tx.send_replace(state.clone()); }
                     Err(e) => { state.connected = false; state.error = Some(e); tx.send_replace(state.clone()); }
                 }
                 continue;
             }
             incoming = events.recv(), if state.connected => incoming,
-            _ = tokio::time::sleep(Duration::from_millis(250)), if !state.connected => {
+            _ = tokio::time::sleep(retry), if !state.connected => {
+                retry = (retry * 2).min(RETRY_MAX);
                 match connection.reconnect().await {
                     Ok(c) => {
                         connection = c; events = connection.events(); state.mirror.clear_live();
                         match connection.session_subscribe(&id, Some(state.mirror.last_seq)).await {
-                            Ok(_) => { state.connected = true; state.error = None; tx.send_replace(state.clone()); }
+                            Ok(_) => { state.connected = true; state.error = None; retry = RETRY_MIN; tx.send_replace(state.clone()); }
                             Err(e) => { state.error = Some(e); tx.send_replace(state.clone()); }
                         }
                     }

@@ -7,9 +7,11 @@
 //! ⌘J (with focus in the pane) opens the session switcher.
 
 mod attach;
-mod client;
-mod editor;
+pub(crate) mod client;
+pub(crate) mod editor;
+mod header;
 mod markdown;
+pub(crate) mod mention;
 mod pill_input;
 mod reveal;
 mod rows;
@@ -31,6 +33,7 @@ use gpui::{
 };
 use otto_client::{ClientError, Connection, FollowerState, SessionCreateOptions, SessionFollower};
 use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, InputPart, Method, ProjectInfo, SessionInfo, TurnStatus};
+use silo_client::transport::tunnel::TunnelErrCode;
 
 use crate::text_field::{FieldEvent, TextField};
 use attach::{Attachment, upload};
@@ -38,6 +41,7 @@ use client::Catalog;
 use editor::{Editor, EditorEvent, Nav};
 use signin::SignIn;
 use transcript::{Row, Times, Todo};
+pub(crate) use view::provider_name;
 
 /// Turn state of the shown session, reported to the server as `block.report`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +101,8 @@ enum Overlay {
     Menu,
     /// Slash commands, typed into the composer.
     Slash,
+    /// `@` mentions (agents, project paths), typed into the composer.
+    Mention,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +124,7 @@ struct SlashCommand {
     act: SlashAct,
 }
 
-const SLASH: [SlashCommand; 10] = [
+const SLASH: [SlashCommand; 9] = [
     SlashCommand { name: "new", about: "Start a new session", icon: "new-session", act: SlashAct::New },
     SlashCommand { name: "sessions", about: "Switch to another session", icon: "history", act: SlashAct::Sessions },
     SlashCommand { name: "model", about: "Choose the model", icon: "bot", act: SlashAct::Model },
@@ -126,7 +132,6 @@ const SLASH: [SlashCommand; 10] = [
     SlashCommand { name: "agent", about: "Choose the agent", icon: "agent", act: SlashAct::Agent },
     SlashCommand { name: "mode auto", about: "Run tools without asking", icon: "lock-off", act: SlashAct::Mode(ApprovalMode::Auto) },
     SlashCommand { name: "mode ask", about: "Ask before changes", icon: "lock", act: SlashAct::Mode(ApprovalMode::AskOnEffects) },
-    SlashCommand { name: "mode plan", about: "Read-only", icon: "list-todo", act: SlashAct::Mode(ApprovalMode::Plan) },
     SlashCommand { name: "providers", about: "Connect or disconnect providers", icon: "plug", act: SlashAct::Providers },
     SlashCommand { name: "clear", about: "Clear the input and start over", icon: "rotate-ccw", act: SlashAct::Clear },
 ];
@@ -149,7 +154,7 @@ fn slash_matches(query: &str) -> Vec<&'static SlashCommand> {
 }
 
 /// The ⋮ menu's rows, in order.
-const MENU_ROWS: usize = 6;
+const MENU_ROWS: usize = 5;
 
 /// The effort menu's rows; `None` is the default (the agent's, else the model's).
 const EFFORTS: [Option<Effort>; 5] = [None, Some(Effort::Low), Some(Effort::Medium), Some(Effort::High), Some(Effort::Max)];
@@ -203,6 +208,52 @@ enum Conn {
     Connecting,
     Ready,
     Failed(String),
+    /// A remote host's otto couldn't be reached (no raw error: [`Failure::copy`]).
+    Unreachable(Failure),
+}
+
+/// Why a remote host's otto couldn't be reached, from the tunnel's refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// The host's server has no `otto` service (an older silo).
+    NoOtto,
+    /// It has one but couldn't start or reach it.
+    NotStarted,
+    Unreachable,
+}
+
+impl Failure {
+    pub(crate) fn of(refused: Option<TunnelErrCode>) -> Self {
+        match refused {
+            Some(TunnelErrCode::NotFound) => Self::NoOtto,
+            Some(TunnelErrCode::Unavailable) => Self::NotStarted,
+            _ => Self::Unreachable,
+        }
+    }
+
+    /// What the pane says, and whether Retry shows (there is no update from here).
+    pub(crate) fn copy(self, host: &str) -> (String, bool) {
+        match self {
+            Self::NoOtto => (format!("{host} doesn't have otto yet. Update silo there."), false),
+            Self::NotStarted => (format!("Couldn't start otto on {host}"), true),
+            Self::Unreachable => (format!("Couldn't reach otto on {host}"), true),
+        }
+    }
+}
+
+/// Whether the reconnect strip shows: a remote pane whose host is down, or
+/// whose follower lost otto (`follower`: its `connected`, if it follows a session).
+pub(crate) fn reconnecting(remote: bool, host_up: bool, follower: Option<bool>) -> bool {
+    remote && (!host_up || follower == Some(false))
+}
+
+/// The tunnel's refusal of remote host `id`'s otto, probed after a failed connect.
+async fn probe_refusal(id: &str) -> Option<TunnelErrCode> {
+    let error = match client::dialer(id).await {
+        Ok(dialer) => dialer.open_service(client::SERVICE).await.err()?,
+        Err(error) => error,
+    };
+    silo_client::tunnel::refusal(&error)
 }
 
 pub struct AgentPane {
@@ -210,6 +261,13 @@ pub struct AgentPane {
     pub focus: FocusHandle,
     session_id: Option<String>,
     cwd: Option<String>,
+    /// The otto daemon this block's host runs, and the host's name (`None`: this Mac).
+    target: client::Otto,
+    host: Option<String>,
+    /// The host's silo connection is up (always on this Mac).
+    host_up: bool,
+    /// The daemon user's home (`hello.home`), for shortening paths.
+    home: Option<String>,
     /// A folder this pane moved to that the server hasn't echoed yet.
     moving: Option<String>,
     rt: tokio::runtime::Handle,
@@ -220,7 +278,7 @@ pub struct AgentPane {
     /// Recent otto projects, most recent first (the project list).
     projects: Vec<ProjectInfo>,
     sessions: Vec<SessionInfo>,
-    follower: Option<SessionFollower>,
+    follower: Option<std::sync::Arc<SessionFollower>>,
     pump: Option<Task<()>>,
     generation: u64,
     state: Option<FollowerState>,
@@ -266,6 +324,8 @@ pub struct AgentPane {
     overlay_anim: crate::motion::Toggle,
     /// Esc closed the slash menu; it stays closed until the `/` goes.
     slash_dismissed: bool,
+    /// The `@` popup.
+    mention: mention::Popup,
     selected: usize,
     signin: SignIn,
     status: Option<AgentStatus>,
@@ -332,11 +392,15 @@ pub struct AgentPane {
 }
 
 impl AgentPane {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_id: String,
         session_id: Option<String>,
         cwd: Option<String>,
         rt: tokio::runtime::Handle,
+        target: client::Otto,
+        host: Option<String>,
+        host_up: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -359,6 +423,7 @@ impl AgentPane {
             cx.subscribe(&url_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe_in(&filter, window, |this, _, event: &FieldEvent, window, cx| this.filter_event(event, window, cx)),
             cx.observe_global::<client::AuthChanged>(Self::reload_catalog),
+            cx.observe_global::<client::AgentsChanged>(Self::reload_catalog),
             cx.on_focus_in(&focus, window, |_, _, cx| cx.emit(AgentPaneEvent::Activated)),
             // The pane itself has nothing to type into: focus lands on the composer.
             cx.on_focus(&focus, window, |this, window, cx| this.focus_composer(window, cx)),
@@ -372,6 +437,10 @@ impl AgentPane {
             focus,
             session_id,
             cwd,
+            target,
+            host_up: host_up || host.is_none(),
+            host,
+            home: None,
             moving: None,
             rt,
             width: std::rc::Rc::default(),
@@ -412,6 +481,7 @@ impl AgentPane {
             overlay_shown: None,
             overlay_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             slash_dismissed: false,
+            mention: mention::Popup::default(),
             selected: 0,
             signin: SignIn::default(),
             status: None,
@@ -456,6 +526,35 @@ impl AgentPane {
         pane
     }
 
+    /// The host's connection came back (reconnect now, not at the next
+    /// retry) or went (the reconnect strip shows).
+    pub fn set_host_up(&mut self, up: bool, cx: &mut Context<Self>) {
+        if self.host.is_none() || self.host_up == up {
+            return;
+        }
+        self.host_up = up;
+        cx.notify();
+        if !up {
+            return;
+        }
+        if !matches!(self.conn, Conn::Ready) {
+            self.conn = Conn::Connecting;
+        }
+        self.load(cx);
+        let Some(follower) = self.follower.clone().filter(|f| !f.current().connected) else { return };
+        let target = self.target.clone();
+        self.rt.spawn(async move {
+            if let Ok(connection) = client::connection(&target).await {
+                let _ = follower.reconnect(connection).await;
+            }
+        });
+    }
+
+    /// The reconnect strip shows: sending waits, the transcript and the text stay.
+    fn reconnecting(&self) -> bool {
+        reconnecting(self.host.is_some(), self.host_up, self.state.as_ref().map(|s| s.connected))
+    }
+
     /// The server's state changed (another window or device switched sessions).
     pub fn show(&mut self, session_id: Option<String>, cwd: Option<String>, cx: &mut Context<Self>) {
         // State from before this pane's own move.
@@ -485,6 +584,7 @@ impl AgentPane {
 
     /// The pane header's title on the chat screen (`New session` before the
     /// first prompt); `None` on sign-in and Providers (no session controls).
+    /// The header's parts: `header.rs`.
     pub fn header_title(&self) -> Option<String> {
         self.composer_visible().then(|| {
             self.mirror()
@@ -575,8 +675,9 @@ impl AgentPane {
         F: FnOnce(Connection) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, ClientError>> + Send + 'static,
     {
+        let target = self.target.clone();
         let task = self.rt.spawn(async move {
-            let connection = client::connection().await?;
+            let connection = client::connection(&target).await?;
             work(connection).await
         });
         cx.spawn(async move |this, cx| {
@@ -594,33 +695,61 @@ impl AgentPane {
 
     /// Connect, then load providers, the project and its sessions.
     fn load(&mut self, cx: &mut Context<Self>) {
+        // A remote host that is down: loaded once it is back (`set_host_up`).
+        if !self.host_up {
+            return;
+        }
         let cwd = self.cwd.clone();
         let asked = cwd.clone();
-        self.run(
-            cx,
-            move |c| async move {
+        let target = self.target.clone();
+        let task = self.rt.spawn(async move {
+            let c = match client::connection(&target).await {
+                Ok(c) => c,
+                Err(error) => {
+                    let refused = match &target {
+                        client::Otto::Remote { id } => probe_refusal(id).await,
+                        client::Otto::Local => None,
+                    };
+                    return Err((describe(&error), refused));
+                }
+            };
+            async {
                 let catalog = client::catalog(&c).await?;
                 let project = client::project(&c, cwd.as_deref()).await?;
                 let sessions = c.session_list(Some(project.id.clone()), false).await?;
-                Ok((catalog, project, sessions))
-            },
-            move |this, result, cx| match result {
-                // Moved again meanwhile: the newer load wins.
-                _ if this.cwd != asked => {}
-                Ok((catalog, project, sessions)) => {
-                    let first = matches!(this.conn, Conn::Connecting | Conn::Failed(_));
-                    this.conn = Conn::Ready;
-                    this.catalog = Some(catalog);
-                    this.project = Some(project);
-                    this.sessions = sessions;
-                    this.watch_sessions(cx);
-                    if first || this.follower.is_none() {
-                        this.follow(cx);
+                Ok::<_, ClientError>((catalog, project, sessions, c.hello().home.clone()))
+            }
+            .await
+            .map_err(|e| (describe(&e), None))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|error| Err((error.to_string(), None)));
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    // Moved again meanwhile: the newer load wins.
+                    _ if this.cwd != asked => {}
+                    Ok((catalog, project, sessions, home)) => {
+                        let first = !matches!(this.conn, Conn::Ready);
+                        this.conn = Conn::Ready;
+                        this.home = Some(home).filter(|h| !h.is_empty());
+                        this.catalog = Some(catalog);
+                        this.project = Some(project);
+                        this.sessions = sessions;
+                        this.watch_sessions(cx);
+                        if first || this.follower.is_none() {
+                            this.follow(cx);
+                        }
+                    }
+                    // The host went down meanwhile: the strip says so, and it loads again once back.
+                    Err(_) if !this.host_up => {}
+                    Err((error, refused)) => {
+                        this.conn = if this.host.is_some() { Conn::Unreachable(Failure::of(refused)) } else { Conn::Failed(error) };
                     }
                 }
-                Err(error) => this.conn = Conn::Failed(error),
-            },
-        );
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn reload_catalog(&mut self, cx: &mut Context<Self>) {
@@ -703,8 +832,9 @@ impl AgentPane {
         if !matches!(self.conn, Conn::Ready) {
             return;
         }
+        let target = self.target.clone();
         let task = self.rt.spawn(async move {
-            let connection = client::connection().await?;
+            let connection = client::connection(&target).await?;
             SessionFollower::new(connection, id).await
         });
         self.pump = Some(cx.spawn(async move |this, cx| {
@@ -727,7 +857,7 @@ impl AgentPane {
                 if this.generation != generation {
                     return false;
                 }
-                this.follower = Some(follower);
+                this.follower = Some(std::sync::Arc::new(follower));
                 this.apply(first, cx);
                 true
             });
@@ -792,12 +922,13 @@ impl AgentPane {
             turn,
             error: m.last_error.as_ref().map(|e| e.1.as_str()),
             cwd: cwd.as_deref(),
+            home: self.home.as_deref(),
             times: &self.times,
             now,
         });
         let mut todos = transcript::todos(&m.items, &m.tools, &self.times);
         for todo in &mut todos {
-            todo.step = transcript::display(&todo.step, cwd.as_deref());
+            todo.step = transcript::display(&todo.step, cwd.as_deref(), self.home.as_deref());
         }
         // Subagents are child sessions: their status comes from the session list
         // (refreshed on otto's `sessions.changed` too).
@@ -920,13 +1051,15 @@ impl AgentPane {
     /// Text as shown (`transcript::display`) for the shown session's folder.
     fn shown(&self, text: &str) -> String {
         let cwd = self.mirror().map(|m| m.info.cwd.as_str()).filter(|c| !c.is_empty()).or(self.cwd.as_deref());
-        transcript::display(text, cwd)
+        transcript::display(text, cwd, self.home.as_deref())
     }
 
     fn editor_event(&mut self, event: &EditorEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             EditorEvent::Submit => {
-                if matches!(self.overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Effort | Overlay::Menu)) && self.overlay_count(cx) > 0 {
+                if matches!(self.overlay, Some(Overlay::Slash | Overlay::Mention | Overlay::Agents | Overlay::Effort | Overlay::Menu))
+                    && self.overlay_count(cx) > 0
+                {
                     self.activate_choice(self.selected, window, cx);
                 } else {
                     self.set_overlay(None, cx);
@@ -936,6 +1069,9 @@ impl AgentPane {
             EditorEvent::Escape => {
                 if self.overlay == Some(Overlay::Slash) {
                     self.slash_dismissed = true;
+                    self.set_overlay(None, cx);
+                } else if self.overlay == Some(Overlay::Mention) {
+                    self.mention.dismissed = self.mention.at.as_ref().map(|a| a.0.start);
                     self.set_overlay(None, cx);
                 } else if self.overlay.is_some() {
                     self.close_overlay(window, cx);
@@ -951,7 +1087,10 @@ impl AgentPane {
                     self.notice = None;
                 }
                 self.sync_slash(cx);
+                self.sync_mention(cx);
             }
+            // The caret moved (keys, a click): the `@` popup follows it.
+            EditorEvent::Moved => self.sync_mention(cx),
             EditorEvent::Nav(nav) => {
                 let count = self.overlay_count(cx);
                 match nav {
@@ -959,6 +1098,9 @@ impl AgentPane {
                     Nav::Down => self.selected = if count == 0 { 0 } else { (self.selected + 1) % count },
                     Nav::Tab if count > 0 => return self.activate_choice(self.selected, window, cx),
                     Nav::Tab => {}
+                }
+                if self.overlay == Some(Overlay::Mention) {
+                    self.mention.scroll.scroll_to_item(self.selected);
                 }
                 cx.notify();
             }
@@ -978,7 +1120,7 @@ impl AgentPane {
     /// Open, filter or close the slash menu as the composer's text changes.
     fn sync_slash(&mut self, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).text().to_owned();
-        let query = slash_query(&text);
+        let query = slash_query(&text).filter(|_| self.mention_query(cx).is_none());
         if query.is_none() {
             self.slash_dismissed = false;
         }
@@ -992,6 +1134,85 @@ impl AgentPane {
             self.set_overlay(None, cx);
         }
         cx.notify();
+    }
+
+    /// The `@query` at the composer's caret, if any.
+    fn mention_query(&self, cx: &gpui::App) -> Option<(std::ops::Range<usize>, String)> {
+        let e = self.editor.read(cx);
+        mention::query(e.text(), e.caret(), e.chips()).map(|(range, query)| (range, query.to_owned()))
+    }
+
+    /// Open, filter or close the `@` popup as the composer's text changes; a new query asks otto for paths.
+    fn sync_mention(&mut self, cx: &mut Context<Self>) {
+        let found = self.mention_query(cx);
+        if self.mention.dismissed.is_some() && found.as_ref().map(|f| f.0.start) != self.mention.dismissed {
+            self.mention.dismissed = None;
+        }
+        match found.filter(|_| self.mention.dismissed.is_none() && self.composer_visible()) {
+            Some((range, query)) => {
+                let fresh = self.mention.at.as_ref().is_none_or(|(_, q)| *q != query);
+                // Just opened: no paths yet (the popup shows the agents and a loading row).
+                if self.mention.at.is_none() {
+                    self.mention.files = None;
+                }
+                self.mention.at = Some((range, query.clone()));
+                if self.overlay != Some(Overlay::Mention) {
+                    self.set_overlay(Some(Overlay::Mention), cx);
+                }
+                if fresh {
+                    self.selected = 0;
+                    self.mention.scroll.scroll_to_item(0);
+                    self.complete_files(query, cx);
+                }
+            }
+            None => {
+                self.mention.at = None;
+                if self.overlay == Some(Overlay::Mention) {
+                    self.set_overlay(None, cx);
+                }
+            }
+        }
+    }
+
+    /// The session's folder (paths in mentions are relative to it).
+    fn files_cwd(&self) -> Option<String> {
+        self.mirror()
+            .map(|m| m.info.cwd.clone())
+            .filter(|c| !c.is_empty())
+            .or_else(|| self.project.as_ref().map(|p| p.root.clone()))
+            .or_else(|| self.cwd.clone())
+    }
+
+    /// `files.complete` for `query` once typing pauses; a reply to an older query is dropped.
+    fn complete_files(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(cwd) = self.files_cwd() else {
+            self.mention.files = Some(Vec::new());
+            return;
+        };
+        self.mention.asked += 1;
+        let asked = self.mention.asked;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(mention::DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.mention.asked != asked {
+                    return;
+                }
+                this.run(
+                    cx,
+                    move |c| async move { c.files_complete(&cwd, &query, mention::FILES).await },
+                    move |this, result, _| {
+                        if this.mention.asked == asked {
+                            this.mention.files = Some(result.unwrap_or_default());
+                        }
+                    },
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn mention_choices(&self) -> Vec<mention::Choice> {
+        self.mention.at.as_ref().map(|(_, query)| mention::choices(&self.agent_choices(), query, self.mention.files.as_deref())).unwrap_or_default()
     }
 
     fn slash_choices(&self, cx: &gpui::App) -> Vec<&'static SlashCommand> {
@@ -1021,7 +1242,7 @@ impl AgentPane {
     fn agent_choices(&self) -> Vec<(String, String)> {
         let agents: Vec<(String, String)> =
             self.catalog.as_ref().map(|c| c.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect()).unwrap_or_default();
-        if agents.is_empty() { vec![("build".into(), String::new()), ("plan".into(), String::new())] } else { agents }
+        if agents.is_empty() { vec![("build".into(), String::new())] } else { agents }
     }
 
     /// Rows of the open overlay, for keyboard selection.
@@ -1034,6 +1255,7 @@ impl AgentPane {
             Some(Overlay::Effort) => EFFORTS.len(),
             Some(Overlay::Menu) => MENU_ROWS,
             Some(Overlay::Slash) => self.slash_choices(cx).len(),
+            Some(Overlay::Mention) => mention::pickable(&self.mention_choices()),
             None => 0,
         }
     }
@@ -1052,7 +1274,7 @@ impl AgentPane {
             self.overlay_anim.set(false, now, reduce);
         }
         self.overlay = overlay;
-        let nav = matches!(overlay, Some(Overlay::Slash | Overlay::Agents | Overlay::Effort | Overlay::Menu));
+        let nav = matches!(overlay, Some(Overlay::Slash | Overlay::Mention | Overlay::Agents | Overlay::Effort | Overlay::Menu));
         self.editor.update(cx, |e, _| e.nav = nav);
         cx.notify();
     }
@@ -1114,10 +1336,10 @@ impl AgentPane {
     }
 
     /// An input on its way: shown until the session has one more user item with its text.
-    fn pending(&self, text: &str) -> Pending {
+    fn pending(&self, text: &str, chips: Vec<mention::Chip>) -> Pending {
         let text = text.trim().to_owned();
         let users = user_count(&self.built, &text);
-        Pending { text, users, at: Instant::now(), id: None }
+        Pending { text, chips, users, at: Instant::now(), id: None }
     }
 
     /// The transcript plus the optimistic bubble of a prompt otto hasn't recorded yet.
@@ -1137,7 +1359,7 @@ impl AgentPane {
         self.queue_edits.retain(|id, edit| queue.iter().any(|q| &q.id == id && Some(q.delivery) != *edit));
         let mut rows = self.built.clone();
         if let Some(p) = self.optimistic.as_ref().filter(|p| !p.text.is_empty()) {
-            rows.push(Row::User { key: OPTIMISTIC.to_owned(), text: p.text.clone(), files: Vec::new() });
+            rows.push(Row::User { key: OPTIMISTIC.to_owned(), text: p.text.clone(), files: Vec::new(), mentions: p.chips.clone() });
         }
         self.sync_rows(rows);
     }
@@ -1149,8 +1371,18 @@ impl AgentPane {
 
     /// ⏎: sends; while a turn runs it steers (the agent reads it at its next step).
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Waiting for the host: the text stays until it can go.
+        if self.reconnecting() {
+            return;
+        }
         let delivery = if self.running { Delivery::Steer } else { Delivery::Queue };
-        let text = self.editor.read(cx).text().trim().to_owned();
+        let (text, chips) = {
+            let e = self.editor.read(cx);
+            let lead = e.text().len() - e.text().trim_start().len();
+            let text = e.text().trim().to_owned();
+            let chips = mention::within(e.text(), e.chips(), lead, lead + text.len());
+            (text, chips)
+        };
         let question = self.mirror().and_then(|m| m.pending_questions.first()).map(|q| q.question_id.clone());
         if let (Some(question), false) = (question, text.is_empty()) {
             self.editor.update(cx, |e, cx| e.set_text("", cx));
@@ -1176,7 +1408,7 @@ impl AgentPane {
         // Uploaded to the session first; the prompt names them (kept if the send fails).
         let files = std::mem::take(&mut self.attachments);
         let uploads: Vec<Attachment> = files.clone();
-        let words = (!text.is_empty()).then(|| InputPart::Text { text: text.clone() });
+        let words = mention::input(&text, &chips);
         if self.error.is_some() {
             // The shown session can't be opened: this prompt starts a new one.
             self.session_id = None;
@@ -1184,9 +1416,9 @@ impl AgentPane {
         // Feedback at once: a steer waits in the queue bar until it lands; a
         // prompt shows its bubble and the activity row before otto confirms.
         if delivery == Delivery::Steer {
-            self.steers.push(self.pending(&text));
+            self.steers.push(self.pending(&text, Vec::new()));
         } else {
-            self.optimistic = Some(self.pending(&text));
+            self.optimistic = Some(self.pending(&text, chips.clone()));
             self.entered.insert(OPTIMISTIC.to_owned(), Instant::now());
             self.sent_at = Some(Instant::now());
             self.running_since = Some(self.now());
@@ -1194,6 +1426,7 @@ impl AgentPane {
         }
         if let Some(id) = self.session_id.clone() {
             let steer = delivery == Delivery::Steer;
+            let chips = chips.clone();
             self.run(
                 cx,
                 move |c| async move {
@@ -1209,7 +1442,7 @@ impl AgentPane {
                         this.show_rows();
                     }
                     Ok(_) => {}
-                    Err(error) => this.unsend(text, files, error, cx),
+                    Err(error) => this.unsend(text, chips, files, error, cx),
                 },
             );
             return;
@@ -1240,14 +1473,14 @@ impl AgentPane {
                     this.follow(cx);
                     this.refresh_sessions(cx);
                 }
-                Err(error) => this.unsend(text, files, error, cx),
+                Err(error) => this.unsend(text, chips, files, error, cx),
             },
         );
     }
 
     /// A send failed: its optimistic feedback goes, the draft returns to the
-    /// composer with its attachments and the notice says why.
-    fn unsend(&mut self, text: String, files: Vec<Attachment>, error: String, cx: &mut Context<Self>) {
+    /// composer with its chips and attachments and the notice says why.
+    fn unsend(&mut self, text: String, chips: Vec<mention::Chip>, files: Vec<Attachment>, error: String, cx: &mut Context<Self>) {
         self.steers.retain(|s| s.text != text);
         if self.optimistic.as_ref().is_some_and(|p| p.text == text) {
             self.optimistic = None;
@@ -1259,7 +1492,7 @@ impl AgentPane {
         if self.attachments.is_empty() {
             self.attachments = files;
         }
-        self.editor.update(cx, |e, cx| e.set_text(text, cx));
+        self.editor.update(cx, |e, cx| e.set_content(text, chips, cx));
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
@@ -1276,10 +1509,13 @@ impl AgentPane {
         );
     }
 
-    /// Ask the same question again.
-    fn retry(&mut self, text: String, cx: &mut Context<Self>) {
+    /// Ask the user message `key` again: its text and mentions (its files aren't sent again).
+    fn retry(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(id) = self.session_id.clone() else { return };
-        let input = vec![InputPart::Text { text }];
+        let Some(input) = self.mirror().and_then(|m| m.items.iter().find(|i| i.id == key)).map(mention::retry_input) else { return };
+        if input.is_empty() {
+            return;
+        }
         self.list.set_follow_mode(gpui::FollowMode::Tail);
         self.run(
             cx,
@@ -1503,7 +1739,7 @@ impl AgentPane {
                 let focus = self.filter.read(cx).focus.clone();
                 window.focus(&focus, cx);
             }
-            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash => self.focus_composer(window, cx),
+            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash | Overlay::Mention => self.focus_composer(window, cx),
         }
         cx.notify();
     }
@@ -1511,6 +1747,9 @@ impl AgentPane {
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlay == Some(Overlay::Slash) {
             self.slash_dismissed = true;
+        }
+        if self.overlay == Some(Overlay::Mention) {
+            self.mention.dismissed = self.mention.at.as_ref().map(|a| a.0.start);
         }
         self.set_overlay(None, cx);
         self.focus_composer(window, cx);
@@ -1575,14 +1814,21 @@ impl AgentPane {
             Some(Overlay::Menu) => match index {
                 0 => self.set_mode(ApprovalMode::Auto, cx),
                 1 => self.set_mode(ApprovalMode::AskOnEffects, cx),
-                2 => self.set_mode(ApprovalMode::Plan, cx),
-                3 => self.new_session(window, cx),
-                4 => self.open_overlay(Overlay::Sessions, window, cx),
+                2 => self.new_session(window, cx),
+                3 => self.open_overlay(Overlay::Sessions, window, cx),
                 _ => self.open_signin(window, cx),
             },
             Some(Overlay::Slash) => {
                 if let Some(c) = self.slash_choices(cx).get(index) {
                     self.run_slash(c.act, window, cx);
+                }
+            }
+            Some(Overlay::Mention) => {
+                // The `@word` at the caret now (it may have moved since the popup opened).
+                if let (Some((kind, target)), Some((range, _))) =
+                    (self.mention_choices().get(index).and_then(mention::Choice::mention), self.mention_query(cx))
+                {
+                    self.editor.update(cx, |e, cx| e.insert_chip(range, kind, target, cx));
                 }
             }
             None => {}
@@ -1707,6 +1953,8 @@ const AWAIT: Duration = Duration::from_secs(15);
 /// An input sent but not yet in the transcript.
 struct Pending {
     text: String,
+    /// Its mentions, as the optimistic bubble shows them.
+    chips: Vec<mention::Chip>,
     /// User items with this text when it was sent.
     users: usize,
     at: Instant,
@@ -1725,9 +1973,16 @@ fn user_count(rows: &[Row], text: &str) -> usize {
     rows.iter().filter(|r| matches!(r, Row::User { text: t, .. } if t == text)).count()
 }
 
-/// The text parts of an input, joined.
+/// The text of an input, mentions as `@target`.
 pub(super) fn input_text(input: &[InputPart]) -> String {
-    input.iter().filter_map(|p| if let InputPart::Text { text } = p { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ")
+    input
+        .iter()
+        .filter_map(|p| match p {
+            InputPart::Text { text } => Some(text.clone()),
+            InputPart::Mention { target, .. } => Some(format!("@{target}")),
+            _ => None,
+        })
+        .collect()
 }
 
 fn session_label(s: &SessionInfo) -> String {
@@ -1740,7 +1995,7 @@ fn first_choice(overlay: Overlay) -> usize {
 }
 
 /// A project's folder name (the UI never shows paths).
-fn project_name(root: &str) -> String {
+pub(crate) fn project_name(root: &str) -> String {
     let root = root.trim_end_matches('/');
     root.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("/").to_owned()
 }
@@ -1759,7 +2014,7 @@ fn project_names<'a>(roots: impl Iterator<Item = &'a str> + Clone) -> Vec<(Strin
 }
 
 /// A short, user-facing reason.
-fn describe(error: &ClientError) -> String {
+pub(crate) fn describe(error: &ClientError) -> String {
     match error {
         ClientError::Io { kind: std::io::ErrorKind::NotFound, .. } => "otto is not available".to_owned(),
         ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout => "Can't reach otto".to_owned(),
@@ -1813,10 +2068,35 @@ mod tests {
         let names = |q: &str| slash_matches(q).into_iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(names("new")[0], "new");
         assert!(names("mode").iter().all(|n| n.starts_with("mode") || n.starts_with("model")));
-        assert_eq!(names("mode plan")[0], "mode plan");
+        assert_eq!(names("mode ask")[0], "mode ask");
+        assert!(!SLASH.iter().any(|c| c.name.contains("plan")), "plan mode is gone");
         assert!(names("zzz").is_empty());
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
+        }
+    }
+
+    #[test]
+    fn remote_failures_say_why_without_raw_errors() {
+        let copy = |code| Failure::of(code).copy("mini");
+        assert_eq!(copy(Some(TunnelErrCode::NotFound)), ("mini doesn't have otto yet. Update silo there.".to_owned(), false));
+        assert_eq!(copy(Some(TunnelErrCode::Unavailable)), ("Couldn't start otto on mini".to_owned(), true));
+        for other in [None, Some(TunnelErrCode::Busy), Some(TunnelErrCode::Unauthorized), Some(TunnelErrCode::Unknown)] {
+            assert_eq!(copy(other), ("Couldn't reach otto on mini".to_owned(), true), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_reconnect_strip_shows_while_a_remote_host_or_its_otto_is_away() {
+        // Remote: the host down, or the follower disconnected.
+        assert!(reconnecting(true, false, None));
+        assert!(reconnecting(true, false, Some(true)));
+        assert!(reconnecting(true, true, Some(false)));
+        assert!(!reconnecting(true, true, Some(true)));
+        assert!(!reconnecting(true, true, None), "no session followed, the host up");
+        // This Mac keeps today's behaviour.
+        for (up, follower) in [(true, Some(false)), (false, None), (true, None)] {
+            assert!(!reconnecting(false, up, follower));
         }
     }
 

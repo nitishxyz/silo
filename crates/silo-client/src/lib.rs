@@ -2,6 +2,7 @@
 //! and spawn, per-block data streams and the local terminal mirror.
 
 pub mod cache;
+pub mod callback;
 mod control;
 mod data;
 pub mod hosts;

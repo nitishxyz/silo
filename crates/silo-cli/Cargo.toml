@@ -21,6 +21,7 @@ silo-server.workspace = true
 silo-client.workspace = true
 silo-tools.workspace = true
 otto-client.workspace = true
+otto-cli.workspace = true
 otto-proto.workspace = true
 tokio-util.workspace = true
 toml_edit = "0.25"

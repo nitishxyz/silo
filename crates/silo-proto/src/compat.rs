@@ -39,6 +39,10 @@ pub mod feature {
     /// The app shows approval cards (`approval.requested`) and answers
     /// them: only such apps are asked to approve.
     pub const APPROVALS: &str = "approvals";
+    /// The server tunnels to its otto daemon (`TunnelOpen.service`
+    /// `"otto"`). Sent only by servers that registered that service, so
+    /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
+    pub const OTTO: &str = "otto";
 }
 
 /// Everything this build supports beyond protocol 1.
