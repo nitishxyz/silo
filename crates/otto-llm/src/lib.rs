@@ -40,4 +40,4 @@ pub use model::{Caps, ModelInfo, Pricing, ToolFamily};
 #[cfg(feature = "client")]
 pub use providers::Providers;
 pub use request::{CacheOptions, Compaction, Effort, ProviderOptions, Reasoning, Request, ToolChoice, ToolDef, ToolKind};
-pub use types::{CallKind, Citation, Item, ItemId, Media, MediaSource, Opaque, Origin, Part, ProviderId, ResultPart, Role};
+pub use types::{CallKind, Citation, Item, ItemId, Media, MediaSource, Mention, MentionKind, Opaque, Origin, Part, ProviderId, ResultPart, Role};

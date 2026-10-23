@@ -12,8 +12,12 @@ use gpui::{
 
 use crate::blink::Blink;
 
+use super::mention::Chip;
+
 pub enum EditorEvent {
     Changed,
+    /// The caret or selection moved without an edit (keys, a click).
+    Moved,
     Submit,
     Escape,
     /// ↑ / ↓ / Tab while [`Editor::nav`] is on (a menu over the composer).
@@ -58,6 +62,10 @@ pub struct Editor {
     pub nav: bool,
     /// Pasted files and images become [`EditorEvent::Files`] / [`EditorEvent::Image`].
     pub files: bool,
+    /// ⏎ inserts a newline and ⌘⏎ submits (a document, not a composer).
+    pub multiline: bool,
+    /// `@` mention chips over the text: whole tokens for the caret and backspace.
+    chips: Vec<Chip>,
     grow: Rc<Cell<Grow>>,
 }
 
@@ -142,6 +150,8 @@ impl Editor {
             animate_growth: false,
             nav: false,
             files: false,
+            multiline: false,
+            chips: Vec::new(),
             grow: Rc::default(),
         }
     }
@@ -184,11 +194,44 @@ impl Editor {
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.set_content(text, Vec::new(), cx);
+    }
+
+    /// The text with its chips (a draft put back).
+    pub fn set_content(&mut self, text: impl Into<String>, chips: Vec<Chip>, cx: &mut Context<Self>) {
         self.text = text.into();
+        self.chips = chips;
         self.selection = self.text.len()..self.text.len();
         self.marked = None;
         self.scroll = px(0.0);
         self.hscroll = px(0.0);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn chips(&self) -> &[Chip] {
+        &self.chips
+    }
+
+    pub fn caret(&self) -> usize {
+        self.cursor()
+    }
+
+    /// Replace `range` (an `@query`) with a chip for `target`, then a space unless one follows
+    /// (a folder gets none: typing on opens it).
+    pub fn insert_chip(&mut self, range: Range<usize>, kind: otto_proto::MentionKind, target: String, cx: &mut Context<Self>) {
+        if self.read_only || range.end > self.text.len() {
+            return;
+        }
+        let chip = Chip::new(range.start, kind, target);
+        let spaced = self.text[range.end..].starts_with(char::is_whitespace);
+        let label = format!("@{}", chip.target);
+        let text = if chip.folder() || spaced { label } else { format!("{label} ") };
+        self.edit(range, &text);
+        let caret = if spaced && !chip.folder() { chip.range.end + 1 } else { chip.range.start + text.len() };
+        self.chips.push(chip);
+        self.chips.sort_by_key(|c| c.range.start);
+        self.selection = caret..caret;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -201,6 +244,7 @@ impl Editor {
         self.selection = offset..offset;
         self.reversed = false;
         self.blink.reset();
+        cx.emit(EditorEvent::Moved);
         cx.notify();
     }
 
@@ -215,10 +259,12 @@ impl Editor {
             self.selection = self.selection.end..self.selection.start;
         }
         self.blink.reset();
+        cx.emit(EditorEvent::Moved);
         cx.notify();
     }
 
     fn go(&mut self, offset: usize, extend: bool, cx: &mut Context<Self>) {
+        let offset = snap(&self.chips, offset, offset > self.cursor());
         if extend { self.select_to(offset, cx) } else { self.move_to(offset, cx) }
     }
 
@@ -226,6 +272,13 @@ impl Editor {
         if self.read_only {
             return;
         }
+        self.edit(range, text);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Replace `range` with `text`, chips following along (without the change event).
+    fn edit(&mut self, range: Range<usize>, text: &str) {
         let flat;
         let text = if self.single_line && text.contains(['\n', '\r']) {
             flat = text.replace(['\n', '\r'], "");
@@ -233,14 +286,13 @@ impl Editor {
         } else {
             text
         };
+        shift(&mut self.chips, range.clone(), text);
         self.text.replace_range(range.clone(), text);
         let end = range.start + text.len();
         self.selection = end..end;
         self.reversed = false;
         self.marked = None;
         self.blink.reset();
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
     }
 
     fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -250,6 +302,7 @@ impl Editor {
 
     fn delete(&mut self, to: usize, cx: &mut Context<Self>) {
         let range = if self.selection.is_empty() { to.min(self.cursor())..to.max(self.cursor()) } else { self.selection.clone() };
+        let range = widen(&self.chips, range);
         if !range.is_empty() {
             self.replace(range, "", cx);
         }
@@ -285,7 +338,8 @@ impl Editor {
             "up" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Up)),
             "down" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Down)),
             "tab" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Tab)),
-            "enter" if m.shift || m.alt => self.insert("\n", cx),
+            "enter" if m.shift || m.alt || (self.multiline && !m.platform) => self.insert("\n", cx),
+            "enter" if self.multiline => cx.emit(EditorEvent::Submit),
             "enter" if !m.platform && !m.control => cx.emit(EditorEvent::Submit),
             "escape" => cx.emit(EditorEvent::Escape),
             "backspace" => {
@@ -335,7 +389,7 @@ impl Editor {
             "x" if m.platform => {
                 if let Some(text) = self.selected() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    let range = self.selection.clone();
+                    let range = widen(&self.chips, self.selection.clone());
                     self.replace(range, "", cx);
                 }
             }
@@ -535,19 +589,30 @@ impl IntoElement for EditorElement {
     }
 }
 
-fn runs(text: &str, marked: Option<&Range<usize>>, font: gpui::Font, color: Hsla) -> Vec<TextRun> {
+/// Runs of `text`: the marked (IME) range underlined, the bytes at `hidden` (chips' `@`, drawn as icons) clear.
+fn runs(text: &str, marked: Option<&Range<usize>>, hidden: &[usize], font: gpui::Font, color: Hsla) -> Vec<TextRun> {
     let run = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
-    match marked {
-        Some(m) if m.end <= text.len() => [
-            TextRun { len: m.start, ..run.clone() },
-            TextRun { len: m.end - m.start, underline: Some(UnderlineStyle { color: Some(color), thickness: px(1.0), wavy: false }), ..run.clone() },
-            TextRun { len: text.len() - m.end, ..run },
-        ]
-        .into_iter()
+    let marked = marked.filter(|m| m.end <= text.len());
+    let mut cuts = vec![0, text.len()];
+    cuts.extend(marked.iter().flat_map(|m| [m.start, m.end]));
+    cuts.extend(hidden.iter().filter(|h| **h < text.len()).flat_map(|h| [*h, h + 1]));
+    cuts.sort_unstable();
+    cuts.dedup();
+    let runs: Vec<TextRun> = cuts
+        .windows(2)
+        .map(|w| TextRun {
+            len: w[1] - w[0],
+            color: if hidden.contains(&w[0]) && w[1] == w[0] + 1 { Hsla { a: 0.0, ..color } } else { color },
+            underline: marked.filter(|m| m.start <= w[0] && w[1] <= m.end).map(|_| UnderlineStyle {
+                color: Some(color),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            ..run.clone()
+        })
         .filter(|r| r.len > 0)
-        .collect(),
-        _ => vec![run],
-    }
+        .collect();
+    if runs.is_empty() { vec![run] } else { runs }
 }
 
 /// `width`: wrap there; `None`: one unwrapped line (single-line fields scroll sideways).
@@ -557,8 +622,9 @@ fn shape(text: &str, runs: &[TextRun], size: Pixels, width: Option<Pixels>, wind
 
 /// The placeholder on one line, cut with `…` to fit `width` (it never wraps).
 fn fitted(text: &str, font: &gpui::Font, color: Hsla, size: Pixels, width: Pixels, window: &Window) -> String {
-    let wide =
-        |t: &str| shape(t, &runs(t, None, font.clone(), color), size, None, window).iter().map(|l| l.size(px(0.0)).width).fold(px(0.0), Pixels::max);
+    let wide = |t: &str| {
+        shape(t, &runs(t, None, &[], font.clone(), color), size, None, window).iter().map(|l| l.size(px(0.0)).width).fold(px(0.0), Pixels::max)
+    };
     if wide(text) <= width {
         return text.to_owned();
     }
@@ -616,7 +682,7 @@ impl Element for EditorElement {
                 return size(width.unwrap_or(px(0.0)), px(grow.height(f32::from(lh), max, Instant::now(), reduce)));
             }
             let lines = width.filter(|_| !single && !placeholder).map_or(1, |w| {
-                let runs = runs(&text, None, font.clone(), color);
+                let runs = runs(&text, None, &[], font.clone(), color);
                 shape(&text, &runs, font_size, Some(w), window).iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1)
             });
             #[allow(clippy::cast_precision_loss)]
@@ -646,16 +712,18 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (text, marked, empty, focus, single) = {
+        let (text, marked, empty, focus, single, chips) = {
             let e = self.editor.read(cx);
             let empty = e.text.is_empty();
             let marked = e.marked.as_ref().map(|m| e.disp(m.start)..e.disp(m.end));
-            (if empty { e.placeholder.to_string() } else { e.display() }, marked, empty, e.focus.clone(), e.single_line)
+            let chips = if empty || e.mask { Vec::new() } else { e.chips.clone() };
+            (if empty { e.placeholder.to_string() } else { e.display() }, marked, empty, e.focus.clone(), e.single_line, chips)
         };
         let color = if empty { self.colors.placeholder } else { self.colors.text };
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
         let text = if empty { fitted(&text, &window.text_style().font(), color, font_size, bounds.size.width, window) } else { text };
-        let runs = runs(&text, marked.as_ref(), window.text_style().font(), color);
+        let hidden: Vec<usize> = chips.iter().map(|c| c.range.start).collect();
+        let runs = runs(&text, marked.as_ref(), &hidden, window.text_style().font(), color);
         let wrap = (!single && !empty).then_some(bounds.size.width);
         let lines = shape(&text, &runs, font_size, wrap, window);
         let line_height = window.line_height();
@@ -728,6 +796,10 @@ impl Element for EditorElement {
                     window.paint_quad(row(b.y, px(0.0), b.x));
                 }
             }
+            if !chips.is_empty() {
+                let origin = layout.origin;
+                super::mention::paint(&chips, |i| (i <= text.len()).then(|| origin + layout.position(i)), line_height, window, cx);
+            }
             for (line, top) in layout.lines.iter().zip(&layout.tops) {
                 let origin = layout.origin + point(px(0.0), *top);
                 if origin.y > bounds.bottom() || origin.y + line.size(line_height).height < bounds.top() {
@@ -796,6 +868,7 @@ impl EntityInputHandler for Editor {
             return;
         }
         let range = range.as_ref().map(|r| self.range_from_utf16(r)).or(self.marked.clone()).unwrap_or(self.selection.clone());
+        shift(&mut self.chips, range.clone(), text);
         self.text.replace_range(range.clone(), text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
         self.selection = match selected {
@@ -867,6 +940,39 @@ fn word_end(text: &str, at: usize) -> usize {
     at + skip + rest.find(|c: char| !is_word(c)).unwrap_or(rest.len())
 }
 
+// ---- chips ----
+
+/// Chips after `range` became `text`: those it touches go, as does a folder typed onto (it is a query
+/// again); later ones move.
+fn shift(chips: &mut Vec<Chip>, range: Range<usize>, text: &str) {
+    chips.retain_mut(|c| {
+        if c.range.end <= range.start {
+            return !(c.folder() && range.is_empty() && c.range.end == range.start && text.starts_with(|ch: char| !ch.is_whitespace()));
+        }
+        if c.range.start >= range.end {
+            let at = |offset: usize| offset - range.end + range.start + text.len();
+            c.range = at(c.range.start)..at(c.range.end);
+            return true;
+        }
+        false
+    });
+}
+
+/// `range` grown to whole chips (a chip is deleted as one).
+fn widen(chips: &[Chip], mut range: Range<usize>) -> Range<usize> {
+    for c in chips {
+        if c.range.start < range.end && range.start < c.range.end {
+            range = range.start.min(c.range.start)..range.end.max(c.range.end);
+        }
+    }
+    range
+}
+
+/// A caret never rests inside a chip: it goes to the edge it was heading for.
+fn snap(chips: &[Chip], offset: usize, forward: bool) -> usize {
+    chips.iter().find(|c| c.range.start < offset && offset < c.range.end).map_or(offset, |c| if forward { c.range.end } else { c.range.start })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,5 +991,47 @@ mod tests {
         assert_eq!(prev_char(u, u.len()), 3);
         assert_eq!(next_char(u, 1), 3);
         assert_eq!(next_char(u, u.len()), u.len());
+    }
+
+    #[test]
+    fn chips_move_with_edits_and_go_whole() {
+        use otto_proto::MentionKind::{Agent, File};
+        let chips = || vec![Chip::new(4, Agent, "build".into()), Chip::new(11, File, "src/".into())];
+        // "ask @build @src/": typing before both moves them, typing inside one makes it text.
+        let mut c = chips();
+        shift(&mut c, 0..0, "hey ");
+        assert_eq!((c[0].range.clone(), c[1].range.clone()), (8..14, 15..20));
+        let mut c = chips();
+        shift(&mut c, 6..6, "x");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].range, 12..17);
+        // Replacing a range that ends at a chip's start keeps it; one covering part of it drops it.
+        let mut c = chips();
+        shift(&mut c, 0..4, "");
+        assert_eq!(c[0].range, 0..6);
+        let mut c = chips();
+        shift(&mut c, 3..5, "");
+        assert_eq!(c.len(), 1);
+        // Typing right after a folder opens it again; a space, or after an agent, keeps the chip.
+        let mut c = chips();
+        shift(&mut c, 16..16, "m");
+        assert_eq!(c.len(), 1);
+        let mut c = chips();
+        shift(&mut c, 16..16, " ");
+        assert_eq!(c.len(), 2);
+        let mut c = chips();
+        shift(&mut c, 10..10, "!");
+        assert_eq!((c.len(), c[0].range.clone()), (2, 4..10));
+        // Backspace at a chip's end, or delete at its start, takes it whole.
+        let c = chips();
+        assert_eq!(widen(&c, 9..10), 4..10);
+        assert_eq!(widen(&c, 4..5), 4..10);
+        assert_eq!(widen(&c, 2..12), 2..16);
+        assert_eq!(widen(&c, 0..3), 0..3);
+        // The caret skips over chips.
+        assert_eq!(snap(&c, 6, true), 10);
+        assert_eq!(snap(&c, 6, false), 4);
+        assert_eq!(snap(&c, 4, true), 4);
+        assert_eq!(snap(&c, 10, false), 10);
     }
 }

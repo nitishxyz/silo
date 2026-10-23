@@ -63,11 +63,19 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
     cx.emit(Event::TurnFinished { turn, status, usage }, Projection::TurnStatus(stored), turn, 0).await?;
     result
 }
-async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<Vec<Part>> {
+/// The input as a user item's parts and the `@` mentions in their text.
+async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<(Vec<Part>, Vec<Mention>)> {
     let mut parts = Vec::new();
+    let mut mentions = Vec::new();
+    let mut run = Vec::new();
     for part in input {
+        if matches!(part, InputPart::Text { .. } | InputPart::Mention { .. }) {
+            run.push(part);
+            continue;
+        }
+        text_run(cx, std::mem::take(&mut run), &mut parts, &mut mentions)?;
         parts.push(match part {
-            InputPart::Text { text } => Part::text(crate::commands::expand(&cx.root, &cx.runtime.0.config.user_config_dir, &text)?),
+            InputPart::Text { .. } | InputPart::Mention { .. } => continue,
             InputPart::Image { mime, data_base64 } => Part::Image(Media { mime, source: MediaSource::Base64 { data: data_base64 }, name: None }),
             InputPart::File { path } => {
                 Part::text(format!("Attached file {path}:\n{}", tokio::fs::read_to_string(std::path::Path::new(&cx.row.cwd).join(&path)).await?))
@@ -78,7 +86,80 @@ async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<Vec<Part>> {
             }
         });
     }
-    Ok(parts)
+    text_run(cx, run, &mut parts, &mut mentions)?;
+    Ok((parts, mentions))
+}
+/// Text parts in a row: each its own part, or with a mention among them one part with each
+/// mention as `@target`, its range in [`Item::text`] noted and checked (an unknown agent, a missing path).
+fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: &mut Vec<Mention>) -> Result<()> {
+    let user = &cx.runtime.0.config.user_config_dir;
+    if !run.iter().any(|p| matches!(p, InputPart::Mention { .. })) {
+        for part in run {
+            if let InputPart::Text { text } = part {
+                parts.push(Part::text(crate::commands::expand(&cx.root, user, &text)?));
+            }
+        }
+        return Ok(());
+    }
+    let base: usize = parts.iter().map(|p| if let Part::Text { text, .. } = p { text.len() } else { 0 }).sum();
+    let agents: Vec<String> = crate::agents::discover(&cx.root, user).into_iter().map(|a| a.name).collect();
+    let mut text = String::new();
+    for part in run {
+        match part {
+            InputPart::Text { text: t } => text.push_str(&t),
+            InputPart::Mention { kind, target } => {
+                let start = base + text.len();
+                text.push('@');
+                text.push_str(&target);
+                let found = match kind {
+                    MentionKind::Agent => agents.contains(&target),
+                    MentionKind::File => project_path(&cx.row.cwd, &target),
+                };
+                mentions.push(Mention { kind, range: [start, base + text.len()], missing: !found, target });
+            }
+            _ => {}
+        }
+    }
+    parts.push(Part::text(crate::commands::expand(&cx.root, user, &text)?));
+    Ok(())
+}
+/// `target` is a file, or a folder when it ends in `/`, inside `cwd`.
+fn project_path(cwd: &str, target: &str) -> bool {
+    let relative = std::path::Path::new(target.trim_end_matches('/'));
+    let inside = !target.is_empty() && relative.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
+    inside && std::fs::metadata(std::path::Path::new(cwd).join(relative)).is_ok_and(|m| !target.ends_with('/') || m.is_dir())
+}
+/// The model's note on a user item's mentions (those found): which agents to delegate to, which paths to read.
+pub(crate) fn mention_note(mentions: &[Mention]) -> Option<String> {
+    let named = |kind: MentionKind| {
+        let mut names: Vec<&str> = Vec::new();
+        for m in mentions.iter().filter(|m| m.kind == kind && !m.missing) {
+            if !names.contains(&m.target.as_str()) {
+                names.push(&m.target);
+            }
+        }
+        names
+    };
+    let (agents, files) = (named(MentionKind::Agent), named(MentionKind::File));
+    let mut lines = Vec::new();
+    if let [one] = agents.as_slice() {
+        lines.push(format!("Mentioned agents: {one}. Delegate the matching part with subagent {{agent:\"{one}\"}}."));
+    } else if !agents.is_empty() {
+        lines.push(format!("Mentioned agents: {}. Delegate the matching parts with subagent {{agent:\"<name>\"}}.", agents.join(", ")));
+    }
+    if !files.is_empty() {
+        lines.push(format!("Mentioned files: {} (paths relative to the project; read them as needed).", files.join(", ")));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+/// User items with mentions get their note after the text, for the model only.
+pub(crate) fn noted(mut items: Vec<Item>) -> Vec<Item> {
+    for item in &mut items {
+        if let Some(note) = mention_note(&item.mentions) {
+            item.parts.push(Part::text(note));
+        }
+    }
+    items
 }
 /// An attachment's note, then the image, downscaled, when it is one (kept for the transcript; a model
 /// without vision isn't sent it: [`visible`]).
@@ -127,8 +208,15 @@ async fn input(cx: &Context, input: QueuedInput, turn: i64, step: i64) -> Result
     if input.input.is_empty() {
         return Ok(true);
     }
-    let prompt =
-        input.input.iter().filter_map(|p| if let InputPart::Text { text } = p { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+    let prompt = input
+        .input
+        .iter()
+        .filter_map(|p| match p {
+            InputPart::Text { text } => Some(text.clone()),
+            InputPart::Mention { target, .. } => Some(format!("@{target}")),
+            _ => None,
+        })
+        .collect::<String>();
     let hook = apply_hook(cx, "UserPromptSubmit", "", serde_json::json!({"prompt":prompt}), turn, step).await?;
     if let Some(reason) = hook.deny.or(hook.stop) {
         cx.emit(
@@ -140,8 +228,10 @@ async fn input(cx: &Context, input: QueuedInput, turn: i64, step: i64) -> Result
         .await?;
         return Ok(false);
     }
-    let parts = parts(cx, input.input).await?;
-    cx.item(Item::new(input.id, Role::User, parts), turn, step).await?;
+    let (parts, mentions) = parts(cx, input.input).await?;
+    let mut item = Item::new(input.id, Role::User, parts);
+    item.mentions = mentions;
+    cx.item(item, turn, step).await?;
     Ok(true)
 }
 /// Hand pending steering input to the live model stream, in arrival order.
@@ -151,9 +241,11 @@ async fn hand_off(cx: &Context, session: &dyn ModelSession, built: &mut std::col
     let mut handed = Vec::new();
     for next in queued.by_ref() {
         let outcome = match parts(cx, next.input.clone()).await {
-            Ok(parts) => {
-                let item = Item::new(next.id.clone(), Role::User, parts);
-                match session.steer(&next.id, item.parts.clone()).await {
+            Ok((parts, mentions)) => {
+                let mut item = Item::new(next.id.clone(), Role::User, parts);
+                item.mentions = mentions;
+                let shown = noted(vec![item.clone()]).remove(0).parts;
+                match session.steer(&next.id, shown).await {
                     Ok(true) => {
                         built.insert(next.id.clone(), item);
                         handed.push(next);
@@ -269,7 +361,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             }
             let presentation = spec.presentation(&family);
             let name = presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone());
-            if spec.loading != otto_tools::Loading::Deferred || loaded.contains(&spec.name) {
+            if !crate::tools::behind_loader(&live, spec) || loaded.contains(&spec.name) {
                 let kind =
                     presentation.and_then(|p| p.freeform.clone()).map_or(ToolKind::Function, |format| ToolKind::Custom { format: Some(format) });
                 if spec.mode == otto_tools::CallMode::Async && matches!(kind, ToolKind::Function | ToolKind::Custom { .. }) {
@@ -302,7 +394,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         for queued in steer {
             input(&cx, queued, turn, step).await?;
         }
-        let items = visible(crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window), live.model.info().caps.vision);
+        let items = visible(noted(crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window)), live.model.info().caps.vision);
         let compaction = crate::compaction::threshold(&live, &items);
         let mut provider = ProviderOptions::default();
         let caps = &live.model.info().caps;

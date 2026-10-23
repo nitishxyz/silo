@@ -1,8 +1,8 @@
-//! Attachments: stored per session, noted in the prompt (images downscaled),
+//! Prompt input. Attachments: stored per session, noted in the prompt (images downscaled),
 //! copied by `copy_attachment`, removed with the session.
 use otto_core::*;
 use otto_llm::*;
-use otto_proto::{Delivery, Event, InputPart};
+use otto_proto::{Delivery, Event, InputPart, MentionKind};
 use otto_store::Store;
 use std::{
     collections::VecDeque,
@@ -235,5 +235,54 @@ async fn pdfs_go_as_documents_to_models_that_read_them() {
     assert!(
         matches!(&content[1], ResultPart::Document(Media { mime, name, .. }) if mime == "application/pdf" && name.as_deref() == Some("spec.pdf"))
     );
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mentions_are_noted_for_the_model_and_kept_on_the_user_item() {
+    let (dir, r, s, model) = setup(false).await;
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+    model.scripts.lock().unwrap().push_back(text("ok"));
+    let notes = r.attachment_put(&s.id, "notes.txt", "text/plain", b"hi".to_vec(), None).await.unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let mention = |kind, target: &str| InputPart::Mention { kind, target: target.into() };
+    let words = |text: &str| InputPart::Text { text: text.into() };
+    let input = vec![
+        InputPart::Attachment { id: notes.id.clone() },
+        words("ask "),
+        mention(MentionKind::Agent, "build"),
+        words(" about "),
+        mention(MentionKind::File, "src/main.rs"),
+        words(", "),
+        mention(MentionKind::File, "src/"),
+        words(" and "),
+        mention(MentionKind::Agent, "nobody"),
+        words(" "),
+        mention(MentionKind::File, "gone.rs"),
+        mention(MentionKind::File, "src/main.rs/"),
+    ];
+    r.prompt(&s.id, input, Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let said = "ask @build about @src/main.rs, @src/ and @nobody @gone.rs@src/main.rs/";
+    // The model: the attachment's note, the text as one part, then the note on what was found.
+    let parts = model.requests.lock().unwrap()[0].items[0].parts.clone();
+    assert_eq!(parts.len(), 3, "{parts:?}");
+    assert_eq!(parts[1], Part::text(said));
+    assert_eq!(
+        parts[2],
+        Part::text(
+            "Mentioned agents: build. Delegate the matching part with subagent {agent:\"build\"}.\nMentioned files: src/main.rs, src/ (paths relative to the project; read them as needed)."
+        )
+    );
+    // Stored without the note; the mentions keep their place in the item's text and what wasn't found.
+    let item = s.view().await.unwrap().items[0].clone();
+    assert_eq!(item.parts.len(), 2);
+    let found: Vec<(&str, bool)> = item.mentions.iter().map(|m| (m.target.as_str(), m.missing)).collect();
+    assert_eq!(found, [("build", false), ("src/main.rs", false), ("src/", false), ("nobody", true), ("gone.rs", true), ("src/main.rs/", true)]);
+    let text = item.text();
+    for m in &item.mentions {
+        assert_eq!(&text[m.range[0]..m.range[1]], format!("@{}", m.target));
+    }
     r.shutdown().await.unwrap();
 }

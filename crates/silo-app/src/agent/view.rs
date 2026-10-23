@@ -358,7 +358,7 @@ fn ago(ms: i64) -> String {
     }
 }
 
-pub(super) fn provider_name(provider: &str) -> String {
+pub(crate) fn provider_name(provider: &str) -> String {
     match provider {
         "anthropic" => "Anthropic".into(),
         "openai" => "OpenAI".into(),
@@ -382,7 +382,6 @@ fn mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Auto => "Auto",
         ApprovalMode::AskOnEffects | ApprovalMode::AskAll => "Ask",
-        ApprovalMode::Plan => "Plan",
     }
 }
 
@@ -662,17 +661,29 @@ impl AgentPane {
         let centered = |child: AnyElement| {
             div().size_full().flex().flex_col().items_center().justify_center().px(px(24.0)).pb(px(pad)).child(child).into_any_element()
         };
+        let otto = self.host.as_ref().map_or_else(|| "otto".to_owned(), |host| format!("otto on {host}"));
+        let retry = |cx: &mut Context<Self>| {
+            chip("agent-retry", "Try again").mt(px(12.0)).text_color(rgb(theme::accent())).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.conn = Conn::Connecting;
+                this.load(cx);
+                cx.notify();
+            }))
+        };
         match &self.conn {
-            Conn::Connecting => return (1, centered(empty_state("Connecting to otto…", None).into_any_element())),
+            // A host that is down: the pane loads once it is back.
+            Conn::Connecting if self.reconnecting() => {
+                let text = format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default());
+                return (1, centered(empty_state(text, None).into_any_element()));
+            }
+            Conn::Connecting => return (1, centered(empty_state(format!("Connecting to {otto}…"), None).into_any_element())),
             Conn::Failed(error) => {
-                let retry = chip("agent-retry", "Try again").mt(px(12.0)).text_color(rgb(theme::accent())).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.conn = Conn::Connecting;
-                        this.load(cx);
-                        cx.notify();
-                    },
-                ));
-                return (2, centered(empty_state("Can't reach otto", Some(error.clone())).child(retry).into_any_element()));
+                let state = empty_state(format!("Can't reach {otto}"), Some(error.clone())).child(retry(cx));
+                return (2, centered(state.into_any_element()));
+            }
+            Conn::Unreachable(failure) => {
+                let (text, can_retry) = failure.copy(self.host.as_deref().unwrap_or_default());
+                let state = empty_state(text, None).when(can_retry, |s| s.child(retry(cx)));
+                return (2, centered(state.into_any_element()));
             }
             Conn::Ready => {}
         }
@@ -862,7 +873,7 @@ impl AgentPane {
             (Some(Row::Group(_)), Row::Group(_)) => 4.0,
         };
         let content = match &row {
-            Row::User { text, files, .. } => self.render_user(text, files, cx),
+            Row::User { text, files, mentions, .. } => self.render_user(text, files, mentions, cx),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
         };
@@ -1236,7 +1247,7 @@ impl AgentPane {
         let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. }));
         let actions = answer.then(|| {
             let copy = text.to_owned();
-            let question = self.rows[..ix].iter().rev().find_map(|r| if let Row::User { text, .. } = r { Some(text.clone()) } else { None });
+            let question = self.rows[..ix].iter().rev().find_map(|r| if let Row::User { key, .. } = r { Some(key.clone()) } else { None });
             let group = SharedString::from(format!("answer-{key}"));
             div()
                 .flex()
@@ -1253,7 +1264,7 @@ impl AgentPane {
                 .children(question.map(|q| {
                     icon_button(gpui::ElementId::Name(format!("retry-{key}").into()), "rotate-ccw", 13.0, 24.0, theme::muted())
                         .tooltip(Tooltip::text("Retry"))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(q.clone(), cx)))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(&q, cx)))
                 }))
         });
         let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
@@ -1308,7 +1319,27 @@ impl AgentPane {
             .notice
             .clone()
             .map(|n| div().pb(px(8.0)).px(px(pill_input::HALO + pill_input::TEXT_X)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
-        let popovers: Vec<AnyElement> = [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Menu, Overlay::Slash]
+        // Sending waits for the host; the transcript and the text stay.
+        let strip = self.reconnecting().then(|| {
+            div()
+                .pb(px(8.0))
+                .px(px(pill_input::HALO + pill_input::TEXT_X))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme::muted()))
+                .child(crate::browser_pane::spinner(&format!("agent-reconnect-{}", self.block_id), 12.0, theme::muted(), cx))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default())),
+                )
+        });
+        let popovers: Vec<AnyElement> = [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Menu, Overlay::Slash, Overlay::Mention]
             .into_iter()
             .filter_map(|o| self.popover(o, window, cx))
             .collect();
@@ -1328,6 +1359,7 @@ impl AgentPane {
                     .max_w(px(COLUMN))
                     .flex()
                     .flex_col()
+                    .children(strip)
                     .children(notice)
                     .children(self.render_card(cx))
                     .children(self.render_bars(cx))
@@ -1713,7 +1745,7 @@ impl AgentPane {
         };
         let editor = Editor::element(&self.editor, 8, colors, cx);
         // Always send: while a turn runs it steers (stopping is the activity row's, and esc).
-        let enabled = !empty;
+        let enabled = !empty && !self.reconnecting();
         let now = Instant::now();
         let reduce = cx.reduce_motion();
         self.send_ready.set(enabled, now, reduce);
@@ -1979,9 +2011,9 @@ impl AgentPane {
 
     // ---- popovers ----
 
-    /// Clicking outside an open popover closes it (the slash menu stays while the `/` does).
+    /// Clicking outside an open popover closes it (the slash and `@` menus stay while their text does).
     fn render_backdrop(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.overlay.is_none() || self.overlay == Some(Overlay::Slash) {
+        if self.overlay.is_none() || matches!(self.overlay, Some(Overlay::Slash | Overlay::Mention)) {
             return None;
         }
         Some(
@@ -2014,12 +2046,14 @@ impl AgentPane {
             Overlay::Effort => self.render_efforts(cx),
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),
+            Overlay::Mention => self.render_mention(cx),
         };
         let width = match which {
             Overlay::Sessions | Overlay::Projects => 440.0,
             Overlay::Models => 340.0,
             Overlay::Effort => 260.0,
             Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
+            Overlay::Mention => 360.0,
         };
         let below = matches!(which, Overlay::Sessions | Overlay::Projects);
         let card = div()
@@ -2269,7 +2303,7 @@ impl AgentPane {
             let row = rows::row(
                 gpui::ElementId::Name(format!("agent-{name}").into()),
                 i == self.selected,
-                Some(rows::lead(if name == "plan" { "list-todo" } else { "bot" }, checked)),
+                Some(rows::lead("bot", checked)),
                 div().font_family(mono()).text_size(px(12.5)).child(name.to_uppercase()),
                 subtitle,
                 checked.then(rows::check),
@@ -2311,9 +2345,7 @@ impl AgentPane {
         let mode = self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode);
         let mut list = div().id("agent-menu-list").flex().flex_col().child(rows::section("Approvals", None));
         for (i, (label, glyph, hint)) in
-            [("Auto", "lock-off", "Run tools without asking"), ("Ask", "lock", "Ask before changes"), ("Plan", "list-todo", "Read-only")]
-                .into_iter()
-                .enumerate()
+            [("Auto", "lock-off", "Run tools without asking"), ("Ask", "lock", "Ask before changes")].into_iter().enumerate()
         {
             let checked = mode_label(mode) == label;
             let row = rows::row(
@@ -2337,7 +2369,7 @@ impl AgentPane {
         .into_iter()
         .enumerate()
         {
-            let i = i + 3;
+            let i = i + 2;
             let row = rows::row(id, i == self.selected, Some(rows::lead(glyph, false)), label, None, Some(rows::note(note)));
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
@@ -2368,6 +2400,37 @@ impl AgentPane {
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_slash(act, window, cx))),
+            );
+        }
+        list.into_any_element()
+    }
+
+    /// The `@` popup: agents (bot), then the project's files and folders.
+    fn render_mention(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let choices = self.mention_choices();
+        if choices.is_empty() {
+            return rows::row("agent-mention-empty", false, None, div().text_color(rgb(theme::muted())).child("No matches"), None, None)
+                .into_any_element();
+        }
+        let mut list =
+            div().id("agent-mention").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll().track_scroll(&self.mention.scroll);
+        for (i, choice) in choices.into_iter().enumerate() {
+            let selected = i == self.selected;
+            let (glyph, title, about) = match choice {
+                super::mention::Choice::Agent { name, about } => ("bot", name, (!about.is_empty()).then_some(about)),
+                super::mention::Choice::File { path, dir } => (if dir { "folder" } else { "file-text" }, path, None),
+                super::mention::Choice::Loading => {
+                    let quiet = div().text_size(px(12.0)).text_color(rgb(theme::muted())).child("Finding files…");
+                    list = list.child(rows::row(("agent-mention-loading", i), false, None, quiet, None, None));
+                    continue;
+                }
+            };
+            let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono()).text_size(px(12.5)).child(title);
+            let about = about.map(|a| div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(a).into_any_element());
+            let row = rows::row(("agent-mention", i), selected, Some(rows::lead(glyph, selected)), title, about, None);
+            list = list.child(
+                self.pick_row(row, i, selected, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
         list.into_any_element()

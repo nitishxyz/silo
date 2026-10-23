@@ -113,7 +113,7 @@ pub struct Group {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
-    User { key: String, text: String, files: Vec<FileChip> },
+    User { key: String, text: String, files: Vec<FileChip>, mentions: Vec<super::mention::Chip> },
     Group(Group),
     Text { key: String, text: String, streaming: bool },
 }
@@ -138,17 +138,25 @@ pub fn attachment_note(text: &str) -> Option<(&str, &str)> {
     Some((name, mime))
 }
 
-/// A user item's text without attachment notes, and its files: attached
-/// ones by their notes, images sent inline as `Image`.
+/// A user item's text without attachment notes, its files (attached ones by
+/// their notes, images sent inline as `Image`) and its mentions in that text.
 #[must_use]
-pub fn user_message(item: &Item) -> (String, Vec<FileChip>) {
+pub fn user_message(item: &Item) -> (String, Vec<FileChip>, Vec<super::mention::Chip>) {
     let mut text = String::new();
     let mut files: Vec<FileChip> = Vec::new();
+    // Where each text part starts in `text` (`None`: a note, not shown).
+    let mut shown = Vec::new();
     for (pi, part) in item.parts.iter().enumerate() {
         match part {
             Part::Text { text: t, .. } => match attachment_note(t) {
-                Some((name, mime)) => files.push(FileChip { name: name.to_owned(), mime: mime.to_owned(), image: None }),
-                None => text.push_str(t),
+                Some((name, mime)) => {
+                    shown.push(None);
+                    files.push(FileChip { name: name.to_owned(), mime: mime.to_owned(), image: None });
+                }
+                None => {
+                    shown.push(Some(text.len()));
+                    text.push_str(t);
+                }
             },
             Part::Image(media) => {
                 let key = Some(format!("{}#{pi}", item.id));
@@ -160,7 +168,10 @@ pub fn user_message(item: &Item) -> (String, Vec<FileChip>) {
             _ => {}
         }
     }
-    (text.trim().to_owned(), files)
+    let lead = text.len() - text.trim_start().len();
+    let text = text.trim().to_owned();
+    let mentions = if item.mentions.is_empty() { Vec::new() } else { super::mention::item_chips(item, &shown, lead, text.len()) };
+    (text, files, mentions)
 }
 
 /// Attachment names by id, from the notes in the user's messages.
@@ -427,12 +438,15 @@ pub struct Input<'a> {
     pub turn: Option<TurnStatus>,
     pub error: Option<&'a str>,
     pub cwd: Option<&'a str>,
+    /// The daemon user's home (`hello.home`): paths under it read `~/…`.
+    pub home: Option<&'a str>,
     pub times: &'a Times,
     pub now: u64,
 }
 
 struct Ctx<'a> {
     cwd: Option<&'a str>,
+    home: Option<&'a str>,
     times: &'a Times,
     now: u64,
     running: bool,
@@ -500,7 +514,7 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     let jobs = job_reports(input.items);
     let files = attachment_names(input.items);
     let stopped = input.turn == Some(TurnStatus::Cancelled);
-    let cx = Ctx { cwd: input.cwd, times: input.times, now: input.now, running, stopped, jobs: &jobs, files: &files };
+    let cx = Ctx { cwd: input.cwd, home: input.home, times: input.times, now: input.now, running, stopped, jobs: &jobs, files: &files };
     let results = results(input.items);
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
@@ -517,12 +531,12 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     for (ix, item) in input.items.iter().enumerate() {
         match item.role {
             Role::User => {
-                let (text, files) = user_message(item);
+                let (text, files, mentions) = user_message(item);
                 if text.is_empty() && files.is_empty() {
                     continue;
                 }
                 flush(&mut rows, &mut lines, false, false);
-                rows.push(Row::User { key: item.id.clone(), text, files });
+                rows.push(Row::User { key: item.id.clone(), text, files, mentions });
             }
             Role::Assistant => {
                 // Text rows are keyed by their place among the item's texts, not by part index: the finished item
@@ -733,7 +747,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     let mut failed = None;
     // No detail from the result text (it only says where the result goes).
     let mut quiet = false;
-    let path = |key: &str| str_at(input, key).map(|p| rel(p, cx.cwd));
+    let path = |key: &str| str_at(input, key).map(|p| rel(p, cx.cwd, cx.home));
     // An attachment by its name (the result's, else its note's), never its id or where it's stored.
     let attached =
         || meta["name"].as_str().or_else(|| str_at(input, "attachment_id").and_then(|id| cx.files.get(id)).map(String::as_str)).map(str::to_owned);
@@ -775,7 +789,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             if glob { (Kind::Search, "Finding", "Found", pattern) } else { (Kind::Search, "Searching for", "Searched for", pattern) }
         }
         "shell" => {
-            let cmd = clip(&display(str_at(input, "command").unwrap_or(""), cx.cwd), 80);
+            let cmd = clip(&display(str_at(input, "command").unwrap_or(""), cx.cwd, cx.home), 80);
             failed = Some(title("Failed to run", &cmd));
             let job = if status == Status::Done { shell_job(text, meta) } else { None };
             let end = job.as_ref().and_then(|j| cx.jobs.get(&j.id));
@@ -837,7 +851,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             (Kind::Shell, "Running", "Ran", cmd)
         }
         "terminal_run" => {
-            let cmd = clip(&display(str_at(input, "command").unwrap_or(""), cx.cwd), 80);
+            let cmd = clip(&display(str_at(input, "command").unwrap_or(""), cx.cwd, cx.home), 80);
             failed = Some(title("Failed to run", &cmd));
             let json = json_of(text);
             let exit = json["exit"].as_i64();
@@ -864,7 +878,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             }
         }
         "edit" | "multiedit" | "write" | "apply_patch" => {
-            let edit = edit_stats(name, input, meta, cx.cwd);
+            let edit = edit_stats(name, input, meta, cx.cwd, cx.home);
             line.desc = edit.desc();
             line.detail = edit.diff.map(Detail::Diff);
             let subject = match edit.files.as_slice() {
@@ -984,7 +998,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         line.detail = Some(if status == Status::Error { Detail::Text(tail(text)) } else { Detail::Mono(tail(text)) });
     }
     // No absolute paths on screen: the project's read relative, the rest of home as `~`.
-    let show = |s: &str| display(s, cx.cwd);
+    let show = |s: &str| display(s, cx.cwd, cx.home);
     line.title = show(&line.title);
     line.desc = line.desc.as_deref().map(show);
     line.detail = line.detail.map(|d| match d {
@@ -1056,12 +1070,12 @@ fn prefixed(text: &str, mark: char) -> impl Iterator<Item = String> + '_ {
 
 type FileMeta<'a> = (Option<String>, Option<u64>, Option<u64>, Option<&'a str>);
 
-fn file_meta<'a>(m: &'a Value, cwd: Option<&str>) -> FileMeta<'a> {
-    (m["path"].as_str().map(|p| rel(p, cwd)), m["added"].as_u64(), m["removed"].as_u64(), m["diff"].as_str())
+fn file_meta<'a>(m: &'a Value, cwd: Option<&str>, home: Option<&str>) -> FileMeta<'a> {
+    (m["path"].as_str().map(|p| rel(p, cwd, home)), m["added"].as_u64(), m["removed"].as_u64(), m["diff"].as_str())
 }
 
-fn edit_stats(name: &str, input: &Value, meta: &Value, cwd: Option<&str>) -> EditStats {
-    let one = |m| file_meta(m, cwd);
+fn edit_stats(name: &str, input: &Value, meta: &Value, cwd: Option<&str>, home: Option<&str>) -> EditStats {
+    let one = |m| file_meta(m, cwd, home);
     if let Some(files) = meta["files"].as_array() {
         let mut stats = EditStats { removed: Some(0), ..EditStats::default() };
         let mut diffs = Vec::new();
@@ -1083,7 +1097,7 @@ fn edit_stats(name: &str, input: &Value, meta: &Value, cwd: Option<&str>) -> Edi
             diff: diff.map(str::to_owned),
         };
     }
-    let path = str_at(input, "path").map(|p| rel(p, cwd));
+    let path = str_at(input, "path").map(|p| rel(p, cwd, home));
     match name {
         "edit" | "multiedit" => {
             let edits: Vec<&Value> =
@@ -1110,18 +1124,18 @@ fn edit_stats(name: &str, input: &Value, meta: &Value, cwd: Option<&str>) -> Edi
         }
         _ => {
             let patch = input.as_str().or_else(|| input["input"].as_str()).or_else(|| input["patch"].as_str()).unwrap_or("");
-            patch_stats(patch, cwd)
+            patch_stats(patch, cwd, home)
         }
     }
 }
 
 /// Files and line counts of an `apply_patch` envelope.
-fn patch_stats(patch: &str, cwd: Option<&str>) -> EditStats {
+fn patch_stats(patch: &str, cwd: Option<&str>, home: Option<&str>) -> EditStats {
     let mut stats = EditStats { removed: Some(0), ..EditStats::default() };
     for line in patch.lines() {
         let file = ["*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: "].iter().find_map(|p| line.strip_prefix(p));
         if let Some(file) = file {
-            let file = rel(file.trim(), cwd);
+            let file = rel(file.trim(), cwd, home);
             if !stats.files.contains(&file) {
                 stats.files.push(file);
             }
@@ -1307,18 +1321,18 @@ fn tail(text: &str) -> String {
     out
 }
 
-/// `path` relative to `cwd` (or `~`), shortened to its last components.
+/// `path` relative to `cwd` (or `~` for `home`, the daemon user's), shortened to its last components.
 #[must_use]
-pub fn rel(path: &str, cwd: Option<&str>) -> String {
+pub fn rel(path: &str, cwd: Option<&str>, home: Option<&str>) -> String {
     let path = path.trim();
     let inside = cwd
         .map(|c| c.trim_end_matches('/'))
         .filter(|c| !c.is_empty())
         .and_then(|c| path.strip_prefix(c))
         .and_then(|r| if r.is_empty() { Some(".".to_owned()) } else { r.strip_prefix('/').map(str::to_owned) });
-    let home = std::env::var("HOME").ok().filter(|h| h.len() > 1);
+    let home = home.map(|h| h.trim_end_matches('/')).filter(|h| h.len() > 1);
     let shown = inside
-        .or_else(|| home.and_then(|h| path.strip_prefix(h.as_str()).filter(|r| r.starts_with('/')).map(|r| format!("~{r}"))))
+        .or_else(|| home.and_then(|h| path.strip_prefix(h).filter(|r| r.starts_with('/')).map(|r| format!("~{r}"))))
         .unwrap_or_else(|| path.to_owned());
     if shown.chars().count() <= 60 {
         return shown;
@@ -1328,14 +1342,10 @@ pub fn rel(path: &str, cwd: Option<&str>) -> String {
 }
 
 /// Text as shown (commands, titles, details): a leading `cd <project> &&`
-/// goes, `<project>/x` reads `x` and other paths under the home folder
-/// `~/…`. Display only; what otto runs is unchanged.
+/// goes, `<project>/x` reads `x` and other paths under `home` (the daemon
+/// user's) `~/…`. Display only; what otto runs is unchanged.
 #[must_use]
-pub fn display(text: &str, cwd: Option<&str>) -> String {
-    shown(text, cwd, std::env::var("HOME").ok().as_deref())
-}
-
-fn shown(text: &str, cwd: Option<&str>, home: Option<&str>) -> String {
+pub fn display(text: &str, cwd: Option<&str>, home: Option<&str>) -> String {
     let cwd = cwd.map(|c| c.trim_end_matches('/')).filter(|c| c.len() > 1);
     let home = home.map(|h| h.trim_end_matches('/')).filter(|h| h.len() > 1);
     // The project as `~/…` too, as a command may name it.
@@ -1469,7 +1479,7 @@ mod tests {
     }
 
     fn build_rows(items: &[Item], tools: &HashMap<String, ToolState>, turn: Option<TurnStatus>, times: &Times, now: u64) -> Vec<Row> {
-        build(&Input { items, tools, turn, error: None, cwd: Some("/work/app"), times, now })
+        build(&Input { items, tools, turn, error: None, cwd: Some("/work/app"), home: None, times, now })
     }
 
     fn group_of(row: &Row) -> &Group {
@@ -1641,8 +1651,16 @@ mod tests {
 
     #[test]
     fn web_tools_read_as_searches_and_fetches() {
-        let cx =
-            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: Some("/w"),
+            home: None,
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+        };
         let live = |name: &str, error: bool, text: &str, meta: Value| ToolState {
             name: name.into(),
             status: if error { ToolStatus::Error } else { ToolStatus::Done },
@@ -1758,6 +1776,7 @@ mod tests {
     fn tool_titles_and_descriptions() {
         let cx = Ctx {
             cwd: Some("/work/app"),
+            home: None,
             times: &Times::default(),
             now: 0,
             running: false,
@@ -1797,7 +1816,8 @@ mod tests {
     fn shell_lines_report_exit_and_duration() {
         let mut times = Times::default();
         span(&mut times, "c", 0, Some(1_234));
-        let cx = Ctx { cwd: None, times: &times, now: 5_000, running: true, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx =
+            Ctx { cwd: None, home: None, times: &times, now: 5_000, running: true, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
         let live = ToolState {
             name: "shell".into(),
             status: ToolStatus::Error,
@@ -1816,7 +1836,16 @@ mod tests {
 
     #[test]
     fn silo_tools_reveal_blocks() {
-        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: None,
+            home: None,
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+        };
         let out = (r#"{"block_id":"b42","url":"http://localhost:3000/"}"#.to_owned(), false);
         let line = tool("b", "browser_open", &json!({"url": "http://localhost:3000/"}), None, Some(&out), &cx);
         assert_eq!((line.title.as_str(), line.kind, line.reveal.as_deref()), ("Opened browser localhost:3000", Kind::Browser, Some("b42")));
@@ -1834,7 +1863,7 @@ mod tests {
     fn command_block_shells_open_wait_and_report() {
         let reports = |text: &str| job_reports(&[Item::new("s", Role::System, vec![Part::System { text: text.into() }])]);
         let jobs = reports("Background shell job-a1 (`cargo test`) in block b9 exited with code 101.\nFAILED");
-        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &jobs, files: &HashMap::new() };
+        let cx = Ctx { cwd: None, home: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &jobs, files: &HashMap::new() };
         // Running in its block: open and stop it.
         let live = ToolState { name: "shell".into(), status: ToolStatus::Running, messages: vec!["block:b3".into()], ..ToolState::default() };
         let none = HashMap::new();
@@ -1897,8 +1926,16 @@ mod tests {
 
     #[test]
     fn edits_count_lines_from_metadata_input_or_patch() {
-        let cx =
-            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: Some("/w"),
+            home: None,
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+        };
         let live = ToolState {
             name: "edit".into(),
             status: ToolStatus::Done,
@@ -1954,6 +1991,7 @@ mod tests {
             turn: Some(TurnStatus::Error),
             error: Some("rate limited"),
             cwd: None,
+            home: None,
             times: &times,
             now: 0,
         });
@@ -2147,7 +2185,16 @@ mod tests {
             &items[1].parts.iter().find_map(|p| if let Part::ToolCall { input, .. } = p { Some(input.clone()) } else { None }).unwrap(),
             None,
             Some(&("ok".into(), false)),
-            &Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() },
+            &Ctx {
+                cwd: None,
+                home: None,
+                times: &Times::default(),
+                now: 0,
+                running: false,
+                stopped: false,
+                jobs: &HashMap::new(),
+                files: &HashMap::new(),
+            },
         );
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Updated todos", Some("1/3 done")));
     }
@@ -2166,12 +2213,12 @@ mod tests {
 
     #[test]
     fn paths_and_durations_stay_short() {
-        assert_eq!(rel("/work/app/src/main.rs", Some("/work/app/")), "src/main.rs");
-        assert_eq!(rel("/work/app", Some("/work/app")), ".");
-        assert_eq!(rel("/elsewhere/x.rs", Some("/work/app")), "/elsewhere/x.rs");
+        assert_eq!(rel("/work/app/src/main.rs", Some("/work/app/"), None), "src/main.rs");
+        assert_eq!(rel("/work/app", Some("/work/app"), None), ".");
+        assert_eq!(rel("/elsewhere/x.rs", Some("/work/app"), None), "/elsewhere/x.rs");
         // Commands and details: the project's `cd` goes, project paths read relative, the rest of home as `~`.
         let (cwd, home) = (Some("/Users/me/dev/app"), Some("/Users/me"));
-        let show = |t: &str| shown(t, cwd, home);
+        let show = |t: &str| display(t, cwd, home);
         assert_eq!(show("cd /Users/me/dev/app && cargo test"), "cargo test");
         assert_eq!(show("cd \"/Users/me/dev/app/\"; ls src"), "ls src");
         assert_eq!(show("cd ~/dev/app && git status"), "git status");
@@ -2180,9 +2227,15 @@ mod tests {
         assert_eq!(show("cat /Users/me/dev/app2/x /Users/me/.zshrc"), "cat ~/dev/app2/x ~/.zshrc");
         assert_eq!(show("ls /tmp/Users/me/x"), "ls /tmp/Users/me/x");
         assert_eq!(show("echo hi"), "echo hi");
-        assert_eq!(shown("cd /w && make", None, None), "cd /w && make");
+        assert_eq!(display("cd /w && make", None, None), "cd /w && make");
         let long = format!("/a/{}/deep/file.rs", "x".repeat(80));
-        assert_eq!(rel(&long, None), "…/deep/file.rs");
+        assert_eq!(rel(&long, None, None), "…/deep/file.rs");
+        // A remote daemon's home, not this Mac's.
+        assert_eq!(rel("/home/bat/notes.md", Some("/srv/app"), Some("/home/bat/")), "~/notes.md");
+        assert_eq!(rel("/home/bat/notes.md", None, None), "/home/bat/notes.md", "no home: as is");
+        assert_eq!(display("cat /home/bat/.bashrc /home/batman/x", None, Some("/home/bat")), "cat ~/.bashrc /home/batman/x");
+        assert_eq!(display("cd ~/app && make", Some("/home/bat/app"), Some("/home/bat")), "make");
+        assert_eq!(display("cd ~/app && make", Some("/home/bat/app"), Some("/Users/me")), "cd ~/app && make");
         assert_eq!(dur(400), "1s");
         assert_eq!(dur(42_000), "42s");
         assert_eq!(dur(120_000), "2m");
@@ -2208,8 +2261,9 @@ mod tests {
                 image(None),
             ],
         );
-        let (text, files) = user_message(&item);
+        let (text, files, mentions) = user_message(&item);
         assert_eq!(text, "add these");
+        assert!(mentions.is_empty());
         assert_eq!(
             files,
             [
@@ -2224,9 +2278,34 @@ mod tests {
     }
 
     #[test]
+    fn user_messages_show_mentions_inline() {
+        use otto_llm::{Mention, MentionKind};
+        let note = "[attachment att_00000001: a.txt, text/plain, 1 B]";
+        let mut item = Item::new("u2", Role::User, vec![Part::text(note), Part::text("  ask @build about @gone.rs ")]);
+        let at = |s: usize, e: usize| [note.len() + s, note.len() + e];
+        item.mentions = vec![
+            Mention { kind: MentionKind::Agent, target: "build".into(), range: at(6, 12), missing: false },
+            Mention { kind: MentionKind::File, target: "gone.rs".into(), range: at(19, 27), missing: true },
+        ];
+        let (text, files, mentions) = user_message(&item);
+        assert_eq!(text, "ask @build about @gone.rs");
+        assert_eq!(files.len(), 1);
+        let shown: Vec<(&str, bool)> = mentions.iter().map(|m| (&text[m.range.clone()], m.missing)).collect();
+        assert_eq!(shown, [("@build", false), ("@gone.rs", true)]);
+    }
+
+    #[test]
     fn copy_attachment_reads_as_copied_name_to_path() {
-        let cx =
-            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: Some("/w"),
+            home: None,
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+        };
         let input = json!({"attachment_id": "att_3f2a9c1b", "path": "/w/assets/shot.png"});
         let line = tool("c", "copy_attachment", &input, None, Some(&("Copied shot.png to /w/assets/shot.png (812 KB)".into(), false)), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.detail.is_none()), ("Copied shot.png → assets/shot.png", Some("812 KB"), true));

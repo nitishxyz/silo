@@ -259,7 +259,7 @@ impl PillInput {
             }
             EditorEvent::Submit => self.submit(cx),
             EditorEvent::Escape => cx.emit(PillInputEvent::Cancel),
-            EditorEvent::Nav(_) | EditorEvent::Files(_) | EditorEvent::Image(_) => {}
+            EditorEvent::Moved | EditorEvent::Nav(_) | EditorEvent::Files(_) | EditorEvent::Image(_) => {}
         }
     }
 

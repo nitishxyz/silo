@@ -59,11 +59,15 @@ pub struct Item {
     /// Which provider/model produced it (assistant items).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    /// `@` mentions in a user item's text (`Item::text` byte ranges); the
+    /// model gets a note naming them, not these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<Mention>,
 }
 
 impl Item {
     pub fn new(id: impl Into<ItemId>, role: Role, parts: Vec<Part>) -> Self {
-        Self { id: id.into(), role, parts, origin: None }
+        Self { id: id.into(), role, parts, origin: None, mentions: Vec::new() }
     }
     pub fn user_text(id: impl Into<ItemId>, text: impl Into<String>) -> Self {
         Self::new(id, Role::User, vec![Part::text(text)])
@@ -86,6 +90,26 @@ impl Item {
             _ => None,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionKind {
+    Agent,
+    /// A project file or folder (`target` ends in `/`).
+    File,
+}
+
+/// An `@` mention in a user item: `@target` at `range` of [`Item::text`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Mention {
+    pub kind: MentionKind,
+    /// An agent name, or a path relative to the session's folder.
+    pub target: String,
+    pub range: [usize; 2],
+    /// No such agent or path when it was sent (left out of the model's note).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

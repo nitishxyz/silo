@@ -89,8 +89,8 @@ fn thumbnail(bytes: &[u8]) -> Option<Arc<gpui::Image>> {
 }
 
 /// Upload `files` to the session in chunks under the frame limit; the
-/// prompt's input names them, then the text.
-pub(super) async fn upload(c: &Connection, session: &str, files: Vec<Attachment>, text: Option<InputPart>) -> Result<Vec<InputPart>, ClientError> {
+/// prompt's input names them, then the text (and its mentions).
+pub(super) async fn upload(c: &Connection, session: &str, files: Vec<Attachment>, text: Vec<InputPart>) -> Result<Vec<InputPart>, ClientError> {
     let mut input = Vec::new();
     for file in files {
         let chunks: Vec<&[u8]> = if file.bytes.is_empty() { vec![&[]] } else { file.bytes.chunks(otto_proto::ATTACHMENT_CHUNK).collect() };
@@ -131,8 +131,8 @@ pub(super) fn chip(thumb: Option<Arc<gpui::Image>>, mime: &str, name: String) ->
 }
 
 impl AgentPane {
-    /// The user's message: its files' chips, then the bubble.
-    pub(super) fn render_user(&mut self, text: &str, files: &[FileChip], cx: &mut Context<Self>) -> AnyElement {
+    /// The user's message: its files' chips, then the bubble (its mentions as chips inline).
+    pub(super) fn render_user(&mut self, text: &str, files: &[FileChip], mentions: &[super::mention::Chip], cx: &mut Context<Self>) -> AnyElement {
         let chips: Vec<Div> = files
             .iter()
             .map(|f| {
@@ -149,7 +149,7 @@ impl AgentPane {
                 .bg(rgb(ink(0.06)))
                 .text_color(rgb(ink(0.85)))
                 .line_height(px(21.0))
-                .child(text.to_owned())
+                .map(|el| if mentions.is_empty() { el.child(text.to_owned()) } else { el.child(super::mention::inline(text, mentions)) })
         });
         div()
             .flex()
