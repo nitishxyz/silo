@@ -113,9 +113,23 @@ pub struct Group {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
-    User { key: String, text: String, files: Vec<FileChip>, mentions: Vec<super::mention::Chip> },
+    User {
+        key: String,
+        text: String,
+        files: Vec<FileChip>,
+        mentions: Vec<super::mention::Chip>,
+    },
     Group(Group),
-    Text { key: String, text: String, streaming: bool },
+    Text {
+        key: String,
+        text: String,
+        streaming: bool,
+    },
+    /// A quiet line between turns: `Context compacted` where otto compacted the history.
+    Marker {
+        key: String,
+        text: String,
+    },
 }
 
 /// A file the user attached, shown as a chip on their message.
@@ -212,7 +226,7 @@ impl Row {
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Row::User { key, .. } | Row::Text { key, .. } => key,
+            Row::User { key, .. } | Row::Text { key, .. } | Row::Marker { key, .. } => key,
             Row::Group(g) => &g.key,
         }
     }
@@ -571,6 +585,10 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                         joined = None;
                     }
                 }
+            }
+            Role::System if item.parts.iter().any(|p| matches!(p, Part::Compaction { .. })) => {
+                flush(&mut rows, &mut lines, false, false);
+                rows.push(Row::Marker { key: item.id.clone(), text: "Context compacted".into() });
             }
             Role::System | Role::Tool => {}
         }
@@ -1493,6 +1511,16 @@ mod tests {
         let seq = times.seq;
         times.seq += 1;
         times.spans.insert(key.into(), Span { start: Some(start), end, seq });
+    }
+
+    #[test]
+    fn a_compaction_is_a_marker_between_turns() {
+        let compaction = Item::new("c", Role::System, vec![Part::Compaction { summary: Some("so far".into()), opaque: None }]);
+        let other = Item::new("s", Role::System, vec![Part::System { text: "note".into() }]);
+        let items = vec![user("u", "hi"), assistant("a", vec![Part::text("Hello.")]), compaction, other, user("u2", "more")];
+        let rows = build_rows(&items, &HashMap::new(), None, &Times::default(), 0);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0", "c", "u2"]);
+        assert!(matches!(&rows[2], Row::Marker { text, .. } if text == "Context compacted"));
     }
 
     #[test]

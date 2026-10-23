@@ -120,6 +120,7 @@ enum SlashAct {
     Providers,
     Settings,
     Clear,
+    Compact,
 }
 
 struct SlashCommand {
@@ -129,9 +130,10 @@ struct SlashCommand {
     act: SlashAct,
 }
 
-const SLASH: [SlashCommand; 10] = [
+const SLASH: [SlashCommand; 11] = [
     SlashCommand { name: "new", about: "Start a new session", icon: "new-session", act: SlashAct::New },
     SlashCommand { name: "sessions", about: "Switch to another session", icon: "history", act: SlashAct::Sessions },
+    SlashCommand { name: "compact", about: "Summarize the conversation to free context", icon: "unzoom", act: SlashAct::Compact },
     SlashCommand { name: "model", about: "Choose the model", icon: "bot", act: SlashAct::Model },
     SlashCommand { name: "effort", about: "Choose the reasoning effort", icon: "brain", act: SlashAct::Effort },
     SlashCommand { name: "agent", about: "Choose the agent", icon: "agent", act: SlashAct::Agent },
@@ -141,6 +143,16 @@ const SLASH: [SlashCommand; 10] = [
     SlashCommand { name: "settings", about: "Otto settings", icon: "settings", act: SlashAct::Settings },
     SlashCommand { name: "clear", about: "Clear the input and start over", icon: "rotate-ccw", act: SlashAct::Clear },
 ];
+
+/// Why `/compact` can't run now, if it can't: no session yet, a turn running, or one already compacting.
+fn compact_refusal(session: bool, running: bool, compacting: bool) -> Option<&'static str> {
+    match (session, running, compacting) {
+        (false, ..) => Some("Nothing to compact yet"),
+        (_, _, true) => Some("Already compacting"),
+        (_, true, _) => Some("Can't compact while the agent works"),
+        _ => None,
+    }
+}
 
 /// What follows a leading `/` on a single line.
 fn slash_query(text: &str) -> Option<&str> {
@@ -292,6 +304,8 @@ pub struct AgentPane {
     error: Option<String>,
     /// A request failed (prompt, approval, …); shown above the composer.
     notice: Option<String>,
+    /// The session `/compact` is summarizing; sending waits until it's done.
+    compacting: Option<String>,
     /// The composer's text was just put back after a failed send (its change keeps the notice).
     restored: bool,
     rows: Vec<Row>,
@@ -472,6 +486,7 @@ impl AgentPane {
             state: None,
             error: None,
             notice: None,
+            compacting: None,
             restored: false,
             rows: Vec::new(),
             built: Vec::new(),
@@ -1035,7 +1050,7 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } => {}
+                Row::Text { .. } | Row::User { .. } | Row::Marker { .. } => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
@@ -1243,8 +1258,39 @@ impl AgentPane {
             SlashAct::Mode(mode) => self.set_mode(mode, cx),
             SlashAct::Providers => self.open_otto_settings(settings::Entry::Providers, window, cx),
             SlashAct::Settings => self.open_otto_settings(settings::Entry::Slash, window, cx),
+            SlashAct::Compact => self.compact(cx),
         }
         cx.notify();
+    }
+
+    /// Whether the shown session is being compacted (`/compact`).
+    fn compacting(&self) -> bool {
+        self.compacting.is_some() && self.compacting == self.session_id
+    }
+
+    /// `/compact`: summarize the shown session's history on its own otto; the transcript gets otto's marker.
+    fn compact(&mut self, cx: &mut Context<Self>) {
+        let session = self.updatable();
+        if let Some(why) = compact_refusal(session.is_some(), self.running, self.compacting()) {
+            // Clearing `/compact` from the composer keeps it.
+            self.notice = Some(why.into());
+            self.restored = true;
+            return;
+        }
+        let Some(id) = session else { return };
+        self.notice = None;
+        self.compacting = Some(id.clone());
+        self.run(
+            cx,
+            move |c| async move { c.compact(&id).await },
+            |this, result, cx| {
+                this.compacting = None;
+                if let Err(error) = result {
+                    this.notice = Some(format!("Couldn't compact: {error}"));
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// Agents offered by the picker (name, description).
@@ -1380,8 +1426,8 @@ impl AgentPane {
 
     /// ⏎: sends; while a turn runs it steers (the agent reads it at its next step).
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Waiting for the host: the text stays until it can go.
-        if self.reconnecting() {
+        // Waiting for the host or a compaction: the text stays until it can go.
+        if self.reconnecting() || self.compacting() {
             return;
         }
         let delivery = if self.running { Delivery::Steer } else { Delivery::Queue };
@@ -2082,9 +2128,20 @@ mod tests {
         assert!(names("zzz").is_empty());
         let act = |name: &str| SLASH.iter().find(|c| c.name == name).map(|c| c.act);
         assert_eq!((act("settings"), act("providers")), (Some(SlashAct::Settings), Some(SlashAct::Providers)), "both open the otto settings");
+        assert_eq!(names("comp")[0], "compact");
+        assert_eq!(act("compact"), Some(SlashAct::Compact));
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
         }
+    }
+
+    #[test]
+    fn compact_needs_an_idle_session() {
+        assert_eq!(compact_refusal(true, false, false), None);
+        assert_eq!(compact_refusal(false, false, false), Some("Nothing to compact yet"));
+        assert_eq!(compact_refusal(false, true, true), Some("Nothing to compact yet"), "no session wins");
+        assert_eq!(compact_refusal(true, true, false), Some("Can't compact while the agent works"), "never queued");
+        assert_eq!(compact_refusal(true, false, true), Some("Already compacting"));
     }
 
     #[test]

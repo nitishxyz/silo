@@ -163,7 +163,7 @@ See §8 for status.
   (`Delivery::Steer`, see §4f); queued inputs appear as chips in the tray. Stop lives on the activity row (§4f).
 - `⋮` menu: approval mode (auto / ask), new session.
 - Footer: agent (`BUILD`, …) picker; provider glyph / model id (subscription marker) → searchable model picker
-  from `model.list` limited to signed-in providers; at the footer's right end the context's used count (`48k`),
+  from `model.list` limited to signed-in providers; on the right, before the buttons, the context's used count (`48k`),
   muted, amber above 80%, red above 95%; its tooltip gives the window, exact counts, the session totals and cost
   (see §4b Footer).
 - Todos tray: from the latest `update_todos` call of the session (new otto builtin `update_todos {todos: [{step,
@@ -215,14 +215,14 @@ Units are points.
   provider logo 13 + `/` + model id + ` (pro)`/` (max)` dimmer when on a subscription, the whole thing the model
   picker button; right `brain` 14 (reasoning, tinted violet when on) and `image` 14 (attach, tinted green when the
   model accepts images), each a 22×22 button. Context % and cost move into the model picker header and tooltip.
-  As built (context): the used count of `SessionInfo.context` alone at the footer's right end, after the image
-  button, 22 tall like the other footer controls (`999`, `9,999`, `12k`, `1.2M`), tinted by `used / window` (muted
+  As built (context): the used count of `SessionInfo.context` on the footer's right, before the `brain` and image
+  buttons (order: count, plan ring, `brain`, image; the buttons keep their place whatever the count or ring shows), 22 tall like the other footer controls (`999`, `9,999`, `12k`, `1.2M`), tinted by `used / window` (muted
   ink; `theme::warning` above 80%, `theme::danger` above 95%; `agent/ring.rs` keeps the 14 ring and these levels for
   the plan-usage ring); the window shows only in the tooltip:
   `48,213 of 200,000 tokens (24%)` and the session's `In 1.2M · Out 84k · Cache 900k · $0.31`. Hidden without a
   session or a known window; the model button has no
   usage tooltip and the model picker no usage header. A sub-agent's block shows its own.
-  As built (plan usage, `agent/plan.rs`): after the count, at the very right end, the 14 ring of `agent/ring.rs`
+  As built (plan usage, `agent/plan.rs`): after the count, before the buttons, the 14 ring of `agent/ring.rs`
   in a 22-tall slot, filled to the subscription's tightest window (highest `used`) and tinted by the same levels.
   Tooltip: a line per window, `5-hour: 62% · resets in 1h 40m` (relative under 24 h), `Weekly: 18% · resets Mon
   09:00` (local day and time), then the plan's name when the catalog knows it (`Claude Max`, `ChatGPT Plus`). A
@@ -334,8 +334,10 @@ Units are points.
   smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the attach glyph ends under
   the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
   attach muted, always on (§4g).
-- **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask /providers /settings /clear` (`/clear` also
-  drops attachments; `/providers` and `/settings` open the Otto settings, §4h); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps
+- **Slash menu:** `/new /sessions /compact /model /effort /agent /mode auto|ask /providers /settings /clear` (`/clear` also
+  drops attachments; `/compact` calls `session.compact` on the pane's otto: a quiet `Compacting…` strip and no sending
+  until it returns (the draft stays), otto's compaction marker and a count back to 0 after; refused inline with no
+  session or while a turn runs, never queued; `/providers` and `/settings` open the Otto settings, §4h); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps
   the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
 - **Rows** (`agent/rows.rs`): one 44 tall row (28 icon column, title + muted subtitle, trailing check/note/buttons,

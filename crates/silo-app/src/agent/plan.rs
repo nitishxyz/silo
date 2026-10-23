@@ -1,4 +1,4 @@
-//! The plan usage ring at the footer's right end: how much of the
+//! The plan usage ring after the footer's count: how much of the
 //! subscription's limits (Claude's 5-hour and weekly windows, ChatGPT's) is
 //! used, from otto's `plan.usage` and its live `plan.usage` events.
 
@@ -150,7 +150,7 @@ impl AgentPane {
         }));
     }
 
-    /// The ring after the token count: `provider`'s subscription usage, filled to its tightest
+    /// The ring after the token count, before the buttons: `provider`'s subscription usage, filled to its tightest
     /// window. None for API keys and local models, while nothing is known, or when too narrow.
     pub(super) fn render_plan(&self, fit: Fit, provider: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let provider = provider.filter(|_| fit.ring)?;

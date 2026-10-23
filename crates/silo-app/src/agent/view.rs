@@ -106,7 +106,7 @@ pub(super) struct Fit {
     pub tools: bool,
     /// The model button.
     pub model: bool,
-    /// The context's token count at the footer's right end (`48k`).
+    /// The context's token count before the footer's buttons (`48k`).
     pub tokens: bool,
     /// The plan usage ring after it (`plan.rs`); goes after the count.
     pub ring: bool,
@@ -872,6 +872,7 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
+            Some(Row::Marker { .. }) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
@@ -926,6 +927,7 @@ impl AgentPane {
         let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
             (None, _) => 16.0,
             (Some(Row::User { .. }), _) => 20.0,
+            (Some(Row::Marker { .. }), _) | (Some(_), Row::Marker { .. }) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Group(_)), Row::User { .. }) => 28.0,
             (Some(Row::Text { .. }), _) => 4.0,
@@ -936,6 +938,17 @@ impl AgentPane {
             Row::User { text, files, mentions, .. } => self.render_user(text, files, mentions, cx),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
+            Row::Marker { text, .. } => div()
+                .h(px(LINE_H))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme::muted()))
+                .child(div().flex_1().h(px(1.0)).bg(rgb(theme::border())))
+                .child(div().flex_none().child(text.clone()))
+                .child(div().flex_1().h(px(1.0)).bg(rgb(theme::border())))
+                .into_any_element(),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
         let content = match enter {
@@ -1379,8 +1392,13 @@ impl AgentPane {
             .notice
             .clone()
             .map(|n| div().pb(px(8.0)).px(px(pill_input::HALO + pill_input::TEXT_X)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
-        // Sending waits for the host; the transcript and the text stay.
-        let strip = self.reconnecting().then(|| {
+        // Sending waits for the host or a compaction; the transcript and the text stay.
+        let waiting = if self.reconnecting() {
+            Some(format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default()))
+        } else {
+            self.compacting().then(|| "Compacting…".to_owned())
+        };
+        let strip = waiting.map(|text| {
             div()
                 .pb(px(8.0))
                 .px(px(pill_input::HALO + pill_input::TEXT_X))
@@ -1390,14 +1408,7 @@ impl AgentPane {
                 .text_size(px(12.0))
                 .text_color(rgb(theme::muted()))
                 .child(crate::browser_pane::spinner(&format!("agent-reconnect-{}", self.block_id), 12.0, theme::muted(), cx))
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default())),
-                )
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
         });
         let popovers: Vec<AnyElement> = [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Menu, Overlay::Slash, Overlay::Mention]
             .into_iter()
@@ -1805,7 +1816,7 @@ impl AgentPane {
         };
         let editor = Editor::element(&self.editor, 8, colors, cx);
         // Always send: while a turn runs it steers (stopping is the activity row's, and esc).
-        let enabled = !empty && !self.reconnecting();
+        let enabled = !empty && !self.reconnecting() && !self.compacting();
         let now = Instant::now();
         let reduce = cx.reduce_motion();
         self.send_ready.set(enabled, now, reduce);
@@ -1936,7 +1947,7 @@ impl AgentPane {
         }
     }
 
-    /// The token count at the footer's right end; none without a session or a known window.
+    /// The token count left of the footer's buttons; none without a session or a known window.
     fn render_context(&self, fit: Fit, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (label, level) = context_label(self.mirror()?.info.context).filter(|_| fit.tokens)?;
         let pane = cx.entity().downgrade();
@@ -2054,6 +2065,7 @@ impl AgentPane {
         // At the circles' outer edges: the agent label starts under the ⋮
         // circle's left edge, the image glyph ends under the send circle's
         // right edge (button paddings 6 and 4).
+        // The count and ring come before the buttons, so those never move as they change.
         // Left and right share what the model leaves; each clips its own (no overlap).
         let side = || div().flex_1().flex_basis(px(0.0)).min_w_0().overflow_hidden().flex().items_center();
         div()
@@ -2075,10 +2087,10 @@ impl AgentPane {
                     .justify_end()
                     .gap(px(2.0))
                     .pr(px(pill_input::HALO + pill_input::INSET - 4.0))
-                    .children(brain)
-                    .when(fit.tools, |el| el.child(image))
                     .children(context)
-                    .children(usage),
+                    .children(usage)
+                    .children(brain)
+                    .when(fit.tools, |el| el.child(image)),
             )
             .into_any_element()
     }
