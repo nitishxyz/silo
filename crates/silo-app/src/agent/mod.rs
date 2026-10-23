@@ -324,6 +324,8 @@ pub struct AgentPane {
     list: ListState,
     /// The pane's width as last laid out: narrow panes drop secondary items.
     width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The pane's bounds from the last paint (window coordinates), for focus moves between panes.
+    bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// The composer column's height as last laid out (0 when hidden), and the one the list was last padded for:
     /// the column floats over the transcript, whose end is padded clear of it.
     composer_h: std::rc::Rc<std::cell::Cell<f32>>,
@@ -471,6 +473,7 @@ impl AgentPane {
             moving: None,
             rt,
             width: std::rc::Rc::default(),
+            bounds: std::rc::Rc::default(),
             composer_h: std::rc::Rc::default(),
             composer_pad: 0.0,
             // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.
@@ -670,6 +673,11 @@ impl AgentPane {
             let _ = this.update_in(cx, |this, window, cx| this.switch_project(dir, window, cx));
         })
         .detach();
+    }
+
+    /// The pane's bounds from the last paint (window coordinates).
+    pub fn bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.bounds.get()
     }
 
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {

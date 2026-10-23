@@ -576,9 +576,11 @@ impl AgentPane {
         self.scroll.set_inset(pad);
         let bg = theme::background();
         let width = self.width.clone();
-        // The pane's width, for what fits (a change lays out again).
+        let bounds = self.bounds.clone();
+        // The pane's width, for what fits (a change lays out again), and its bounds.
         let measure = gpui::canvas(
             move |b, window, _| {
+                bounds.set(Some(b));
                 let w = f32::from(b.size.width);
                 if (width.get() - w).abs() > 0.5 {
                     width.set(w);

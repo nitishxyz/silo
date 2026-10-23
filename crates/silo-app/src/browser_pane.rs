@@ -2012,10 +2012,13 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
 impl crate::workspace::Workspace {
     /// Content bounds of any pane, terminal or browser.
     pub(crate) fn block_bounds(&self, block: &str, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
-        match self.browsers.get(block) {
-            Some((pane, _)) => pane.read(cx).bounds(),
-            None => self.panes.get(block).and_then(|(p, _)| p.read(cx).bounds()),
+        if let Some((pane, _)) = self.browsers.get(block) {
+            return pane.read(cx).bounds();
         }
+        if let Some((pane, _)) = self.agents.get(block) {
+            return pane.read(cx).bounds();
+        }
+        self.panes.get(block).and_then(|(p, _)| p.read(cx).bounds())
     }
 }
 
