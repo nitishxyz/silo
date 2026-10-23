@@ -415,10 +415,11 @@ impl Runtime {
             return Err(Error::Closed);
         }
         let owned = id.to_owned();
+        let models = self.0.config.models.clone();
         let row = self
             .db(move |s| {
                 let row = s.session(&owned)?.ok_or_else(|| Error::Invalid(format!("unknown session {owned}")))?;
-                Ok(row)
+                with_context(s, models.as_ref(), row)
             })
             .await?;
         let handle = crate::session::spawn(self.clone(), row).await?;
@@ -427,7 +428,17 @@ impl Runtime {
     }
     pub async fn list_sessions(&self, project: &str, include_archived: bool) -> Result<Vec<SessionInfo>> {
         let project = project.to_owned();
-        self.db(move |s| s.list_sessions(&project, include_archived)?.into_iter().map(|row| info(s, row)).collect()).await
+        let models = self.0.config.models.clone();
+        self.db(move |s| {
+            s.list_sessions(&project, include_archived)?
+                .into_iter()
+                .map(|row| {
+                    let row = with_context(s, models.as_ref(), row)?;
+                    info(s, row)
+                })
+                .collect()
+        })
+        .await
     }
     pub async fn view(&self, id: &str) -> Result<SessionView> {
         self.session(id).await?.view().await
@@ -624,6 +635,21 @@ impl Runtime {
         }
         Ok(applied)
     }
+}
+/// `row` with its context use: a session stored before otto kept one gets it
+/// once, persisted: its last step's prompt out of its model's window.
+fn with_context(s: &mut Store, models: &dyn ModelResolver, mut row: otto_store::Session) -> Result<otto_store::Session> {
+    if !row.meta["context"]["used"].is_null() {
+        return Ok(row);
+    }
+    let used = s.last_usage(&row.id)?.map_or(0, |usage| usage.total_input());
+    let window = models.resolve(&row.provider, &row.model).map_or(0, |model| model.info().caps.context_window);
+    if !row.meta.is_object() {
+        row.meta = serde_json::json!({});
+    }
+    row.meta["context"] = serde_json::json!(otto_proto::ContextUse { used, window });
+    s.set_meta(&row.id, &row.meta)?;
+    Ok(row)
 }
 pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
     let usage = s.usage_totals(&row.id)?;

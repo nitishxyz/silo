@@ -218,6 +218,105 @@ async fn an_old_plan_session_opens_as_auto() {
     r.shutdown().await.unwrap();
 }
 
+/// A session stored before otto kept its context use gets it from its last
+/// step's usage and its model's window, once, without moving in the list.
+#[tokio::test]
+async fn an_old_session_gets_its_context_from_its_last_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let project = store.create_project(dir.path().to_str().unwrap()).unwrap();
+    let row = store
+        .create_session(otto_store::NewSession {
+            project_id: project.id.clone(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "test".into(),
+            provider: "test".into(),
+            title: String::new(),
+            cwd: dir.path().to_string_lossy().into(),
+            meta: serde_json::json!({"tools":["read"],"denied_tools":[]}),
+        })
+        .unwrap();
+    for (turn, input) in [(1, 9_000), (2, 1_000)] {
+        let usage = otto_llm::Usage { input, output: 50, cache_read: 20_000, cache_write: 500, reasoning: 0 };
+        store
+            .append(
+                &row.id,
+                otto_store::EventRecord { turn, step: 1, kind: "usage".into(), payload: serde_json::Value::Null },
+                otto_store::Projection::Usage(otto_store::UsageRecord { provider: "test".into(), model: "test".into(), usage, cost_usd: 0.0 }),
+            )
+            .unwrap();
+    }
+    let updated_at = store.session(&row.id).unwrap().unwrap().updated_at;
+    let store = Arc::new(Mutex::new(store));
+    let model = Arc::new(ScriptedModel {
+        info: ModelInfo {
+            id: "test".into(),
+            provider: "test".into(),
+            name: "test".into(),
+            caps: Caps { context_window: 200_000, ..Caps::default() },
+            pricing: None,
+        },
+        scripts: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(vec![]),
+    });
+    let r = Runtime::new(RuntimeConfig {
+        store: store.clone(),
+        models: Arc::new(Resolver(model)),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    let expected = otto_proto::ContextUse { used: 21_500, window: 200_000 };
+    assert_eq!(r.list_sessions(&project.id, false).await.unwrap()[0].context, expected);
+    let stored = store.lock().unwrap().session(&row.id).unwrap().unwrap();
+    assert_eq!(serde_json::from_value::<otto_proto::ContextUse>(stored.meta["context"].clone()).unwrap(), expected);
+    assert_eq!(stored.updated_at, updated_at);
+    assert_eq!(stored.meta["tools"], serde_json::json!(["read"]));
+    // Persisted: a later usage record no longer changes it until a step runs.
+    {
+        let usage = otto_llm::Usage { input: 5, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 };
+        let record = otto_store::UsageRecord { provider: "test".into(), model: "test".into(), usage, cost_usd: 0.0 };
+        let event = otto_store::EventRecord { turn: 3, step: 1, kind: "usage".into(), payload: serde_json::Value::Null };
+        store.lock().unwrap().append(&row.id, event, otto_store::Projection::Usage(record)).unwrap();
+    }
+    let s = r.session(&row.id).await.unwrap();
+    assert_eq!(s.view().await.unwrap().info.context, expected);
+    r.shutdown().await.unwrap();
+}
+
+/// A session that never ran a step gets an empty context use with its window.
+#[tokio::test]
+async fn an_old_session_without_steps_opens_with_an_empty_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let project = store.create_project(dir.path().to_str().unwrap()).unwrap();
+    let row = store
+        .create_session(otto_store::NewSession {
+            project_id: project.id.clone(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "test".into(),
+            provider: "test".into(),
+            title: String::new(),
+            cwd: dir.path().to_string_lossy().into(),
+            meta: serde_json::json!({"tools":["read"],"denied_tools":[]}),
+        })
+        .unwrap();
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(store)),
+        models: Arc::new(Resolver(ScriptedModel::new(vec![]))),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    let s = r.session(&row.id).await.unwrap();
+    assert_eq!(s.view().await.unwrap().info.context, otto_proto::ContextUse::default());
+    r.shutdown().await.unwrap();
+}
+
 fn write_agent(dir: &std::path::Path, name: &str, frontmatter: &str) {
     std::fs::create_dir_all(dir.join(".otto/agents")).unwrap();
     std::fs::write(dir.join(format!(".otto/agents/{name}.md")), format!("---\n{frontmatter}\n---\nWork.")).unwrap();

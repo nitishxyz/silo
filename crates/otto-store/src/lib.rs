@@ -301,6 +301,14 @@ impl Store {
         require_row(count, id)
     }
 
+    /// Replaces the session's meta, keeping `updated_at` (the list order).
+    /// # Errors
+    /// Returns database errors or `NotFound`.
+    pub fn set_meta(&mut self, id: &str, meta: &Value) -> Result<()> {
+        let count = self.connection.execute("UPDATE sessions SET meta=?2 WHERE id=?1", params![id, serde_json::to_string(meta)?])?;
+        require_row(count, id)
+    }
+
     /// Commits the event and projection atomically, assigning a gap-free sequence.
     /// Usage is cumulative per turn/step/provider/model: the last record wins.
     /// # Errors
@@ -392,6 +400,20 @@ impl Store {
         Ok(self
             .connection
             .query_row("SELECT started_at FROM turns WHERE session_id=? AND status='running' ORDER BY turn DESC LIMIT 1", [session_id], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// The usage recorded for the session's last step, if it ran one.
+    /// # Errors
+    /// Returns database errors, including integer overflow.
+    pub fn last_usage(&self, session_id: &str) -> Result<Option<Usage>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT input,output,cache_read,cache_write,reasoning FROM usage WHERE session_id=? ORDER BY turn DESC,step DESC,rowid DESC LIMIT 1",
+                [session_id],
+                |r| Ok(Usage { input: r.get(0)?, output: r.get(1)?, cache_read: r.get(2)?, cache_write: r.get(3)?, reasoning: r.get(4)? }),
+            )
             .optional()?)
     }
 

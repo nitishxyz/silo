@@ -212,7 +212,31 @@ impl BlockHeader for crate::pane::Pane {
     }
 }
 
-/// A header button; `color` is its glyph's.
+thread_local! {
+    /// The header button last pressed while the pointer is still on it: its
+    /// tooltip stays away until the pointer leaves. GPUI's own dismissal on
+    /// press misses a tooltip still waiting to show, and a window opened
+    /// over the button (Silo Settings) keeps the pointer's last move on it.
+    static PRESSED: std::cell::RefCell<Option<gpui::ElementId>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether button `id` shows its tooltip.
+fn tip_shown(id: &gpui::ElementId) -> bool {
+    PRESSED.with_borrow(|pressed| pressed.as_ref() != Some(id))
+}
+
+/// The pointer entered (`hovered`) or left button `id`: leaving the pressed
+/// one, or entering another, brings tooltips back.
+fn hover(id: &gpui::ElementId, hovered: bool) {
+    PRESSED.with_borrow_mut(|pressed| {
+        if pressed.as_ref().is_some_and(|p| !hovered || p != id) {
+            *pressed = None;
+        }
+    });
+}
+
+/// A header button; `color` is its glyph's. Pressing it dismisses its
+/// tooltip until the pointer leaves it.
 pub fn button(
     id: impl Into<gpui::ElementId>,
     glyph: &'static str,
@@ -222,8 +246,10 @@ pub fn button(
     style: HeaderStyle,
 ) -> gpui::Stateful<gpui::Div> {
     let palette = style.palette;
+    let id: gpui::ElementId = id.into();
+    let (pressed, hovered) = (id.clone(), id.clone());
     div()
-        .id(id)
+        .id(id.clone())
         .flex()
         .flex_none()
         .items_center()
@@ -231,7 +257,18 @@ pub fn button(
         .size(px(BUTTON))
         .continuous(style.control)
         .when(enabled, |el| el.cursor_pointer().hover(move |s| s.bg(palette.hover())))
-        .tooltip(crate::tooltip::Tooltip::text(tip))
+        .when(tip_shown(&id), |el| el.tooltip(crate::tooltip::Tooltip::text(tip)))
+        .capture_any_mouse_down(move |_, window, _| {
+            PRESSED.set(Some(pressed.clone()));
+            window.refresh();
+        })
+        .on_hover(move |&on, window, _| {
+            let was = tip_shown(&hovered);
+            hover(&hovered, on);
+            if was != tip_shown(&hovered) {
+                window.refresh();
+            }
+        })
         .child(crate::assets::icon(glyph, 13.0, color))
 }
 
@@ -243,6 +280,21 @@ pub fn keep_press<E: InteractiveElement>(el: E) -> E {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pressed_button_has_no_tooltip_until_the_pointer_leaves() {
+        let (gear, back): (gpui::ElementId, gpui::ElementId) = ("gear".into(), "back".into());
+        PRESSED.set(Some(gear.clone()));
+        assert!(!tip_shown(&gear) && tip_shown(&back));
+        hover(&gear, true);
+        assert!(!tip_shown(&gear), "a move over it keeps it quiet");
+        hover(&gear, false);
+        assert!(tip_shown(&gear));
+        // Pressed and gone (its pane changed): entering another button clears it.
+        PRESSED.set(Some(gear.clone()));
+        hover(&back, true);
+        assert!(tip_shown(&gear));
+    }
 
     #[test]
     fn each_block_type_follows_its_own_setting() {

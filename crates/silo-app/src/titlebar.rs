@@ -713,6 +713,19 @@ impl Workspace {
                 )
             })
             .child(label)
+            // The percent in a slot sized by a hidden `100%`, in tabular
+            // figures: the pill keeps its width as the number grows.
+            .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
+                let figures = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
+                el.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .font_features(figures)
+                        .child(div().invisible().child("100%"))
+                        .child(div().absolute().top_0().right_0().child(format!("{percent}%"))),
+                )
+            })
             .tooltip(crate::tooltip::Tooltip::below(tooltip, TITLEBAR_HEIGHT))
             .map(claim_press);
         Some(if ready {
