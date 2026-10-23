@@ -19,6 +19,8 @@ struct State {
     usage: Usage,
     reason: Option<FinishReason>,
     stopped: bool,
+    /// A tool call closed with unparseable input; only valid if the message then stops at `max_tokens`.
+    truncated: bool,
 }
 /// Decode a Messages byte stream, including terminal errors and incomplete-stream detection.
 pub fn decode<S>(bytes: S, model: impl Into<String>) -> EventStream
@@ -168,7 +170,15 @@ impl State {
             "content_block_stop" => {
                 let mut block = self.blocks.remove(&index).ok_or_else(|| protocol("stop for missing block"))?;
                 if !block.input.is_empty() {
-                    block.value["input"] = serde_json::from_str(&block.input).map_err(|e| protocol(&format!("invalid tool JSON: {e}")))?;
+                    match serde_json::from_str(&block.input) {
+                        Ok(input) => block.value["input"] = input,
+                        // Output cut off mid-arguments: drop the call; `message_stop` decides if that was `max_tokens`.
+                        Err(_) if matches!(block.value["type"].as_str(), Some("tool_use" | "server_tool_use")) => {
+                            self.truncated = true;
+                            return Ok(events);
+                        }
+                        Err(e) => return Err(protocol(&format!("invalid tool JSON: {e}"))),
+                    }
                 }
                 let b = block.value;
                 let part = match b["type"].as_str().unwrap_or_default() {
@@ -224,8 +234,21 @@ impl State {
                 }
             }
             "message_stop" => {
-                if !self.blocks.is_empty() {
+                // At `max_tokens` the API can stop mid-block (seen mid tool input, with no
+                // `content_block_stop`). The cut-off blocks are dropped and the finish stays
+                // `MaxTokens`, so the caller continues instead of failing the turn.
+                let cut = self.reason == Some(FinishReason::MaxTokens);
+                if !self.blocks.is_empty() && !cut {
                     return Err(protocol("message stopped with unfinished blocks"));
+                }
+                if self.truncated && !cut {
+                    return Err(protocol("invalid tool JSON"));
+                }
+                // Open text is kept (it streamed already); unsigned thinking and partial calls can't be replayed.
+                for (_, block) in std::mem::take(&mut self.blocks) {
+                    if block.value["type"] == "text" {
+                        events.push(StreamEvent::PartDone { part: Part::text(string(&block.value, "text")) });
+                    }
                 }
                 self.stopped = true;
                 events.push(StreamEvent::Finish {

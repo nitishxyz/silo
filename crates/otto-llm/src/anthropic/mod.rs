@@ -142,6 +142,11 @@ mod client {
             if req.model.is_empty() {
                 req.model.clone_from(&self.config.model.id);
             }
+            // `max_tokens` is required here; unset means the model's own output limit (models.dev
+            // `limit.output`), not a small fixed default that thinking alone can exhaust.
+            if req.max_output.is_none() && self.config.model.caps.max_output > 0 {
+                req.max_output = Some(u32::try_from(self.config.model.caps.max_output).unwrap_or(u32::MAX));
+            }
             let provider = self.config.model.provider.as_str();
             let body = convert::body_for(&req, provider)?;
             let mut betas = self.config.betas.clone();

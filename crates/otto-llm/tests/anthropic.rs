@@ -21,6 +21,7 @@ const REDACTED: &str = include_str!("fixtures/anthropic/redacted.sse");
 const PARALLEL: &str = include_str!("fixtures/anthropic/parallel.sse");
 const SEARCH: &str = include_str!("fixtures/anthropic/web_search.sse");
 const MAX: &str = include_str!("fixtures/anthropic/max_tokens.sse");
+const MAX_TOOL: &str = include_str!("fixtures/anthropic/max_tokens_tool.sse");
 const ERROR: &str = include_str!("fixtures/anthropic/overloaded.sse");
 async fn events(raw: &str, seed: u64) -> Vec<StreamEvent> {
     testing::collect_events(stream::decode(testing::chunked(raw.as_bytes(), seed), "claude-sonnet-4-6")).await
@@ -107,6 +108,34 @@ async fn terminal_errors_and_finish_reasons() {
     let truncated: Vec<_> = stream::decode(testing::chunked(b"", 0), "m").collect().await;
     assert_eq!(truncated[0].as_ref().unwrap_err().class, ErrorClass::Network);
 }
+#[tokio::test]
+async fn max_tokens_mid_tool_call_drops_the_call() {
+    // As seen live: the tool block never gets `content_block_stop`.
+    let closed = MAX_TOOL
+        .replace("event: message_delta", "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta");
+    // An open text block at the cut is kept.
+    let open_text = MAX.replace("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n", "");
+    for raw in [MAX_TOOL, closed.as_str()] {
+        for seed in [0, 1, 7, 42] {
+            let events = events(raw, seed).await;
+            assert_eq!(parts(&events), vec![Part::text("Writing it.")], "seed {seed}");
+            assert!(matches!(events.last(), Some(StreamEvent::Finish { reason: FinishReason::MaxTokens, .. })));
+        }
+    }
+    assert_ne!(open_text, MAX);
+    assert_eq!(parts(&events(&open_text, 0).await), vec![Part::text("Partial")]);
+    // Any other stop with an open or broken block is still a protocol error.
+    for raw in [MAX_TOOL.replace("max_tokens", "tool_use"), closed.replace("max_tokens", "tool_use")] {
+        let events: Vec<_> = stream::decode(testing::chunked(raw.as_bytes(), 0), "m").collect().await;
+        assert_eq!(events.last().unwrap().as_ref().unwrap_err().class, ErrorClass::Other);
+    }
+}
+#[test]
+fn thinking_budget_stays_below_max_tokens() {
+    let req = Request { max_output: Some(4096), reasoning: Some(Reasoning::Budget(16384)), ..request() };
+    let body = convert::body(&req).unwrap();
+    assert_eq!((body["max_tokens"].as_u64(), body["thinking"]["budget_tokens"].as_u64()), (Some(4096), Some(2048)));
+}
 #[test]
 fn alternation_cache_tools_and_effort() {
     let mut req = request();
@@ -172,6 +201,9 @@ fn credential(access: &str) -> Credential {
 async fn http_401_refresh_retry_and_count_tokens() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    // An unset `max_output` sends the catalog's (models.dev) output limit.
+    let limit = anthropic::model_info("claude-sonnet-4-6").unwrap().caps.max_output;
+    assert!(limit > 8192);
     let server = tokio::spawn(async move {
         for n in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -204,7 +236,10 @@ async fn http_401_refresh_retry_and_count_tokens() {
                     "application/json",
                     "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"expired\"}}",
                 ),
-                1 => ("200 OK", "text/event-stream", TEXT),
+                1 => {
+                    assert_eq!(body["max_tokens"].as_u64(), Some(limit));
+                    ("200 OK", "text/event-stream", TEXT)
+                }
                 _ => {
                     assert!(headers.contains("/v1/messages/count_tokens"));
                     assert!(body.get("max_tokens").is_none());

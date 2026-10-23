@@ -148,6 +148,12 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
         }
         None => {}
     }
+    // The API rejects `budget_tokens >= max_tokens` (a low `max_output` or model limit).
+    if let (Some(budget), Some(max)) = (body["thinking"]["budget_tokens"].as_u64(), body["max_tokens"].as_u64())
+        && budget >= max
+    {
+        body["thinking"]["budget_tokens"] = json!((max / 2).max(1024));
+    }
     // Models that always think omit their thinking text unless asked for a summary.
     if body.get("thinking").is_none() && super::always_thinking(&req.model) && super::supports_adaptive(&req.model) {
         body["thinking"] = adaptive();
