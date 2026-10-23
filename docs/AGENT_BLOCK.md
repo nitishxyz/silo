@@ -400,7 +400,10 @@ Units are points.
   files of any kind, several at once; folders are skipped. ⌘V takes copied files first, then text, then a copied
   image (as `Pasted image.png`). Over 25 MB: the notice says `name is over 25 MB` and the rest still attach.
 - **Chips** (`agent/attach.rs`): name and kind glyph (a 16 px thumbnail for images, `file-text` otherwise), never a
-  path; `×` removes one. On send each file is uploaded with `attachment.put` (8 MB chunks) and the prompt names
+  path; `×` removes one. They sit in their own row above the input row, spanning the pill from the buttons'
+  inset (the `⋮` and send circle stay with the input row and reserve no space beside the chips); at narrow widths
+  a chip's name ellipsizes down to its glyph. The row's height glides as chips come and go (the pill eases, the
+  tail stays put). On send each file is uploaded with `attachment.put` (8 MB chunks) and the prompt names
   them (`InputPart::Attachment`); a failed send puts the text and the chips back.
 - **Transcript:** a user message shows its files' chips above the bubble (thumbnails made in the background from
   the image otto sent with it, by `item#part`); otto's `[attachment …]` notes are hidden from the bubble. Older

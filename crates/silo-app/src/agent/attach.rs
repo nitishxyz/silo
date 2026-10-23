@@ -108,7 +108,7 @@ pub(super) async fn upload(c: &Connection, session: &str, files: Vec<Attachment>
 /// The chip's glyph: an image's thumbnail, else its kind's icon.
 pub(super) fn glyph(thumb: Option<Arc<gpui::Image>>, mime: &str) -> AnyElement {
     match thumb {
-        Some(thumb) => img(thumb).size(px(16.0)).rounded(px(3.0)).object_fit(ObjectFit::Cover).into_any_element(),
+        Some(thumb) => img(thumb).flex_none().size(px(16.0)).rounded(px(3.0)).object_fit(ObjectFit::Cover).into_any_element(),
         None => icon(if mime.starts_with("image/") { "image" } else { "file-text" }, 12.0, theme::muted()).into_any_element(),
     }
 }

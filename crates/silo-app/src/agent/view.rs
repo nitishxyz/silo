@@ -1687,13 +1687,37 @@ impl AgentPane {
             .bottom(px(pill_input::INSET - pill_input::BORDER))
             .tooltip(Tooltip::text("Options"))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Menu, window, cx)));
-        let chips = (!self.attachments.is_empty()).then(|| {
-            div().pb(px(8.0)).flex().flex_wrap().gap(px(6.0)).children(self.attachments.iter().enumerate().map(|(i, a)| {
+        let pad_y = (pill_input::HEIGHT - 2.0 * pill_input::BORDER - COMPOSER_LINE) / 2.0;
+        // Narrow: no `⋮` (the slash menu has it all), the text starts near the
+        // edge; narrowest, no send circle (⏎ sends).
+        let Fit { lead, send: circle, .. } = self.fit();
+        let pad_l = if lead {
+            pill_input::TEXT_X - pill_input::BORDER
+        } else if circle {
+            16.0
+        } else {
+            10.0
+        };
+        let pad_r = if circle { pill_input::INSET + pill_input::CIRCLE + 10.0 - pill_input::BORDER } else { 10.0 };
+        // The chips belong to the whole pill: their row spans it from the buttons' inset, above the input row.
+        // Its height glides to what it measured (the pill grows and shrinks smoothly, the tail stays put).
+        let edge = pill_input::INSET - pill_input::BORDER;
+        let measured = self.chip_row.1.clone();
+        let want = if self.attachments.is_empty() { 0.0 } else { measured.get() };
+        self.chip_row.0.target(want, now, reduce);
+        let row_h = self.chip_row.0.value(now, reduce);
+        if self.chip_row.0.moving(now, reduce) {
+            MOVING.set(true);
+        }
+        let chips = (!self.attachments.is_empty() || row_h > 0.0).then(|| {
+            let inner = div().relative().pb(px(8.0)).flex().flex_wrap().gap(px(6.0)).children(self.attachments.iter().enumerate().map(|(i, a)| {
                 let enter = eased(a.at, motion::UI, now, cx).unwrap_or(1.0);
                 div()
                     .relative()
                     .left(px((1.0 - enter) * -6.0))
                     .opacity(enter)
+                    .min_w_0()
+                    .max_w_full()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -1705,10 +1729,11 @@ impl AgentPane {
                     .text_size(px(12.0))
                     .text_color(rgb(theme::muted()))
                     .child(super::attach::glyph(a.thumb.clone(), &a.mime))
-                    .child(div().max_w(px(160.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(a.name.clone()))
+                    .child(div().min_w_0().max_w(px(160.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(a.name.clone()))
                     .child(
                         div()
                             .id(("agent-attachment", i))
+                            .flex_none()
                             .size(px(18.0))
                             .flex()
                             .items_center()
@@ -1724,21 +1749,32 @@ impl AgentPane {
                                 cx.notify();
                             })),
                     )
-            }))
+            }));
+            // A new height (rewrapped, a chip added) draws again to glide to it.
+            let report = gpui::canvas(
+                move |bounds, window, _| {
+                    let h = f32::from(bounds.size.height);
+                    if (measured.replace(h) - h).abs() >= 0.5 {
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
+            div()
+                .flex_none()
+                .ml(px(edge.min(pad_l) - pad_l))
+                .mr(px(edge.min(pad_r) - pad_r))
+                .h(px(row_h))
+                .overflow_hidden()
+                .child(inner.child(report))
         });
-        let pad_y = (pill_input::HEIGHT - 2.0 * pill_input::BORDER - COMPOSER_LINE) / 2.0;
-        // Narrow: no `⋮` (the slash menu has it all), the text starts near the
-        // edge; narrowest, no send circle (⏎ sends).
-        let Fit { lead, send: circle, .. } = self.fit();
         let pill = pill_input::pill(focused, false)
-            .pl(px(if lead {
-                pill_input::TEXT_X - pill_input::BORDER
-            } else if circle {
-                16.0
-            } else {
-                10.0
-            }))
-            .pr(px(if circle { pill_input::INSET + pill_input::CIRCLE + 10.0 - pill_input::BORDER } else { 10.0 }))
+            .pl(px(pad_l))
+            .pr(px(pad_r))
             .py(px(pad_y))
             .font_family(mono())
             .text_size(px(14.0))

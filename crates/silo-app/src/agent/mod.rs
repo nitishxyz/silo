@@ -289,6 +289,8 @@ pub struct AgentPane {
     scroll: std::rc::Rc<scroll::Inner>,
     /// Files attached to the next prompt.
     attachments: Vec<Attachment>,
+    /// The composer's chip row: its height easing to what it last measured.
+    chip_row: (crate::motion::Glide, std::rc::Rc<std::cell::Cell<f32>>),
     /// Thumbnails of the transcript's images by `item#part` (`None` while made).
     thumbs: HashMap<String, Option<std::sync::Arc<gpui::Image>>>,
     /// Bars above the composer by key: expanded motion, and when each appeared.
@@ -423,6 +425,7 @@ impl AgentPane {
             reveals: HashMap::new(),
             scroll,
             attachments: Vec::new(),
+            chip_row: (crate::motion::Glide::new(crate::motion::UI), std::rc::Rc::default()),
             thumbs: HashMap::new(),
             bars: HashMap::new(),
             bar_shown: HashMap::new(),
