@@ -1,6 +1,6 @@
 //! Titlebar: one inline row with the traffic-light gap, the session pill,
-//! compact window tabs and, at the far right, the Update pill (once an
-//! update is ready), the appearance toggle and the "+" button, all on the
+//! compact window tabs and, at the far right, the Update pill (while an
+//! update downloads, installs or is ready), the appearance toggle and the "+" button, all on the
 //! terminal's own background. Tabs are small
 //! pills: inactive ones filled only on hover, the current one a subtle step
 //! brighter.
@@ -669,23 +669,19 @@ impl Workspace {
         )
     }
 
-    /// The Update pill: accent-filled once an update is staged (a click
-    /// installs it and restarts), outlined when this copy of Silo cannot
-    /// be replaced; nothing otherwise, downloads included.
+    /// The Update pill: outlined with a spinner while a release downloads
+    /// or installs, accent-filled once one is staged (a click installs it
+    /// and restarts), outlined when this copy of Silo cannot be replaced.
     fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::updater::State;
-        let (label, tooltip, ready) = match self.updater.read(cx).state() {
-            State::Ready { version, .. } => ("Update", Some(crate::updater::ready(version)), true),
-            State::Installing => ("Updating…", None, false),
-            State::Blocked { version, reason } => ("Can't Update", Some(format!("Silo {version} is available. {reason}.")), false),
-            State::Idle | State::Downloading(_) => return None,
-        };
-        let chrome = self.chrome;
+        use crate::updater::PillKind;
+        let (label, tooltip, kind) = crate::updater::pill(self.updater.read(cx).state())?;
+        let (chrome, ready) = (self.chrome, kind == PillKind::Ready);
         let pill = div()
             .id("update")
             .flex()
             .flex_none()
             .items_center()
+            .gap(px(5.0))
             .ml(px(6.0))
             .h(px(TAB_HEIGHT - 2.0))
             .px(px(11.0))
@@ -700,8 +696,9 @@ impl Workspace {
                     el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
                 }
             })
+            .when(kind == PillKind::Busy, |el| el.child(crate::browser_pane::spinner("update", 12.0, chrome.muted, cx)))
             .child(label)
-            .when_some(tooltip, |el, text| el.tooltip(crate::tooltip::Tooltip::below(text, TITLEBAR_HEIGHT)))
+            .tooltip(crate::tooltip::Tooltip::below(tooltip, TITLEBAR_HEIGHT))
             .map(claim_press);
         Some(if ready {
             pill.on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |updater, cx| updater.restart(cx)))).into_any_element()

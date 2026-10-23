@@ -76,9 +76,10 @@ app_restart() {
     APP_PID=$!
     disown
     mkdir -p "$SILO_HOME" && echo "$APP_PID" > "$APP_PIDFILE"
-    # Window first, then a connected server with a terminal attached.
+    # Window first, then a connected server with its session shown (any
+    # front pane: a terminal, an agent or a browser).
     read -r WX WY WW WH WID < <("$DRIVER" wait-window "$APP_PID" 10000) || { echo "ui-env: no window" >&2; return 1; }
-    wait_log "connected to silo server" 10000 && wait_log "pane attached" 5000
+    wait_log "connected to silo server" 10000 && wait_log "session shown" 5000
 }
 app_stop() {
     local p; p=$(app_pid)
