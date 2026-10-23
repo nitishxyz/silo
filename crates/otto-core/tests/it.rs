@@ -2,5 +2,6 @@
 
 mod attachments;
 mod harness;
+mod plan_usage;
 mod runtime;
 mod update;

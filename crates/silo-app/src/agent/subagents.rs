@@ -500,6 +500,7 @@ mod tests {
             usage: otto_proto::UsageTotals::default(),
             context: otto_proto::ContextUse::default(),
             report_held: false,
+            plan: None,
         }
     }
 

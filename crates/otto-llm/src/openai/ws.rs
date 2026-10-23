@@ -33,6 +33,8 @@ pub(super) struct Lane {
     opened: Instant,
     /// The connection-local cache entry the next call may continue from.
     last: Option<Last>,
+    /// The plan usage of the upgrade response's headers, until a call reports it.
+    plan: Option<crate::PlanUsage>,
 }
 
 /// What the server holds for the connection's last response.
@@ -112,7 +114,11 @@ impl Dial {
                 Err(crate::http::classify_status(status, &reqwest::header::HeaderMap::new(), &format!("WebSocket upgrade rejected: HTTP {status}")))
             }
             Ok(Err(e)) => Err(LlmError::new(ErrorClass::Network, format!("WebSocket connect: {e}"))),
-            Ok(Ok((socket, _))) => Ok(Lane { socket, opened: Instant::now(), last: None }),
+            Ok(Ok((socket, response))) => {
+                let headers = response.headers().iter().filter_map(|(n, v)| Some((n.as_str(), v.to_str().ok()?)));
+                let plan = crate::plan_usage::from_headers(headers.collect::<Vec<_>>(), crate::plan_usage::unix_now());
+                Ok(Lane { socket, opened: Instant::now(), last: None, plan })
+            }
         }
     }
 }
@@ -323,6 +329,11 @@ async fn drive(call: Call, out: &mpsc::Sender<Result<E, LlmError>>, mut steer_rx
     let mut clean = true;
     let mut response_id = None;
     loop {
+        if let Some(plan) = lane.plan.take()
+            && out.send(Ok(E::PlanUsage(plan))).await.is_err()
+        {
+            return Ok(());
+        }
         if pending_create {
             match send(&mut lane.socket, create.clone()).await {
                 Ok(()) => pending_create = false,

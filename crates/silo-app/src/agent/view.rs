@@ -108,6 +108,8 @@ pub(super) struct Fit {
     pub model: bool,
     /// The context's token count at the footer's right end (`48k`).
     pub tokens: bool,
+    /// The plan usage ring after it (`plan.rs`); goes after the count.
+    pub ring: bool,
     /// The footer at all.
     pub footer: bool,
     /// The composer's `⋮` circle (the slash menu does the same).
@@ -128,6 +130,7 @@ impl Fit {
         let w = if width > 0.0 { width } else { f32::MAX };
         Self {
             tokens: w >= 460.0,
+            ring: w >= 450.0,
             plan: w >= 440.0,
             provider: w >= 340.0,
             tools: w >= 270.0,
@@ -1963,6 +1966,7 @@ impl AgentPane {
         let muted = theme::muted();
         let agent = self.agent_name();
         let model = self.model();
+        let usage = self.render_plan(fit, model.as_ref().map(|(p, _)| p.as_str()), cx);
         let catalog = self.catalog.as_ref();
         let plan = model.as_ref().filter(|_| fit.plan).and_then(|(p, _)| catalog.and_then(|c| c.subscription(p)));
         let reasons = model
@@ -2073,7 +2077,8 @@ impl AgentPane {
                     .pr(px(pill_input::HALO + pill_input::INSET - 4.0))
                     .children(brain)
                     .when(fit.tools, |el| el.child(image))
-                    .children(context),
+                    .children(context)
+                    .children(usage),
             )
             .into_any_element()
     }
@@ -2876,11 +2881,22 @@ mod tests {
     #[test]
     fn narrow_panes_drop_secondary_items_in_order() {
         let wide = Fit::of(800.0);
-        assert!(wide.plan && wide.tokens && wide.provider && wide.tools && wide.model && wide.footer && wide.lead && wide.detail && wide.labels);
+        assert!(
+            wide.plan
+                && wide.tokens
+                && wide.ring
+                && wide.provider
+                && wide.tools
+                && wide.model
+                && wide.footer
+                && wide.lead
+                && wide.detail
+                && wide.labels
+        );
         assert_eq!(Fit::of(0.0), wide, "not laid out yet: everything");
-        // Widest first: the token count, the plan, the provider, then the bar details, effort/image, labels,
-        // the model, the footer.
-        let order = |f: Fit| [f.tokens, f.plan, f.provider, f.detail, f.tools, f.lead, f.labels, f.model, f.footer, f.send];
+        // Widest first: the token count, the plan ring, the plan marker, the provider, then the bar details,
+        // effort/image, labels, the model, the footer.
+        let order = |f: Fit| [f.tokens, f.ring, f.plan, f.provider, f.detail, f.tools, f.lead, f.labels, f.model, f.footer, f.send];
         let mut last = order(wide);
         for w in (60..800).rev().step_by(10) {
             #[allow(clippy::cast_precision_loss)]
@@ -2894,7 +2910,9 @@ mod tests {
         let smallest = Fit::of(60.0);
         assert!(!smallest.footer && !smallest.send, "the smallest split keeps only the composer, without its circle");
         let mid = Fit::of(450.0);
-        assert!(!mid.tokens && mid.plan && mid.model, "the token count goes first");
+        assert!(!mid.tokens && mid.ring && mid.plan && mid.model, "the token count goes first");
+        let ringless = Fit::of(445.0);
+        assert!(!ringless.tokens && !ringless.ring && ringless.plan, "then the plan ring");
     }
 
     #[test]

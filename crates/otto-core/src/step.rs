@@ -481,6 +481,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                     cx.emit(Event::ToolInputDelta { call_id, delta }, Projection::None, turn, step).await?;
                 }
                 StreamEvent::Usage(u) => usage = u,
+                StreamEvent::PlanUsage(plan) => cx.runtime.record_plan(live.row.provider.as_str(), plan),
                 // The provider applied steering input mid-response and goes on
                 // in a new response: close this item, then the user input.
                 StreamEvent::Steered { ids } => {

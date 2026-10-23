@@ -64,6 +64,8 @@ pub struct Configure {
     /// Back to the agent's effort, else the model's default.
     pub reset_effort: bool,
 }
+/// Each provider's last plan usage, in the state folder.
+const PLANS: &str = "plan_usage.json";
 /// A committed event. Live and replay streams use identical sequence numbers.
 pub type SequencedEvent = (i64, Event);
 /// Receiver that suppresses events already included in replay.
@@ -103,12 +105,15 @@ pub(crate) struct Inner {
     closing: std::sync::atomic::AtomicBool,
     /// Name untitled sessions after their first turn (`set_auto_title`).
     auto_title: std::sync::atomic::AtomicBool,
+    /// Each provider's subscription limits as last reported (`<state>/plan_usage.json`).
+    plans: Mutex<std::collections::BTreeMap<String, otto_llm::PlanUsage>>,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
     pub async fn new(config: RuntimeConfig) -> Result<Self> {
         let (global, _) = broadcast::channel(256);
         let (index, _) = broadcast::channel(256);
+        let plans = std::fs::read(config.state_dir.join(PLANS)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
         let runtime = Self(Arc::new(Inner {
             config,
             actors: tokio::sync::Mutex::new(HashMap::new()),
@@ -121,6 +126,7 @@ impl Runtime {
             renderer: Mutex::new(None),
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
+            plans: Mutex::new(plans),
         }));
         runtime.db(crate::recovery::recover).await?;
         let state = runtime.0.config.state_dir.clone();
@@ -441,7 +447,49 @@ impl Runtime {
         .await
     }
     pub async fn view(&self, id: &str) -> Result<SessionView> {
-        self.session(id).await?.view().await
+        let mut view = self.session(id).await?.view().await?;
+        view.info = self.with_plan(view.info);
+        Ok(view)
+    }
+    /// Subscription limits per provider as last reported (`plan.usage`): `provider`'s, or all.
+    pub fn plan_usage(&self, provider: Option<&str>) -> Vec<otto_proto::ProviderPlan> {
+        let plans = self.0.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        plans
+            .iter()
+            .filter(|(p, _)| provider.is_none_or(|want| want == p.as_str()))
+            .map(|(provider, usage)| otto_proto::ProviderPlan { provider: provider.clone(), usage: usage.clone() })
+            .collect()
+    }
+    /// `info` with its provider's plan usage (`SessionInfo.plan`).
+    #[must_use]
+    pub fn with_plan(&self, mut info: SessionInfo) -> SessionInfo {
+        info.plan = self.0.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&info.provider).cloned();
+        info
+    }
+    /// A response reported `provider`'s limits: kept (merged by window),
+    /// saved, and announced (`plan.usage`).
+    pub(crate) fn record_plan(&self, provider: &str, usage: otto_llm::PlanUsage) {
+        let (merged, bytes) = {
+            let mut plans = self.0.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = plans.entry(provider.to_owned()).or_default();
+            entry.merge(usage);
+            (entry.clone(), serde_json::to_vec_pretty(&*plans))
+        };
+        let dir = &self.0.config.state_dir;
+        let temporary = dir.join(format!("{PLANS}.tmp"));
+        let saved = bytes.map_err(std::io::Error::other).and_then(|bytes| {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(&temporary, bytes)?;
+            std::fs::rename(&temporary, dir.join(PLANS))
+        });
+        if let Err(error) = saved {
+            tracing::warn!(%error, "saving plan usage");
+        }
+        let event = Event::PlanUsage { provider: provider.to_owned(), usage: merged };
+        let mut index = self.0.index.lock().expect("index mutex");
+        index.0 += 1;
+        let _ = index.1.send((index.0, event.clone()));
+        let _ = self.0.global.send(event);
     }
     /// Subscribe first, read the journal second, then discard overlapping live sequences.
     pub async fn subscribe(&self, id: &str, after_seq: i64) -> Result<(Vec<SequencedEvent>, LiveEvents)> {
@@ -623,7 +671,7 @@ impl Runtime {
         let handle = self.session(id).await?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle.tx.send(crate::session::Command::Configure(change, tx)).await.map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)?
+        rx.await.map_err(|_| Error::Closed)?.map(|info| self.with_plan(info))
     }
     async fn update(&self, id: &str, update: SessionUpdate, untitled: bool) -> Result<bool> {
         let handle = self.session(id).await?;
@@ -663,6 +711,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         model: row.model,
         effort: serde_json::from_value(row.meta["effort"].clone()).ok(),
         report_held: crate::subagents::held(&row.meta),
+        plan: None,
         context: serde_json::from_value(row.meta["context"].clone()).unwrap_or_default(),
         title: row.title,
         cwd: row.cwd,

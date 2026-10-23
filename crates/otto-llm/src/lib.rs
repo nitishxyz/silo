@@ -27,6 +27,7 @@ pub mod event;
 pub mod google;
 pub mod model;
 pub mod openai;
+pub mod plan_usage;
 pub mod request;
 pub mod types;
 
@@ -37,6 +38,7 @@ pub use event::{FinishReason, StreamEvent, Usage};
 #[cfg(feature = "client")]
 pub use model::{CallCx, Model, ModelSession};
 pub use model::{Caps, ModelInfo, Pricing, ToolFamily};
+pub use plan_usage::{PlanUsage, PlanWindow};
 #[cfg(feature = "client")]
 pub use providers::Providers;
 pub use request::{CacheOptions, Compaction, Effort, ProviderOptions, Reasoning, Request, ToolChoice, ToolDef, ToolKind};

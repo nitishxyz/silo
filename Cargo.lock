@@ -7213,6 +7213,7 @@ version = "0.1.7"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
+ "chrono",
  "data-encoding",
  "gpui",
  "gpui_platform",

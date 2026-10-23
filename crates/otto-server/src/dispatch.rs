@@ -88,7 +88,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
                 })
                 .await
                 .map_err(core_error)?;
-            Ok(json!(handle.view().await.map_err(core_error)?.info))
+            Ok(json!(runtime.with_plan(handle.view().await.map_err(core_error)?.info)))
         }
         Method::SessionList { project_id, include_archived } => {
             let projects = match project_id {
@@ -99,7 +99,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             for project in projects {
                 sessions.extend(runtime.list_sessions(&project, include_archived).await.map_err(core_error)?);
             }
-            Ok(json!(sessions))
+            Ok(json!(sessions.into_iter().map(|info| runtime.with_plan(info)).collect::<Vec<_>>()))
         }
         Method::SessionView { session_id } => Ok(json!(runtime.view(&session_id).await.map_err(core_error)?)),
         Method::SessionSubscribe { session_id, after_seq } => {
@@ -118,7 +118,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
                 None => runtime.view(&session_id).await.map_err(core_error)?.seq,
             };
             let handle = runtime.fork(&session_id, seq).await.map_err(core_error)?;
-            Ok(json!(handle.view().await.map_err(core_error)?.info))
+            Ok(json!(runtime.with_plan(handle.view().await.map_err(core_error)?.info)))
         }
         Method::SessionSetMode { session_id, approval_mode } => {
             runtime.set_approval_mode(&session_id, approval_mode).await.map_err(core_error)?;
@@ -244,6 +244,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             *settings = next;
             Ok(json!({}))
         }
+        Method::PlanUsage { provider } => Ok(json!(runtime.plan_usage(provider.as_deref()))),
     }
 }
 pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcError> {

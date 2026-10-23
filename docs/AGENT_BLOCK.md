@@ -222,6 +222,14 @@ Units are points.
   `48,213 of 200,000 tokens (24%)` and the session's `In 1.2M · Out 84k · Cache 900k · $0.31`. Hidden without a
   session or a known window; the model button has no
   usage tooltip and the model picker no usage header. A sub-agent's block shows its own.
+  As built (plan usage, `agent/plan.rs`): after the count, at the very right end, the 14 ring of `agent/ring.rs`
+  in a 22-tall slot, filled to the subscription's tightest window (highest `used`) and tinted by the same levels.
+  Tooltip: a line per window, `5-hour: 62% · resets in 1h 40m` (relative under 24 h), `Weekly: 18% · resets Mon
+  09:00` (local day and time), then the plan's name when the catalog knows it (`Claude Max`, `ChatGPT Plus`). A
+  window past its reset reads 0% until the next report. Hidden for API keys and local models (no subscription
+  sign-in for the provider) and while nothing is known. The pane calls `plan.usage` when it loads and follows
+  otto's global `plan.usage` events; the session's `SessionInfo.plan` is the fallback. Static, so Reduce Motion
+  has nothing to drop. A sub-agent's block shows its own provider's.
   As built: the subscription marker is the plan otto reports (` (Max)`, ` (Pro)`), ` (sub)` when it reports none.
   `brain` shows only when the model has `caps.reasoning` and opens the effort menu (also `/effort`): a 260 popover
   above it, right-aligned, rows `Default` (the agent's effort, else the model's), `Low`, `Medium`, `High`, `Max`,
@@ -410,7 +418,8 @@ Units are points.
   nothing, and that refusal is dropped quietly. Otherwise closing the block is only a view change: the child keeps
   running and reporting, and stays in the parent's bar.
 - **Narrow panes** (a split can be 60 wide; `view::Fit`): nothing overlaps; text truncates with `…` and items drop as
-  the pane narrows: the token count (<460), the plan marker (<440), the provider logo (<340), bars' current item,
+  the pane narrows: the token count (<460), the plan usage ring (<450), the plan marker (<440), the provider logo
+  (<340), bars' current item,
   sub-agent agent names and the strip's parent title (<320), effort/image (<270), the
   composer's `⋮` (<240, the slash menu covers it), labels
   beside icons (`Main agent`, bar labels, <230), the model (<200), the footer (<130), then the send circle (⏎

@@ -247,6 +247,12 @@ pub enum Method {
     ConfigGet { key: Option<String> },
     #[serde(rename = "config.set")]
     ConfigSet { key: String, value: Value },
+    /// Subscription limits per provider as last reported; one provider or all.
+    #[serde(rename = "plan.usage")]
+    PlanUsage {
+        #[serde(default)]
+        provider: Option<String>,
+    },
 }
 
 impl std::fmt::Debug for Method {
@@ -306,6 +312,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("files.complete", "Complete a project path for an @ mention."),
     ("config.get", "Read a configuration key, or all configuration."),
     ("config.set", "Set a configuration key."),
+    ("plan.usage", "Subscription limits per provider, as the last response reported them."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -566,6 +573,7 @@ pub const EVENTS: &[&str] = &[
     "subagent.changed",
     "queue.changed",
     "error",
+    "plan.usage",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -621,6 +629,9 @@ pub enum Event {
     QueueChanged { queued: Vec<QueuedInput> },
     #[serde(rename = "error")]
     Error { class: String, message: String, retryable: bool },
+    /// A response reported `provider`'s subscription limits (global, not journaled).
+    #[serde(rename = "plan.usage")]
+    PlanUsage { provider: String, usage: otto_llm::PlanUsage },
 }
 
 impl Event {

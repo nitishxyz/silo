@@ -74,6 +74,7 @@ fn result_schema(method: &Method) -> Schema {
         M::CommandsList { .. } => schema_for!(Vec<CommandInfo>),
         M::FilesComplete { .. } => schema_for!(Vec<FileMatch>),
         M::ConfigGet { .. } => schema_for!(ConfigValue),
+        M::PlanUsage { .. } => schema_for!(Vec<ProviderPlan>),
         M::ServerShutdown {}
         | M::Ping {}
         | M::SessionUnsubscribe { .. }
@@ -181,6 +182,7 @@ pub fn examples() -> Vec<Method> {
         M::FilesComplete { cwd: "/work/project".into(), query: "src/ma".into(), limit: 50 },
         M::ConfigGet { key: None },
         M::ConfigSet { key: "model".into(), value: json!("example-model") },
+        M::PlanUsage { provider: Some("anthropic".into()) },
     ]
 }
 

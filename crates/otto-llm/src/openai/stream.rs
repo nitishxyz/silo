@@ -198,6 +198,10 @@ impl State {
                 tool: "web_search".into(),
                 status: kind.rsplit('.').next().unwrap_or_default().into(),
             }),
+            // The Codex backend's `codex.rate_limits`: the plan's windows.
+            kind if kind.ends_with("rate_limits") => {
+                out.extend(crate::plan_usage::codex_event(&v, crate::plan_usage::unix_now()).map(E::PlanUsage));
+            }
             _ => {}
         }
         Ok(out)

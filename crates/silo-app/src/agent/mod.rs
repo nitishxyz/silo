@@ -13,6 +13,7 @@ mod header;
 mod markdown;
 pub(crate) mod mention;
 mod pill_input;
+mod plan;
 mod reveal;
 mod ring;
 mod rows;
@@ -393,6 +394,9 @@ pub struct AgentPane {
     fresh: bool,
     /// Parsed assistant text by row key (only a streaming text's open block parses again).
     parsed: HashMap<String, markdown::Doc>,
+    /// Each provider's subscription usage as otto last reported it (`plan.rs`).
+    plans: HashMap<String, otto_llm::PlanUsage>,
+    plan_watch: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -528,6 +532,8 @@ impl AgentPane {
             running: false,
             fresh: false,
             parsed: HashMap::new(),
+            plans: HashMap::new(),
+            plan_watch: None,
             _subscriptions: subscriptions,
         };
         pane.load(cx);
@@ -745,6 +751,8 @@ impl AgentPane {
                         this.project = Some(project);
                         this.sessions = sessions;
                         this.watch_sessions(cx);
+                        this.load_plans(cx);
+                        this.watch_plans(cx);
                         if first || this.follower.is_none() {
                             this.follow(cx);
                         }

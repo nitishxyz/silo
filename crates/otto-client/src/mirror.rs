@@ -221,6 +221,11 @@ impl SessionMirror {
                 self.info.status = SessionStatus::Error;
             }
             Event::Compaction { .. } => self.info.context.used = 0,
+            Event::PlanUsage { provider, usage } => {
+                if *provider == self.info.provider {
+                    self.info.plan = Some(usage.clone());
+                }
+            }
             Event::SessionsChanged {} | Event::SubagentChanged { .. } => {}
         }
     }

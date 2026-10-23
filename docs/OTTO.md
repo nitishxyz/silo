@@ -400,6 +400,30 @@ schema as a function, or a family presentation of ours (GPT: `apply_patch` as th
 `edit`/`multiedit` for every other family); no provider-predefined tool types; tools with
 `CallMode::Async` (`web_fetch`, MCP tools) go into `openai::Options.async_tools` when `caps.async_tools`.
 
+### 4.9 Plan usage (subscription limits, built 2026-10-24)
+
+How much of a subscription's limits is used, for the agent block's footer ring (AGENT_BLOCK.md §4b).
+`otto_llm::plan_usage` parses it with pure functions into `PlanUsage { windows: [PlanWindow { name, label, used
+(0–1), resets_at (unix s)? }] }`, emitted as one `StreamEvent::PlanUsage` per header set or event:
+- **Claude (OAuth):** every `anthropic-ratelimit-unified-{window}-utilization` with its `-reset`, generically
+  (`5h`, `7d`, per-model `7d_opus`, …). A value above 1 reads as a percent; resets are unix seconds (ms when that
+  large) or RFC 3339. Malformed values drop the window.
+- **ChatGPT/Codex:** headers `x-codex-{window}-used-percent` (a percent), `-window-minutes`, `-reset-at` or
+  `-reset-after-seconds`, for `primary`/`secondary` (or any prefix); and the `codex.rate_limits` event
+  (`rate_limits.{primary,secondary}.{used_percent,window_minutes,reset_at|reset_after_seconds}`) on the stream.
+  Over WebSocket the upgrade response's headers are reported by the connection's first call.
+- **API keys and local models:** neither family appears, so nothing.
+- Labels from the window length: 300 min `5-hour`, 10080 `Weekly`, else `{n}d` / `{n}h`; a per-model suffix
+  follows (`Weekly Opus`); unknown lengths use the window's name.
+- Evidence: none of these headers or events are in our fixtures; names follow Claude Code's and the Codex CLI's
+  handling and need a live check.
+
+otto-core keeps the latest per **provider** (merged by window name) in memory and in `<state>/plan_usage.json`
+(read at start). Each report is announced as the global, unjournaled event `plan.usage {provider, usage}`;
+`session.view`, `session.list`, `session.create`/`fork`/`update` fill `SessionInfo.plan` for the session's
+provider; `plan.usage {provider?}` returns `[{provider, usage}]` so a client can show it before a session's first
+reply.
+
 ---
 
 ## 5. `otto-tools`: tool model

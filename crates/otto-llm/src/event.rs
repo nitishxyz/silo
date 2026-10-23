@@ -50,6 +50,9 @@ pub enum StreamEvent {
     },
     /// Cumulative usage so far; the last one wins.
     Usage(Usage),
+    /// The subscription's limits as this response reports them
+    /// (`plan_usage`); at most one per header set or rate-limit event.
+    PlanUsage(crate::PlanUsage),
     /// The provider committed steering input (ids from
     /// [`crate::ModelSession::steer`], in submission order) and continues in a
     /// new response. Everything before this event belongs to the previous

@@ -657,6 +657,47 @@
           }
         ]
       },
+      "PlanUsage": {
+        "properties": {
+          "windows": {
+            "items": {
+              "$ref": "#/$defs/PlanWindow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "windows"
+        ],
+        "type": "object"
+      },
+      "PlanWindow": {
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resets_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "used": {
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "used"
+        ],
+        "type": "object"
+      },
       "ProviderId": {
         "type": "string"
       },
@@ -794,6 +835,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlanUsage"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -1546,6 +1597,34 @@
           },
           "event": {
             "const": "error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/PlanUsage"
+              }
+            },
+            "required": [
+              "provider",
+              "usage"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "plan.usage",
             "type": "string"
           }
         },
@@ -7271,6 +7350,316 @@
         "type": "object"
       }
     },
+    "plan.usage": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "provider": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
+          "ProviderPlan": {
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/PlanUsage"
+              }
+            },
+            "required": [
+              "provider",
+              "usage"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/ProviderPlan"
+        },
+        "title": "Array_of_ProviderPlan",
+        "type": "array"
+      }
+    },
     "project.list": {
       "params": {
         "$defs": {
@@ -9665,6 +10054,47 @@
             ],
             "type": "string"
           },
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
           "SessionStatus": {
             "enum": [
               "idle",
@@ -9776,6 +10206,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlanUsage"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -10110,6 +10550,47 @@
             ],
             "type": "string"
           },
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
           "SessionStatus": {
             "enum": [
               "idle",
@@ -10221,6 +10702,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlanUsage"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -10800,6 +11291,47 @@
             ],
             "type": "string"
           },
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
           "SessionInfo": {
             "properties": {
               "agent": {
@@ -10847,6 +11379,16 @@
                 "type": [
                   "string",
                   "null"
+                ]
+              },
+              "plan": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "project_id": {
@@ -13075,6 +13617,47 @@
             ],
             "type": "string"
           },
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
           "SessionStatus": {
             "enum": [
               "idle",
@@ -13186,6 +13769,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlanUsage"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -14209,6 +14802,47 @@
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "properties": {
+              "windows": {
+                "items": {
+                  "$ref": "#/$defs/PlanWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows"
+            ],
+            "type": "object"
+          },
+          "PlanWindow": {
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "used": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "used"
+            ],
+            "type": "object"
+          },
           "ProviderId": {
             "type": "string"
           },
@@ -14370,6 +15004,16 @@
                 "type": [
                   "string",
                   "null"
+                ]
+              },
+              "plan": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "project_id": {
@@ -16142,6 +16786,34 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "provider": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "$ref": "#/$defs/PlanUsage"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "usage"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "plan.usage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -16697,6 +17369,47 @@
           }
         ]
       },
+      "PlanUsage": {
+        "properties": {
+          "windows": {
+            "items": {
+              "$ref": "#/$defs/PlanWindow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "windows"
+        ],
+        "type": "object"
+      },
+      "PlanWindow": {
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resets_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "used": {
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "used"
+        ],
+        "type": "object"
+      },
       "ProviderId": {
         "type": "string"
       },
@@ -16850,6 +17563,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlanUsage"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -17678,6 +18401,34 @@
               },
               "event": {
                 "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "provider": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "$ref": "#/$defs/PlanUsage"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "usage"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "plan.usage",
                 "type": "string"
               }
             },

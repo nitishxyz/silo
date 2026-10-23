@@ -170,10 +170,14 @@ mod client {
             let mut body = serde_json::to_value(request).map_err(|e| LlmError::new(ErrorClass::InvalidRequest, e.to_string()))?;
             body["stream"] = Value::Bool(true);
             let response = self.send("messages", body, &self.config.betas, &cx).await?;
-            Ok(stream::decode_for(
-                byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
-                model,
-                self.config.model.provider.as_str(),
+            let plan = crate::plan_usage::from_response(&response);
+            Ok(crate::plan_usage::prepend(
+                plan,
+                stream::decode_for(
+                    byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
+                    model,
+                    self.config.model.provider.as_str(),
+                ),
             ))
         }
     }
@@ -186,10 +190,14 @@ mod client {
             let (body, betas) = self.prepare(&req)?;
             let model = body["model"].as_str().unwrap_or_default().to_owned();
             let response = self.send("messages", body, &betas, &cx).await?;
-            Ok(stream::decode_for(
-                byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
-                model,
-                self.config.model.provider.as_str(),
+            let plan = crate::plan_usage::from_response(&response);
+            Ok(crate::plan_usage::prepend(
+                plan,
+                stream::decode_for(
+                    byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel),
+                    model,
+                    self.config.model.provider.as_str(),
+                ),
             ))
         }
         async fn count_tokens(&self, req: &Request) -> Result<Option<u64>, LlmError> {

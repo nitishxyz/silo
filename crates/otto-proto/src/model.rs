@@ -79,6 +79,17 @@ pub struct SessionInfo {
     /// reports: a later turn, `session.hand_back`, or the next otto start.
     #[serde(default)]
     pub report_held: bool,
+    /// The provider's subscription limits as last reported (`plan.usage`);
+    /// in `session.view`, `session.list` and `session.update` results only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<otto_llm::PlanUsage>,
+}
+
+/// A provider's subscription limits as its last response reported them (`plan.usage`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderPlan {
+    pub provider: String,
+    pub usage: otto_llm::PlanUsage,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
