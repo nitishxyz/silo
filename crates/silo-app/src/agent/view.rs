@@ -30,6 +30,8 @@ const LINE_H: f32 = 24.0;
 const COMPOSER_FADE: f32 = 28.0;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
+/// Streaming reasoning's window: four of its lines and the gap below.
+const STREAM_H: f32 = 4.0 * 18.0 + 4.0;
 const TEXT: f32 = 13.5;
 /// Height of an open `›` detail (240 max plus its margins).
 const DETAIL_H: f32 = 250.0;
@@ -781,7 +783,7 @@ impl AgentPane {
 
     /// Whether the activity row shows: a turn runs and no live group ends the transcript.
     fn activity_shown(&self) -> bool {
-        (self.running || self.awaiting()) && !matches!(self.rows.last(), Some(Row::Group(g)) if g.live)
+        (self.running || self.awaiting()) && !transcript::indicator_is_group(&self.rows)
     }
 
     /// The list's last item: `Thinking…` / `Working for 12s` with Stop while a
@@ -955,9 +957,10 @@ impl AgentPane {
             }
             return column.into_any_element();
         }
-        // Live, or folding: the newest lines under a top fade.
-        let frozen = self.frozen.as_ref().filter(|(k, _)| *k == key).map(|(_, n)| *n);
-        let shown = &g.lines[..frozen.unwrap_or(g.lines.len()).min(g.lines.len())];
+        // Live, or folding: a window on the newest lines under a top fade. It scrolls (an inner box,
+        // `scroll.rs`): pinned to its newest line until the user scrolls up in it, then it stays put and a
+        // bottom fade says more is below, until they scroll back down.
+        let shown = &g.lines[..];
         let n = shown.len();
         // How much of each line has arrived (0 → 1 while it enters, from its own `entered`).
         let arrived: Vec<f32> = shown
@@ -979,40 +982,37 @@ impl AgentPane {
             .collect();
         // The top fade comes in with the line that fills the window.
         let fade = (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0);
-        let max = LINE_H * LIVE_LINES;
-        let hover_key = key.clone();
-        let count = g.lines.len();
-        let keys: Vec<String> = g.lines.iter().map(|l| l.key.clone()).collect();
+        // An open detail gets its own room in the window (its box scrolls on its own).
+        #[allow(clippy::cast_precision_loss)]
+        let max = LINE_H * LIVE_LINES + shown.iter().filter(|l| self.details.contains(&l.key)).count() as f32 * DETAIL_H;
+        let id = format!("live-{key}");
+        let handle = self.scroll.handle(&id);
+        let pin = self.live_pins.entry(key.clone()).or_default();
+        if let Some(y) = pin.follow(f32::from(handle.offset().y), f32::from(handle.max_offset().y)) {
+            handle.set_offset(gpui::point(handle.offset().x, px(y)));
+        }
+        let below = !pin.pinned;
+        // Thinking folding away is gone in the fold's first third (its line repeats the header) while the
+        // space closes over the whole fold.
+        let alpha = if !g.live && transcript::thought(g) { (1.0 - 3.0 * fold).max(0.0) } else { 1.0 - fold };
+        let scroller =
+            self.scroll.scroller(&id, div().id(gpui::ElementId::Name(id.clone().into())).max_h(px(max * (1.0 - fold))).flex().flex_col(), false);
+        let bg = theme::background();
+        let edge = |top: bool| {
+            let (a, b) = if top { (1.0, 0.0) } else { (0.0, 1.0) };
+            div().absolute().left_0().right_0().h(px(28.0)).map(|el| if top { el.top_0() } else { el.bottom_0() }).bg(linear_gradient(
+                180.0,
+                linear_color_stop(hsla(bg, a), 0.0),
+                linear_color_stop(hsla(bg, b), 1.0),
+            ))
+        };
         let window_el = div()
-            .id(gpui::ElementId::Name(format!("live-{key}").into()))
             .relative()
             .pl(px(NEST))
-            .max_h(px(max * (1.0 - fold)))
-            .opacity(1.0 - fold)
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .justify_end()
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                // Lines held back while hovered ease in once the pointer leaves.
-                if !*hovered && let Some((_, held)) = this.frozen.take_if(|(k, _)| *k == hover_key) {
-                    let now = Instant::now();
-                    for k in keys.iter().skip(held) {
-                        this.entered.insert(k.clone(), now);
-                    }
-                }
-                this.frozen = hovered.then(|| (hover_key.clone(), count));
-                cx.notify();
-            }))
-            .child(div().flex_none().flex().flex_col().children(lines))
-            .when(f32::from(window.line_height()) > 0.0 && fade > 0.0, |el| {
-                let bg = theme::background();
-                el.child(div().absolute().top_0().left_0().right_0().h(px(28.0)).opacity(fade).bg(linear_gradient(
-                    180.0,
-                    linear_color_stop(hsla(bg, 1.0), 0.0),
-                    linear_color_stop(hsla(bg, 0.0), 1.0),
-                )))
-            });
+            .opacity(alpha)
+            .child(scroller.child(div().flex_none().flex().flex_col().children(lines)))
+            .when(f32::from(window.line_height()) > 0.0 && fade > 0.0, |el| el.child(edge(true).opacity(fade)))
+            .when(below, |el| el.child(edge(false)));
         column.child(window_el).into_any_element()
     }
 
@@ -1126,10 +1126,12 @@ impl AgentPane {
                         this.open_session_block(session.clone(), cx);
                     }))
             }));
-        // Streaming reasoning eases its height to what it measured as it grows, and folds away once it ends.
+        // Streaming reasoning shows its newest lines at the bottom of a window up to four lines tall: what's
+        // older moves up out of a top fade, never dropping a whole paragraph at once. Its height eases to what it
+        // measured as it grows, and folds away once it ends.
         let tail = line.stream.as_ref().filter(|s| !s.trim().is_empty()).map(|s| {
             let tail: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-            tail[tail.len().saturating_sub(4)..].join("\n")
+            tail[tail.len().saturating_sub(12)..].join("\n")
         });
         if let Some(text) = tail {
             let s = self.streams.entry(key.clone()).or_insert_with(|| Stream {
@@ -1144,7 +1146,7 @@ impl AgentPane {
         }
         let reduce = cx.reduce_motion();
         let stream = self.streams.get_mut(&key).map(|s| {
-            let natural = s.measured.get();
+            let natural = s.measured.get().min(STREAM_H);
             s.height.target(if s.live { natural } else { 0.0 }, now, reduce);
             let h = s.height.value(now, reduce);
             let moving = s.height.moving(now, reduce);
@@ -1163,7 +1165,15 @@ impl AgentPane {
                 .text_color(rgb(muted))
                 .child(s.text.clone())
                 .child(gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
-            let el = div().h(px(h)).overflow_hidden().flex().flex_col().opacity(0.8 * fade).child(body);
+            let bg = theme::background();
+            let over = s.measured.get() > STREAM_H;
+            let el = div().relative().h(px(h)).overflow_hidden().flex().flex_col().justify_end().opacity(0.8 * fade).child(body).when(over, |el| {
+                el.child(div().absolute().top_0().left_0().right_0().h(px(18.0)).bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(hsla(bg, 1.0), 0.0),
+                    linear_color_stop(hsla(bg, 0.0), 1.0),
+                )))
+            });
             (el, !s.live && !moving)
         });
         let stream = match stream {
@@ -2584,7 +2594,7 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                     div()
                         .whitespace_nowrap()
                         .when(lines.is_some() && reveal::code_line(v, line_alpha(lines, v)) <= 0.0, |el| el.opacity(0.0))
-                        .child(if l.is_empty() { " ".to_owned() } else { l.to_owned() })
+                        .child(if l.is_empty() { " ".to_owned() } else { reveal::expand_tabs(l).into_owned() })
                 }),
             ));
             let (Some(lines), Some(f)) = (lines, fx) else { return code.into_any_element() };

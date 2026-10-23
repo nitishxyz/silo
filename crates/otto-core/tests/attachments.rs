@@ -56,9 +56,12 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 /// Auto approval (the fresh default); the model reads images and, when `pdf`, PDFs.
 async fn setup(pdf: bool) -> (tempfile::TempDir, Runtime, SessionHandle, Arc<Scripted>) {
+    setup_caps(true, pdf).await
+}
+async fn setup_caps(vision: bool, pdf: bool) -> (tempfile::TempDir, Runtime, SessionHandle, Arc<Scripted>) {
     let dir = tempfile::tempdir().unwrap();
     let mut info = ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None };
-    info.caps.vision = true;
+    info.caps.vision = vision;
     info.caps.pdf = pdf;
     let model = Arc::new(Scripted { info, scripts: Mutex::new(VecDeque::new()), requests: Mutex::new(vec![]) });
     let runtime = Runtime::new(RuntimeConfig {
@@ -189,6 +192,33 @@ async fn a_write_grant_without_copy_attachment_still_reaches_it() {
     r.prompt(&s.id, vec![InputPart::Text { text: "add it".into() }], Delivery::Queue).await.unwrap();
     finish(&mut live).await;
     assert!(dir.path().join("shot.png").exists());
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_model_without_vision_gets_no_images_but_the_transcript_keeps_them() {
+    let (_dir, r, s, model) = setup_caps(false, false).await;
+    let shot = r.attachment_put(&s.id, "shot.png", "image/png", png(640, 480), None).await.unwrap();
+    model.scripts.lock().unwrap().extend([call("c1", "read", serde_json::json!({"attachment_id":shot.id})), text("done")]);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let input = vec![InputPart::Attachment { id: shot.id.clone() }, InputPart::Text { text: "look".into() }];
+    r.prompt(&s.id, input, Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let requests = model.requests.lock().unwrap().clone();
+    // The prompt: the note (copy_attachment still works), a line in place of the image, the text.
+    let parts = &requests[0].items[0].parts;
+    assert!(matches!(&parts[0], Part::Text { text, .. } if text.starts_with(&format!("[attachment {}: shot.png, image/png", shot.id))));
+    assert_eq!(parts[1], Part::text("[shot.png not sent: this model can't view images]"));
+    assert_eq!(parts[2], Part::text("look"));
+    assert!(requests.iter().flat_map(|q| &q.items).flat_map(|i| &i.parts).all(|p| !matches!(p, Part::Image(_))));
+    // Stored with its image: the transcript's chip has a thumbnail.
+    let view = s.view().await.unwrap();
+    assert!(matches!(&view.items[0].parts[1], Part::Image(Media { name, .. }) if name.as_deref() == Some("shot.png")));
+    // `read` describes it instead of sending it.
+    let Part::ToolResult { content, .. } = requests[1].items.last().unwrap().parts.last().unwrap() else { panic!() };
+    assert!(!content.iter().any(|p| matches!(p, ResultPart::Image(_))), "{content:?}");
+    let ResultPart::Text { text } = &content[0] else { panic!("{content:?}") };
+    assert!(text.starts_with("shot.png: 640×480 PNG, ") && text.ends_with("; this model can't view images"), "{text}");
     r.shutdown().await.unwrap();
 }
 

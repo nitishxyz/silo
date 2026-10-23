@@ -173,6 +173,8 @@ pub struct ToolCx {
     pub sessions: Vec<String>,
     /// Delivers text to the calling session later (background results).
     pub mailbox: Option<Arc<dyn Mailbox>>,
+    /// The model can view images (its catalog caps); `read` describes an image as text otherwise.
+    pub vision: bool,
 }
 
 /// Text for a session after its call returned: injected at its next step,
@@ -196,6 +198,7 @@ impl ToolCx {
             services: None,
             sessions: Vec::new(),
             mailbox: None,
+            vision: true,
         }
     }
     pub fn progress(&self, message: Option<String>, output: Option<String>) {

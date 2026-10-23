@@ -281,8 +281,8 @@ pub struct AgentPane {
     /// Groups the user opened (folded) or closed (live).
     toggled: HashSet<String>,
     details: HashSet<String>,
-    /// Lines shown in the hovered live group (auto-scroll pauses).
-    frozen: Option<(String, usize)>,
+    /// Live groups' windows following their newest line (scrolled up in one, it stays put).
+    live_pins: HashMap<String, scroll::Pin>,
     /// Line reveal of streaming text rows, by row key (kept until the last line faded in).
     reveals: HashMap<String, reveal::Reveal>,
     /// Scroll chaining of the boxes inside the transcript (details, code blocks).
@@ -421,7 +421,7 @@ impl AgentPane {
             fold_at: HashMap::new(),
             toggled: HashSet::new(),
             details: HashSet::new(),
-            frozen: None,
+            live_pins: HashMap::new(),
             reveals: HashMap::new(),
             scroll,
             attachments: Vec::new(),
@@ -672,6 +672,7 @@ impl AgentPane {
         self.entered.clear();
         self.live_groups.clear();
         self.fold_at.clear();
+        self.live_pins.clear();
         self.toggled.clear();
         self.details.clear();
         self.anims.clear();
@@ -869,7 +870,8 @@ impl AgentPane {
                 }
             }
         }
-        if handoff.is_some() {
+        // One indicator at a time: whenever a live group ends the transcript its header is it, the row goes at once.
+        if transcript::indicator_is_group(&self.rows) {
             self.activity = crate::motion::Toggle::new(false, crate::motion::UI);
         }
         for row in &self.rows {
@@ -879,7 +881,9 @@ impl AgentPane {
                 }
                 Row::Group(g) => {
                     if self.live_groups.remove(&g.key) {
-                        self.fold_at.insert(g.key.clone(), now + FOLD_DELAY);
+                        // Thinking alone folds at once: its line would only repeat the header ("Thought for 1s").
+                        let delay = if transcript::thought(g) { Duration::ZERO } else { FOLD_DELAY };
+                        self.fold_at.insert(g.key.clone(), now + delay);
                         // Folded lines never stream again.
                         self.streams.retain(|k, _| !g.lines.iter().any(|l| l.key == *k));
                     }
@@ -891,8 +895,16 @@ impl AgentPane {
                 Row::Text { .. } | Row::User { .. } => {}
             }
         }
-        let rows = &self.rows;
-        self.reveals.retain(|k, _| rows.iter().any(|r| r.key() == k));
+        // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
+        // glide and sweep never fight the newer row's arrival through the list's measuring.
+        let open = transcript::revealing(&self.rows).map(str::to_owned);
+        let settled: Vec<usize> = (0..self.rows.len())
+            .filter(|ix| self.reveals.contains_key(self.rows[*ix].key()) && open.as_deref() != Some(self.rows[*ix].key()))
+            .collect();
+        self.reveals.retain(|k, _| open.as_deref() == Some(k.as_str()));
+        for ix in settled {
+            self.list.remeasure_items(ix..ix + 1);
+        }
     }
 
     // ---- actions ----

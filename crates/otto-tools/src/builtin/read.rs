@@ -22,6 +22,20 @@ tool!(
 const MAX_TEXT: usize = 20 * 1024 * 1024;
 const MAX_FILE: usize = 25 * 1024 * 1024;
 async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
+    let attached = input.get("attachment_id").and_then(Value::as_str).is_some();
+    let (mut output, name) = read(input, cx).await?;
+    // An attachment is named by its note, never by where it's stored.
+    if attached {
+        match &mut output.metadata {
+            Value::Object(m) => {
+                m.insert("name".into(), name.into());
+            }
+            meta => *meta = json!({"name": name}),
+        }
+    }
+    Ok(output)
+}
+async fn read(input: Value, cx: ToolCx) -> Result<(ToolOutput, String), ToolError> {
     let (path, name) = match input.get("attachment_id").and_then(Value::as_str) {
         Some(id) => {
             let root = cx.attachments.as_ref().ok_or_else(|| ToolError::invalid("This session has no attachments"))?;
@@ -55,13 +69,22 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
             return Err(ToolError::invalid("PDF exceeds 20 MiB; split it or extract its text with the shell"));
         }
         let text = format!("{name}: PDF, {}", attachments::size(bytes.len() as u64));
-        return Ok(ToolOutput {
+        let output = ToolOutput {
             content: vec![
                 OutputPart::Text { text },
-                OutputPart::Document { mime: "application/pdf".into(), data_base64: b64(&bytes), name: Some(name) },
+                OutputPart::Document { mime: "application/pdf".into(), data_base64: b64(&bytes), name: Some(name.clone()) },
             ],
             ..Default::default()
-        });
+        };
+        return Ok((output, name));
+    }
+    if images::decodable(&bytes) && !cx.vision {
+        let size = attachments::size(bytes.len() as u64);
+        let text = match images::describe(&bytes) {
+            Some(((w, h), format)) => format!("{name}: {w}×{h} {format}, {size}; this model can't view images"),
+            None => format!("{name}: image, {size}; this model can't view images"),
+        };
+        return Ok((ToolOutput::text(text).with_metadata(json!({"bytes": bytes.len()})), name));
     }
     if images::decodable(&bytes) {
         let max_edge = input.get("max_edge").and_then(Value::as_u64).map_or(images::MAX_EDGE, |e| e.clamp(64, 8000) as u32);
@@ -71,11 +94,12 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
             .map_err(|e| ToolError::failed(e.to_string()))?
             .map_err(|e| ToolError::invalid(format!("{name}: {e}")))?;
         let text = format!("{name} {}", prepared.dimensions());
-        return Ok(ToolOutput {
+        let output = ToolOutput {
             content: vec![OutputPart::Text { text }, OutputPart::Image { mime: prepared.mime.into(), data_base64: b64(&prepared.bytes) }],
             metadata: json!({"original":[prepared.original.0, prepared.original.1],"sent":[prepared.sent.0, prepared.sent.1],"bytes":prepared.bytes.len()}),
             ..Default::default()
-        });
+        };
+        return Ok((output, name));
     }
     if bytes.len() > MAX_TEXT {
         return Err(ToolError::invalid("File exceeds 20 MiB; use search or a smaller file"));
@@ -86,5 +110,7 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
     let text = String::from_utf8(bytes).map_err(|_| ToolError::invalid("File is not UTF-8"))?;
     let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
     let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
-    crate::output::limit(text.lines().enumerate().skip(offset - 1).take(limit).map(|(i, line)| format!("{}: {line}\n", i + 1)).collect(), &cx)
+    let output =
+        crate::output::limit(text.lines().enumerate().skip(offset - 1).take(limit).map(|(i, line)| format!("{}: {line}\n", i + 1)).collect(), &cx)?;
+    Ok((output, name))
 }

@@ -80,13 +80,14 @@ async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<Vec<Part>> {
     }
     Ok(parts)
 }
-/// An attachment's note, then the image, downscaled, when it is one.
+/// An attachment's note, then the image, downscaled, when it is one (kept for the transcript; a model
+/// without vision isn't sent it: [`visible`]).
 async fn attachment(cx: &Context, id: &str) -> Result<Vec<Part>> {
     let dir = otto_tools::attachments::dir(&cx.runtime.attachments_root(), &cx.row.id);
     let (attachment, path) = otto_tools::attachments::get(&dir, id)?;
     let mut parts = vec![Part::text(attachment.note())];
     let bytes = tokio::fs::read(&path).await?;
-    if cx.live().model.info().caps.vision && otto_tools::images::decodable(&bytes) {
+    if otto_tools::images::decodable(&bytes) {
         let prepared =
             tokio::task::spawn_blocking(move || otto_tools::images::prepare(&bytes, otto_tools::images::MAX_EDGE, otto_tools::images::QUALITY))
                 .await
@@ -97,6 +98,28 @@ async fn attachment(cx: &Context, id: &str) -> Result<Vec<Part>> {
         }
     }
     Ok(parts)
+}
+/// What a model sees of `items`: one without vision gets a line in place of each image (an
+/// attachment's note still says what it is, so `copy_attachment` works).
+pub(crate) fn visible(mut items: Vec<Item>, vision: bool) -> Vec<Item> {
+    if vision {
+        return items;
+    }
+    let note = |m: &Media| format!("[{} not sent: this model can't view images]", m.name.as_deref().unwrap_or("image"));
+    for part in items.iter_mut().flat_map(|i| i.parts.iter_mut()) {
+        match part {
+            Part::Image(m) => *part = Part::text(note(m)),
+            Part::ToolResult { content, .. } => {
+                for c in content.iter_mut() {
+                    if let ResultPart::Image(m) = c {
+                        *c = ResultPart::text(note(m));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    items
 }
 /// Commit a user input unless a UserPromptSubmit hook blocks it (`false`).
 async fn input(cx: &Context, input: QueuedInput, turn: i64, step: i64) -> Result<bool> {
@@ -279,7 +302,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         for queued in steer {
             input(&cx, queued, turn, step).await?;
         }
-        let items = crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window);
+        let items = visible(crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window), live.model.info().caps.vision);
         let compaction = crate::compaction::threshold(&live, &items);
         let mut provider = ProviderOptions::default();
         let caps = &live.model.info().caps;
@@ -504,6 +527,7 @@ async fn execute(
     tcx.approver = Some(bridge.clone());
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
     tcx.attachments = Some(cx.runtime.attachments_root());
+    tcx.vision = cx.live().model.info().caps.vision;
     tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
     tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
     let tool = lookup.get(&name).cloned();

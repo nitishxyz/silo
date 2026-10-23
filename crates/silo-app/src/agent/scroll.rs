@@ -140,7 +140,7 @@ impl Inner {
         self.latch.borrow().boxed(now)
     }
 
-    fn handle(&self, id: &str) -> ScrollHandle {
+    pub(super) fn handle(&self, id: &str) -> ScrollHandle {
         self.handles.borrow_mut().entry(id.to_owned()).or_default().clone()
     }
 
@@ -236,9 +236,51 @@ impl Inner {
     }
 }
 
+/// A live window following its newest line: whether it's pinned to the bottom, and its overflow last frame.
+/// It stays pinned while the content only grew (a line arrived); scrolled up off the bottom it stays where the
+/// user put it until they scroll back down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pin {
+    pub pinned: bool,
+    max: f32,
+}
+
+impl Default for Pin {
+    fn default() -> Self {
+        Self { pinned: true, max: 0.0 }
+    }
+}
+
+impl Pin {
+    /// This frame's offset (0 … -`max`) and overflow: the offset to set, if it follows.
+    pub fn follow(&mut self, offset: f32, max: f32) -> Option<f32> {
+        if max <= self.max + 0.5 {
+            self.pinned = max < 0.5 || offset <= -max + 1.0;
+        }
+        self.max = max;
+        self.pinned.then_some(-max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_window_follows_its_newest_line_until_scrolled_up() {
+        let mut p = Pin::default();
+        assert_eq!(p.follow(0.0, 0.0), Some(0.0), "nothing to scroll");
+        // A line arrived (the overflow grew): still at the bottom.
+        assert_eq!(p.follow(0.0, 24.0), Some(-24.0));
+        assert_eq!(p.follow(-24.0, 48.0), Some(-48.0));
+        // Scrolled up: it stays put, through new lines too.
+        assert_eq!(p.follow(-20.0, 48.0), None);
+        assert!(!p.pinned);
+        assert_eq!(p.follow(-20.0, 72.0), None, "a new line doesn't pull it down");
+        // Back at the bottom: it follows again.
+        assert_eq!(p.follow(-72.0, 72.0), Some(-72.0));
+        assert_eq!(p.follow(-72.0, 96.0), Some(-96.0));
+    }
 
     const MS: Duration = Duration::from_millis(1);
 

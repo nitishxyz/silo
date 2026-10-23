@@ -398,6 +398,10 @@ mod tests {
         assert_eq!(doc.blocks()[0], first);
         assert_eq!((doc.stable, doc.stable_end), (2, 20), "the list is complete once the fence opens");
         assert_eq!(doc.blocks()[2], Block::Code { lang: None, text: "code".into() });
+        // The reply completes with the text it streamed (its row keeps its key, so this `Doc`): nothing restarts.
+        let streamed = doc.blocks().to_vec();
+        doc.update("Para one.\n\n- a\n- b\n\n```\ncode");
+        assert_eq!((doc.blocks(), doc.stable, doc.stable_end), (&streamed[..], 2, 20));
         // Not a continuation (an edit, a retry): parsed afresh.
         doc.update("Other.");
         assert_eq!(doc.blocks(), parse("Other."));

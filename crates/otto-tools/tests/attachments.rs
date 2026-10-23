@@ -160,6 +160,18 @@ async fn read_sends_images_downscaled_pdfs_as_documents_and_attachments() {
     let a = attachments::put(&attachments::dir(root.path(), "s1"), "notes.txt", "text/plain", b"hello\nworld\n").unwrap();
     let out = Read::default().call(json!({"attachment_id":a.id}), cx(project.path(), root.path())).await.unwrap();
     assert_eq!(out.joined_text(), "1: hello\n2: world\n");
+    assert_eq!(out.metadata["name"], "notes.txt", "an attachment read is named for the transcript");
+    let shot = attachments::put(&attachments::dir(root.path(), "s1"), "screenshot.png", "image/png", &png(40, 30)).unwrap();
+    let out = Read::default().call(json!({"attachment_id":shot.id}), cx(project.path(), root.path())).await.unwrap();
+    assert_eq!((out.metadata["name"].as_str(), out.metadata["sent"].clone()), (Some("screenshot.png"), json!([40, 30])));
+    // A model without vision gets a description, not the image.
+    let mut blind = cx(project.path(), root.path());
+    blind.vision = false;
+    let out = Read::default().call(json!({"attachment_id":shot.id}), blind).await.unwrap();
+    assert_eq!(out.content.len(), 1);
+    let size = attachments::size(png(40, 30).len() as u64);
+    assert_eq!(out.joined_text(), format!("screenshot.png: 40×30 PNG, {size}; this model can't view images"));
+    assert_eq!(out.metadata["name"], "screenshot.png");
     // The policy leaves an attachment read without a path.
     let prepared = Policy::default().prepare(Read::default().spec(), &json!({"attachment_id":a.id}), &cx(project.path(), root.path())).unwrap();
     assert!(prepared.input.get("path").is_none());

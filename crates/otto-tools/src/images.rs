@@ -49,6 +49,31 @@ pub fn decodable(bytes: &[u8]) -> bool {
     })
 }
 
+/// An image's width and height (upright) and format name, from its header.
+#[must_use]
+pub fn describe(bytes: &[u8]) -> Option<((u32, u32), &'static str)> {
+    let format = image::guess_format(bytes).ok()?;
+    let mut decoder = image::ImageReader::with_format(std::io::Cursor::new(bytes), format).into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
+    let turned = matches!(
+        decoder.orientation().ok()?,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    );
+    let name = match format {
+        ImageFormat::Png => "PNG",
+        ImageFormat::Jpeg => "JPEG",
+        ImageFormat::Gif => "GIF",
+        ImageFormat::WebP => "WebP",
+        ImageFormat::Tiff => "TIFF",
+        ImageFormat::Bmp => "BMP",
+        _ => "image",
+    };
+    Some((if turned { (h, w) } else { (w, h) }, name))
+}
+
 /// `bytes` fit for a model: at most `max_edge` on the long edge and
 /// `MAX_BYTES` encoded. Small PNG/JPEG/GIF/WebP files pass unchanged;
 /// others become PNG (transparency, or a PNG source that fits) or JPEG at `quality`.

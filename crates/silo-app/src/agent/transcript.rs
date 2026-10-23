@@ -163,6 +163,40 @@ pub fn user_message(item: &Item) -> (String, Vec<FileChip>) {
     (text.trim().to_owned(), files)
 }
 
+/// Attachment names by id, from the notes in the user's messages.
+fn attachment_names(items: &[Item]) -> HashMap<String, String> {
+    let named = |text: &str| {
+        let id = text.trim().strip_prefix("[attachment ")?.split_once(':')?.0;
+        attachment_note(text).map(|(name, _)| (id.to_owned(), name.to_owned()))
+    };
+    items
+        .iter()
+        .filter(|i| i.role == Role::User)
+        .flat_map(|i| &i.parts)
+        .filter_map(|p| if let Part::Text { text, .. } = p { named(text) } else { None })
+        .collect()
+}
+
+/// Why a copy failed, in a few words and without paths.
+fn copy_failure(text: &str) -> &'static str {
+    let t = text.to_lowercase();
+    if t.contains(" exists") {
+        "already exists"
+    } else if t.contains("is a folder") || t.contains("is a directory") {
+        "a folder is in the way"
+    } else if t.contains("unknown attachment") || t.contains("no attachments") {
+        "no such attachment"
+    } else if t.contains("permission denied") || t.contains("read-only") {
+        "permission denied"
+    } else if t.contains("no space") {
+        "disk full"
+    } else if t.contains("denied") {
+        "denied"
+    } else {
+        "failed"
+    }
+}
+
 impl Row {
     #[must_use]
     pub fn key(&self) -> &str {
@@ -170,6 +204,29 @@ impl Row {
             Row::User { key, .. } | Row::Text { key, .. } => key,
             Row::Group(g) => &g.key,
         }
+    }
+}
+
+/// The running turn's indicator is the live group's header (it ends the transcript), not the activity row.
+/// There is only ever one of them.
+#[must_use]
+pub fn indicator_is_group(rows: &[Row]) -> bool {
+    matches!(rows.last(), Some(Row::Group(g)) if g.live)
+}
+
+/// A group of thinking only (its header says all its line does).
+#[must_use]
+pub fn thought(g: &Group) -> bool {
+    g.lines.iter().all(|l| l.kind == Kind::Reasoning)
+}
+
+/// The one text row that may still reveal (sweep in, its height gliding): the last row, while it's text. A row
+/// after it settles it at once; the newer row has the motion.
+#[must_use]
+pub fn revealing(rows: &[Row]) -> Option<&str> {
+    match rows.last() {
+        Some(Row::Text { key, .. }) => Some(key),
+        _ => None,
     }
 }
 
@@ -383,6 +440,8 @@ struct Ctx<'a> {
     stopped: bool,
     /// Background shell jobs that reported, by job id.
     jobs: &'a HashMap<String, (JobEnd, String)>,
+    /// Attachment names by id (`attachment_names`).
+    files: &'a HashMap<String, String>,
 }
 
 /// How a shell job (background, or answered after waiting for input) ended.
@@ -439,8 +498,9 @@ fn shell_job(text: &str, meta: &Value) -> Option<ShellJob> {
 pub fn build(input: &Input<'_>) -> Vec<Row> {
     let running = input.turn == Some(TurnStatus::Running);
     let jobs = job_reports(input.items);
+    let files = attachment_names(input.items);
     let stopped = input.turn == Some(TurnStatus::Cancelled);
-    let cx = Ctx { cwd: input.cwd, times: input.times, now: input.now, running, stopped, jobs: &jobs };
+    let cx = Ctx { cwd: input.cwd, times: input.times, now: input.now, running, stopped, jobs: &jobs, files: &files };
     let results = results(input.items);
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
@@ -465,11 +525,23 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                 rows.push(Row::User { key: item.id.clone(), text, files });
             }
             Role::Assistant => {
+                // Text rows are keyed by their place among the item's texts, not by part index: the finished item
+                // may hold parts its stream never showed (a thinking block without text, a signature), and a
+                // key that shifts at `item.done` would make the reply a new row (gone, then in again).
+                let (mut texts, mut joined) = (0, None::<usize>);
                 for (pi, part) in item.parts.iter().enumerate() {
+                    let shown = lines.len();
                     match part {
                         Part::Text { text, .. } if !text.trim().is_empty() => {
+                            // Text blocks with nothing shown between them read as one (the stream joined them).
+                            if let Some(Row::Text { text: prev, .. }) = joined.and_then(|r| rows.get_mut(r)) {
+                                prev.push_str(text);
+                                continue;
+                            }
                             flush(&mut rows, &mut lines, false, false);
-                            rows.push(Row::Text { key: format!("{}#{pi}", item.id), text: text.clone(), streaming: false });
+                            rows.push(Row::Text { key: format!("{}#t{texts}", item.id), text: text.clone(), streaming: false });
+                            joined = Some(rows.len() - 1);
+                            texts += 1;
                         }
                         Part::Reasoning { summary, text, .. } => {
                             let live = running && Some(ix) == last && pi + 1 == item.parts.len() && !any_pending;
@@ -480,6 +552,9 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                             lines.push(tool(call_id, name, args, input.tools.get(call_id), results.get(call_id.as_str()), &cx));
                         }
                         _ => {}
+                    }
+                    if lines.len() > shown {
+                        joined = None;
                     }
                 }
             }
@@ -657,27 +732,33 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     // No detail from the result text (it only says where the result goes).
     let mut quiet = false;
     let path = |key: &str| str_at(input, key).map(|p| rel(p, cx.cwd));
+    // An attachment by its name (the result's, else its note's), never its id or where it's stored.
+    let attached =
+        || meta["name"].as_str().or_else(|| str_at(input, "attachment_id").and_then(|id| cx.files.get(id)).map(String::as_str)).map(str::to_owned);
     let (kind, run, done, subject): (Kind, &str, &str, String) = match name {
-        "read" => (
-            Kind::Read,
-            "Reading",
-            "Read",
-            path("path").or_else(|| str_at(input, "attachment_id").map(|_| "attachment".to_owned())).unwrap_or_default(),
-        ),
+        "read" => {
+            let subject = match path("path") {
+                Some(p) => p,
+                None if str_at(input, "attachment_id").is_some() => attached().unwrap_or_else(|| "attachment".into()),
+                None => String::new(),
+            };
+            (Kind::Read, "Reading", "Read", subject)
+        }
         "copy_attachment" => {
             let dest = path("path").unwrap_or_default();
-            let name = meta["name"]
-                .as_str()
-                .map(str::to_owned)
+            let name = attached()
                 .or_else(|| text.strip_prefix("Copied ").and_then(|t| t.rsplit_once(" to ")).map(|(name, _)| name.to_owned()))
                 .unwrap_or_else(|| "attachment".into());
-            line.files = vec![dest.clone()];
+            if status == Status::Done {
+                line.files = vec![dest.clone()];
+            }
             line.desc = text
                 .trim_end()
                 .strip_suffix(')')
                 .and_then(|t| t.rsplit_once(" ("))
                 .map(|(_, size)| size.to_owned())
                 .filter(|_| status == Status::Done);
+            failed = out.is_some().then(|| format!("Couldn't copy {name}: {}", copy_failure(text)));
             quiet = true;
             (Kind::Edit, "Copying", "Copied", format!("{name} → {dest}"))
         }
@@ -792,7 +873,36 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             line.files = edit.files;
             if name == "write" { (Kind::Edit, "Writing", "Wrote", subject) } else { (Kind::Edit, "Editing", "Edited", subject) }
         }
-        "web_fetch" => (Kind::Fetch, "Fetching", "Fetched", host(str_at(input, "url").unwrap_or(""))),
+        // Web tools (otto-tools `web_fetch`/`web_search`): matched on their robust fields (metadata `rendered`,
+        // `results`; the `rendered in browser` note; numbered hits) so small changes to their text still read.
+        "web_fetch" => {
+            let url = str_at(input, "url").unwrap_or("");
+            let page = host(url.split(['?', '#']).next().unwrap_or(url));
+            failed = Some(title("Couldn't fetch", &page));
+            if status == Status::Done && (meta["rendered"].as_bool() == Some(true) || text.lines().any(|l| l.trim() == "Note: rendered in browser")) {
+                line.desc = Some("rendered".into());
+            }
+            // The page's markdown, without the header for the model (title, URL, notes).
+            if let Some((head, body)) = text.split_once("\n\n")
+                && head.lines().all(|l| ["Title:", "URL:", "Status:", "Note:"].iter().any(|p| l.starts_with(p)))
+                && !body.trim().is_empty()
+            {
+                line.detail = Some(if status == Status::Error { Detail::Text(tail(body)) } else { Detail::Mono(tail(body)) });
+            }
+            (Kind::Fetch, "Fetching", "Fetched", page)
+        }
+        "web_search" => {
+            let query = format!("\"{}\"", clip(str_at(input, "query").unwrap_or(""), 60));
+            failed = Some(format!("Couldn't search the web for {query}"));
+            if status == Status::Done {
+                let n = meta["results"]
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or_else(|| text.lines().filter(|l| l.split_once(". ").is_some_and(|(n, _)| n.parse::<usize>().is_ok())).count());
+                line.desc = Some(plural(n, "result", "results"));
+            }
+            (Kind::Search, "Searching the web for", "Searched the web for", query)
+        }
         "ask_user" => {
             if status == Status::Done && !text.trim().is_empty() {
                 line.desc = Some(clip(text, 40));
@@ -1399,7 +1509,7 @@ mod tests {
         let times = Times::default();
         let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Done), &times, 0);
         let keys: Vec<&str> = rows.iter().map(Row::key).collect();
-        assert_eq!(keys, ["u1", "g:a1#0", "a2#0", "g:c3", "a3#0"]);
+        assert_eq!(keys, ["u1", "g:a1#0", "a2#t0", "g:c3", "a3#t0"]);
         let g = group_of(&rows[1]);
         assert!(!g.live);
         assert_eq!(
@@ -1490,7 +1600,127 @@ mod tests {
         items.push(assistant("c", vec![Part::text("Done.")]));
         let done = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 1_300);
         assert_eq!(list_change(&after, &done), ListChange { remeasure: 1..2, splice: Some((2..2, 1)) });
-        assert_eq!(arrivals(&after, &done, |k| entered.contains_key(k)), ["c#0"]);
+        assert_eq!(arrivals(&after, &done, |k| entered.contains_key(k)), ["c#t0"]);
+    }
+
+    #[test]
+    fn thinking_then_text_folds_above_the_text_with_one_indicator() {
+        use otto_client::SessionMirror;
+        use otto_proto::Event;
+        let view: otto_proto::SessionView = serde_json::from_value(json!({"info":{"id":"s","project_id":"p","agent":"a","provider":"p","model":"m","title":"t","cwd":"/","status":"busy","created_at":0,"updated_at":0,"last_seq":1,"usage":{"usage":{"input":0,"output":0},"cost_usd":0.0}},"items":[serde_json::to_value(user("u", "go")).unwrap()],"pending_approvals":[],"pending_questions":[],"queue":[],"running_tool_calls":[],"seq":1})).unwrap();
+        let mut m = SessionMirror::new(view);
+        m.apply(2, &Event::TurnStarted { turn: 1 });
+        m.apply(3, &Event::ItemStarted { item_id: "a".into(), role: Role::Assistant });
+        let mut times = Times::live();
+        let think = |t: &str| Event::ReasoningDelta { item_id: "a".into(), text: t.into(), summary: false };
+        let text = |t: &str| Event::TextDelta { item_id: "a".into(), text: t.into() };
+        // Thinking streams (an empty delta first, as Claude sends without `display`): its live group is the indicator.
+        m.apply_live(3, &think(""));
+        m.apply_live(3, &think("Plan the"));
+        times.observe(&m.items, &m.tools, true, HashMap::new(), 0);
+        let rows = build_rows(&m.items, &m.tools, m.turn.map(|t| t.1), &times, 0);
+        assert!(indicator_is_group(&rows), "the live group's header is the one indicator");
+        // The reply starts; the thinking's records land while it streams.
+        m.apply_live(3, &text("Build the runtime"));
+        m.apply(4, &think(""));
+        m.apply(5, &think("Plan the"));
+        m.apply_live(5, &text(" first, then the"));
+        m.apply(6, &text("Build the runtime"));
+        times.observe(&m.items, &m.tools, true, HashMap::new(), 1_000);
+        let rows = build_rows(&m.items, &m.tools, m.turn.map(|t| t.1), &times, 1_000);
+        let keys: Vec<&str> = rows.iter().map(Row::key).collect();
+        assert_eq!(keys, ["u", "g:a#0", "a#t0"], "the folded group above the text, nothing after it");
+        let g = group_of(&rows[1]);
+        assert!(!g.live && g.lines.iter().all(|l| l.status == Status::Done), "{g:?}");
+        assert_eq!(g.lines[0].title, "Thought for 1s");
+        assert!(matches!(&rows[2], Row::Text { text, streaming: true, .. } if text == "Build the runtime first, then the"));
+        assert!(!indicator_is_group(&rows), "the activity row is the indicator now, after the text");
+    }
+
+    #[test]
+    fn web_tools_read_as_searches_and_fetches() {
+        let cx =
+            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let live = |name: &str, error: bool, text: &str, meta: Value| ToolState {
+            name: name.into(),
+            status: if error { ToolStatus::Error } else { ToolStatus::Done },
+            output: Some(json!({"content": [{"type": "text", "text": text}], "metadata": meta, "is_error": error})),
+            ..ToolState::default()
+        };
+        let input = json!({"query": "gpui list remeasure", "limit": 5});
+        let hits = "1. List in gpui\n   https://zed.dev/a\n   About lists\n2. Remeasure\n   https://zed.dev/b";
+        let out = live("web_search", false, hits, json!({"engine": "duckduckgo", "rendered": true, "results": [{}, {}]}));
+        let line = tool("s", "web_search", &input, Some(&out), None, &cx);
+        assert_eq!(
+            (line.title.as_str(), line.desc.as_deref(), line.kind),
+            ("Searched the web for \"gpui list remeasure\"", Some("2 results"), Kind::Search)
+        );
+        assert_eq!(line.detail, Some(Detail::Mono(hits.into())), "the results list");
+        // Counted from the text when the metadata has no list.
+        let line = tool("s", "web_search", &input, None, Some(&(hits.into(), false)), &cx);
+        assert_eq!(line.desc.as_deref(), Some("2 results"));
+        let line = tool("s", "web_search", &input, None, Some(&("Search failed: timed out".into(), true)), &cx);
+        assert_eq!((line.title.as_str(), line.status), ("Couldn't search the web for \"gpui list remeasure\"", Status::Error));
+        assert_eq!(tool("s", "web_search", &input, None, None, &Ctx { running: true, ..cx }).title, "Searching the web for \"gpui list remeasure\"");
+
+        let input = json!({"url": "https://example.com/docs/intro?ref=x#top"});
+        let page = "Title: Intro\nURL: https://example.com/docs/intro\nNote: rendered in browser\n\n# Intro\n\nHello.";
+        let out = live("web_fetch", false, page, json!({"url": "https://example.com/docs/intro", "rendered": true}));
+        let line = tool("f", "web_fetch", &input, Some(&out), None, &cx);
+        assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Fetched example.com/docs/intro", Some("rendered")));
+        assert_eq!(line.detail, Some(Detail::Mono("# Intro\n\nHello.".into())), "the page's markdown");
+        let plain = "URL: https://example.com/docs/intro\n\nHello.";
+        let line = tool("f", "web_fetch", &input, None, Some(&(plain.into(), false)), &cx);
+        assert_eq!((line.title.as_str(), line.desc), ("Fetched example.com/docs/intro", None));
+        let line = tool("f", "web_fetch", &input, None, Some(&("Failed: HTTP 404 for https://example.com/docs/intro".into(), true)), &cx);
+        assert_eq!((line.title.as_str(), line.status, line.desc), ("Couldn't fetch example.com/docs/intro", Status::Error, None));
+    }
+
+    #[test]
+    fn a_streamed_reply_keeps_its_rows_when_it_completes() {
+        use otto_client::SessionMirror;
+        use otto_proto::Event;
+        let view: otto_proto::SessionView = serde_json::from_value(json!({"info":{"id":"s","project_id":"p","agent":"a","provider":"p","model":"m","title":"t","cwd":"/","status":"busy","created_at":0,"updated_at":0,"last_seq":1,"usage":{"usage":{"input":0,"output":0},"cost_usd":0.0}},"items":[serde_json::to_value(user("u", "go")).unwrap()],"pending_approvals":[],"pending_questions":[],"queue":[],"running_tool_calls":[],"seq":1})).unwrap();
+        let mut m = SessionMirror::new(view);
+        m.apply(2, &Event::TurnStarted { turn: 1 });
+        m.apply(3, &Event::ItemStarted { item_id: "a".into(), role: Role::Assistant });
+        let times = Times::default();
+        let rows = |m: &SessionMirror| build_rows(&m.items, &m.tools, m.turn.map(|t| t.1), &times, 0);
+        let keys = |rows: &[Row]| rows.iter().map(|r| r.key().to_owned()).collect::<Vec<_>>();
+        // Text, thinking, then text again, in tiny live deltas.
+        let text = |t: &str| Event::TextDelta { item_id: "a".into(), text: t.into() };
+        let think = |t: &str| Event::ReasoningDelta { item_id: "a".into(), text: t.into(), summary: false };
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        for event in [text("I'll look "), text("first.\n\n"), think("hm"), think("m"), text("1. **Blocks"), text(" are typed.** Each")] {
+            m.apply_live(3, &event);
+            seen.push(keys(&rows(&m)));
+        }
+        let streaming = rows(&m);
+        assert_eq!(keys(&streaming), ["u", "a#t0", "g:a#1", "a#t1"]);
+        assert!(matches!(streaming.last(), Some(Row::Text { streaming: true, .. })));
+        assert_eq!(revealing(&streaming), Some("a#t1"), "only the last row reveals");
+        // Once a row exists for a key it stays: nothing is re-keyed (re-entered, re-revealed) mid-stream.
+        for (i, k) in keys(&streaming).iter().enumerate() {
+            let first = seen.iter().position(|s| s.contains(k)).unwrap();
+            assert!(seen[first..].iter().all(|s| s.get(i) == Some(k)), "{k} moved: {seen:?}");
+        }
+        // The finished item holds a thinking block the stream never showed, and splits the last text in two.
+        let reason = |t: Option<&str>| Part::Reasoning { summary: None, text: t.map(str::to_owned), opaque: None };
+        let done = assistant(
+            "a",
+            vec![Part::text("I'll look first.\n\n"), reason(Some("hmm")), reason(None), Part::text("1. **Blocks"), Part::text(" are typed.** Each")],
+        );
+        m.apply(4, &Event::ItemDone { item: done });
+        let finished = rows(&m);
+        assert_eq!(keys(&finished), keys(&streaming), "same rows, same keys");
+        assert_eq!(finished[3], streaming[3], "the same text, still streaming until the turn ends");
+        assert_eq!(list_change(&streaming, &finished).splice, None, "nothing spliced in or out");
+        // A group arriving after the text settles it: only the newest row reveals.
+        m.apply(5, &Event::ToolCall { call_id: "c".into(), name: "read".into(), input: json!({"path": "a.rs"}) });
+        assert_eq!(revealing(&rows(&m)), None);
+        m.apply(6, &Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: otto_llm::Usage::default() });
+        let ended = rows(&m);
+        assert!(matches!(&ended[3], Row::Text { key, streaming: false, .. } if key == "a#t1"));
     }
 
     #[test]
@@ -1517,7 +1747,15 @@ mod tests {
 
     #[test]
     fn tool_titles_and_descriptions() {
-        let cx = Ctx { cwd: Some("/work/app"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() };
+        let cx = Ctx {
+            cwd: Some("/work/app"),
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+        };
         let ok = |text: &str| (text.to_owned(), false);
         let line = tool("s", "search", &json!({"pattern": "frozen-lockfile"}), None, Some(&ok("a.rs:1: x\nb.rs:2: y\n\n")), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Searched for frozen-lockfile", Some("2 results")));
@@ -1550,7 +1788,7 @@ mod tests {
     fn shell_lines_report_exit_and_duration() {
         let mut times = Times::default();
         span(&mut times, "c", 0, Some(1_234));
-        let cx = Ctx { cwd: None, times: &times, now: 5_000, running: true, stopped: false, jobs: &HashMap::new() };
+        let cx = Ctx { cwd: None, times: &times, now: 5_000, running: true, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
         let live = ToolState {
             name: "shell".into(),
             status: ToolStatus::Error,
@@ -1569,7 +1807,7 @@ mod tests {
 
     #[test]
     fn silo_tools_reveal_blocks() {
-        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() };
+        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
         let out = (r#"{"block_id":"b42","url":"http://localhost:3000/"}"#.to_owned(), false);
         let line = tool("b", "browser_open", &json!({"url": "http://localhost:3000/"}), None, Some(&out), &cx);
         assert_eq!((line.title.as_str(), line.kind, line.reveal.as_deref()), ("Opened browser localhost:3000", Kind::Browser, Some("b42")));
@@ -1587,7 +1825,7 @@ mod tests {
     fn command_block_shells_open_wait_and_report() {
         let reports = |text: &str| job_reports(&[Item::new("s", Role::System, vec![Part::System { text: text.into() }])]);
         let jobs = reports("Background shell job-a1 (`cargo test`) in block b9 exited with code 101.\nFAILED");
-        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &jobs };
+        let cx = Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &jobs, files: &HashMap::new() };
         // Running in its block: open and stop it.
         let live = ToolState { name: "shell".into(), status: ToolStatus::Running, messages: vec!["block:b3".into()], ..ToolState::default() };
         let none = HashMap::new();
@@ -1650,7 +1888,8 @@ mod tests {
 
     #[test]
     fn edits_count_lines_from_metadata_input_or_patch() {
-        let cx = Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() };
+        let cx =
+            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
         let live = ToolState {
             name: "edit".into(),
             status: ToolStatus::Done,
@@ -1899,7 +2138,7 @@ mod tests {
             &items[1].parts.iter().find_map(|p| if let Part::ToolCall { input, .. } = p { Some(input.clone()) } else { None }).unwrap(),
             None,
             Some(&("ok".into(), false)),
-            &Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() },
+            &Ctx { cwd: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() },
         );
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Updated todos", Some("1/3 done")));
     }
@@ -1977,7 +2216,8 @@ mod tests {
 
     #[test]
     fn copy_attachment_reads_as_copied_name_to_path() {
-        let cx = Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() };
+        let cx =
+            Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
         let input = json!({"attachment_id": "att_3f2a9c1b", "path": "/w/assets/shot.png"});
         let line = tool("c", "copy_attachment", &input, None, Some(&("Copied shot.png to /w/assets/shot.png (812 KB)".into(), false)), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.detail.is_none()), ("Copied shot.png → assets/shot.png", Some("812 KB"), true));
@@ -1989,7 +2229,38 @@ mod tests {
             ..ToolState::default()
         };
         assert_eq!(tool("c", "copy_attachment", &input, Some(&live), None, &cx).title, "Copied shot.png → assets/shot.png");
-        let read = tool("r", "read", &json!({"attachment_id": "att_3f2a9c1b"}), None, Some(&("shot.png 40×30".into(), false)), &cx);
-        assert_eq!(read.title, "Read attachment");
+        // A read names the file: from the result's metadata, else the user's note; never the id or a path.
+        let files = HashMap::from([("att_3f2a9c1b".to_owned(), "screenshot.png".to_owned())]);
+        let named = Ctx { files: &files, ..cx };
+        let read = tool("r", "read", &json!({"attachment_id": "att_3f2a9c1b"}), None, Some(&("1: hello".into(), false)), &named);
+        assert_eq!(read.title, "Read screenshot.png");
+        let live = ToolState {
+            name: "read".into(),
+            status: ToolStatus::Done,
+            output: Some(json!({"content": [{"type": "text", "text": "logo.png 40×30"}], "metadata": {"name": "logo.png"}})),
+            ..ToolState::default()
+        };
+        assert_eq!(tool("r", "read", &json!({"attachment_id": "att_0000ffff"}), Some(&live), None, &cx).title, "Read logo.png");
+        assert_eq!(
+            tool("r", "read", &json!({"attachment_id": "att_0000ffff"}), None, None, &Ctx { running: true, ..cx }).title,
+            "Reading attachment"
+        );
+        // A failed copy says why, without the path.
+        let input = json!({"attachment_id": "att_3f2a9c1b", "path": "/w/assets/logo.png"});
+        let exists = "InvalidInput: /w/assets/logo.png exists; pass overwrite: true to replace it";
+        let line = tool("c", "copy_attachment", &input, None, Some(&(exists.into(), true)), &named);
+        assert_eq!((line.title.as_str(), line.status, line.desc.as_deref()), ("Couldn't copy screenshot.png: already exists", Status::Error, None));
+        assert!(line.files.is_empty() && line.detail.is_none());
+        let line = tool("c", "copy_attachment", &input, None, Some(&("NotFound: unknown attachment att_3f2a9c1b".into(), true)), &cx);
+        assert_eq!(line.title, "Couldn't copy attachment: no such attachment");
+        let line = tool("c", "copy_attachment", &input, None, Some(&("Failed: Permission denied (os error 13)".into(), true)), &named);
+        assert_eq!(line.title, "Couldn't copy screenshot.png: permission denied");
+        // The user's notes name attachments by id.
+        let items = [Item::new(
+            "u",
+            Role::User,
+            vec![Part::text("[attachment att_3f2a9c1b: logo.png, image/png, 180 KB — copy_attachment can save it into the project]")],
+        )];
+        assert_eq!(attachment_names(&items), HashMap::from([("att_3f2a9c1b".to_owned(), "logo.png".to_owned())]));
     }
 }

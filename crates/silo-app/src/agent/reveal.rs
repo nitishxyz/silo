@@ -86,11 +86,39 @@ fn closed(source: &str, kind: Kind) -> bool {
     }
 }
 
+/// Columns between a code box's tab stops.
+pub const TAB: usize = 4;
+
+/// A code line's width in cells: a tab runs to the next stop, East Asian wide characters and emoji take two.
+pub fn display_width(line: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    line.split('\t').enumerate().fold(0, |w, (i, run)| if i == 0 { w } else { (w / TAB + 1) * TAB } + run.width())
+}
+
+/// A code line as drawn: tabs expanded to spaces up to the next stop.
+pub fn expand_tabs(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.contains('\t') {
+        return line.into();
+    }
+    use unicode_width::UnicodeWidthStr;
+    let (mut out, mut w) = (String::with_capacity(line.len() + TAB), 0);
+    for (i, run) in line.split('\t').enumerate() {
+        if i > 0 {
+            let pad = (w / TAB + 1) * TAB - w;
+            out.extend(std::iter::repeat_n(' ', pad));
+            w += pad;
+        }
+        out.push_str(run);
+        w += run.width();
+    }
+    out.into()
+}
+
 /// A code line's width as a share of its box's visible width, `cell` being a character's advance as a share
 /// of it (monospace; 0: not laid out yet, the full width).
 pub fn code_share(line: &str, cell: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
-    let w = line.chars().count() as f32 * cell;
+    let w = display_width(line) as f32 * cell;
     if cell > 0.0 { w.min(1.0) } else { 1.0 }
 }
 
@@ -618,6 +646,49 @@ mod tests {
         let p = at(SWEEP / 2 + SWEEP.mul_f32(SHORTEST) + MS);
         assert!(p[0] < 1.0 && p[1] == 1.0, "{p:?}");
         assert!(p[2] > 0.0, "the next already started: {p:?}");
+    }
+
+    #[test]
+    fn code_width_counts_display_cells() {
+        assert_eq!(display_width("ls -la"), 6);
+        // Tabs run to the next stop of four.
+        assert_eq!(display_width("\tx"), TAB + 1);
+        assert_eq!(display_width("ab\tc"), TAB + 1);
+        assert_eq!(display_width("abcd\te"), 2 * TAB + 1);
+        assert_eq!(display_width("a\t\tb"), 2 * TAB + 1);
+        // East Asian wide characters and emoji take two cells; combining marks none.
+        assert_eq!(display_width("漢字"), 4);
+        assert_eq!(display_width("ok 🚀"), 5);
+        assert_eq!(display_width("e\u{301}"), 1);
+        assert_eq!(display_width("漢\tx"), TAB + 1, "a tab after a wide character still stops at four");
+        assert_eq!(expand_tabs("ab\tc"), "ab  c");
+        assert_eq!(expand_tabs("漢\tx"), "漢  x");
+        assert_eq!(expand_tabs("\t\tx"), "        x");
+        assert!(matches!(expand_tabs("plain"), std::borrow::Cow::Borrowed("plain")));
+        // The sweep follows: a wide line sweeps as long as its cells, not its characters.
+        assert!(close(code_share("漢字漢字", 0.02), 0.16));
+        assert!(close(code_share("\tx", 0.02), 0.1));
+    }
+
+    #[test]
+    fn a_finished_reply_shows_as_its_last_streaming_frame() {
+        let now = Instant::now();
+        let mut r = Reveal::new(false, now);
+        let src = "One two\n\nThree four";
+        let blocks = parse(src);
+        wrap(&r, "k-0", &[0]);
+        wrap(&r, "k-1", &[0]);
+        r.drawn = 1000.0;
+        r.frame("k", &blocks, src, true, 400.0, now, false);
+        let s = r.frame("k", &blocks, src, true, 400.0, now + Duration::from_secs(1), false);
+        assert_eq!(s.lines["k-1"], [(0, 0.0)], "the line being written is held");
+        assert_eq!(s.settled, 1);
+        // The stream ends with the same text: nothing shown before comes in again; only the held line sweeps.
+        let end = now + Duration::from_secs(2);
+        let s = r.frame("k", &blocks, src, false, 400.0, end, false);
+        assert_eq!((s.settled, s.lines.contains_key("k-0")), (1, false));
+        let s = r.frame("k", &blocks, src, false, 400.0, end + OPEN + SWEEP, false);
+        assert!(s.done && s.lines.is_empty() && !s.moving);
     }
 
     #[test]

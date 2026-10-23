@@ -7237,6 +7237,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
 ]
 
 [[package]]
