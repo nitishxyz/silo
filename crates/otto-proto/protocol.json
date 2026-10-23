@@ -140,6 +140,22 @@
               "path"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1680,6 +1696,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -1825,6 +1857,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -1960,6 +2008,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -2093,6 +2157,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -2125,6 +2205,184 @@
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Empty",
+        "type": "object"
+      }
+    },
+    "attachment.put": {
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all",
+              "plan"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "append_to": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data_base64": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "name",
+          "mime",
+          "data_base64"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "mime",
+          "size"
+        ],
+        "title": "AttachmentInfo",
         "type": "object"
       }
     },
@@ -2226,6 +2484,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -2496,6 +2770,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -2615,6 +2905,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -2807,6 +3113,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -2926,6 +3248,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -3110,6 +3448,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -3257,6 +3611,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -3384,6 +3754,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -3505,6 +3891,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -3810,6 +4212,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -3921,6 +4339,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -4066,6 +4500,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -4209,6 +4659,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -4336,6 +4802,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -4480,6 +4962,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -4591,6 +5089,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -4714,6 +5228,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -4835,6 +5365,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -4954,6 +5500,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -5299,6 +5861,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -5592,6 +6170,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -5711,6 +6305,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -6009,6 +6619,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -6149,6 +6775,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -6272,6 +6914,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -6403,6 +7061,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -6528,6 +7202,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -6651,6 +7341,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -6794,6 +7500,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -6913,6 +7635,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -7237,6 +7975,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -7383,6 +8137,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -8312,6 +9082,22 @@
                   "path"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -8451,6 +9237,22 @@
                 "required": [
                   "type",
                   "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
                 ],
                 "type": "object"
               }
@@ -9304,6 +10106,22 @@
             "required": [
               "type",
               "path"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
             ],
             "type": "object"
           }

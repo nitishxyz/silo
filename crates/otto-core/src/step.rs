@@ -72,7 +72,29 @@ async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<Vec<Part>> {
             InputPart::File { path } => {
                 Part::text(format!("Attached file {path}:\n{}", tokio::fs::read_to_string(std::path::Path::new(&cx.row.cwd).join(&path)).await?))
             }
+            InputPart::Attachment { id } => {
+                parts.extend(attachment(cx, &id).await?);
+                continue;
+            }
         });
+    }
+    Ok(parts)
+}
+/// An attachment's note, then the image, downscaled, when it is one.
+async fn attachment(cx: &Context, id: &str) -> Result<Vec<Part>> {
+    let dir = otto_tools::attachments::dir(&cx.runtime.attachments_root(), &cx.row.id);
+    let (attachment, path) = otto_tools::attachments::get(&dir, id)?;
+    let mut parts = vec![Part::text(attachment.note())];
+    let bytes = tokio::fs::read(&path).await?;
+    if cx.live().model.info().caps.vision && otto_tools::images::decodable(&bytes) {
+        let prepared =
+            tokio::task::spawn_blocking(move || otto_tools::images::prepare(&bytes, otto_tools::images::MAX_EDGE, otto_tools::images::QUALITY))
+                .await
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+        if let Ok(image) = prepared {
+            let data = otto_tools::attachments::encode(&image.bytes);
+            parts.push(Part::Image(Media { mime: image.mime.into(), source: MediaSource::Base64 { data }, name: Some(attachment.name) }));
+        }
     }
     Ok(parts)
 }
@@ -481,6 +503,7 @@ async fn execute(
     tcx.project_root = cx.root.clone();
     tcx.approver = Some(bridge.clone());
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
+    tcx.attachments = Some(cx.runtime.attachments_root());
     tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
     tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
     let tool = lookup.get(&name).cloned();
@@ -584,6 +607,16 @@ async fn execute(
             otto_tools::OutputPart::Image { mime, data_base64 } => {
                 content.push(ResultPart::Image(Media { mime: mime.clone(), source: MediaSource::Base64 { data: data_base64.clone() }, name: None }));
                 limited.content.push(otto_tools::OutputPart::Image { mime, data_base64 });
+            }
+            otto_tools::OutputPart::Document { mime, data_base64, name } => {
+                let media = Media { mime: mime.clone(), source: MediaSource::Base64 { data: data_base64.clone() }, name: name.clone() };
+                let live = cx.live();
+                if live.model.info().caps.pdf {
+                    content.push(ResultPart::Document(media));
+                    limited.content.push(otto_tools::OutputPart::Document { mime, data_base64, name });
+                } else {
+                    content.push(ResultPart::text(media.unsupported(&format!("{}/{}", live.row.provider, live.row.model))));
+                }
             }
             otto_tools::OutputPart::File { path } => {
                 content.push(ResultPart::text(format!("Output file: {}", path.display())));

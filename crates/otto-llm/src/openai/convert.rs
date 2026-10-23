@@ -118,6 +118,10 @@ fn media(media: &Media, image: bool) -> Value {
     }
     value
 }
+/// A document as a file for OpenAI; a note for wire-compatible providers.
+fn document(m: &Media, provider: &str) -> Value {
+    if provider == "openai" { media(m, false) } else { json!({"type":"input_text","text":m.unsupported(provider)}) }
+}
 /// `response.steer` input. Steering accepts only user messages with text,
 /// image and file content.
 #[must_use]
@@ -176,7 +180,7 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                     Some(json!({"type": if item.role == Role::Assistant { "output_text" } else { "input_text" }, "text":text}))
                 }
                 Part::Image(m) => Some(media(m, true)),
-                Part::Document(m) => Some(media(m, false)),
+                Part::Document(m) => Some(document(m, provider)),
                 _ => None,
             };
             if let Some(content) = content {
@@ -211,7 +215,7 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                         .map(|p| match p {
                             ResultPart::Text { text } => json!({"type":"input_text","text":text}),
                             ResultPart::Image(m) => media(m, true),
-                            ResultPart::Document(m) => media(m, false),
+                            ResultPart::Document(m) => document(m, provider),
                         })
                         .collect();
                     let kind = if kind == CallKind::Custom { "custom_tool_call_output" } else { "function_call_output" };

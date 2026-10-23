@@ -91,6 +91,7 @@ pub fn messages(req: &Request, dialect: &Dialect) -> Result<Vec<Value>, LlmError
                 Part::ToolsChanged { added, removed } => {
                     content.push(json!({"type":"text","text":format!("Tools added: {}; removed: {}", added.join(", "), removed.join(", "))}));
                 }
+                Part::Document(m) if !dialect.documents() => content.push(json!({"type":"text","text":m.unsupported(dialect.id)})),
                 Part::Image(m) | Part::Document(m) => content.push(media(m)?),
                 Part::Compaction { summary: Some(summary), .. } => content.push(json!({"type":"text","text":summary})),
                 Part::ToolResult { call_id, content: result, is_error } => {
@@ -107,10 +108,10 @@ pub fn messages(req: &Request, dialect: &Dialect) -> Result<Vec<Value>, LlmError
                     let media: Vec<_> = result
                         .iter()
                         .filter_map(|p| match p {
-                            ResultPart::Image(m) | ResultPart::Document(m) => Some(m),
+                            ResultPart::Document(m) if !dialect.documents() => Some(Ok(json!({"type":"text","text":m.unsupported(dialect.id)}))),
+                            ResultPart::Image(m) | ResultPart::Document(m) => Some(media(m)),
                             ResultPart::Text { .. } => None,
                         })
-                        .map(media)
                         .collect::<Result<_, _>>()?;
                     if !media.is_empty() {
                         out.push(json!({"role":"user","content":media}));

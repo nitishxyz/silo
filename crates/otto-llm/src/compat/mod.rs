@@ -198,6 +198,11 @@ pub fn dialect(id: &str) -> Option<&'static Dialect> {
 }
 
 impl Dialect {
+    /// Takes PDFs as `file` content (OpenRouter); others get a note instead.
+    #[must_use]
+    pub fn documents(&self) -> bool {
+        self.id == "openrouter"
+    }
     /// The base URL: `configured`, else the dialect's env override, else its default.
     #[must_use]
     pub fn base(&self, configured: Option<&str>) -> Option<String> {

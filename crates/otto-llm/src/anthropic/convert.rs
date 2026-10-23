@@ -247,6 +247,7 @@ fn part_block(part: &Part, provider: &str) -> Result<Option<Value>, LlmError> {
         }
         Part::System { text } => Some(json!({"type":"text","text":text})),
         Part::Image(media) => Some(media_block("image", media)?),
+        Part::Document(media) if provider != "anthropic" => Some(json!({"type":"text","text":media.unsupported(provider)})),
         Part::Document(media) => Some(media_block("document", media)?),
         Part::Audio(_) => return Err(LlmError::new(ErrorClass::InvalidRequest, "Anthropic does not support audio input")),
         Part::ToolCall { call_id, name, input, kind, .. } if *kind != crate::CallKind::Hosted => {
@@ -258,6 +259,7 @@ fn part_block(part: &Part, provider: &str) -> Result<Option<Value>, LlmError> {
                 .map(|part| match part {
                     ResultPart::Text { text } => Ok(json!({"type":"text","text":text})),
                     ResultPart::Image(m) => media_block("image", m),
+                    ResultPart::Document(m) if provider != "anthropic" => Ok(json!({"type":"text","text":m.unsupported(provider)})),
                     ResultPart::Document(m) => media_block("document", m),
                 })
                 .collect::<Result<Vec<_>, _>>()?;

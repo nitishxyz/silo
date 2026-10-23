@@ -5,6 +5,7 @@ mod anthropic_depth;
 mod catalog;
 mod compat;
 mod cross_provider;
+mod documents;
 mod google;
 mod openai;
 mod openai_depth;

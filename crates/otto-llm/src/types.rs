@@ -202,6 +202,18 @@ pub struct Media {
     pub name: Option<String>,
 }
 
+impl Media {
+    /// What a provider that can't read this document gets instead.
+    #[must_use]
+    pub fn unsupported(&self, provider: &str) -> String {
+        format!(
+            "[{} ({}) not sent: {provider} doesn't accept documents here. Extract its text instead, e.g. `pdftotext file.pdf -` in the shell.]",
+            self.name.as_deref().unwrap_or("document"),
+            self.mime
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaSource {

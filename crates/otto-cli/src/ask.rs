@@ -176,6 +176,9 @@ fn result_parts(parts: Vec<OutputPart>) -> Vec<ResultPart> {
             OutputPart::Image { mime, data_base64 } => {
                 ResultPart::Image(Media { mime, source: MediaSource::Base64 { data: data_base64 }, name: None })
             }
+            OutputPart::Document { mime, data_base64, name } => {
+                ResultPart::Document(Media { mime, source: MediaSource::Base64 { data: data_base64 }, name })
+            }
             OutputPart::File { path } => ResultPart::text(path.display().to_string()),
         })
         .collect()

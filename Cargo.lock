@@ -5525,6 +5525,7 @@ version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures",
+ "image",
  "jsonschema",
  "otto-llm",
  "otto-proto",
@@ -5656,6 +5657,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "image",
  "libc",
  "regex",
  "reqwest",
@@ -5667,6 +5669,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -95,7 +95,8 @@ async fn deferred_tools_load_next_step_and_survive_resume() {
             assert!(loader.description.contains("browser_test: Inspect a page."));
             assert!(!loader.description.contains("More detail"));
             assert!(requests[1].tools.iter().any(|t| t.name == "browser_test"));
-            assert!(!requests[1].tools.iter().any(|t| t.name == "load_tools"));
+            // Loaded tools leave the index (the built-in deferred ones stay).
+            assert!(!requests[1].tools.iter().any(|t| t.name == "load_tools" && t.description.contains("browser_test")));
         }
         if input.get("names").is_some() {
             let view = s.view().await.unwrap();
@@ -117,7 +118,7 @@ async fn deferred_tools_load_next_step_and_survive_resume() {
         prompt(&s).await;
         finish(&mut live).await;
         assert!(resumed_model.requests.lock().unwrap()[0].tools.iter().any(|t| t.name == "browser_test"));
-        assert!(!r.tools(&s.id).await.unwrap().iter().any(|t| t.name == "load_tools"));
+        assert!(!r.tools(&s.id).await.unwrap().iter().any(|t| t.name == "load_tools" && t.description.contains("browser_test")));
         r.shutdown().await.unwrap();
     }
 }

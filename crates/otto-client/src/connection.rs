@@ -263,6 +263,17 @@ impl Connection {
     pub async fn prompt(&self, session_id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<PromptAccepted> {
         self.call_typed(Method::SessionPrompt { session_id: session_id.into(), input, delivery }).await
     }
+    /// Store a file (or a chunk of one, `append_to` its id) for the session's prompts.
+    pub async fn attachment_put(
+        &self,
+        session_id: &str,
+        name: &str,
+        mime: &str,
+        data_base64: String,
+        append_to: Option<String>,
+    ) -> Result<AttachmentInfo> {
+        self.call_typed(Method::AttachmentPut { session_id: session_id.into(), name: name.into(), mime: mime.into(), data_base64, append_to }).await
+    }
     pub async fn cancel(&self, session_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionCancel { session_id: session_id.into() }).await
     }

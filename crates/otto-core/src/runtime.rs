@@ -425,7 +425,45 @@ impl Runtime {
     }
     /// User input; to a subagent it counts as steering or taking it over (§7.4).
     pub async fn prompt(&self, id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<String> {
+        let dir = otto_tools::attachments::dir(&self.attachments_root(), id);
+        for part in &input {
+            if let InputPart::Attachment { id } = part {
+                otto_tools::attachments::get(&dir, id).map_err(|_| Error::Invalid(format!("unknown attachment {id}")))?;
+            }
+        }
         self.session(id).await?.prompt(input, delivery).await
+    }
+    /// `<state>/attachments`: a folder per session.
+    pub fn attachments_root(&self) -> PathBuf {
+        self.0.config.state_dir.join("attachments")
+    }
+    /// Store a file for the session's prompts (`attachment.put`), or append a
+    /// chunk to attachment `append_to`; at most `otto_proto::MAX_ATTACHMENT` bytes.
+    pub async fn attachment_put(
+        &self,
+        id: &str,
+        name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        append_to: Option<&str>,
+    ) -> Result<otto_proto::AttachmentInfo> {
+        let max = otto_proto::MAX_ATTACHMENT as u64;
+        if bytes.len() as u64 > max {
+            return Err(Error::Invalid(format!("attachment exceeds {}", otto_tools::attachments::size(max))));
+        }
+        if self.session(id).await?.view().await?.info.status == otto_proto::SessionStatus::Archived {
+            return Err(Error::Invalid("Unarchive the session before attaching files".into()));
+        }
+        let dir = otto_tools::attachments::dir(&self.attachments_root(), id);
+        let (name, mime, append_to) = (name.to_owned(), mime.to_owned(), append_to.map(str::to_owned));
+        let stored = tokio::task::spawn_blocking(move || match append_to {
+            Some(to) => otto_tools::attachments::append(&dir, &to, &bytes, max),
+            None => otto_tools::attachments::put(&dir, &name, &mime, &bytes),
+        })
+        .await
+        .map_err(|e| Error::Invalid(e.to_string()))?
+        .map_err(|e| if e.kind() == std::io::ErrorKind::InvalidInput { Error::Invalid(e.to_string()) } else { e.into() })?;
+        Ok(otto_proto::AttachmentInfo { id: stored.id, name: stored.name, mime: stored.mime, size: stored.size })
     }
     /// Input from a parent session to its child.
     pub(crate) async fn prompt_child(&self, id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<String> {
@@ -457,7 +495,10 @@ impl Runtime {
     }
     pub async fn fork(&self, id: &str, at_seq: i64) -> Result<SessionHandle> {
         let id = id.to_owned();
+        let from = id.clone();
         let fork = self.db(move |s| Ok(s.fork_session(&id, at_seq)?)).await?;
+        let root = self.attachments_root();
+        otto_tools::attachments::copy_all(&otto_tools::attachments::dir(&root, &from), &otto_tools::attachments::dir(&root, &fork))?;
         self.session(&fork).await
     }
     /// Apply a durable mode change before subsequent tool policy checks.

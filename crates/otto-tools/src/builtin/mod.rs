@@ -1,5 +1,6 @@
 pub mod apply_patch;
 pub mod ask_user;
+pub mod copy_attachment;
 pub mod edit;
 pub mod glob;
 pub mod ls;

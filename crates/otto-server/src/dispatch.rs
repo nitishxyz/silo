@@ -121,6 +121,10 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             }
             Ok(json!(PromptAccepted { input_id: runtime.prompt(&session_id, input, delivery).await.map_err(core_error)? }))
         }
+        Method::AttachmentPut { session_id, name, mime, data_base64, append_to } => {
+            let bytes = otto_core::attachments::decode(&data_base64).map_err(RpcError::bad_request)?;
+            Ok(json!(runtime.attachment_put(&session_id, &name, &mime, bytes, append_to.as_deref()).await.map_err(core_error)?))
+        }
         Method::SessionQueueRemove { session_id, input_id } => {
             runtime.queue_remove(&session_id, &input_id).await.map_err(core_error)?;
             Ok(json!({}))

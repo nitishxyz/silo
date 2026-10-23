@@ -1,5 +1,6 @@
 //! The integration tests, one module per file, in one binary.
 
+mod attachments;
 mod builtins;
 mod patch;
 mod patch_edges;

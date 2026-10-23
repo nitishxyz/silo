@@ -553,7 +553,7 @@ async fn project_sources_load_by_prefix_and_list_changes_reach_the_next_step() {
     assert!(names(0).is_empty());
     assert_eq!(names(1), ["mcp__fake__alpha", "mcp__fake__beta"]);
     assert_eq!(names(2), ["mcp__fake__alpha", "mcp__fake__beta", "mcp__fake__late"]);
-    assert!(!requests[2].tools.iter().any(|t| t.name == "load_tools"));
+    assert!(!requests[2].tools.iter().any(|t| t.name == "load_tools" && t.description.contains("mcp__fake__")));
     runtime.shutdown().await.unwrap();
 }
 

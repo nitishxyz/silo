@@ -1,7 +1,9 @@
 //! The tool model (docs/OTTO.md §5): the [`Tool`] trait, specs with effects
 //! and presentations, outputs, and [`ToolSource`]s (builtin, silo, MCP, ext).
 
+pub mod attachments;
 pub mod builtin;
+pub mod images;
 pub mod output;
 pub mod policy;
 pub mod registry;

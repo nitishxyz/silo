@@ -154,7 +154,10 @@ impl Policy {
                 lines.push(rewritten);
             }
             input = serde_json::json!({"input": lines.join("\n")});
-        } else if matches!(spec.name.as_str(), "read" | "write" | "edit" | "multiedit" | "ls" | "tree" | "glob" | "search" | "shell") {
+        } else if matches!(spec.name.as_str(), "read" | "write" | "copy_attachment" | "edit" | "multiedit" | "ls" | "tree" | "glob" | "search" | "shell")
+            // An attachment read has no path.
+            && !(spec.name == "read" && input.get("path").is_none() && input.get("attachment_id").is_some())
+        {
             let key = if spec.name == "shell" { "cwd" } else { "path" };
             let raw = input.get(key).and_then(Value::as_str).unwrap_or(".");
             let path = resolve(raw)?;

@@ -148,6 +148,18 @@ pub enum Method {
         #[serde(default)]
         delivery: Delivery,
     },
+    /// Store a file for the session's next prompts (`InputPart::Attachment`).
+    /// Larger files go in chunks: the first call returns the id, the next
+    /// ones pass it as `append_to` (same `name` and `mime`).
+    #[serde(rename = "attachment.put")]
+    AttachmentPut {
+        session_id: SessionId,
+        name: String,
+        mime: String,
+        data_base64: String,
+        #[serde(default)]
+        append_to: Option<String>,
+    },
     /// Withdraw a pending input (queued or a steer not yet handed to the model).
     #[serde(rename = "session.queue_remove")]
     SessionQueueRemove { session_id: SessionId, input_id: String },
@@ -211,6 +223,7 @@ impl std::fmt::Debug for Method {
         match self {
             Self::AuthLogin { api_key: Some(_), .. } => value["params"]["api_key"] = Value::String("[REDACTED]".into()),
             Self::AuthLoginComplete { code: Some(_), .. } => value["params"]["code"] = Value::String("[REDACTED]".into()),
+            Self::AttachmentPut { data_base64, .. } => value["params"]["data_base64"] = Value::String(format!("[{} bytes]", data_base64.len())),
             _ => {}
         }
         f.debug_tuple("Method").field(&value).finish()
@@ -236,6 +249,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.set_mode", "Change approval mode for subsequent tool calls; plan agents remain read-only."),
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),
+    ("attachment.put", "Store a file for the session's prompts; large files in chunks."),
     ("session.queue_remove", "Withdraw a queued input or a pending steer."),
     ("session.queue_update", "Change a pending input's delivery: steer, queue, or interrupt."),
     ("session.cancel", "Cancel the current turn and its children."),

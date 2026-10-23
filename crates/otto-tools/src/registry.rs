@@ -37,6 +37,7 @@ pub fn tools_with(family: &str, host: &shell::Host) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(read::Read::default()),
         Arc::new(write::Write::default()),
+        Arc::new(copy_attachment::CopyAttachment::default()),
         Arc::new(ls::Ls::default()),
         Arc::new(tree::Tree::default()),
         Arc::new(glob::Glob::default()),

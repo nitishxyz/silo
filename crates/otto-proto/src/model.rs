@@ -74,9 +74,31 @@ pub struct SessionInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputPart {
-    Text { text: String },
-    Image { mime: String, data_base64: String },
-    File { path: String },
+    Text {
+        text: String,
+    },
+    Image {
+        mime: String,
+        data_base64: String,
+    },
+    File {
+        path: String,
+    },
+    /// A file stored by `attachment.put`: the model gets a note naming it
+    /// (`[attachment att_…: name, mime, size]`), and images downscaled.
+    Attachment {
+        id: String,
+    },
+}
+
+/// A file the user attached to a session (`attachment.put`); kept until the
+/// session is archived.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

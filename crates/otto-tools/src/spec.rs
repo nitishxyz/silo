@@ -162,6 +162,9 @@ pub struct ToolCx {
     pub approver: Option<Arc<dyn Approver>>,
     /// Where large outputs spill.
     pub spill_dir: Option<PathBuf>,
+    /// The attachments root (`<state>/attachments`); a session's files are in
+    /// its folder, looked up through `sessions` (`attachments::find`).
+    pub attachments: Option<PathBuf>,
     /// Runtime services for tools that need the session (subagents, todos,
     /// skills), downcast by those tools.
     pub services: Option<Arc<dyn Any + Send + Sync>>,
@@ -189,6 +192,7 @@ impl ToolCx {
             progress: None,
             approver: None,
             spill_dir: None,
+            attachments: None,
             services: None,
             sessions: Vec::new(),
             mailbox: None,
@@ -251,10 +255,26 @@ impl ToolOutput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputPart {
-    Text { text: String },
-    Json { value: Value },
-    Image { mime: String, data_base64: String },
-    File { path: PathBuf },
+    Text {
+        text: String,
+    },
+    Json {
+        value: Value,
+    },
+    Image {
+        mime: String,
+        data_base64: String,
+    },
+    /// A document (PDF) for providers that read them.
+    Document {
+        mime: String,
+        data_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    File {
+        path: PathBuf,
+    },
 }
 
 /// The model saw a head and tail; the whole output is in `full_path`.

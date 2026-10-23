@@ -36,8 +36,15 @@ pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
     all
 }
 
+/// `copy_attachment` comes with `write`: a grant fixed before it existed still reaches it.
+fn implied(name: &str) -> Option<&'static str> {
+    (name == "copy_attachment").then_some("write")
+}
+
 fn allowed(live: &Live, name: &str) -> bool {
-    let list = |key: &str| live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| pattern(p, name)));
+    let names = [Some(name), implied(name)];
+    let list =
+        |key: &str| live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| names.iter().flatten().any(|n| pattern(p, n))));
     list("tools").unwrap_or(true) && !list("denied_tools").unwrap_or(false)
 }
 

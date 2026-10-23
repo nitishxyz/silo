@@ -23,6 +23,10 @@ pub use timing::PartTime;
 pub const PROTOCOL: u32 = 1;
 /// Maximum frame length, including the kind byte.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+/// Largest attachment (`attachment.put`, all chunks together).
+pub const MAX_ATTACHMENT: usize = 25 * 1024 * 1024;
+/// Largest decoded chunk a client should send in one `attachment.put`.
+pub const ATTACHMENT_CHUNK: usize = 8 * 1024 * 1024;
 pub const BINARY: &str = "otto-silo";
 pub const ENV_PREFIX: &str = "OTTO_SILO";
 pub const PROJECT_STATE_DIR: &str = ".otto-silo";

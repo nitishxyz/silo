@@ -15,8 +15,10 @@ async fn read_write_images_and_guards() {
     assert!(out.metadata["diff"].as_str().unwrap().contains("+two"));
     let out = call(&read::Read::default(), json!({"path":"nested/a","offset":2,"limit":1}), d.path()).await;
     assert_eq!(out.joined_text(), "2: two\n");
-    std::fs::write(d.path().join("image"), b"\x89PNG\r\n\x1a\nabc").unwrap();
-    assert!(matches!(call(&read::Read::default(), json!({"path":"image"}), d.path()).await.content[0], OutputPart::Image { .. }));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(4, 3).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    std::fs::write(d.path().join("image"), png.into_inner()).unwrap();
+    assert!(matches!(call(&read::Read::default(), json!({"path":"image"}), d.path()).await.content[1], OutputPart::Image { .. }));
     std::fs::write(d.path().join("binary"), b"a\0b").unwrap();
     assert!(read::Read::default().call(json!({"path":"binary"}), cx(d.path())).await.is_err());
     let f = std::fs::File::create(d.path().join("huge")).unwrap();

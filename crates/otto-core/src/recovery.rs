@@ -58,6 +58,9 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
                                     source: otto_llm::MediaSource::Base64 { data: data_base64 },
                                     name: None,
                                 }),
+                                otto_tools::OutputPart::Document { mime, data_base64, name } => {
+                                    ResultPart::Document(otto_llm::Media { mime, source: otto_llm::MediaSource::Base64 { data: data_base64 }, name })
+                                }
                                 otto_tools::OutputPart::File { path } => ResultPart::text(format!("Output file: {}", path.display())),
                             })
                             .collect()
