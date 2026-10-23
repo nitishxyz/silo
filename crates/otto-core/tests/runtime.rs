@@ -499,6 +499,31 @@ async fn server_discovery_defaults_and_fork_replay() {
 }
 
 #[tokio::test]
+async fn default_effort_applies_unless_the_agent_or_session_sets_one() {
+    let (dir, r, _s, _) = setup(vec![], "build").await;
+    let project = r.list_projects().await.unwrap()[0].id.clone();
+    std::fs::create_dir_all(dir.path().join("user/agents")).unwrap();
+    std::fs::write(dir.path().join("user/agents/thinker.md"), "---\ndescription: Thinks\neffort: high\n---\nThink.").unwrap();
+    r.set_config(SessionDefaults { effort: Some(otto_llm::Effort::Low), ..Default::default() }).unwrap();
+    let create = |agent: &str, effort| CreateSession {
+        project_id: project.clone(),
+        cwd: dir.path().into(),
+        agent: agent.into(),
+        effort,
+        ..Default::default()
+    };
+    let plain = r.create_session(create("build", None)).await.unwrap();
+    assert_eq!(plain.view().await.unwrap().info.effort, Some(otto_llm::Effort::Low));
+    let thinker = r.create_session(create("thinker", None)).await.unwrap();
+    assert_eq!(thinker.view().await.unwrap().info.effort, Some(otto_llm::Effort::High));
+    let chosen = r.create_session(create("thinker", Some(otto_llm::Effort::Max))).await.unwrap();
+    assert_eq!(chosen.view().await.unwrap().info.effort, Some(otto_llm::Effort::Max));
+    r.set_config(SessionDefaults::default()).unwrap();
+    assert_eq!(r.create_session(create("build", None)).await.unwrap().view().await.unwrap().info.effort, None);
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn all_crash_windows_reconciled_at_startup() {
     for point in ["not_started", "unknown", "outcome"] {
         let dir = tempfile::tempdir().unwrap();

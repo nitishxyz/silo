@@ -275,6 +275,10 @@ pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcE
             Some(Value::String(name)) => name.parse().map_err(|e: String| RpcError::bad_request(format!("search_engine: {e}")))?,
             _ => return Err(RpcError::bad_request("search_engine must be a string or null")),
         },
+        effort: match value.get("effort") {
+            None | Some(Value::Null) => None,
+            Some(effort) => Some(serde_json::from_value(effort.clone()).map_err(|e| RpcError::bad_request(format!("effort: {e}")))?),
+        },
     })
 }
 async fn save_json(path: &std::path::Path, value: &Value) -> Result<(), RpcError> {

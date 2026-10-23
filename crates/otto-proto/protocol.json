@@ -66,6 +66,25 @@
         },
         "type": "object"
       },
+      "ContextUse": {
+        "properties": {
+          "used": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "used",
+          "window"
+        ],
+        "type": "object"
+      },
       "Delivery": {
         "enum": [
           "queue",
@@ -737,6 +756,13 @@
             "$ref": "#/$defs/ApprovalMode",
             "default": "auto"
           },
+          "context": {
+            "$ref": "#/$defs/ContextUse",
+            "default": {
+              "used": 0,
+              "window": 0
+            }
+          },
           "created_at": {
             "format": "int64",
             "type": "integer"
@@ -1363,6 +1389,13 @@
         "properties": {
           "data": {
             "properties": {
+              "context": {
+                "$ref": "#/$defs/ContextUse",
+                "default": {
+                  "used": 0,
+                  "window": 0
+                }
+              },
               "cost_usd": {
                 "format": "double",
                 "type": [
@@ -9601,6 +9634,25 @@
             ],
             "type": "string"
           },
+          "ContextUse": {
+            "properties": {
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "used",
+              "window"
+            ],
+            "type": "object"
+          },
           "Effort": {
             "enum": [
               "none",
@@ -9685,6 +9737,13 @@
           "approval_mode": {
             "$ref": "#/$defs/ApprovalMode",
             "default": "auto"
+          },
+          "context": {
+            "$ref": "#/$defs/ContextUse",
+            "default": {
+              "used": 0,
+              "window": 0
+            }
           },
           "created_at": {
             "format": "int64",
@@ -10020,6 +10079,25 @@
             ],
             "type": "string"
           },
+          "ContextUse": {
+            "properties": {
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "used",
+              "window"
+            ],
+            "type": "object"
+          },
           "Effort": {
             "enum": [
               "none",
@@ -10104,6 +10182,13 @@
           "approval_mode": {
             "$ref": "#/$defs/ApprovalMode",
             "default": "auto"
+          },
+          "context": {
+            "$ref": "#/$defs/ContextUse",
+            "default": {
+              "used": 0,
+              "window": 0
+            }
           },
           "created_at": {
             "format": "int64",
@@ -10684,6 +10769,25 @@
             ],
             "type": "string"
           },
+          "ContextUse": {
+            "properties": {
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "used",
+              "window"
+            ],
+            "type": "object"
+          },
           "Effort": {
             "enum": [
               "none",
@@ -10704,6 +10808,13 @@
               "approval_mode": {
                 "$ref": "#/$defs/ApprovalMode",
                 "default": "auto"
+              },
+              "context": {
+                "$ref": "#/$defs/ContextUse",
+                "default": {
+                  "used": 0,
+                  "window": 0
+                }
               },
               "created_at": {
                 "format": "int64",
@@ -12933,6 +13044,25 @@
             ],
             "type": "string"
           },
+          "ContextUse": {
+            "properties": {
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "used",
+              "window"
+            ],
+            "type": "object"
+          },
           "Effort": {
             "enum": [
               "none",
@@ -13017,6 +13147,13 @@
           "approval_mode": {
             "$ref": "#/$defs/ApprovalMode",
             "default": "auto"
+          },
+          "context": {
+            "$ref": "#/$defs/ContextUse",
+            "default": {
+              "used": 0,
+              "window": 0
+            }
           },
           "created_at": {
             "format": "int64",
@@ -13392,6 +13529,25 @@
                 ]
               }
             },
+            "type": "object"
+          },
+          "ContextUse": {
+            "properties": {
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "used",
+              "window"
+            ],
             "type": "object"
           },
           "Delivery": {
@@ -14175,6 +14331,13 @@
               "approval_mode": {
                 "$ref": "#/$defs/ApprovalMode",
                 "default": "auto"
+              },
+              "context": {
+                "$ref": "#/$defs/ContextUse",
+                "default": {
+                  "used": 0,
+                  "window": 0
+                }
               },
               "created_at": {
                 "format": "int64",
@@ -15296,6 +15459,25 @@
         },
         "type": "object"
       },
+      "ContextUse": {
+        "properties": {
+          "used": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "used",
+          "window"
+        ],
+        "type": "object"
+      },
       "Delivery": {
         "enum": [
           "queue",
@@ -15795,6 +15977,13 @@
             "properties": {
               "data": {
                 "properties": {
+                  "context": {
+                    "$ref": "#/$defs/ContextUse",
+                    "default": {
+                      "used": 0,
+                      "window": 0
+                    }
+                  },
                   "cost_usd": {
                     "format": "double",
                     "type": [
@@ -16623,6 +16812,13 @@
             "$ref": "#/$defs/ApprovalMode",
             "default": "auto"
           },
+          "context": {
+            "$ref": "#/$defs/ContextUse",
+            "default": {
+              "used": 0,
+              "window": 0
+            }
+          },
           "created_at": {
             "format": "int64",
             "type": "integer"
@@ -17325,6 +17521,13 @@
             "properties": {
               "data": {
                 "properties": {
+                  "context": {
+                    "$ref": "#/$defs/ContextUse",
+                    "default": {
+                      "used": 0,
+                      "window": 0
+                    }
+                  },
                   "cost_usd": {
                     "format": "double",
                     "type": [

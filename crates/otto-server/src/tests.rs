@@ -200,6 +200,23 @@ async fn hello_api_validation_lock_and_shutdown() {
 }
 
 #[tokio::test]
+async fn config_effort_round_trips_and_reaches_new_sessions() {
+    let f = Fixture::new(vec![]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    client.call(Method::ConfigSet { key: "effort".into(), value: json!("high") }).await.unwrap();
+    assert_eq!(client.call(Method::ConfigGet { key: Some("effort".into()) }).await.unwrap()["value"], "high");
+    assert_eq!(f.session(&client).await.effort, Some(Effort::High));
+    let error = client.call(Method::ConfigSet { key: "effort".into(), value: json!("loud") }).await.unwrap_err();
+    assert!(matches!(error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST));
+    assert_eq!(client.call(Method::ConfigGet { key: Some("effort".into()) }).await.unwrap()["value"], "high");
+    client.call(Method::ConfigSet { key: "effort".into(), value: serde_json::Value::Null }).await.unwrap();
+    assert_eq!(client.call(Method::ConfigGet { key: Some("effort".into()) }).await.unwrap()["value"], serde_json::Value::Null);
+    assert_eq!(f.session(&client).await.effort, None);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn hello_carries_home() {
     let f = Fixture::new(vec![]).await;
     let server = Server::start(f.config()).await.unwrap();

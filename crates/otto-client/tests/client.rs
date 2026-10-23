@@ -261,7 +261,13 @@ fn approvals_questions_tools_and_usage() {
         Event::QuestionAsked { question_id: "q".into(), call_id: "c".into(), question: "?".into(), options: vec![] },
         Event::QuestionResolved { question_id: "q".into(), answer: "yes".into() },
         Event::ToolResult { call_id: "c".into(), is_error: false, output: json!(3), item_id: "result".into() },
-        Event::Usage { turn: 1, step: 1, usage: Usage { input: 4, output: 2, ..Usage::default() }, cost_usd: Some(0.1) },
+        Event::Usage {
+            turn: 1,
+            step: 1,
+            usage: Usage { input: 4, output: 2, ..Usage::default() },
+            cost_usd: Some(0.1),
+            context: otto_proto::ContextUse { used: 4, window: 1000 },
+        },
         Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage { input: 4, output: 2, ..Usage::default() } },
     ];
     for (i, e) in script.iter().enumerate() {
@@ -282,6 +288,9 @@ fn approvals_questions_tools_and_usage() {
     assert_eq!(tool.output, Some(json!(3)));
     assert_eq!(m.info.usage.usage.input, 4);
     assert_eq!(m.info.usage.cost_usd, 0.1);
+    assert_eq!(m.info.context, otto_proto::ContextUse { used: 4, window: 1000 });
+    m.apply(script.len() as i64 + 1, &Event::Compaction { through_seq: 1, summary: None });
+    assert_eq!(m.info.context, otto_proto::ContextUse { used: 0, window: 1000 });
 }
 #[tokio::test]
 async fn rejects_incompatible_hello() {

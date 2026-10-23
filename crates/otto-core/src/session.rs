@@ -215,17 +215,40 @@ impl Context {
             Event::ItemDone { item } => item.id.strip_prefix("outbox-").map(String::from),
             _ => None,
         };
+        // The context use persists with the session: a step's prompt size, reset by a compaction.
+        let context = match &event {
+            Event::Usage { context, .. } => Some(*context),
+            Event::Compaction { .. } => Some(otto_proto::ContextUse { used: 0, window: self.live().model.info().caps.context_window }),
+            _ => None,
+        };
         let changed = status.is_some();
-        let seq = self
+        let (seq, meta) = self
             .runtime
             .db(move |s| {
-                let update = otto_store::SessionUpdate { status, ..Default::default() };
-                Ok(match delivered {
+                let meta = match context {
+                    Some(context) => {
+                        let mut meta = s.session(&id)?.ok_or(Error::Closed)?.meta;
+                        if !meta.is_object() {
+                            meta = serde_json::json!({});
+                        }
+                        meta["context"] = serde_json::json!(context);
+                        Some(meta)
+                    }
+                    None => None,
+                };
+                let update = otto_store::SessionUpdate { status, meta: meta.clone(), ..Default::default() };
+                let seq = match delivered {
                     Some(outbox) => s.append_delivering(&id, record, projection, update, &outbox)?,
                     None => s.append_with_session(&id, record, projection, update)?,
-                })
+                };
+                Ok((seq, meta))
             })
             .await?;
+        if let Some(meta) = meta {
+            let mut row = self.live().row.clone();
+            row.meta = meta;
+            self.set_row(row);
+        }
         if changed {
             self.runtime.changed();
         }
@@ -451,6 +474,10 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
     }
     if let Some(effort) = change.effort {
         meta["effort"] = serde_json::to_value(effort)?;
+    }
+    if model_changed {
+        let used = meta["context"]["used"].as_u64().unwrap_or_default();
+        meta["context"] = serde_json::json!(otto_proto::ContextUse { used, window: model.info().caps.context_window });
     }
     let id = cx.row.id.clone();
     let update = otto_store::SessionUpdate {

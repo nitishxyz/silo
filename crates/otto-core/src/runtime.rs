@@ -34,6 +34,8 @@ pub struct SessionDefaults {
     pub native_compaction: bool,
     /// The results page `web_search` reads (`search_engine` in config).
     pub search_engine: otto_tools::builtin::web_search::Engine,
+    /// Reasoning effort for sessions whose agent sets none.
+    pub effort: Option<otto_llm::Effort>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct CreateSession {
@@ -331,8 +333,14 @@ impl Runtime {
         let model = options.model.unwrap_or_else(|| agent_model.map(|m| m.1).unwrap_or(&defaults.1).to_owned());
         let resolved = self.0.config.models.resolve(&provider, &model)?;
         let family = crate::session::family(resolved.as_ref());
+        let window = resolved.info().caps.context_window;
         let (grant, loadable, denied) = self.grants(&agent, &family, options.parent_id.clone()).await?;
-        let effort = options.effort.map(serde_json::to_value).transpose()?.or_else(|| agent.effort.clone().map(serde_json::Value::String));
+        let effort = options
+            .effort
+            .map(serde_json::to_value)
+            .transpose()?
+            .or_else(|| agent.effort.clone().map(serde_json::Value::String))
+            .or_else(|| config.effort.map(|e| serde_json::to_value(e).expect("effort enum")));
         let approval_mode = options.approval_mode.or(agent.approval_mode).map(|m| serde_json::to_value(m).expect("mode enum"));
         let task = options.task;
         let row = self
@@ -345,7 +353,7 @@ impl Runtime {
                     model,
                     title: options.title,
                     cwd: options.cwd.to_string_lossy().into_owned(),
-                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"loadable":loadable,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")))}),
+                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"loadable":loadable,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum"))),"context":{"used":0,"window":window}}),
                 })?)
             })
             .await?;
@@ -629,6 +637,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         model: row.model,
         effort: serde_json::from_value(row.meta["effort"].clone()).ok(),
         report_held: crate::subagents::held(&row.meta),
+        context: serde_json::from_value(row.meta["context"].clone()).unwrap_or_default(),
         title: row.title,
         cwd: row.cwd,
         status: if row.archived {

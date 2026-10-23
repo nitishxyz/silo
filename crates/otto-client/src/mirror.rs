@@ -206,7 +206,8 @@ impl SessionMirror {
             }
             Event::QuestionResolved { question_id, .. } => self.pending_questions.retain(|q| q.question_id != *question_id),
             Event::QueueChanged { queued } => self.queue = queued.clone(),
-            Event::Usage { usage, cost_usd, .. } => {
+            Event::Usage { usage, cost_usd, context, .. } => {
+                self.info.context = *context;
                 let total = &mut self.info.usage.usage;
                 total.input = total.input.saturating_add(usage.input);
                 total.output = total.output.saturating_add(usage.output);
@@ -219,7 +220,8 @@ impl SessionMirror {
                 self.last_error = Some((class.clone(), message.clone(), *retryable));
                 self.info.status = SessionStatus::Error;
             }
-            Event::SessionsChanged {} | Event::Compaction { .. } | Event::SubagentChanged { .. } => {}
+            Event::Compaction { .. } => self.info.context.used = 0,
+            Event::SessionsChanged {} | Event::SubagentChanged { .. } => {}
         }
     }
     /// Advance past a forward-compatible unknown event without projecting it.

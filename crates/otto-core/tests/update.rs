@@ -284,6 +284,66 @@ async fn automatic_titles_never_overwrite_and_failures_stay_empty() {
 }
 
 #[tokio::test]
+async fn context_use_is_the_last_step_survives_reload_and_follows_the_model() {
+    let windowed = |id: &str, window: u64, scripts: Vec<Vec<StreamEvent>>| {
+        Arc::new(Scripted {
+            info: ModelInfo {
+                id: id.into(),
+                provider: "test".into(),
+                name: id.into(),
+                caps: Caps { context_window: window, ..Caps::default() },
+                pricing: None,
+            },
+            scripts: Mutex::new(scripts.into()),
+            requests: Mutex::new(vec![]),
+        })
+    };
+    let usage = |input| StreamEvent::Usage(Usage { input, output: 5, cache_read: 20, cache_write: 3, reasoning: 0 });
+    let step = |mut events: Vec<StreamEvent>, input| {
+        events.insert(events.len() - 1, usage(input));
+        events
+    };
+    let a = windowed(
+        "a",
+        1000,
+        vec![step(call("l", "ls", serde_json::json!({"path":"."})), 100), step(text("done"), 200), text("no usage"), text("summary")],
+    );
+    let b = windowed("b", 5000, vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("otto.db");
+    let models = Arc::new(Models { models: vec![a.clone(), b.clone()], resolved: AtomicUsize::new(0) });
+    let open = || RuntimeConfig {
+        store: Arc::new(Mutex::new(Store::open(&path).unwrap())),
+        models: models.clone(),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    };
+    let runtime = Runtime::new(open()).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap().id;
+    let s = runtime.create_session(CreateSession { project_id: project, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    assert_eq!(s.view().await.unwrap().info.context, otto_proto::ContextUse { used: 0, window: 1000 });
+    turn(&runtime, &s).await;
+    let (replay, _) = runtime.subscribe(&s.id, 0).await.unwrap();
+    let reported: Vec<_> = replay.iter().filter_map(|(_, e)| if let Event::Usage { context, .. } = e { Some(context.used) } else { None }).collect();
+    assert_eq!(reported, [123, 223], "each step reports its own prompt, not the sum");
+    let id = s.id.clone();
+    runtime.shutdown().await.unwrap();
+    let runtime = Runtime::new(open()).await.unwrap();
+    let info = runtime.view(&id).await.unwrap().info;
+    assert_eq!(info.context, otto_proto::ContextUse { used: 223, window: 1000 });
+    assert_eq!(info.usage.usage.input, 300);
+    // A step whose provider reports no usage keeps the last known size.
+    turn(&runtime, &runtime.session(&id).await.unwrap()).await;
+    assert_eq!(runtime.view(&id).await.unwrap().info.context, otto_proto::ContextUse { used: 223, window: 1000 });
+    let info = runtime.configure(&id, Configure { model: Some("b".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(info.context, otto_proto::ContextUse { used: 223, window: 5000 });
+    runtime.configure(&id, Configure { model: Some("a".into()), ..Default::default() }).await.unwrap();
+    runtime.compact(&id).await.unwrap();
+    assert_eq!(runtime.view(&id).await.unwrap().info.context, otto_proto::ContextUse { used: 0, window: 1000 });
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn recent_projects_order_by_use_and_skip_missing_roots() {
     let f = fixture(vec![Scripted::new("a", false, None, vec![])]).await;
     let (old, gone) = (f.dir.path().join("old"), f.dir.path().join("gone"));

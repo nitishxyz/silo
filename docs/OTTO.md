@@ -850,6 +850,11 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 - Events: `session.changed`, `turn.started/finished`, `item.started`, `text.delta`, `reasoning.delta`,
   `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
   `question.asked`, `usage`, `compaction`, `subagent.changed`, `queue.changed`, `error`.
+- `SessionInfo.context: {used, window}` (additive): `used` is the last step's prompt as the provider reported it
+  (`input + cache_read + cache_write`), `window` the session model's `context_window` (0 when unknown). Kept in
+  session meta (`meta.context`): each step's `usage` event writes it and carries it (`usage.context`), a
+  `compaction` resets `used` to 0 until the next step, a model change sets `window`. `usage` (the session's
+  totals) stays cumulative.
 - `api.describe` and `protocol.json` pinning work as in silo; `otto-proto` builds for wasm32.
 
 ---

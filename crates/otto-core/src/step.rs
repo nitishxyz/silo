@@ -306,7 +306,19 @@ async fn settle(
             / 1_000_000.0
     });
     cx.emit(
-        Event::Usage { turn, step, usage: usage.clone(), cost_usd: cost },
+        Event::Usage {
+            turn,
+            step,
+            usage: usage.clone(),
+            cost_usd: cost,
+            // A provider that reported no usage leaves the last known prompt size.
+            context: otto_proto::ContextUse {
+                used: Some(usage.total_input())
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| cx.live().row.meta["context"]["used"].as_u64().unwrap_or_default()),
+                window: live.model.info().caps.context_window,
+            },
+        },
         Projection::Usage(UsageRecord {
             provider: live.row.provider.clone(),
             model: live.row.model.clone(),

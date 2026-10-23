@@ -604,7 +604,15 @@ pub enum Event {
     #[serde(rename = "question.resolved")]
     QuestionResolved { question_id: String, answer: String },
     #[serde(rename = "usage")]
-    Usage { turn: i64, step: i64, usage: Usage, cost_usd: Option<f64> },
+    /// `context` is the session's [`SessionInfo::context`] after this step.
+    Usage {
+        turn: i64,
+        step: i64,
+        usage: Usage,
+        cost_usd: Option<f64>,
+        #[serde(default)]
+        context: ContextUse,
+    },
     #[serde(rename = "compaction")]
     Compaction { through_seq: i64, summary: Option<String> },
     #[serde(rename = "subagent.changed")]

@@ -35,6 +35,15 @@ pub struct UsageTotals {
     pub cost_usd: f64,
 }
 
+/// How full the context is: the last request's prompt (`input + cache_read +
+/// cache_write`, as the provider reported it) out of the model's window
+/// (0 when unknown). `used` is 0 after a compaction until the next step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextUse {
+    pub used: u64,
+    pub window: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -64,6 +73,8 @@ pub struct SessionInfo {
     pub updated_at: i64,
     pub last_seq: i64,
     pub usage: UsageTotals,
+    #[serde(default)]
+    pub context: ContextUse,
     /// A sub-agent the user stopped holds its report for the parent until it
     /// reports: a later turn, `session.hand_back`, or the next otto start.
     #[serde(default)]
