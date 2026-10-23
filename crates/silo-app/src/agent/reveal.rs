@@ -1,11 +1,13 @@
 //! Line-by-line reveal of streaming assistant text (`docs/AGENT_BLOCK.md` §3):
 //! a wrapped line shows once it's complete (a later line or block began, or
-//! the stream ended); the message's height glides open for it, and once its
-//! slot is mostly open it sweeps in left to right where it ends up (nothing
-//! slides out from under a clip): a soft edge moves across it at a constant
-//! speed, the next line starting halfway through. A burst is paced, never far
-//! behind the stream (behind, sweeps speed up). Pure: the view feeds back each
-//! leaf's visual lines (starts, widths, glyph x positions) from its last layout.
+//! the stream ended); the message's height glides open for it once its turn is
+//! near (the lines before it started: space opens line by line with the
+//! sweeps, never a burst's worth ahead), and once its slot is mostly open it
+//! sweeps in left to right where it ends up (nothing slides out from under a
+//! clip): a soft edge moves across it at a constant speed, the next line
+//! starting halfway through. A burst is paced, never far behind the stream
+//! (behind, sweeps speed up). Pure: the view feeds back each leaf's visual
+//! lines (starts, widths, glyph x positions, top) from its last layout.
 
 use std::{
     cell::{Cell, RefCell},
@@ -30,6 +32,8 @@ pub const SEGMENTS: usize = 16;
 /// A line's sweep starts at least this long after its slot began to open, and
 /// only once the height drawn is within [`SLACK`] of it.
 pub const OPEN: Duration = Duration::from_millis(60);
+/// The message's height glides this long toward its target (a line's slot opens in about a third of it).
+pub const GLIDE: Duration = motion::UI_FAST;
 /// How far a message may draw past the height it was given: the last couple of
 /// points of a slot still opening (within the gap above the activity row).
 pub const SLACK: f32 = 4.0;
@@ -215,8 +219,9 @@ pub fn fades(lines: &[(usize, f32)], wrap: Option<&Wrap>) -> Vec<(usize, f32)> {
 }
 
 /// A leaf's visual lines, as last laid out: where each starts (bytes into its text), its width as a share
-/// of the text's, its sweep segments ([`cuts`]); and the line height. A code box reports only `cell`: a
-/// character's advance as a share of its visible width.
+/// of the text's, its sweep segments ([`cuts`]); the line height and its top (window coordinates, as the
+/// message's [`Reveal::origin`]). A code box reports only `cell`, a character's advance as a share of its
+/// visible width, and its top; a rule its top.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wrap {
     pub starts: Vec<usize>,
@@ -224,6 +229,7 @@ pub struct Wrap {
     pub cuts: Vec<Vec<(usize, f32)>>,
     pub line_h: f32,
     pub cell: f32,
+    pub top: Option<f32>,
 }
 
 /// What a frame shows of the message.
@@ -231,10 +237,14 @@ pub struct Wrap {
 pub struct Shown {
     /// Each leaf not fully shown: its lines' starts (bytes for text, line indices otherwise) and how far
     /// each has swept in (0 hidden … 1 shown).
-    /// A fixed leaf (code) lists only its complete lines: the one being written isn't drawn.
+    /// A fixed leaf (code) lists only its complete lines given their space: the one being written and those
+    /// waiting for their turn aren't drawn (the box grows with its revealed lines).
     pub lines: HashMap<String, Vec<(usize, f32)>>,
     /// Height held back at the end (the text line being written, drawn transparent).
     pub held: f32,
+    /// The height the message is given: down to the end of the last line that started sweeping or is about
+    /// to (at most one line ahead of the text shown), all of it but the line being written once caught up.
+    pub height: f32,
     /// Top-level blocks before this are fully shown.
     pub settled: usize,
     /// A line is sweeping in or waiting for its turn.
@@ -245,8 +255,8 @@ pub struct Shown {
 
 pub struct Reveal {
     /// When each revealed line of a leaf starts sweeping (or will), for how long, and the height the message
-    /// is given once its slot is open (the target when it completed): it doesn't start while less than
-    /// that, less [`SLACK`], is drawn.
+    /// needs for it when its leaf's top isn't known (the height when it completed): it doesn't start while
+    /// less than its bottom, less [`SLACK`], is drawn.
     arrivals: HashMap<String, Vec<(Instant, Duration, f32)>>,
     last: Option<(Instant, Duration)>,
     quiet_until: Option<Instant>,
@@ -255,6 +265,8 @@ pub struct Reveal {
     pub wraps: Rc<RefCell<HashMap<String, Wrap>>>,
     pub height: motion::Glide,
     pub measured: Rc<Cell<f32>>,
+    /// The message's top in window coordinates at the last layout (leaves report theirs alike).
+    pub origin: Rc<Cell<f32>>,
     /// The height drawn at the last frame.
     pub drawn: f32,
     /// Frames drawn since everything showed and the height settled.
@@ -271,8 +283,9 @@ impl Reveal {
             settled: 0,
             width: 0.0,
             wraps: Rc::default(),
-            height: motion::Glide::new(motion::UI),
+            height: motion::Glide::new(GLIDE),
             measured: Rc::default(),
+            origin: Rc::default(),
             drawn: 0.0,
             idle: 0,
         }
@@ -294,7 +307,7 @@ impl Reveal {
         }
         let instant = self.quiet(now) || reduce;
         let slow = motion::slowdown();
-        let (lag, open_at) = (LAG.mul_f32(slow), now + OPEN.mul_f32(slow));
+        let (lag, open_at, origin) = (LAG.mul_f32(slow), now + OPEN.mul_f32(slow), self.origin.get());
         self.settled = self.settled.min(blocks.len());
         let base = self.settled;
         let mut leafs = Vec::new();
@@ -311,6 +324,10 @@ impl Reveal {
         // Where the next line held back may start: halfway through the one before (held lines released
         // together keep their order instead of sweeping as a group).
         let mut floor: Option<(Instant, Duration)> = None;
+        // Space opens for the lines that started and the next about to (`open`: every line so far started);
+        // `gap`: where the first line not given its space yet begins (None inside: its top isn't known);
+        // `next`: the end of the line given its space while it waits (the last given: nothing below it opens).
+        let (mut open, mut next, mut gap) = (true, None::<Option<f32>>, None::<Option<f32>>);
         for (ix, (id, kind, code)) in leafs.iter().enumerate() {
             let last = ix + 1 == leafs.len();
             let wrap = wraps.get(id);
@@ -344,21 +361,45 @@ impl Reveal {
                 }
                 arrivals.push((at, dur, 0.0));
             }
-            // A slot still opening (the height lags a burst) holds its line back.
-            for (at, dur, need) in arrivals.iter_mut() {
-                if *need > drawn {
+            let top = wrap.and_then(|w| w.top).map(|t| t - origin);
+            let line_h = wrap.map_or(TEXT_LINE, |w| w.line_h);
+            #[allow(clippy::cast_precision_loss)]
+            let reach = |v: usize| {
+                top.map(|t| match kind {
+                    Kind::Fixed(_) if code.is_empty() => t + 1.0,
+                    Kind::Fixed(_) => t + 2.0 * CODE_PAD_Y + (v + 1) as f32 * CODE_LINE,
+                    _ => t + (v + 1) as f32 * line_h,
+                })
+            };
+            let base = |v: usize| if v == 0 { top } else { reach(v - 1) };
+            // Lines given their space (a code box draws only these).
+            let mut given = 0;
+            for (v, (at, dur, need)) in arrivals.iter_mut().enumerate() {
+                // A slot still opening (the height lags a burst) holds its line back.
+                let held = !instant && reach(v).unwrap_or(*need) > drawn;
+                if held {
                     let start = floor.map_or(now, |(a, d)| (a + d / 2).min(now + lag).max(a + lag / CASCADE).max(now));
                     if now > *at || start > *at {
                         *at = start;
                     }
                 }
                 floor = Some((*at, *dur));
+                if open {
+                    if *at > open_at {
+                        (open, gap) = (false, Some(base(v)));
+                    } else {
+                        given = v + 1;
+                        if held || *at > now {
+                            (open, next) = (false, Some(reach(v)));
+                        }
+                    }
+                }
             }
             let swept = |v: usize| arrivals.get(v).map_or(0.0, |(at, dur, _)| progress(*at, *dur, now));
             out.moving |= (0..arrivals.len()).any(|v| swept(v) < 1.0);
             let lines: Vec<(usize, f32)> = match (kind, count) {
                 (_, None) => vec![(0, 0.0)],
-                (Kind::Fixed(_), Some(_)) => (0..complete).map(|v| (v, swept(v))).collect(),
+                (Kind::Fixed(_), Some(_)) => (0..complete.min(given)).map(|v| (v, swept(v))).collect(),
                 (_, Some(c)) => (0..c).map(|v| (wrap.map_or(0, |w| w.starts[v]), swept(v))).collect(),
             };
             if last {
@@ -367,7 +408,8 @@ impl Reveal {
                     _ => count.map_or(1, |c| c - complete) as f32 * wrap.map_or(TEXT_LINE, |w| w.line_h),
                 };
             }
-            let shown_all = count.is_some() && !writing && lines.iter().all(|(_, a)| *a >= 1.0);
+            let waiting = matches!(kind, Kind::Fixed(_)) && given < complete;
+            let shown_all = count.is_some() && !writing && !waiting && lines.iter().all(|(_, a)| *a >= 1.0);
             if !shown_all {
                 out.lines.insert(id.clone(), lines);
             }
@@ -377,13 +419,19 @@ impl Reveal {
         if let Some(latest) = floor.filter(|(at, _)| self.last.is_none_or(|(last, _)| *at > last)) {
             self.last = Some(latest);
         }
-        // Lines that completed this frame open the height to here.
+        // Lines that completed this frame need the height to here (when their leaf's top isn't known).
         let target = (self.measured.get() - out.held).max(0.0);
         for (id, v, extra) in fresh {
             if let Some(a) = self.arrivals.get_mut(&id).and_then(|a| a.get_mut(v)) {
                 a.2 = target + extra;
             }
         }
+        // The last line given its space hasn't started: nothing more below it (the gap and padding after it
+        // open once it sweeps).
+        out.height = match gap.or(next) {
+            Some(Some(g)) => g.max(0.0),
+            _ => target,
+        };
         // Leading blocks fully shown (and not the one still being written) are done with.
         let mut from = 0;
         for (bi, end) in ends.iter().enumerate() {
@@ -502,7 +550,8 @@ mod tests {
         // Fewer glyphs than segments: each is its own.
         assert_eq!(cuts([(0, 0.0), (1, 50.0), (5, 120.0)], 200.0, SEGMENTS), [(0, 0.0), (1, 0.25), (5, 0.6)]);
         // Fades: only the sweeping line is segmented; one not started is hidden, one done shows.
-        let wrap = Wrap { starts: vec![0, 10, 50], widths: vec![1.0; 3], cuts: vec![vec![(0, 0.0)], c, vec![(50, 0.0)]], line_h: 21.0, cell: 0.0 };
+        let wrap =
+            Wrap { starts: vec![0, 10, 50], widths: vec![1.0; 3], cuts: vec![vec![(0, 0.0)], c, vec![(50, 0.0)]], line_h: 21.0, ..Wrap::default() };
         let f = fades(&[(0, 1.0), (10, 0.5), (50, 0.0)], Some(&wrap));
         assert_eq!(f[0], (0, 1.0));
         assert_eq!(*f.last().unwrap(), (50, 0.0));
@@ -702,6 +751,9 @@ mod tests {
         assert!(s.held.abs() < 1e-3);
         let src = "```sh\nls\npwd\n";
         let s = r.frame("k", &parse(src), src, true, 400.0, now, false);
+        assert_eq!(s.lines["k-0"].len(), 1, "`pwd` is complete but waits for its turn: the box grows with its lines");
+        r.drawn = 1000.0;
+        let s = r.frame("k", &parse(src), src, true, 400.0, now + OPEN + SWEEP / 2 + 30 * MS, false);
         assert_eq!(s.lines["k-0"].len(), 2);
         let src = "- one\n- tw";
         let blocks = parse(src);
@@ -735,5 +787,119 @@ mod tests {
         wrap(&r, "k-1", &[0, 4]);
         let s = r.frame("k", &blocks, src, true, 300.0, late, false);
         assert_eq!(s.lines["k-1"], [(0, 1.0), (4, 0.0)]);
+    }
+
+    /// Drives `r` like the view, a frame every 8 ms from `from` to `to`: the height glides to `Shown::height`
+    /// and `layout` (given the frame) sets what the last layout reported. Checks every frame with `check`.
+    #[allow(clippy::too_many_arguments)]
+    fn drive(
+        r: &mut Reveal,
+        h: &mut motion::Glide,
+        src: &str,
+        streaming: bool,
+        (from, to): (Instant, Instant),
+        layout: &dyn Fn(&Reveal, &Shown),
+        check: &mut dyn FnMut(&Shown, f32),
+    ) -> Shown {
+        let blocks = parse(src);
+        let mut t = from;
+        loop {
+            let s = r.frame("k", &blocks, src, streaming, 400.0, t, false);
+            check(&s, r.drawn);
+            h.target(s.height, t, false);
+            r.drawn = h.value(t, false);
+            layout(r, &s);
+            t += 8 * MS;
+            if t > to {
+                return s;
+            }
+        }
+    }
+
+    #[test]
+    fn a_burst_opens_its_space_line_by_line_with_the_sweeps() {
+        // Twelve one-line paragraphs arrive at once (29 apart: a line and its gap), then one being written.
+        let now = Instant::now();
+        let mut src: String = (0..12).map(|i| format!("Line {i}\n\n")).collect();
+        src.push_str("Tail");
+        let mut r = Reveal::new(false, now);
+        let top = |i: usize| i as f32 * 29.0;
+        for i in 0..=12 {
+            r.wraps
+                .borrow_mut()
+                .insert(format!("k-{i}"), Wrap { starts: vec![0], widths: vec![1.0], line_h: 21.0, top: Some(top(i) + 500.0), ..Wrap::default() });
+        }
+        r.origin.set(500.0);
+        r.measured.set(13.0 * 29.0);
+        let mut h = motion::Glide::new(GLIDE);
+        // The end of the text shown: blocks settled or fully shown, and lines that began to sweep.
+        let shown = |s: &Shown| {
+            (0..12)
+                .filter(|i| *i < s.settled || s.lines.get(&format!("k-{i}")).is_none_or(|l| l[0].1 > 0.0))
+                .map(|i| top(i) + 21.0)
+                .fold(0.0, f32::max)
+        };
+        let mut started = Vec::new();
+        let s = drive(&mut r, &mut h, &src, true, (now, now + Duration::from_secs(3)), &|_, _| {}, &mut |s, drawn| {
+            assert!(s.height <= shown(s) + 29.0 + 0.5, "at most a line (and its gap) ahead of the text: {} {}", s.height, shown(s));
+            for i in 0..12 {
+                let p = s.lines.get(&format!("k-{i}")).map_or(1.0, |l| l[0].1);
+                if p > 0.0 && started.len() == i {
+                    assert!(top(i) + 21.0 <= drawn + SLACK, "line {i} sweeps once its slot is open: {drawn}");
+                    started.push(i);
+                }
+            }
+        });
+        assert_eq!(started.len(), 12, "all shown while the stream goes on");
+        assert!((s.height - (13.0 * 29.0 - 21.0)).abs() < 0.5, "caught up: all but the line being written ({})", s.height);
+        // Paced: twelve lines in under two seconds (each slot opens as the line before starts).
+        let mut r = Reveal::new(false, now);
+        for i in 0..=12 {
+            r.wraps
+                .borrow_mut()
+                .insert(format!("k-{i}"), Wrap { starts: vec![0], widths: vec![1.0], line_h: 21.0, top: Some(top(i)), ..Wrap::default() });
+        }
+        r.measured.set(13.0 * 29.0);
+        let mut h = motion::Glide::new(GLIDE);
+        let s = drive(&mut r, &mut h, &src, true, (now, now + Duration::from_secs(2)), &|_, _| {}, &mut |_, _| {});
+        assert!(s.settled >= 12, "{}", s.settled);
+        // The stream ends: the last line comes promptly and the height ends at the whole message.
+        let end = now + Duration::from_millis(2500);
+        let s = drive(&mut r, &mut h, &src, false, (end, end + Duration::from_secs(1)), &|_, _| {}, &mut |_, _| {});
+        assert!(s.done && (s.height - 13.0 * 29.0).abs() < 0.5 && (r.drawn - 13.0 * 29.0).abs() < 0.5, "{} {}", s.height, r.drawn);
+    }
+
+    #[test]
+    fn a_code_box_grows_with_its_revealed_lines() {
+        // Ten code lines arrive at once; the box draws only those given their space (laid out as such).
+        let now = Instant::now();
+        let mut src = "```sh\n".to_owned();
+        for i in 0..10 {
+            src.push_str(&format!("echo {i}\n"));
+        }
+        src.push_str("```\n\nTail");
+        let mut r = Reveal::new(false, now);
+        r.wraps.borrow_mut().insert("k-0".into(), Wrap { cell: 0.02, top: Some(0.0), ..Wrap::default() });
+        let layout = |r: &Reveal, s: &Shown| {
+            let n = s.lines.get("k-0").map_or(10, Vec::len) as f32;
+            let tail = if n > 0.0 { CODE_BOX + n * CODE_LINE } else { 0.0 };
+            r.wraps.borrow_mut().insert("k-1".into(), Wrap { starts: vec![0], widths: vec![1.0], line_h: 21.0, top: Some(tail), ..Wrap::default() });
+            r.measured.set(tail + 29.0);
+        };
+        layout(&r, &Shown::default());
+        r.measured.set(29.0);
+        let mut h = motion::Glide::new(GLIDE);
+        let mut most = 0;
+        let s = drive(&mut r, &mut h, &src, true, (now, now + Duration::from_secs(3)), &layout, &mut |s, _| {
+            let Some(lines) = s.lines.get("k-0") else { return };
+            let sweeping = lines.iter().filter(|(_, p)| *p > 0.0).count();
+            assert!(lines.len() <= sweeping + 1, "the box holds the lines shown and one about to: {lines:?}");
+            #[allow(clippy::cast_precision_loss)]
+            let shown = if sweeping == 0 { 0.0 } else { 2.0 * CODE_PAD_Y + sweeping as f32 * CODE_LINE };
+            assert!(s.height <= shown + 2.0 * CODE_PAD_Y + CODE_LINE + 0.5, "{} {shown}", s.height);
+            most = most.max(lines.len());
+        });
+        assert_eq!((most, s.settled), (10, 1), "every line came, the box is done with");
+        assert!((s.height - (CODE_BOX + 10.0 * CODE_LINE + 8.0)).abs() < 0.5, "{}", s.height);
     }
 }

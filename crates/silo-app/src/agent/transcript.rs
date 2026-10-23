@@ -621,6 +621,8 @@ fn duration(lines: &[Line], cx: &Ctx<'_>) -> Option<u64> {
 #[must_use]
 pub fn summary(lines: &[Line], duration: Option<u64>, stopped: bool) -> String {
     let count = |k: Kind| lines.iter().filter(|l| l.kind == k).count();
+    // What a verb claims (read, edited, fetched…) counts only what didn't fail: a failure is counted as one.
+    let done = |k: Kind| lines.iter().filter(|l| l.kind == k && l.status != Status::Error).count();
     let failed = |k: Kind| lines.iter().filter(|l| l.kind == k && l.status == Status::Error).count();
     let halted = |k: Kind| lines.iter().filter(|l| l.kind == k && l.status == Status::Stopped).count();
     let mut parts = Vec::new();
@@ -629,11 +631,11 @@ pub fn summary(lines: &[Line], duration: Option<u64>, stopped: bool) -> String {
             parts.push(text);
         }
     };
-    let n = count(Kind::Read);
+    let n = done(Kind::Read);
     add(n, format!("read {}", plural(n, "file", "files")));
-    let n = count(Kind::List);
+    let n = done(Kind::List);
     add(n, format!("listed {}", plural(n, "folder", "folders")));
-    let n = count(Kind::Search);
+    let n = done(Kind::Search);
     add(n, format!("searched {}", plural(n, "time", "times")));
     let n = count(Kind::Shell);
     let ran = std::iter::once(format!("ran {}", plural(n, "command", "commands")))
@@ -643,22 +645,22 @@ pub fn summary(lines: &[Line], duration: Option<u64>, stopped: bool) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     add(n, ran);
-    let mut files: Vec<&String> = lines.iter().filter(|l| l.kind == Kind::Edit).flat_map(|l| &l.files).collect();
+    let mut files: Vec<&String> = lines.iter().filter(|l| l.kind == Kind::Edit && l.status != Status::Error).flat_map(|l| &l.files).collect();
     files.sort();
     files.dedup();
-    let n = if files.is_empty() { count(Kind::Edit) } else { files.len() };
+    let n = if files.is_empty() { done(Kind::Edit) } else { files.len() };
     add(n, format!("edited {}", plural(n, "file", "files")));
-    let n = count(Kind::Fetch);
+    let n = done(Kind::Fetch);
     add(n, format!("fetched {}", plural(n, "page", "pages")));
     let n = count(Kind::Terminal);
     add(n, plural(n, "terminal step", "terminal steps"));
     let n = count(Kind::Browser);
     add(n, plural(n, "browser step", "browser steps"));
-    let n = count(Kind::Ask);
+    let n = done(Kind::Ask);
     add(n, format!("asked {}", plural(n, "question", "questions")));
     let n = count(Kind::Subagent);
     add(n, plural(n, "subagent step", "subagent steps"));
-    let n = count(Kind::Todos);
+    let n = done(Kind::Todos);
     add(n, "updated todos".to_owned());
     let n = count(Kind::Other);
     add(n, format!("used {}", plural(n, "tool", "tools")));
@@ -1743,6 +1745,13 @@ mod tests {
         assert_eq!(summary(&halted, Some(3_000), true), "Worked for 3s · read 1 file · ran 2 commands, 1 failed, 1 stopped · 1 stopped");
         assert_eq!(summary(&halted[..1], None, false), "Ran 1 command, 1 stopped");
         assert_eq!(summary(&[], None, false), "Worked");
+        // A failed copy, write or edit didn't edit anything (nor a failed read read, or fetch fetch): counted as failed.
+        let copy = vec![line(Kind::Edit, Status::Error, &["assets/shot.png"]), line(Kind::Read, Status::Done, &[])];
+        assert_eq!(summary(&copy, Some(2_000), false), "Worked for 2s · read 1 file · 1 failed");
+        let some = vec![line(Kind::Edit, Status::Done, &["a.rs"]), line(Kind::Edit, Status::Error, &["b.rs"]), line(Kind::Edit, Status::Error, &[])];
+        assert_eq!(summary(&some, None, false), "Edited 1 file · 2 failed");
+        let others = vec![line(Kind::Read, Status::Error, &[]), line(Kind::Fetch, Status::Error, &[]), line(Kind::Search, Status::Error, &[])];
+        assert_eq!(summary(&others, None, false), "3 failed");
     }
 
     #[test]

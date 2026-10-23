@@ -281,6 +281,8 @@ pub struct AgentPane {
     /// Groups the user opened (folded) or closed (live).
     toggled: HashSet<String>,
     details: HashSet<String>,
+    /// Open `›` details' box heights as last laid out (a live window's budget makes room for exactly that).
+    detail_h: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
     /// Live groups' windows following their newest line (scrolled up in one, it stays put).
     live_pins: HashMap<String, scroll::Pin>,
     /// Line reveal of streaming text rows, by row key (kept until the last line faded in).
@@ -422,6 +424,7 @@ impl AgentPane {
             toggled: HashSet::new(),
             details: HashSet::new(),
             live_pins: HashMap::new(),
+            detail_h: std::rc::Rc::default(),
             reveals: HashMap::new(),
             scroll,
             attachments: Vec::new(),
@@ -675,6 +678,7 @@ impl AgentPane {
         self.live_pins.clear();
         self.toggled.clear();
         self.details.clear();
+        self.detail_h.borrow_mut().clear();
         self.anims.clear();
         self.line_status.clear();
         self.streams.clear();

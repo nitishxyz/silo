@@ -54,7 +54,8 @@ See §8 for status.
 - **Grouping rule:** within a turn, every non-text part (reasoning, any tool call/result, errors) goes into the
   current group; only assistant **text** ends a group. Tools after text open a new group. Typical turn: one group,
   then the answer.
-- **Live group:** at most ~6 visible lines (plus room for an open detail); older lines fade out at the top under a
+- **Live group:** at most ~6 visible lines (plus room for each open detail as drawn: its box as last measured and
+  8 above and below, clipped like its wrapper while it opens, so a pinned window keeps following); older lines fade out at the top under a
   gradient mask. The window is an inner box (`scroll.rs` rules): pinned to its newest line, scrolled up in it, it
   stays put while lines arrive below, with a bottom fade, until scrolled back down (`scroll::Pin`). Its header is
   the turn's one indicator while it ends the transcript; otherwise the activity row is. Reasoning streams as dim
@@ -92,8 +93,11 @@ See §8 for status.
 - **Assistant text:** markdown (paragraphs, headings, lists, inline code, fenced code with mono font, links,
   bold/italic). Streams line by line (`agent/reveal.rs`): a wrapped line shows once complete (the next line or
   block began; a paragraph's last line at its blank line, a heading's or code line's at its newline; all of it when
-  the stream ends); the message's height glides (`Glide`) open for it (what it measured less the line being
-  written, so at the bottom the transcript scrolls smoothly), and once the height drawn is within 4 of its slot
+  the stream ends); the message's height glides (`Glide`, 180 ms) to the bottom of the last line whose sweep
+  started or is next (each leaf reports its top after layout), so space opens line by line with the sweeps and a
+  burst never opens a blank slot ahead of its text: at most one line of space below what shows; once caught up,
+  everything but the line being written (at the bottom the transcript scrolls smoothly). Once the height drawn is
+  within 4 of its slot
   (and at least 60 ms after it completed) it sweeps in left to right right where it ends up: a soft edge 20% of the
   line wide, at a constant speed (250 ms for a full-width line, at least 50 ms; × `slowdown`), the next line
   starting halfway through. Nothing slides out from under a clip, and the message may draw at most 4 past its
@@ -105,8 +109,9 @@ See §8 for status.
   colour over the text's, so a transparent colour does nothing); a code line sweeps across its own width (its
   display width × the mono advance: tabs to the next stop of 4 (drawn as spaces), East Asian wide characters and
   emoji two cells; at most the box's visible width, the mask running under the right padding where
-  long lines show) under a gradient mask of the box's colour. A code block draws only its complete lines (nothing
-  before the first); the box fades in during the first sixth of its first line's sweep, and that line's text sweeps
+  long lines show) under a gradient mask of the box's colour. A code block draws only its complete lines given
+  their space (nothing before the first; the box grows with its revealed lines); the box fades in during the
+  first sixth of its first line's sweep, and that line's text sweeps
   in the rest (a mask under the box's own fade would let the whole line through). A list marker comes in as its
   item's first line starts. Text already there (a block opened mid-reply: otto's `session.view` carries the reply
   being written with what's been journaled, and live deltas continue it) and rewrapped lines after a width change

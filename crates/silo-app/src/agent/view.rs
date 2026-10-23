@@ -985,9 +985,17 @@ impl AgentPane {
             .collect();
         // The top fade comes in with the line that fills the window.
         let fade = (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0);
-        // An open detail gets its own room in the window (its box scrolls on its own).
-        #[allow(clippy::cast_precision_loss)]
-        let max = LINE_H * LIVE_LINES + shown.iter().filter(|l| self.details.contains(&l.key)).count() as f32 * DETAIL_H;
+        // An open detail gets its own room in the window, as drawn (its box scrolls on its own): the window grows
+        // and shrinks with it, so a pinned window keeps its overflow and nothing jumps.
+        let max = {
+            let heights = self.detail_h.borrow();
+            live_budget(
+                shown
+                    .iter()
+                    .filter(|l| l.detail.is_some())
+                    .map(|l| (self.openness(&format!("det:{}", l.key), self.details.contains(&l.key), now, cx), heights.get(&l.key).copied())),
+            )
+        };
         let id = format!("live-{key}");
         let handle = self.scroll.handle(&id);
         let pin = self.live_pins.entry(key.clone()).or_default();
@@ -1190,9 +1198,18 @@ impl AgentPane {
             .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, &self.scroll)))
             .flatten()
             // The gap is the wrapper's padding: a margin on the box collapsed out of the (block) line, so the next row
-            // overlapped the box once it was fully open.
+            // overlapped the box once it was fully open. The box reports its height (a live window's budget).
             .map(|d| {
-                div().py(px(DETAIL_GAP)).when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(d)
+                let (heights, key) = (self.detail_h.clone(), key.clone());
+                let measure = gpui::canvas(move |b, _, _| _ = heights.borrow_mut().insert(key, f32::from(b.size.height)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full();
+                div()
+                    .py(px(DETAIL_GAP))
+                    .when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness))
+                    .child(div().relative().child(d).child(measure))
             });
         let enter = self.entered.get(&key).and_then(|at| eased(*at, ENTER, now, cx));
         let (shift, alpha) = enter.map_or((0.0, 1.0), |t| ((1.0 - t) * 6.0, t));
@@ -1241,14 +1258,12 @@ impl AgentPane {
         });
         let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
         let (Some(mut r), Some(s)) = (reveal, shown) else { return body.into_any_element() };
-        // The height glides to what was measured, less the line being written (the list follows it at the
-        // bottom, so the transcript scrolls smoothly).
-        let natural = r.measured.get();
+        // The height glides to the end of the lines the reveal gave space (`Shown::height`: line by line with
+        // the sweeps; the list follows it at the bottom, so the transcript scrolls smoothly).
         if r.quiet(now) {
-            r.height = motion::Glide::new(motion::UI);
+            r.height = motion::Glide::new(reveal::GLIDE);
         }
-        let target = (natural - s.held).max(0.0);
-        r.height.target(target, now, reduce);
+        r.height.target(s.height, now, reduce);
         let h = r.height.value(now, reduce);
         r.drawn = h;
         let moving = r.height.moving(now, reduce);
@@ -1256,7 +1271,7 @@ impl AgentPane {
         if moving || s.moving || r.idle > 0 {
             MOVING.set(true);
         }
-        let measured = r.measured.clone();
+        let (measured, origin) = (r.measured.clone(), r.origin.clone());
         // Done (twice, so the last measure is in): drawn as usual from the next frame, at the same height.
         if r.idle < 2 {
             self.reveals.insert(key.to_owned(), r);
@@ -1266,11 +1281,23 @@ impl AgentPane {
         div()
             .h(px(h))
             .relative()
-            .child(div().absolute().top_0().left_0().right_0().h(px(h + reveal::SLACK)).overflow_hidden().child(
-                div().relative().child(body).child(
-                    gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full(),
+            .child(
+                div().absolute().top_0().left_0().right_0().h(px(h + reveal::SLACK)).overflow_hidden().child(
+                    div().relative().child(body).child(
+                        gpui::canvas(
+                            move |b, _, _| {
+                                measured.set(f32::from(b.size.height));
+                                origin.set(f32::from(b.origin.y));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    ),
                 ),
-            ))
+            )
             .into_any_element()
     }
 
@@ -2391,6 +2418,12 @@ fn render_detail(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll:
     }
 }
 
+/// A live group window's most height: [`LIVE_LINES`] lines, and each detail (its openness, its box's height as last
+/// laid out) as its wrapper draws it: the box and its gaps, clipped to its share of [`DETAIL_H`] while it opens.
+fn live_budget(details: impl IntoIterator<Item = (f32, Option<f32>)>) -> f32 {
+    LINE_H * LIVE_LINES + details.into_iter().map(|(open, h)| h.map_or(DETAIL_H, |h| h + 2.0 * DETAIL_GAP).min(DETAIL_H * open)).sum::<f32>()
+}
+
 /// A streaming message's line reveal while drawing its blocks not yet fully shown: each leaf's line
 /// starts and sweep progress (`reveal::Shown::lines`; a leaf not in it shows), and where each leaf's
 /// wrapped lines are reported after layout.
@@ -2404,8 +2437,8 @@ fn line_alpha(lines: Option<&[(usize, f32)]>, at: usize) -> f32 {
     lines.map_or(1.0, |l| l.iter().rev().find(|(s, _)| *s <= at).map_or(0.0, |(_, a)| *a))
 }
 
-/// Reports a revealed code box's character advance as a share of the width its lines show in (the element's,
-/// less the left padding: a long line runs under the right one).
+/// Reports a revealed code box's top and character advance as a share of the width its lines show in (the
+/// element's, less the left padding: a long line runs under the right one).
 fn code_cell(fx: &Fx, id: &str) -> impl IntoElement {
     let (wraps, id) = (fx.wraps.clone(), id.to_owned());
     gpui::canvas(
@@ -2413,7 +2446,10 @@ fn code_cell(fx: &Fx, id: &str) -> impl IntoElement {
             let ts = window.text_system();
             let advance = ts.em_advance(ts.resolve_font(&gpui::font(mono())), px(reveal::CODE_FONT)).map_or(0.0, f32::from);
             let inner = f32::from(bounds.size.width) - reveal::CODE_PAD_X;
-            wraps.borrow_mut().entry(id).or_default().cell = if inner > 0.0 { advance / inner } else { 0.0 };
+            let mut wraps = wraps.borrow_mut();
+            let wrap = wraps.entry(id).or_default();
+            wrap.cell = if inner > 0.0 { advance / inner } else { 0.0 };
+            wrap.top = Some(f32::from(bounds.origin.y));
         },
         |_, _, _, _| {},
     )
@@ -2428,7 +2464,8 @@ fn wrap_of(layout: &gpui::TextLayout) -> reveal::Wrap {
     let lines = layout.line_layouts();
     let full = lines.iter().filter_map(|l| l.wrap_width).map(f32::from).fold(0.0, f32::max);
     let full = if full > 0.0 { full } else { lines.iter().map(|l| f32::from(l.width())).fold(1.0, f32::max) };
-    let mut wrap = reveal::Wrap { line_h: f32::from(layout.line_height()), ..reveal::Wrap::default() };
+    let mut wrap =
+        reveal::Wrap { line_h: f32::from(layout.line_height()), top: Some(f32::from(layout.bounds().origin.y)), ..reveal::Wrap::default() };
     let mut at = 0;
     for line in &lines {
         let un = &line.unwrapped_layout;
@@ -2669,14 +2706,45 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
             .children(blocks.iter().enumerate().map(|(i, b)| render_block(&format!("{id}-q{i}"), b, fx, theme::muted(), scroll)))
             .into_any_element(),
         Block::Rule => {
-            div().my(px(10.0)).h(px(1.0)).bg(rgb(theme::border())).when(lines.is_some(), |el| el.opacity(line_alpha(lines, 0))).into_any_element()
+            // A revealed rule reports its top (its space opens in turn).
+            let report = fx.map(|f| {
+                let (wraps, id) = (f.wraps.clone(), id.to_owned());
+                gpui::canvas(move |b, _, _| wraps.borrow_mut().entry(id).or_default().top = Some(f32::from(b.origin.y)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+            });
+            div()
+                .relative()
+                .my(px(10.0))
+                .h(px(1.0))
+                .bg(rgb(theme::border()))
+                .when(lines.is_some(), |el| el.opacity(line_alpha(lines, 0)))
+                .children(report)
+                .into_any_element()
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Fit, Tail};
+    use super::{DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, Tail, live_budget};
+
+    #[test]
+    fn a_live_window_makes_room_for_its_open_details_as_drawn() {
+        let lines = LINE_H * LIVE_LINES;
+        assert!((live_budget(std::iter::empty()) - lines).abs() < 1e-3);
+        // Open: the box and its gaps above and below (a short one, a tall one capped at 240).
+        assert!((live_budget([(1.0, Some(60.0))]) - (lines + 60.0 + 2.0 * DETAIL_GAP)).abs() < 1e-3);
+        assert!((live_budget([(1.0, Some(240.0)), (1.0, Some(60.0))]) - (lines + DETAIL_H + 60.0 + 2.0 * DETAIL_GAP)).abs() < 1e-3);
+        // Opening or closing: as its wrapper is clipped, so the window grows and shrinks with it (no jump).
+        assert!((live_budget([(0.1, Some(240.0))]) - (lines + 0.1 * DETAIL_H)).abs() < 1e-3);
+        assert!((live_budget([(0.9, Some(60.0))]) - (lines + 60.0 + 2.0 * DETAIL_GAP)).abs() < 1e-3);
+        assert!((live_budget([(0.0, Some(60.0))]) - lines).abs() < 1e-3, "closed");
+        // Not laid out yet: the most it can take.
+        assert!((live_budget([(1.0, None)]) - (lines + DETAIL_H)).abs() < 1e-3);
+    }
 
     #[test]
     fn the_pill_and_following_come_from_the_scroll_position() {
