@@ -30,10 +30,11 @@ impl Registry {
     }
 }
 pub fn tools_for_family(family: &str) -> Vec<Arc<dyn Tool>> {
-    tools_with(family, &shell::Host::default())
+    tools_with(family, &shell::Host::default(), &web_fetch::Web::default())
 }
-/// The built-ins for `family`, whose shells share `host` (jobs, terminals).
-pub fn tools_with(family: &str, host: &shell::Host) -> Vec<Arc<dyn Tool>> {
+/// The built-ins for `family`, whose shells share `host` (jobs, terminals)
+/// and whose web tools share `web` (renderer, search engine).
+pub fn tools_with(family: &str, host: &shell::Host, web: &web_fetch::Web) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(read::Read::default()),
         Arc::new(write::Write::default()),
@@ -44,7 +45,8 @@ pub fn tools_with(family: &str, host: &shell::Host) -> Vec<Arc<dyn Tool>> {
         Arc::new(search::Search::default()),
         Arc::new(shell::Shell::with(host.clone())),
         Arc::new(shell::Job::new(host.jobs.clone())),
-        Arc::new(web_fetch::WebFetch::default()),
+        Arc::new(web_fetch::WebFetch::new(web.clone())),
+        Arc::new(web_search::WebSearch::new(web.clone())),
         Arc::new(ask_user::AskUser::default()),
         Arc::new(update_todos::UpdateTodos::default()),
     ];

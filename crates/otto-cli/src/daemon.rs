@@ -56,9 +56,10 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         .await?,
     );
     runtime.set_auto_title(true);
-    let (silo_tools, terminals) = otto_silo_tools::silo(otto_silo_tools::Config::default());
-    runtime.add_tools(silo_tools);
-    runtime.set_terminals(terminals);
+    let silo = otto_silo_tools::connect(otto_silo_tools::Config::default());
+    runtime.add_tools(silo.tools);
+    runtime.set_terminals(silo.terminals);
+    runtime.set_renderer(silo.renderer);
     runtime.add_source(otto_mcp::Mcp::new(paths::user_config()));
     // Children that finished while their parent was closed, or before a restart.
     runtime.deliver_pending().await?;

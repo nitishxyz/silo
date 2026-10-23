@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
 otto-tools.workspace = true
 serde_json.workspace = true

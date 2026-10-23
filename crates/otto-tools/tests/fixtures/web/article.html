@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>Ownership &amp; Borrowing | Example Docs</title><script>window.analytics = {};</script><style>body { font: 16px sans-serif; }</style></head>
+<body>
+<header class="site"><a href="/">Example Docs</a><nav><ul><li><a href="/guide">Guide</a></li><li><a href="/api">API</a></li></ul></nav></header>
+<aside class="sidebar"><p>Table of contents</p></aside>
+<article id="content">
+<h1>Ownership &amp; Borrowing</h1>
+<p>Rust manages memory through a system of <strong>ownership</strong> with a set of rules that the compiler checks.
+If any of the rules are violated, the program won&#39;t compile.</p>
+<h2 id="rules">The rules</h2>
+<ul><li>Each value has an <em>owner</em>.</li><li>There can only be one owner at a time.</li><li>When the owner goes out of scope, the value is dropped.</li></ul>
+<p>See <a href="/book/references">references and borrowing</a> for the details, and use <code>clone</code> when a deep copy is needed.</p>
+<pre><code>let s1 = String::from("hello");
+let s2 = s1;   // s1 moved
+</code></pre>
+</article>
+<footer><p>&copy; 2026 Example Docs</p></footer>
+</body>
+</html>

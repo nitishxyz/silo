@@ -8,13 +8,20 @@
 //! [`terminals`] runs otto's `shell` commands in parked command blocks next
 //! to the agent block showing the session (docs/OTTO.md §6.2); without silo
 //! or such a block, pipes run them.
+//!
+//! [`connect`]'s renderer loads pages for otto's `web_fetch`/`web_search`
+//! through silo's `browser_fetch` (a hidden page in the app's off-screen
+//! browser host, docs/AGENTS.md).
 
 use std::{collections::BTreeMap, collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use otto_tools::{
     Effects, Loading, OutputPart, Source, Tool, ToolCx, ToolError, ToolErrorKind, ToolOutput, ToolSpec,
-    builtin::shell::{Finished, Terminal, Terminals},
+    builtin::{
+        render::{RenderError, RenderRequest, Rendered, Renderer},
+        shell::{Finished, Terminal, Terminals},
+    },
 };
 use serde_json::Value;
 use silo_client::Control;
@@ -96,10 +103,61 @@ pub fn tools(config: Config) -> Vec<Arc<dyn Tool>> {
 /// connection made on first use.
 #[must_use]
 pub fn silo(config: Config) -> (Vec<Arc<dyn Tool>>, Arc<dyn Terminals>) {
+    let silo = connect(config);
+    (silo.tools, silo.terminals)
+}
+
+/// What otto gets from silo, sharing one connection made on first use.
+pub struct Silo {
+    pub tools: Vec<Arc<dyn Tool>>,
+    /// Command blocks for `shell`.
+    pub terminals: Arc<dyn Terminals>,
+    /// Rendered fetches for `web_fetch`/`web_search` (`browser_fetch`).
+    pub renderer: Arc<dyn Renderer>,
+}
+
+#[must_use]
+pub fn connect(config: Config) -> Silo {
     let shared = Arc::new(Shared { config, live: Mutex::new(None), anchors: Mutex::new(HashMap::new()) });
     let tools =
         silo_tools::descriptors().into_iter().map(|d| Arc::new(SiloTool { spec: spec(d), shared: shared.clone() }) as Arc<dyn Tool>).collect();
-    (tools, Arc::new(SiloTerminals { shared }))
+    Silo { tools, terminals: Arc::new(SiloTerminals { shared: shared.clone() }), renderer: Arc::new(SiloRenderer { shared }) }
+}
+
+struct SiloRenderer {
+    shared: Arc<Shared>,
+}
+
+#[async_trait]
+impl Renderer for SiloRenderer {
+    async fn render(&self, request: RenderRequest, cx: &ToolCx) -> Result<Rendered, RenderError> {
+        let tools = self.shared.tools(&cx.cwd).await.map_err(|e| RenderError::NoApp(e.message))?;
+        let input = serde_json::json!({
+            "url": request.url, "timeout_ms": request.timeout_ms, "screenshot": request.screenshot.then_some(true), "selector": request.selector,
+        });
+        let fetched = tokio::select! {
+            biased;
+            () = cx.cancel.cancelled() => return Err(RenderError::Failed("cancelled".into())),
+            fetched = tools.fetch(&input) => fetched,
+        };
+        fetched.map(rendered).map_err(render_error)
+    }
+}
+
+fn rendered(r: silo_tools::BrowserFetchResult) -> Rendered {
+    let screenshot = r.screenshot.map(|s| (s.mime, s.data_base64));
+    Rendered { url: r.url, title: r.title, status: r.status, html: r.html, timed_out: r.timed_out, screenshot }
+}
+
+fn render_error(error: anyhow::Error) -> RenderError {
+    use silo_proto::control::RpcError;
+    let message = format!("{error:#}");
+    match error.downcast_ref::<RpcError>().map(|e| e.code.as_str()) {
+        Some(RpcError::NO_APP | RpcError::METHOD_NOT_FOUND) => RenderError::NoApp(message),
+        Some(RpcError::TIMEOUT) => RenderError::Timeout(message),
+        Some(RpcError::NAVIGATION) => RenderError::Navigation(message),
+        _ => RenderError::Failed(message),
+    }
 }
 
 fn spec(d: ToolDescriptor) -> ToolSpec {
@@ -216,6 +274,27 @@ mod tests {
         assert_eq!(spec("terminal_run").source, Source::Silo);
         assert!(!spec("terminal_run").effects.read_only());
         assert!(spec("terminal_read").effects.read_only());
+    }
+
+    #[test]
+    fn fetch_errors_map_to_render_errors() {
+        use silo_proto::control::RpcError;
+        let rpc = |code: &str| anyhow::Error::new(RpcError::new(code, "m"));
+        assert!(matches!(render_error(rpc(RpcError::NO_APP)), RenderError::NoApp(_)));
+        assert!(matches!(render_error(rpc(RpcError::METHOD_NOT_FOUND)), RenderError::NoApp(_)), "an older server");
+        assert!(matches!(render_error(rpc(RpcError::TIMEOUT)), RenderError::Timeout(_)));
+        assert!(matches!(render_error(rpc(RpcError::NAVIGATION)), RenderError::Navigation(_)));
+        assert!(matches!(render_error(rpc("bad_request")), RenderError::Failed(_)));
+        assert!(matches!(render_error(anyhow::anyhow!("url must be an http or https URL")), RenderError::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn no_server_is_no_app() {
+        let home = tempfile::tempdir().unwrap();
+        let silo = connect(Config { home: home.path().into(), client_name: "otto test".into(), token: None });
+        let request = RenderRequest { url: "https://example.com".into(), ..Default::default() };
+        let error = silo.renderer.render(request, &ToolCx::new("c1", home.path())).await.unwrap_err();
+        assert!(matches!(&error, RenderError::NoApp(m) if m.contains("silo is not running")), "{error:?}");
     }
 
     #[tokio::test]

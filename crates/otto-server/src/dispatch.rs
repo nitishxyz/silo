@@ -231,6 +231,11 @@ pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcE
             Some(Value::Bool(on)) => *on,
             _ => return Err(RpcError::bad_request("native_compaction must be a boolean or null")),
         },
+        search_engine: match value.get("search_engine") {
+            None | Some(Value::Null) => Default::default(),
+            Some(Value::String(name)) => name.parse().map_err(|e: String| RpcError::bad_request(format!("search_engine: {e}")))?,
+            _ => return Err(RpcError::bad_request("search_engine must be a string or null")),
+        },
     })
 }
 async fn save_json(path: &std::path::Path, value: &Value) -> Result<(), RpcError> {

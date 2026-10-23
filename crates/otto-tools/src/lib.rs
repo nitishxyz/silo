@@ -3,6 +3,7 @@
 
 pub mod attachments;
 pub mod builtin;
+pub mod html;
 pub mod images;
 pub mod output;
 pub mod policy;

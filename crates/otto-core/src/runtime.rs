@@ -32,6 +32,8 @@ pub struct SessionDefaults {
     /// Let new sessions use the provider's native compaction when their model
     /// has it and the history is its own; otto's summarizer otherwise.
     pub native_compaction: bool,
+    /// The results page `web_search` reads (`search_engine` in config).
+    pub search_engine: otto_tools::builtin::web_search::Engine,
 }
 #[derive(Clone, Debug, Default)]
 pub struct CreateSession {
@@ -93,6 +95,8 @@ pub(crate) struct Inner {
     /// What every session's shells share: background jobs and the terminal
     /// host (silo) commands run in.
     shell: Mutex<otto_tools::builtin::shell::Host>,
+    /// Loads pages for `web_fetch` and `web_search` (silo's off-screen browser).
+    renderer: Mutex<Option<Arc<dyn otto_tools::builtin::render::Renderer>>>,
     /// Set by shutdown: no actor starts afterwards.
     closing: std::sync::atomic::AtomicBool,
     /// Name untitled sessions after their first turn (`set_auto_title`).
@@ -112,6 +116,7 @@ impl Runtime {
             extra: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
             shell: Mutex::new(otto_tools::builtin::shell::Host::default()),
+            renderer: Mutex::new(None),
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
         }));
@@ -181,9 +186,18 @@ impl Runtime {
     pub fn set_terminals(&self, terminals: Arc<dyn otto_tools::builtin::shell::Terminals>) {
         self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).terminals = Some(terminals);
     }
-    /// The built-ins for `family`, sharing this runtime's jobs and terminals.
+    /// Render pages for `web_fetch` and `web_search` in `renderer` (silo's
+    /// off-screen browser); plain HTTP otherwise.
+    pub fn set_renderer(&self, renderer: Arc<dyn otto_tools::builtin::render::Renderer>) {
+        *self.0.renderer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(renderer);
+    }
+    /// The built-ins for `family`, sharing this runtime's jobs, terminals and renderer.
     pub(crate) fn builtins(&self, family: &str) -> Vec<Arc<dyn otto_tools::Tool>> {
-        otto_tools::registry::tools_with(family, &self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        let web = otto_tools::builtin::web_fetch::Web {
+            renderer: self.0.renderer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            engine: self.defaults().search_engine,
+        };
+        otto_tools::registry::tools_with(family, &self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &web)
     }
     /// Add project-dependent tools (MCP servers). Their tools are granted by
     /// pattern (`mcp__*` by default) and listed again before every request,

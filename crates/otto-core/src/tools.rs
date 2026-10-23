@@ -36,9 +36,14 @@ pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
     all
 }
 
-/// `copy_attachment` comes with `write`: a grant fixed before it existed still reaches it.
+/// `copy_attachment` comes with `write` and `web_search` with `web_fetch`: a grant fixed before
+/// they existed still reaches them.
 fn implied(name: &str) -> Option<&'static str> {
-    (name == "copy_attachment").then_some("write")
+    match name {
+        "copy_attachment" => Some("write"),
+        "web_search" => Some("web_fetch"),
+        _ => None,
+    }
 }
 
 fn allowed(live: &Live, name: &str) -> bool {
