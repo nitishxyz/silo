@@ -13,7 +13,8 @@ use super::{
     AgentPane, AgentPaneEvent, Card, Conn, ENTER, FOLD, Overlay,
     editor::{Editor, EditorColors},
     markdown::{Block, Inline},
-    pill_input, reveal, rows,
+    pill_input, reveal, ring,
+    rows::{self, menu},
     transcript::{self, Detail, Group, Line, Row, Status, TodoStatus},
 };
 use crate::{
@@ -2134,8 +2135,7 @@ impl AgentPane {
             .max_w(relative(1.0))
             .max_h(px(40.0 + 520.0 * t))
             .overflow_hidden()
-            .p(px(6.0))
-            .continuous(12.0)
+            .map(|el| if below { el.p(px(6.0)).continuous(12.0) } else { el.p(px(menu::PAD)).continuous(menu::RADIUS) })
             .bg(theme::overlay_fill())
             .border_1()
             .border_color(rgb(ink(0.12)))
@@ -2308,9 +2308,9 @@ impl AgentPane {
         let catalog = self.catalog.clone().unwrap_or_default();
         let choices: Vec<(String, String, String)> =
             self.model_choices(cx).into_iter().map(|m| (m.provider.as_str().to_owned(), m.id.clone(), m.name.clone())).collect();
-        let mut list = div().id("agent-models").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        let mut list = div().id("agent-models").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
         if choices.is_empty() {
-            list = list.child(rows::row("agent-models-empty", false, None, div().text_color(rgb(muted)).child("No matching models"), None, None));
+            list = list.child(menu::empty("agent-models-empty", "No matching models"));
         }
         let mut group: Option<String> = None;
         for (i, (provider, id, name)) in choices.into_iter().enumerate() {
@@ -2320,12 +2320,12 @@ impl AgentPane {
                     Some(_) => format!("{} · subscription", provider_name(&provider)),
                     None => provider_name(&provider),
                 };
-                list = list.child(rows::section(label, provider_logo(&provider).map(|logo| icon(logo, 13.0, muted).into_any_element())));
+                list = list.child(menu::section(label, provider_logo(&provider).map(|logo| icon(logo, 12.0, muted).into_any_element())));
                 group = Some(provider.clone());
             }
             let checked = current.as_ref().is_some_and(|(p, m)| *p == provider && *m == id);
-            let subtitle = (!name.is_empty() && name != id).then(|| div().child(name).into_any_element());
-            let row = rows::row(
+            let subtitle = (!name.is_empty() && name != id).then(|| name.into());
+            let row = menu::row(
                 gpui::ElementId::Name(format!("model-{provider}-{id}").into()),
                 i == self.selected,
                 None,
@@ -2338,25 +2338,11 @@ impl AgentPane {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
-        let usage = self.usage();
+        let focused = self.filter.read(cx).focus.is_focused(window);
         div()
             .flex()
             .flex_col()
-            .when_some(usage, |el, u| {
-                el.child(
-                    div()
-                        .h(px(26.0))
-                        .px(px(rows::PAD))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .font_family(mono())
-                        .text_size(px(11.5))
-                        .text_color(rgb(muted))
-                        .child(u),
-                )
-            })
-            .child(self.search_field(window, cx))
+            .child(menu::search(focused, self.filter.clone()))
             .child(list)
             .when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step")))
             .into_any_element()
@@ -2364,14 +2350,14 @@ impl AgentPane {
 
     fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.agent_name();
-        let mut list = div().id("agent-agents").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        let mut list = div().id("agent-agents").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
         for (i, (name, description)) in self.agent_choices().into_iter().enumerate() {
             let checked = name == current;
-            let subtitle = (!description.is_empty()).then(|| div().child(transcript::clip(&description, 80)).into_any_element());
-            let row = rows::row(
+            let subtitle = (!description.is_empty()).then(|| transcript::clip(&description, 120).into());
+            let row = menu::row(
                 gpui::ElementId::Name(format!("agent-{name}").into()),
                 i == self.selected,
-                Some(rows::lead("bot", checked)),
+                Some(menu::lead("bot", checked)),
                 div().font_family(mono()).text_size(px(12.5)).child(name.to_uppercase()),
                 subtitle,
                 checked.then(rows::check),
@@ -2394,12 +2380,12 @@ impl AgentPane {
         let mut list = div().id("agent-efforts").flex().flex_col();
         for (i, effort) in super::EFFORTS.into_iter().enumerate() {
             let checked = effort == current;
-            let row = rows::row(
+            let row = menu::row(
                 ("agent-effort", i),
                 i == self.selected,
-                Some(rows::lead("brain", checked)),
+                Some(menu::lead("brain", checked)),
                 effort_label(effort),
-                Some(div().child(effort_about(effort)).into_any_element()),
+                Some(effort_about(effort).into()),
                 checked.then(rows::check),
             );
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -2411,24 +2397,24 @@ impl AgentPane {
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode);
-        let mut list = div().id("agent-menu-list").flex().flex_col().child(rows::section("Approvals", None));
+        let mut list = div().id("agent-menu-list").flex().flex_col().child(menu::section("Approvals", None));
         for (i, (label, glyph, hint)) in
             [("Auto", "lock-off", "Run tools without asking"), ("Ask", "lock", "Ask before changes")].into_iter().enumerate()
         {
             let checked = mode_label(mode) == label;
-            let row = rows::row(
+            let row = menu::row(
                 ("agent-mode", i),
                 i == self.selected,
-                Some(rows::lead(glyph, checked)),
+                Some(menu::lead(glyph, checked)),
                 label,
-                Some(div().child(hint).into_any_element()),
+                Some(hint.into()),
                 checked.then(rows::check),
             );
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
             })));
         }
-        list = list.child(rows::divider());
+        list = list.child(menu::divider());
         for (i, (id, glyph, label, note)) in [
             ("agent-menu-new", "new-session", "New session", "/new"),
             ("agent-menu-sessions", "history", "Sessions", "⌘J"),
@@ -2438,7 +2424,7 @@ impl AgentPane {
         .enumerate()
         {
             let i = i + 2;
-            let row = rows::row(id, i == self.selected, Some(rows::lead(glyph, false)), label, None, Some(rows::note(note)));
+            let row = menu::row(id, i == self.selected, Some(menu::lead(glyph, false)), label, None, Some(rows::note(note)));
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
             })));
@@ -2450,19 +2436,18 @@ impl AgentPane {
         let choices = self.slash_choices(cx);
         let mode = mode_label(self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode));
         if choices.is_empty() {
-            return rows::row("agent-slash-empty", false, None, div().text_color(rgb(theme::muted())).child("No matching command"), None, None)
-                .into_any_element();
+            return menu::empty("agent-slash-empty", "No matching command").into_any_element();
         }
-        let mut list = div().id("agent-slash").flex().flex_col().max_h(px(rows::ROW_H * 6.0)).overflow_y_scroll();
+        let mut list = div().id("agent-slash").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
         for (i, c) in choices.into_iter().enumerate() {
             let act = c.act;
             let current = matches!(act, super::SlashAct::Mode(m) if mode_label(m) == mode);
-            let row = rows::row(
+            let row = menu::row(
                 ("agent-slash", i),
                 i == self.selected,
-                Some(rows::lead(c.icon, i == self.selected || current)),
+                Some(menu::lead(c.icon, i == self.selected || current)),
                 div().font_family(mono()).text_size(px(12.5)).child(format!("/{}", c.name)),
-                Some(div().child(c.about).into_any_element()),
+                Some(c.about.into()),
                 current.then(rows::check),
             );
             list = list.child(
@@ -2477,25 +2462,21 @@ impl AgentPane {
     fn render_mention(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let choices = self.mention_choices();
         if choices.is_empty() {
-            return rows::row("agent-mention-empty", false, None, div().text_color(rgb(theme::muted())).child("No matches"), None, None)
-                .into_any_element();
+            return menu::empty("agent-mention-empty", "No matches").into_any_element();
         }
-        let mut list =
-            div().id("agent-mention").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll().track_scroll(&self.mention.scroll);
+        let mut list = div().id("agent-mention").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll().track_scroll(&self.mention.scroll);
         for (i, choice) in choices.into_iter().enumerate() {
             let selected = i == self.selected;
             let (glyph, title, about) = match choice {
                 super::mention::Choice::Agent { name, about } => ("bot", name, (!about.is_empty()).then_some(about)),
                 super::mention::Choice::File { path, dir } => (if dir { "folder" } else { "file-text" }, path, None),
                 super::mention::Choice::Loading => {
-                    let quiet = div().text_size(px(12.0)).text_color(rgb(theme::muted())).child("Finding files…");
-                    list = list.child(rows::row(("agent-mention-loading", i), false, None, quiet, None, None));
+                    list = list.child(menu::empty(("agent-mention-loading", i), "Finding files…"));
                     continue;
                 }
             };
-            let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono()).text_size(px(12.5)).child(title);
-            let about = about.map(|a| div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(a).into_any_element());
-            let row = rows::row(("agent-mention", i), selected, Some(rows::lead(glyph, selected)), title, about, None);
+            let title = div().font_family(mono()).text_size(px(12.5)).child(title);
+            let row = menu::row(("agent-mention", i), selected, Some(menu::lead(glyph, selected)), title, about.map(Into::into), None);
             list = list.child(
                 self.pick_row(row, i, selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),

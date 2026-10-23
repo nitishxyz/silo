@@ -1007,17 +1007,10 @@ impl AgentPane {
                 .when_some(fade, |el, t| el.opacity(t))
         } else {
             let p2 = provider.clone();
+            // Sign in left of API key: API key keeps the right column down the list.
             div()
                 .flex()
                 .gap(px(6.0))
-                .when(status.modes.contains(&AuthMode::ApiKey), |el| {
-                    el.child(self.button(format!("signin-key-{i}"), Kind::Outline, "API key", ROW_BUTTON, state(Act::Key), cx, move |this, _, cx| {
-                        this.signin.error = None;
-                        this.signin.confirm = None;
-                        this.key_field.update(cx, |e, cx| e.clear(cx));
-                        this.open_dialog(p.clone(), Step::ApiKey, cx);
-                    }))
-                })
                 .when(status.modes.contains(&AuthMode::Subscription), |el| {
                     el.child(self.button(
                         format!("signin-sub-{i}"),
