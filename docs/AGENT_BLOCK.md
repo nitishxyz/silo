@@ -154,6 +154,11 @@ Units are points.
   `history`, `more-vertical`, `arrow-up`, `stop`, `brain`, `image`, `list-todo`, `circle`, `circle-dot`,
   `circle-check`, `x-circle`, `file-text`, `search`, `folder`, `pencil`, `arrow-up-right`, `copy`, `rotate-ccw`,
   `bot`, `provider-anthropic`, `provider-openai`.
+- **Working in the icon slot:** while an agent block (or a sub-agent's) reports working, its header icon and, when
+  it is the tab's focused block, the tab icon are the spinner (same 12 size, swapped in place like a loading
+  browser's) and the trailing working spinner is dropped; a reported percent still shows as text. Needs you, done
+  and error keep their trailing marks, with the sparkles back. A tab whose working block isn't its focused one keeps
+  the trailing spinner (`block_status::spins`, `tab_mark`).
 - **Column:** transcript and composer share one centered column, max 760 wide, 20 side padding. Vertical rhythm:
   20 between a user message and what follows, 12 between a group and text, trace lines 24 tall (13 text), prose
   13.5/1.55, code 12.5 mono.

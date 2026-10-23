@@ -152,10 +152,13 @@ impl Workspace {
         }
     }
 
-    /// Block `id`'s icon slot at `size`: the spinner while its page loads,
-    /// its favicon, else its glyph. `slot` keeps spinners apart.
+    /// Block `id`'s icon slot at `size`: the spinner while its page loads or
+    /// its agent works, its favicon, else its glyph. `slot` keeps spinners apart.
     pub(crate) fn block_icon_view(&self, id: &str, slot: &str, size: f32, color: u32, cx: &gpui::App) -> AnyElement {
         use crate::browser_pane::Icon;
+        if self.icon_spins(id) {
+            return crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx);
+        }
         let pane = self.browsers.get(id).map(|(p, _)| p.read(cx));
         match pane.map_or(Icon::Glyph(self.block_icon(id)), crate::browser_pane::BrowserPane::icon) {
             Icon::Spinner => crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx),
