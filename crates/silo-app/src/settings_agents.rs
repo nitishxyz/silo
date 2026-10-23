@@ -1566,7 +1566,7 @@ impl AgentsSettings {
             .text_size(px(11.5))
             .cursor_pointer()
             .hover(|s| s.bg(theme::row_fill()))
-            .when(!tip.is_empty(), |el| el.tooltip(Tooltip::text(tip)))
+            .when(!tip.is_empty() && !menu_open, |el| el.tooltip(Tooltip::text(tip)))
             .child(icon(glyph, 11.0, theme::muted()))
             .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label))
             .when_some(group.clone(), |el, (_, count)| {
