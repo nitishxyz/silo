@@ -40,12 +40,15 @@ sink for the CLI's tracing subscriber. It does not install a global subscriber.
 The auth implementation filters model results by signed-in auth mode and owns
 credential storage and login state. Credentials are never written to daemon
 config or tracing events. `auth.login` accepts `device: bool` (defaults to false),
-valid only for subscription mode. `LoginResult::Pending` retains `url` and `login_id`
+valid only for subscription mode, and `paste: bool` (defaults to false; subscription mode, not with
+`device`), which starts the provider's paste redirect: `Pending` with `needs_code`. `LoginResult::Pending` retains `url` and `login_id`
 and adds optional `user_code: String`, `verification_uri: String`, and
 `interval_secs: u64`. Missing values deserialize as None and None values are omitted.
 `needs_code: bool` (omitted when false) says the provider shows a code to paste into
 `auth.login_complete`; otherwise `login_complete` without a code waits for the browser
-redirect or device approval. `AuthStatus.modes` lists the sign-in modes a provider
+redirect or device approval. `accepts_code: bool` (omitted when false) says a browser
+login also completes with the pasted callback URL or code, for when its loopback
+callback can't be reached. `AuthStatus.modes` lists the sign-in modes a provider
 supports (also when signed out); `AuthStatus.default_model` is set on the provider new
 sessions default to.
 The CLI implementation must pass the device flag to its provider login flow and

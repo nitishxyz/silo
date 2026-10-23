@@ -1,5 +1,7 @@
 //! Bundled models.dev metadata, locally cached refreshes, and auth policy.
 
+pub mod remote;
+
 use crate::{Caps, Effort, ModelInfo, Pricing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,6 +97,9 @@ fn api_default() -> Vec<String> {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Overlay {
+    /// Set for a provider models.dev does not list: its models are `manual` only.
+    #[serde(default)]
+    name: Option<String>,
     auth: AuthPolicy,
     #[serde(default)]
     subscription_overrides: BTreeMap<String, Value>,
@@ -174,6 +179,10 @@ impl Catalog {
         for (id, overlay) in &catalog.overlay {
             if let Some(provider) = catalog.providers.get_mut(id) {
                 provider.models.extend(overlay.manual.clone());
+            } else if let Some(name) = &overlay.name {
+                let models = overlay.manual.clone();
+                let provider = ModelsDevProvider { id: id.clone(), name: name.clone(), env: vec![], doc: None, models, extra: BTreeMap::new() };
+                catalog.providers.insert(id.clone(), provider);
             }
         }
         catalog
@@ -277,6 +286,9 @@ impl Catalog {
         if provider == "openai" {
             openai_caps(&mut caps, id, mode);
         }
+        if provider == "antigravity" && id.starts_with("gemini-") {
+            caps.tool_family = crate::ToolFamily::Gemini;
+        }
         if let Some(field) = raw["interleaved"]["field"].as_str() {
             // models.dev names the field reasoning must be replayed in.
             caps.reasoning_replay |= caps.reasoning && field == "reasoning_content";
@@ -365,6 +377,7 @@ pub fn base_caps(provider: &str) -> Caps {
         "openai" => crate::openai::base_caps(),
         "xai" => crate::openai::xai_caps(),
         "google" => crate::google::base_caps(),
+        "antigravity" => Caps { reasoning_replay: true, parallel_tools: true, ..Caps::default() },
         id => crate::compat::dialect(id).map(crate::compat::base_caps).unwrap_or_default(),
     }
 }

@@ -6,7 +6,8 @@ fn device_fields_are_additive() {
     let request: Request =
         serde_json::from_value(json!({"id":1,"method":"auth.login","params":{"provider":"openai","mode":"subscription"}})).unwrap();
     assert!(matches!(request.method, Method::AuthLogin { device: false, .. }));
-    let method = Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None };
+    let method =
+        Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None, paste: false };
     assert_eq!(serde_json::to_value(method).unwrap()["params"]["device"], true);
     let old: LoginResult = serde_json::from_value(json!({"status":"pending","url":"https://example.test","login_id":"l"})).unwrap();
     assert!(matches!(
@@ -21,6 +22,7 @@ fn device_fields_are_additive() {
         interval_secs: Some(5),
         needs_code: false,
         callback: None,
+        accepts_code: false,
     };
     let wire = serde_json::to_value(device).unwrap();
     assert_eq!(wire["user_code"], "ABCD");

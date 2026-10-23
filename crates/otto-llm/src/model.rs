@@ -24,6 +24,11 @@ pub trait Model: Send + Sync {
     fn session(&self) -> Option<&dyn ModelSession> {
         None
     }
+    /// Plan usage the provider reports out of band (a polled endpoint), asked after each
+    /// response; `None` when there is nothing new (throttled, failed, or no such endpoint).
+    async fn plan_usage(&self) -> Option<crate::PlanUsage> {
+        None
+    }
 }
 
 /// Provider-side session state (O3); a cache, never the truth (§7.3).

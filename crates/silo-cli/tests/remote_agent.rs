@@ -275,6 +275,7 @@ async fn signed_in_session(otto: &Connection, tree: &Tree, model: &Model) -> Str
             api_key: Some(KEY.into()),
             device: false,
             base_url: Some(format!("http://127.0.0.1:{}/v1", model.port)),
+            paste: false,
         })
         .await
         .unwrap();

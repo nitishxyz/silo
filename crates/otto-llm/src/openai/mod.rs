@@ -9,6 +9,8 @@ pub mod stream;
 pub mod subscription;
 #[cfg(feature = "client")]
 pub mod ws;
+#[cfg(feature = "client")]
+pub mod xai;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Options {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,6 +80,7 @@ mod client {
         auth::{AuthMode, Credential, CredentialSource},
         http::{HttpClient, RetryPolicy, byte_stream_with_idle_timeout, send_with_retry},
     };
+    use reqwest::header::HeaderMap;
     use std::{sync::Arc, time::Duration};
     #[derive(Clone)]
     pub struct OpenAiConfig {
@@ -95,23 +98,34 @@ mod client {
     pub struct OpenAiModel {
         config: OpenAiConfig,
         ws: Arc<ws::Shared>,
+        /// Sent on every HTTP request (xAI's Grok CLI fingerprint).
+        headers: HeaderMap,
     }
     impl OpenAiModel {
         #[must_use]
         pub fn new(config: OpenAiConfig) -> Self {
-            Self { config, ws: Arc::default() }
+            Self { config, ws: Arc::default(), headers: HeaderMap::new() }
+        }
+        #[must_use]
+        pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+            self.headers = headers;
+            self
+        }
+        /// Signed in with a ChatGPT account: the Codex endpoint, its headers and body shape.
+        fn chatgpt(&self) -> bool {
+            self.config.mode == AuthMode::Subscription && self.provider() == "openai"
         }
         /// Steerable models (steering exists only over WebSocket) and the
         /// ChatGPT/Codex endpoint (as the Codex CLI does) use WebSocket mode.
         fn websocket(&self) -> bool {
-            self.config.model.caps.steering || (self.config.mode == AuthMode::Subscription && self.provider() == "openai")
+            self.config.model.caps.steering || self.chatgpt()
         }
         fn provider(&self) -> &str {
             self.config.model.provider.as_str()
         }
         fn url(&self) -> String {
             let base = &self.config.base_url;
-            if self.config.mode == AuthMode::Subscription && (base.is_empty() || base.starts_with("https://api.openai.com")) {
+            if self.chatgpt() && (base.is_empty() || base.starts_with("https://api.openai.com")) {
                 subscription::RESPONSES_URL.into()
             } else {
                 endpoint(base)
@@ -121,7 +135,7 @@ mod client {
             let invalid = |_| LlmError::new(crate::ErrorClass::Auth, "invalid header value");
             let url = self.url();
             let url = url.strip_prefix("https://").map_or_else(|| url.replacen("http://", "ws://", 1), |rest| format!("wss://{rest}"));
-            if self.config.mode == AuthMode::Subscription {
+            if self.chatgpt() {
                 let mut headers = subscription::headers(credential, session)?;
                 headers.insert("openai-beta", reqwest::header::HeaderValue::from_static(subscription::WEBSOCKET_BETA));
                 return Ok(ws::Dial { url, headers: headers.into_iter().filter_map(|(name, value)| Some((name?, value))).collect() });
@@ -157,11 +171,11 @@ mod client {
                     result => (result?, false, dial),
                 }
             };
-            let (provider, subscription) = (self.provider().to_owned(), self.config.mode == AuthMode::Subscription);
+            let (provider, chatgpt) = (self.provider().to_owned(), self.chatgpt());
             let replay = Box::new(move |parts: &[Part]| {
                 let item = crate::Item::new("", crate::Role::Assistant, parts.to_vec());
                 let mut body = serde_json::json!({"store": false, "input": convert::input(&[item], &provider)});
-                if subscription {
+                if chatgpt {
                     subscription::shape(&mut body, None);
                 } else {
                     convert::stateless_reasoning(&mut body);
@@ -196,11 +210,7 @@ mod client {
         }
         async fn send_to(&self, url: &str, body: &serde_json::Value, credential: &Credential, cx: &CallCx) -> Result<reqwest::Response, LlmError> {
             let config = &self.config;
-            let headers = if config.mode == AuthMode::Subscription {
-                subscription::headers(credential, cx.session.as_deref())?
-            } else {
-                reqwest::header::HeaderMap::new()
-            };
+            let headers = if self.chatgpt() { subscription::headers(credential, cx.session.as_deref())? } else { self.headers.clone() };
             let token = match credential {
                 Credential::ApiKey { key } => key,
                 Credential::OAuth { access, .. } => access,
@@ -241,8 +251,10 @@ mod client {
             }
             let mut body = convert::request_for(&req, self.provider());
             let subscription = self.config.mode == AuthMode::Subscription;
-            if subscription {
+            if self.chatgpt() {
                 subscription::shape(&mut body, cx.session.as_deref());
+            } else if subscription && self.provider() == "xai" {
+                super::xai::shape(&mut body, cx.session.as_deref());
             }
             // `/responses/compact` has no custom summarization prompt; `instructions` stays the system prompt.
             if matches!(req.compaction, Some(crate::Compaction::Now { .. })) {
@@ -270,6 +282,13 @@ mod client {
         }
         fn session(&self) -> Option<&dyn ModelSession> {
             self.config.model.caps.steering.then_some(self as &dyn ModelSession)
+        }
+        /// A Grok Build sign-in's credits (polled); ChatGPT's come in response headers.
+        async fn plan_usage(&self) -> Option<crate::PlanUsage> {
+            if self.config.mode != AuthMode::Subscription || self.provider() != "xai" {
+                return None;
+            }
+            super::xai::plan_usage(&self.config.auth, &self.config.http).await
         }
     }
     #[async_trait::async_trait]

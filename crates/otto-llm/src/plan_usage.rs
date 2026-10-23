@@ -125,7 +125,7 @@ mod parse {
     }
 
     /// Unix seconds (milliseconds when that large) or RFC 3339.
-    fn timestamp(value: &str) -> Option<i64> {
+    pub(crate) fn timestamp(value: &str) -> Option<i64> {
         let value = value.trim();
         if let Ok(n) = value.parse::<f64>() {
             #[allow(clippy::cast_possible_truncation)]

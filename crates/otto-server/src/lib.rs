@@ -25,9 +25,17 @@ pub type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, RpcError>> + 
 /// Implementations own credential storage and filter models by the active auth mode.
 pub trait AuthService: Send + Sync {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>>;
-    /// `base_url`, when set, is stored for local/custom providers before signing in.
-    fn login(&self, provider: String, mode: AuthMode, api_key: Option<String>, device: bool, base_url: Option<String>)
-    -> AuthFuture<'_, LoginResult>;
+    /// `base_url`, when set, is stored for local/custom providers before signing in. `paste` starts
+    /// a browser sign-in whose code the user pastes (`login_complete`).
+    fn login(
+        &self,
+        provider: String,
+        mode: AuthMode,
+        api_key: Option<String>,
+        device: bool,
+        base_url: Option<String>,
+        paste: bool,
+    ) -> AuthFuture<'_, LoginResult>;
     fn login_complete(&self, login_id: String, code: Option<String>) -> AuthFuture<'_, AuthStatus>;
     /// Drops a pending login, aborting an in-flight `login_complete` for it.
     fn login_cancel(&self, login_id: String) -> AuthFuture<'_, ()>;

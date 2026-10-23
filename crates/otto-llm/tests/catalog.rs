@@ -47,7 +47,15 @@ fn snapshot_and_wrappers() {
     assert_eq!(parsed.len(), otto_llm::catalog::PROVIDERS.len());
     let catalog = Catalog::global();
     let providers = catalog.providers();
-    assert_eq!(providers.iter().filter(|p| p.implemented).count(), otto_llm::catalog::PROVIDERS.len());
+    // Plus Kimi Code and Google Antigravity, which only the overlay lists.
+    assert_eq!(providers.iter().filter(|p| p.implemented).count(), otto_llm::catalog::PROVIDERS.len() + 2);
+    for (id, default) in [("kimi-code", "kimi-k3"), ("antigravity", "gemini-3.1-pro-low")] {
+        assert!(!catalog.models(id, Some(otto_llm::catalog::AuthMode::Subscription)).is_empty());
+        assert!(catalog.models(id, Some(otto_llm::catalog::AuthMode::ApiKey)).is_empty());
+        assert_eq!(catalog.default_model(id, otto_llm::catalog::AuthMode::Subscription).as_deref(), Some(default));
+        assert_eq!(catalog.merge_remote(id, None, None).first().map(|e| e.info.id.as_str()), Some(default), "subscription_ids fall back");
+    }
+    assert_eq!(providers.iter().find(|p| p.id == "antigravity").map(|p| p.name.as_str()), Some("Google Antigravity"));
     for id in otto_llm::catalog::PROVIDERS {
         assert!(!catalog.models(id, None).is_empty());
     }
@@ -110,10 +118,10 @@ fn auth_and_subscription_limits() {
         assert!(catalog.supports("openai", id, AuthMode::Subscription));
     }
     assert!(catalog.models("google", Some(AuthMode::Subscription)).is_empty());
-    assert_eq!(catalog.models("xai", Some(AuthMode::Subscription)).len(), 3);
+    assert_eq!(catalog.models("xai", Some(AuthMode::Subscription)).len(), 4);
     assert!(catalog.supports("xai", "grok-composer-2.5-fast", AuthMode::Subscription));
     assert!(!catalog.supports("xai", "grok-composer-2.5-fast", AuthMode::ApiKey));
-    assert!(catalog.entry("xai", "grok-build", None).is_none());
+    assert!(catalog.supports("xai", "grok-build", AuthMode::Subscription) && !catalog.supports("xai", "grok-build", AuthMode::ApiKey));
     for id in ["gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"] {
         assert!(!catalog.supports("openai", id, AuthMode::Subscription));
         assert!(catalog.supports("openai", id, AuthMode::ApiKey));
@@ -196,8 +204,8 @@ fn cache_merges_per_id_and_corrupt_cache_falls_back() {
     dir.cache(feed, now());
     let catalog = Catalog::load(Some(&dir.0));
     assert!(catalog.info("openai", "gpt-4o", None).is_some());
-    assert!(catalog.entry("xai", "grok-build", None).is_none());
-    assert!(!catalog.supports("xai", "grok-build", AuthMode::Subscription));
+    assert_eq!(catalog.entry("xai", "grok-build", None).unwrap().auth, vec![AuthMode::Subscription], "the overlay's policy, not the cache's");
+    assert!(!catalog.supports("xai", "grok-build", AuthMode::ApiKey));
     assert_eq!(catalog.info("xai", "grok-composer-2.5-fast", Some(AuthMode::Subscription)).unwrap().caps.context_window, 200_000);
     std::fs::write(dir.0.join("catalog/models.json"), b"bad json").unwrap();
     let catalog = Catalog::load(Some(&dir.0));

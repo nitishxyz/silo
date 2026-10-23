@@ -1633,6 +1633,22 @@
           "data"
         ],
         "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "type": "object"
+          },
+          "event": {
+            "const": "auth.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
       }
     ],
     "title": "Event"
@@ -4332,6 +4348,10 @@
           "mode": {
             "$ref": "#/$defs/AuthMode"
           },
+          "paste": {
+            "default": false,
+            "type": "boolean"
+          },
           "provider": {
             "type": "string"
           }
@@ -4447,6 +4467,9 @@
           },
           {
             "properties": {
+              "accepts_code": {
+                "type": "boolean"
+              },
               "callback": {
                 "anyOf": [
                   {
@@ -16814,6 +16837,22 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "object"
+              },
+              "event": {
+                "const": "auth.changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -18429,6 +18468,22 @@
               },
               "event": {
                 "const": "plan.usage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "object"
+              },
+              "event": {
+                "const": "auth.changed",
                 "type": "string"
               }
             },

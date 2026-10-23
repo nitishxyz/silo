@@ -1,6 +1,7 @@
 //! Shared durable agent runtime for local and server clients.
 pub mod agents;
 mod approvals;
+mod auth_watch;
 pub mod commands;
 mod compaction;
 mod deltas;

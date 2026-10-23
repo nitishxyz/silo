@@ -143,6 +143,9 @@ impl otto_core::ModelResolver for Services {
     fn list(&self) -> Vec<ModelInfo> {
         self.models(None)
     }
+    fn refresh_models(&self) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(self.providers.refresh_remote(false))
+    }
 }
 
 impl AuthService for Services {
@@ -159,10 +162,11 @@ impl AuthService for Services {
         api_key: Option<String>,
         device: bool,
         base_url: Option<String>,
+        paste: bool,
     ) -> AuthFuture<'_, LoginResult> {
         Box::pin(async move {
-            if device && mode != AuthMode::Subscription {
-                return Err(RpcError::bad_request("device login requires subscription mode"));
+            if (device || paste) && mode != AuthMode::Subscription {
+                return Err(RpcError::bad_request("device and paste logins require subscription mode"));
             }
             // Written to <state>/providers.json, where provider resolution reads it.
             if let Some(url) = &base_url {
@@ -171,6 +175,7 @@ impl AuthService for Services {
             let mode = match mode {
                 AuthMode::ApiKey => LoginMode::ApiKey,
                 AuthMode::Subscription if device => LoginMode::Device,
+                AuthMode::Subscription if paste => LoginMode::Paste,
                 AuthMode::Subscription => LoginMode::Subscription,
             };
             let flow = self.providers.begin_login(&provider, mode).await.map_err(rpc)?;
@@ -183,6 +188,7 @@ impl AuthService for Services {
             let verification_uri = flow.verification_uri().map(str::to_owned);
             let interval_secs = flow.interval_secs();
             let needs_code = flow.needs_input();
+            let accepts_code = flow.accepts_paste();
             let callback = flow.callback().map(|(port, path)| otto_proto::LoginCallback { port, path });
             let login_id = uuid::Uuid::new_v4().to_string();
             let mut logins = self.logins.lock().await;
@@ -201,7 +207,7 @@ impl AuthService for Services {
                 return Err(RpcError::new(RpcError::BUSY, "too many pending logins"));
             }
             logins.insert(login_id.clone(), PendingLogin { provider, at: Instant::now(), flow: Some(flow), cancel: Arc::new(Notify::new()) });
-            Ok(LoginResult::Pending { url, login_id, user_code, verification_uri, interval_secs, needs_code, callback })
+            Ok(LoginResult::Pending { url, login_id, user_code, verification_uri, interval_secs, needs_code, callback, accepts_code })
         })
     }
     fn login_complete(&self, login_id: String, code: Option<String>) -> AuthFuture<'_, AuthStatus> {
@@ -266,12 +272,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
         let url = "http://127.0.0.1:9";
-        services.login("custom".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into())).await.unwrap();
+        services.login("custom".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into()), false).await.unwrap();
         assert!(std::fs::read_to_string(dir.path().join("providers.json")).unwrap().contains(url));
         assert!(services.statuses().unwrap().iter().any(|s| s.provider == "custom" && s.base_url.as_deref() == Some(url)));
-        assert!(services.login("openai".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into())).await.is_err());
+        assert!(services.login("openai".into(), AuthMode::ApiKey, Some("k".into()), false, Some(url.into()), false).await.is_err());
         // A local server needs no key; with none answering it stays signed out.
-        let LoginResult::SignedIn { auth } = services.login("ollama".into(), AuthMode::ApiKey, None, false, Some(url.into())).await.unwrap() else {
+        let LoginResult::SignedIn { auth } = services.login("ollama".into(), AuthMode::ApiKey, None, false, Some(url.into()), false).await.unwrap()
+        else {
             panic!("expected a saved endpoint");
         };
         assert!(!auth.signed_in && auth.base_url.is_some());
@@ -280,10 +287,10 @@ mod tests {
     async fn auth_adapter_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
-        assert!(services.login("openai".into(), AuthMode::ApiKey, None, true, None).await.is_err());
-        assert!(services.login("anthropic".into(), AuthMode::Subscription, None, true, None).await.is_err());
+        assert!(services.login("openai".into(), AuthMode::ApiKey, None, true, None, false).await.is_err());
+        assert!(services.login("anthropic".into(), AuthMode::Subscription, None, true, None, false).await.is_err());
         assert!(matches!(
-            services.login("openai".into(), AuthMode::ApiKey, Some("test-key".into()), false, None).await.unwrap(),
+            services.login("openai".into(), AuthMode::ApiKey, Some("test-key".into()), false, None, false).await.unwrap(),
             LoginResult::SignedIn { .. }
         ));
         assert!(
@@ -291,14 +298,32 @@ mod tests {
         );
         assert!(!services.list_models(Some("openai".into())).await.unwrap().is_empty());
         services.logout("openai".into()).await.unwrap();
-        let login = services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap();
-        let LoginResult::Pending { login_id, url, user_code, verification_uri, interval_secs, needs_code, callback } = login else {
+        let login = services.login("anthropic".into(), AuthMode::Subscription, None, false, None, false).await.unwrap();
+        let LoginResult::Pending { login_id, url, user_code, verification_uri, interval_secs, needs_code, callback, accepts_code } = login else {
             panic!("expected OAuth flow");
         };
-        assert!(url.starts_with("https://claude.ai/") && needs_code && callback.is_none());
+        assert!(url.starts_with("https://claude.ai/") && needs_code && accepts_code && callback.is_none());
         assert!(user_code.is_none() && verification_uri.is_none() && interval_secs.is_none());
         assert!(services.login_complete(login_id.clone(), Some("code#wrong-state".into())).await.is_err());
         assert!(services.login_complete(login_id, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_paste_login_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
+        assert!(services.login("antigravity".into(), AuthMode::ApiKey, None, false, None, true).await.is_err());
+        assert!(services.login("kimi-code".into(), AuthMode::Subscription, None, false, None, true).await.is_err(), "no paste redirect");
+        let login = services.login("antigravity".into(), AuthMode::Subscription, None, false, None, true).await.unwrap();
+        let LoginResult::Pending { login_id, url, needs_code, accepts_code, callback, user_code, .. } = login else {
+            panic!("expected a paste login")
+        };
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback") && needs_code && accepts_code);
+        assert!(callback.is_none() && user_code.is_none());
+        // A callback URL whose state is not this login's is refused before any exchange.
+        let pasted = "https://antigravity.google/oauth-callback?code=c&state=other";
+        assert!(services.login_complete(login_id.clone(), Some(pasted.into())).await.is_err());
+        assert!(services.login_complete(login_id, Some("c".into())).await.is_err(), "the login is spent");
     }
 
     #[test]
@@ -313,13 +338,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let services = Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap();
         let statuses = services.status().await.unwrap();
-        for provider in ["anthropic", "openai"] {
+        for provider in ["anthropic", "openai", "xai"] {
             let status = statuses.iter().find(|s| s.provider == provider).unwrap();
             assert!(!status.signed_in);
             assert_eq!(status.modes, vec![AuthMode::ApiKey, AuthMode::Subscription], "{provider}");
         }
+        for provider in ["kimi-code", "antigravity"] {
+            assert_eq!(
+                statuses.iter().find(|s| s.provider == provider).unwrap().modes,
+                vec![AuthMode::Subscription],
+                "{provider}: subscription only"
+            );
+        }
         // Every other provider signs in with an API key (optional for local servers).
-        for provider in ["google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"] {
+        for provider in ["google", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"] {
             let status = statuses.iter().find(|s| s.provider == provider).unwrap_or_else(|| panic!("{provider} listed"));
             assert_eq!(status.modes, vec![AuthMode::ApiKey], "{provider}");
         }
@@ -329,7 +361,8 @@ mod tests {
     async fn cancel_and_supersede_drop_pending_logins() {
         let dir = tempfile::tempdir().unwrap();
         let services = Arc::new(Services::new(Providers::new(dir.path().join("auth"), dir.path().into()).unwrap()).unwrap());
-        let LoginResult::Pending { login_id, .. } = services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
+        let LoginResult::Pending { login_id, .. } =
+            services.login("anthropic".into(), AuthMode::Subscription, None, false, None, false).await.unwrap()
         else {
             panic!("expected OAuth flow");
         };
@@ -337,12 +370,12 @@ mod tests {
         assert!(services.login_complete(login_id, Some("x#y".into())).await.is_err());
         // A second login for the same provider supersedes the first.
         let LoginResult::Pending { login_id: first, .. } =
-            services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
+            services.login("anthropic".into(), AuthMode::Subscription, None, false, None, false).await.unwrap()
         else {
             panic!("expected OAuth flow");
         };
         let LoginResult::Pending { login_id: second, .. } =
-            services.login("anthropic".into(), AuthMode::Subscription, None, false, None).await.unwrap()
+            services.login("anthropic".into(), AuthMode::Subscription, None, false, None, false).await.unwrap()
         else {
             panic!("expected OAuth flow");
         };

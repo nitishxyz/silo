@@ -3,6 +3,7 @@
 //! replay, usage options, tool streaming). MiniMax speaks the Anthropic
 //! dialect and runs on the Messages client.
 pub mod convert;
+pub mod kimi;
 #[cfg(feature = "client")]
 pub mod stream;
 
@@ -115,6 +116,8 @@ pub const DIALECTS: &[Dialect] = &[
         cache: true,
         discovery: None,
     },
+    // Served by `kimi::KimiCodeModel` (its own headers and shaping), not `CompatModel`.
+    kimi::DIALECT,
     Dialect {
         id: "zai",
         name: "Z.ai (GLM)",

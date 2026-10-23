@@ -14,6 +14,8 @@ use std::{
 struct Scripted {
     info: ModelInfo,
     scripts: Mutex<VecDeque<Vec<StreamEvent>>>,
+    /// What `plan_usage` answers after each response (a polled usage endpoint).
+    polled: Mutex<VecDeque<PlanUsage>>,
 }
 #[async_trait::async_trait]
 impl Model for Scripted {
@@ -23,6 +25,9 @@ impl Model for Scripted {
     async fn stream(&self, _: Request, _: CallCx) -> std::result::Result<EventStream, LlmError> {
         let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
         Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+    }
+    async fn plan_usage(&self) -> Option<PlanUsage> {
+        self.polled.lock().unwrap().pop_front()
     }
 }
 struct Resolver(Arc<Scripted>);
@@ -38,9 +43,13 @@ impl ModelResolver for Resolver {
     }
 }
 fn config(dir: &Path, scripts: Vec<Vec<StreamEvent>>) -> RuntimeConfig {
+    polled_config(dir, scripts, vec![])
+}
+fn polled_config(dir: &Path, scripts: Vec<Vec<StreamEvent>>, polled: Vec<PlanUsage>) -> RuntimeConfig {
     let model = Arc::new(Scripted {
         info: ModelInfo { id: "test".into(), provider: "anthropic".into(), name: "test".into(), caps: Caps::default(), pricing: None },
         scripts: Mutex::new(scripts.into()),
+        polled: Mutex::new(polled.into()),
     });
     RuntimeConfig {
         store: Arc::new(Mutex::new(Store::open(dir.join("db")).unwrap())),
@@ -116,5 +125,39 @@ async fn plan_usage_is_kept_per_provider_announced_and_survives_a_restart() {
     let runtime = Runtime::new(config(dir.path(), vec![])).await.unwrap();
     assert_eq!(runtime.plan_usage(Some("anthropic"))[0].usage, merged);
     assert_eq!(runtime.view(&session.id).await.unwrap().info.plan, Some(merged));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn polled_plan_usage_is_recorded_after_a_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let polled = PlanUsage { windows: vec![window("5h", 0.4)] };
+    let done = vec![StreamEvent::PartDone { part: Part::text("ok") }, StreamEvent::Finish { reason: FinishReason::Stop, response_id: None }];
+    let runtime = Runtime::new(polled_config(dir.path(), vec![done], vec![polled.clone()])).await.unwrap();
+    let mut global = runtime.events();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let session = runtime
+        .create_session(CreateSession {
+            project_id: project.id.clone(),
+            cwd: dir.path().into(),
+            provider: Some("anthropic".into()),
+            model: Some("test".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session.prompt(vec![InputPart::Text { text: "one".into() }], Delivery::Queue).await.unwrap();
+    // The poll runs beside the turn; its report goes out like a response's.
+    let announced = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Event::PlanUsage { provider, usage } = global.recv().await.unwrap() {
+                return (provider, usage);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(announced, ("anthropic".to_owned(), polled.clone()));
+    assert_eq!(runtime.plan_usage(Some("anthropic"))[0].usage, polled);
     runtime.shutdown().await.unwrap();
 }

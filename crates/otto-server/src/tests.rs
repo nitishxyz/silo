@@ -50,7 +50,7 @@ impl AuthService for NoAuth {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>> {
         Box::pin(async { Ok(vec![]) })
     }
-    fn login(&self, provider: String, mode: AuthMode, _: Option<String>, device: bool, _: Option<String>) -> AuthFuture<'_, LoginResult> {
+    fn login(&self, provider: String, mode: AuthMode, _: Option<String>, device: bool, _: Option<String>, _: bool) -> AuthFuture<'_, LoginResult> {
         Box::pin(async move {
             if provider == "openai" && mode == AuthMode::Subscription && !device {
                 return Ok(LoginResult::Pending {
@@ -61,6 +61,7 @@ impl AuthService for NoAuth {
                     interval_secs: None,
                     needs_code: false,
                     callback: Some(LoginCallback { port: 1455, path: "/auth/callback".into() }),
+                    accepts_code: true,
                 });
             }
             if !device {
@@ -74,6 +75,7 @@ impl AuthService for NoAuth {
                 interval_secs: Some(5),
                 needs_code: false,
                 callback: None,
+                accepts_code: false,
             })
         })
     }
@@ -230,7 +232,8 @@ async fn pending_login_reports_its_callback() {
     let f = Fixture::new(vec![]).await;
     let server = Server::start(f.config()).await.unwrap();
     let client = f.connect().await;
-    let login = |device| Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device, base_url: None };
+    let login =
+        |device| Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device, base_url: None, paste: false };
     let browser: LoginResult = client.call_typed(login(false)).await.unwrap();
     assert!(matches!(browser, LoginResult::Pending { callback: Some(LoginCallback { port: 1455, ref path }), .. } if path == "/auth/callback"));
     let device = client.call(login(true)).await.unwrap();

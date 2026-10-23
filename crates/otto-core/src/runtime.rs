@@ -14,7 +14,13 @@ pub trait ModelResolver: Send + Sync {
     fn resolve(&self, provider: &str, model: &str) -> Result<Arc<dyn Model>>;
     fn default_model(&self) -> Option<(String, String)>;
     fn list(&self) -> Vec<ModelInfo>;
+    /// Refresh the model lists signed-in providers report, where due; true when one changed.
+    fn refresh_models(&self) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
 }
+/// How often [`ModelResolver::refresh_models`] is asked whether a list is due.
+pub const MODEL_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 pub struct RuntimeConfig {
     pub store: Arc<Mutex<Store>>,
     pub models: Arc<dyn ModelResolver>,
@@ -140,7 +146,37 @@ impl Runtime {
                 Ok(())
             })
             .await?;
+        runtime.spawn_model_refresh();
         Ok(runtime)
+    }
+    /// Hourly (first right away), refresh due model lists and announce a change (`auth.changed`,
+    /// which makes clients reread their model pickers). Ends with the runtime.
+    fn spawn_model_refresh(&self) {
+        let inner = Arc::downgrade(&self.0);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(MODEL_REFRESH_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(runtime) = inner.upgrade().map(Runtime) else { return };
+                if runtime.0.closing.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let models = runtime.0.config.models.clone();
+                drop(runtime);
+                if models.refresh_models().await
+                    && let Some(runtime) = inner.upgrade().map(Runtime)
+                {
+                    runtime.broadcast_global(Event::AuthChanged {});
+                }
+            }
+        });
+    }
+    fn broadcast_global(&self, event: Event) {
+        let mut index = self.0.index.lock().expect("index mutex");
+        index.0 += 1;
+        let _ = index.1.send((index.0, event.clone()));
+        let _ = self.0.global.send(event);
     }
     pub(crate) async fn db<T: Send + 'static>(&self, f: impl FnOnce(&mut Store) -> Result<T> + Send + 'static) -> Result<T> {
         let store = self.0.config.store.clone();
@@ -485,11 +521,7 @@ impl Runtime {
         if let Err(error) = saved {
             tracing::warn!(%error, "saving plan usage");
         }
-        let event = Event::PlanUsage { provider: provider.to_owned(), usage: merged };
-        let mut index = self.0.index.lock().expect("index mutex");
-        index.0 += 1;
-        let _ = index.1.send((index.0, event.clone()));
-        let _ = self.0.global.send(event);
+        self.broadcast_global(Event::PlanUsage { provider: provider.to_owned(), usage: merged });
     }
     /// Subscribe first, read the journal second, then discard overlapping live sequences.
     pub async fn subscribe(&self, id: &str, after_seq: i64) -> Result<(Vec<SequencedEvent>, LiveEvents)> {

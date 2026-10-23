@@ -11,9 +11,9 @@ cross-machine conflicts (§12).
 | O1 loop + tools | Turn engine (one actor per session), approvals (default `auto`, per-session modes), `Policy::prepare` path binding, tool journal + crash recovery, compaction, subagents, agents/skills/hooks/commands, built-in tools | `otto-core`, `otto-tools`, `otto-store` |
 | O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
 | O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Every provider gets otto's own tools (name, description, JSON schema; GPT's `apply_patch` as our freeform patch tool); provider-predefined client tools (Claude `bash`/`text_editor`, OpenAI `shell`/`apply_patch` types) are not used, and old sessions' calls to them replay as calls to ours (§5) | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
-| O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 12 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
+| O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 14 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
 | Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
-| O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`; parked blocks (`block.spawn`/`park`/`reveal`) and `shell` in parked command blocks with background results delivered to the session (§6.2). Not built: per-subagent grants, the `service` tunnel target | `silo-proto`, `silo-server`, `silo-tools`, `otto-silo-tools`, `otto-tools`, `silo-cli` |
+| O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`; parked blocks (`block.spawn`/`park`/`reveal`) and `shell` in parked command blocks with background results delivered to the session (§6.2). Per-subagent grants: `delegate {tools}` narrows a child to a subset of its agent's tools, silo's included (§7.4). Not built: the `service` tunnel target | `silo-proto`, `silo-server`, `silo-tools`, `otto-silo-tools`, `otto-tools`, `silo-cli` |
 | O7 agent block | Built: otto sessions as a native chat block in the app (docs/AGENT_BLOCK.md) | `silo-app/src/agent` |
 | O6, O8 | Not started beyond the `browser_*` tools above | – |
 
@@ -249,9 +249,10 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
 | Anthropic | Messages (SSE); caching, thinking, compaction, inline tools, server tools, Files | O0 |
 | OpenAI | Responses (SSE, then WebSocket with `stream_id`, steering, async tools, compaction) | O0 / O3 |
 | Google | Interactions API (`POST /v1beta/interactions`, SSE, `store=false`) | O3 |
+| Google Antigravity (subscription) | Cloud Code Assist `v1internal:streamGenerateContent?alt=sse` (`google/codeassist`): agent envelope, daily → sandbox → prod hosts, project via `loadCodeAssist`/`onboardUser`, models via `fetchAvailableModels`, usage via `retrieveUserQuotaSummary` (`Model::plan_usage`, once a minute); provider `antigravity`, subscription only, default `gemini-3.1-pro-low` | Phase 2 |
 | Claude subscription (Pro/Max) | Same Messages client, OAuth bearer auth plus the request shaping the subscription endpoint expects | O0 |
 | ChatGPT subscription (Codex) | Same Responses client against `chatgpt.com/backend-api/codex/responses` (HTTP and `wss://`) | O0 (HTTP), O3 (WS) |
-| xAI | Same Responses client, `https://api.x.ai/v1` | O3 |
+| xAI | Same Responses client, `https://api.x.ai/v1`; Grok Build subscription (`openai/xai.rs`, `xai::SPEC`) with `grok-build`/`grok-composer-2.5-fast` through the Grok CLI proxy | O3 / Phase 2 |
 | Compat family | Chat Completions dialect table: OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax (Anthropic dialect), Ollama, LM Studio, custom base URLs | O3 |
 | Bedrock / Vertex / Azure | auth + endpoint variants of the above | later |
 
@@ -262,6 +263,20 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   cancellation that closes the stream.
 - Credentials: env vars, sealed store (`silo-store`-style), macOS Keychain. OAuth: device and loopback flows, a
   refresh coordinator with a file lock (a TS lesson: concurrent refresh rotation), request-scoped credentials.
+- Sign-in specs (`auth/flows.rs`): one `SubscriptionSpec` per provider in `SPECS` (client, URLs, scopes, params,
+  nonce, callbacks `Loopback{host, Fixed|Any, path}` / `Paste{redirect}`, `Device::Rfc8628` or a custom device
+  flow, per-call headers from the state dir, refresh encoding/rotation/rejection, credential mapping, `finish`
+  hook). `providers.rs` login, refresh, plan labels and login modes read the spec. A loopback login also completes
+  with a pasted callback URL or `code#state` (`LoginResult.accepts_code`). `auth.login {paste: true}` starts the
+  spec's `Paste` callback instead (the remote/SSH flow): `Pending` with `needs_code`, finished by
+  `auth.login_complete` with the pasted code or URL; the CLI picks it when no browser is available.
+- Google Antigravity (`google/codeassist/auth.rs`): Google PKCE with the Antigravity CLI's installed-app client
+  (its public secret as embedded in pi-antigravity), `access_type=offline`, `prompt=consent`, scopes `cloud-platform`,
+  `userinfo.email`, `userinfo.profile`, `cclog`, `experimentsandconfigs`, `aicode`; loopback
+  `http://localhost:51121/oauth-callback` or paste via `https://antigravity.google/oauth-callback` (bare code
+  accepted). The `finish` hook runs `loadCodeAssist`/`onboardUser` and stores the project as `extra.project`;
+  refreshes keep it, and the model, usage and model-list calls reuse it. Refresh: `invalid_grant` = sign in again.
+  The CLI shows the terms warning with a y/N confirm before starting.
 - **Subscriptions are an auth mode of a provider, not a separate provider.** `Auth::{ApiKey, Subscription}`
   picks the endpoint, headers and request shaping inside the provider crate. The model list, tools and transcript
   stay the same. Every subscription-specific rule (required instructions, header set, Codex prompt mode, no-strict
@@ -273,6 +288,14 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   the list), so its shaping is only the `SYSTEM_PREFIX` block and the headers; every provider gets the same names.
 - Catalog: generated at build from a models.dev-style source plus a manual overlay, refreshed at runtime with a
   cache. Pricing feeds usage and cost events.
+- Remote model lists (`catalog/remote.rs`): subscription providers' own lists (Kimi Code `/models`, Antigravity
+  `fetchAvailableModels`) are saved to `<state>/catalog/remote-<provider>.json` and refreshed after login and when
+  older than a jittered 4–6 h. Catalog metadata wins on matching ids, list-only ids use the list's fields, and with no
+  list yet the overlay's `subscription_ids` stand in. `Providers` holds the store for `providers::REMOTE`
+  (`kimi-code`, `antigravity`): `catalog_entries`, `model_info` and `resolve_model` read it; `complete_login`
+  refreshes the provider's list after a subscription sign-in; otto-core asks `ModelResolver::refresh_models` at start
+  and hourly (`Providers::refresh_remote`, only signed-in providers whose list is due) and announces a change as
+  `auth.changed`.
 - Tests: **recorded stream fixtures** (raw SSE/WS bytes in, canonical events out) per provider feature, with
   `OTTO_RECORD=1` to refresh them against live APIs.
 
@@ -375,7 +398,13 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   [streaming](https://ai.google.dev/gemini-api/docs/streaming), [reference](https://ai.google.dev/api/interactions-api))
 - xAI: wire-compatible Responses (`https://api.x.ai/v1/responses`, Bearer `XAI_API_KEY`, efforts
   low/medium/high/xhigh, encrypted reasoning), so the OpenAI client runs it with provider id `xai` (opaque items
-  never cross providers). No xAI subscription transport. ([Responses](https://docs.x.ai/developers/rest-api-reference/inference/responses),
+  never cross providers). Grok Build sign-in (`openai::xai`, as the TS otto does it; login wiring pending):
+  `xai::model` routes grok-4.x to `api.x.ai` with the subscription bearer and `grok-build`/`grok-composer-2.5-fast`
+  to `https://cli-chat-proxy.grok.com/v1` with the Grok CLI fingerprint (`x-xai-token-auth`, `x-grok-client-*`,
+  `user-agent: grok-shell/0.2.22 (os; arch)`); the session is the `prompt_cache_key`. `OpenAiModel`'s ChatGPT
+  branches (Codex URL, headers, body shape, WebSocket) apply only to provider `openai`. Usage: `fetch_xai_usage`
+  reads `/v1/billing?format=credits` (`creditUsagePercent`, reset at the period end) as one `Credits` window.
+  `xai::SPEC` is the login spec (device flow `referrer=grok-build`, or PKCE with a nonce on `127.0.0.1:56121`). ([Responses](https://docs.x.ai/developers/rest-api-reference/inference/responses),
   [Reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning))
 - Compat (`otto_llm::compat`, one Chat Completions parser, a dialect table): OpenRouter (`reasoning:{effort}`,
   `reasoning_details` replay, usage chunk repeats the finish), DeepSeek (`thinking` + `reasoning_effort`;
@@ -388,6 +417,20 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   [OpenRouter reasoning](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens),
   [Z.ai thinking](https://docs.z.ai/guides/capabilities/thinking-mode),
   [Kimi thinking](https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model))
+- Kimi Code (`compat::kimi`, provider and dialect `kimi-code`, subscription only): Chat at
+  `https://api.kimi.ai/coding/v1` served by `KimiCodeModel`, not `CompatModel`. `thinking:{type}` plus
+  `reasoning_effort` from the model's own `think_efforts` (nearest listed; none when it lists none; no `thinking`
+  for non-reasoning models; never `disabled` for always-thinking models such as k3.1-pro, which get their lowest
+  effort), `temperature: 1` always, `prompt_cache_key` = `cache.key` else the session id, `max_completion_tokens`,
+  `reasoning_content` replay (empty on a tool-call turn that had none while thinking is on), tool schemas cut down
+  to Kimi's dialect. Every call carries `kimi_headers(state_dir)`: `X-Msh-{Platform: kimi_cli, Version, Device-Name,
+  Device-Model, Os-Version, Device-Id}` and `User-Agent: KimiCLI/<ver>`, the id persisted in
+  `<state>/kimi-device-id`. A 401 on an OAuth credential refreshes once and retries. `fetch_kimi_models` (`GET
+  /models`) and `fetch_kimi_usage` (`GET /usages` → `PlanUsage`: limits by window, `5h`; `usage` as `Weekly` when
+  it resets within 7 days, else `Monthly`). Sign-in is `kimi::SPEC` (device flow at `auth.kimi.com`, kimi-cli's
+  client id and headers, rotating refresh tokens, 401/403 = rejected); models come from the overlay's `kimi-code`
+  entry (a provider models.dev does not list, its `subscription_ids` the fallback) until the account's own list is
+  fetched.
 - Catalog: models.dev for all of the above except Ollama/custom (local discovery only); base URLs for local and
   custom providers live in `<state>/providers.json` or `OLLAMA_HOST` / `LMSTUDIO_BASE_URL` /
   `OTTO_SILO_CUSTOM_BASE_URL`. `Usage::cache_hit_rate` is comparable across providers
@@ -420,6 +463,8 @@ How much of a subscription's limits is used, for the agent block's footer ring (
   overage-disabled-reason}`; no `7d` header on that response, so only `5-hour` was recorded. Codex names follow the
   Codex CLI and are unchecked (no ChatGPT plan to test with).
 - Only responses to a subscription (OAuth) credential are parsed; API-key responses never report plan usage.
+- Polled usage: after each response otto-core asks `Model::plan_usage` off the turn's path; Kimi Code answers from
+  `GET /usages` at most once a minute. The result is recorded like a response's report.
 
 otto-core keeps the latest per **provider** (merged by window name) in memory and in `<state>/plan_usage.json`
 (read at start). Each report is announced as the global, unjournaled event `plan.usage {provider, usage}`;
@@ -460,7 +505,12 @@ pub struct ToolSpec {
   the registry picks the set from `tool_family`. Everyone gets the full `shell` (`command`, `cwd`, `timeout_ms`,
   `background`). Paths are relative to the working directory, and the prompt and `shell` say not to `cd` into it.
   History from before this (calls named `bash` / `str_replace_based_edit_tool`, or OpenAI `shell_call` /
-  `apply_patch_call` items) is read as calls to ours (`otto-core/src/legacy.rs`) for requests and session views.
+  `apply_patch_call` items) is read as calls to ours (`otto-core/src/legacy.rs`) for requests and session views
+  (Claude's `undo_edit` as our `undo_edit`). A `shell_call` / `local_shell_call` a Responses model still emits
+  becomes one `shell` call per command (`openai/stream.rs`: the first keeps the call id and the raw item, the rest
+  are `{call_id}_{n}`), each its own transcript entry; `convert.rs` answers the call with one `shell_call_output`
+  listing every command's output (a `local_shell_call` with a `function_call_output`); other providers get plain
+  `shell` calls.
 - **Sources**: builtin, silo (§6, `Runtime::add_tools`), project sources (`ProjectSources`, `Runtime::add_source`)
   and extensions later (subprocess JSON protocol like the TS native host; WASM later). Project sources are listed
   again before every model request, so a changed list reaches the next step and every provider gets the full
@@ -495,7 +545,10 @@ pub struct ToolSpec {
 `read`, `write`, `edit`/`multiedit` (str_replace family), `apply_patch` (patch family), `ls`, `tree`, `glob`,
 `search` (ripgrep's `grep` + `ignore` crates), `shell` (one-shot, pipes, timeout, background jobs), `web_fetch`,
 `update_todos`, `ask_user`, `skill`, `load_tools`, `subagent` (delegate/list/message/stop/retry), `wait`; deferred
-(through `load_tools`): `copy_attachment`, `web_search` (§6.3; provider-hosted search stays where it exists).
+(through `load_tools`): `copy_attachment`, `web_search` (§6.3; provider-hosted search stays where it exists),
+`undo_edit {path}` (takes back the session's last `edit`/`multiedit`/`write`/`apply_patch` change to that file, one
+per call, newest first; an in-memory stack per session of 64 changes; granted with the edit tools; refused when the
+session has nothing left to undo there, or when the file changed after that edit).
 
 - **New tools are deferred.** Any tool added from here on is `Loading::Deferred` (in `load_tools`' index with the
   first sentence of its description, loaded by name) unless it is part of the core edit/run loop. Improvements to
@@ -827,6 +880,11 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `retry`; `agent` is required (the tool lists the agents; a missing or unknown one is an error naming them);
   depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
   tool set = the agent's set ∩ the parent's grant, minus both deny lists.
+- **Per-subagent grants.** `delegate {…, tools: [names]}` narrows a new child to those of its agent's tools
+  (`CreateSession.tools`, kept as `meta.grant` so a model or agent change re-applies it). `create_session` rejects a
+  name the agent can't use (built-ins, silo's `terminal_*`/`browser_*`, MCP tools, `skill`, `subagent`) with the list
+  of available ones; with a `session_id` (reuse) it is an error. A call to anything else fails with "X is not among the
+  tools this sub-agent was given. Available tools: …".
 - **User takeover.** A client's `session.prompt` / `session.cancel` / `queue_update` to a child are the user's
   (the parent's tool calls and its cancel cascade are not). User input marks the child (`meta.user`: `steered`, or
   `took_over` once the user stopped or interrupted a running turn); the next report adds one line, `The user steered

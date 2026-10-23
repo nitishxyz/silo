@@ -182,19 +182,20 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         }
         Method::ModelList { provider } => Ok(json!(state.config.auth.list_models(provider).await?)),
         Method::AuthStatus {} => Ok(json!(state.config.auth.status().await?)),
-        Method::AuthLogin { provider, mode, api_key, device, base_url } => {
+        Method::AuthLogin { provider, mode, api_key, device, base_url, paste } => {
             if provider.is_empty()
                 // Local and custom servers (a `base_url`) may need no key.
                 || (mode == AuthMode::ApiKey && base_url.is_none() && api_key.as_deref().is_none_or(str::is_empty))
                 || (mode == AuthMode::Subscription && api_key.is_some())
-                || (device && mode != AuthMode::Subscription)
+                || ((device || paste) && mode != AuthMode::Subscription)
+                || (device && paste)
             {
                 return Err(RpcError::bad_request("login requires a provider and credentials matching its mode"));
             }
             if base_url.as_deref().is_some_and(|url| !(url.starts_with("http://") || url.starts_with("https://"))) {
                 return Err(RpcError::bad_request("base_url must start with http:// or https://"));
             }
-            Ok(json!(state.config.auth.login(provider, mode, api_key, device, base_url).await?))
+            Ok(json!(state.config.auth.login(provider, mode, api_key, device, base_url, paste).await?))
         }
         Method::AuthLoginComplete { login_id, code } => Ok(json!(state.config.auth.login_complete(login_id, code).await?)),
         Method::AuthLoginCancel { login_id } => {

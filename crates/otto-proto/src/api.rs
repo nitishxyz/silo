@@ -151,7 +151,7 @@ pub fn examples() -> Vec<Method> {
         M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into() },
         M::ModelList { provider: None },
         M::AuthStatus {},
-        M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None },
+        M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None, paste: false },
         M::AuthLoginComplete { login_id: "login1".into(), code: None },
         M::AuthLoginCancel { login_id: "login1".into() },
         M::AuthLogout { provider: "openai".into() },

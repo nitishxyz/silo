@@ -226,7 +226,7 @@ impl SessionMirror {
                     self.info.plan = Some(usage.clone());
                 }
             }
-            Event::SessionsChanged {} | Event::SubagentChanged { .. } => {}
+            Event::SessionsChanged {} | Event::SubagentChanged { .. } | Event::AuthChanged {} => {}
         }
     }
     /// Advance past a forward-compatible unknown event without projecting it.

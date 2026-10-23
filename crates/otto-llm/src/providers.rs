@@ -3,13 +3,19 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use crate::{
     ErrorClass, LlmError, Model, ModelInfo, anthropic,
-    auth::{self, AuthMode, Credential, CredentialSource, CredentialStore},
-    catalog::{Catalog, CatalogEntry, ProviderEntry},
+    auth::{
+        self, AuthMode, Credential, CredentialSource, CredentialStore,
+        flows::{self, Callback, SubscriptionSpec},
+    },
+    catalog::{
+        Catalog, CatalogEntry, ProviderEntry,
+        remote::{RemoteModel, RemoteStore},
+    },
     compat::{self, Wire},
     google,
     http::{HttpClient, RetryPolicy},
@@ -17,17 +23,51 @@ use crate::{
 };
 
 /// Every provider with a transport, in default-model preference order.
-pub const IDS: [&str; 12] =
-    ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"];
-/// Providers with a subscription sign-in.
-const SUBSCRIPTION: [&str; 2] = ["anthropic", "openai"];
+pub const IDS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "xai",
+    "openrouter",
+    "deepseek",
+    "moonshotai",
+    compat::kimi::ID,
+    google::codeassist::convert::PROVIDER,
+    "zai",
+    "minimax",
+    "ollama",
+    "lmstudio",
+    "custom",
+];
 const XAI_URL: &str = "https://api.x.ai/v1";
+/// Subscription providers whose model list comes from the provider (`catalog::remote`).
+pub const REMOTE: &[&str] = &[compat::kimi::ID, google::codeassist::convert::PROVIDER];
+
+/// Fetches `provider`'s model list with a signed-in credential (tests replace it).
+type RemoteFetch = Arc<dyn Fn(&'static str, Credential) -> futures::future::BoxFuture<'static, Result<Vec<RemoteModel>, LlmError>> + Send + Sync>;
+fn fetch_remote(provider: &'static str, credential: Credential) -> futures::future::BoxFuture<'static, Result<Vec<RemoteModel>, LlmError>> {
+    Box::pin(async move {
+        let Credential::OAuth { access, .. } = &credential else { return Err(LlmError::new(ErrorClass::Auth, "expected a sign-in")) };
+        let http = HttpClient::new()?;
+        if provider == compat::kimi::ID {
+            return compat::kimi::fetch_kimi_models(http.client(), access).await;
+        }
+        let project = match google::codeassist::stored_project(&credential) {
+            Some(project) => project,
+            None => google::codeassist::project::Project::new(http.clone(), None).get(access).await?,
+        };
+        google::codeassist::fetch_antigravity_models(http.client(), access, &project).await
+    })
+}
 
 #[derive(Clone)]
 pub struct Providers {
     store: CredentialStore,
     state_dir: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
+    /// The model lists [`REMOTE`] providers reported.
+    remote: RemoteStore,
+    remote_fetch: RemoteFetch,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Models local servers reported at the last [`Providers::discover_local`].
     local: Arc<RwLock<BTreeMap<String, Vec<String>>>>,
@@ -56,6 +96,8 @@ pub enum LoginMode {
     Max,
     Console,
     Device,
+    /// Browser sign-in where the user pastes the code or callback URL.
+    Paste,
 }
 
 /// Opaque, single-use login state. Never serialize PKCE verifiers to clients.
@@ -67,15 +109,14 @@ pub struct LoginFlow {
 }
 enum LoginState {
     ApiKey,
-    Anthropic { verifier: String, state: String },
-    OpenAi(openai::subscription::Login),
-    Device(openai::subscription::DeviceCode),
+    Pkce(flows::Login),
+    Device(&'static SubscriptionSpec, flows::DeviceCode),
 }
 impl LoginFlow {
     #[must_use]
     pub fn verification_uri(&self) -> Option<&str> {
         match &self.state {
-            LoginState::Device(code) => Some(&code.verification_uri),
+            LoginState::Device(_, code) => Some(&code.verification_uri),
             _ => None,
         }
     }
@@ -83,21 +124,32 @@ impl LoginFlow {
     #[must_use]
     pub fn interval_secs(&self) -> Option<u64> {
         match &self.state {
-            LoginState::Device(code) => Some(code.interval.as_secs()),
+            LoginState::Device(_, code) => Some(code.interval.as_secs()),
             _ => None,
         }
     }
 
+    /// The user has to supply something to `complete_login`: an API key, or the code the provider shows.
     #[must_use]
     pub fn needs_input(&self) -> bool {
-        matches!(self.state, LoginState::ApiKey | LoginState::Anthropic { .. })
+        match &self.state {
+            LoginState::ApiKey => true,
+            LoginState::Pkce(login) => login.needs_paste(),
+            LoginState::Device(..) => false,
+        }
+    }
+
+    /// `complete_login` also takes a pasted code or full callback URL instead of waiting for the browser.
+    #[must_use]
+    pub fn accepts_paste(&self) -> bool {
+        matches!(self.state, LoginState::Pkce(_))
     }
 
     /// The loopback `(port, path)` the browser is redirected to, for flows that listen on one.
     #[must_use]
     pub fn callback(&self) -> Option<(u16, String)> {
         match &self.state {
-            LoginState::OpenAi(login) => Some((login.callback().port(), login.callback().path().to_owned())),
+            LoginState::Pkce(login) => login.callback().map(|c| (c.port(), c.path().to_owned())),
             _ => None,
         }
     }
@@ -110,6 +162,8 @@ impl Providers {
         Ok(Self {
             store: CredentialStore::open(auth_dir)?,
             catalog: Arc::new(RwLock::new(Catalog::load(Some(&state_dir)))),
+            remote: RemoteStore::load(&state_dir),
+            remote_fetch: Arc::new(fetch_remote),
             state_dir,
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             local: Arc::default(),
@@ -236,6 +290,33 @@ impl Providers {
         Ok(true)
     }
 
+    /// Fetch the model list of every [`REMOTE`] provider signed in with a subscription whose list
+    /// is due (`force`: regardless). Returns whether a list was saved; failures keep the old one.
+    pub async fn refresh_remote(&self, force: bool) -> bool {
+        let mut changed = false;
+        for provider in REMOTE.iter().copied() {
+            if force || self.remote.due(provider, SystemTime::now()) {
+                changed |= self.refresh_remote_one(provider).await;
+            }
+        }
+        changed
+    }
+    async fn refresh_remote_one(&self, provider: &'static str) -> bool {
+        let (Ok(Some(Credential::OAuth { .. })), Some(spec)) = (self.store.get(provider), flows::spec(provider)) else { return false };
+        let source = CredentialSource::store(self.store.clone(), provider, flows::refresh_fn(spec, self.state_dir.clone()));
+        let result = match source.current().await {
+            Ok(credential) => self.remote.refresh(provider, SystemTime::now(), (self.remote_fetch)(provider, credential)).await,
+            Err(error) => Err(error),
+        };
+        result.inspect_err(|error| tracing::debug!(%error, provider, "model list refresh")).is_ok()
+    }
+
+    /// The entries of a [`REMOTE`] provider: its fetched list over the catalog, else the overlay's.
+    fn remote_entries(&self, provider: &str, mode: Option<AuthMode>) -> Vec<CatalogEntry> {
+        let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
+        self.remote.models(&catalog, provider, mode).into_iter().filter(|e| mode.is_none_or(|m| e.auth.contains(&m))).collect()
+    }
+
     #[must_use]
     pub fn catalog_providers(&self) -> Vec<ProviderEntry> {
         let mut providers = self.catalog.read().unwrap_or_else(|e| e.into_inner()).providers();
@@ -264,6 +345,10 @@ impl Providers {
                 entries.extend(local.iter().map(|id| self.local_entry(&entry.id, id)));
                 continue;
             }
+            if REMOTE.contains(&entry.id.as_str()) {
+                entries.extend(self.remote_entries(&entry.id, mode));
+                continue;
+            }
             entries.extend(self.catalog.read().unwrap_or_else(|e| e.into_inner()).models(&entry.id, mode));
         }
         entries
@@ -288,6 +373,11 @@ impl Providers {
         }
         if self.local_models(provider).iter().any(|m| m == id) {
             return Some(self.local_entry(provider, id).info);
+        }
+        if REMOTE.contains(&provider)
+            && let Some(entry) = self.remote_entries(provider, None).into_iter().find(|e| e.info.id == id)
+        {
+            return Some(entry.info);
         }
         let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
         if !catalog.providers().iter().any(|entry| entry.id == provider) {
@@ -329,15 +419,17 @@ impl Providers {
             None if dialect.is_some_and(|d| !d.key_required) => Credential::ApiKey { key: String::new() },
             None => return Err(login_required(provider)),
         };
+        let project = google::codeassist::stored_project(&credential);
         let (mode, auth) = match credential {
             Credential::ApiKey { key } => (AuthMode::ApiKey, CredentialSource::api_key(key)),
-            Credential::OAuth { .. } if SUBSCRIPTION.contains(&provider) => {
-                let refresh = if provider == "anthropic" { anthropic::subscription::refresh_fn() } else { openai::subscription::refresh_fn() };
-                (AuthMode::Subscription, CredentialSource::store(self.store.clone(), provider, refresh))
-            }
-            Credential::OAuth { .. } => return Err(login_required(provider)),
+            Credential::OAuth { .. } => match flows::spec(provider) {
+                Some(spec) => {
+                    (AuthMode::Subscription, CredentialSource::store(self.store.clone(), provider, flows::refresh_fn(spec, self.state_dir.clone())))
+                }
+                None => return Err(login_required(provider)),
+            },
         };
-        let info = if dialect.is_some() {
+        let info = if dialect.is_some() || REMOTE.contains(&provider) {
             self.model_info(provider, model).ok_or_else(|| unknown(provider))?
         } else {
             let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
@@ -383,6 +475,7 @@ impl Providers {
         Ok(match (provider, dialect) {
             ("anthropic", _) => messages("https://api.anthropic.com".into(), auth, mode, info),
             ("openai", _) => responses("https://api.openai.com/v1", auth, mode, info),
+            ("xai", _) if mode == AuthMode::Subscription => openai::xai::model(info, auth, http.clone(), retry.clone(), idle_timeout),
             ("xai", _) => responses(XAI_URL, auth, mode, info),
             ("google", _) => Arc::new(google::GoogleModel::new(google::GoogleConfig {
                 base_url: google::BASE_URL.into(),
@@ -392,6 +485,24 @@ impl Providers {
                 retry: retry.clone(),
                 idle_timeout,
             })),
+            (compat::kimi::ID, _) => Arc::new(compat::kimi::KimiCodeModel::new(compat::kimi::KimiCodeConfig {
+                base_url: compat::kimi::BASE_URL.into(),
+                auth,
+                efforts: self.remote_entries(provider, None).into_iter().find(|e| e.info.id == model).map(|e| e.efforts).unwrap_or_default(),
+                model: info,
+                headers: compat::kimi::kimi_headers(&self.state_dir)?,
+                http: http.clone(),
+                retry: retry.clone(),
+                idle_timeout,
+            })),
+            (google::codeassist::convert::PROVIDER, _) => {
+                Arc::new(google::codeassist::AntigravityModel::new(google::codeassist::AntigravityConfig::new(
+                    info,
+                    auth,
+                    http.clone(),
+                    google::codeassist::project::Project::new(http.clone(), project),
+                )))
+            }
             (_, Some(dialect)) => {
                 let base_url = self
                     .base_url(provider)
@@ -431,7 +542,7 @@ impl Providers {
             return Some((provider.into(), model.into()));
         }
         let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
-        IDS.into_iter().find_map(|provider| {
+        IDS.iter().copied().find_map(|provider| {
             let mode = signed_in(provider)?;
             catalog.default_model(provider, mode).or_else(|| self.local_models(provider).into_iter().next()).map(|model| (provider.into(), model))
         })
@@ -439,7 +550,8 @@ impl Providers {
 
     #[must_use]
     pub fn status(&self) -> Vec<AuthStatus> {
-        IDS.into_iter()
+        IDS.iter()
+            .copied()
             .map(|provider| {
                 let mut status = AuthStatus {
                     provider: provider.into(),
@@ -461,10 +573,7 @@ impl Providers {
                         status.signed_in = true;
                         status.expires_at_ms = Some(expires_at_ms);
                         status.account_id = account_id;
-                        status.plan = match provider {
-                            "openai" => extra["id_token"].as_str().and_then(openai::subscription::plan),
-                            _ => extra["plan"].as_str().map(String::from),
-                        };
+                        status.plan = flows::spec(provider).and_then(|spec| (spec.plan)(&extra));
                     }
                     // A running local server needs no sign-in.
                     Ok(None) if !self.local_models(provider).is_empty() => {
@@ -485,11 +594,23 @@ impl Providers {
         if !IDS.contains(&provider) {
             return Vec::new();
         }
-        let mut modes = vec![AuthMode::ApiKey];
-        if SUBSCRIPTION.contains(&provider) {
-            modes.push(AuthMode::Subscription);
+        match flows::spec(provider) {
+            Some(spec) if spec.api_key => vec![AuthMode::ApiKey, AuthMode::Subscription],
+            Some(_) => vec![AuthMode::Subscription],
+            None => vec![AuthMode::ApiKey],
         }
-        modes
+    }
+
+    /// The provider's sign-in has a device flow, the way out when no browser opens.
+    #[must_use]
+    pub fn has_device_login(&self, provider: &str) -> bool {
+        flows::spec(provider).is_some_and(|spec| spec.device.is_some())
+    }
+
+    /// The provider's sign-in can show a code to paste, the way out when the browser cannot reach this machine.
+    #[must_use]
+    pub fn has_paste_login(&self, provider: &str) -> bool {
+        flows::spec(provider).is_some_and(|spec| spec.callbacks.iter().any(|c| matches!(c, Callback::Paste { .. })))
     }
 
     /// # Errors
@@ -499,41 +620,45 @@ impl Providers {
             return Err(unknown(provider));
         }
         let mut flow = LoginFlow { provider: provider.into(), url: None, user_code: None, state: LoginState::ApiKey };
-        flow.state = match (provider, mode) {
-            (_, LoginMode::ApiKey) => LoginState::ApiKey,
-            ("anthropic", LoginMode::Subscription | LoginMode::Max | LoginMode::Console) => {
-                let mode = if mode == LoginMode::Console { anthropic::subscription::Mode::Console } else { anthropic::subscription::Mode::Max };
-                let (url, verifier, state) = anthropic::subscription::authorize(mode);
-                flow.url = Some(url);
-                LoginState::Anthropic { verifier, state }
-            }
-            ("openai", LoginMode::Subscription) => match openai::subscription::Login::begin().await {
+        let unsupported = || LlmError::new(ErrorClass::InvalidRequest, "login mode is not supported by this provider");
+        let spec = flows::spec(provider);
+        if mode == LoginMode::ApiKey {
+            return if spec.is_none_or(|spec| spec.api_key) { Ok(flow) } else { Err(unsupported()) };
+        }
+        let spec = spec.ok_or_else(unsupported)?;
+        let callback = match mode {
+            LoginMode::Device => None,
+            LoginMode::Paste => Some(spec.callbacks.iter().find(|c| matches!(c, Callback::Paste { .. })).ok_or_else(unsupported)?),
+            LoginMode::Max | LoginMode::Console if spec.console.is_none() => return Err(unsupported()),
+            _ => spec.callbacks.first(),
+        };
+        if let Some(callback) = callback {
+            match flows::Login::begin(spec, callback, mode == LoginMode::Console).await {
                 Ok(login) => {
                     flow.url = Some(login.url.clone());
-                    LoginState::OpenAi(login)
+                    flow.state = LoginState::Pkce(login);
+                    return Ok(flow);
                 }
-                Err(_) => return self.device_login().await,
-            },
-            ("openai", LoginMode::Device) => return self.device_login().await,
-            _ => return Err(LlmError::new(ErrorClass::InvalidRequest, "login mode is not supported by this provider")),
-        };
+                // A busy loopback port falls back to the device flow where there is one.
+                Err(error) if spec.device.is_none() || mode == LoginMode::Paste => return Err(error),
+                Err(_) => {}
+            }
+        }
+        let code = flows::begin_device(spec, flows::Cx { client: &reqwest::Client::new(), dir: &self.state_dir }).await?;
+        flow.url = Some(code.url().to_owned());
+        flow.user_code = Some(code.user_code.clone());
+        flow.state = LoginState::Device(spec, code);
         Ok(flow)
     }
 
-    async fn device_login(&self) -> Result<LoginFlow, LlmError> {
-        let code = openai::subscription::device_code(&reqwest::Client::new()).await?;
-        Ok(LoginFlow {
-            provider: "openai".into(),
-            url: Some(code.verification_uri.clone()),
-            user_code: Some(code.user_code.clone()),
-            state: LoginState::Device(code),
-        })
-    }
-
+    /// `input` is the API key, or for a sign-in the pasted code, `code#state` or full callback URL;
+    /// empty waits for the browser's loopback callback or the device approval.
     /// # Errors
     /// Returns errors for empty keys, mismatched OAuth state, timeout, token exchange,
     /// or credential persistence. Dropping this future cancels pending authorization.
     pub async fn complete_login(&self, flow: LoginFlow, input: &str) -> Result<(), LlmError> {
+        let client = reqwest::Client::new();
+        let cx = flows::Cx { client: &client, dir: &self.state_dir };
         let credential = match flow.state {
             LoginState::ApiKey => {
                 if input.trim().is_empty() {
@@ -545,26 +670,16 @@ impl Providers {
                 }
                 Credential::ApiKey { key: input.trim().into() }
             }
-            LoginState::Anthropic { verifier, state } => {
-                if input.trim().split_once('#').map(|(_, pasted)| pasted) != Some(state.as_str()) {
-                    return Err(LlmError::new(ErrorClass::Auth, "OAuth state mismatch; restart login"));
-                }
-                anthropic::subscription::exchange(input, &verifier).await?
-            }
-            LoginState::OpenAi(login) => login.finish(&reqwest::Client::new()).await?,
-            LoginState::Device(code) => tokio::time::timeout(Duration::from_secs(900), async {
-                let client = reqwest::Client::new();
-                loop {
-                    if let Some(credential) = openai::subscription::poll_device(&client, &code).await? {
-                        return Ok(credential);
-                    }
-                    tokio::time::sleep(code.interval).await;
-                }
-            })
-            .await
-            .map_err(|_| LlmError::new(ErrorClass::Timeout, "device login timed out"))??,
+            LoginState::Pkce(login) => login.finish(cx, input).await?,
+            LoginState::Device(spec, code) => flows::poll_device(spec, cx, &code).await?,
         };
-        self.store.set(&flow.provider, credential)
+        let subscription = matches!(credential, Credential::OAuth { .. });
+        self.store.set(&flow.provider, credential)?;
+        // The new account's own model list; a failure keeps the previous or fallback list.
+        if let Some(provider) = REMOTE.iter().copied().find(|p| *p == flow.provider).filter(|_| subscription) {
+            self.refresh_remote_one(provider).await;
+        }
+        Ok(())
     }
 
     /// Removes stored credentials; environment API keys remain in effect.
@@ -692,5 +807,145 @@ mod tests {
         let flow = f.1.begin_login("anthropic", LoginMode::Max).await.unwrap();
         assert!(f.1.complete_login(flow, "code#wrong-state").await.is_err());
         assert!(f.1.begin_login("anthropic", LoginMode::Device).await.is_err());
+        assert!(f.1.begin_login("openai", LoginMode::Console).await.is_err(), "no console sign-in, and no device fallback for it");
+    }
+
+    #[tokio::test]
+    async fn kimi_code_is_subscription_only() {
+        let f = Fixture::new();
+        assert_eq!(f.1.login_modes("kimi-code"), vec![AuthMode::Subscription]);
+        assert!(f.1.has_device_login("kimi-code"));
+        assert!(f.1.begin_login("kimi-code", LoginMode::ApiKey).await.is_err());
+        assert!(f.1.begin_login("kimi-code", LoginMode::Paste).await.is_err());
+        assert_eq!(f.1.resolve_model("kimi-code", "kimi-k3").err().unwrap().class, ErrorClass::Auth);
+        let oauth = Credential::OAuth { access: "a".into(), refresh: "r".into(), expires_at_ms: 0, account_id: None, extra: serde_json::Value::Null };
+        f.1.store.set("kimi-code", oauth).unwrap();
+        let model = f.1.resolve_model("kimi-code", "kimi-k3").unwrap();
+        assert_eq!((model.info().provider.as_str(), model.info().caps.context_window), ("kimi-code", 1_048_576));
+        assert!(f.0.join("kimi-device-id").exists(), "the device id lives in the state folder");
+        assert!(f.1.list_models(Some("kimi-code"), Some(AuthMode::Subscription)).iter().any(|m| m.id == "kimi-k3.1-pro"));
+        assert_eq!(f.1.status().iter().find(|s| s.provider == "kimi-code").unwrap().mode.as_deref(), Some("subscription"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_is_subscription_only_with_a_paste_login() {
+        let f = Fixture::new();
+        assert_eq!(IDS.len(), 14);
+        assert_eq!(IDS.iter().position(|p| *p == "antigravity"), IDS.iter().position(|p| *p == "kimi-code").map(|i| i + 1));
+        assert_eq!(f.1.login_modes("antigravity"), vec![AuthMode::Subscription]);
+        assert!(!f.1.has_device_login("antigravity") && f.1.has_paste_login("antigravity") && !f.1.has_paste_login("kimi-code"));
+        assert!(f.1.begin_login("antigravity", LoginMode::ApiKey).await.is_err());
+        let flow = f.1.begin_login("antigravity", LoginMode::Paste).await.unwrap();
+        let url = flow.url.clone().unwrap();
+        assert!(url.starts_with("https://accounts.google.com/") && url.contains("access_type=offline") && url.contains("prompt=consent"));
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback"));
+        assert!(flow.needs_input() && flow.accepts_paste() && flow.callback().is_none());
+        assert_eq!(f.1.resolve_model("antigravity", "gemini-3.1-pro-low").err().unwrap().class, ErrorClass::Auth);
+        let extra = serde_json::json!({"project":"proj"});
+        f.1.store
+            .set("antigravity", Credential::OAuth { access: "a".into(), refresh: "r".into(), expires_at_ms: 0, account_id: None, extra })
+            .unwrap();
+        let model = f.1.resolve_model("antigravity", "gemini-3.1-pro-low").unwrap();
+        assert_eq!((model.info().provider.as_str(), model.info().caps.tool_family), ("antigravity", crate::ToolFamily::Gemini));
+        assert!(f.1.list_models(Some("antigravity"), Some(AuthMode::Subscription)).iter().any(|m| m.id == "gemini-pro-agent"));
+        assert!(f.1.list_models(Some("antigravity"), Some(AuthMode::ApiKey)).is_empty());
+        let default = f.1.default_with(None, |p| (p == "antigravity").then_some(AuthMode::Subscription));
+        assert_eq!(default, Some(("antigravity".into(), "gemini-3.1-pro-low".into())));
+    }
+
+    #[tokio::test]
+    async fn xai_offers_both_sign_ins_and_resolves_subscription_models() {
+        let f = Fixture::new();
+        assert_eq!(f.1.login_modes("xai"), vec![AuthMode::ApiKey, AuthMode::Subscription]);
+        assert!(f.1.has_device_login("xai") && std::ptr::eq(flows::spec("xai").unwrap(), &openai::xai::SPEC));
+        let oauth = Credential::OAuth { access: "a".into(), refresh: "r".into(), expires_at_ms: 0, account_id: None, extra: serde_json::Value::Null };
+        f.1.store.set("xai", oauth).unwrap();
+        for id in openai::xai::SUBSCRIPTION_MODELS.iter().chain(&["grok-build"]) {
+            let model = f.1.resolve_model("xai", id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!((model.info().provider.as_str(), model.info().id.as_str()), ("xai", *id));
+        }
+        let listed: Vec<_> = f.1.list_models(Some("xai"), Some(AuthMode::Subscription)).into_iter().map(|m| m.id).collect();
+        assert!(listed.iter().any(|id| id == "grok-build") && listed.iter().any(|id| id == "grok-4.6"), "{listed:?}");
+        f.1.store.set("xai", Credential::ApiKey { key: "k".into() }).unwrap();
+        assert!(f.1.resolve_model("xai", "grok-build").is_err(), "the proxy models need the sign-in");
+    }
+
+    /// A token endpoint answering every request with `body`.
+    async fn token_server(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut buffer = [0; 8192];
+                let _ = tcp.read(&mut buffer).await;
+                let reply =
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                let _ = tcp.write_all(reply.as_bytes()).await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn remote_lists_refresh_after_sign_in_and_merge_over_the_catalog() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut f = Fixture::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        f.1.remote_fetch = Arc::new(move |provider: &'static str, credential: Credential| -> futures::future::BoxFuture<'static, _> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            assert!(provider == "kimi-code" && matches!(&credential, Credential::OAuth { access, .. } if access == "fresh"));
+            let model = |id: &str| RemoteModel { id: id.into(), name: id.into(), context_window: 1000, ..RemoteModel::default() };
+            Box::pin(async move { Ok(vec![model("kimi-k3"), model("kimi-new")]) })
+        });
+        // Before any list: the overlay's fallback ids.
+        assert!(f.1.list_models(Some("kimi-code"), Some(AuthMode::Subscription)).iter().any(|m| m.id == "kimi-k3.1-pro"));
+        let token = token_server(r#"{"access_token":"fresh","refresh_token":"r","expires_in":3600}"#).await;
+        let spec: &'static SubscriptionSpec = Box::leak(Box::new(SubscriptionSpec {
+            token: Box::leak(token.into_boxed_str()),
+            headers: None,
+            finish: None,
+            callbacks: &[],
+            ..clone_spec(&compat::kimi::SPEC)
+        }));
+        let login = flows::Login::begin(spec, &Callback::Paste { redirect: "https://example.invalid/cb", bare_code: true }, false).await.unwrap();
+        let flow = LoginFlow { provider: "kimi-code".into(), url: None, user_code: None, state: LoginState::Pkce(login) };
+        f.1.complete_login(flow, "the-code").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "signing in fetches the account's list");
+        let ids: Vec<_> = f.1.list_models(Some("kimi-code"), Some(AuthMode::Subscription)).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["kimi-k3", "kimi-new"], "the fetched list, in its order");
+        assert_eq!(f.1.model_info("kimi-code", "kimi-k3").unwrap().caps.context_window, 1_048_576, "catalog metadata wins");
+        assert_eq!(f.1.model_info("kimi-code", "kimi-new").unwrap().caps.context_window, 1000);
+        assert!(f.0.join("catalog/remote-kimi-code.json").exists());
+        assert!(!f.1.refresh_remote(false).await, "a fresh list is not due");
+        assert!(Providers::new(f.0.join("auth"), f.0.clone()).unwrap().list_models(Some("kimi-code"), None).iter().any(|m| m.id == "kimi-new"));
+        assert!(f.1.refresh_remote(true).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "only signed-in providers are fetched");
+    }
+
+    /// The fields a test spec keeps from `spec` (specs are not `Clone`).
+    fn clone_spec(spec: &SubscriptionSpec) -> SubscriptionSpec {
+        SubscriptionSpec {
+            provider: spec.provider,
+            api_key: spec.api_key,
+            client_id: spec.client_id,
+            client_secret: spec.client_secret,
+            authorize: "https://example.invalid/authorize",
+            console: None,
+            token: spec.token,
+            scopes: spec.scopes,
+            params: spec.params,
+            nonce: spec.nonce,
+            callbacks: spec.callbacks,
+            device: None,
+            headers: spec.headers,
+            exchange_encoding: spec.exchange_encoding,
+            exchange_state: spec.exchange_state,
+            refresh: spec.refresh,
+            credential: spec.credential,
+            finish: spec.finish,
+            plan: spec.plan,
+        }
     }
 }

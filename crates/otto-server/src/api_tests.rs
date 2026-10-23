@@ -33,7 +33,14 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
     assert_eq!(second.agent, "build");
     assert_eq!(client.session_view(&first.id).await.unwrap().info.model, "startup");
     let pending = client
-        .call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None })
+        .call(Method::AuthLogin {
+            provider: "openai".into(),
+            mode: AuthMode::Subscription,
+            api_key: None,
+            device: true,
+            base_url: None,
+            paste: false,
+        })
         .await
         .unwrap();
     assert_eq!(pending["user_code"], "ABCD");
@@ -41,7 +48,14 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
     assert_eq!(pending["verification_uri"], "https://example.test/device");
     assert!(
         client
-            .call(Method::AuthLogin { provider: "openai".into(), mode: AuthMode::ApiKey, api_key: Some("test".into()), device: true, base_url: None })
+            .call(Method::AuthLogin {
+                provider: "openai".into(),
+                mode: AuthMode::ApiKey,
+                api_key: Some("test".into()),
+                device: true,
+                base_url: None,
+                paste: false
+            })
             .await
             .is_err()
     );
@@ -52,6 +66,7 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
         api_key: None,
         device: false,
         base_url: base_url.map(String::from),
+        paste: false,
     };
     let error = client.call(keyless(None)).await.unwrap_err().to_string();
     assert!(error.contains("bad_request"), "{error}");

@@ -58,6 +58,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         .await?,
     );
     runtime.set_auto_title(true);
+    // Sign-ins made by the CLI reach the clients.
+    runtime.watch_auth(paths::auth_dir(&home).join("auth.json"));
     let silo = otto_silo_tools::connect(otto_silo_tools::Config::default());
     runtime.add_tools(silo.tools);
     runtime.set_terminals(silo.terminals);

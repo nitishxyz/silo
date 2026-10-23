@@ -63,8 +63,8 @@
     "manual": {}
   },
   "xai": {
-    "comment": "Responses API transport (API key). Subscription ids, manual CLI models and the hidden build alias follow catalog-auth.ts and catalog-manual.ts in the TS reference; there is no xAI subscription transport, so those entries are listed but unusable. Manual entries omit unknown list prices and output limits.",
-    "auth": {"default": ["api_key"], "subscription_ids": ["grok-4.5", "grok-4.6"], "subscription_prefixes": [], "overrides": {"grok-build": [], "grok-composer-2.5-fast": ["subscription"]}},
+    "comment": "Responses API transport (API key). Subscription ids, manual CLI models and the hidden build alias follow catalog-auth.ts and catalog-manual.ts in the TS reference; the subscription (Grok Build sign-in, openai/xai.rs) serves grok-4.x on api.x.ai and grok-build/grok-composer through the Grok CLI proxy. Manual entries omit unknown list prices and output limits.",
+    "auth": {"default": ["api_key"], "subscription_ids": ["grok-4.5", "grok-4.6", "grok-composer-2.5-fast", "grok-build"], "subscription_prefixes": [], "overrides": {"grok-build": ["subscription"], "grok-composer-2.5-fast": ["subscription"]}},
     "subscription_overrides": {},
     "defaults": {"api_key": "grok-4.6", "subscription": "grok-4.6"},
     "manual": {
@@ -85,6 +85,85 @@
         "reasoning": true,
         "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {"context": 200000}
+      }
+    }
+  },
+  "kimi-code": {
+    "comment": "Kimi Code subscription (kimi-cli sign-in); not in models.dev. Seed list until the live GET /coding/v1/models list is stored; ids per kimi-cli and the TS reference.",
+    "name": "Kimi Code",
+    "auth": {"default": ["subscription"], "subscription_ids": ["kimi-k3", "kimi-k3.1-pro", "kimi-k2.7-code-highspeed"], "subscription_prefixes": [], "overrides": {}},
+    "subscription_overrides": {},
+    "defaults": {"subscription": "kimi-k3"},
+    "manual": {
+      "kimi-k3": {
+        "id": "kimi-k3",
+        "name": "Kimi K3",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}],
+        "release_date": "2026-07-16",
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "limit": {"context": 1048576, "output": 131072}
+      },
+      "kimi-k3.1-pro": {
+        "id": "kimi-k3.1-pro",
+        "name": "Kimi K3.1 Pro",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}],
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "limit": {"context": 1048576, "output": 131072}
+      },
+      "kimi-k2.7-code-highspeed": {
+        "id": "kimi-k2.7-code-highspeed",
+        "name": "Kimi K2.7 Code Highspeed",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "knowledge": "2025-01",
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "limit": {"context": 262144, "output": 262144}
+      }
+    }
+  },
+  "antigravity": {
+    "comment": "Google Antigravity subscription (Google sign-in, Cloud Code Assist); not in models.dev. Seed list until the live fetchAvailableModels list is stored; runtime ids per pi-antigravity.",
+    "name": "Google Antigravity",
+    "auth": {"default": ["subscription"], "subscription_ids": ["gemini-3.1-pro-low", "gemini-pro-agent", "gemini-3.8-flash-low"], "subscription_prefixes": [], "overrides": {}},
+    "subscription_overrides": {},
+    "defaults": {"subscription": "gemini-3.1-pro-low"},
+    "manual": {
+      "gemini-3.1-pro-low": {
+        "id": "gemini-3.1-pro-low",
+        "name": "Gemini 3.1 Pro",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}],
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+        "limit": {"context": 1048576, "output": 65535}
+      },
+      "gemini-pro-agent": {
+        "id": "gemini-pro-agent",
+        "name": "Gemini 3.1 Pro (High)",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}],
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+        "limit": {"context": 1048576, "output": 65535}
+      },
+      "gemini-3.8-flash-low": {
+        "id": "gemini-3.8-flash-low",
+        "name": "Gemini 3.8 Flash",
+        "attachment": true,
+        "tool_call": true,
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}],
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+        "limit": {"context": 1048576, "output": 65536}
       }
     }
   }

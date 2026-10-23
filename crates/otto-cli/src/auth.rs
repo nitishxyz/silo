@@ -49,7 +49,8 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
     if !otto_llm::providers::IDS.contains(&provider.as_str()) {
         bail!("unknown provider {provider}; choose one of {}", otto_llm::providers::IDS.join(", "));
     }
-    let subscription = providers.login_modes(&provider).contains(&AuthMode::Subscription);
+    let modes = providers.login_modes(&provider);
+    let subscription = modes.contains(&AuthMode::Subscription);
     // Local and custom servers: where they listen. The environment override wins when set.
     if let Some(url) = &args.base_url {
         providers.set_base_url(&provider, Some(url))?;
@@ -76,6 +77,8 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
         LoginMode::Subscription
     } else if !subscription {
         LoginMode::ApiKey
+    } else if !modes.contains(&AuthMode::ApiKey) {
+        LoginMode::Subscription
     } else {
         match prompt("Mode (subscription/api-key)", false).await?.as_str() {
             "subscription" | "" => LoginMode::Subscription,
@@ -83,13 +86,23 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
             _ => bail!("choose subscription or api-key"),
         }
     };
-    if provider == "openai" && mode == LoginMode::Subscription && !browser_available() {
-        mode = LoginMode::Device;
+    if mode == LoginMode::Subscription && !browser_available() {
+        if providers.has_device_login(&provider) {
+            mode = LoginMode::Device;
+        } else if providers.has_paste_login(&provider) {
+            mode = LoginMode::Paste;
+        }
+    }
+    if provider == "antigravity" && mode != LoginMode::ApiKey {
+        eprintln!("Google's Antigravity terms forbid third-party use. Your Google account may be suspended.");
+        if !matches!(prompt("Continue? [y/N]", false).await?.to_ascii_lowercase().as_str(), "y" | "yes") {
+            bail!("cancelled");
+        }
     }
     let mut flow = providers.begin_login(&provider, mode).await?;
     if let Some(url) = &flow.url {
         eprintln!("Open: {url}");
-        if !open_browser(url) && provider == "openai" && mode == LoginMode::Subscription {
+        if !open_browser(url) && flow.user_code.is_none() && mode == LoginMode::Subscription && providers.has_device_login(&provider) {
             drop(flow);
             flow = providers.begin_login(&provider, LoginMode::Device).await?;
             if let Some(url) = &flow.url {
@@ -107,7 +120,7 @@ async fn login(args: LoginArgs, providers: &Providers) -> Result<()> {
             None => prompt("API key", true).await?,
         }
     } else if flow.needs_input() {
-        prompt("Paste code#state", false).await?
+        prompt("Paste code or URL", false).await?
     } else {
         String::new()
     };

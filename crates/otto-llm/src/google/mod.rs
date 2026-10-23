@@ -1,5 +1,8 @@
 //! Google Gemini through the Interactions API (`POST /v1beta/interactions`,
-//! SSE), stateless (`store=false`) with full-history replay.
+//! SSE), stateless (`store=false`) with full-history replay. [`codeassist`] is Antigravity's
+//! Cloud Code Assist wire.
+#[cfg(feature = "client")]
+pub mod codeassist;
 pub mod convert;
 #[cfg(feature = "client")]
 pub mod stream;

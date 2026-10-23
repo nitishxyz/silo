@@ -203,6 +203,10 @@ pub enum Method {
         /// stored before signing in. Providers with a fixed endpoint reject it.
         #[serde(default)]
         base_url: Option<String>,
+        /// Browser sign-in where the user pastes the code the provider shows (for a machine
+        /// the browser cannot reach): `Pending` with `accepts_code`, finished by `auth.login_complete`.
+        #[serde(default)]
+        paste: bool,
     },
     #[serde(rename = "auth.login_complete")]
     AuthLoginComplete { login_id: String, code: Option<String> },
@@ -396,6 +400,10 @@ pub enum LoginResult {
         /// The loopback the provider redirects the browser to; a remote client forwards it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         callback: Option<LoginCallback>,
+        /// A browser login that also completes with `auth.login_complete` given the pasted
+        /// callback URL (or code), instead of waiting: for when the loopback can't be reached.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        accepts_code: bool,
     },
 }
 
@@ -574,6 +582,7 @@ pub const EVENTS: &[&str] = &[
     "queue.changed",
     "error",
     "plan.usage",
+    "auth.changed",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -632,6 +641,9 @@ pub enum Event {
     /// A response reported `provider`'s subscription limits (global, not journaled).
     #[serde(rename = "plan.usage")]
     PlanUsage { provider: String, usage: otto_llm::PlanUsage },
+    /// The stored sign-ins changed, possibly by another process (global): reread `auth.status`.
+    #[serde(rename = "auth.changed")]
+    AuthChanged {},
 }
 
 impl Event {

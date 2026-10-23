@@ -10,6 +10,7 @@ fn debug_redacts_credentials_without_changing_serialization() {
             api_key: Some("secret-api-key".into()),
             device: false,
             base_url: None,
+            paste: false,
         },
         Method::AuthLoginComplete { login_id: "login".into(), code: Some("secret-login-code".into()) },
     ];
