@@ -27,7 +27,7 @@ pub struct SessionDefaults {
     pub agent: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
-    /// None selects Auto; plan agents always use Plan.
+    /// None selects Auto.
     pub approval_mode: Option<otto_tools::policy::ApprovalMode>,
     /// Let new sessions use the provider's native compaction when their model
     /// has it and the history is its own; otto's summarizer otherwise.
@@ -252,9 +252,54 @@ impl Runtime {
                     Some((p, m)) => (Some(p.into()), Some(m.into())),
                     None => (None, Some(m)),
                 });
-                otto_proto::AgentInfo { name: a.name, description: a.description, model, provider }
+                otto_proto::AgentInfo { name: a.name, description: a.description, model, provider, scope: a.scope }
             })
             .collect()
+    }
+    /// Paths under `cwd` for an `@` mention (`files.complete`), best match first.
+    pub async fn complete_files(&self, cwd: String, query: String, limit: usize) -> Result<Vec<otto_proto::FileMatch>> {
+        if !Path::new(&cwd).is_dir() {
+            return Err(Error::Invalid("cwd is not a folder".into()));
+        }
+        let hits = tokio::task::spawn_blocking(move || otto_tools::complete::complete(Path::new(&cwd), &query, limit.min(200)))
+            .await
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(hits.into_iter().map(|(path, dir)| otto_proto::FileMatch { path, dir }).collect())
+    }
+    /// `name` as discovery resolves it for `project_root` (`agents.get`).
+    pub fn agent(&self, name: &str, project_root: Option<&Path>) -> Result<otto_proto::AgentDef> {
+        crate::agents::discover(project_root.unwrap_or(&self.0.config.user_config_dir.join("__no_project__")), &self.0.config.user_config_dir)
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(crate::agents::Agent::def)
+            .ok_or_else(|| otto_store::Error::NotFound(format!("agent {name}")).into())
+    }
+    /// Write a user or project definition and read it back (`agents.save`); a
+    /// different `previous_name` removes that scope's old definition.
+    pub fn save_agent(&self, agent: &otto_proto::AgentDef, previous_name: Option<&str>, project_root: Option<&Path>) -> Result<otto_proto::AgentDef> {
+        crate::agents::save(project_root, &self.0.config.user_config_dir, agent, previous_name)?;
+        self.agent(&agent.name, project_root)
+    }
+    /// Remove a user or project definition (`agents.delete`).
+    pub fn delete_agent(&self, name: &str, scope: otto_proto::AgentScope, project_root: Option<&Path>) -> Result<()> {
+        crate::agents::delete(project_root, &self.0.config.user_config_dir, name, scope)
+    }
+    /// Every tool an agent can list (`tools.catalog`): the built-ins for the
+    /// default model's family, `skill` and `subagent`, extras, and `project_root`'s sources.
+    pub async fn tool_catalog(&self, project_root: Option<&Path>) -> Vec<otto_proto::ToolCatalogEntry> {
+        let config = self.defaults();
+        let mut defaults = self.0.config.models.default_model().unwrap_or_default();
+        defaults.0 = config.provider.unwrap_or(defaults.0);
+        defaults.1 = config.model.unwrap_or(defaults.1);
+        let family = self.0.config.models.resolve(&defaults.0, &defaults.1).map_or_else(|_| "generic".into(), |m| crate::session::family(m.as_ref()));
+        let mut tools = self.builtins(&family);
+        tools.extend(self.extra_tools());
+        if let Some(root) = project_root {
+            tools.extend(self.source_tools(root).await);
+        }
+        let mut specs: Vec<otto_tools::ToolSpec> = tools.iter().map(|t| t.spec().clone()).collect();
+        specs.extend(crate::tools::session_specs());
+        specs.iter().map(crate::tools::catalog_entry).collect()
     }
     pub async fn tools(&self, session_id: &str) -> Result<Vec<otto_proto::ToolInfo>> {
         let handle = self.session(session_id).await?;
@@ -286,7 +331,7 @@ impl Runtime {
         let model = options.model.unwrap_or_else(|| agent_model.map(|m| m.1).unwrap_or(&defaults.1).to_owned());
         let resolved = self.0.config.models.resolve(&provider, &model)?;
         let family = crate::session::family(resolved.as_ref());
-        let (grant, denied) = self.grants(&agent, &family, options.parent_id.clone()).await?;
+        let (grant, loadable, denied) = self.grants(&agent, &family, options.parent_id.clone()).await?;
         let effort = options.effort.map(serde_json::to_value).transpose()?.or_else(|| agent.effort.clone().map(serde_json::Value::String));
         let approval_mode = options.approval_mode.or(agent.approval_mode).map(|m| serde_json::to_value(m).expect("mode enum"));
         let task = options.task;
@@ -300,7 +345,7 @@ impl Runtime {
                     model,
                     title: options.title,
                     cwd: options.cwd.to_string_lossy().into_owned(),
-                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")))}),
+                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"loadable":loadable,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum")))}),
                 })?)
             })
             .await?;
@@ -308,9 +353,17 @@ impl Runtime {
         self.changed();
         Ok(handle)
     }
-    /// The tools `agent` is granted on a model of `family`, narrowed by the parent's grant.
-    pub(crate) async fn grants(&self, agent: &crate::agents::Agent, family: &str, parent: Option<String>) -> Result<(Vec<String>, Vec<String>)> {
-        let mut grant: Vec<String> = if agent.tools.is_empty() {
+    /// The tools `agent` is granted on a model of `family`, narrowed by the
+    /// parent's grant: the whole grant, the part behind `load_tools` (`None`:
+    /// each tool's own default), and the denied patterns.
+    pub(crate) async fn grants(
+        &self,
+        agent: &crate::agents::Agent,
+        family: &str,
+        parent: Option<String>,
+    ) -> Result<(Vec<String>, Option<Vec<String>>, Vec<String>)> {
+        let listed = !agent.tools.is_empty() || !agent.loadable.is_empty();
+        let mut grant: Vec<String> = if !listed {
             otto_tools::registry::tools_for_family(family)
                 .iter()
                 .map(|t| t.spec().name.clone())
@@ -318,26 +371,32 @@ impl Runtime {
                 .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
                 .collect()
         } else {
-            agent.tools.clone()
+            agent.tools.iter().chain(&agent.loadable).cloned().collect()
         };
+        let mut loadable = listed.then(|| agent.loadable.clone());
         let mut denied = agent.disallowed.clone();
         if let Some(parent) = parent {
             let parent = self.db(move |s| Ok(s.session(&parent)?.ok_or(Error::Closed)?.meta)).await?;
             if let Some(allowed) = parent["tools"].as_array() {
-                grant.retain(|tool| allowed.iter().filter_map(|v| v.as_str()).any(|p| crate::tools::pattern(p, tool)));
+                let allowed = |tool: &String| allowed.iter().filter_map(|v| v.as_str()).any(|p| crate::tools::pattern(p, tool));
+                grant.retain(allowed);
+                loadable.iter_mut().for_each(|l| l.retain(allowed));
             }
             denied.extend(parent["denied_tools"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)));
         }
-        grant.retain(|tool| !denied.iter().any(|d| crate::tools::pattern(d, tool)));
-        if otto_tools::registry::tools_for_family(family)
-            .into_iter()
-            .chain(self.extra_tools())
-            .any(|tool| tool.spec().loading == otto_tools::Loading::Deferred && grant.contains(&tool.spec().name))
+        let kept = |tool: &String| !denied.iter().any(|d| crate::tools::pattern(d, tool));
+        grant.retain(kept);
+        loadable.iter_mut().for_each(|l| l.retain(kept));
+        if (loadable.as_ref().is_some_and(|l| !l.is_empty())
+            || otto_tools::registry::tools_for_family(family)
+                .into_iter()
+                .chain(self.extra_tools())
+                .any(|tool| tool.spec().loading == otto_tools::Loading::Deferred && grant.contains(&tool.spec().name)))
             && !grant.iter().any(|name| name == "load_tools")
         {
             grant.push("load_tools".into());
         }
-        Ok((grant, denied))
+        Ok((grant, loadable, denied))
     }
     pub async fn session(&self, id: &str) -> Result<SessionHandle> {
         let mut actors = self.0.actors.lock().await;
@@ -564,11 +623,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         id: row.id,
         project_id: row.project_id,
         parent_id: row.parent_id,
-        approval_mode: if row.agent == "plan" {
-            otto_proto::ApprovalMode::Plan
-        } else {
-            serde_json::from_value(row.meta["approval_mode"].clone()).unwrap_or_default()
-        },
+        approval_mode: approval_mode(&row.meta),
         agent: row.agent,
         provider: row.provider,
         model: row.model,
@@ -586,6 +641,17 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         last_seq: row.last_seq,
         usage: UsageTotals { usage: usage.usage, cost_usd: usage.cost_usd },
     })
+}
+/// The session's approval mode; a value otto no longer has (`plan`) reads as the default, `auto`.
+pub(crate) fn approval_mode(meta: &serde_json::Value) -> otto_proto::ApprovalMode {
+    serde_json::from_value(meta["approval_mode"].clone()).unwrap_or_default()
+}
+pub(crate) fn policy_mode(mode: otto_proto::ApprovalMode) -> otto_tools::policy::ApprovalMode {
+    match mode {
+        otto_proto::ApprovalMode::Auto => otto_tools::policy::ApprovalMode::Auto,
+        otto_proto::ApprovalMode::AskOnEffects => otto_tools::policy::ApprovalMode::AskOnEffects,
+        otto_proto::ApprovalMode::AskAll => otto_tools::policy::ApprovalMode::AskAll,
+    }
 }
 /// When the items' timed parts ran, from the journal (`SessionView.part_times`).
 pub(crate) fn part_times(s: &Store, id: &str, items: &[otto_llm::Item]) -> Result<Vec<otto_proto::PartTime>> {

@@ -113,8 +113,6 @@ fn copy_attachment_goes_through_the_path_policy() {
         rules: vec![Rule { tool: "copy_attachment".into(), pattern: Some("**/secret/**".into()), decision: RuleDecision::Deny }],
     };
     assert!(matches!(deny.decide(tool.spec(), &json!({"attachment_id":"x","path":"secret/a.png"}), &cx), Decision::Deny { .. }));
-    let plan = Policy { mode: ApprovalMode::Plan, rules: vec![] };
-    assert!(matches!(plan.decide(tool.spec(), &json!({"attachment_id":"x","path":"a.png"}), &cx), Decision::Deny { .. }));
 }
 
 #[test]

@@ -3,7 +3,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +19,12 @@ use tokio::{
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 pub type Events = broadcast::Receiver<Result<ServerMessage>>;
+
+/// A bidirectional byte stream a connection runs over (a socket, a tunnel stream).
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stream for T {}
+/// Opens a fresh stream to the daemon; a dialed connection reconnects through it.
+pub type Dial = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Box<dyn Stream>>> + Send + 'static>> + Send + Sync>;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ClientError {
@@ -59,7 +67,11 @@ struct Inner {
     events: broadcast::Sender<Result<ServerMessage>>,
     shutdown: watch::Sender<bool>,
     hello: ServerHello,
-    home: Option<PathBuf>,
+    redial: Option<Redial>,
+}
+enum Redial {
+    Home(PathBuf),
+    Dial(Dial),
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -100,7 +112,15 @@ impl Connection {
         })
         .await
         .map_err(|_| ClientError::Timeout)??;
-        Arc::get_mut(&mut conn.inner).expect("new connection").home = Some(home.to_owned());
+        Arc::get_mut(&mut conn.inner).expect("new connection").redial = Some(Redial::Home(home.to_owned()));
+        Ok(conn)
+    }
+    /// Connect over a stream from `dial`; `reconnect` dials again.
+    /// # Errors
+    /// Dial failure, transport, malformed hello, or protocol incompatibility.
+    pub async fn connect_dial(dial: Dial) -> Result<Self> {
+        let mut conn = Self::connect_stream(dial().await?).await?;
+        Arc::get_mut(&mut conn.inner).expect("new connection").redial = Some(Redial::Dial(dial));
         Ok(conn)
     }
     /// # Errors
@@ -183,7 +203,7 @@ impl Connection {
             }
             let _ = e.send(Err(error));
         });
-        Ok(Self { inner: Arc::new(Inner { tx, pending, next: AtomicU64::new(1), events, shutdown, hello, home: None }) })
+        Ok(Self { inner: Arc::new(Inner { tx, pending, next: AtomicU64::new(1), events, shutdown, hello, redial: None }) })
     }
     #[must_use]
     pub fn hello(&self) -> &ServerHello {
@@ -207,9 +227,12 @@ impl Connection {
         self.inner.pending.lock().unwrap().is_none()
     }
     /// # Errors
-    /// No local transport, or reconnect failure. Tunnels supply a new connection to the follower.
+    /// Neither a home nor a dialer to reconnect through, or reconnect failure.
     pub async fn reconnect(&self) -> Result<Self> {
-        Self::connect(self.inner.home.as_deref().ok_or(ClientError::NoReconnect)?).await
+        match self.inner.redial.as_ref().ok_or(ClientError::NoReconnect)? {
+            Redial::Home(home) => Self::connect(home).await,
+            Redial::Dial(dial) => Self::connect_dial(dial.clone()).await,
+        }
     }
     /// # Errors
     /// Serialization, frame limit, transport, or server error.
@@ -294,6 +317,28 @@ impl Connection {
     }
     pub async fn commands_list(&self, project_root: Option<String>) -> Result<Vec<CommandInfo>> {
         self.call_typed(Method::CommandsList { project_root }).await
+    }
+    /// Paths under `cwd` matching an `@` mention's `query`, best first (folders end in `/`).
+    pub async fn files_complete(&self, cwd: &str, query: &str, limit: u32) -> Result<Vec<FileMatch>> {
+        self.call_typed(Method::FilesComplete { cwd: cwd.into(), query: query.into(), limit }).await
+    }
+    pub async fn agents_list(&self) -> Result<Vec<AgentInfo>> {
+        self.call_typed(Method::AgentsList {}).await
+    }
+    /// An agent as discovery resolves it; project definitions need `cwd`.
+    pub async fn agents_get(&self, name: &str, cwd: Option<String>) -> Result<AgentDef> {
+        self.call_typed(Method::AgentsGet { name: name.into(), cwd }).await
+    }
+    /// Write a user or project definition; a different `previous_name` removes that scope's old file.
+    pub async fn agents_save(&self, agent: AgentDef, previous_name: Option<String>, cwd: Option<String>) -> Result<AgentDef> {
+        self.call_typed(Method::AgentsSave { agent, previous_name, cwd }).await
+    }
+    pub async fn agents_delete(&self, name: &str, scope: AgentScope, cwd: Option<String>) -> Result<Empty> {
+        self.call_typed(Method::AgentsDelete { name: name.into(), scope, cwd }).await
+    }
+    /// Every tool an agent can be granted, with `cwd`'s MCP tools.
+    pub async fn tools_catalog(&self, cwd: Option<String>) -> Result<Vec<ToolCatalogEntry>> {
+        self.call_typed(Method::ToolsCatalog { cwd }).await
     }
     pub async fn approval_answer(&self, session_id: &str, approval_id: &str, decision: ApprovalDecision, note: Option<String>) -> Result<Empty> {
         self.call_typed(Method::ApprovalAnswer { session_id: session_id.into(), approval_id: approval_id.into(), decision, note }).await

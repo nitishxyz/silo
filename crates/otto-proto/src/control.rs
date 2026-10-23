@@ -63,6 +63,9 @@ pub struct ServerHello {
     pub pid: u32,
     pub started_at: i64,
     pub client_id: String,
+    /// The daemon user's home directory, for shortening paths.
+    #[serde(default)]
+    pub home: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -87,8 +90,14 @@ pub enum Method {
     ApiDescribe { method: String },
     #[serde(rename = "ping")]
     Ping {},
+    /// A non-empty `root` as given; else `cwd`'s git toplevel (or `cwd`); else the daemon user's home.
     #[serde(rename = "project.open")]
-    ProjectOpen { root: String },
+    ProjectOpen {
+        #[serde(default)]
+        root: String,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     #[serde(rename = "project.list")]
     ProjectList {},
     #[serde(rename = "session.create")]
@@ -205,12 +214,35 @@ pub enum Method {
     ToolsList { session_id: Option<SessionId> },
     #[serde(rename = "agents.list")]
     AgentsList {},
+    /// One agent as discovery resolves it; project definitions need `cwd`.
+    #[serde(rename = "agents.get")]
+    AgentsGet { name: String, cwd: Option<String> },
+    /// Write a user (`<config>/agents/<name>.md`) or project (`<cwd>/.otto/agents/<name>.md`)
+    /// definition; a different `previous_name` removes that scope's old file (rename, clone).
+    #[serde(rename = "agents.save")]
+    AgentsSave { agent: AgentDef, previous_name: Option<String>, cwd: Option<String> },
+    /// Remove a user or project definition (resetting an override of a built-in).
+    #[serde(rename = "agents.delete")]
+    AgentsDelete { name: String, scope: AgentScope, cwd: Option<String> },
+    /// Every tool an agent can list: built-ins for the default model's family, extras, and `cwd`'s MCP tools.
+    #[serde(rename = "tools.catalog")]
+    ToolsCatalog { cwd: Option<String> },
     /// Skills the `skill` tool can load; project skills need `project_root`.
     #[serde(rename = "skills.list")]
     SkillsList { project_root: Option<String> },
     /// Slash commands (`/name arguments`); project commands need `project_root`.
     #[serde(rename = "commands.list")]
     CommandsList { project_root: Option<String> },
+    /// Files and folders under `cwd` for an `@` mention, best match first
+    /// (`.gitignore` respected; folders end in `/`).
+    #[serde(rename = "files.complete")]
+    FilesComplete {
+        cwd: String,
+        #[serde(default)]
+        query: String,
+        #[serde(default = "file_limit")]
+        limit: u32,
+    },
     #[serde(rename = "config.get")]
     ConfigGet { key: Option<String> },
     #[serde(rename = "config.set")]
@@ -236,7 +268,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("api.list", "List supported methods."),
     ("api.describe", "Parameter and result schemas and an example request."),
     ("ping", "Probe server liveness."),
-    ("project.open", "Open or register a project root."),
+    ("project.open", "Open or register a project: root, else cwd's git root, else home."),
     ("project.list", "List registered projects."),
     ("session.create", "Create a session in a project."),
     ("session.list", "List sessions, optionally including archived sessions."),
@@ -246,7 +278,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.fork", "Fork a session at a durable sequence boundary."),
     ("session.rename", "Change a session title."),
     ("session.update", "Change a session's provider, model, agent or reasoning effort from its next model request."),
-    ("session.set_mode", "Change approval mode for subsequent tool calls; plan agents remain read-only."),
+    ("session.set_mode", "Change approval mode for subsequent tool calls."),
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),
     ("attachment.put", "Store a file for the session's prompts; large files in chunks."),
@@ -265,8 +297,13 @@ pub const METHODS: &[(&str, &str)] = &[
     ("auth.logout", "Remove provider credentials."),
     ("tools.list", "List tools available to a session."),
     ("agents.list", "List agent definitions."),
+    ("agents.get", "Read an agent definition."),
+    ("agents.save", "Write a user or project agent definition; rename or clone with previous_name."),
+    ("agents.delete", "Delete a user or project agent definition."),
+    ("tools.catalog", "List every tool an agent can be granted."),
     ("skills.list", "List skills."),
     ("commands.list", "List slash commands."),
+    ("files.complete", "Complete a project path for an @ mention."),
     ("config.get", "Read a configuration key, or all configuration."),
     ("config.set", "Set a configuration key."),
 ];
@@ -299,6 +336,10 @@ impl TryFrom<RawRequest> for Request {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Empty {}
+
+fn file_limit() -> u32 {
+    50
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ApiMethod {
@@ -345,7 +386,16 @@ pub enum LoginResult {
         /// `auth.login_complete` without a code waits for the browser or device approval.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         needs_code: bool,
+        /// The loopback the provider redirects the browser to; a remote client forwards it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback: Option<LoginCallback>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LoginCallback {
+    pub port: u16,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

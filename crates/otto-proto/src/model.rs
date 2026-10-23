@@ -1,6 +1,6 @@
 //! Snapshot and input types; timestamps and sequences match the durable journal.
 
-use otto_llm::{Effort, Item, Usage};
+use otto_llm::{Effort, Item, MentionKind, Usage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,7 +42,6 @@ pub enum ApprovalMode {
     Auto,
     AskOnEffects,
     AskAll,
-    Plan,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -89,6 +88,20 @@ pub enum InputPart {
     Attachment {
         id: String,
     },
+    /// `@target` at this point of the text: an agent or a project path (a
+    /// folder ends in `/`). The model gets a note naming them; the user item
+    /// keeps them as `Item::mentions`.
+    Mention {
+        kind: MentionKind,
+        target: String,
+    },
+}
+
+/// A `files.complete` match: a path relative to `cwd`, folders ending in `/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileMatch {
+    pub path: String,
+    pub dir: bool,
 }
 
 /// A file the user attached to a session (`attachment.put`); kept until the
@@ -244,4 +257,56 @@ pub struct AgentInfo {
     pub description: String,
     pub model: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub scope: AgentScope,
+}
+
+/// Where an agent definition comes from: built in, the user's `agents/`, or the
+/// project's `.otto/agents/` (and `.claude/agents/`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentScope {
+    #[default]
+    Builtin,
+    User,
+    Project,
+}
+
+/// An agent definition (`agents.get` / `agents.save`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentDef {
+    pub name: String,
+    pub description: String,
+    /// `provider/model` or a model id; `None` inherits.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub approval_mode: Option<ApprovalMode>,
+    pub prompt: String,
+    /// Tools shown to the model: names and `prefix*` patterns. With `loadable`
+    /// also empty, every tool, each with its own default loading.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Tools granted behind `load_tools`.
+    #[serde(default)]
+    pub loadable: Vec<String>,
+    /// Removed from the grant (`disallowedTools`).
+    #[serde(default)]
+    pub disallowed: Vec<String>,
+    pub scope: AgentScope,
+    /// A user or project definition named like a built-in.
+    #[serde(default)]
+    pub overrides_builtin: bool,
+}
+
+/// A tool an agent can list (`tools.catalog`).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ToolCatalogEntry {
+    pub name: String,
+    /// The first sentence of its description.
+    pub description: String,
+    /// `builtin`, `silo`, `mcp:<server>` or `ext:<plugin>`.
+    pub source: String,
+    /// The tool's own default: `default` (shown) or `deferred` (behind `load_tools`).
+    pub loading: String,
+    pub effects: Vec<String>,
 }

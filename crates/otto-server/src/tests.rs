@@ -50,8 +50,19 @@ impl AuthService for NoAuth {
     fn status(&self) -> AuthFuture<'_, Vec<AuthStatus>> {
         Box::pin(async { Ok(vec![]) })
     }
-    fn login(&self, _: String, _: AuthMode, _: Option<String>, device: bool, _: Option<String>) -> AuthFuture<'_, LoginResult> {
+    fn login(&self, provider: String, mode: AuthMode, _: Option<String>, device: bool, _: Option<String>) -> AuthFuture<'_, LoginResult> {
         Box::pin(async move {
+            if provider == "openai" && mode == AuthMode::Subscription && !device {
+                return Ok(LoginResult::Pending {
+                    url: "https://example.test/authorize".into(),
+                    login_id: "browser".into(),
+                    user_code: None,
+                    verification_uri: None,
+                    interval_secs: None,
+                    needs_code: false,
+                    callback: Some(LoginCallback { port: 1455, path: "/auth/callback".into() }),
+                });
+            }
             if !device {
                 return Err(RpcError::auth_required("test"));
             }
@@ -62,6 +73,7 @@ impl AuthService for NoAuth {
                 verification_uri: Some("https://example.test/device".into()),
                 interval_secs: Some(5),
                 needs_code: false,
+                callback: None,
             })
         })
     }
@@ -185,6 +197,62 @@ async fn hello_api_validation_lock_and_shutdown() {
     server.serve_forever().await.unwrap();
     assert!(!paths::socket(f.dir.path()).exists());
     assert!(!paths::runtime(f.dir.path()).exists());
+}
+
+#[tokio::test]
+async fn hello_carries_home() {
+    let f = Fixture::new(vec![]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    assert_eq!(client.hello().home, std::env::var("HOME").unwrap());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_login_reports_its_callback() {
+    let f = Fixture::new(vec![]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let login = |device| Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device, base_url: None };
+    let browser: LoginResult = client.call_typed(login(false)).await.unwrap();
+    assert!(matches!(browser, LoginResult::Pending { callback: Some(LoginCallback { port: 1455, ref path }), .. } if path == "/auth/callback"));
+    let device = client.call(login(true)).await.unwrap();
+    assert!(device.get("callback").is_none(), "{device}");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn project_open_resolves_cwd_to_git_root() {
+    let f = Fixture::new(vec![]).await;
+    let repo = f.dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+    assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).status().unwrap().success());
+    let plain = f.dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let open =
+        |root: &str, cwd: Option<&std::path::Path>| Method::ProjectOpen { root: root.into(), cwd: cwd.map(|c| c.to_string_lossy().into_owned()) };
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+    let project: ProjectInfo = client.call_typed(open("", Some(&repo.join("src/deep")))).await.unwrap();
+    assert_eq!(project.root, canonical(&repo));
+    let project: ProjectInfo = client.call_typed(open("", Some(&plain))).await.unwrap();
+    assert_eq!(project.root, canonical(&plain));
+    // A given root wins over cwd.
+    let project: ProjectInfo = client.call_typed(open(&plain.to_string_lossy(), Some(&repo))).await.unwrap();
+    assert_eq!(project.root, canonical(&plain));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_project_open_is_home() {
+    let f = Fixture::new(vec![]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let project: ProjectInfo = client.call_typed(serde_json::from_value(json!({"method":"project.open","params":{}})).unwrap()).await.unwrap();
+    let home = std::fs::canonicalize(std::env::var("HOME").unwrap()).unwrap();
+    assert_eq!(project.root, home.to_string_lossy());
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -118,8 +118,6 @@ fn policy_modes_rules_and_redaction() {
     policy.rules.push(Rule { tool: "wri*".into(), pattern: None, decision: RuleDecision::Allow });
     assert_eq!(policy.decide(write.spec(), &json!({"path":"a"}), &context), Decision::Allow);
     assert!(matches!(policy.decide(write.spec(), &json!({"path":"../outside"}), &context), Decision::Ask { .. }));
-    policy.mode = ApprovalMode::Plan;
-    assert!(matches!(policy.decide(write.spec(), &json!({"path":"a"}), &context), Decision::Deny { .. }));
     policy.mode = ApprovalMode::Auto;
     assert_eq!(policy.decide(write.spec(), &json!({"path":"../outside"}), &context), Decision::Allow);
     policy.mode = ApprovalMode::AskAll;

@@ -68,8 +68,11 @@ fn result_schema(method: &Method) -> Schema {
         M::AuthLoginComplete { .. } => schema_for!(AuthStatus),
         M::ToolsList { .. } => schema_for!(Vec<ToolInfo>),
         M::AgentsList {} => schema_for!(Vec<AgentInfo>),
+        M::AgentsGet { .. } | M::AgentsSave { .. } => schema_for!(AgentDef),
+        M::ToolsCatalog { .. } => schema_for!(Vec<ToolCatalogEntry>),
         M::SkillsList { .. } => schema_for!(Vec<SkillInfo>),
         M::CommandsList { .. } => schema_for!(Vec<CommandInfo>),
+        M::FilesComplete { .. } => schema_for!(Vec<FileMatch>),
         M::ConfigGet { .. } => schema_for!(ConfigValue),
         M::ServerShutdown {}
         | M::Ping {}
@@ -86,6 +89,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::QuestionAnswer { .. }
         | M::AuthLoginCancel { .. }
         | M::AuthLogout { .. }
+        | M::AgentsDelete { .. }
         | M::ConfigSet { .. } => schema_for!(Empty),
     }
 }
@@ -100,7 +104,7 @@ pub fn examples() -> Vec<Method> {
         M::ApiList {},
         M::ApiDescribe { method: "session.prompt".into() },
         M::Ping {},
-        M::ProjectOpen { root: "/work/project".into() },
+        M::ProjectOpen { root: String::new(), cwd: Some("/work/project/src".into()) },
         M::ProjectList {},
         M::SessionCreate {
             project_root: Some("/work/project".into()),
@@ -127,7 +131,7 @@ pub fn examples() -> Vec<Method> {
             effort: Some(otto_llm::Effort::High),
             reset_effort: false,
         },
-        M::SessionSetMode { session_id: "s1".into(), approval_mode: crate::model::ApprovalMode::Plan },
+        M::SessionSetMode { session_id: "s1".into(), approval_mode: crate::model::ApprovalMode::AskOnEffects },
         M::SessionArchive { session_id: "s1".into() },
         M::SessionPrompt { session_id: "s1".into(), input: vec![InputPart::Text { text: "Review this project".into() }], delivery: Delivery::Queue },
         M::AttachmentPut {
@@ -152,8 +156,29 @@ pub fn examples() -> Vec<Method> {
         M::AuthLogout { provider: "openai".into() },
         M::ToolsList { session_id: Some("s1".into()) },
         M::AgentsList {},
+        M::AgentsGet { name: "reviewer".into(), cwd: Some("/work/project".into()) },
+        M::AgentsSave {
+            agent: AgentDef {
+                name: "reviewer".into(),
+                description: "Reviews changes".into(),
+                model: Some("anthropic/claude-sonnet-5-5".into()),
+                effort: Some("high".into()),
+                approval_mode: None,
+                prompt: "Review the diff and report problems.".into(),
+                tools: vec!["read".into(), "search".into()],
+                loadable: vec!["mcp__github__*".into()],
+                disallowed: vec![],
+                scope: AgentScope::Project,
+                overrides_builtin: false,
+            },
+            previous_name: None,
+            cwd: Some("/work/project".into()),
+        },
+        M::AgentsDelete { name: "reviewer".into(), scope: AgentScope::Project, cwd: Some("/work/project".into()) },
+        M::ToolsCatalog { cwd: Some("/work/project".into()) },
         M::SkillsList { project_root: Some("/work/project".into()) },
         M::CommandsList { project_root: Some("/work/project".into()) },
+        M::FilesComplete { cwd: "/work/project".into(), query: "src/ma".into(), limit: 50 },
         M::ConfigGet { key: None },
         M::ConfigSet { key: "model".into(), value: json!("example-model") },
     ]

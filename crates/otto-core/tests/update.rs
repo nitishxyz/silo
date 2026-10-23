@@ -204,18 +204,33 @@ async fn update_rejects_unknown_agent_model_and_signed_out_provider() {
 }
 
 #[tokio::test]
-async fn agent_update_regrants_tools_and_plan_stays_read_only() {
-    let a = Scripted::new("a", false, None, vec![call("w", "write", serde_json::json!({"path":"file","content":"bad"})), text("done")]);
-    let f = fixture(vec![a.clone()]).await;
-    let s = f.session(CreateSession::default()).await;
-    let info = f.runtime.configure(&s.id, Configure { agent: Some("plan".into()), ..Default::default() }).await.unwrap();
-    assert_eq!((info.agent.as_str(), info.approval_mode), ("plan", otto_proto::ApprovalMode::Plan));
-    assert!(f.runtime.set_approval_mode(&s.id, otto_proto::ApprovalMode::Auto).await.is_err());
+async fn an_agent_brings_its_model_effort_and_mode_at_start_and_on_change() {
+    let a = Scripted::new("a", true, None, vec![text("one")]);
+    let b = Scripted::new("b", true, None, vec![text("two"), text("three")]);
+    let f = fixture(vec![a.clone(), b.clone()]).await;
+    let agents = f.dir.path().join(".otto/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("deep.md"), "---\nmodel: test/b\neffort: high\napproval_mode: ask_all\ntools: read\n---\nThink.").unwrap();
+    std::fs::write(agents.join("bare.md"), "---\neffort: low\n---\nx").unwrap();
+    let s = f.session(CreateSession { agent: "deep".into(), ..Default::default() }).await;
+    let info = s.view().await.unwrap().info;
+    assert_eq!((info.model.as_str(), info.effort, info.approval_mode), ("b", Some(Effort::High), otto_proto::ApprovalMode::AskAll));
     turn(&f.runtime, &s).await;
-    assert!(!f.dir.path().join("file").exists());
-    assert!(matches!(&s.view().await.unwrap().items[2].parts[0], Part::ToolResult { is_error: true, .. }));
-    let info = f.runtime.configure(&s.id, Configure { agent: Some("build".into()), ..Default::default() }).await.unwrap();
-    assert_ne!(info.approval_mode, otto_proto::ApprovalMode::Plan);
+    assert_eq!(b.requests()[0].reasoning, Some(Reasoning::Effort(Effort::High)));
+    assert_eq!(b.requests()[0].tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["read"]);
+    // An agent without a model keeps the session's.
+    let info = f.runtime.configure(&s.id, Configure { agent: Some("bare".into()), ..Default::default() }).await.unwrap();
+    assert_eq!((info.model.as_str(), info.effort), ("b", Some(Effort::Low)));
+    let plain = f.session(CreateSession::default()).await;
+    let info = f.runtime.configure(&plain.id, Configure { agent: Some("deep".into()), ..Default::default() }).await.unwrap();
+    assert_eq!((info.agent.as_str(), info.model.as_str(), info.effort), ("deep", "b", Some(Effort::High)));
+    assert_eq!(info.approval_mode, otto_proto::ApprovalMode::AskAll);
+    turn(&f.runtime, &plain).await;
+    assert_eq!(b.requests().len(), 2);
+    // A model given with the agent wins over the agent's.
+    let info =
+        f.runtime.configure(&plain.id, Configure { agent: Some("build".into()), model: Some("a".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(info.model, "a");
     f.runtime.shutdown().await.unwrap();
 }
 

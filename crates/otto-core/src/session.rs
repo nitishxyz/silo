@@ -255,11 +255,7 @@ pub(crate) async fn spawn(runtime: Runtime, row: otto_store::Session) -> Result<
     let root = runtime.db(move |s| Ok(s.project(&project)?.ok_or(Error::Closed)?.root)).await?;
     let root = std::path::PathBuf::from(root);
     let system = crate::prompt::assemble(&root, std::path::Path::new(&row.cwd), &runtime.0.config.user_config_dir, &row.agent);
-    let mode = if row.agent == "plan" {
-        otto_tools::policy::ApprovalMode::Plan
-    } else {
-        serde_json::from_value(row.meta["approval_mode"].clone()).unwrap_or(otto_tools::policy::ApprovalMode::Auto)
-    };
+    let mode = crate::runtime::policy_mode(crate::runtime::approval_mode(&row.meta));
     let policy = otto_tools::policy::Policy::load(&root.join(".otto/rules.json"), &runtime.0.config.user_config_dir.join("rules.json"), mode)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     let (tx, rx) = mpsc::channel(128);
@@ -345,7 +341,6 @@ async fn actor(
             command=rx.recv()=>{let Some(command)=command else {cancel.cancel();break};match command {
                 Command::Tools(reply)=>{let _=reply.send(crate::tools::infos(cx.clone()).await);}
                 Command::SetMode(mode,reply)=>{
-                    if cx.live().row.agent=="plan"&&mode!=ApprovalMode::Plan{let _=reply.send(Err(Error::Invalid("plan agents cannot leave plan mode".into())));continue;}
                     let id=cx.row.id.clone();
                     let result=cx.runtime.db(move|s|{
                         let mut row=s.session(&id)?.ok_or(Error::Closed)?;
@@ -356,7 +351,7 @@ async fn actor(
                         let seq=s.append_with_session(&id,crate::runtime::record(&event,turn,0)?,Projection::None,otto_store::SessionUpdate{meta:Some(meta),..Default::default()})?;
                         Ok(((seq,event),row))
                     }).await;
-                    let result=result.map(|(event,row)|{cx.set_row(row);state.policy.mode=match mode{ApprovalMode::Auto=>otto_tools::policy::ApprovalMode::Auto,ApprovalMode::AskOnEffects=>otto_tools::policy::ApprovalMode::AskOnEffects,ApprovalMode::AskAll=>otto_tools::policy::ApprovalMode::AskAll,ApprovalMode::Plan=>otto_tools::policy::ApprovalMode::Plan};let _=cx.events.send(event);cx.runtime.changed();});
+                    let result=result.map(|(event,row)|{cx.set_row(row);state.policy.mode=crate::runtime::policy_mode(mode);let _=cx.events.send(event);cx.runtime.changed();});
                     let _=reply.send(result);
                 }
                 Command::Configure(change,reply)=>{let result=configure(&cx,&mut state,turn,change).await;let _=reply.send(result);}
@@ -399,13 +394,26 @@ async fn actor(
 }
 /// Apply `session.update`. A running turn picks it up at its next step; a new
 /// model drops the old one's provider-side state (one connection per model).
+/// A new agent brings its model (unless one is given), effort and approval mode.
 async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::Configure) -> Result<SessionInfo> {
     let live = cx.live();
     let current = &live.row;
-    let provider = change.provider.unwrap_or_else(|| current.provider.clone());
-    let model_id = change.model.unwrap_or_else(|| current.model.clone());
     let agent_name = change.agent.unwrap_or_else(|| current.agent.clone());
-    let (model_changed, agent_changed) = (provider != current.provider || model_id != current.model, agent_name != current.agent);
+    let agent_changed = agent_name != current.agent;
+    let user = &cx.runtime.0.config.user_config_dir;
+    let find = || {
+        crate::agents::discover(&cx.root, user)
+            .into_iter()
+            .find(|a| a.name == agent_name)
+            .ok_or_else(|| Error::Invalid(format!("unknown agent {agent_name}")))
+    };
+    let new_agent = if agent_changed { Some(find()?) } else { None };
+    let agent_model = new_agent.as_ref().and_then(|a| a.model.as_deref()).map(|m| m.split_once('/').map_or((None, m), |(p, m)| (Some(p), m)));
+    let (provider, model_id) = match (change.provider, change.model, agent_model) {
+        (None, None, Some((provider, model))) => (provider.unwrap_or(&current.provider).to_owned(), model.to_owned()),
+        (provider, model, _) => (provider.unwrap_or_else(|| current.provider.clone()), model.unwrap_or_else(|| current.model.clone())),
+    };
+    let model_changed = provider != current.provider || model_id != current.model;
     let models = &cx.runtime.0.config.models;
     let model = if model_changed {
         let listed = models.list();
@@ -416,20 +424,20 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
     } else {
         live.model.clone()
     };
-    let user = &cx.runtime.0.config.user_config_dir;
     let mut meta = if current.meta.is_object() { current.meta.clone() } else { serde_json::json!({}) };
     let mut system = live.system.clone();
     if agent_changed || model_changed || change.reset_effort {
-        let agent = crate::agents::discover(&cx.root, user)
-            .into_iter()
-            .find(|a| a.name == agent_name)
-            .ok_or_else(|| Error::Invalid(format!("unknown agent {agent_name}")))?;
+        let agent = match new_agent {
+            Some(agent) => agent,
+            None => find()?,
+        };
         if change.reset_effort {
             meta["effort"] = serde_json::json!(agent.effort);
         }
         let family = crate::session::family(model.as_ref());
-        let (grant, denied) = cx.runtime.grants(&agent, &family, current.parent_id.clone()).await?;
+        let (grant, loadable, denied) = cx.runtime.grants(&agent, &family, current.parent_id.clone()).await?;
         meta["tools"] = serde_json::json!(grant);
+        meta["loadable"] = serde_json::json!(loadable);
         meta["denied_tools"] = serde_json::json!(denied);
         if agent_changed {
             if let Some(effort) = &agent.effort {
@@ -437,8 +445,6 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
             }
             if let Some(mode) = agent.approval_mode {
                 meta["approval_mode"] = serde_json::to_value(mode)?;
-            } else if current.agent == "plan" && meta["approval_mode"] == "plan" {
-                meta["approval_mode"] = cx.runtime.defaults().approval_mode.map(serde_json::to_value).transpose()?.unwrap_or_default();
             }
             system = crate::prompt::assemble(&cx.root, std::path::Path::new(&current.cwd), user, &agent_name);
         }
@@ -470,11 +476,7 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
         })
         .await?;
     if agent_changed {
-        state.policy.mode = if agent_name == "plan" {
-            otto_tools::policy::ApprovalMode::Plan
-        } else {
-            serde_json::from_value(row.meta["approval_mode"].clone()).unwrap_or(otto_tools::policy::ApprovalMode::Auto)
-        };
+        state.policy.mode = crate::runtime::policy_mode(crate::runtime::approval_mode(&row.meta));
     }
     cx.set_live(Live { row, model, system });
     let _ = cx.events.send(event);

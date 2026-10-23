@@ -14,7 +14,15 @@ async fn hello(s: &mut DuplexStream) {
         s,
         &Frame::json(
             kind::HELLO,
-            &ServerHello { protocol: PROTOCOL, version: "test".into(), server_id: "server".into(), pid: 1, started_at: 0, client_id: "c".into() },
+            &ServerHello {
+                protocol: PROTOCOL,
+                version: "test".into(),
+                server_id: "server".into(),
+                pid: 1,
+                started_at: 0,
+                client_id: "c".into(),
+                home: "/home/u".into(),
+            },
         )
         .unwrap(),
     )
@@ -157,6 +165,56 @@ async fn follower_resyncs_gap_and_replacement() {
     .unwrap();
     task.await.unwrap();
 }
+#[tokio::test]
+async fn connection_reconnects_through_its_dialer() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let dials = Arc::new(AtomicUsize::new(0));
+    let counter = dials.clone();
+    let dial: Dial = Arc::new(move || {
+        let n = counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let (client, mut server) = tokio::io::duplex(8192);
+            tokio::spawn(async move {
+                hello(&mut server).await;
+                if n == 0 {
+                    let r = request(&mut server).await;
+                    assert!(matches!(r.method, Method::SessionView { .. }));
+                    response(&mut server, r.id, serde_json::to_value(view(0)).unwrap()).await;
+                    let r = request(&mut server).await;
+                    assert!(matches!(r.method, Method::SessionSubscribe { after_seq: Some(0), .. }));
+                    event(&mut server, 1, Event::TurnStarted { turn: 1 }).await;
+                    response(&mut server, r.id, json!({"session_id":"s","seq":1})).await;
+                    // Dropping the stream drops the connection.
+                } else {
+                    let r = request(&mut server).await;
+                    assert!(matches!(r.method, Method::SessionSubscribe { after_seq: Some(1), .. }), "resumes from last_seq");
+                    event(&mut server, 2, Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage::default() }).await;
+                    response(&mut server, r.id, json!({"session_id":"s","seq":2})).await;
+                    while read_frame(&mut server).await.is_ok_and(|f| f.is_some()) {}
+                }
+            });
+            Ok(Box::new(client) as Box<dyn Stream>)
+        })
+    });
+    let connection = Connection::connect_dial(dial).await.unwrap();
+    let follower = SessionFollower::new(connection, "s").await.unwrap();
+    let mut changes = follower.changes();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if changes.borrow().mirror.last_seq == 2 && changes.borrow().connected {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(changes.borrow().mirror.turn, Some((1, TurnStatus::Done)));
+    assert_eq!(dials.load(Ordering::SeqCst), 2);
+}
 #[test]
 fn mirror_script_matches_snapshot_and_deduplicates() {
     let mut m = SessionMirror::new(view(0));
@@ -234,7 +292,15 @@ async fn rejects_incompatible_hello() {
             &mut server,
             &Frame::json(
                 kind::HELLO,
-                &ServerHello { protocol: PROTOCOL + 1, version: "test".into(), server_id: "s".into(), pid: 1, started_at: 0, client_id: "c".into() },
+                &ServerHello {
+                    protocol: PROTOCOL + 1,
+                    version: "test".into(),
+                    server_id: "s".into(),
+                    pid: 1,
+                    started_at: 0,
+                    client_id: "c".into(),
+                    home: String::new(),
+                },
             )
             .unwrap(),
         )

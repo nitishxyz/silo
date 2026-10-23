@@ -10,7 +10,6 @@ pub enum ApprovalMode {
     Auto,
     AskOnEffects,
     AskAll,
-    Plan,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -175,9 +174,6 @@ impl Policy {
         Ok(Prepared { decision, input, resolved })
     }
     pub fn decide(&self, spec: &ToolSpec, input: &Value, cx: &ToolCx) -> Decision {
-        if self.mode == ApprovalMode::Plan && !spec.effects.read_only() {
-            return Decision::Deny { reason: "Plan mode permits only read-only tools".into() };
-        }
         let mut paths = Vec::new();
         if spec.name == "apply_patch" {
             let patch = input.as_str().or_else(|| input.get("input").or_else(|| input.get("patch")).and_then(Value::as_str)).unwrap_or("");

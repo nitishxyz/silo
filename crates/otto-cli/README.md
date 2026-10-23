@@ -11,18 +11,16 @@ start `otto-silo server --daemon` automatically when needed.
 - `server status` / `server stop`: inspect or stop an existing daemon; these do
   not start one.
 - `run [--model provider/model] [--agent NAME] [--session ID | --continue]
-  [--approve auto|ask|ask-all|plan] [--json] [--show-reasoning] PROMPT`: submit a durable
+  [--approve auto|ask|ask-all] [--json] [--show-reasoning] PROMPT`: submit a durable
   turn. Standard input is appended to the prompt; `-` reads only standard input.
   `--continue` chooses the most recently updated session for the git toplevel
   (or current directory). Approval defaults to `auto` ("yolo"); deny rules still
   apply. `ask` and `ask-all` handle daemon approval requests interactively; without
   a TTY they deny with a message. `--approve` sets server-side policy on creation
   and switches it before prompting with `--session` or `--continue`; no daemon
-  configuration is needed. `plan` creates a read-only plan agent for new sessions,
-  or switches an existing non-plan agent to Plan. Plan agents cannot leave Plan.
-  The run header and session listing show the current approval mode.
+  configuration is needed. The run header and session listing show the current approval mode.
   Ctrl-C sends cancellation and exits 130.
-- `session mode ID auto|ask|ask-all|plan`: durably switch a session's approval
+- `session mode ID auto|ask|ask-all`: durably switch a session's approval
   policy for subsequent tool calls. Existing calls keep their prepared decision.
 - `sessions [--all]`: list current-project sessions or every registered project,
   including archived sessions with `--all`.

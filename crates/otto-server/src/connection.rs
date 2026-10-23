@@ -74,6 +74,7 @@ pub(crate) async fn serve(state: Arc<State>, mut stream: UnixStream, mut index: 
             pid: info.pid,
             started_at: info.started_at,
             client_id: uuid::Uuid::new_v4().to_string(),
+            home: crate::dispatch::user_home(),
         };
         write_frame(&mut stream, &Frame::json(kind::HELLO, &hello)?).await
     };

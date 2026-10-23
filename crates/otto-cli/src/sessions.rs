@@ -18,8 +18,8 @@ pub struct RunArgs {
     pub session: Option<String>,
     #[arg(long = "continue")]
     pub resume: bool,
-    /// Approval handling: auto (default), ask (on effects), ask-all, or plan.
-    #[arg(long, default_value = "auto", value_parser = ["auto", "ask", "ask-all", "plan"])]
+    /// Approval handling: auto (default), ask (on effects), or ask-all.
+    #[arg(long, default_value = "auto", value_parser = ["auto", "ask", "ask-all"])]
     pub approve: String,
     #[arg(long)]
     pub json: bool,
@@ -43,10 +43,10 @@ pub struct AttachArgs {
 }
 #[derive(Subcommand)]
 pub enum SessionCommand {
-    /// Set the approval mode: auto (default), ask, ask-all or plan.
+    /// Set the approval mode: auto (default), ask or ask-all.
     Mode {
         id: String,
-        #[arg(value_parser=["auto","ask","ask-all","plan"])]
+        #[arg(value_parser=["auto","ask","ask-all"])]
         mode: String,
     },
     /// Rename a session.
@@ -75,17 +75,12 @@ fn approval_mode(value: &str) -> otto_proto::ApprovalMode {
     match value {
         "ask" => otto_proto::ApprovalMode::AskOnEffects,
         "ask-all" => otto_proto::ApprovalMode::AskAll,
-        "plan" => otto_proto::ApprovalMode::Plan,
         _ => otto_proto::ApprovalMode::Auto,
     }
 }
 async fn project(connection: &Connection) -> Result<otto_proto::ProjectInfo> {
-    let output = tokio::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output().await;
-    let root = match output {
-        Ok(output) if output.status.success() => String::from_utf8(output.stdout)?.trim().to_owned(),
-        _ => std::env::current_dir()?.to_string_lossy().into_owned(),
-    };
-    Ok(connection.call_typed(Method::ProjectOpen { root }).await?)
+    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+    Ok(connection.call_typed(Method::ProjectOpen { root: String::new(), cwd: Some(cwd) }).await?)
 }
 pub async fn list(all: bool) -> Result<()> {
     let c = crate::daemon::connect().await?;
@@ -158,12 +153,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .map(|s| s.split_once('/').ok_or_else(|| anyhow::anyhow!("--model must be provider/model")))
             .transpose()?
             .map_or((None, None), |(p, m)| (Some(p.into()), Some(m.into())));
-        let agent = if args.approve == "plan" { Some("plan".into()) } else { args.agent };
         c.session_create(SessionCreateOptions {
             project_id: Some(project.id),
             provider,
             model,
-            agent,
+            agent: args.agent,
             approval_mode: Some(mode),
             title: Some(text.chars().take(80).collect()),
             ..Default::default()
@@ -250,8 +244,6 @@ async fn watch(
                 }
                 let (decision, note) = if options.approve == "auto" {
                     (ApprovalDecision::Allow, None)
-                } else if options.approve == "plan" {
-                    (ApprovalDecision::Deny, None)
                 } else if io::stdin().is_terminal() {
                     approval_reply(&crate::prompt(&format!("{} [y/n/a=always; optional ': note']", approval.summary), false).await?)
                 } else {

@@ -2,6 +2,7 @@
 
 mod attachments;
 mod builtins;
+mod complete;
 mod patch;
 mod patch_edges;
 mod policy;

@@ -75,7 +75,7 @@ impl Effects {
     pub const PROCESS: Self = Self { read: true, write: true, process: true, ..Self::NONE };
     pub const NETWORK: Self = Self { network: true, ..Self::NONE };
 
-    /// Read-only: allowed in plan mode.
+    /// Read-only: no approval in `ask_on_effects`.
     #[must_use]
     pub fn read_only(&self) -> bool {
         !(self.write || self.process || self.external || self.secrets)

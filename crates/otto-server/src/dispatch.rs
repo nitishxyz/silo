@@ -21,6 +21,33 @@ pub(crate) fn core_error(error: otto_core::Error) -> RpcError {
     }
 }
 
+/// The daemon user's home directory.
+pub(crate) fn user_home() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+}
+
+/// `project.open`: a non-empty `root`; else `cwd`'s git toplevel, else `cwd`; else home.
+async fn project_root(root: String, cwd: Option<String>) -> String {
+    if !root.is_empty() {
+        return root;
+    }
+    let Some(cwd) = cwd.filter(|c| !c.is_empty()) else { return user_home() };
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|r| !r.is_empty()).unwrap_or(cwd)
+        }
+        _ => cwd,
+    }
+}
+
 pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &Subs) -> Result<Value, RpcError> {
     let runtime = &state.config.runtime;
     match method {
@@ -33,7 +60,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
                 .collect::<Vec<_>>()
         )),
         Method::ApiDescribe { method } => Ok(json!(api::describe(&method).ok_or_else(|| RpcError::method_not_found(&method))?)),
-        Method::ProjectOpen { root } => Ok(json!(runtime.open_project(root).await.map_err(core_error)?)),
+        Method::ProjectOpen { root, cwd } => Ok(json!(runtime.open_project(project_root(root, cwd).await).await.map_err(core_error)?)),
         Method::ProjectList {} => Ok(json!(runtime.recent_projects().await.map_err(core_error)?)),
         Method::SessionCreate { project_root, project_id, agent, approval_mode, model, provider, title, parent, effort } => {
             let project = match (project_root, project_id) {
@@ -183,8 +210,20 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!(runtime.tools(&id).await.map_err(core_error)?))
         }
         Method::AgentsList {} => Ok(json!(runtime.agents(None))),
+        Method::AgentsGet { name, cwd } => Ok(json!(runtime.agent(&name, cwd.as_deref().map(std::path::Path::new)).map_err(core_error)?)),
+        Method::AgentsSave { agent, previous_name, cwd } => {
+            Ok(json!(runtime.save_agent(&agent, previous_name.as_deref(), cwd.as_deref().map(std::path::Path::new)).map_err(core_error)?))
+        }
+        Method::AgentsDelete { name, scope, cwd } => {
+            runtime.delete_agent(&name, scope, cwd.as_deref().map(std::path::Path::new)).map_err(core_error)?;
+            Ok(json!({}))
+        }
+        Method::ToolsCatalog { cwd } => Ok(json!(runtime.tool_catalog(cwd.as_deref().map(std::path::Path::new)).await)),
         Method::SkillsList { project_root } => Ok(json!(runtime.skills(project_root.as_deref().map(std::path::Path::new)))),
         Method::CommandsList { project_root } => Ok(json!(runtime.commands(project_root.as_deref().map(std::path::Path::new)))),
+        Method::FilesComplete { cwd, query, limit } => {
+            Ok(json!(runtime.complete_files(cwd, query, usize::try_from(limit).unwrap_or(usize::MAX)).await.map_err(core_error)?))
+        }
         Method::ConfigGet { key } => {
             let settings = state.settings.lock().await;
             Ok(json!(ConfigValue { value: key.map_or_else(|| settings.clone(), |key| settings.get(key).cloned().unwrap_or(Value::Null)) }))

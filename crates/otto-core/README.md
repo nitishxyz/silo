@@ -33,7 +33,7 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
 - `set_approval_mode(session_id: &str, mode: otto_proto::ApprovalMode) -> Result<()>`
   durably changes policy for subsequent tool preparation. SessionChanged and
   SessionInfo expose the mode. Existing prepared/gated calls retain their decision.
-  Plan agents always report Plan and reject attempts to leave it.
+  A stored mode otto no longer has (`plan`) reads as Auto.
 - `session(id) -> Result<SessionHandle>` starts a persisted session lazily.
 - `list_sessions(project, include_archived) -> Result<Vec<SessionInfo>>`.
 - `list_projects() -> Result<Vec<ProjectInfo>>` lists durable project records.
@@ -44,6 +44,9 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
 - Synchronous `agents(project_root: Option<&Path>) -> Vec<AgentInfo>` applies the
   configured user directory and optional project overrides; `skills(..)` and
   `commands(..)` list skills and slash commands the same way.
+- `agent(name, project_root)`, `save_agent(&AgentDef, previous_name, project_root)`
+  and `delete_agent(name, scope, project_root)` read and edit definitions
+  (`agents.get/save/delete`); `tool_catalog(project_root)` lists every grantable tool.
 - `add_source(Arc<dyn otto_tools::ProjectSources>)` adds project-dependent tools
   (MCP via `otto-mcp`), listed again before every model request and granted by
   pattern (`mcp__*` by default). `shutdown` stops them.
@@ -60,10 +63,10 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
   opts new sessions into provider-native compaction.
 - Synchronous `set_config(SessionDefaults) -> Result<()>` replaces new-session
   defaults (`agent`, `provider`, `model`, `approval_mode`, all optional). Explicit
-  creation options and agent model overrides take priority; plan agents remain
-  read-only. Existing sessions retain their settings. None restores Auto ("yolo"):
+  creation options and agent model overrides take priority.
+  Existing sessions retain their settings. None restores Auto ("yolo"):
   effect approvals do not prompt, but deny rules still block tools. Explicit
-  AskOnEffects, AskAll, and Plan remain available. User questions still require
+  AskOnEffects and AskAll remain available. User questions still require
   an answer; Auto is not permission to invent answers.
 - `answer_approval_with_note(id, approval_id, decision, Option<String>)` persists
   the note as an ItemDone system item before resolving the approval. The handle
@@ -82,8 +85,8 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
   (`session.update`): each step reads one snapshot of the session's model, agent and
   meta, so a change applies at the next model request. A new provider/model resolves
   a new model instance (dropping its provider-side state) and regrants tools for the
-  model's family; a new agent regrants tools, reassembles the prompt and keeps Plan
-  read-only. `CreateSession.effort` / meta `effort` reach requests as
+  model's family; a new agent brings its model (unless one is given), effort and
+  approval mode, regrants tools and reassembles the prompt. `CreateSession.effort` / meta `effort` reach requests as
   `Reasoning::Effort` only for models with `caps.reasoning`.
 - `set_auto_title(true)` (the daemon enables it) names untitled sessions after their
   first finished turn with one call to the provider's cheapest priced model, else the
@@ -169,9 +172,10 @@ hooks permits its commands to execute.
 `.claude/commands`, then user `commands` (subfolders: `folder:name`), with
 `$ARGUMENTS`, `$1`…`$9`, or the arguments appended. Skills come from user
 `skills/`, `.claude/skills`, `.agents/skills`, `.otto/skills`. Agents come from user
-`agents/`, `.claude/agents`, `.otto/agents` with `tools`/`disallowedTools` (Claude
-Code names mapped, `prefix*` patterns), `model` (`inherit`), `effort`, and
-`approval_mode`/`permissionMode`.
+`agents/`, `.claude/agents`, `.otto/agents` with `tools` (shown), `loadable` (behind
+`load_tools`), `disallowedTools` (Claude Code names mapped, `prefix*` patterns),
+`model` (`inherit`), `effort`, and `approval_mode`/`permissionMode`. The only
+built-in is `build`.
 
 ## Subagents and outbox
 

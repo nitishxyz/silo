@@ -163,7 +163,7 @@ What this means for the design:
 | `otto-server` | Daemon: transport, auth, methods, event fan-out | `silo-transport` only |
 | `otto-silo-tools` | `ToolSource` over a silo control connection | `silo-client` |
 | `otto-client` | Connection + session mirror reducer for the GPUI block and CLI | no |
-| `otto-cli` | The `otto-silo` binary: server + CLI in one, like `silo` | – |
+| `otto-cli` | The `otto-silo` binary: server + CLI in one, like `silo`; also a library (`otto_cli::main_from`) embedded in `silo` as the hidden `silo otto …` | – |
 
 The harness library stays usable without silo, and silo integration lives in one adapter crate. The silo side
 gets `silo-proto/src/tools.rs` plus `tools.*` methods (§6).
@@ -175,6 +175,7 @@ names differ from the final ones, so nothing clashes with the TS `otto` already 
 |---|---|---|
 | Binary | `otto-silo` | `otto` |
 | State dir | `~/Library/Application Support/otto-silo`, `$XDG_STATE_HOME/otto-silo`; override `OTTO_SILO_HOME` | `otto` |
+| User config | `$XDG_CONFIG_HOME/otto-silo`, else `~/.config/otto-silo` (agents, skills, commands, hooks, `mcp.json`, `rules.json`, `AGENTS.md`); override `OTTO_SILO_CONFIG_DIR`. Its own, not shared with the TS otto's `~/.config/otto` | `otto` |
 | Project dir | `.otto/` read-only for agents, skills and commands (shared with the TS otto); otto-silo state in `.otto-silo/` | `.otto/` |
 | Socket | `<state>/server.sock` | – |
 
@@ -454,6 +455,11 @@ pub struct ToolSpec {
   names persist in session metadata (`loaded_tools`), independently for each child. Direct calls to granted
   unloaded tools still run, and `tools.list` includes deferred tools. Native tool search with `defer_loading` is
   not used yet.
+- **Shown or loadable is per agent.** An agent's `tools` are shown to the model and its `loadable` sit behind
+  `load_tools` (names and `prefix*` patterns; the longest matching pattern decides, a tie goes to shown); a tool
+  in neither is not granted. With both empty (the built-in `build`) every tool of the family is granted with
+  its own default (`Loading`). Session meta `tools` is the whole grant, `loadable` the deferred part (absent:
+  each tool's default).
 - **Async tools**: native `async: true` on OpenAI. Elsewhere the call returns a job handle; the result is injected
   later as a system item, plus a `wait` tool.
 
@@ -489,11 +495,24 @@ pub struct ToolSpec {
   created, an existing file refused unless `overwrite`), effects `write`, so the path policy and approvals apply.
   It finds the session's attachments, then its ancestors'. Returns the path and size. A grant fixed before it
   existed (sessions created earlier, agents listing `write`) reaches it through `write`.
+- **Mentions** (`otto-core/src/step.rs`): `InputPart::Mention {kind: agent|file, target}` stands for `@target` at
+  its place in the text (a folder ends in `/`). Text and mentions in a row become one text part; the user item keeps
+  `mentions: [{kind, target, range: [start, end] of Item::text, missing?}]`, so replay keeps the chips. `missing`:
+  no such agent for the project, or no such path under the session's folder (inside it only). At request time the
+  item gets one note after its text, for the found ones only: `Mentioned agents: build. Delegate the matching part
+  with subagent {agent:"build"}.` and `Mentioned files: src/main.rs, docs/ (paths relative to the project; read them
+  as needed).` Contents are never inlined. A native steer sends the note with it.
+- **`files.complete {cwd, query, limit = 50}`** → `[{path, dir}]` (`otto-tools/src/complete.rs`): files and
+  folders under `cwd` for an `@` popup, `.gitignore` respected (`ignore`, as `glob`/`search`), `.git` skipped, at
+  most 20k entries walked, limit capped at 200. Fuzzy subsequence on the relative path, a basename match first,
+  shallower and shorter paths ahead; an empty query lists shallow entries. A query naming an existing folder
+  (`src/ma`) matches the rest inside it. Served by otto so it works where the agent runs.
 
 ### 5.2 Policy
 
 - Approval modes: `auto` (**default**, "yolo": nothing prompts; deny rules still apply), `ask-on-effects`
-  (write/process/external need approval unless a rule allows it), `ask-all`, `plan` (read-only). Decision 7.
+  (write/process/external need approval unless a rule allows it), `ask-all`. Decision 7. There is no plan mode:
+  a stored session whose mode is `plan` (or whose agent was the removed `plan` built-in) opens in `auto`.
 - Rules: `{tool, arg pattern, decision}`, e.g. `shell: "cargo test*" → allow`, stored per project and per user.
   "Always allow" answers write rules.
 - Canonical path resolution (symlinks, `~`, project/reference/outside) runs before guards and before the approval
@@ -698,10 +717,19 @@ nav/aside/header/footer; a candidate with under 200 characters and under a third
 
 - **Project** (root, config, instructions from `AGENTS.md`/`CLAUDE.md`), **Session** (agent, model, parent, cwd),
   **Turn** (one user input until the model stops), **Step** (one model call + its tool calls).
-- **Agents** as markdown with frontmatter (`name, description, model, tools, disallowedTools, effort,
+- **Agents** as markdown with frontmatter (`name, description, model, tools, loadable, disallowedTools, effort,
   approval_mode`/`permissionMode`) in user `agents/`, `.claude/agents/` and `.otto/agents/` (later wins).
   Claude Code tool names map to otto's (`Read`→`read`, `Bash`→`shell`, …), `model: inherit` keeps the session's
-  model, `*` suffixes grant prefixes. Built-ins: `build`, `plan`, `general`, `research`.
+  model, `*` suffixes grant prefixes. The only built-in is `build`. A session started with an agent, or switched
+  to one, takes its model (unless one is given), effort and approval mode.
+  - `agents.get {name, cwd?}` → `AgentDef {name, description, model, effort, approval_mode, prompt, tools,
+    loadable, disallowed, scope: builtin|user|project, overrides_builtin}`; `agents.save {agent, previous_name?,
+    cwd?}` writes `<config>/agents/<name>.md` (user) or `<cwd>/.otto/agents/<name>.md` (project) and returns it
+    read back; a different `previous_name` removes that scope's old file (rename; clone is a save under a new
+    name). Names are 1–64 of `[A-Za-z0-9_-]`. `agents.delete {name, scope, cwd?}` removes the file the scope's
+    definition was read from (`.claude/agents` counts as project); deleting an override of `build` resets it,
+    the built-in itself can't be deleted. `tools.catalog {cwd?}` lists every grantable tool (the default
+    model's family, `skill`, `subagent`, extras, `cwd`'s MCP tools) with its own default loading.
 - **Skills**: `SKILL.md` folders (user `skills/`, `.claude/skills`, `.agents/skills`, `.otto/skills`), loaded on
   demand by the `skill` tool with their folder path; names and descriptions only in the prompt;
   `disable-model-invocation` hides one from the model. `skills.list` lists them.
@@ -768,8 +796,9 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   boundary, or a new turn starts when it is idle. The item and its acknowledgement commit in one transaction, so
   each entry is delivered exactly once. `Runtime::deliver_pending` (daemon start) wakes parents whose children
   finished while they were closed. This is the record remote delegation (§12.2) will reuse.
-- `delegate {task, agent?, session_id?}` (reuse), `list`, `status`, `message{queue|steer|interrupt}`, `stop`,
-  `retry`; depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
+- `delegate {task, agent, session_id?}` (reuse), `list`, `status`, `message{queue|steer|interrupt}`, `stop`,
+  `retry`; `agent` is required (the tool lists the agents; a missing or unknown one is an error naming them);
+  depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
   tool set = the agent's set ∩ the parent's grant, minus both deny lists.
 - **User takeover.** A client's `session.prompt` / `session.cancel` / `queue_update` to a child are the user's
   (the parent's tool calls and its cancel cascade are not). User input marks the child (`meta.user`: `steered`, or
@@ -812,7 +841,12 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 - Methods (sketch): `server.info`, `api.list/describe`, `project.open/list`, `session.create/list/view/fork/rename/
   archive`, `session.prompt {input, attachments, delivery: queue|steer|interrupt}`, `session.cancel`,
   `session.compact`, `approval.answer`, `question.answer`, `model.list`, `auth.status/login/logout`,
-  `tools.list`, `agents.list`, `skills.list`, `config.get/set`, `subagent.*`.
+  `tools.list`, `tools.catalog`, `agents.list/get/save/delete`, `skills.list`, `config.get/set`, `subagent.*`.
+- For remote clients (additive): the server hello carries `home`, the daemon user's home directory (for shortening
+  paths); `project.open {root?, cwd?}` takes a non-empty `root` as is, else resolves `cwd`'s git toplevel on the
+  server (falling back to `cwd`), else opens the daemon user's home; a pending `auth.login` reports
+  `callback: {port, path}` when the provider redirects the browser to a loopback listener (OpenAI's browser
+  login: `{1455, "/auth/callback"}`), so a client on another machine can forward it.
 - Events: `session.changed`, `turn.started/finished`, `item.started`, `text.delta`, `reasoning.delta`,
   `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
   `question.asked`, `usage`, `compaction`, `subagent.changed`, `queue.changed`, `error`.
@@ -832,6 +866,34 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   - Auth: tunnels already need control · server (PHASE7 §3.4), which is shell access as the user, so a tunneled
     connection is owner on otto. For attribution, silo writes a one-line `TunnelPeer {device, label}` preamble
     before the bytes on service tunnels. Otto trusts it only on its own socket, from its own uid.
+  - As built (phase 1): `silo_server::Config.services` maps names to a `ServiceFn` returning the socket path
+    (15 s limit); unknown names get `not_found`, an error or a dead socket `unavailable`. Service tunnels splice
+    with no idle limit (TCP ones keep 10 minutes). A server with `"otto"` adds the hello feature `otto`. No
+    `TunnelPeer` preamble yet. Client side, `silo_client::tunnel::TunnelDialer` (one cached connection per host)
+    opens TCP and service streams for the browser proxy and the agent block.
+  - Remote OAuth sign-in: `silo_client::callback::CallbackForward` listens on `127.0.0.1` and `[::1]` at the
+    login's callback port while the login is pending (ttl), forwards only `GET <path>[?…]` to the remote's
+    `127.0.0.1:<port>` through the dialer (404 for anything else, 4 connections, 30 s idle), and stops when dropped.
+    A taken port is `PortBusy`.
+- **otto is embedded in `silo`** (phase 1): `silo otto <args…>` (hidden) runs `otto_cli::main_from` before silo's
+  own runtime and logging, so tarballs, `silo update`, remote upgrade and install all carry otto. `silo server`
+  registers the `"otto"` service: it starts `silo otto server --daemon` (own process group, `SILO_HOME` set to
+  the server's home) in the default otto home through `otto_client::ensure_started`, and returns its socket. A
+  running daemon of an older version is asked to stop (`server.shutdown`) once none of its sessions is busy or
+  waiting for approval, then the current one starts; while one is busy the old daemon keeps serving. A daemon
+  with another protocol is not touched (it idles out). Processes otto starts itself (the daemon, the catalog
+  refresh) run `<exe> otto …` when embedded. Clients reach a remote daemon with `Connection::connect_dial(Dial)`,
+  which reconnects through the same dialer; a follower retries with a 250 ms to 5 s backoff.
+- **The remote agent flow** (A = the Mac, B = a paired host):
+  1. B's `silo server` registers `"otto"` and advertises feature `otto`; A's app routes that host's agent blocks to
+     `Otto::Remote{id}`.
+  2. A opens `open_service("otto")` on B's `TunnelDialer`; B's server starts its embedded daemon if needed and
+     splices the stream to its socket. A runs `Connection::connect_dial` over it (`hello.home` is B's home).
+  3. Everything runs on B: sessions, tools, commands, and `auth.login` credentials (B's otto home only).
+  4. A browser sign-in answers `Pending{url, callback}`: A opens the URL and runs `CallbackForward` on the callback's
+     port until the login completes, so the provider's redirect reaches B's loopback listener.
+  5. A dropped tunnel redials through the same dialer, and followers resume from `last_seq`.
+  Tested end to end in `silo-cli/tests/remote_agent.rs`.
 - A new `BlockKind::Agent` whose server-side state is `{otto_session_id}`. The GPUI block (`otto-client` mirror +
   renderer) talks to otto directly, through the tunnel when remote. Silo only places it in the layout and shows
   status (busy, needs approval, done) through the Phase 7 status channel.
@@ -899,7 +961,7 @@ the harness; A survives a restart mid-task and resubscribes.
 | 4 | First providers | Anthropic and OpenAI (API key and subscription each); others in O3 |
 | 5 | Naming | `otto-silo` binary and state dir for this version, crates `otto-*` in this workspace; rename to `otto` later (§3.1) |
 | 6 | History ownership | Our log is the truth (`store=false` by default); provider-side state is only a cache (§7.3) |
-| 7 | Default approval mode | `auto` ("yolo"). The other modes stay one flag or config value away; plan agents are always read-only (§5.2) |
+| 7 | Default approval mode | `auto` ("yolo"). The other modes stay one flag or config value away (§5.2) |
 | 8 | Parked blocks' home | The user's current session, next to the agent block (§6.2) |
 | 9 | Command block retention | None: a command block lives as long as its command; otto keeps the text. Background shells are for finite work (tests, builds) whose result arrives later; servers and watchers run in terminals. Hidden terminals close with the agent session, revealed ones stay (§6.2) |
 

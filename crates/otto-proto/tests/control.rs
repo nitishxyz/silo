@@ -79,3 +79,54 @@ fn live_wire_is_unsequenced_restricted_and_ignored_by_old_clients() {
     invalid["after_seq"] = json!(-1);
     assert!(serde_json::from_value::<ServerMessage>(invalid).is_err());
 }
+
+#[test]
+fn agent_shapes_and_no_plan_mode() {
+    use otto_proto::{AgentDef, AgentInfo, AgentScope};
+    let info: AgentInfo = serde_json::from_value(json!({"name": "build", "description": "", "model": null, "provider": null})).unwrap();
+    assert_eq!(info.scope, AgentScope::Builtin);
+    let request: Request =
+        serde_json::from_value(json!({"id": 1, "method": "agents.delete", "params": {"name": "x", "scope": "project", "cwd": "/p"}})).unwrap();
+    assert!(matches!(request.method, Method::AgentsDelete { scope: AgentScope::Project, .. }));
+    let def: AgentDef = serde_json::from_value(json!({
+        "name": "x", "description": "", "model": null, "effort": null, "approval_mode": "ask_all", "prompt": "", "scope": "user"
+    }))
+    .unwrap();
+    assert!(def.tools.is_empty() && def.loadable.is_empty() && !def.overrides_builtin);
+    let wire = serde_json::to_value(&def).unwrap();
+    for key in ["tools", "loadable", "disallowed", "overrides_builtin", "approval_mode", "scope"] {
+        assert!(wire.get(key).is_some(), "{key}");
+    }
+    let plan = json!({"id": 1, "method": "session.set_mode", "params": {"session_id": "s", "approval_mode": "plan"}});
+    assert!(serde_json::from_value::<Request>(plan).is_err());
+}
+
+#[test]
+fn mention_and_file_complete_shapes() {
+    use otto_proto::{FileMatch, InputPart, Item, Mention, MentionKind};
+    let input = vec![
+        InputPart::Text { text: "ask ".into() },
+        InputPart::Mention { kind: MentionKind::Agent, target: "build".into() },
+        InputPart::Mention { kind: MentionKind::File, target: "docs/".into() },
+    ];
+    let wire = serde_json::to_value(&input).unwrap();
+    assert_eq!(
+        wire,
+        json!([{"type": "text", "text": "ask "}, {"type": "mention", "kind": "agent", "target": "build"}, {"type": "mention", "kind": "file", "target": "docs/"}])
+    );
+    assert_eq!(serde_json::from_value::<Vec<InputPart>>(wire).unwrap(), input);
+    let request: Request = serde_json::from_value(json!({"id": 1, "method": "files.complete", "params": {"cwd": "/p"}})).unwrap();
+    assert!(matches!(request.method, Method::FilesComplete { ref query, limit: 50, .. } if query.is_empty()));
+    assert_eq!(serde_json::to_value(FileMatch { path: "src/".into(), dir: true }).unwrap(), json!({"path": "src/", "dir": true}));
+    // Items without mentions keep their old shape; a missing target says so.
+    let mut item = Item::user_text("u1", "ask @build");
+    assert!(serde_json::to_value(&item).unwrap().get("mentions").is_none());
+    item.mentions.push(Mention { kind: MentionKind::Agent, target: "build".into(), range: [4, 10], missing: false });
+    item.mentions.push(Mention { kind: MentionKind::File, target: "gone.rs".into(), range: [0, 0], missing: true });
+    let wire = serde_json::to_value(&item).unwrap();
+    assert_eq!(
+        wire["mentions"],
+        json!([{"kind": "agent", "target": "build", "range": [4, 10]}, {"kind": "file", "target": "gone.rs", "range": [0, 0], "missing": true}])
+    );
+    assert_eq!(serde_json::from_value::<Item>(wire).unwrap(), item);
+}

@@ -17,15 +17,18 @@ pub fn home() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()).map_or_else(|| user_home.join(".local/state"), PathBuf::from).join(BINARY)
 }
 
-/// User-level agents, skills, hooks and `AGENTS.md`, shared with the TS otto:
-/// `$OTTO_SILO_CONFIG_DIR`, else `$XDG_CONFIG_HOME/otto`, else `~/.config/otto`.
+/// User-level agents, skills, hooks and `AGENTS.md`, this harness's own (not the TS otto's):
+/// `$OTTO_SILO_CONFIG_DIR`, else `$XDG_CONFIG_HOME/otto-silo`, else `~/.config/otto-silo`.
 #[must_use]
 pub fn user_config() -> PathBuf {
-    if let Some(dir) = std::env::var_os(format!("{ENV_PREFIX}_CONFIG_DIR")).filter(|d| !d.is_empty()) {
+    user_config_in(|name| std::env::var_os(name))
+}
+fn user_config_in(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = var(&format!("{ENV_PREFIX}_CONFIG_DIR")).filter(|d| !d.is_empty()) {
         return dir.into();
     }
-    let user_home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).map_or_else(|| user_home.join(".config"), PathBuf::from).join("otto")
+    let user_home = var("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    var("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).map_or_else(|| user_home.join(".config"), PathBuf::from).join(BINARY)
 }
 
 #[must_use]
@@ -67,4 +70,19 @@ pub struct Runtime {
     pub version: String,
     pub server_id: String,
     pub started_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn user_config_prefers_env_then_xdg_then_home() {
+        fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+            move |name| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(*v))
+        }
+        assert_eq!(user_config_in(env(&[("OTTO_SILO_CONFIG_DIR", "/c"), ("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), PathBuf::from("/c"));
+        assert_eq!(user_config_in(env(&[("OTTO_SILO_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), PathBuf::from("/x/otto-silo"));
+        assert_eq!(user_config_in(env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])), PathBuf::from("/h/.config/otto-silo"));
+        assert_eq!(user_config_in(env(&[("HOME", "/h")])), PathBuf::from("/h/.config/otto-silo"));
+    }
 }

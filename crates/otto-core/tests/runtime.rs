@@ -154,30 +154,163 @@ async fn live_mode_change_applies_to_next_call_and_is_journaled() {
     let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
     prompt(&s).await;
     loop {
-        if let Event::QuestionAsked { question_id, .. } = live.recv().await.unwrap().1 {
-            r.set_approval_mode(&s.id, otto_proto::ApprovalMode::Plan).await.unwrap();
-            assert_eq!(s.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::Plan);
-            s.answer_question(&question_id, "yes".into()).await.unwrap();
-            break;
+        match live.recv().await.unwrap().1 {
+            Event::QuestionAsked { question_id, .. } => {
+                r.set_approval_mode(&s.id, otto_proto::ApprovalMode::AskOnEffects).await.unwrap();
+                assert_eq!(s.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::AskOnEffects);
+                s.answer_question(&question_id, "yes".into()).await.unwrap();
+            }
+            Event::ApprovalRequested { approval_id, .. } => {
+                s.answer_approval(&approval_id, ApprovalDecision::Deny).await.unwrap();
+                break;
+            }
+            _ => {}
         }
     }
     finish(&mut live).await;
     assert!(!dir.path().join("blocked").exists());
     let (events, _) = r.subscribe(&s.id, 0).await.unwrap();
-    assert!(events.iter().any(|(_, e)| matches!(e,Event::SessionChanged{info} if info.approval_mode==otto_proto::ApprovalMode::Plan)));
-    let project = s.view().await.unwrap().info.project_id;
-    let plan = r
-        .create_session(CreateSession {
-            project_id: project,
-            cwd: dir.path().into(),
+    assert!(events.iter().any(|(_, e)| matches!(e,Event::SessionChanged{info} if info.approval_mode==otto_proto::ApprovalMode::AskOnEffects)));
+    r.shutdown().await.unwrap();
+}
+
+/// A session stored by an otto that had the `plan` agent and mode still opens and runs.
+#[tokio::test]
+async fn an_old_plan_session_opens_as_auto() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let project = store.create_project(dir.path().to_str().unwrap()).unwrap();
+    let row = store
+        .create_session(otto_store::NewSession {
+            project_id: project.id.clone(),
+            parent_id: None,
             agent: "plan".into(),
-            approval_mode: Some(otto_proto::ApprovalMode::Auto),
+            model: "test".into(),
+            provider: "test".into(),
+            title: String::new(),
+            cwd: dir.path().to_string_lossy().into(),
+            meta: serde_json::json!({"tools":["read","write"],"denied_tools":[],"approval_mode":"plan"}),
+        })
+        .unwrap();
+    let model = ScriptedModel::new(vec![vec![call("w", "write", serde_json::json!({"path":"file","content":"ok"}))], text("done")]);
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(store)),
+        models: Arc::new(Resolver(model.clone())),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    let listed = r.list_sessions(&project.id, false).await.unwrap();
+    assert_eq!((listed[0].agent.as_str(), listed[0].approval_mode), ("plan", otto_proto::ApprovalMode::Auto));
+    let s = r.session(&row.id).await.unwrap();
+    assert_eq!(s.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::Auto);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    assert!(dir.path().join("file").exists());
+    let mut tools: Vec<_> = model.requests.lock().unwrap()[0].tools.iter().map(|t| t.name.clone()).collect();
+    tools.sort();
+    // `copy_attachment` comes with `write`, behind `load_tools`.
+    assert_eq!(tools, ["load_tools", "read", "write"]);
+    let info = r.configure(&s.id, Configure { agent: Some("build".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(info.agent, "build");
+    r.shutdown().await.unwrap();
+}
+
+fn write_agent(dir: &std::path::Path, name: &str, frontmatter: &str) {
+    std::fs::create_dir_all(dir.join(".otto/agents")).unwrap();
+    std::fs::write(dir.join(format!(".otto/agents/{name}.md")), format!("---\n{frontmatter}\n---\nWork.")).unwrap();
+}
+
+/// `tools` are shown, `loadable` wait behind `load_tools`, whatever each tool's own default;
+/// an agent listing neither gets every tool with its own default.
+#[tokio::test]
+async fn agents_choose_shown_and_loadable_tools() {
+    let (dir, r, _, model) =
+        setup(vec![vec![call("load", "load_tools", serde_json::json!({"names":["search"]}))], text("done"), text("done")], "build").await;
+    r.add_tools(vec![deferred_tool()]);
+    write_agent(dir.path(), "picky", "tools: read, browser_test, mcp__gh__issue\nloadable: search, mcp__*");
+    write_agent(dir.path(), "lazy", "loadable: read");
+    let project = r.list_projects().await.unwrap()[0].id.clone();
+    let session = |agent: &str| {
+        r.create_session(CreateSession { project_id: project.clone(), cwd: dir.path().into(), agent: agent.into(), ..Default::default() })
+    };
+    let picky = session("picky").await.unwrap();
+    let mut granted: Vec<_> = r.tools(&picky.id).await.unwrap().into_iter().map(|t| t.name).collect();
+    granted.sort();
+    assert_eq!(granted, ["browser_test", "load_tools", "read", "search"]);
+    let (_, mut live) = r.subscribe(&picky.id, 0).await.unwrap();
+    prompt(&picky).await;
+    finish(&mut live).await;
+    {
+        let requests = model.requests.lock().unwrap();
+        let names = |i: usize| {
+            let mut names: Vec<_> = requests[i].tools.iter().map(|t| t.name.clone()).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(0), ["browser_test", "load_tools", "read"]);
+        assert!(requests[0].tools.iter().any(|t| t.name == "load_tools" && t.description.contains("search:")));
+        assert_eq!(names(1), ["browser_test", "read", "search"]);
+    }
+    let lazy = session("lazy").await.unwrap();
+    let mut granted: Vec<_> = r.tools(&lazy.id).await.unwrap().into_iter().map(|t| t.name).collect();
+    granted.sort();
+    assert_eq!(granted, ["load_tools", "read"]);
+    let build = session("build").await.unwrap();
+    let (_, mut live) = r.subscribe(&build.id, 0).await.unwrap();
+    prompt(&build).await;
+    finish(&mut live).await;
+    let names: Vec<_> = model.requests.lock().unwrap()[2].tools.iter().map(|t| t.name.clone()).collect();
+    assert!(["read", "subagent", "load_tools"].iter().all(|n| names.iter().any(|m| m == n)));
+    assert!(!names.iter().any(|n| n == "browser_test" || n == "web_search"));
+    r.shutdown().await.unwrap();
+}
+
+/// A child's grant, shown and loadable alike, stays within its parent's.
+#[tokio::test]
+async fn a_child_agent_is_narrowed_to_its_parent() {
+    let (dir, r, _, _) = setup(vec![], "build").await;
+    write_agent(dir.path(), "narrow", "tools: read, subagent, web_fetch\ndisallowedTools: shell");
+    write_agent(dir.path(), "wide", "tools: read, write, shell\nloadable: search, web_fetch");
+    let project = r.list_projects().await.unwrap()[0].id.clone();
+    let create = |agent: &str, parent: Option<String>| {
+        r.create_session(CreateSession {
+            project_id: project.clone(),
+            cwd: dir.path().into(),
+            agent: agent.into(),
+            parent_id: parent,
             ..Default::default()
         })
-        .await
-        .unwrap();
-    assert_eq!(plan.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::Plan);
-    assert!(r.set_approval_mode(&plan.id, otto_proto::ApprovalMode::Auto).await.is_err());
+    };
+    let parent = create("narrow", None).await.unwrap();
+    let child = create("wide", Some(parent.id.clone())).await.unwrap();
+    let mut granted: Vec<_> = r.tools(&child.id).await.unwrap().into_iter().map(|t| t.name).collect();
+    granted.sort();
+    // `web_search` comes with the `web_fetch` grant.
+    assert_eq!(granted, ["load_tools", "read", "web_fetch", "web_search"]);
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegating_needs_a_known_agent() {
+    let (_dir, r, s, _) = setup(
+        vec![
+            vec![call("none", "subagent", serde_json::json!({"action":"delegate","task":"inspect","agent":""}))],
+            vec![call("bad", "subagent", serde_json::json!({"action":"delegate","task":"inspect","agent":"general"}))],
+            text("done"),
+        ],
+        "build",
+    )
+    .await;
+    r.set_approval_mode(&s.id, otto_proto::ApprovalMode::Auto).await.unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    let items = serde_json::to_string(&s.view().await.unwrap().items).unwrap();
+    assert!(items.contains("agent required; available: build"), "{items}");
+    assert!(items.contains("unknown agent general; available: build"), "{items}");
     r.shutdown().await.unwrap();
 }
 
@@ -332,7 +465,9 @@ async fn server_discovery_defaults_and_fork_replay() {
     let (dir, r, s, _) = setup(vec![text("answer")], "build").await;
     let projects = r.list_projects().await.unwrap();
     assert_eq!(projects.len(), 1);
-    assert!(r.agents(Some(dir.path())).iter().any(|a| a.name == "plan"));
+    assert_eq!(r.agents(Some(dir.path())).iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["build"]);
+    std::fs::create_dir_all(dir.path().join("user/agents")).unwrap();
+    std::fs::write(dir.path().join("user/agents/helper.md"), "---\ndescription: Helps\n---\nHelp.").unwrap();
     let tools = r.tools(&s.id).await.unwrap();
     assert!(tools.iter().any(|t| t.name == "write" && t.effects.contains(&"write".into())));
     assert!(tools.iter().any(|t| t.name == "update_todos"));
@@ -348,7 +483,7 @@ async fn server_discovery_defaults_and_fork_replay() {
     assert!(replay.iter().all(|(_, e)| matches!(e, Event::ItemDone { .. })));
     assert!(replay.windows(2).all(|p| p[1].0 == p[0].0 + 1));
     r.set_config(SessionDefaults {
-        agent: Some("general".into()),
+        agent: Some("helper".into()),
         model: Some("changed-model".into()),
         approval_mode: Some(otto_tools::policy::ApprovalMode::AskAll),
         ..Default::default()
@@ -356,7 +491,7 @@ async fn server_discovery_defaults_and_fork_replay() {
     .unwrap();
     let next = r.create_session(CreateSession { project_id: projects[0].id.clone(), cwd: dir.path().into(), ..Default::default() }).await.unwrap();
     let info = next.view().await.unwrap().info;
-    assert_eq!(info.agent, "general");
+    assert_eq!(info.agent, "helper");
     assert_eq!(info.model, "changed-model");
     assert_eq!(s.view().await.unwrap().info.model, "test");
     r.shutdown().await.unwrap();
@@ -530,7 +665,7 @@ impl Model for ScriptedModel {
 async fn delegate_tool_delivers_outbox() {
     let (_dir, r, s, _) = setup(
         vec![
-            vec![call("child", "subagent", serde_json::json!({"action":"delegate","task":"inspect project"}))],
+            vec![call("child", "subagent", serde_json::json!({"action":"delegate","task":"inspect project","agent":"build"}))],
             text("done"),
             text("done"),
             text("done"),
@@ -880,15 +1015,6 @@ async fn approval_allow_and_deny() {
         assert_eq!(dir.path().join("file").exists(), decision == ApprovalDecision::Allow);
         assert!(serde_json::to_string(&s.view().await.unwrap().items).unwrap().contains("reviewed scope"));
     }
-}
-#[tokio::test]
-async fn plan_blocks_writes() {
-    let (dir, r, s, _) = setup(vec![vec![call("w", "write", serde_json::json!({"path":"file","content":"bad"}))], text("done")], "plan").await;
-    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
-    prompt(&s).await;
-    finish(&mut live).await;
-    assert!(!dir.path().join("file").exists());
-    assert!(matches!(&s.view().await.unwrap().items[2].parts[0], Part::ToolResult { is_error: true, .. }));
 }
 #[tokio::test]
 async fn cancel_pending_stream() {

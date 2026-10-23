@@ -490,7 +490,7 @@ async fn skills_commands_and_agents_are_discovered_claude_style() {
     write(root.join(".claude/commands/ship.md"), "---\ndescription: Ship it\nargument-hint: <version>\n---\nShip version $1 now");
     write(
         root.join(".claude/agents/reviewer.md"),
-        "---\nname: reviewer\ndescription: Reviews\ntools: Read, Grep\nmodel: inherit\npermissionMode: plan\n---\nReview carefully.",
+        "---\nname: reviewer\ndescription: Reviews\ntools: Read, Grep\nmodel: inherit\npermissionMode: default\n---\nReview carefully.",
     );
     let model = Scripted::new(vec![vec![call("s", "skill", serde_json::json!({"name":"release"}))], text("done")]);
     let runtime = Runtime::new(config(root, Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
@@ -508,7 +508,7 @@ async fn skills_commands_and_agents_are_discovered_claude_style() {
         .create_session(CreateSession { project_id: project.id.clone(), cwd: root.into(), agent: "reviewer".into(), ..Default::default() })
         .await
         .unwrap();
-    assert_eq!(reviewer.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::Plan);
+    assert_eq!(reviewer.view().await.unwrap().info.approval_mode, otto_proto::ApprovalMode::AskOnEffects);
     let mut tools: Vec<_> = runtime.tools(&reviewer.id).await.unwrap().into_iter().map(|t| t.name).collect();
     tools.sort();
     assert_eq!(tools, ["read", "search"]);
@@ -521,6 +521,97 @@ async fn skills_commands_and_agents_are_discovered_claude_style() {
     let system = requests[0].system.join("\n");
     assert!(system.contains("release: Cut a release") && !system.contains("private: Hidden"));
     assert!(serde_json::to_string(&requests[1].items).unwrap().contains("Steps: tag it."));
+    runtime.shutdown().await.unwrap();
+}
+
+fn agent_def(name: &str, scope: otto_proto::AgentScope) -> otto_proto::AgentDef {
+    otto_proto::AgentDef {
+        name: name.into(),
+        description: "Reviews code".into(),
+        model: Some("test/other".into()),
+        effort: Some("high".into()),
+        approval_mode: Some(otto_proto::ApprovalMode::AskAll),
+        prompt: "Review carefully.\n\nReport problems.".into(),
+        tools: vec!["read".into(), "search".into()],
+        loadable: vec!["mcp__gh__*".into()],
+        disallowed: vec!["shell".into()],
+        scope,
+        overrides_builtin: false,
+    }
+}
+
+#[tokio::test]
+async fn agents_save_rename_clone_and_delete_in_both_scopes() {
+    use otto_proto::{AgentDef, AgentScope};
+    let dir = tempfile::tempdir().unwrap();
+    let (root, user) = (dir.path().join("project"), dir.path().join("user"));
+    std::fs::create_dir_all(&root).unwrap();
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), Scripted::new(vec![]))).await.unwrap();
+    let project = Some(root.as_path());
+    let saved = runtime.save_agent(&agent_def("rev", AgentScope::User), None, project).unwrap();
+    assert_eq!(saved, agent_def("rev", AgentScope::User));
+    assert!(user.join("agents/rev.md").exists());
+    assert_eq!(runtime.agent("rev", None).unwrap(), saved);
+    // Rename: the old file of the scope goes.
+    let renamed = runtime.save_agent(&AgentDef { name: "critic".into(), ..saved.clone() }, Some("rev"), project).unwrap();
+    assert!(!user.join("agents/rev.md").exists() && user.join("agents/critic.md").exists());
+    assert!(runtime.agent("rev", project).is_err());
+    // Clone into the project, then rename the clone: the user's copy stays.
+    let clone = runtime.save_agent(&AgentDef { scope: AgentScope::Project, ..renamed.clone() }, None, project).unwrap();
+    assert_eq!(clone, AgentDef { scope: AgentScope::Project, ..renamed.clone() });
+    assert!(root.join(".otto/agents/critic.md").exists());
+    runtime.save_agent(&AgentDef { name: "judge".into(), ..clone }, Some("critic"), project).unwrap();
+    assert!(!root.join(".otto/agents/critic.md").exists() && root.join(".otto/agents/judge.md").exists());
+    assert_eq!(runtime.agent("critic", project).unwrap().scope, AgentScope::User);
+    let listed = runtime.agents(project);
+    assert!(listed.iter().any(|a| a.name == "judge" && a.scope == AgentScope::Project && a.provider.as_deref() == Some("test")));
+    // Saving over a file of another name that defines the agent replaces it.
+    write(root.join(".otto/agents/zz.md"), "---\nname: judge\n---\nshadow");
+    runtime.save_agent(&agent_def("judge", AgentScope::Project), None, project).unwrap();
+    assert!(!root.join(".otto/agents/zz.md").exists());
+    assert_eq!(runtime.agent("judge", project).unwrap(), agent_def("judge", AgentScope::Project));
+    runtime.delete_agent("judge", AgentScope::Project, project).unwrap();
+    assert!(runtime.agent("judge", project).is_err());
+    runtime.delete_agent("critic", AgentScope::User, project).unwrap();
+    assert!(!user.join("agents/critic.md").exists());
+    // Overriding the built-in, then resetting it.
+    let build = runtime.agent("build", project).unwrap();
+    assert!((build.scope, build.overrides_builtin) == (AgentScope::Builtin, false));
+    let mine = runtime.save_agent(&AgentDef { scope: AgentScope::User, prompt: "Mine.".into(), ..build.clone() }, None, project).unwrap();
+    assert!(mine.overrides_builtin && mine.prompt == "Mine.");
+    assert!(runtime.delete_agent("build", AgentScope::Builtin, project).is_err());
+    runtime.delete_agent("build", AgentScope::User, project).unwrap();
+    assert_eq!(runtime.agent("build", project).unwrap(), build);
+    assert!(runtime.save_agent(&build, None, project).is_err());
+    // A `.claude/agents` file is project scope; deleting removes it.
+    write(root.join(".claude/agents/old.md"), "---\nname: legacy\n---\nx");
+    assert_eq!(runtime.agent("legacy", project).unwrap().scope, AgentScope::Project);
+    runtime.delete_agent("legacy", AgentScope::Project, project).unwrap();
+    assert!(!root.join(".claude/agents/old.md").exists());
+    assert!(runtime.delete_agent("legacy", AgentScope::Project, project).is_err());
+    assert!(runtime.save_agent(&agent_def("p", AgentScope::Project), None, None).is_err());
+    for bad in ["", "a b", "../x", "a/b", "x.md", &"a".repeat(65)] {
+        assert!(runtime.save_agent(&agent_def(bad, AgentScope::User), None, project).is_err(), "{bad}");
+        assert!(runtime.delete_agent(bad, AgentScope::User, project).is_err(), "{bad}");
+    }
+    assert!(runtime.save_agent(&agent_def("ok", AgentScope::User), Some("../x"), project).is_err());
+    assert!(runtime.save_agent(&agent_def(&"a".repeat(64), AgentScope::User), None, project).is_ok());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_tool_catalog_lists_every_grantable_tool_with_its_default_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), Scripted::new(vec![]))).await.unwrap();
+    runtime.add_source(Arc::new(Source { grown: Default::default() }));
+    let catalog = runtime.tool_catalog(Some(dir.path())).await;
+    let entry = |name: &str| catalog.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("{name}"));
+    assert_eq!((entry("read").loading.as_str(), entry("read").source.as_str()), ("default", "builtin"));
+    assert_eq!(entry("web_search").loading, "deferred");
+    assert!(entry("subagent").effects.contains(&"process".into()) && catalog.iter().any(|t| t.name == "skill"));
+    assert_eq!(entry("mcp__fake__alpha").loading, "deferred");
+    assert!(!entry("read").description.is_empty() && !entry("read").description.contains('\n'));
+    assert!(runtime.tool_catalog(None).await.iter().all(|t| !t.name.starts_with("mcp__")));
     runtime.shutdown().await.unwrap();
 }
 

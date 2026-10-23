@@ -55,7 +55,22 @@ fn allowed(live: &Live, name: &str) -> bool {
 
 fn deferred(cx: &Context, all: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
     let live = cx.live();
-    all.iter().map(|t| t.spec()).filter(|s| s.loading == Loading::Deferred && allowed(&live, &s.name)).cloned().collect()
+    all.iter().map(|t| t.spec()).filter(|s| behind_loader(&live, s) && allowed(&live, &s.name)).cloned().collect()
+}
+
+/// Whether a granted tool waits behind `load_tools`. The session's `loadable`
+/// list decides against the shown rest of `tools` (the longest matching pattern
+/// wins, a tie goes to shown); without that list, or for a tool reached only
+/// through `implied`, the tool's own default.
+pub(crate) fn behind_loader(live: &Live, spec: &ToolSpec) -> bool {
+    let Some(loadable) = live.row.meta["loadable"].as_array() else { return spec.loading == Loading::Deferred };
+    let loadable: Vec<&str> = loadable.iter().filter_map(Value::as_str).collect();
+    let best = |patterns: &mut dyn Iterator<Item = &str>| patterns.filter(|p| pattern(p, &spec.name)).map(str::len).max();
+    let shown = best(&mut live.row.meta["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| !loadable.contains(p)));
+    match (shown, best(&mut loadable.iter().copied())) {
+        (None, None) => spec.loading == Loading::Deferred,
+        (shown, loadable) => loadable > shown,
+    }
 }
 
 /// `load_tools` only exists while it has something to load, and it only
@@ -78,36 +93,46 @@ pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::Too
                 return None;
             }
             let presentation = spec.presentation(&family);
-            let effects = [
-                ("read", spec.effects.read),
-                ("write", spec.effects.write),
-                ("process", spec.effects.process),
-                ("network", spec.effects.network),
-                ("secrets", spec.effects.secrets),
-                ("external", spec.effects.external),
-            ]
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(name, _)| name.into())
-            .collect();
-            let source = match &spec.source {
-                otto_tools::Source::Builtin => "builtin".into(),
-                otto_tools::Source::Silo => "silo".into(),
-                otto_tools::Source::Mcp { server } => format!("mcp:{server}"),
-                otto_tools::Source::Ext { plugin } => format!("ext:{plugin}"),
-            };
             Some(otto_proto::ToolInfo {
                 name: presentation.map_or_else(|| spec.name.clone(), |p| p.name.clone()),
                 description: presentation.and_then(|p| p.description.clone()).unwrap_or_else(|| spec.description.clone()),
-                source,
-                effects,
+                source: source(spec),
+                effects: effects(spec),
             })
         })
         .collect())
 }
 
-fn first_sentence(text: &str) -> String {
+pub(crate) fn first_sentence(text: &str) -> String {
     text.split_inclusive(['.', '!', '?']).next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn effects(spec: &ToolSpec) -> Vec<String> {
+    let e = &spec.effects;
+    [("read", e.read), ("write", e.write), ("process", e.process), ("network", e.network), ("secrets", e.secrets), ("external", e.external)]
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| name.into())
+        .collect()
+}
+
+fn source(spec: &ToolSpec) -> String {
+    match &spec.source {
+        otto_tools::Source::Builtin => "builtin".into(),
+        otto_tools::Source::Silo => "silo".into(),
+        otto_tools::Source::Mcp { server } => format!("mcp:{server}"),
+        otto_tools::Source::Ext { plugin } => format!("ext:{plugin}"),
+    }
+}
+
+pub(crate) fn catalog_entry(spec: &ToolSpec) -> otto_proto::ToolCatalogEntry {
+    otto_proto::ToolCatalogEntry {
+        name: spec.name.clone(),
+        description: first_sentence(&spec.description),
+        source: source(spec),
+        loading: if spec.loading == Loading::Deferred { "deferred" } else { "default" }.into(),
+        effects: effects(spec),
+    }
 }
 
 /// Rank deferred tools for a query: every word must appear in the name or
@@ -134,39 +159,53 @@ pub(crate) fn search(specs: &[ToolSpec], query: &str) -> Vec<String> {
     scored.into_iter().take(QUERY_LIMIT).map(|(_, s)| s.name.clone()).collect()
 }
 
-pub(crate) fn tools(cx: Arc<Context>, all: &[Arc<dyn Tool>], loaded: &BTreeSet<String>) -> Vec<Arc<dyn Tool>> {
-    let mut tools: Vec<Arc<dyn Tool>> = [
+/// `skill` and `subagent`: tools of the session itself.
+pub(crate) fn session_specs() -> Vec<ToolSpec> {
+    [
         ("skill", "Load a skill's instructions by name", json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
         (
             "subagent",
-            "Run child agents in the background. delegate {task, agent?, session_id? to reuse a child} returns at once; the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry.",
+            "Run child agents in the background. delegate {task, agent, session_id? to reuse a child} returns at once; the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry.",
             json!({"type":"object","properties":{
                 "action":{"type":"string","enum":["delegate","list","status","message","stop","retry"]},
                 "task":{"type":"string"},"message":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"string"},
-                "delivery":{"type":"string","enum":["queue","steer","interrupt"]}},"required":["action"]}),
+                "delivery":{"type":"string","enum":["queue","steer","interrupt"]}},"required":["action","agent"]}),
         ),
     ]
     .into_iter()
-    .map(|(name, description, input_schema)| {
-        Arc::new(SessionTool {
-            spec: ToolSpec {
-                name: name.into(),
-                description: description.into(),
-                input_schema,
-                output_schema: None,
-                effects: if name == "subagent" { Effects::PROCESS } else { Effects::READ },
-                sensitive: vec![],
-                loading: Default::default(),
-                mode: Default::default(),
-                presentations: vec![],
-                source: Default::default(),
-                exclusive: name == "subagent",
-            },
-            cx: cx.clone(),
-        }) as Arc<dyn Tool>
+    .map(|(name, description, input_schema)| ToolSpec {
+        name: name.into(),
+        description: description.into(),
+        input_schema,
+        output_schema: None,
+        effects: if name == "subagent" { Effects::PROCESS } else { Effects::READ },
+        sensitive: vec![],
+        loading: Default::default(),
+        mode: Default::default(),
+        presentations: vec![],
+        source: Default::default(),
+        exclusive: name == "subagent",
     })
-    .collect();
-    let pending: Vec<_> = deferred(&cx, all).into_iter().filter(|s| !loaded.contains(&s.name)).collect();
+    .collect()
+}
+
+fn session_tools(cx: &Arc<Context>) -> Vec<Arc<dyn Tool>> {
+    let agents: Vec<_> = crate::agents::discover(&cx.root, &cx.runtime.0.config.user_config_dir).into_iter().map(|a| a.name).collect();
+    session_specs()
+        .into_iter()
+        .map(|mut spec| {
+            if spec.name == "subagent" {
+                spec.description.push_str(&format!(" Agents: {}.", agents.join(", ")));
+            }
+            Arc::new(SessionTool { spec, cx: cx.clone() }) as Arc<dyn Tool>
+        })
+        .collect()
+}
+
+pub(crate) fn tools(cx: Arc<Context>, all: &[Arc<dyn Tool>], loaded: &BTreeSet<String>) -> Vec<Arc<dyn Tool>> {
+    let mut tools = session_tools(&cx);
+    let candidates: Vec<_> = all.iter().chain(&tools).cloned().collect();
+    let pending: Vec<_> = deferred(&cx, &candidates).into_iter().filter(|s| !loaded.contains(&s.name)).collect();
     if !pending.is_empty() {
         let mut description = "Load deferred tool schemas for the next model call. Call with {\"names\": [\"tool_name\"]} (a trailing * loads every tool with that prefix, e.g. \"mcp__github__*\"), or {\"query\": \"open browser tab\"} to load the best name/description matches. Available tools:\n".to_owned();
         for spec in pending.iter().take(INDEX_LIMIT) {
@@ -202,7 +241,9 @@ impl Tool for SessionTool {
     async fn call(&self, input: Value, _cx: ToolCx) -> std::result::Result<ToolOutput, ToolError> {
         match self.spec.name.as_str() {
             "load_tools" => {
-                let specs = deferred(&self.cx, &available(&self.cx).await);
+                let mut all = available(&self.cx).await;
+                all.extend(session_tools(&self.cx));
+                let specs = deferred(&self.cx, &all);
                 let names: Vec<String> = input
                     .get("names")
                     .cloned()

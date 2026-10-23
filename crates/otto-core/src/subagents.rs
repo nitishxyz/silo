@@ -82,11 +82,12 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
             if depth >= MAX_DEPTH {
                 return Err(Error::Invalid("subagent depth limit reached; do the task yourself".into()));
             }
-            let name = input["agent"].as_str().unwrap_or("general");
-            let agent = crate::agents::discover(&cx.root, &cx.runtime.0.config.user_config_dir)
-                .into_iter()
-                .find(|a| a.name == name)
-                .ok_or_else(|| Error::Invalid(format!("unknown agent {name}")))?;
+            let agents = crate::agents::discover(&cx.root, &cx.runtime.0.config.user_config_dir);
+            let names = || agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
+            let name =
+                input["agent"].as_str().filter(|n| !n.is_empty()).ok_or_else(|| Error::Invalid(format!("agent required; available: {}", names())))?;
+            let agent =
+                agents.iter().find(|a| a.name == name).ok_or_else(|| Error::Invalid(format!("unknown agent {name}; available: {}", names())))?;
             // The agent's own model wins; otherwise the child inherits the parent's.
             let inherit = agent.model.is_none();
             let live = cx.live();
