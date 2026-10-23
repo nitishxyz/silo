@@ -146,25 +146,26 @@ fn openpty() -> (std::fs::File, OwnedFd) {
     unsafe { (std::fs::File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
 }
 
-/// A session running `sleep 30`, once its block reads as busy, with the
+/// A session running `sleep 30`, once its block reads as busy and is
+/// titled after it (a probe sets the two one after the other), with the
 /// block's title.
 async fn busy_session(control: &Control) -> (Created, String) {
     let spawn = SpawnSpec { command: vec!["sleep".into(), "30".into()], ..SpawnSpec::default() };
     let created: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
-    tokio::time::timeout(T, async {
+    let title = tokio::time::timeout(T, async {
         loop {
             let method = Method::BlocksBusy { session_id: Some(created.session_id.clone()), window_id: None, block_ids: None };
             let busy: BusyBlocks = control.call(method).await.unwrap();
-            if busy.busy.iter().any(|b| b.busy.process == "sleep") {
-                return;
+            let view: BlockView = control.call(Method::BlockView { block_id: created.block_id.clone() }).await.unwrap();
+            if busy.busy.iter().any(|b| b.busy.process == "sleep") && view.block.title == "sleep" {
+                return view.block.title;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("sleep reads as busy");
-    let view: BlockView = control.call(Method::BlockView { block_id: created.block_id.clone() }).await.unwrap();
-    (created, view.block.title)
+    .expect("sleep reads as busy, and titles its block");
+    (created, title)
 }
 
 async fn exists(control: &Control, block_id: &str) -> bool {

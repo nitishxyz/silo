@@ -285,9 +285,10 @@ impl RenderOnce for Segmented {
             thumb
                 .with_animation(
                     ElementId::Name(format!("segmented-thumb-{generation}").into()),
-                    Animation::new(SPRING_DURATION).with_easing(spring),
+                    // The spring overshoots 1, which gpui refuses as an easing: applied here instead.
+                    Animation::new(SPRING_DURATION),
                     move |thumb, delta| {
-                        let (left, width) = thumb_geometry(from, selected, count, delta);
+                        let (left, width) = thumb_geometry(from, selected, count, spring(delta));
                         thumb.left(relative(left / count_f)).w(relative(width / count_f))
                     },
                 )
