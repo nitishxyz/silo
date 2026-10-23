@@ -1,4 +1,5 @@
 //! Request-scoped credentials and refresh coordination.
+pub mod flows;
 pub mod oauth;
 mod store;
 pub use store::CredentialStore;

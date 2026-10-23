@@ -2,24 +2,20 @@
 use crate::{
     ErrorClass, LlmError,
     auth::{
-        Credential, RefreshFn, now_ms,
-        oauth::{self, LoopbackCallback, TokenEncoding, TokenResponse},
+        Credential,
+        flows::{self, Callback, CustomDevice, Cx, Device, DeviceCode, Fut, Poll, Port, Refresh, Rotation, SubscriptionSpec},
+        oauth::{TokenEncoding, TokenResponse},
     },
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{sync::OnceLock, time::Duration};
 pub const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 /// WebSocket mode on the Codex endpoint (`codex-rs/core/src/client.rs`,
 /// `RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE`).
 pub const WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
-pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
 fn auth_claims(token: &str) -> Option<Value> {
     let bytes = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?).ok()?;
@@ -38,119 +34,84 @@ pub fn plan(id_token: &str) -> Option<String> {
     let first = chars.next()?;
     Some(first.to_ascii_uppercase().to_string() + chars.as_str())
 }
-fn credential(token: TokenResponse, previous: Option<Credential>) -> Credential {
+fn credential(token: &TokenResponse, previous: Option<&Credential>) -> Result<Credential, LlmError> {
     let (old_refresh, old_account, old_id) = match previous {
-        Some(Credential::OAuth { refresh, account_id, extra, .. }) => (refresh, account_id, extra["id_token"].as_str().map(String::from)),
+        Some(Credential::OAuth { refresh, account_id, extra, .. }) => {
+            (refresh.clone(), account_id.clone(), extra["id_token"].as_str().map(String::from))
+        }
         _ => (String::new(), None, None),
     };
     let account_id = token.id_token.as_deref().and_then(account_id).or_else(|| account_id(&token.access)).or(old_account);
-    let id_token = token.id_token.or(old_id);
-    Credential::OAuth {
-        access: token.access,
-        refresh: token.refresh.unwrap_or(old_refresh),
-        expires_at_ms: now_ms().saturating_add(if token.expires_in == 0 { 3600 } else { token.expires_in }.saturating_mul(1000)),
+    let id_token = token.id_token.clone().or(old_id);
+    Ok(Credential::OAuth {
+        access: token.access.clone(),
+        refresh: token.refresh.clone().unwrap_or(old_refresh),
+        expires_at_ms: flows::expires_at_ms(token),
         account_id,
         extra: json!({"id_token":id_token}),
-    }
-}
-pub struct Login {
-    pub url: String,
-    verifier: String,
-    state: String,
-    callback: LoopbackCallback,
-}
-impl Login {
-    pub async fn begin() -> Result<Self, LlmError> {
-        let callback = LoopbackCallback::bind(1455, "/auth/callback").await?;
-        let pair = oauth::pkce_pair();
-        let state = oauth::random_state();
-        let mut url = reqwest::Url::parse(&format!("{ISSUER}/oauth/authorize")).expect("static URL");
-        url.query_pairs_mut().extend_pairs([
-            ("response_type", "code"),
-            ("client_id", CLIENT_ID),
-            ("redirect_uri", REDIRECT_URI),
-            ("scope", "openid profile email offline_access"),
-            ("code_challenge", &pair.challenge),
-            ("code_challenge_method", "S256"),
-            ("id_token_add_organizations", "true"),
-            ("codex_cli_simplified_flow", "true"),
-            ("state", &state),
-            ("originator", "codex_cli_rs"),
-        ]);
-        Ok(Self { url: url.into(), verifier: pair.verifier, state, callback })
-    }
-    #[must_use]
-    pub fn callback(&self) -> &LoopbackCallback {
-        &self.callback
-    }
-    pub async fn finish(self, client: &reqwest::Client) -> Result<Credential, LlmError> {
-        let code = self.callback.wait(&self.state, Duration::from_secs(300)).await?;
-        exchange(client, &code.code, &self.verifier, REDIRECT_URI).await
-    }
-}
-pub async fn exchange(client: &reqwest::Client, code: &str, verifier: &str, redirect: &str) -> Result<Credential, LlmError> {
-    let fields = BTreeMap::from([
-        ("client_id".into(), CLIENT_ID.into()),
-        ("code".into(), code.into()),
-        ("code_verifier".into(), verifier.into()),
-        ("redirect_uri".into(), redirect.into()),
-    ]);
-    Ok(credential(oauth::exchange_code(client, &format!("{ISSUER}/oauth/token"), &fields, TokenEncoding::Form).await?, None))
-}
-#[must_use]
-pub fn refresh_fn() -> RefreshFn {
-    Arc::new(|previous| {
-        Box::pin(async move {
-            let Credential::OAuth { refresh, .. } = &previous else {
-                return Err(LlmError::new(ErrorClass::Auth, "expected OAuth credential"));
-            };
-            let fields = BTreeMap::from([("client_id".into(), CLIENT_ID.into()), ("refresh_token".into(), refresh.clone())]);
-            let token = oauth::refresh_token(&reqwest::Client::new(), &format!("{ISSUER}/oauth/token"), &fields, TokenEncoding::Form).await.map_err(
-                |mut e| {
-                    if is_refresh_rejection(&e) {
-                        e.class = ErrorClass::Auth;
-                    }
-                    e
-                },
-            )?;
-            Ok(credential(token, Some(previous)))
-        })
     })
 }
+fn stored_plan(extra: &Value) -> Option<String> {
+    extra["id_token"].as_str().and_then(plan)
+}
+
+/// Browser sign-in on Codex's fixed loopback port, or the ChatGPT device flow.
+pub static SPEC: SubscriptionSpec = SubscriptionSpec {
+    provider: "openai",
+    api_key: true,
+    client_id: CLIENT_ID,
+    client_secret: None,
+    authorize: "https://auth.openai.com/oauth/authorize",
+    console: None,
+    token: "https://auth.openai.com/oauth/token",
+    scopes: &["openid", "profile", "email", "offline_access"],
+    params: &[("id_token_add_organizations", "true"), ("codex_cli_simplified_flow", "true"), ("originator", "codex_cli_rs")],
+    nonce: false,
+    callbacks: &[Callback::Loopback { host: "localhost", port: Port::Fixed(1455), path: "/auth/callback" }],
+    device: Some(Device::Custom(CustomDevice { begin: device_code, poll: poll_device })),
+    headers: None,
+    exchange_encoding: TokenEncoding::Form,
+    exchange_state: false,
+    refresh: Refresh { encoding: TokenEncoding::Form, rotation: Rotation::Keep, rejected: is_refresh_rejection, rejected_message: None },
+    credential,
+    finish: None,
+    plan: stored_plan,
+};
 #[must_use]
 pub fn is_refresh_rejection(error: &LlmError) -> bool {
     error.class == ErrorClass::Auth
         || ["invalid_grant", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalid"].iter().any(|s| error.message.contains(s))
 }
 
-pub struct DeviceCode {
-    pub verification_uri: String,
-    pub user_code: String,
-    pub device_auth_id: String,
-    pub interval: Duration,
-}
-pub async fn device_code(client: &reqwest::Client) -> Result<DeviceCode, LlmError> {
-    let value = device_request(client, "usercode", json!({"client_id":CLIENT_ID}))
-        .await?
-        .ok_or_else(|| LlmError::new(ErrorClass::Auth, "missing device code"))?;
-    let get = |key: &str| value[key].as_str().map(String::from).ok_or_else(|| LlmError::new(ErrorClass::Auth, "invalid device code response"));
-    Ok(DeviceCode {
-        verification_uri: format!("{ISSUER}/codex/device"),
-        user_code: get("user_code").or_else(|_| get("usercode"))?,
-        device_auth_id: get("device_auth_id")?,
-        interval: Duration::from_secs(
-            value["interval"].as_u64().or_else(|| value["interval"].as_str()?.parse().ok()).filter(|n| *n > 0).unwrap_or(5),
-        ),
+fn device_code(cx: Cx<'_>) -> Fut<'_, DeviceCode> {
+    Box::pin(async move {
+        let value = device_request(cx.client, "usercode", json!({"client_id":CLIENT_ID}))
+            .await?
+            .ok_or_else(|| LlmError::new(ErrorClass::Auth, "missing device code"))?;
+        let get = |key: &str| value[key].as_str().map(String::from).ok_or_else(|| LlmError::new(ErrorClass::Auth, "invalid device code response"));
+        Ok(DeviceCode {
+            verification_uri: format!("{ISSUER}/codex/device"),
+            verification_uri_complete: None,
+            user_code: get("user_code").or_else(|_| get("usercode"))?,
+            device_code: get("device_auth_id")?,
+            interval: Duration::from_secs(
+                value["interval"].as_u64().or_else(|| value["interval"].as_str()?.parse().ok()).filter(|n| *n > 0).unwrap_or(5),
+            ),
+            expires_in: None,
+        })
     })
 }
-pub async fn poll_device(client: &reqwest::Client, code: &DeviceCode) -> Result<Option<Credential>, LlmError> {
-    let Some(value) = device_request(client, "token", json!({"device_auth_id":code.device_auth_id,"user_code":code.user_code})).await? else {
-        return Ok(None);
-    };
-    let get =
-        |key: &str| value[key].as_str().filter(|s| !s.is_empty()).ok_or_else(|| LlmError::new(ErrorClass::Auth, "invalid device token response"));
-    get("code_challenge")?;
-    exchange(client, get("authorization_code")?, get("code_verifier")?, &format!("{ISSUER}/deviceauth/callback")).await.map(Some)
+fn poll_device<'a>(cx: Cx<'a>, code: &'a DeviceCode) -> Fut<'a, Poll> {
+    Box::pin(async move {
+        let Some(value) = device_request(cx.client, "token", json!({"device_auth_id":code.device_code,"user_code":code.user_code})).await? else {
+            return Ok(Poll::Pending);
+        };
+        let get =
+            |key: &str| value[key].as_str().filter(|s| !s.is_empty()).ok_or_else(|| LlmError::new(ErrorClass::Auth, "invalid device token response"));
+        get("code_challenge")?;
+        let redirect = format!("{ISSUER}/deviceauth/callback");
+        flows::exchange(&SPEC, cx, get("authorization_code")?, get("code_verifier")?, &redirect, None).await.map(Poll::Done)
+    })
 }
 async fn device_request(client: &reqwest::Client, path: &str, body: Value) -> Result<Option<Value>, LlmError> {
     let response = client

@@ -1,13 +1,13 @@
-//! Claude Pro/Max code-paste OAuth and subscription-only request shaping.
+//! Claude Pro/Max code-paste OAuth spec and subscription-only request shaping.
 use crate::{
     ErrorClass, LlmError,
     auth::{
-        Credential, RefreshFn, now_ms,
-        oauth::{self, TokenEncoding, TokenResponse},
+        Credential,
+        flows::{self, Callback, Cx, Fut, Refresh, Rotation, SubscriptionSpec},
+        oauth::{TokenEncoding, TokenResponse},
     },
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ENDPOINT: &str = "https://platform.claude.com/v1/oauth/token";
@@ -16,88 +16,75 @@ const PROFILE: &str = "https://api.anthropic.com/api/oauth/profile";
 pub const USER_AGENT: &str = "claude-cli/2.1.309 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const BETAS: &[&str] = &["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
-#[derive(Clone, Copy, Debug)]
-pub enum Mode {
-    Max,
-    Console,
-}
 
-/// Returns the authorization URL, PKCE verifier, and expected pasted state.
-#[must_use]
-pub fn authorize(mode: Mode) -> (String, String, String) {
-    let pkce = oauth::pkce_pair();
-    let state = oauth::random_state();
-    let mut url = reqwest::Url::parse(match mode {
-        Mode::Max => "https://claude.ai/oauth/authorize",
-        Mode::Console => "https://platform.claude.com/oauth/authorize",
-    })
-    .expect("static URL");
-    url.query_pairs_mut().extend_pairs([
-        ("code", "true"),
-        ("client_id", CLIENT_ID),
-        ("response_type", "code"),
-        ("redirect_uri", REDIRECT),
-        ("scope", "org:create_api_key user:profile user:inference"),
-        ("code_challenge", &pkce.challenge),
-        ("code_challenge_method", "S256"),
-        ("state", &state),
-    ]);
-    (url.into(), pkce.verifier, state)
+/// Sign-in with the pasted `code#state` (or callback URL); `console` accounts use the platform's authorize page.
+pub static SPEC: SubscriptionSpec = SubscriptionSpec {
+    provider: "anthropic",
+    api_key: true,
+    client_id: CLIENT_ID,
+    client_secret: None,
+    authorize: "https://claude.ai/oauth/authorize",
+    console: Some("https://platform.claude.com/oauth/authorize"),
+    token: ENDPOINT,
+    scopes: &["org:create_api_key", "user:profile", "user:inference"],
+    params: &[("code", "true")],
+    nonce: false,
+    callbacks: &[Callback::Paste { redirect: REDIRECT, bare_code: false }],
+    device: None,
+    headers: Some(token_headers),
+    exchange_encoding: TokenEncoding::Json,
+    exchange_state: true,
+    refresh: Refresh {
+        encoding: TokenEncoding::Form,
+        rotation: Rotation::Keep,
+        rejected: refresh_rejected,
+        rejected_message: Some("Claude OAuth refresh token rejected. Run `otto auth login anthropic` again."),
+    },
+    credential: build,
+    finish: Some(finish),
+    plan: stored_plan,
+};
+fn token_headers(_: &std::path::Path) -> Result<reqwest::header::HeaderMap, LlmError> {
+    Ok(reqwest::header::HeaderMap::from_iter([(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static(USER_AGENT))]))
 }
-/// Exchange a pasted `code#state`. Callers must compare the state with `authorize`.
-pub async fn exchange(code_with_state: &str, verifier: &str) -> Result<Credential, LlmError> {
-    let (code, state) = code_with_state
-        .trim()
-        .split_once('#')
-        .filter(|(c, s)| !c.is_empty() && !s.is_empty() && !s.contains('#'))
-        .ok_or_else(|| LlmError::new(ErrorClass::Auth, "expected code#state"))?;
-    let fields = BTreeMap::from([
-        ("code".into(), code.into()),
-        ("state".into(), state.into()),
-        ("client_id".into(), CLIENT_ID.into()),
-        ("redirect_uri".into(), REDIRECT.into()),
-        ("code_verifier".into(), verifier.into()),
-    ]);
-    let token = oauth::exchange_code(&client()?, ENDPOINT, &fields, TokenEncoding::Json).await?;
-    if token.refresh.is_none() {
-        return Err(LlmError::new(ErrorClass::Auth, "missing OAuth refresh token"));
-    }
-    let plan = signed_plan(&token, None).await;
-    Ok(credential(token, "", plan))
+fn refresh_rejected(error: &LlmError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    error.class == ErrorClass::Auth
+        || message.contains("invalid_grant")
+        || message.contains("not_found_error")
+        || message.contains("not found")
+        || (message.contains("invalid_request")
+            && (message.contains("refresh_token") || message.contains("refresh token") || message.contains("refresh-token")))
 }
-/// `previous_plan` is kept when neither the token nor the profile reports one.
-pub async fn refresh(refresh_token: &str, previous_plan: Option<String>) -> Result<Credential, LlmError> {
-    let fields = BTreeMap::from([("client_id".into(), CLIENT_ID.into()), ("refresh_token".into(), refresh_token.into())]);
-    let token = oauth::refresh_token(&client()?, ENDPOINT, &fields, TokenEncoding::Form).await.map_err(|error| {
-        let message = error.message.to_ascii_lowercase();
-        if error.class == ErrorClass::Auth
-            || message.contains("invalid_grant")
-            || message.contains("not_found_error")
-            || message.contains("not found")
-            || (message.contains("invalid_request")
-                && (message.contains("refresh_token") || message.contains("refresh token") || message.contains("refresh-token")))
-        {
-            LlmError::new(ErrorClass::Auth, "Claude OAuth refresh token rejected. Run `otto auth login anthropic` again.")
-        } else {
-            error
-        }
-    })?;
-    let plan = signed_plan(&token, previous_plan).await;
-    Ok(credential(token, refresh_token, plan))
-}
-#[must_use]
-pub fn refresh_fn() -> RefreshFn {
-    Arc::new(|credential| {
-        Box::pin(async move {
-            match credential {
-                Credential::OAuth { refresh: token, extra, .. } => refresh(&token, extra["plan"].as_str().map(String::from)).await,
-                _ => Err(LlmError::new(ErrorClass::Auth, "expected Claude OAuth credential")),
-            }
-        })
-    })
+fn stored_plan(extra: &Value) -> Option<String> {
+    extra["plan"].as_str().map(String::from)
 }
 fn client() -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder().user_agent(USER_AGENT).build().map_err(crate::http::network)
+}
+/// The plan the token response reports; [`finish`] asks the profile when it does not.
+fn build(token: &TokenResponse, previous: Option<&Credential>) -> Result<Credential, LlmError> {
+    let Credential::OAuth { access, refresh, expires_at_ms, account_id, .. } = flows::plain_credential(token, previous)? else {
+        unreachable!("plain_credential builds OAuth")
+    };
+    let extra = plan(&token.raw).map_or(Value::Null, |plan| json!({"plan":plan}));
+    Ok(Credential::OAuth { access, refresh, expires_at_ms, account_id, extra })
+}
+/// Without a plan from the token: the profile's (best effort), else the previous one.
+fn finish<'a>(_: Cx<'a>, mut credential: Credential, previous: Option<&'a Credential>) -> Fut<'a, Credential> {
+    Box::pin(async move {
+        if let Credential::OAuth { access, extra, .. } = &mut credential
+            && extra["plan"].is_null()
+        {
+            let previous = match previous {
+                Some(Credential::OAuth { extra, .. }) => stored_plan(extra),
+                _ => None,
+            };
+            let plan = profile_plan(access).await.or(previous);
+            *extra = plan.map_or(Value::Null, |plan| json!({"plan":plan}));
+        }
+        Ok(credential)
+    })
 }
 /// Subscription plan label from a token or `/api/oauth/profile` response:
 /// `organization.organization_type`, else the account's `has_claude_max` / `has_claude_pro`.
@@ -114,28 +101,15 @@ pub fn plan(value: &Value) -> Option<String> {
     };
     Some(label.into())
 }
-/// The plan the token response reports, else the profile's (best effort).
-async fn signed_plan(token: &TokenResponse, previous: Option<String>) -> Option<String> {
-    if let Some(plan) = plan(&token.raw) {
-        return Some(plan);
-    }
+async fn profile_plan(token: &str) -> Option<String> {
     let profile = async {
-        let response = client().ok()?.get(PROFILE).bearer_auth(&token.access).header("anthropic-beta", "oauth-2025-04-20").send().await.ok()?;
+        let response = client().ok()?.get(PROFILE).bearer_auth(token).header("anthropic-beta", "oauth-2025-04-20").send().await.ok()?;
         if !response.status().is_success() {
             return None;
         }
         plan(&serde_json::from_str(&response.text().await.ok()?).ok()?)
     };
-    tokio::time::timeout(std::time::Duration::from_secs(10), profile).await.ok().flatten().or(previous)
-}
-fn credential(token: TokenResponse, fallback: &str, plan: Option<String>) -> Credential {
-    Credential::OAuth {
-        access: token.access,
-        refresh: token.refresh.unwrap_or_else(|| fallback.into()),
-        expires_at_ms: now_ms().saturating_add(if token.expires_in == 0 { 3_600_000 } else { token.expires_in.saturating_mul(1000) }),
-        account_id: None,
-        extra: plan.map_or(Value::Null, |plan| json!({"plan":plan})),
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), profile).await.ok().flatten()
 }
 /// The required system prefix. Client tool names are sent as they are.
 pub fn shape(body: &mut Value) {
@@ -188,12 +162,9 @@ pub(crate) fn url(base: &str) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn authorization_and_shaping() {
-        let (url, verifier, state) = authorize(Mode::Max);
-        let url = reqwest::Url::parse(&url).unwrap();
-        assert_eq!(url.host_str(), Some("claude.ai"));
-        assert!(url.query_pairs().any(|(k, v)| k == "state" && v == state));
-        assert_eq!(verifier.len(), 43);
+    fn spec_and_shaping() {
+        assert!(SPEC.callbacks.iter().all(|c| matches!(c, Callback::Paste { redirect: REDIRECT, bare_code: false })));
+        assert_eq!(flows::spec("anthropic").unwrap().client_id, CLIENT_ID);
         let mut body = json!({"system":[{"type":"text","text":"custom"}]});
         shape(&mut body);
         shape(&mut body);

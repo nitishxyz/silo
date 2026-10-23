@@ -124,6 +124,48 @@ fn parse_callback(request: &str, path: &str, expected: &str) -> Result<Authoriza
     let code = code.filter(|code| !code.is_empty()).ok_or_else(invalid_callback)?;
     Ok(AuthorizationCode { code, state })
 }
+/// An authorization code the user pasted: the full callback URL, its query (`code=…&state=…`),
+/// `code#state`, or, only with `bare_code`, the code alone. The state must match `expected`.
+pub fn parse_pasted(input: &str, expected: &str, bare_code: bool) -> Result<AuthorizationCode, LlmError> {
+    let input = input.trim();
+    let query = if input.contains("://") {
+        reqwest::Url::parse(input).map_err(|_| invalid_paste())?.query().map(String::from)
+    } else if input.contains("code=") || input.contains("error=") {
+        Some(input.trim_start_matches('?').to_owned())
+    } else {
+        None
+    };
+    let (code, state) = if let Some(query) = query {
+        let url = reqwest::Url::parse(&format!("http://localhost/?{query}")).map_err(|_| invalid_paste())?;
+        let (mut code, mut state) = (None, None);
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "code" if code.is_none() => code = Some(value.into_owned()),
+                "state" if state.is_none() => state = Some(value.into_owned()),
+                "error" => return Err(LlmError::new(ErrorClass::Auth, format!("authorization failed: {value}"))),
+                "code" | "state" => return Err(invalid_paste()),
+                _ => {}
+            }
+        }
+        (code.unwrap_or_default(), state)
+    } else if let Some((code, state)) = input.split_once('#') {
+        (code.to_owned(), Some(state.to_owned()))
+    } else {
+        (input.to_owned(), None)
+    };
+    if code.is_empty() || state.as_deref().is_some_and(|s| s.is_empty() || s.contains('#')) {
+        return Err(invalid_paste());
+    }
+    match state {
+        Some(state) if state == expected => Ok(AuthorizationCode { code, state }),
+        Some(_) => Err(LlmError::new(ErrorClass::Auth, "OAuth state mismatch; restart login")),
+        None if bare_code => Ok(AuthorizationCode { code, state: expected.into() }),
+        None => Err(invalid_paste()),
+    }
+}
+fn invalid_paste() -> LlmError {
+    LlmError::new(ErrorClass::Auth, "expected the callback URL or code#state")
+}
 fn invalid_callback() -> LlmError {
     LlmError::new(ErrorClass::Auth, "invalid OAuth callback or state")
 }
@@ -162,21 +204,39 @@ pub struct TokenResponse {
     pub raw: serde_json::Value,
 }
 
+/// Extra request headers, e.g. a client fingerprint.
+pub type Headers = reqwest::header::HeaderMap;
+/// A raw HTTP reply, for endpoints whose error bodies carry protocol state.
+pub struct Reply {
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: String,
+}
+impl Reply {
+    /// The body as an error, classified by status.
+    #[must_use]
+    pub fn error(&self) -> LlmError {
+        classify_status(self.status, &self.headers, &self.body)
+    }
+}
+
 pub async fn exchange_code(
     client: &reqwest::Client,
     url: &str,
     fields: &BTreeMap<String, String>,
     encoding: TokenEncoding,
+    headers: &Headers,
 ) -> Result<TokenResponse, LlmError> {
-    token_request(client, url, fields, "authorization_code", encoding).await
+    token_request(client, url, fields, "authorization_code", encoding, headers).await
 }
 pub async fn refresh_token(
     client: &reqwest::Client,
     url: &str,
     fields: &BTreeMap<String, String>,
     encoding: TokenEncoding,
+    headers: &Headers,
 ) -> Result<TokenResponse, LlmError> {
-    token_request(client, url, fields, "refresh_token", encoding).await
+    token_request(client, url, fields, "refresh_token", encoding, headers).await
 }
 async fn token_request(
     client: &reqwest::Client,
@@ -184,15 +244,30 @@ async fn token_request(
     fields: &BTreeMap<String, String>,
     grant: &str,
     encoding: TokenEncoding,
+    headers: &Headers,
 ) -> Result<TokenResponse, LlmError> {
     let mut fields = fields.clone();
     fields.insert("grant_type".into(), grant.into());
-    let request = client.post(url).timeout(Duration::from_secs(30));
+    let reply = post(client, url, &fields, encoding, headers).await?;
+    if !reply.status.is_success() {
+        return Err(reply.error());
+    }
+    parse_token(&reply.body)
+}
+/// POST `fields` (30 s timeout) and return the reply whatever its status.
+pub async fn post(
+    client: &reqwest::Client,
+    url: &str,
+    fields: &BTreeMap<String, String>,
+    encoding: TokenEncoding,
+    headers: &Headers,
+) -> Result<Reply, LlmError> {
+    let request = client.post(url).timeout(Duration::from_secs(30)).headers(headers.clone());
     let request = match encoding {
-        TokenEncoding::Json => request.json(&fields),
+        TokenEncoding::Json => request.json(fields),
         TokenEncoding::Form => {
             let mut encoded = reqwest::Url::parse("http://localhost").expect("static URL");
-            encoded.query_pairs_mut().extend_pairs(&fields);
+            encoded.query_pairs_mut().extend_pairs(fields);
             request.header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded").body(encoded.query().unwrap_or_default().to_owned())
         }
     };
@@ -200,12 +275,9 @@ async fn token_request(
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.text().await.map_err(network)?;
-    if !status.is_success() {
-        return Err(classify_status(status, &headers, &body));
-    }
-    parse_token(&body)
+    Ok(Reply { status, headers, body })
 }
-fn parse_token(body: &str) -> Result<TokenResponse, LlmError> {
+pub(crate) fn parse_token(body: &str) -> Result<TokenResponse, LlmError> {
     let raw: serde_json::Value = serde_json::from_str(body).map_err(|_| LlmError::new(ErrorClass::Auth, "invalid token response JSON"))?;
     let access = raw
         .get("access_token")
@@ -233,6 +305,25 @@ mod tests {
         assert!(parse_callback(valid, "/other", "abc").is_err());
         assert!(parse_callback(valid, "/callback", "wrong").is_err());
         assert!(parse_callback("GET /callback?code=a&state=x&state=x HTTP/1.1", "/callback", "x").is_err());
+    }
+    #[test]
+    fn pasted_input_forms() {
+        let ok = |input: &str, bare| parse_pasted(input, "st", bare).map(|c| c.code);
+        assert_eq!(ok("c%2Bd#st", false).unwrap(), "c%2Bd");
+        assert_eq!(ok(" http://localhost:1455/auth/callback?code=a%2Bb&state=st \n", false).unwrap(), "a+b");
+        assert_eq!(ok("https://x.test/cb?code=a&state=st&extra=1", false).unwrap(), "a");
+        assert_eq!(ok("?code=a&state=st", false).unwrap(), "a");
+        assert_eq!(ok("code=a&state=st", false).unwrap(), "a");
+        assert_eq!(ok("plain", true).unwrap(), "plain");
+        assert!(ok("plain", false).is_err());
+        assert!(ok("a#wrong", false).unwrap_err().message.contains("state mismatch"));
+        assert!(ok("http://x.test/cb?code=a&state=wrong", true).is_err());
+        assert!(ok("http://x.test/cb?code=a&code=b&state=st", false).is_err());
+        assert!(ok("a#st#st", false).is_err());
+        assert!(ok("#st", false).is_err());
+        assert!(ok("a#", false).is_err());
+        assert!(ok("", true).is_err());
+        assert!(ok("http://x.test/cb?error=access_denied&state=st", false).unwrap_err().message.contains("access_denied"));
     }
     #[tokio::test]
     async fn loopback_reports_its_port_and_path() {
