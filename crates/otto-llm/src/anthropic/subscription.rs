@@ -13,7 +13,7 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ENDPOINT: &str = "https://platform.claude.com/v1/oauth/token";
 const REDIRECT: &str = "https://platform.claude.com/oauth/code/callback";
 const PROFILE: &str = "https://api.anthropic.com/api/oauth/profile";
-pub const USER_AGENT: &str = "claude-cli/1.0.61 (external, cli)";
+pub const USER_AGENT: &str = "claude-cli/2.1.309 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const BETAS: &[&str] = &["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
 #[derive(Clone, Copy, Debug)]

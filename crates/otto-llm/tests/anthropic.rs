@@ -135,6 +135,7 @@ fn alternation_cache_tools_and_effort() {
     assert_eq!(body["tools"][0]["defer_loading"], true);
     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
     assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["thinking"]["display"], "summarized");
     assert_eq!(body["output_config"]["effort"], "high");
     assert!(body.get("temperature").is_none());
     assert_eq!(body.to_string().matches("cache_control").count(), 3);

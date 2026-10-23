@@ -5,6 +5,11 @@ use serde_json::{Value, json};
 pub fn body(req: &Request) -> Result<Value, LlmError> {
     body_for(req, "anthropic")
 }
+/// Adaptive thinking with its summary returned: newer models default to
+/// `display: "omitted"`, which streams thinking blocks with empty text.
+fn adaptive() -> Value {
+    json!({"type":"adaptive","display":"summarized"})
+}
 /// A Messages body for `provider` (`anthropic`, or an Anthropic-dialect one
 /// such as `minimax`): only its opaque blocks are replayed, and Anthropic
 /// betas (mid-conversation system, compaction) apply to Anthropic only.
@@ -118,7 +123,7 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
             if effort == Effort::None && !super::always_thinking(&req.model) {
                 body["thinking"] = json!({"type":"disabled"});
             } else if super::supports_adaptive(&req.model) {
-                body["thinking"] = json!({"type":"adaptive"});
+                body["thinking"] = adaptive();
                 // An effort the model doesn't list goes to the nearest it does (Opus 4.5 has no `max`, 4.6 no `xhigh`).
                 let effort = match effort.nearest(&crate::catalog::efforts(provider, &req.model)) {
                     Effort::None | Effort::Minimal | Effort::Low => "low",
@@ -142,6 +147,10 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
             }
         }
         None => {}
+    }
+    // Models that always think omit their thinking text unless asked for a summary.
+    if body.get("thinking").is_none() && super::always_thinking(&req.model) && super::supports_adaptive(&req.model) {
+        body["thinking"] = adaptive();
     }
     if body["thinking"]["type"] == "enabled" || body["thinking"]["type"] == "adaptive" || super::always_thinking(&req.model) {
         body.as_object_mut().expect("object").remove("temperature");
