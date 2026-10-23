@@ -2,7 +2,7 @@
 //! subscription's limits (Claude's 5-hour and weekly windows, ChatGPT's) is
 //! used, from otto's `plan.usage` and its live `plan.usage` events.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone};
 use gpui::{AnyElement, Context, prelude::*, px};
@@ -106,12 +106,14 @@ impl AgentPane {
         );
     }
 
-    /// Follow otto's `plan.usage` events (any session's reply reports its provider's limits).
+    /// Follow otto's `plan.usage` events (any session's reply reports its provider's limits), and
+    /// `auth.changed` (a sign-in made elsewhere, e.g. the CLI): every view of this otto reloads.
     pub(super) fn watch_plans(&mut self, cx: &mut Context<Self>) {
         if self.plan_watch.is_some() {
             return;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProviderPlan>();
+        // `None`: the sign-ins changed.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<ProviderPlan>>();
         let target = self.target.clone();
         self.rt.spawn(async move {
             loop {
@@ -120,9 +122,12 @@ impl AgentPane {
                     loop {
                         match events.recv().await {
                             Ok(Ok(ServerMessage::Event { session_id: None, event, .. })) => {
-                                if let Event::PlanUsage { provider, usage } = *event
-                                    && tx.send(ProviderPlan { provider, usage }).is_err()
-                                {
+                                let sent = match *event {
+                                    Event::PlanUsage { provider, usage } => tx.send(Some(ProviderPlan { provider, usage })),
+                                    Event::AuthChanged {} => tx.send(None),
+                                    _ => Ok(()),
+                                };
+                                if sent.is_err() {
                                     return;
                                 }
                             }
@@ -139,9 +144,16 @@ impl AgentPane {
         });
         self.plan_watch = Some(cx.spawn(async move |this, cx| {
             while let Some(plan) = rx.recv().await {
-                let applied = this.update(cx, |this, cx| {
-                    this.plans.insert(plan.provider, plan.usage);
-                    cx.notify();
+                let applied = this.update(cx, |this, cx| match plan {
+                    Some(plan) => {
+                        this.plans.insert(plan.provider, plan.usage);
+                        cx.notify();
+                    }
+                    None => {
+                        if cx.default_global::<super::client::AuthSeen>().fresh(&this.target, Instant::now()) {
+                            cx.set_global(super::client::OttoChanged(this.target.clone()));
+                        }
+                    }
                 });
                 if applied.is_err() {
                     return;

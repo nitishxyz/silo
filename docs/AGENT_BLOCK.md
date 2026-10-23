@@ -254,7 +254,16 @@ Units are points.
   row per provider (logo 16 + name), each with a primary pill button for the subscription (`Claude Pro/Max`,
   `ChatGPT`) and a secondary text button `API key`. Pending login: the provider row turns into the flow (opened
   browser → paste-code field for Anthropic; ChatGPT completes on its own via loopback, else shows the device code
-  big + `Copy`, polling until done), with `Cancel`.
+  big + `Copy`, polling until done), with `Cancel`. Kimi Code and xAI device logins show their code the same way.
+  When a browser login's redirect can't reach otto (a remote host's callback port is busy on this Mac, or there is
+  nothing to forward) and the login takes a pasted address, the dialog shows a paste pill instead of waiting
+  (`Paste the address you were sent to`); it completes the login with it (never also waiting: otto refuses a
+  second waiting call). Antigravity instead restarts as Google's paste login (its page shows a code to paste).
+  Logins that can't take one keep `Port N is in use on this Mac.` + `Use a code`.
+  Antigravity first asks `Sign in with Google Antigravity?` / "Google's Antigravity terms forbid third-party use. Your
+  Google account may be suspended." with `Cancel` / `Continue`; only Continue starts the login (opens the browser).
+  A sign-in made elsewhere (the CLI) reaches open panes: otto watches its credential store and sends
+  `auth.changed`, and every view of that otto reloads its providers.
 
 ## 4c. Commands and motion (user requests)
 
@@ -405,6 +414,11 @@ Units are points.
   first, returned last. A returned row stays while the parent's turn runs (or, the parent idle, through the turn its
   report starts) and fades out (opacity and height, 260 ms) when that turn ends. A row (hover fill, `↗` on hover)
   opens the child; so does `↗` on a transcript's subagent line.
+- **Sub-agent reports in the thread:** otto's `Subagent completion:` system item is a quiet `Row::Report` where it
+  arrived (enters like any row, 12 gaps as a marker): `bot Sub-agent finished · <title>` (`stopped` muted, `failed`
+  in the error colour), its error or the first line of its reply as the tooltip; a click opens the child. A turn otto
+  starts with a notice (a report, a job's end) never streams the previous reply again: text streams only while its
+  item ends the transcript.
 - **Sub-agent block:** opening a child focuses the agent block already showing it (the server's blocks carry
   `agent.session_id`), else splits a new agent block beside the pane (`block.split` kind agent in its folder, with
   `agent: {session_id, title}` so it shows the child from its first frame), composer focused. It is a normal agent
@@ -444,8 +458,10 @@ Units are points.
   system item `Background shell <job> … exited with code N.`), then `Ran` / `Failed to run` with `exit N` (or
   `stopped`) and the reported output as its detail. Terminal lines (`terminal_open`, …) open their block the same
   way; a parked one floats in first. Opening a block that has closed says so.
-- **Providers view:** all 12 otto providers, each with a monochrome logo (`provider-*.svg`; Custom uses `plug`):
-  Anthropic and OpenAI `API key` + `Sign in`; Google, xAI, OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax `API key`;
+- **Providers view:** every otto provider in daemon order (no fixed count), each with a monochrome logo
+  (`provider-*.svg`; Custom uses `plug`, Antigravity the Google logo, Kimi Code Kimi's): Anthropic, OpenAI and xAI
+  `API key` + `Sign in`; Kimi Code and Antigravity `Sign in` (`Kimi membership`, `Google account`); Google,
+  OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax `API key`;
   Ollama and LM Studio (`Local, no key needed`) and Custom (`OpenAI-compatible server`) `Connect` / `Change`. Connect
   opens the dialog with an address pill (prefilled with the current or default address, `http(s)://` required) and,
   for Custom only, an optional key pill below; it saves with `auth.login {base_url}` (no key needed). A local

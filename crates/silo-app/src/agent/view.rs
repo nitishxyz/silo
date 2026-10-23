@@ -424,6 +424,8 @@ pub(crate) fn provider_name(provider: &str) -> String {
         "openrouter" => "OpenRouter".into(),
         "deepseek" => "DeepSeek".into(),
         "moonshotai" => "Kimi".into(),
+        "kimi-code" => "Kimi Code".into(),
+        "antigravity" => "Google Antigravity".into(),
         "zai" => "Z.ai".into(),
         "minimax" => "MiniMax".into(),
         "lmstudio" => "LM Studio".into(),

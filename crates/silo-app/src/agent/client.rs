@@ -210,6 +210,23 @@ impl gpui::Global for AuthChanged {}
 pub struct OttoChanged(pub Otto);
 impl gpui::Global for OttoChanged {}
 
+/// When each otto last announced `auth.changed` to the panes: every pane hears the event, one
+/// reloads them all.
+#[derive(Default)]
+pub struct AuthSeen(std::collections::HashMap<Otto, std::time::Instant>);
+impl gpui::Global for AuthSeen {}
+
+impl AuthSeen {
+    /// Whether `target`'s `auth.changed` at `now` is news (not one another pane already passed on).
+    pub fn fresh(&mut self, target: &Otto, now: std::time::Instant) -> bool {
+        let fresh = self.0.get(target).is_none_or(|at| now.saturating_duration_since(*at) > std::time::Duration::from_secs(1));
+        if fresh {
+            self.0.insert(target.clone(), now);
+        }
+        fresh
+    }
+}
+
 impl OttoChanged {
     /// Whether a pane on `target` reloads for this change.
     #[must_use]
@@ -318,5 +335,15 @@ mod tests {
         assert!(OttoChanged(mini()).concerns(&mini()));
         assert!(!OttoChanged(Otto::Local).concerns(&mini()));
         assert!(!OttoChanged(mini()).concerns(&Otto::Remote { id: "boat".into() }));
+    }
+
+    #[test]
+    fn one_auth_changed_reloads_once_per_otto() {
+        let mini = Otto::Remote { id: "mini".into() };
+        let (mut seen, now) = (AuthSeen::default(), std::time::Instant::now());
+        assert!(seen.fresh(&Otto::Local, now));
+        assert!(!seen.fresh(&Otto::Local, now), "another pane heard the same event");
+        assert!(seen.fresh(&mini, now), "another otto");
+        assert!(seen.fresh(&Otto::Local, now + std::time::Duration::from_secs(2)), "a later change");
     }
 }

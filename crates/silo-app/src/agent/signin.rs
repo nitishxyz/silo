@@ -99,6 +99,8 @@ enum Step {
     },
     /// A remote browser login couldn't listen here; it was cancelled.
     Blocked(Blocked),
+    /// The provider's terms forbid this use: `Continue` starts the login.
+    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +111,8 @@ enum Flow {
     Browser,
     /// Device authorization: the user types `code` on the page.
     Device { code: String },
+    /// The browser's redirect can't reach the daemon: the user pastes the address it was sent to.
+    Paste,
 }
 
 impl Flow {
@@ -118,6 +122,46 @@ impl Flow {
             None if needs_code => Self::Code,
             None => Self::Browser,
         }
+    }
+
+    /// `auth.login_complete` without a code waits for the browser or device; the
+    /// daemon refuses a second waiting call, so pasting flows never wait.
+    fn waits(&self) -> bool {
+        matches!(self, Self::Browser | Self::Device { .. })
+    }
+}
+
+/// A pending login's next step, given how its callback forward went (`None`: nothing
+/// to forward) and whether it is on a remote host. A login that accepts a pasted
+/// address is kept and pasted into when the redirect can't reach its daemon.
+fn pending_step(flow: Flow, accepts_code: bool, remote: bool, forward: Option<Result<(), Blocked>>) -> Result<Flow, Blocked> {
+    let unreachable = matches!(forward, Some(Err(_))) || (remote && forward.is_none());
+    match forward {
+        _ if unreachable && accepts_code && flow == Flow::Browser => Ok(Flow::Paste),
+        Some(Err(blocked)) => Err(blocked),
+        _ => Ok(flow),
+    }
+}
+
+const WARNING: &str = "Google's Antigravity terms forbid third-party use. Your Google account may be suspended.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gate {
+    /// Show the warning first.
+    Ask,
+    /// Start the login (the browser opens).
+    Start,
+    /// Close without starting anything.
+    Close,
+}
+
+/// `Sign in` (`answer: None`) and the warning's Continue / Cancel. Providers whose
+/// terms forbid third-party use ask before the browser opens.
+fn gate(provider: &str, answer: Option<bool>) -> Gate {
+    match answer {
+        None if provider == "antigravity" => Gate::Ask,
+        None | Some(true) => Gate::Start,
+        Some(false) => Gate::Close,
     }
 }
 
@@ -186,7 +230,17 @@ fn forward_route<'a>(target: &'a Otto, result: &'a LoginResult) -> Option<(&'a s
 }
 
 fn subscription_login(provider: String, device: bool) -> Method {
-    Method::AuthLogin { provider, mode: AuthMode::Subscription, api_key: None, device, base_url: None }
+    Method::AuthLogin { provider, mode: AuthMode::Subscription, api_key: None, device, base_url: None, paste: false }
+}
+
+/// A browser login whose page shows a code to paste: for a remote host the browser's redirect can't reach.
+fn paste_login(provider: String) -> Method {
+    Method::AuthLogin { provider, mode: AuthMode::Subscription, api_key: None, device: false, base_url: None, paste: true }
+}
+
+/// Providers with such a paste login (Google's remote flow); others paste their loopback address.
+fn pastes(provider: &str) -> bool {
+    provider == "antigravity"
 }
 
 /// Providers offered for sign-in, in daemon order; rows with no sign-in modes
@@ -208,6 +262,9 @@ fn plan(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "Claude Pro/Max",
         "openai" => "ChatGPT Plus/Pro",
+        "xai" => "SuperGrok",
+        "kimi-code" => "Kimi membership",
+        "antigravity" => "Google account",
         _ => "Subscription",
     }
 }
@@ -285,11 +342,11 @@ fn logo(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "provider-anthropic",
         "openai" => "provider-openai",
-        "google" => "provider-google",
+        "google" | "antigravity" => "provider-google",
         "xai" => "provider-xai",
         "openrouter" => "provider-openrouter",
         "deepseek" => "provider-deepseek",
-        "moonshotai" => "provider-moonshotai",
+        "moonshotai" | "kimi-code" => "provider-moonshotai",
         "zai" => "provider-zai",
         "minimax" => "provider-minimax",
         "ollama" => "provider-ollama",
@@ -448,8 +505,8 @@ impl AgentPane {
             let target = match &dialog.step {
                 Step::ApiKey => self.key_field.read(cx).focus_handle(cx),
                 Step::Endpoint => self.url_field.read(cx).focus_handle(cx),
-                Step::Login { flow: Flow::Code, .. } => self.code_field.read(cx).focus_handle(cx),
-                Step::Login { .. } | Step::Blocked(_) => dialog.focus.clone(),
+                Step::Login { flow: Flow::Code | Flow::Paste, .. } => self.code_field.read(cx).focus_handle(cx),
+                Step::Login { .. } | Step::Blocked(_) | Step::Warning => dialog.focus.clone(),
             };
             window.focus(&target, cx);
         }
@@ -576,10 +633,26 @@ impl AgentPane {
         }
     }
 
+    /// `Sign in` on a row, or the warning's answer (see `gate`).
+    fn sign_in(&mut self, provider: String, answer: Option<bool>, cx: &mut Context<Self>) {
+        match gate(&provider, answer) {
+            Gate::Ask => {
+                self.signin.error = None;
+                self.signin.confirm = None;
+                self.open_dialog(provider, Step::Warning, cx);
+            }
+            Gate::Start => self.start_subscription(provider, false, cx),
+            Gate::Close => self.close_dialog(cx),
+        }
+    }
+
     /// Cancel: the login (if any) is dropped on the daemon too.
     fn dialog_cancel(&mut self, cx: &mut Context<Self>) {
         if !self.dialog_open() {
             return;
+        }
+        if let Some(Dialog { step: Step::Warning, provider, .. }) = &self.signin.dialog {
+            return self.sign_in(provider.clone(), Some(false), cx);
         }
         self.cancel_login(cx);
         self.close_dialog(cx);
@@ -631,7 +704,8 @@ impl AgentPane {
                 self.set_dialog_busy(true);
                 self.save_key(provider, key, cx);
             }
-            (Step::Login { login_id, flow: Flow::Code, .. }, false) => {
+            (Step::Warning, _) => self.sign_in(provider, Some(true), cx),
+            (Step::Login { login_id, flow: Flow::Code | Flow::Paste, .. }, false) => {
                 let Some(code) = value else { return };
                 let login_id = login_id.clone();
                 self.set_dialog_busy(true);
@@ -686,6 +760,7 @@ impl AgentPane {
                     api_key: Some(key),
                     device: false,
                     base_url: None,
+                    paste: false,
                 })
                 .await
             },
@@ -714,6 +789,7 @@ impl AgentPane {
                     api_key: key,
                     device: false,
                     base_url: Some(url),
+                    paste: false,
                 })
                 .await
             },
@@ -750,14 +826,22 @@ impl AgentPane {
         self.run(
             cx,
             move |c| async move {
-                let result = c.call_typed::<LoginResult>(subscription_login(p, device)).await?;
+                let result = c.call_typed::<LoginResult>(subscription_login(p.clone(), device)).await?;
                 let forward = match forward_route(&target, &result) {
                     Some((id, callback)) => {
                         let started = match client::dialer(id).await {
                             Ok(dialer) => CallbackForward::start(dialer, callback.port, callback.port, callback.path.clone(), FORWARD_TTL),
                             Err(e) => Err(ForwardError::Bind(e)),
                         };
-                        if let (Err(_), LoginResult::Pending { login_id, .. }) = (&started, &result) {
+                        // Its fixed port can't be forwarded: the provider's own page shows a code instead.
+                        if let (Err(_), LoginResult::Pending { login_id, .. }) = (&started, &result)
+                            && pastes(&p)
+                        {
+                            let _ = c.call_typed::<serde_json::Value>(Method::AuthLoginCancel { login_id: login_id.clone() }).await;
+                            return Ok((c.call_typed::<LoginResult>(paste_login(p)).await?, None));
+                        }
+                        // A login that takes a pasted address stays; the card pastes into it.
+                        if let (Err(_), LoginResult::Pending { login_id, accepts_code: false, .. }) = (&started, &result) {
                             let _ = c.call_typed::<serde_json::Value>(Method::AuthLoginCancel { login_id: login_id.clone() }).await;
                         }
                         Some(started.map_err(|e| Blocked::of(&e)))
@@ -768,17 +852,24 @@ impl AgentPane {
             },
             move |this, result, cx| {
                 if this.signin.attempt != attempt {
-                    if let Ok((LoginResult::Pending { login_id, .. }, None | Some(Ok(_)))) = result {
+                    if let Ok((LoginResult::Pending { login_id, accepts_code, .. }, forward)) = result
+                        && (accepts_code || !matches!(forward, Some(Err(_))))
+                    {
                         this.send_cancel(login_id, cx);
                     }
                     return;
                 }
                 this.signin.busy = None;
+                let remote = matches!(this.target, Otto::Remote { .. });
                 match result {
                     Ok((LoginResult::SignedIn { .. }, _)) => this.signed_in(provider, Act::Subscribe, cx),
-                    // Already cancelled on the remote; the page isn't opened.
-                    Ok((LoginResult::Pending { .. }, Some(Err(blocked)))) => this.show_step(provider, Step::Blocked(blocked), device, None, cx),
-                    Ok((LoginResult::Pending { url, login_id, user_code, verification_uri, needs_code, .. }, forward)) => {
+                    Ok((LoginResult::Pending { url, login_id, user_code, verification_uri, needs_code, accepts_code, .. }, forward)) => {
+                        let reached = forward.as_ref().map(|f| f.as_ref().map(|_| ()).map_err(|b| *b));
+                        let flow = match pending_step(Flow::of(user_code, needs_code), accepts_code, remote, reached) {
+                            Ok(flow) => flow,
+                            // Already cancelled on the remote; the page isn't opened.
+                            Err(blocked) => return this.show_step(provider, Step::Blocked(blocked), device, None, cx),
+                        };
                         let held = forward.and_then(Result::ok).map(|f| Held {
                             login_id: login_id.clone(),
                             until: Instant::now() + FORWARD_TTL,
@@ -787,14 +878,17 @@ impl AgentPane {
                         if held.is_some() {
                             this.expire_forward(cx);
                         }
-                        let flow = Flow::of(user_code, needs_code);
                         let url = match &flow {
                             Flow::Device { .. } => verification_uri.unwrap_or(url),
                             _ => url,
                         };
                         cx.open_url(&url);
-                        this.code_field.update(cx, |e, cx| e.clear(cx));
-                        let waits = flow != Flow::Code;
+                        let placeholder = if flow == Flow::Paste { "Paste the address you were sent to" } else { "Paste the code" };
+                        this.code_field.update(cx, |e, cx| {
+                            e.clear(cx);
+                            e.set_placeholder(placeholder, cx);
+                        });
+                        let waits = flow.waits();
                         let step = Step::Login { login_id: login_id.clone(), url, flow };
                         this.show_step(provider, step, device, held, cx);
                         if waits {
@@ -1019,7 +1113,7 @@ impl AgentPane {
                         ROW_BUTTON,
                         state(Act::Subscribe),
                         cx,
-                        move |this, _, cx| this.start_subscription(p2.clone(), false, cx),
+                        move |this, _, cx| this.sign_in(p2.clone(), None, cx),
                     ))
                 })
                 .when(status.modes.contains(&AuthMode::ApiKey), |el| {
@@ -1072,6 +1166,10 @@ impl AgentPane {
             Step::Login { flow: Flow::Code, .. } => {
                 ("Finish signing in".to_owned(), "Authorize in your browser, then paste the code".to_owned(), "Continue")
             }
+            Step::Login { flow: Flow::Paste, .. } => {
+                ("Finish signing in".to_owned(), "Sign in in your browser, then paste the address it ends on".to_owned(), "Continue")
+            }
+            Step::Warning => (format!("Sign in with {name}?"), WARNING.to_owned(), "Continue"),
             Step::Login { flow: Flow::Browser, .. } => {
                 ("Finish signing in".to_owned(), "Continue in your browser; this closes when you're done".to_owned(), "Open again")
             }
@@ -1080,21 +1178,23 @@ impl AgentPane {
             }
             Step::Blocked(blocked) => ("Finish signing in".to_owned(), blocked.message(), "Use a code"),
         };
-        let blocked = match step {
-            Step::Blocked(blocked) => Some(blocked),
+        // Steps that end in a choice: Cancel, and the primary if it has one.
+        let choice = match step {
+            Step::Blocked(blocked) => Some(blocked.use_code()),
+            Step::Warning => Some(true),
             _ => None,
         };
         let primary = if spent { "Try again" } else { primary };
         let pill = match &step {
             Step::ApiKey => Some(self.key_field.clone()),
             Step::Endpoint => Some(self.url_field.clone()),
-            Step::Login { flow: Flow::Code, .. } => Some(self.code_field.clone()),
-            Step::Login { .. } | Step::Blocked(_) => None,
+            Step::Login { flow: Flow::Code | Flow::Paste, .. } => Some(self.code_field.clone()),
+            Step::Login { .. } | Step::Blocked(_) | Step::Warning => None,
         };
         // Every body is one pill tall, so the dialog is the same size for each step.
         let body_h = pill_input::HEIGHT + 10.0;
         let body: Option<AnyElement> = match (&step, pill) {
-            (Step::Blocked(_), _) => None,
+            (Step::Blocked(_) | Step::Warning, _) => None,
             (_, Some(pill)) => {
                 let error = error.clone().map(SharedString::from);
                 pill.update(cx, |p, cx| {
@@ -1155,7 +1255,8 @@ impl AgentPane {
                     .into_any_element(),
             ),
         };
-        let has_pill = matches!(&step, Step::ApiKey | Step::Endpoint | Step::Login { flow: Flow::Code, .. } | Step::Blocked(_));
+        let has_pill =
+            matches!(&step, Step::ApiKey | Step::Endpoint | Step::Login { flow: Flow::Code | Flow::Paste, .. } | Step::Blocked(_) | Step::Warning);
         // The pill carries its own error line; other steps reserve one here.
         let error_line = (!has_pill).then(|| {
             div()
@@ -1171,9 +1272,9 @@ impl AgentPane {
         });
         let waiting = matches!(&step, Step::Login { flow: Flow::Browser | Flow::Device { .. }, .. }) && !spent;
         // The pill is the primary action; a footer only for reopening the page or restarting.
-        let footer = if let Some(blocked) = blocked {
+        let footer = if let Some(primary_shown) = choice {
             let cancel = self.button("signin-dialog-cancel", Kind::Quiet, "Cancel", DIALOG_BUTTON, READY, cx, |this, _, cx| this.dialog_cancel(cx));
-            let code = blocked.use_code().then(|| {
+            let code = primary_shown.then(|| {
                 self.button("signin-dialog-ok", Kind::Primary, primary, DIALOG_BUTTON, State { enabled: true, loading: busy }, cx, |this, _, cx| {
                     this.dialog_submit(None, cx);
                 })
@@ -1298,7 +1399,22 @@ mod tests {
 
     #[test]
     fn every_provider_has_a_logo_and_endpoints_need_http() {
-        let ids = ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "ollama", "lmstudio", "custom"];
+        let ids = [
+            "anthropic",
+            "openai",
+            "google",
+            "xai",
+            "openrouter",
+            "deepseek",
+            "moonshotai",
+            "kimi-code",
+            "antigravity",
+            "zai",
+            "minimax",
+            "ollama",
+            "lmstudio",
+            "custom",
+        ];
         for provider in ids {
             assert!(crate::assets::has_icon(logo(provider)), "{provider}");
             assert_ne!(logo(provider), "agent", "{provider}");
@@ -1335,6 +1451,7 @@ mod tests {
             verification_uri: None,
             interval_secs: None,
             needs_code: false,
+            accepts_code: callback.is_some(),
             callback,
         }
     }
@@ -1395,13 +1512,69 @@ mod tests {
         assert!(busy.use_code());
         assert!(matches!(
             subscription_login("openai".into(), busy.use_code()),
-            Method::AuthLogin { ref provider, mode: AuthMode::Subscription, device: true, api_key: None, base_url: None } if provider == "openai"
+            Method::AuthLogin { ref provider, mode: AuthMode::Subscription, device: true, api_key: None, base_url: None, paste: false } if provider == "openai"
         ));
         assert!(matches!(subscription_login("openai".into(), false), Method::AuthLogin { device: false, .. }));
         let bind = Blocked::of(&ForwardError::Bind(std::io::Error::other("denied")));
         assert_eq!(bind, Blocked::Bind);
         assert_eq!(bind.message(), "Couldn't listen for the sign-in.");
         assert!(!bind.use_code(), "only Cancel");
+    }
+
+    #[test]
+    fn unreachable_redirects_paste_instead_of_waiting() {
+        let busy = Some(Err(Blocked::PortBusy(56121)));
+        // A busy port on the Mac: paste the address when the login takes one, else the old choice.
+        assert_eq!(pending_step(Flow::Browser, true, true, busy), Ok(Flow::Paste));
+        assert_eq!(pending_step(Flow::Browser, false, true, busy), Err(Blocked::PortBusy(56121)));
+        assert_eq!(pending_step(Flow::Browser, true, true, Some(Err(Blocked::Bind))), Ok(Flow::Paste));
+        // Remote with nothing to forward: the redirect can't reach the host either.
+        assert_eq!(pending_step(Flow::Browser, true, true, None), Ok(Flow::Paste));
+        assert_eq!(pending_step(Flow::Browser, false, true, None), Ok(Flow::Browser));
+        // Forwarded, or on this Mac: the browser's redirect lands; wait for it.
+        assert_eq!(pending_step(Flow::Browser, true, true, Some(Ok(()))), Ok(Flow::Browser));
+        assert_eq!(pending_step(Flow::Browser, true, false, None), Ok(Flow::Browser));
+        // Code and device flows don't depend on a redirect.
+        assert_eq!(pending_step(Flow::Code, true, true, None), Ok(Flow::Code));
+        let device = Flow::Device { code: "AB-CD".into() };
+        assert_eq!(pending_step(device.clone(), true, true, None), Ok(device));
+        // Only the browser and device flows wait: the daemon refuses a second waiting call.
+        assert!(Flow::Browser.waits() && Flow::Device { code: "X".into() }.waits());
+        assert!(!Flow::Paste.waits() && !Flow::Code.waits());
+        // Google's fixed port can't be forwarded: its own paste login instead.
+        assert!(pastes("antigravity") && !pastes("openai") && !pastes("xai"));
+        assert!(matches!(paste_login("antigravity".into()), Method::AuthLogin { paste: true, device: false, mode: AuthMode::Subscription, .. }));
+        assert!(matches!(subscription_login("antigravity".into(), false), Method::AuthLogin { paste: false, .. }));
+    }
+
+    #[test]
+    fn google_warns_before_the_browser_opens() {
+        assert_eq!(gate("antigravity", None), Gate::Ask);
+        assert_eq!(gate("antigravity", Some(true)), Gate::Start, "Continue starts the login");
+        assert_eq!(gate("antigravity", Some(false)), Gate::Close, "Cancel starts nothing");
+        for provider in ["anthropic", "openai", "xai", "kimi-code", "google"] {
+            assert_eq!(gate(provider, None), Gate::Start, "{provider}");
+        }
+        assert!(WARNING.starts_with("Google's Antigravity terms forbid third-party use."));
+    }
+
+    #[test]
+    fn provider_list_follows_the_daemon_not_a_count() {
+        let both = vec![AuthMode::ApiKey, AuthMode::Subscription];
+        let ids = ["anthropic", "openai", "google", "antigravity", "xai", "kimi-code", "moonshotai", "zai", "minimax", "deepseek", "openrouter"];
+        let mut auth: Vec<AuthStatus> = ids.iter().map(|p| status(p, both.clone())).collect();
+        auth.extend(["ollama", "lmstudio", "custom"].map(|p| status(p, vec![AuthMode::ApiKey])));
+        auth.push(status("test", vec![]));
+        let shown: Vec<&str> = providers(&auth).into_iter().map(|a| a.provider.as_str()).collect();
+        assert_eq!(shown.len(), 14);
+        assert_eq!(&shown[..4], ["anthropic", "openai", "google", "antigravity"]);
+        for s in providers(&auth) {
+            assert_ne!(logo(&s.provider), "agent", "{}", s.provider);
+            assert!(!super::super::view::provider_name(&s.provider).is_empty());
+        }
+        assert_eq!(super::super::view::provider_name("kimi-code"), "Kimi Code");
+        assert_eq!(offer(&status("xai", both.clone())), "SuperGrok");
+        assert_eq!(offer(&status("antigravity", vec![AuthMode::Subscription])), "Google account");
     }
 
     #[test]
