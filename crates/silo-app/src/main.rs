@@ -46,7 +46,6 @@ mod qr;
 mod radius;
 mod remote;
 mod settings;
-mod settings_agents;
 mod settings_panel;
 mod settings_table;
 mod share;

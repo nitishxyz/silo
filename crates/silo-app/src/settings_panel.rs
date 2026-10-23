@@ -385,24 +385,82 @@ pub enum SettingsEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Section {
     Appearance,
-    Terminal,
-    Agents,
     Keyboard,
     Notifications,
+    Terminal,
+    Browser,
     Hosts,
     Server,
     About,
 }
 
+/// The sidebar's groups, by what their pages set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Group {
+    General,
+    Terminal,
+    Browser,
+    Connections,
+    About,
+}
+
+impl Group {
+    /// The sidebar label; About stands alone at the bottom.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Self::General => Some("General"),
+            Self::Terminal => Some("Terminal"),
+            Self::Browser => Some("Browser"),
+            Self::Connections => Some("Connections"),
+            Self::About => None,
+        }
+    }
+}
+
+/// A sidebar row: a group's label or a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarRow {
+    Label(Group),
+    Section(Section),
+}
+
+/// The sidebar's rows, in [`Section::ALL`] order: each shown page under its
+/// group's label. `shown` filters the pages (a search), and a group with
+/// none shown loses its label too.
+fn sidebar_rows(shown: impl Fn(Section) -> bool) -> Vec<SidebarRow> {
+    let mut rows = Vec::new();
+    let mut group = None;
+    for section in Section::ALL.into_iter().filter(|s| shown(*s)) {
+        if group != Some(section.group()) {
+            group = Some(section.group());
+            if section.group().label().is_some() {
+                rows.push(SidebarRow::Label(section.group()));
+            }
+        }
+        rows.push(SidebarRow::Section(section));
+    }
+    rows
+}
+
 impl Section {
     const ALL: [Self; 8] =
-        [Self::Appearance, Self::Terminal, Self::Agents, Self::Keyboard, Self::Notifications, Self::Hosts, Self::Server, Self::About];
+        [Self::Appearance, Self::Keyboard, Self::Notifications, Self::Terminal, Self::Browser, Self::Hosts, Self::Server, Self::About];
+
+    pub(crate) fn group(self) -> Group {
+        match self {
+            Self::Appearance | Self::Keyboard | Self::Notifications => Group::General,
+            Self::Terminal => Group::Terminal,
+            Self::Browser => Group::Browser,
+            Self::Hosts | Self::Server => Group::Connections,
+            Self::About => Group::About,
+        }
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
-            Self::Agents => "Agents",
+            Self::Browser => "Browser",
             Self::Keyboard => "Keyboard",
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
@@ -415,10 +473,10 @@ impl Section {
         match self {
             Self::Appearance => "settings-shapes",
             Self::Terminal => "terminal",
-            Self::Agents => "agent",
+            Self::Browser => "globe",
             Self::Keyboard => "settings-keyboard",
             Self::Notifications => "settings-bell",
-            Self::Hosts => "globe",
+            Self::Hosts => "laptop",
             Self::Server => "settings-hard-drive",
             Self::About => "settings-info",
         }
@@ -429,7 +487,7 @@ impl Section {
         match self {
             Self::Appearance => 0x008b_5cf6,
             Self::Terminal => 0x0014_b8a6,
-            Self::Agents => 0x0022_c55e,
+            Self::Browser => 0x0022_c55e,
             Self::Keyboard => 0x0063_66f1,
             Self::Notifications => 0x00ef_4444,
             Self::Hosts => 0x000e_a5e9,
@@ -443,7 +501,7 @@ impl Section {
         let own = match self {
             Self::Appearance => "general preferences layout theme colors",
             Self::Terminal => "preview settings file json configuration config edit open reload finder",
-            Self::Agents => "agents agent otto prompt tools model effort approvals new clone delete reset subagent",
+            Self::Browser => "browser web pages swipe back forward zoom pinch",
             Self::Keyboard => "shortcuts keys commands bindings",
             Self::Notifications => "alerts banners dock badge needs you done error",
             Self::Hosts => "remote local address add remove iroh notifications notify",
@@ -521,8 +579,6 @@ pub struct SettingsPanel {
     places: Places,
     building: std::cell::Cell<Section>,
     search: Entity<TextField>,
-    /// Settings › Agents (its own view: it talks to otto).
-    agents: Entity<crate::settings_agents::AgentsSettings>,
     query: String,
     pending_server: Option<ServerAction>,
     pending_remove: Option<String>,
@@ -623,7 +679,6 @@ impl SettingsPanel {
             places: Places::default(),
             building: std::cell::Cell::new(Section::Appearance),
             search,
-            agents: cx.new(|_| crate::settings_agents::AgentsSettings::new()),
             query: String::new(),
             pending_server: None,
             pending_remove: None,
@@ -683,28 +738,6 @@ impl SettingsPanel {
         focus.focus(window, cx);
     }
 
-    /// The runtime for otto calls, the active pane's host and its folder (Settings › Agents).
-    pub fn set_agents_context(
-        &mut self,
-        rt: tokio::runtime::Handle,
-        place: crate::settings_agents::Place,
-        cwd: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.agents.update(cx, |agents, cx| agents.set_context(rt, place, cwd, cx));
-    }
-
-    /// The active host connected: Settings › Agents follows what it supports.
-    pub fn set_agents_place(&mut self, place: crate::settings_agents::Place, cx: &mut Context<Self>) {
-        self.agents.update(cx, |agents, cx| agents.set_place(place, cx));
-    }
-
-    /// Whether the panel may close or change pages: an agent with unsaved
-    /// changes asks first (asked already: they are discarded).
-    pub fn may_leave(&mut self, cx: &mut Context<Self>) -> bool {
-        self.agents.update(cx, |agents, cx| agents.may_leave(cx))
-    }
-
     /// Ask to confirm a server action inline (nothing is running).
     pub fn confirm_server(&mut self, action: ServerAction, cx: &mut Context<Self>) {
         self.pending_server = Some(action);
@@ -716,6 +749,11 @@ impl SettingsPanel {
         self.select(setting.setting().section, cx);
         self.places.clear();
         self.reveal = Some((setting, 0));
+    }
+
+    /// Show `section`'s page (a block header's settings button).
+    pub(crate) fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.select(section, cx);
     }
 
     /// Scroll to the setting being revealed once its page was laid out.
@@ -739,9 +777,6 @@ impl SettingsPanel {
     }
 
     fn select(&mut self, section: Section, cx: &mut Context<Self>) {
-        if section != self.selected && !self.may_leave(cx) {
-            return;
-        }
         self.selected = section;
         self.theme_menu = None;
         self.font_menu = None;
@@ -1662,9 +1697,17 @@ impl SettingsPanel {
                 ));
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
-            Section::Agents => {
-                self.agents.update(cx, |agents, cx| agents.ensure_loaded(cx));
-                out.push(self.agents.clone().into_any_element());
+            Section::Browser => {
+                out.push(self.group(
+                    Some("Gestures"),
+                    vec![Self::row(
+                        "Swipe between pages",
+                        Some("Two fingers go back or forward, as set in macOS".into()),
+                        Some(Self::value("System".to_owned())),
+                        false,
+                    )],
+                ));
+                out.push(Self::note("An agent's web search engine is in its Otto settings."));
             }
             Section::Notifications => out.extend(self.notifications_page(cx)),
             Section::Keyboard => {
@@ -2015,14 +2058,32 @@ impl SettingsPanel {
     fn sidebar(&self, width: f32, searching: bool, cx: &mut Context<Self>) -> AnyElement {
         // Rounded like the card on its outer side; see `render`.
         let mut items = div().id("settings-sidebar-items").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb(px(8.0));
-        for (index, section) in Section::ALL.into_iter().enumerate() {
+        for row in sidebar_rows(|section| !searching || self.matches(section)) {
+            let section = match row {
+                SidebarRow::Label(group) => {
+                    items = items.child(
+                        div()
+                            .mx(px(8.0))
+                            .px(px(8.0))
+                            .pt(px(10.0))
+                            .pb(px(4.0))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(theme::muted()))
+                            .children(group.label()),
+                    );
+                    continue;
+                }
+                SidebarRow::Section(section) => section,
+            };
+            let index = Section::ALL.iter().position(|s| *s == section).unwrap_or_default();
             let selected = self.selected == section && !searching;
-            let dimmed = searching && !self.matches(section);
             items = items.child(
                 div()
                     .id(("settings-section", index))
                     .h(px(36.0))
                     .mx(px(8.0))
+                    .when(section.group() == Group::About, |s| s.mt(px(10.0)))
                     .px(px(8.0))
                     .flex()
                     .items_center()
@@ -2031,7 +2092,6 @@ impl SettingsPanel {
                     .cursor_pointer()
                     .when(selected, |s| s.bg(theme::row_fill()))
                     .when(!selected, |s| s.hover(|s| s.bg(theme::hover_fill())))
-                    .when(dimmed, |s| s.opacity(0.45))
                     .child(
                         div().size(px(22.0)).flex_none().flex().items_center().justify_center().continuous(6.0).bg(rgb(section.tint())).child(icon(
                             section.icon(),
@@ -2162,7 +2222,6 @@ impl Render for SettingsPanel {
         }
         let title: gpui::SharedString = match self.selected {
             _ if searching => "Search Results".into(),
-            Section::Agents => self.agents.read(cx).title().into(),
             section => section.label().into(),
         };
         let gutter = if compact { 20.0 } else { 28.0 };
@@ -2185,10 +2244,7 @@ impl Render for SettingsPanel {
                 if this.theme_menu_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
                 } else if event.keystroke.key == "escape" {
-                    let agents = this.agents.clone();
-                    if !(this.selected == Section::Agents && this.query.is_empty() && agents.update(cx, |a, cx| a.escape(cx))) {
-                        cx.emit(SettingsEvent::Close);
-                    }
+                    cx.emit(SettingsEvent::Close);
                     cx.stop_propagation();
                 }
             }))
@@ -2328,11 +2384,51 @@ mod tests {
         assert_eq!(Section::ALL.len(), 8);
         assert_eq!(Section::ALL[0], Section::Appearance, "Settings opens on Appearance");
         assert!(!Section::ALL.iter().any(|s| s.label() == "General"));
+        assert!(!Section::ALL.iter().any(|s| ["Agents", "Models"].contains(&s.label())), "otto's settings are in the agent pane");
         for section in Section::ALL {
             assert!(!section.keywords().is_empty());
             assert!(crate::assets::has_icon(section.icon()), "missing icon {}", section.icon());
         }
         assert!(crate::assets::has_icon("settings-search"));
+    }
+
+    #[test]
+    fn sections_are_grouped_by_what_they_set_with_about_last() {
+        use Section as S;
+        let order = [S::Appearance, S::Keyboard, S::Notifications, S::Terminal, S::Browser, S::Hosts, S::Server, S::About];
+        assert_eq!(Section::ALL, order);
+        let groups: Vec<Group> = Section::ALL.iter().map(|s| s.group()).collect();
+        use Group as G;
+        assert_eq!(groups, [G::General, G::General, G::General, G::Terminal, G::Browser, G::Connections, G::Connections, G::About]);
+        // Each group's pages are together, so each label shows once.
+        let mut seen: Vec<Group> = Vec::new();
+        for g in groups {
+            if seen.last() != Some(&g) {
+                assert!(!seen.contains(&g), "{g:?} split");
+                seen.push(g);
+            }
+        }
+        assert_eq!(Group::About.label(), None, "About stands alone");
+        let labels: Vec<_> = [G::General, G::Terminal, G::Browser, G::Connections].iter().map(|g| g.label()).collect();
+        assert_eq!(labels, [Some("General"), Some("Terminal"), Some("Browser"), Some("Connections")]);
+    }
+
+    #[test]
+    fn the_sidebar_labels_only_groups_with_shown_pages() {
+        use SidebarRow::{Label, Section as P};
+        let all = sidebar_rows(|_| true);
+        assert_eq!(all.iter().filter(|r| matches!(r, Label(_))).count(), 4);
+        assert_eq!(all.iter().filter(|r| matches!(r, P(_))).count(), Section::ALL.len());
+        assert_eq!(&all[..2], &[Label(Group::General), P(Section::Appearance)]);
+        assert_eq!(all.last(), Some(&P(Section::About)), "About, unlabelled, at the bottom");
+        // A search: only matching pages, under their own groups' labels.
+        let snapshot = SettingsSnapshot::default();
+        let shown = sidebar_rows(|s| section_matches(s, &snapshot, &["pair"]));
+        assert_eq!(shown, [Label(Group::Connections), P(Section::Server)]);
+        let shown = sidebar_rows(|s| matches!(s, Section::Keyboard | Section::Browser));
+        assert_eq!(shown, [Label(Group::General), P(Section::Keyboard), Label(Group::Browser), P(Section::Browser)]);
+        assert!(sidebar_rows(|_| false).is_empty());
+        assert!(section_matches(Section::Browser, &snapshot, &["browser"]));
     }
 
     #[test]

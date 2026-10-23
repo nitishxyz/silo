@@ -43,8 +43,6 @@ const FORWARD_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 pub(super) struct SignIn {
-    /// Shown while signed in too (add a provider, disconnect), with a way back.
-    open: bool,
     dialog: Option<Dialog>,
     /// A row action in flight; every row action is disabled meanwhile.
     busy: Option<(String, Act)>,
@@ -324,7 +322,7 @@ fn ink(amount: f32) -> u32 {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     /// Filled with the foreground: the one main action.
     Primary,
     /// Outlined pill.
@@ -335,18 +333,18 @@ enum Kind {
 
 /// A button's state: `loading` keeps its width and swaps the label for a spinner.
 #[derive(Clone, Copy)]
-struct State {
+pub(super) struct State {
     enabled: bool,
     loading: bool,
 }
 
-const READY: State = State { enabled: true, loading: false };
+pub(super) const READY: State = State { enabled: true, loading: false };
 
 impl AgentPane {
     /// A pill with hover, pressed, keyboard-focus, disabled and loading states.
     /// Enter / Space activate it when focused (Tab reaches it).
     #[allow(clippy::too_many_arguments)]
-    fn button(
+    pub(super) fn button(
         &self,
         id: impl Into<SharedString>,
         kind: Kind,
@@ -421,24 +419,15 @@ impl AgentPane {
             })
     }
 
-    /// Show the Providers view even while signed in: add a provider or disconnect.
-    pub(super) fn open_signin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.signin.open = true;
-        self.set_overlay(None, cx);
-        // The composer goes away: keep keys (Esc) on the pane.
-        window.focus(&self.focus, cx);
-        cx.notify();
-    }
-
-    /// The transcript area shows the sign-in screen.
+    /// The transcript area shows the first-run sign-in screen.
     pub(super) fn showing_signin(&self) -> bool {
-        self.catalog.as_ref().is_some_and(|c| self.signin.open || !c.any_signed_in())
+        !self.showing_otto_settings() && self.catalog.as_ref().is_some_and(|c| !c.any_signed_in())
     }
 
     /// The composer (with its tray and footer) exists only once a provider is
-    /// connected, and not while the Providers view is open.
+    /// connected, and not while the otto settings are open.
     pub(super) fn composer_visible(&self) -> bool {
-        !self.signin.open && self.catalog.as_ref().is_some_and(super::client::Catalog::any_signed_in)
+        !self.showing_otto_settings() && self.catalog.as_ref().is_some_and(super::client::Catalog::any_signed_in)
     }
 
     /// Per frame: drop a dialog that finished closing, move focus into a new
@@ -469,21 +458,14 @@ impl AgentPane {
         }
     }
 
-    /// The Providers view was opened over a signed-in pane (Esc / Back return to the chat).
-    pub(super) fn managing_providers(&self) -> bool {
-        self.signin.open && self.catalog.as_ref().is_some_and(super::client::Catalog::any_signed_in)
-    }
-
-    /// Esc on the pane: close the dialog, else drop a pending confirm, else leave the Providers view.
+    /// Esc on the pane: close the dialog, else drop a pending confirm.
     pub(super) fn signin_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.dialog_open() {
             self.dialog_cancel(cx);
         } else if self.signin.confirm.take().is_some() {
             cx.notify();
-        } else if self.managing_providers() {
-            self.close_signin(window, cx);
         } else {
-            return false;
+            return self.otto_settings_escape(window, cx);
         }
         true
     }
@@ -901,13 +883,36 @@ impl AgentPane {
 
     pub(super) fn render_signin(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let muted = theme::muted();
+        let header = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(div().mb(px(10.0)).child(icon("plug", 20.0, muted)))
+            .child(div().text_size(px(15.0)).font_weight(FontWeight::MEDIUM).child("Sign in to start"))
+            .child(div().mt(px(3.0)).text_size(px(12.5)).text_color(rgb(muted)).child("Choose a model provider"));
+        // The first-run screen sits in the middle.
+        let column = div()
+            .my_auto()
+            .py(px(24.0))
+            .w(px(WIDTH))
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(div().mt(px(22.0)).child(self.provider_list(cx)));
+        // Scrolls when the pane is shorter than the list.
+        div()
+            .size_full()
+            .child(div().id("agent-signin").size_full().overflow_y_scroll().flex().flex_col().items_center().px(px(20.0)).child(column))
+            .into_any_element()
+    }
+
+    /// Every provider with its sign-in state and actions (first run, and Otto settings › Providers).
+    pub(super) fn provider_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let auth = self.catalog.as_ref().map(|c| c.auth.clone()).unwrap_or_default();
-        let managing = auth.iter().any(|a| a.signed_in);
-        let (title, subtitle) =
-            if managing { ("Providers", "Connect the models otto can use") } else { ("Sign in to start", "Choose a model provider") };
         let shown = providers(&auth);
         let count = shown.len();
-        let mut list = div().w_full().mt(px(22.0)).flex().flex_col();
+        let mut list = div().w_full().flex().flex_col();
         for (i, status) in shown.into_iter().enumerate() {
             list = list.child(self.render_provider(i, status, cx));
             if i + 1 < count {
@@ -915,40 +920,12 @@ impl AgentPane {
             }
         }
         let general = self.signin.error.as_ref().filter(|(p, _)| p.is_empty()).map(|(_, e)| e.clone());
-        // Every element starts at the column's left edge: `‹ Back` (Providers
-        // only, a small text button), then the title and subtitle.
-        let back = managing.then(|| {
-            div().flex().ml(px(-8.0)).mb(px(10.0)).child(
-                self.button("signin-back", Kind::Quiet, "", 0.0, READY, cx, |this, window, cx| this.close_signin(window, cx))
-                    .pl(px(4.0))
-                    .pr(px(10.0))
-                    .child(icon("back", 14.0, muted))
-                    .child(div().ml(px(2.0)).child("Back")),
-            )
-        });
-        let header = div()
+        div()
             .w_full()
             .flex()
             .flex_col()
-            .children(back)
-            .when(!managing, |el| el.child(div().mb(px(10.0)).child(icon("plug", 20.0, muted))))
-            .child(div().text_size(px(15.0)).font_weight(FontWeight::MEDIUM).child(title))
-            .child(div().mt(px(3.0)).text_size(px(12.5)).text_color(rgb(muted)).child(subtitle));
-        let column = div()
-            // The first-run screen sits in the middle; the Providers sub-view starts at the top.
-            .when(!managing, |el| el.my_auto())
-            .py(px(if managing { 28.0 } else { 24.0 }))
-            .w(px(WIDTH))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .child(header)
             .child(list)
-            .children(general.map(|e| div().mt(px(10.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)));
-        // Scrolls when the pane is shorter than the list.
-        div()
-            .size_full()
-            .child(div().id("agent-signin").size_full().overflow_y_scroll().flex().flex_col().items_center().px(px(20.0)).child(column))
+            .children(general.map(|e| div().mt(px(10.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)))
             .into_any_element()
     }
 
@@ -1051,6 +1028,14 @@ impl AgentPane {
                         cx,
                         move |this, _, cx| this.start_subscription(p2.clone(), false, cx),
                     ))
+                })
+                .when(status.modes.contains(&AuthMode::ApiKey), |el| {
+                    el.child(self.button(format!("signin-key-{i}"), Kind::Outline, "API key", ROW_BUTTON, state(Act::Key), cx, move |this, _, cx| {
+                        this.signin.error = None;
+                        this.signin.confirm = None;
+                        this.key_field.update(cx, |e, cx| e.clear(cx));
+                        this.open_dialog(p.clone(), Step::ApiKey, cx);
+                    }))
                 })
         };
         // The shared list row, its logo glyph on the column's left edge

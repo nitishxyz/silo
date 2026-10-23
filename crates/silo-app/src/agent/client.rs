@@ -205,9 +205,18 @@ impl Catalog {
 pub struct AuthChanged;
 impl gpui::Global for AuthChanged {}
 
-/// Set when an agent is saved or deleted (Settings › Agents): every agent pane reloads its catalog.
-pub struct AgentsChanged;
-impl gpui::Global for AgentsChanged {}
+/// Set when an agent or a default is saved on an otto (Otto settings): every
+/// agent pane on that otto reloads its pickers.
+pub struct OttoChanged(pub Otto);
+impl gpui::Global for OttoChanged {}
+
+impl OttoChanged {
+    /// Whether a pane on `target` reloads for this change.
+    #[must_use]
+    pub fn concerns(&self, target: &Otto) -> bool {
+        self.0 == *target
+    }
+}
 
 pub async fn catalog(connection: &Connection) -> Result<Catalog, ClientError> {
     let auth = connection.auth_status().await?;
@@ -300,5 +309,14 @@ mod tests {
         catalog.auth[0].plan = Some("Max".into());
         assert_eq!(catalog.subscription("anthropic").as_deref(), Some("Max"));
         assert_eq!(catalog.subscription("openai"), None);
+    }
+
+    #[test]
+    fn a_save_reloads_panes_on_the_same_otto_only() {
+        let mini = || Otto::Remote { id: "mini".into() };
+        assert!(OttoChanged(Otto::Local).concerns(&Otto::Local));
+        assert!(OttoChanged(mini()).concerns(&mini()));
+        assert!(!OttoChanged(Otto::Local).concerns(&mini()));
+        assert!(!OttoChanged(mini()).concerns(&Otto::Remote { id: "boat".into() }));
     }
 }

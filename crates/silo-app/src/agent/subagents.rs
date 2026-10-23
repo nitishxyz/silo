@@ -498,6 +498,7 @@ mod tests {
             updated_at: created_at,
             last_seq: 0,
             usage: otto_proto::UsageTotals::default(),
+            context: otto_proto::ContextUse::default(),
             report_held: false,
         }
     }

@@ -84,6 +84,13 @@ impl HeaderMode {
     pub fn height(self) -> f32 {
         if self == Self::Hidden { 0.0 } else { HEADER_HEIGHT }
     }
+
+    /// Whether the block's actions (and the pane buttons) show: a shrunk
+    /// header is its middle alone.
+    #[must_use]
+    pub fn shows_actions(self) -> bool {
+        self == Self::Full
+    }
 }
 
 /// A pane's content `slot` grown up over its header: its whole card.
@@ -259,6 +266,16 @@ mod tests {
         assert_eq!(header_mode(Kind::Terminal, none), HeaderMode::Hidden);
         assert_eq!(header_mode(Kind::Agent, none), HeaderMode::Hidden);
         assert!((HeaderMode::Middle.height() - HEADER_HEIGHT).abs() < f32::EPSILON, "the same height, shrunk sideways");
+    }
+
+    #[test]
+    fn block_actions_show_only_in_a_full_header() {
+        // The browser's settings button: in its full header, not the shrunk one.
+        assert_eq!(crate::browser_pane::BrowserPane::ACTIONS, ["browser-settings"]);
+        assert!(header_mode(Kind::Browser, PaneHeaders::default()).shows_actions());
+        assert!(!header_mode(Kind::Browser, PaneHeaders::all(false)).shows_actions());
+        assert!(header_mode(Kind::Agent, PaneHeaders::default()).shows_actions());
+        assert!(!HeaderMode::Hidden.shows_actions());
     }
 
     #[test]

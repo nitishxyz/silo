@@ -107,6 +107,7 @@ commands! {
     OpenUrl => "Open URL…", "Browser", [];
     // Agent
     NewAgent => "New Agent", "Agent", ["cmd-shift-o"], "An otto agent beside the focused pane";
+    OttoSettings => "Otto Settings", "Agent", [], "Providers, models and agents of the agent in front";
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];
@@ -175,6 +176,7 @@ impl Command {
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
             Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewBrowser | Self::NewAgent => Method("block.split"),
+            Self::OttoSettings => Method("app.settings_open"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
             Self::FocusPaneLeft | Self::FocusPaneRight | Self::FocusPaneUp | Self::FocusPaneDown => Method("block.focus_dir"),

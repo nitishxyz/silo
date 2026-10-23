@@ -249,6 +249,8 @@ pub enum BrowserPaneEvent {
     Popup(String),
     /// The page's colour changed.
     Backdrop,
+    /// The header's settings button: Settings › Browser.
+    OpenSettings,
 }
 
 impl gpui::EventEmitter<BrowserPaneEvent> for BrowserPane {}
@@ -1044,6 +1046,9 @@ impl BrowserPane {
                 self.focus.focus(window, cx);
             }
             FieldEvent::Cancel => {
+                if close_on_escape(&mut self.security_open, "escape") {
+                    return cx.notify();
+                }
                 self.selected = None;
                 self.focus.focus(window, cx);
                 self.sync_address(cx);
@@ -1061,6 +1066,13 @@ impl BrowserPane {
             FieldEvent::Up | FieldEvent::Down => {}
         }
     }
+}
+
+/// Esc closes an open security popover, and goes no further.
+fn close_on_escape(open: &mut bool, key: &str) -> bool {
+    let close = *open && key == "escape";
+    *open &= !close;
+    close
 }
 
 fn mods(m: gpui::Modifiers) -> silo_web::Modifiers {
@@ -1510,11 +1522,23 @@ impl crate::pane_header::BlockHeader for BrowserPane {
         let progress = (self.loading() && self.progress < 1.0).then_some(self.progress as f32);
         parts.progress = progress;
         parts.rule = true;
+        parts.actions = vec![self.settings_button(style, cx)];
         parts
     }
 }
 
 impl BrowserPane {
+    /// The header's actions by id, before the pane buttons (shown only in a full header).
+    pub(crate) const ACTIONS: [&'static str; 1] = ["browser-settings"];
+
+    fn settings_button(&self, style: crate::pane_header::HeaderStyle, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use crate::pane_header::{button, keep_press};
+        use gpui::{IntoElement as _, StatefulInteractiveElement as _};
+        keep_press(button(Self::ACTIONS[0], "settings", "Browser settings", self.palette.icon, true, style))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(BrowserPaneEvent::OpenSettings)))
+            .into_any_element()
+    }
+
     /// Back, Forward, and Reload or Stop.
     fn nav_buttons(&self, style: crate::pane_header::HeaderStyle, cx: &mut gpui::Context<Self>) -> [gpui::AnyElement; 3] {
         use crate::pane_header::{button, keep_press};
@@ -1786,7 +1810,10 @@ impl gpui::Render for BrowserPane {
             .min_h_0()
             .cursor(cursor_style(self.cursor))
             .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
-                if this.key(&e.keystroke, false) {
+                if close_on_escape(&mut this.security_open, &e.keystroke.key) {
+                    cx.notify();
+                    cx.stop_propagation()
+                } else if this.key(&e.keystroke, false) {
                     cx.stop_propagation()
                 }
             }))
@@ -1889,12 +1916,13 @@ impl crate::workspace::Workspace {
             cx.new(|cx| BrowserPane::new(id, rt, control, route, home, cx))
         });
         pane.update(cx, |pane, cx| pane.attach(window, cx));
-        let sub = cx.subscribe_in(&pane, window, |this, pane, event: &BrowserPaneEvent, _, cx| {
+        let sub = cx.subscribe_in(&pane, window, |this, pane, event: &BrowserPaneEvent, window, cx| {
             let block = pane.read(cx).block_id.clone();
             match event {
                 BrowserPaneEvent::Activated => this.pane_activated(block),
                 BrowserPaneEvent::Popup(url) => this.split_browser(block, Some(url.clone())),
                 BrowserPaneEvent::Backdrop => {}
+                BrowserPaneEvent::OpenSettings => this.open_settings_section(crate::settings_panel::Section::Browser, window, cx),
             }
             cx.notify();
         });
@@ -1996,6 +2024,14 @@ mod tests {
     use silo_proto::model::{Lifecycle, TermSize};
 
     use super::*;
+
+    #[test]
+    fn escape_closes_only_an_open_security_popover() {
+        let mut open = true;
+        assert!(!close_on_escape(&mut open, "a") && open, "other keys leave it open");
+        assert!(close_on_escape(&mut open, "escape") && !open, "Esc closes it and stops there");
+        assert!(!close_on_escape(&mut open, "escape"), "closed: Esc goes on (the address cancels, the page gets it)");
+    }
 
     fn info(kind: BlockKind) -> BlockInfo {
         BlockInfo {

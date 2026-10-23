@@ -283,7 +283,7 @@ impl Workspace {
                         .into_any_element(),
                 }
             }
-            Layout::Unknown => unsupported(),
+            Layout::Unknown => unsupported(UNSUPPORTED.into()),
         }
     }
 
@@ -321,15 +321,11 @@ impl Workspace {
             (Some((pane, _)), _, _) => pane.clone().into_any_element(),
             (None, Some((pane, _)), _) => pane.clone().into_any_element(),
             (None, None, Some((pane, _))) => pane.clone().into_any_element(),
-            (None, None, None)
-                if matches!(
-                    crate::browser_pane::kind_of(self.block_info(id)),
-                    crate::browser_pane::Kind::Unsupported | crate::browser_pane::Kind::Agent
-                ) =>
-            {
-                unsupported()
-            }
-            (None, None, None) => div().size_full().into_any_element(),
+            (None, None, None) => match crate::browser_pane::kind_of(self.block_info(id)) {
+                crate::browser_pane::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
+                crate::browser_pane::Kind::Agent => unsupported(self.agent_unsupported().into()),
+                _ => div().size_full().into_any_element(),
+            },
         };
         let fill_color = self.card_fill(id, cx);
         // A float, or the pane zooming over its siblings, sits over the
@@ -505,7 +501,7 @@ impl Workspace {
             // pointer is over it; they keep their space so nothing shifts.
             // In a pane too narrow for every button the row shrinks and,
             // right-aligned, is clipped from the left: Close stays visible.
-            .when(full, |el| {
+            .when(mode.shows_actions(), |el| {
                 el.child(
                     div()
                         .flex()
@@ -765,8 +761,8 @@ pub fn header_labels(info: Option<&BlockInfo>) -> (String, Option<String>) {
 /// What a newer host's pane or layout node shows here.
 pub(crate) const UNSUPPORTED: &str = "Update Silo to show this pane";
 
-fn unsupported() -> AnyElement {
-    div().size_full().flex().items_center().justify_center().text_size(px(12.0)).text_color(rgb(theme::muted())).child(UNSUPPORTED).into_any_element()
+fn unsupported(text: gpui::SharedString) -> AnyElement {
+    div().size_full().flex().items_center().justify_center().text_size(px(12.0)).text_color(rgb(theme::muted())).child(text).into_any_element()
 }
 
 /// The axis of the split directly holding block `id`.

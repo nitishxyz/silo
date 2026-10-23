@@ -163,7 +163,9 @@ See §8 for status.
   (`Delivery::Steer`, see §4f); queued inputs appear as chips in the tray. Stop lives on the activity row (§4f).
 - `⋮` menu: approval mode (auto / ask), new session.
 - Footer: agent (`BUILD`, …) picker; provider glyph / model id (subscription marker) → searchable model picker
-  from `model.list` limited to signed-in providers; right side: context used % and session cost when known.
+  from `model.list` limited to signed-in providers; at the footer's right end the context's used count (`48k`),
+  muted, amber above 80%, red above 95%; its tooltip gives the window, exact counts, the session totals and cost
+  (see §4b Footer).
 - Todos tray: from the latest `update_todos` call of the session (new otto builtin `update_todos {todos: [{step,
   status: pending|in_progress|completed|cancelled}]}`); collapsed shows the current item and `n/m done`; `⌃`
   expands the list. Hidden when there are no todos and no queued inputs.
@@ -213,6 +215,13 @@ Units are points.
   provider logo 13 + `/` + model id + ` (pro)`/` (max)` dimmer when on a subscription, the whole thing the model
   picker button; right `brain` 14 (reasoning, tinted violet when on) and `image` 14 (attach, tinted green when the
   model accepts images), each a 22×22 button. Context % and cost move into the model picker header and tooltip.
+  As built (context): the used count of `SessionInfo.context` alone at the footer's right end, after the image
+  button, 22 tall like the other footer controls (`999`, `9,999`, `12k`, `1.2M`), tinted by `used / window` (muted
+  ink; `theme::warning` above 80%, `theme::danger` above 95%; `agent/ring.rs` keeps the 14 ring and these levels for
+  the plan-usage ring); the window shows only in the tooltip:
+  `48,213 of 200,000 tokens (24%)` and the session's `In 1.2M · Out 84k · Cache 900k · $0.31`. Hidden without a
+  session or a known window; the model button has no
+  usage tooltip and the model picker no usage header. A sub-agent's block shows its own.
   As built: the subscription marker is the plan otto reports (` (Max)`, ` (Pro)`), ` (sub)` when it reports none.
   `brain` shows only when the model has `caps.reasoning` and opens the effort menu (also `/effort`): a 260 popover
   above it, right-aligned, rows `Default` (the agent's effort, else the model's), `Low`, `Medium`, `High`, `Max`,
@@ -299,8 +308,9 @@ Units are points.
 ## 4e. As shipped (polish round 2)
 
 - **Header:** `AgentPane::header_title()` (chat screen with a provider only) → the pane header shows it with a
-  `chevron-down` (switcher) and adds `history` + `new-session` before split/zoom/close, same buttons and hover. On
-  sign-in / Providers the header shows the block title (`Agent`) and no session controls.
+  `chevron-down` (switcher) and adds `history` + `new-session` + Otto settings (`settings-shapes`, "Otto settings")
+  before split/zoom/close, same buttons and hover (`header::actions`; none on a sub-agent). On sign-in / Otto
+  settings the header shows the block title (`Agent`) and no session controls.
   Since 2026-10 the agent fills the header through `BlockHeader` (`pane_header.rs`, parts in `agent/header.rs`): the
   title + switcher is its middle, History / New Session its actions; the workspace keeps icon, status, pane
   buttons, drag and focus. Headers show per block type (Settings › Appearance › Block headers: Terminal, Agent;
@@ -316,12 +326,16 @@ Units are points.
   smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the attach glyph ends under
   the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
   attach muted, always on (§4g).
-- **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask /providers /clear` (`/clear` also drops
-  attachments); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps the text, menu stays closed until the `/` goes); the current mode
+- **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask /providers /settings /clear` (`/clear` also
+  drops attachments; `/providers` and `/settings` open the Otto settings, §4h); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps
+  the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
 - **Rows** (`agent/rows.rs`): one 44 tall row (28 icon column, title + muted subtitle, trailing check/note/buttons,
-  selected/hover/pressed fills) for the switcher, model/agent pickers, ⋮ and slash menus and provider rows; a small
-  search pill above filterable lists. Arrow keys work in every popover.
+  selected/hover/pressed fills) for the switcher and provider rows; a small search pill above filterable lists.
+  The composer's popups (`@`, `/`, model, agent and effort pickers, `⋮`) use `rows::menu`: one-line 28 rows, a 14
+  icon, the description inline after the name (muted 11.5, cut with `…`), 4 popup padding with the row radius (6)
+  nested in the popup's (10), and an empty state as one such row with its text where row text starts. Arrow keys
+  work in every popover.
 - **Motion** (`motion::{ease_ui, enter, Toggle, Glide}`, `UI` 260 ms / `UI_FAST` 180 ms, `cubic-bezier(0.25,1,0.5,1)`,
   `SILO_MOTION_SLOWDOWN`, Reduce Motion → none): popovers open/close (height, opacity, 6 pt slide), group fold and
   unfold and `›` details (height + opacity, chevrons turn), tray expand (chevron turns) and rise from behind the
@@ -396,8 +410,9 @@ Units are points.
   nothing, and that refusal is dropped quietly. Otherwise closing the block is only a view change: the child keeps
   running and reporting, and stays in the parent's bar.
 - **Narrow panes** (a split can be 60 wide; `view::Fit`): nothing overlaps; text truncates with `…` and items drop as
-  the pane narrows: the plan marker (<440), the provider logo (<340), bars' current item, sub-agent agent names and
-  the strip's parent title (<320), effort/image (<270), the composer's `⋮` (<240, the slash menu covers it), labels
+  the pane narrows: the token count (<460), the plan marker (<440), the provider logo (<340), bars' current item,
+  sub-agent agent names and the strip's parent title (<320), effort/image (<270), the
+  composer's `⋮` (<240, the slash menu covers it), labels
   beside icons (`Main agent`, bar labels, <230), the model (<200), the footer (<130), then the send circle (⏎
   sends), the strip's `Sub-agent` and `Stop  esc` (a stop icon instead) under 120. Side padding 20 → 8 under 300,
   the activity row's too.
@@ -463,13 +478,33 @@ Units are points.
   (its files aren't sent again). A `/command` message shows no chips (its expansion changes the text the ranges
   point into); otto still gets the note.
 
-## 4h. Settings › Agents
+## 4h. Otto settings
 
 Plan mode is gone (otto has no `plan` approval mode): no `/mode plan`, no Plan row in `⋮`, the agent picker's
-fallback is just `build`. The pickers reload when an agent is saved or deleted (`client::AgentsChanged`).
+fallback is just `build`.
 
-Settings has an **Agents** page (`settings_agents.rs`, its own view inside the panel; it calls otto only once the
-page shows). It works on the project of the pane that was active when Settings opened (git toplevel of its folder),
+Silo's Settings are for this Mac only; otto's are a view inside the agent pane (`agent/settings.rs`), shown in
+the chat's place like the first-run sign-in, talking only to the pane's own otto (`connection(&self.target)`).
+It uses the pane's full width at the pane's side padding (descriptions stop at 560). Title `Otto`, or
+`Otto on <host>` for a remote host's; `‹ Back` or Esc returns to the chat (the agent editor takes
+Esc first). Tabs (`settings::Tab::ALL`, a row of pills; MCP, skills and tools go there later):
+- **Providers:** the sign-in list and dialogs of §4b (`provider_list`, shared with the first-run screen); API key
+  (or Connect, or a signed-in row's action) in the rightmost column straight down the list, Sign in to its left.
+- **Models:** otto's defaults for new sessions (`config.get` on open, `config.set` on every change; errors inline,
+  in a few words): model (`Automatic` = the signed-in default, then the signed-in providers' models → `provider` +
+  `model`), effort (Default = none set, Low, Medium, High, Max → `effort`; an agent's own effort wins), agent (`agents.list` →
+  `agent`), approvals (Auto, Ask, Ask all → `approval_mode`), native compaction (→ `native_compaction`). "Applies to
+  new sessions." A saved change reloads the pickers of every agent pane on the same otto (`client::OttoChanged`).
+- **Agents:** the agent list and editor below (`agent/settings_agents.rs`) on the pane's project; a save or delete
+  reloads the pickers of every agent pane on the same otto.
+- **Search:** `search_engine` (DuckDuckGo, Bing, Google).
+
+Entry points (`settings::entry_tab`): the header gear, `/settings` and the palette's `Otto Settings` open Models
+(Providers while nothing is signed in); `/providers` and the `⋮` menu's Providers open Providers. `Otto Settings`
+uses the agent pane in front, else opens a new agent tab on its settings on the active host when it runs agents
+(else `Not supported by <host>` / `<host> is not connected`).
+
+The **Agents** tab calls otto only once it shows. It works on the pane's project (git toplevel of its folder),
 named by folder only.
 - **List** (`agents.list`): name, scope badge (`Built-in`, `Yours`, `Project`), `Edited` for a definition named like
   a built-in (`overrides_builtin` from `agents.get`), the description on one muted line, a model chip (`Session
@@ -489,7 +524,7 @@ named by folder only.
   the lists explicit; `Use defaults` empties both. Patterns naming no listed tool (a server not running) are kept.
 - **Saving:** `agents.save` with `previous_name` on a rename; moving an agent to the other scope saves it there and
   deletes the old definition. Problems show inline in a few words (`Name the agent`, `That name is taken`, `Grant a
-  tool, or use defaults`, otto's reason without paths). Leaving with changes (back, another page, closing Settings)
+  tool, or use defaults`, otto's reason without paths). Leaving with changes (back, another tab, Back to the chat)
   asks `Discard your changes?`; asking again discards. Esc closes a menu, then leaves the editor.
 
 ## 5. Session switcher

@@ -247,9 +247,6 @@ impl Workspace {
             self.refresh_devices(cx);
             let snapshot = self.settings_snapshot(None, cx);
             let panel = cx.new(|cx| SettingsPanel::new(snapshot, window, cx));
-            let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
-            let place = self.agents_place();
-            panel.update(cx, |panel, cx| panel.set_agents_context(self.rt.clone(), place, cwd, cx));
             let sub = cx.subscribe_in(&panel, window, |this, _, event: &SettingsEvent, window, cx| this.settings_event(event, window, cx));
             let devices = cx.spawn(async move |this, cx| {
                 loop {
@@ -273,10 +270,6 @@ impl Workspace {
     }
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // An agent with unsaved changes asks first.
-        if self.settings.as_ref().is_some_and(|m| !m.panel.update(cx, |panel, cx| panel.may_leave(cx))) {
-            return;
-        }
         if self.settings.take().is_some() {
             self.refocus_terminal(window, cx);
             cx.notify();
@@ -374,6 +367,14 @@ impl Workspace {
         self.open_settings(window, cx);
         if let Some(modal) = &self.settings {
             modal.panel.update(cx, |panel, cx| panel.reveal(setting, cx));
+        }
+    }
+
+    /// Show the panel on `section` (a block header's settings button).
+    pub(crate) fn open_settings_section(&mut self, section: crate::settings_panel::Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
+        if let Some(modal) = &self.settings {
+            modal.panel.update(cx, |panel, cx| panel.show_section(section, cx));
         }
     }
 

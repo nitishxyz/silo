@@ -10,9 +10,8 @@ use silo_proto::{
 };
 
 use crate::{
-    agent::{AgentPane, AgentPaneEvent, AgentStatus, client::Otto},
+    agent::{AgentPane, AgentPaneEvent, AgentStatus, client::Otto, settings::Entry},
     hosts::Transport,
-    settings_agents::Place,
 };
 
 /// The block's glyph (pane header, tab, New Tab row).
@@ -54,16 +53,6 @@ pub(crate) fn agents_supported(reach: Reach, features: Option<&[String]>) -> Age
         (Reach::Iroh, None) => Agents::Unknown,
         (Reach::Iroh, Some(f)) if f.iter().any(|f| f == feature::OTTO) => Agents::Run,
         (Reach::Iroh | Reach::Shared, _) => Agents::No,
-    }
-}
-
-/// Settings › Agents for a host named `host` whose daemon is `otto`.
-pub(crate) fn settings_place(agents: Agents, otto: Option<Otto>, host: &str) -> Place {
-    match (agents, otto) {
-        (Agents::Run, Some(Otto::Local)) => Place::Local,
-        (Agents::Run, Some(Otto::Remote { id })) => Place::Remote { id, host: host.to_owned() },
-        (Agents::Unknown, Some(_)) => Place::Offline { host: host.to_owned() },
-        _ => Place::Unsupported { host: host.to_owned() },
     }
 }
 
@@ -111,22 +100,18 @@ impl crate::workspace::Workspace {
 
     /// Why New Agent isn't offered on the active host, if it isn't.
     pub(crate) fn agents_not_offered(&self) -> Option<String> {
-        match self.agents(self.active_host) {
-            Agents::Run => None,
-            Agents::Unknown => Some(format!("{} is not connected", self.hosts[self.active_host].info.name)),
-            Agents::No => Some(self.not_supported()),
-        }
+        not_offered(self.agents(self.active_host), &self.hosts[self.active_host].info.name)
+    }
+
+    /// What an agent block with no pane shows on the active host.
+    pub(crate) fn agent_unsupported(&self) -> String {
+        let h = &self.hosts[self.active_host];
+        unsupported_card(Reach::of(&h.info.transport), self.agents(self.active_host), &h.info.name)
     }
 
     /// The otto daemon of `host`'s agent blocks, if it runs them.
     pub(crate) fn agent_target(&self, host: usize) -> Option<Otto> {
         self.agents_on(host).then(|| Otto::of(&self.hosts[host].info.transport)).flatten()
-    }
-
-    /// Settings › Agents for the active host.
-    pub(crate) fn agents_place(&self) -> Place {
-        let host = &self.hosts[self.active_host].info;
-        settings_place(self.agents(self.active_host), Otto::of(&host.transport), &host.name)
     }
 
     /// `host`'s connection came or went: its agent panes show or drop the
@@ -252,6 +237,7 @@ impl crate::workspace::Workspace {
                 Ok(created) => this.composer_pending = Some(created.block_id),
                 Err(error) => {
                     tracing::warn!("new agent: {error:#}");
+                    this.otto_settings_pending = false;
                     this.flash(this.failed(&error, "Couldn't open an agent"), cx);
                 }
             });
@@ -259,12 +245,73 @@ impl crate::workspace::Workspace {
         .detach();
     }
 
-    /// Focus the pending new agent's composer once its pane exists.
+    /// Focus the pending new agent's composer once its pane exists (or show
+    /// its otto settings, for Otto Settings).
     pub(crate) fn focus_new_agent(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(pane) = self.composer_pending.as_ref().and_then(|b| self.agents.get(b)).map(|(p, _)| p.clone()) else { return };
         self.composer_pending = None;
-        pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
+        if std::mem::take(&mut self.otto_settings_pending) {
+            pane.update(cx, |pane, cx| pane.open_otto_settings(Entry::Palette, window, cx));
+        } else {
+            pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
+        }
     }
+
+    /// Otto Settings: in the agent pane in front, else in a new agent tab on
+    /// the active host, if it runs agents.
+    pub(crate) fn open_otto_settings(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let front = self.agent_focused(window, cx).or_else(|| self.focused_block(window, cx));
+        let pane = front.and_then(|b| self.agents.get(&b)).map(|(p, _)| p.clone());
+        let host = &self.hosts[self.active_host].info.name;
+        match settings_route(pane.is_some(), self.agents(self.active_host), host) {
+            SettingsRoute::Front => {
+                if let Some(pane) = pane {
+                    pane.update(cx, |pane, cx| pane.open_otto_settings(Entry::Palette, window, cx));
+                }
+            }
+            SettingsRoute::NewTab => {
+                self.otto_settings_pending = true;
+                self.new_agent_tab(window, cx);
+            }
+            SettingsRoute::Note(note) => self.flash(crate::status::Status::info(note), cx),
+        }
+    }
+}
+
+/// Why New Agent isn't offered on a host named `host`, if it isn't.
+fn not_offered(agents: Agents, host: &str) -> Option<String> {
+    match agents {
+        Agents::Run => None,
+        Agents::Unknown => Some(format!("{host} is not connected")),
+        Agents::No => Some(format!("Not supported by {host}")),
+    }
+}
+
+/// An agent block's card on a host that doesn't run it: a paired remote
+/// without otto says so as its pane would; anything else is the generic card.
+fn unsupported_card(reach: Reach, agents: Agents, host: &str) -> String {
+    match (reach, agents) {
+        (Reach::Iroh, Agents::No) => crate::agent::Failure::NoOtto.copy(host).0,
+        _ => crate::layout::UNSUPPORTED.to_owned(),
+    }
+}
+
+/// Where Otto Settings opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsRoute {
+    /// The agent pane in front.
+    Front,
+    /// A new agent tab on the active host, on its settings.
+    NewTab,
+    /// Neither: why.
+    Note(String),
+}
+
+fn settings_route(agent_in_front: bool, agents: Agents, host: &str) -> SettingsRoute {
+    if agent_in_front {
+        return SettingsRoute::Front;
+    }
+    not_offered(agents, host).map_or(SettingsRoute::NewTab, SettingsRoute::Note)
 }
 
 /// The agent block showing otto session `session`, if any.
@@ -315,22 +362,21 @@ mod tests {
     }
 
     #[test]
-    fn settings_agents_go_to_the_hosts_otto_or_say_why_not() {
-        let remote = || Some(Otto::Remote { id: "abc".into() });
-        assert_eq!(settings_place(Agents::Run, Some(Otto::Local), "This Mac"), Place::Local);
-        let mini = settings_place(Agents::Run, remote(), "mini");
-        assert_eq!(mini, Place::Remote { id: "abc".into(), host: "mini".into() });
-        assert_eq!(mini.title(), "Agents on mini");
-        assert_eq!(Place::Local.title(), "Agents");
-        // Never this Mac's otto in their place.
-        let old = settings_place(Agents::No, remote(), "mini");
-        assert_eq!((old.target(), old.blocked().as_deref()), (None, Some("Not supported by mini")));
-        let shared = settings_place(Agents::No, None, "Ana's link");
-        assert_eq!((shared.target(), shared.blocked().as_deref()), (None, Some("Not supported by Ana's link")));
-        let offline = settings_place(Agents::Unknown, remote(), "mini");
-        assert_eq!((offline.target(), offline.blocked().as_deref()), (None, Some("mini is not connected")));
-        assert_eq!(mini.target(), remote());
-        assert_eq!(Place::Local.target(), Some(Otto::Local));
+    fn otto_settings_open_in_front_else_on_any_host_running_agents() {
+        assert_eq!(settings_route(true, Agents::No, "mini"), SettingsRoute::Front, "the pane in front, whatever the host");
+        assert_eq!(settings_route(false, Agents::Run, "This Mac"), SettingsRoute::NewTab);
+        assert_eq!(settings_route(false, Agents::Run, "mini"), SettingsRoute::NewTab, "a connected remote with otto");
+        assert_eq!(settings_route(false, Agents::Unknown, "mini"), SettingsRoute::Note("mini is not connected".into()));
+        assert_eq!(settings_route(false, Agents::No, "Ana's link"), SettingsRoute::Note("Not supported by Ana's link".into()));
+        assert_eq!(not_offered(Agents::Run, "mini"), None);
+    }
+
+    #[test]
+    fn an_agent_block_on_a_remote_without_otto_says_to_update_it() {
+        let pane = crate::agent::Failure::NoOtto.copy("mini").0;
+        assert_eq!(unsupported_card(Reach::Iroh, Agents::No, "mini"), "mini doesn't have otto yet. Update silo there.");
+        assert_eq!(unsupported_card(Reach::Iroh, Agents::No, "mini"), pane, "the same words as the pane's");
+        assert_eq!(unsupported_card(Reach::Shared, Agents::No, "Ana's link"), crate::layout::UNSUPPORTED);
     }
 
     #[test]

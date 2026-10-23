@@ -14,8 +14,11 @@ mod markdown;
 pub(crate) mod mention;
 mod pill_input;
 mod reveal;
+mod ring;
 mod rows;
 mod scroll;
+pub(crate) mod settings;
+mod settings_agents;
 mod signin;
 mod subagents;
 mod transcript;
@@ -114,6 +117,7 @@ enum SlashAct {
     Effort,
     Mode(ApprovalMode),
     Providers,
+    Settings,
     Clear,
 }
 
@@ -124,7 +128,7 @@ struct SlashCommand {
     act: SlashAct,
 }
 
-const SLASH: [SlashCommand; 9] = [
+const SLASH: [SlashCommand; 10] = [
     SlashCommand { name: "new", about: "Start a new session", icon: "new-session", act: SlashAct::New },
     SlashCommand { name: "sessions", about: "Switch to another session", icon: "history", act: SlashAct::Sessions },
     SlashCommand { name: "model", about: "Choose the model", icon: "bot", act: SlashAct::Model },
@@ -133,6 +137,7 @@ const SLASH: [SlashCommand; 9] = [
     SlashCommand { name: "mode auto", about: "Run tools without asking", icon: "lock-off", act: SlashAct::Mode(ApprovalMode::Auto) },
     SlashCommand { name: "mode ask", about: "Ask before changes", icon: "lock", act: SlashAct::Mode(ApprovalMode::AskOnEffects) },
     SlashCommand { name: "providers", about: "Connect or disconnect providers", icon: "plug", act: SlashAct::Providers },
+    SlashCommand { name: "settings", about: "Otto settings", icon: "settings", act: SlashAct::Settings },
     SlashCommand { name: "clear", about: "Clear the input and start over", icon: "rotate-ccw", act: SlashAct::Clear },
 ];
 
@@ -328,6 +333,8 @@ pub struct AgentPane {
     mention: mention::Popup,
     selected: usize,
     signin: SignIn,
+    /// The otto settings, shown instead of the chat (`settings.rs`).
+    otto_settings: Option<settings::OttoSettings>,
     status: Option<AgentStatus>,
     title: String,
     /// The header title last announced with [`AgentPaneEvent::Header`].
@@ -384,8 +391,6 @@ pub struct AgentPane {
     running: bool,
     /// The shown session was created by this pane (its steps are timed from the start).
     fresh: bool,
-    usage_seen: Option<u64>,
-    context: Option<u64>,
     /// Parsed assistant text by row key (only a streaming text's open block parses again).
     parsed: HashMap<String, markdown::Doc>,
     _subscriptions: Vec<Subscription>,
@@ -423,7 +428,11 @@ impl AgentPane {
             cx.subscribe(&url_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe_in(&filter, window, |this, _, event: &FieldEvent, window, cx| this.filter_event(event, window, cx)),
             cx.observe_global::<client::AuthChanged>(Self::reload_catalog),
-            cx.observe_global::<client::AgentsChanged>(Self::reload_catalog),
+            cx.observe_global::<client::OttoChanged>(|this, cx| {
+                if cx.global::<client::OttoChanged>().concerns(&this.target) {
+                    this.reload_catalog(cx);
+                }
+            }),
             cx.on_focus_in(&focus, window, |_, _, cx| cx.emit(AgentPaneEvent::Activated)),
             // The pane itself has nothing to type into: focus lands on the composer.
             cx.on_focus(&focus, window, |this, window, cx| this.focus_composer(window, cx)),
@@ -484,6 +493,7 @@ impl AgentPane {
             mention: mention::Popup::default(),
             selected: 0,
             signin: SignIn::default(),
+            otto_settings: None,
             status: None,
             title: String::new(),
             header_seen: None,
@@ -517,8 +527,6 @@ impl AgentPane {
             running_since: None,
             running: false,
             fresh: false,
-            usage_seen: None,
-            context: None,
             parsed: HashMap::new(),
             _subscriptions: subscriptions,
         };
@@ -733,6 +741,7 @@ impl AgentPane {
                         this.conn = Conn::Ready;
                         this.home = Some(home).filter(|h| !h.is_empty());
                         this.catalog = Some(catalog);
+                        this.catalog_loaded(cx);
                         this.project = Some(project);
                         this.sessions = sessions;
                         this.watch_sessions(cx);
@@ -816,8 +825,6 @@ impl AgentPane {
         self.reveals.clear();
         self.scroll.clear();
         self.parsed.clear();
-        self.usage_seen = None;
-        self.context = None;
         self.title.clear();
         self.reset_subagents();
         self.update = Update::default();
@@ -961,13 +968,6 @@ impl AgentPane {
             }
             cx.emit(AgentPaneEvent::Session { session_id: m.info.id.clone(), title: self.title.clone() });
         }
-        let used = m.info.usage.usage.input + m.info.usage.usage.cache_read + m.info.usage.usage.cache_write;
-        if let Some(seen) = self.usage_seen
-            && used > seen
-        {
-            self.context = Some(used - seen);
-        }
-        self.usage_seen = Some(used);
         self.state = Some(state);
         self.primed = true;
         cx.notify();
@@ -1233,7 +1233,8 @@ impl AgentPane {
             SlashAct::Agent => self.open_overlay(Overlay::Agents, window, cx),
             SlashAct::Effort => self.open_overlay(Overlay::Effort, window, cx),
             SlashAct::Mode(mode) => self.set_mode(mode, cx),
-            SlashAct::Providers => self.open_signin(window, cx),
+            SlashAct::Providers => self.open_otto_settings(settings::Entry::Providers, window, cx),
+            SlashAct::Settings => self.open_otto_settings(settings::Entry::Slash, window, cx),
         }
         cx.notify();
     }
@@ -1816,7 +1817,7 @@ impl AgentPane {
                 1 => self.set_mode(ApprovalMode::AskOnEffects, cx),
                 2 => self.new_session(window, cx),
                 3 => self.open_overlay(Overlay::Sessions, window, cx),
-                _ => self.open_signin(window, cx),
+                _ => self.open_otto_settings(settings::Entry::Providers, window, cx),
             },
             Some(Overlay::Slash) => {
                 if let Some(c) = self.slash_choices(cx).get(index) {
@@ -2071,6 +2072,8 @@ mod tests {
         assert_eq!(names("mode ask")[0], "mode ask");
         assert!(!SLASH.iter().any(|c| c.name.contains("plan")), "plan mode is gone");
         assert!(names("zzz").is_empty());
+        let act = |name: &str| SLASH.iter().find(|c| c.name == name).map(|c| c.act);
+        assert_eq!((act("settings"), act("providers")), (Some(SlashAct::Settings), Some(SlashAct::Providers)), "both open the otto settings");
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
         }

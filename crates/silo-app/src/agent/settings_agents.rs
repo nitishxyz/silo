@@ -1,7 +1,7 @@
-//! Settings › Agents: otto's agents for the active project. The list
-//! (`agents.list`), New, Clone, Delete / Reset, and an editor for one agent
-//! (`agents.get` / `agents.save`) with its tools in three columns
-//! (`docs/AGENT_BLOCK.md` §9).
+//! Otto settings › Agents: the agents of a pane's otto for its project. The
+//! list (`agents.list`), New, Clone, Delete / Reset, and an editor for one
+//! agent (`agents.get` / `agents.save`) with its tools in three columns
+//! (`docs/AGENT_BLOCK.md` §9). It only needs an otto and a folder.
 
 use std::{collections::HashSet, future::Future, rc::Rc};
 
@@ -351,7 +351,7 @@ fn model_label(model: Option<&str>) -> String {
 }
 
 /// An error for display: words that look like paths are dropped.
-fn short_error(error: &str) -> String {
+pub(super) fn short_error(error: &str) -> String {
     let text = error.split_whitespace().filter(|w| !w.contains('/')).collect::<Vec<_>>().join(" ");
     let text = text.trim_end_matches(':').trim();
     if text.is_empty() { "Couldn't save".to_owned() } else { text.to_owned() }
@@ -453,10 +453,10 @@ fn hsla(c: u32, alpha: f32) -> Hsla {
 }
 
 pub struct AgentsSettings {
-    rt: Option<tokio::runtime::Handle>,
-    /// The active pane's host: its otto daemon, or why there is none.
-    place: Place,
-    /// The active pane's folder, and its project root once loaded.
+    rt: tokio::runtime::Handle,
+    /// The pane's otto.
+    target: client::Otto,
+    /// The pane's folder, and its project root once loaded.
     cwd: Option<String>,
     root: Option<String>,
     load: Load,
@@ -472,11 +472,11 @@ pub struct AgentsSettings {
 }
 
 impl AgentsSettings {
-    pub fn new() -> Self {
+    pub fn new(rt: tokio::runtime::Handle, target: client::Otto, cwd: Option<String>) -> Self {
         Self {
-            rt: None,
-            place: Place::Local,
-            cwd: None,
+            rt,
+            target,
+            cwd,
             root: None,
             load: Load::Idle,
             agents: Vec::new(),
@@ -489,39 +489,9 @@ impl AgentsSettings {
         }
     }
 
-    /// The runtime for otto calls, the active pane's host and its folder.
-    pub fn set_context(&mut self, rt: tokio::runtime::Handle, place: Place, cwd: Option<String>, cx: &mut Context<Self>) {
-        if self.rt.is_some() && self.place == place && self.cwd == cwd {
-            return;
-        }
-        self.rt = Some(rt);
-        self.place = place;
-        self.cwd = cwd;
-        self.root = None;
-        self.agents.clear();
-        self.edit = None;
-        self.confirm = None;
-        self.notice = None;
-        self.load = Load::Idle;
-        cx.notify();
-    }
-
-    /// The host connected or changed what it supports: the page follows.
-    pub fn set_place(&mut self, place: Place, cx: &mut Context<Self>) {
-        if let (Some(rt), false) = (self.rt.clone(), self.place == place) {
-            let cwd = self.cwd.clone();
-            self.set_context(rt, place, cwd, cx);
-        }
-    }
-
-    /// The page title: `Agents on mini` for a remote host's.
-    pub fn title(&self) -> String {
-        self.place.title()
-    }
-
     /// Load once the page shows (otto starts only when it's needed).
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.load, Load::Idle) && self.rt.is_some() && self.place.target().is_some() {
+        if matches!(self.load, Load::Idle) {
             self.reload(cx);
         }
     }
@@ -573,10 +543,8 @@ impl AgentsSettings {
         F: FnOnce(Connection) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, ClientError>> + Send + 'static,
     {
-        let Some(rt) = &self.rt else { return };
-        // A host without agents never falls back to this Mac's otto.
-        let Some(target) = self.place.target() else { return };
-        let task = rt.spawn(async move { work(client::connection(&target).await?).await });
+        let target = self.target.clone();
+        let task = self.rt.spawn(async move { work(client::connection(&target).await?).await });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result.map_err(|e| crate::agent::describe(&e)),
@@ -718,6 +686,7 @@ impl AgentsSettings {
         placeholder.name.clone_from(&name);
         self.start_edit(Draft::open(placeholder), true, cx);
         self.generation += 1;
+        self.reload_tools(cx);
         let generation = self.generation;
         let cwd = self.root.clone();
         self.run(
@@ -742,11 +711,13 @@ impl AgentsSettings {
 
     fn new_agent(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.reload_tools(cx);
         self.start_edit(Draft::new_agent(), false, cx);
     }
 
     fn clone_agent(&mut self, name: String, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.reload_tools(cx);
         let generation = self.generation;
         let cwd = self.root.clone();
         self.run(
@@ -768,6 +739,20 @@ impl AgentsSettings {
         );
     }
 
+    /// The tool catalog again as the editor opens: an MCP server added since shows.
+    fn reload_tools(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.root.clone();
+        self.run(
+            cx,
+            move |c| async move { c.call_typed::<Vec<ToolCatalogEntry>>(Method::ToolsCatalog { cwd }).await },
+            |this, result, _| {
+                if let Ok(tools) = result {
+                    this.tools = tools;
+                }
+            },
+        );
+    }
+
     fn delete(&mut self, name: String, scope: AgentScope, cx: &mut Context<Self>) {
         self.confirm = None;
         let cwd = self.root.clone();
@@ -781,9 +766,9 @@ impl AgentsSettings {
         );
     }
 
-    /// An agent was saved or deleted: the list and every agent pane reload.
+    /// An agent was saved or deleted: the list and the pickers of every pane on this otto reload.
     fn changed(&mut self, cx: &mut Context<Self>) {
-        cx.set_global(client::AgentsChanged);
+        cx.set_global(client::OttoChanged(self.target.clone()));
         self.reload(cx);
     }
 
@@ -919,7 +904,7 @@ impl AgentsSettings {
             .into_any_element()
     }
 
-    fn card(rows: Vec<AnyElement>) -> AnyElement {
+    pub(super) fn card(rows: Vec<AnyElement>) -> AnyElement {
         let count = rows.len();
         let mut card =
             div().w_full().flex().flex_col().overflow_hidden().continuous(10.0).border_1().border_color(rgb(theme::border())).bg(theme::group_fill());
@@ -932,7 +917,7 @@ impl AgentsSettings {
         card.into_any_element()
     }
 
-    fn titled(title: &'static str, extra: Option<AnyElement>, body: AnyElement) -> AnyElement {
+    pub(super) fn titled(title: &'static str, extra: Option<AnyElement>, body: AnyElement) -> AnyElement {
         div()
             .w_full()
             .flex()
@@ -984,11 +969,18 @@ impl AgentsSettings {
             .into_any_element()
     }
 
-    fn note(text: impl Into<SharedString>) -> AnyElement {
-        div().px(px(4.0)).text_size(px(11.5)).line_height(px(16.0)).text_color(rgb(theme::muted())).child(text.into()).into_any_element()
+    pub(super) fn note(text: impl Into<SharedString>) -> AnyElement {
+        div()
+            .px(px(4.0))
+            .max_w(px(super::settings::DESCRIPTION_MAX))
+            .text_size(px(11.5))
+            .line_height(px(16.0))
+            .text_color(rgb(theme::muted()))
+            .child(text.into())
+            .into_any_element()
     }
 
-    fn error_line(text: String) -> AnyElement {
+    pub(super) fn error_line(text: String) -> AnyElement {
         div()
             .px(px(4.0))
             .flex()
@@ -1653,56 +1645,9 @@ impl AgentsSettings {
 
 impl Render for AgentsSettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let children = if let Some(blocked) = self.place.blocked() {
-            vec![Self::note(blocked)]
-        } else if self.edit.is_some() {
-            self.render_editor(window, cx)
-        } else {
-            self.render_list(cx)
-        };
+        self.ensure_loaded(cx);
+        let children = if self.edit.is_some() { self.render_editor(window, cx) } else { self.render_list(cx) };
         div().w_full().flex().flex_col().gap(px(14.0)).children(children)
-    }
-}
-
-/// Whose agents the page shows (`agent_block::settings_place`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Place {
-    /// This Mac's otto.
-    Local,
-    /// A remote host's otto, by its EndpointId.
-    Remote { id: String, host: String },
-    /// A remote host whose server has no otto, or a shared link.
-    Unsupported { host: String },
-    /// A remote host not connected yet.
-    Offline { host: String },
-}
-
-impl Place {
-    #[must_use]
-    pub fn target(&self) -> Option<client::Otto> {
-        match self {
-            Self::Local => Some(client::Otto::Local),
-            Self::Remote { id, .. } => Some(client::Otto::Remote { id: id.clone() }),
-            Self::Unsupported { .. } | Self::Offline { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub fn title(&self) -> String {
-        match self {
-            Self::Remote { host, .. } => format!("Agents on {host}"),
-            _ => "Agents".to_owned(),
-        }
-    }
-
-    /// What the page says instead of the list.
-    #[must_use]
-    pub fn blocked(&self) -> Option<String> {
-        match self {
-            Self::Local | Self::Remote { .. } => None,
-            Self::Unsupported { host } => Some(format!("Not supported by {host}")),
-            Self::Offline { host } => Some(format!("{host} is not connected")),
-        }
     }
 }
 

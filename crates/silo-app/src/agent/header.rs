@@ -1,6 +1,6 @@
 //! The agent's pane header parts: on the chat screen the session title opens
-//! the switcher and History / New Session sit before the pane buttons (not on
-//! a sub-agent: its strip leads back to the main agent instead).
+//! the switcher and History / New Session / Otto settings sit before the pane
+//! buttons (not on a sub-agent: its strip leads back to the main agent instead).
 
 use gpui::{AnyElement, Context, div, prelude::*, px, rgb};
 use silo_proto::model::BlockInfo;
@@ -23,9 +23,29 @@ impl BlockHeader for AgentPane {
             return named(title, host.as_deref(), style);
         }
         let mut parts = HeaderParts::new(session_title(&title, host.as_deref(), style, cx), title);
-        parts.actions = vec![history(style, cx), new_session(style, cx)];
+        parts.actions = actions(self.is_subagent())
+            .iter()
+            .map(|action| match action {
+                Action::History => history(style, cx),
+                Action::NewSession => new_session(style, cx),
+                Action::Settings => settings(style, cx),
+            })
+            .collect();
         parts
     }
+}
+
+/// A header action of the chat screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    History,
+    NewSession,
+    Settings,
+}
+
+/// The chat screen's actions, in order; a sub-agent has none.
+pub(crate) fn actions(subagent: bool) -> &'static [Action] {
+    if subagent { &[] } else { &[Action::History, Action::NewSession, Action::Settings] }
 }
 
 /// A plain name; a remote host's agent names its host after it.
@@ -88,4 +108,22 @@ fn new_session(style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
     keep_press(button("agent-new", "new-session", "New Session  /new", style.palette.icon, true, style))
         .on_click(cx.listener(|this, _, window, cx| this.start_new_session(window, cx)))
         .into_any_element()
+}
+
+fn settings(style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
+    keep_press(button("agent-settings", "settings", "Otto settings", style.palette.icon, true, style))
+        .on_click(cx.listener(|this, _, window, cx| this.open_settings_from_header(window, cx)))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gear_is_last_and_never_on_a_sub_agent() {
+        assert_eq!(actions(false), [Action::History, Action::NewSession, Action::Settings]);
+        assert!(actions(true).is_empty());
+        assert!(crate::assets::has_icon("settings"));
+    }
 }

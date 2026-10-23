@@ -85,6 +85,8 @@ pub struct Workspace {
     /// A new agent this client created: its composer gets focus once its
     /// pane exists.
     pub(crate) composer_pending: Option<String>,
+    /// That new agent opens on its otto settings (Otto Settings).
+    pub(crate) otto_settings_pending: bool,
     pub(crate) focus: FocusHandle,
     pub(crate) switcher: Option<Switcher>,
     pub(crate) add_host: Option<AddHostSheet>,
@@ -255,6 +257,7 @@ impl Workspace {
             server_focus: None,
             address_pending: None,
             composer_pending: None,
+            otto_settings_pending: false,
             focus: cx.focus_handle(),
             switcher: None,
             add_host: None,
@@ -660,10 +663,6 @@ impl Workspace {
         }
         // Agent panes reconnect now rather than at their next retry.
         self.agents_host_up(host, true, cx);
-        if let Some(modal) = &self.settings {
-            let place = self.agents_place();
-            modal.panel.update(cx, |panel, cx| panel.set_agents_place(place, cx));
-        }
         let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
         if let Some(block) = self.wanted_block.take() {
             self.server_focus = None;

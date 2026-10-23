@@ -105,6 +105,8 @@ pub(super) struct Fit {
     pub tools: bool,
     /// The model button.
     pub model: bool,
+    /// The context's token count at the footer's right end (`48k`).
+    pub tokens: bool,
     /// The footer at all.
     pub footer: bool,
     /// The composer's `⋮` circle (the slash menu does the same).
@@ -124,6 +126,7 @@ impl Fit {
     pub(super) fn of(width: f32) -> Self {
         let w = if width > 0.0 { width } else { f32::MAX };
         Self {
+            tokens: w >= 460.0,
             plan: w >= 440.0,
             provider: w >= 340.0,
             tools: w >= 270.0,
@@ -255,6 +258,56 @@ fn footnote(text: &'static str) -> gpui::Div {
 /// The brain glyph while reasoning is on.
 fn violet() -> u32 {
     if theme::is_light() { 0x007c_3aed } else { 0x00a7_8bfa }
+}
+
+/// A count with thousands separators (`48,213`).
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A token count as the footer shows it: `999`, `9,999`, `48k`, `1.2M`.
+pub(super) fn tokens(n: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let m = n as f64 / 1_000_000.0;
+    if n < 10_000 {
+        grouped(n)
+    } else if n < 999_500 {
+        format!("{}k", (n + 500) / 1000)
+    } else if m < 9.95 {
+        format!("{m:.1}M").replace(".0M", "M")
+    } else {
+        format!("{m:.0}M")
+    }
+}
+
+/// How full the context is (0–1), `None` without a known window.
+pub(super) fn context_fraction(context: otto_proto::ContextUse) -> Option<f32> {
+    ring::fraction(context.used, context.window)
+}
+
+/// The footer's label (the used count, `48k`) and the level it's tinted by; `None` without a known window.
+pub(super) fn context_label(context: otto_proto::ContextUse) -> Option<(String, ring::Fill)> {
+    context_fraction(context).map(|f| (tokens(context.used), ring::Fill::of(f)))
+}
+
+/// The label's tooltip: the context use, then the session's totals and cost.
+fn context_tip(context: otto_proto::ContextUse, usage: &otto_proto::UsageTotals) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let pct = (context.used as f64 * 100.0 / context.window.max(1) as f64).round();
+    let u = &usage.usage;
+    let mut totals = format!("In {} · Out {} · Cache {}", tokens(u.input), tokens(u.output), tokens(u.cache_read + u.cache_write));
+    if usage.cost_usd > 0.0 {
+        totals.push_str(&format!(" · ${:.2}", usage.cost_usd));
+    }
+    format!("{} of {} tokens ({pct:.0}%)\n{totals}", grouped(context.used), grouped(context.window))
 }
 
 /// A reasoning effort as the menu and tooltip name it; `None` is the default.
@@ -687,8 +740,11 @@ impl AgentPane {
             }
             Conn::Ready => {}
         }
+        if self.showing_otto_settings() {
+            return (3, self.render_otto_settings(cx));
+        }
         if self.showing_signin() {
-            return (if self.managing_providers() { 3 } else { 4 }, centered(self.render_signin(window, cx)));
+            return (4, centered(self.render_signin(window, cx)));
         }
         if let Some(error) = &self.error {
             // Sending from here starts a new session; the old one can't be reached.
@@ -1876,22 +1932,33 @@ impl AgentPane {
         }
     }
 
-    /// Context use and cost of the shown session (`12% · $0.31`).
-    fn usage(&self) -> Option<String> {
-        let (provider, model) = self.model()?;
-        let size = self.catalog.as_ref()?.models.iter().find(|m| m.id == model && m.provider.as_str() == provider).map(|m| m.caps.context_window);
-        let mut parts = Vec::new();
-        if let (Some(used), Some(size)) = (self.context, size.filter(|s| *s > 0)) {
-            #[allow(clippy::cast_precision_loss)]
-            parts.push(format!("{:.0}% context", used as f64 * 100.0 / size as f64));
-        }
-        if let Some(cost) = self.mirror().map(|m| m.info.usage.cost_usd).filter(|c| *c > 0.0) {
-            parts.push(format!("${cost:.2}"));
-        }
-        (!parts.is_empty()).then(|| parts.join(" · "))
+    /// The token count at the footer's right end; none without a session or a known window.
+    fn render_context(&self, fit: Fit, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (label, level) = context_label(self.mirror()?.info.context).filter(|_| fit.tokens)?;
+        let pane = cx.entity().downgrade();
+        let tip = Tooltip::live(move |cx| {
+            let tip = pane.upgrade().and_then(|p| p.read(cx).mirror().map(|m| context_tip(m.info.context, &m.info.usage)));
+            tip.unwrap_or_default().into()
+        });
+        Some(
+            div()
+                .id("agent-context")
+                .flex_none()
+                .h(px(22.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .font_features(tabular())
+                .text_color(rgb(level.color()))
+                .tooltip(tip)
+                .child(label)
+                .into_any_element(),
+        )
     }
 
     fn render_footer(&mut self, fit: Fit, cx: &mut Context<Self>) -> AnyElement {
+        let context = self.render_context(fit, cx);
         let muted = theme::muted();
         let agent = self.agent_name();
         let model = self.model();
@@ -1904,7 +1971,6 @@ impl AgentPane {
         // Reasoning is on when the session asks for some effort (the provider's default reads as off).
         let effort = self.effort();
         let thinking = effort.is_some_and(|e| e != Effort::None);
-        let tooltip = self.usage();
         let agent_button = div()
             .id("agent-agent")
             .min_w_0()
@@ -1930,7 +1996,6 @@ impl AgentPane {
             .continuous(6.0)
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover_fill()))
-            .when_some(tooltip, |el, usage| el.tooltip(Tooltip::text(usage)))
             .map(|el| match &model {
                 Some((provider, id)) => el
                     .when(fit.provider, |el| {
@@ -1996,7 +2061,9 @@ impl AgentPane {
             .text_color(rgb(muted))
             .child(side().pl(px(pill_input::HALO + pill_input::INSET - 6.0)).child(agent_button))
             .when(fit.model, |el| {
-                el.child(div().flex_none().max_w(relative(0.5)).min_w_0().overflow_hidden().flex().justify_center().child(model_button))
+                el.child(
+                    div().flex_none().max_w(relative(0.5)).min_w_0().overflow_hidden().flex().items_center().justify_center().child(model_button),
+                )
             })
             .child(
                 side()
@@ -2004,7 +2071,8 @@ impl AgentPane {
                     .gap(px(2.0))
                     .pr(px(pill_input::HALO + pill_input::INSET - 4.0))
                     .children(brain)
-                    .when(fit.tools, |el| el.child(image)),
+                    .when(fit.tools, |el| el.child(image))
+                    .children(context),
             )
             .into_any_element()
     }
@@ -2792,7 +2860,7 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
 
 #[cfg(test)]
 mod tests {
-    use super::{DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, Tail, live_budget};
+    use super::{DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, Tail, context_fraction, context_label, context_tip, grouped, live_budget, tokens};
 
     #[test]
     fn a_live_window_makes_room_for_its_open_details_as_drawn() {
@@ -2827,10 +2895,11 @@ mod tests {
     #[test]
     fn narrow_panes_drop_secondary_items_in_order() {
         let wide = Fit::of(800.0);
-        assert!(wide.plan && wide.provider && wide.tools && wide.model && wide.footer && wide.lead && wide.detail && wide.labels);
+        assert!(wide.plan && wide.tokens && wide.provider && wide.tools && wide.model && wide.footer && wide.lead && wide.detail && wide.labels);
         assert_eq!(Fit::of(0.0), wide, "not laid out yet: everything");
-        // Widest first: the plan, the provider, then the bar details, effort/image, labels, the model, the footer.
-        let order = |f: Fit| [f.plan, f.provider, f.detail, f.tools, f.lead, f.labels, f.model, f.footer, f.send];
+        // Widest first: the token count, the plan, the provider, then the bar details, effort/image, labels,
+        // the model, the footer.
+        let order = |f: Fit| [f.tokens, f.plan, f.provider, f.detail, f.tools, f.lead, f.labels, f.model, f.footer, f.send];
         let mut last = order(wide);
         for w in (60..800).rev().step_by(10) {
             #[allow(clippy::cast_precision_loss)]
@@ -2843,5 +2912,55 @@ mod tests {
         assert!(!split.model && split.footer && !split.lead && split.pad < 20.0);
         let smallest = Fit::of(60.0);
         assert!(!smallest.footer && !smallest.send, "the smallest split keeps only the composer, without its circle");
+        let mid = Fit::of(450.0);
+        assert!(!mid.tokens && mid.plan && mid.model, "the token count goes first");
+    }
+
+    #[test]
+    fn token_counts_are_compact() {
+        assert_eq!(tokens(0), "0");
+        assert_eq!(tokens(999), "999");
+        assert_eq!(tokens(9_999), "9,999");
+        assert_eq!(tokens(10_000), "10k");
+        assert_eq!(tokens(12_345), "12k");
+        assert_eq!(tokens(48_213), "48k");
+        assert_eq!(tokens(200_000), "200k");
+        assert_eq!(tokens(999_499), "999k");
+        assert_eq!(tokens(999_999), "1M", "never 1000k");
+        assert_eq!(tokens(1_000_000), "1M");
+        assert_eq!(tokens(1_234_567), "1.2M");
+        assert_eq!(tokens(12_400_000), "12M");
+        assert_eq!(grouped(48_213), "48,213");
+        assert_eq!(grouped(1_200_000), "1,200,000");
+    }
+
+    #[test]
+    fn the_context_label_warns_near_the_window() {
+        use super::ring::Fill;
+        use otto_proto::ContextUse;
+        assert_eq!(context_fraction(ContextUse { used: 10, window: 0 }), None, "unknown window: no label");
+        assert_eq!(context_fraction(ContextUse { used: 50_000, window: 200_000 }), Some(0.25));
+        assert_eq!(context_fraction(ContextUse { used: 0, window: 200_000 }), Some(0.0));
+        assert_eq!(context_fraction(ContextUse { used: 300_000, window: 200_000 }), Some(1.0), "clamped");
+        assert_eq!(Fill::of(0.5), Fill::Calm);
+        assert_eq!(Fill::of(0.8), Fill::Calm);
+        assert_eq!(Fill::of(0.81), Fill::Warn);
+        assert_eq!(Fill::of(0.95), Fill::Warn);
+        assert_eq!(Fill::of(0.96), Fill::Full);
+        // The label is the used count alone, tinted like the ring; nothing without a window.
+        assert_eq!(context_label(ContextUse { used: 48_213, window: 200_000 }), Some(("48k".into(), Fill::Calm)));
+        assert_eq!(context_label(ContextUse { used: 170_000, window: 200_000 }), Some(("170k".into(), Fill::Warn)));
+        assert_eq!(context_label(ContextUse { used: 195_000, window: 200_000 }), Some(("195k".into(), Fill::Full)));
+        assert_eq!(context_label(ContextUse { used: 48_213, window: 0 }), None);
+        let usage = otto_proto::UsageTotals {
+            usage: otto_llm::Usage { input: 1_200_000, output: 84_000, cache_read: 800_000, cache_write: 100_000, reasoning: 0 },
+            cost_usd: 0.31,
+        };
+        assert_eq!(
+            context_tip(ContextUse { used: 48_213, window: 200_000 }, &usage),
+            "48,213 of 200,000 tokens (24%)\nIn 1.2M · Out 84k · Cache 900k · $0.31"
+        );
+        let free = otto_proto::UsageTotals { cost_usd: 0.0, ..usage };
+        assert!(!context_tip(ContextUse { used: 1, window: 10 }, &free).contains('$'), "no cost when unknown");
     }
 }

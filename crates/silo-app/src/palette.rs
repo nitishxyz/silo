@@ -375,6 +375,7 @@ impl Workspace {
             Command::ReloadTerminalSettings => self.reload_terminal_settings(window, cx),
             Command::ToggleFullScreen => window.toggle_fullscreen(),
             Command::OpenSettings => self.open_settings(window, cx),
+            Command::OttoSettings => self.open_otto_settings(window, cx),
             Command::AppearanceComfortable => self.set_density(crate::hosts::Density::Comfortable, cx),
             Command::AppearanceCompact => self.set_density(crate::hosts::Density::Compact, cx),
             Command::ShowPaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(true), cx),
@@ -435,6 +436,7 @@ impl Workspace {
             Command::CheckForUpdates => self.updater.read(cx).enabled(),
             Command::NewSession => connected,
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
+            Command::OttoSettings => self.view.is_some(),
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab

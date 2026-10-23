@@ -44,6 +44,7 @@ icons!(
     "settings-info",
     "settings-keyboard",
     "settings-search",
+    "settings",
     "settings-shapes",
     "settings-bell",
     "question",
