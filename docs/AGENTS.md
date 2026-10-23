@@ -93,11 +93,11 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 | `browser.screenshot` | `target?, full_page?: bool, format?: png\|jpeg, quality?` | `{mime, data_base64, width, height}` | view |
 
 `browser.fetch {url, timeout_ms?, screenshot?: bool, selector?}` (no `block_id`, control on the server) →
-`{url, title, status?: u16, html, timed_out, truncated, screenshot?: {mime, data_base64, width, height}}` goes to
+`{url, title, status?: u16, html, timed_out, blocked, truncated, screenshot?: {mime, data_base64, width, height}}` goes to
 the local `browser_host` app (never a remote one) and loads `url` in a hidden page there (§4.1). Errors:
 `no_app` (no such app), `timeout` (nothing rendered in time; a page that rendered but never settled returns its
-HTML with `timed_out: true`), `navigation` (DNS, TLS, connection), `bad_request` (selector matched nothing, not
-http(s)). Server timeout 120 s, queue included.
+HTML with `timed_out: true`; a bot check that doesn't clear returns its page with `blocked: true`), `navigation`
+(DNS, TLS, connection), `bad_request` (selector matched nothing, not http(s)). Server timeout 120 s, queue included.
 
 `target` is a ref from the last snapshot (`e12`) or a CSS selector (anything not matching `^e\d+$`).
 
@@ -176,11 +176,15 @@ The app (feature `browser_host`) hosts the browsers no pane shows, on the local 
   reload, same history, refs and console), and a window that stops showing it (switching session or host, closing
   the window) hands it back instead of closing the page. A hosted page closes when its block closes, its session
   closes or the local server disconnects. A window whose pane's block lost its owner runs the request itself and
-  claims the block. Hidden pages keep rendering (no `was_hidden`), like panes in unshown tabs always have.
+  claims the block. Hosted and fetch pages render at 5 fps (`set_windowless_frame_rate`, not `was_hidden`, so
+  timers, rAF and CDP screenshots keep working); a window adopting one restores 60 fps. Screenshots `invalidate`
+  first, so they capture a fresh frame.
 - **Fetches.** `browser.fetch` opens a page in the persistent `agent` profile (`<home>/web/profiles/agent`, made
   like a server profile: own cookies and storage, never the user's `default`), loads the URL, waits for the load
-  event and then network quiet (≤ 2 requests in flight for 500 ms; a Cloudflare-style challenge page keeps
-  waiting), bounded by `timeout_ms` (default 15 s, max 60 s), reads `outerHTML` (of `selector`, if given), takes
+  event and then network quiet (≤ 2 requests in flight for 500 ms), bounded by `timeout_ms` (default 15 s, max
+  60 s). A Cloudflare-style challenge page (title `Just a moment…`/`Attention Required`/…, or a challenge form;
+  checked when settled, else every second once loaded) keeps waiting for 6 s from first sight, then returns
+  `blocked: true` with its title. It reads `outerHTML` (of `selector`, if given), takes
   the viewport screenshot if asked (1280×800), and closes the page. At most 3 fetch pages at once; the rest queue.
 
 Later: `silo browser cdp <block>` exposing a scoped CDP endpoint for Playwright.
@@ -211,7 +215,7 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 `browser_eval`, `browser_console`, `browser_network`, `browser_screenshot` (an image result).
 
 `browser_fetch {url, timeout_ms?, screenshot?, selector?}` (`browser.fetch`, §3.3): JSON `{url, title, status?,
-html, timed_out, truncated}` (capped like every tool result) plus the screenshot as an image part. Validation
+html, timed_out, blocked, truncated}` (capped like every tool result) plus the screenshot as an image part. Validation
 (`silo_tools::fetch_params`): http(s) URL, `timeout_ms` capped at 60000, non-empty `selector`. The typed
 `Tools::fetch(&input) -> anyhow::Result<BrowserFetchResult>` returns the uncapped result; its errors downcast to
 `RpcError` with the codes above.
@@ -274,7 +278,7 @@ renderer}` (`silo()` is `connect` without the renderer), sharing the one connect
 }
 pub struct RenderRequest { pub url: String, pub timeout_ms: Option<u64>, pub screenshot: bool, pub selector: Option<String> }
 pub struct Rendered { pub url: String, pub title: String, pub status: Option<u16>, pub html: String,
-                      pub timed_out: bool, pub screenshot: Option<(String /* mime */, String /* base64 */)> }
+                      pub timed_out: bool, pub blocked: bool, pub screenshot: Option<(String /* mime */, String /* base64 */)> }
 pub enum RenderError { NoApp(String), Timeout(String), Navigation(String), Failed(String) }
 ```
 

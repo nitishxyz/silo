@@ -234,6 +234,10 @@ pub struct BrowserFetchResult {
     /// The deadline passed before the page settled.
     #[serde(default)]
     pub timed_out: bool,
+    /// A bot check (Cloudflare's "Just a moment…") did not clear within a
+    /// few seconds: `title` and `html` are the challenge page's.
+    #[serde(default)]
+    pub blocked: bool,
     /// `html` was cut to [`BrowserFetchResult::HTML_MAX`] bytes.
     #[serde(default)]
     pub truncated: bool,

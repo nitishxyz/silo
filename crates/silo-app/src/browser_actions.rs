@@ -746,6 +746,8 @@ impl Executor {
             bail!("empty screenshot area");
         }
         let mut scale = (16_000_000. / (width * height)).sqrt().min(16_384. / width.max(height)).min(1.);
+        // A page off screen paints a few times a second: ask for a frame now.
+        self.page.invalidate();
         for attempt in 0..10 {
             let name = match format {
                 Format::Png => "png",

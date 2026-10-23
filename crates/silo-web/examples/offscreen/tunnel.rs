@@ -34,6 +34,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         url: "http://10.77.0.1/",
         profile: &profile,
         size: ViewSize { width: 100, height: 100, scale: 1.0 },
+        offscreen: false,
         notify: Arc::new(|| {}),
     };
     let browser = runtime.create_browser(options)?;

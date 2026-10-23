@@ -5,7 +5,7 @@ use otto_tools::{
     Loading, OutputPart, Tool, ToolCx, ToolOutput,
     builtin::{
         render::{RenderError, RenderRequest, Rendered, Renderer},
-        web_fetch::{Verdict, Web, WebFetch, needs_render},
+        web_fetch::{self, Verdict, Web, WebFetch, needs_render},
         web_search::{self, Engine, WebSearch},
     },
     html,
@@ -166,7 +166,9 @@ async fn a_javascript_shell_falls_back_to_the_browser() {
     let out = WebFetch::new(web(&fake, Engine::default())).call(json!({"url": format!("{base}/app")}), cx()).await.unwrap();
     let body = text(&out);
     assert!(
-        body.starts_with("Title: Rendered App\nURL: https://example.com/app\nNote: rendered in browser\nNote: the page had not settled"),
+        body.starts_with(
+            "Title: Rendered App\nURL: https://example.com/app\nNote: rendered in browser\nNote: not settled by the deadline; may be partial\n"
+        ),
         "{body}"
     );
     assert!(body.contains("# Ownership & Borrowing"), "{body}");
@@ -218,19 +220,33 @@ async fn without_the_app_the_plain_result_says_rendering_needs_it() {
     let no_app = renderer(Err(RenderError::NoApp("no app".into())));
     let out = WebFetch::new(web(&no_app, Engine::default())).call(json!({"url": format!("{base}/cf")}), cx()).await.unwrap();
     let body = text(&out);
-    assert!(body.contains("Status: 403\nNote: the page looks blocked by bot protection; rendering it needs the Silo app\n"), "{body}");
+    assert!(body.contains("Status: 403\nNote: bot check; rendering needs the Silo app\n"), "{body}");
     assert!(out.is_error);
     assert_eq!(no_app.calls.lock().unwrap().len(), 1);
     // No renderer at all (otto without silo) reads the same.
     let out = WebFetch::default().call(json!({"url": format!("{base}/app")}), cx()).await.unwrap();
-    assert!(text(&out).contains("Note: the page looks built by JavaScript; rendering it needs the Silo app"), "{}", text(&out));
+    assert!(text(&out).contains("Note: built by JavaScript; rendering needs the Silo app\n"), "{}", text(&out));
     assert!(!out.is_error);
     let out = WebFetch::default().call(json!({"url": format!("{base}/article"), "render": true}), cx()).await.unwrap();
-    assert!(out.is_error && text(&out).starts_with("Rendering needs the Silo app"));
+    assert!(out.is_error && text(&out) == "Rendering needs the Silo app.", "{}", text(&out));
     // Other render failures keep the plain result with the reason.
     let broken = renderer(Err(RenderError::Navigation("DNS failure".into())));
     let out = WebFetch::new(web(&broken, Engine::default())).call(json!({"url": format!("{base}/app")}), cx()).await.unwrap();
     assert!(text(&out).contains("Note: rendering failed: DNS failure"), "{}", text(&out));
+}
+
+#[tokio::test]
+async fn a_bot_check_that_does_not_clear_says_so() {
+    let challenge = r#"<html><head><title>Just a moment...</title></head><body><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></body></html>"#;
+    let fake = renderer(Ok(Rendered { title: "Just a moment...".into(), status: Some(403), blocked: true, ..page(challenge) }));
+    let out = WebFetch::new(web(&fake, Engine::default())).call(json!({"url": "https://example.com/cf", "render": true}), cx()).await.unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("Title: Just a moment...\nURL: https://example.com/app\nStatus: 403\nNote: rendered in browser\nNote: blocked by a bot check (Cloudflare)\n"),
+        "{body}"
+    );
+    assert!(out.is_error);
+    assert_eq!(web_fetch::blocked_note("<title>Please wait</title>"), "blocked by a bot check");
 }
 
 fn urls(hits: &[web_search::Hit]) -> Vec<&str> {

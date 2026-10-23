@@ -16,10 +16,22 @@ use crate::{Profile, Runtime};
 /// optional-in-spirit IME ranges must be passed explicitly.
 const NO_RANGE: Range = Range { from: u32::MAX, to: u32::MAX };
 
+/// Frames per second of a page a window shows, and of one nobody sees (the
+/// off-screen host): still painting, so CDP screenshots and timers work.
+pub const FRAME_RATE: u32 = 60;
+pub const HIDDEN_FRAME_RATE: u32 = 5;
+
+/// The windowless frame rate of a page shown or kept off screen.
+pub fn frame_rate(offscreen: bool) -> u32 {
+    if offscreen { HIDDEN_FRAME_RATE } else { FRAME_RATE }
+}
+
 pub struct BrowserOptions<'a> {
     pub url: &'a str,
     pub profile: &'a Profile,
     pub size: ViewSize,
+    /// No window shows the page: it renders at [`HIDDEN_FRAME_RATE`].
+    pub offscreen: bool,
     /// Called (on the main thread) after each new frame or event.
     pub notify: Arc<dyn Fn() + Send + Sync>,
 }
@@ -70,7 +82,9 @@ impl Runtime {
         });
         let window_info =
             WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
-        let settings = BrowserSettings { windowless_frame_rate: 60, background_color: 0xFFFF_FFFF, ..Default::default() };
+        #[allow(clippy::cast_possible_wrap)]
+        let rate = frame_rate(options.offscreen) as i32;
+        let settings = BrowserSettings { windowless_frame_rate: rate, background_color: 0xFFFF_FFFF, ..Default::default() };
         let mut client = crate::handlers::client(&shared, &options.profile.tunnel);
         let mut context = options.profile.context.clone();
         let url = CefString::from(options.url);
@@ -221,6 +235,21 @@ impl Browser {
         }
     }
 
+    /// Shown in a window (full rate) or kept off screen (throttled).
+    pub fn set_offscreen(&self, offscreen: bool) {
+        if let Some(host) = self.host() {
+            #[allow(clippy::cast_possible_wrap)]
+            host.set_windowless_frame_rate(frame_rate(offscreen) as i32);
+        }
+    }
+
+    /// Ask for a new frame now (a throttled page's screenshot is fresh).
+    pub fn invalidate(&self) {
+        if let Some(host) = self.host() {
+            host.invalidate(PaintElementType::VIEW);
+        }
+    }
+
     /// Asks the page to close; `Event::Closed` follows once CEF is done with it.
     pub fn close(&self) {
         if let Some(host) = self.host() {
@@ -365,5 +394,17 @@ impl Browser {
         if let Some(host) = self.host() {
             host.ime_cancel_composition();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_nobody_sees_render_slowly_but_still_render() {
+        assert_eq!(frame_rate(false), FRAME_RATE);
+        assert_eq!(frame_rate(true), HIDDEN_FRAME_RATE);
+        assert!((1..=5).contains(&HIDDEN_FRAME_RATE), "a few frames a second: screenshots and rAF keep working");
     }
 }

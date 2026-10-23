@@ -20,7 +20,7 @@ mod runtime;
 mod shared;
 pub mod snapshot;
 
-pub use browser::{Browser, BrowserOptions, Edit, Pinch};
+pub use browser::{Browser, BrowserOptions, Edit, FRAME_RATE, HIDDEN_FRAME_RATE, Pinch, frame_rate};
 pub use devtools::DevToolsEvent;
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};

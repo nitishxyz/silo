@@ -149,7 +149,7 @@ fn run() -> Result<()> {
 
     let profile = runtime.profile("default", None)?;
     let size = ViewSize { width: 320, height: 200, scale: 2.0 };
-    let options = BrowserOptions { url: PAGE, profile: &profile, size, notify: Arc::new(|| {}) };
+    let options = BrowserOptions { url: PAGE, profile: &profile, size, offscreen: false, notify: Arc::new(|| {}) };
     let browser = runtime.create_browser(options)?;
 
     let result = (|| {

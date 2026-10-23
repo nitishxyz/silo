@@ -25,6 +25,8 @@ pub struct Rendered {
     pub html: String,
     /// The deadline passed before the page settled: `html` is what existed.
     pub timed_out: bool,
+    /// A bot check didn't clear: `title` and `html` are the challenge page's.
+    pub blocked: bool,
     /// The viewport image: (mime, base64 data).
     pub screenshot: Option<(String, String)>,
 }

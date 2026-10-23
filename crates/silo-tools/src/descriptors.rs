@@ -198,7 +198,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ),
         (
             "browser_fetch",
-            "Load a URL in a hidden page of the Silo app and return the rendered DOM as {url (final), title, status, html}: for pages built by JavaScript or behind bot checks, where plain HTTP fails. The page uses Silo's own agent browser profile (cookies persist across fetches, never the user's), is never shown and closes afterwards. Waits for load and network quiet up to timeout_ms (default 15000, max 60000); timed_out:true means the HTML is what had rendered by then. selector returns that element's outerHTML; screenshot:true adds a viewport image. Fails with no_app when the Silo app is not running on this Mac.",
+            "Load a URL in a hidden page of the Silo app and return the rendered DOM as {url (final), title, status, html}: for pages built by JavaScript or behind bot checks, where plain HTTP fails. The page uses Silo's own agent browser profile (cookies persist across fetches, never the user's), is never shown and closes afterwards. Waits for load and network quiet up to timeout_ms (default 15000, max 60000); timed_out:true means the HTML is what had rendered by then; blocked:true means a bot check did not clear within a few seconds. selector returns that element's outerHTML; screenshot:true adds a viewport image. Fails with no_app when the Silo app is not running on this Mac.",
             "url timeout_ms screenshot selector",
             "url",
             true,

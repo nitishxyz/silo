@@ -41,8 +41,49 @@ const QUIET_INFLIGHT: usize = 2;
 /// How long a new page may take to answer CDP.
 const READY: Duration = Duration::from_secs(10);
 const FETCH_VIEW: silo_web::ViewSize = silo_web::ViewSize { width: 1280, height: 800, scale: 1.0 };
-/// A bot check (Cloudflare's "Just a moment…") settles, then navigates on its own.
-const CHALLENGE: &str = r"/^(just a moment|attention required|checking your browser|please wait)/i.test(document.title) || !!document.querySelector('#challenge-form, #challenge-running, #challenge-stage, #cf-challenge-running')";
+/// A bot check (Cloudflare's "Just a moment…") settles, then navigates on
+/// its own: the page's title and whether it has a challenge form.
+const CHALLENGE: &str =
+    r"({title: document.title, form: !!document.querySelector('#challenge-form, #challenge-running, #challenge-stage, #cf-challenge-running')})";
+const CHALLENGE_TITLES: &[&str] = &["just a moment", "attention required", "checking your browser", "please wait"];
+/// How long a challenge may take to clear itself (automatic JS checks
+/// take a few seconds) before the fetch reports it blocked.
+const GRACE: Duration = Duration::from_secs(6);
+/// How often a loaded page that hasn't settled is checked for a challenge.
+const PROBE: Duration = Duration::from_secs(1);
+
+/// Whether a page with `title` (and a challenge `form`) is a bot check.
+pub(crate) fn challenged(title: &str, form: bool) -> bool {
+    let title = title.trim().to_lowercase();
+    form || CHALLENGE_TITLES.iter().any(|t| title.starts_with(t))
+}
+
+/// A bot check seen on the page, and since when.
+#[derive(Debug, Default)]
+pub(crate) struct Challenge {
+    since: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// No challenge (or it cleared).
+    Clear,
+    /// A challenge, still within [`GRACE`].
+    Wait,
+    /// A challenge that hasn't cleared within [`GRACE`].
+    Blocked,
+}
+
+impl Challenge {
+    pub(crate) fn see(&mut self, challenged: bool, now: Instant) -> Gate {
+        if !challenged {
+            self.since = None;
+            return Gate::Clear;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.duration_since(since) >= GRACE { Gate::Blocked } else { Gate::Wait }
+    }
+}
 
 /// The hosted panes by block: the adoption bookkeeping, apart from gpui.
 pub(crate) struct Hosted<P> {
@@ -305,7 +346,7 @@ fn web_url(url: &str) -> Option<String> {
 fn open_page(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Browser>> {
     let runtime = crate::web::runtime(home, cx)?;
     let profile = runtime.profile(silo_web::AGENT, None)?;
-    let options = silo_web::BrowserOptions { url: "about:blank", profile: &profile, size: FETCH_VIEW, notify: Arc::new(|| {}) };
+    let options = silo_web::BrowserOptions { url: "about:blank", profile: &profile, size: FETCH_VIEW, offscreen: true, notify: Arc::new(|| {}) };
     let page = Rc::new(runtime.create_browser(options)?);
     crate::web::register(page.clone(), Arc::new(AtomicBool::new(false)), None);
     Ok(page)
@@ -411,18 +452,28 @@ async fn load(page: &Browser, params: &BrowserFetchParams, timers: &BackgroundEx
         }
     }
     let mut timed_out = false;
+    let (mut challenge, mut probed, mut blocked) = (Challenge::default(), None::<Instant>, false);
     loop {
         let now = Instant::now();
         if now >= deadline {
             timed_out = true;
             break;
         }
-        if state.settled(now) {
-            let challenge = cdp(page, timers, "Runtime.evaluate", json!({"expression": CHALLENGE, "returnByValue": true}), ANSWER).await?;
-            if challenge["result"]["value"] != json!(true) {
-                break;
+        let settled = state.settled(now);
+        // A challenge page may never settle (its widget polls): look anyway once loaded.
+        if settled || (state.loaded && probed.is_none_or(|t: Instant| now.duration_since(t) >= PROBE)) {
+            probed = Some(now);
+            let read = cdp(page, timers, "Runtime.evaluate", json!({"expression": CHALLENGE, "returnByValue": true}), ANSWER).await?;
+            let value = &read["result"]["value"];
+            match challenge.see(challenged(value["title"].as_str().unwrap_or_default(), value["form"] == json!(true)), Instant::now()) {
+                Gate::Blocked => {
+                    blocked = true;
+                    break;
+                }
+                Gate::Clear if settled => break,
+                Gate::Wait if settled => state.busy(Instant::now()),
+                Gate::Clear | Gate::Wait => {}
             }
-            state.busy(Instant::now());
         }
         let wake = state.wake(now).min(deadline);
         tokio::select! {
@@ -465,6 +516,7 @@ async fn load(page: &Browser, params: &BrowserFetchParams, timers: &BackgroundEx
         status: state.status,
         html,
         timed_out,
+        blocked,
         truncated,
         screenshot,
     })
@@ -472,6 +524,8 @@ async fn load(page: &Browser, params: &BrowserFetchParams, timers: &BackgroundEx
 
 /// The viewport, as png (jpeg when the png passes 4 MiB).
 async fn screenshot(page: &Browser, timers: &BackgroundExecutor) -> Option<BrowserScreenshotResult> {
+    // The page paints a few times a second off screen: ask for a frame now.
+    page.invalidate();
     for format in ["png", "jpeg"] {
         let params = if format == "png" { json!({"format": format}) } else { json!({"format": format, "quality": 80}) };
         let shot = match cdp(page, timers, "Page.captureScreenshot", params, Duration::from_secs(10)).await {
@@ -598,6 +652,29 @@ mod tests {
         load.feed(&event("Page.loadEventFired", json!({})), at(840));
         assert!(load.settled(at(1330)));
         assert_eq!(load.status, Some(200));
+    }
+
+    #[test]
+    fn bot_checks_are_told_from_pages() {
+        assert!(challenged("Just a moment...", false));
+        assert!(challenged("  Attention Required! | Cloudflare", false));
+        assert!(challenged("", true), "Cloudflare's challenge form, whatever the title");
+        assert!(!challenged("Example Domain", false));
+        assert!(!challenged("How to wait: just a moment", false), "only a title that starts with it");
+    }
+
+    #[test]
+    fn a_challenge_that_does_not_clear_is_blocked_after_a_grace_period() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut challenge = Challenge::default();
+        assert_eq!(challenge.see(false, at(0)), Gate::Clear);
+        assert_eq!(challenge.see(true, at(1000)), Gate::Wait, "an automatic check gets time to clear");
+        assert_eq!(challenge.see(true, at(6999)), Gate::Wait);
+        assert_eq!(challenge.see(false, at(7000)), Gate::Clear, "it cleared: the real page");
+        assert_eq!(challenge.see(true, at(8000)), Gate::Wait, "a new challenge starts its own grace");
+        assert_eq!(challenge.see(true, at(13_999)), Gate::Wait);
+        assert_eq!(challenge.see(true, at(14_000)), Gate::Blocked, "6 s without clearing");
     }
 
     #[tokio::test]

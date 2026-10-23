@@ -177,9 +177,7 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
     if render == Some(true) || screenshot {
         return match web.render(request, cx).await {
             Ok(page) => rendered(page, selector.as_deref(), cx),
-            Err(RenderError::NoApp(_)) => {
-                Ok(ToolOutput::error("Rendering needs the Silo app; without render:true or screenshot, web_fetch uses plain HTTP."))
-            }
+            Err(RenderError::NoApp(_)) => Ok(ToolOutput::error("Rendering needs the Silo app.")),
             Err(e) => Ok(ToolOutput::error(format!("Rendering failed: {e}"))),
         };
     }
@@ -195,8 +193,8 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
         Ok(rendered_page) => rendered(rendered_page, selector.as_deref(), cx),
         Err(RenderError::NoApp(_)) => {
             let note = match verdict {
-                Verdict::Blocked => "the page looks blocked by bot protection; rendering it needs the Silo app",
-                Verdict::Empty => "the page looks built by JavaScript; rendering it needs the Silo app",
+                Verdict::Blocked => "bot check; rendering needs the Silo app",
+                Verdict::Empty => "built by JavaScript; rendering needs the Silo app",
             };
             plain(&page, selector.as_deref(), Some(note.into()), cx)
         }
@@ -248,12 +246,25 @@ fn rendered(page: Rendered, selector: Option<&str>, cx: &ToolCx) -> Result<ToolO
         },
     };
     let mut notes = vec!["rendered in browser".to_owned()];
-    if page.timed_out {
-        notes.push("the page had not settled before the deadline; content may be partial".into());
+    if page.blocked {
+        notes.push(blocked_note(&page.html).into());
+    } else if page.timed_out {
+        notes.push("not settled by the deadline; may be partial".into());
     }
     let title = Some(page.title.trim().to_owned()).filter(|t| !t.is_empty()).or_else(|| html::Doc::parse(&page.html).title());
     let failed = page.status.is_some_and(|s| !(200..300).contains(&s));
     finish(Head { title, url: &page.url, status: page.status, notes: &notes }, body, page.screenshot, true, failed || error, cx)
+}
+
+/// The note for a page stuck on a bot check, naming Cloudflare's.
+#[must_use]
+pub fn blocked_note(html: &str) -> &'static str {
+    let lower = html.to_ascii_lowercase();
+    if ["cf-chl", "cf_chl", "challenge-platform", "cloudflare"].iter().any(|m| lower.contains(m)) {
+        "blocked by a bot check (Cloudflare)"
+    } else {
+        "blocked by a bot check"
+    }
 }
 
 struct Head<'a> {

@@ -663,7 +663,8 @@ Plain HTTP `web_fetch` fails on bot protection, JavaScript-built pages and conse
 feature `browser_host`): a browser block no window shows runs there for every `browser_*` tool, and a window showing
 it adopts the same page (no reload) and hands it back when it stops; the page closes with its block. The persistent
 `agent` profile. Silo's deferred `browser_fetch` (`browser.fetch`: load, then network quiet, ≤ 60 s; `selector`,
-`screenshot`; 3 pages at once, the rest queued; `no_app`, `timeout`, `navigation`), and the `Renderer` contract
+`screenshot`; 3 pages at once, the rest queued; a challenge that doesn't clear in 6 s returns `blocked`; `no_app`,
+`timeout`, `navigation`). Pages no window shows render at 5 fps (60 once adopted). The `Renderer` contract
 (`otto_silo_tools::connect(..).renderer`).
 
 **As built (otto side):** both tools reach silo's `browser_fetch` (docs/AGENTS.md) through
@@ -678,8 +679,10 @@ nav/aside/header/footer; a candidate with under 200 characters and under a third
   one; empty when under 200 characters and ≥3 scripts, an empty app root (`#root`, `#app`, `#__next`, …,
   `<app-root>`) or an "enable JavaScript" notice. Non-HTML never renders.
 - **`web_fetch`**: `render: true` or `screenshot: true` go straight to the browser; `render: false` never renders.
-  Output `Title:`/`URL:`/`Status:` (non-2xx)/`Note:` lines, then markdown; `Note: rendered in browser`, a note when
-  the page had not settled, or why it couldn't render (`…rendering it needs the Silo app`, `rendering failed: …`).
+  Output `Title:`/`URL:`/`Status:` (non-2xx)/`Note:` lines, then markdown; `Note: rendered in browser`, then
+  `blocked by a bot check (Cloudflare)` (silo's `blocked`: the challenge didn't clear in 6 s), `not settled by the
+  deadline; may be partial`, or why it couldn't render (`bot check; rendering needs the Silo app`, `built by
+  JavaScript; …`, `rendering failed: …`). Forced rendering without the app: `Rendering needs the Silo app.`
   A `selector` filters the fetched HTML on the HTTP path and is passed to the browser otherwise.
 - **`web_search`** (deferred): engine `search_engine` in config.json (`duckduckgo` default, `bing`, `google`), one
   parser each (`web_search::{duckduckgo, bing, google}`), redirect wrappers unwrapped (DDG `uddg=`, Google

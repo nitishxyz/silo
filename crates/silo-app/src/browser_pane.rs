@@ -442,6 +442,9 @@ impl BrowserPane {
             }),
         ];
         self.offscreen = false;
+        if let Some(page) = &self.page {
+            page.set_offscreen(false);
+        }
     }
 
     /// Run in the off-screen host: no window; a page not open yet opens on
@@ -452,6 +455,7 @@ impl BrowserPane {
         self.editing = false;
         if let Some(page) = &self.page {
             page.set_focus(false);
+            page.set_offscreen(true);
         }
         self.offscreen = true;
     }
@@ -734,7 +738,7 @@ impl BrowserPane {
             let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let flag = dirty.clone();
             let notify = std::sync::Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Release));
-            let options = silo_web::BrowserOptions { url: &url, profile: &profile, size: self.view_size(), notify };
+            let options = silo_web::BrowserOptions { url: &url, profile: &profile, size: self.view_size(), offscreen: self.offscreen, notify };
             anyhow::Ok((runtime.create_browser(options)?, dirty))
         })();
         self.starting = false;

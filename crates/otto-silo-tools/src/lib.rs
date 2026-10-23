@@ -146,7 +146,7 @@ impl Renderer for SiloRenderer {
 
 fn rendered(r: silo_tools::BrowserFetchResult) -> Rendered {
     let screenshot = r.screenshot.map(|s| (s.mime, s.data_base64));
-    Rendered { url: r.url, title: r.title, status: r.status, html: r.html, timed_out: r.timed_out, screenshot }
+    Rendered { url: r.url, title: r.title, status: r.status, html: r.html, timed_out: r.timed_out, blocked: r.blocked, screenshot }
 }
 
 fn render_error(error: anyhow::Error) -> RenderError {

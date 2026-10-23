@@ -269,7 +269,7 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
     let limit = input.get("limit").and_then(Value::as_u64).map_or(8, |n| n.clamp(1, 20)) as usize;
     let engine = web.engine;
     let request = RenderRequest { url: engine.url(query).into(), ..RenderRequest::default() };
-    let (engine, rendered, hits, status, page) = match web.render(request, cx).await {
+    let (engine, rendered, hits, status, page, blocked) = match web.render(request, cx).await {
         Ok(page) => {
             let mut hits = engine.results(&page.html);
             if engine == Engine::Google {
@@ -277,14 +277,14 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
                 hits.truncate(limit + 4);
                 hits = resolve(hits).await;
             }
-            (engine, true, hits, page.status.unwrap_or(200), page.html)
+            (engine, true, hits, page.status.unwrap_or(200), page.html, page.blocked)
         }
         Err(RenderError::NoApp(_)) => {
             let page = http(Engine::Duckduckgo.url(query)).await?;
             if duckduckgo_blocked(page.status, &page.body) {
-                return Ok(ToolOutput::error("Search needs the Silo app: DuckDuckGo turned the plain request away."));
+                return Ok(ToolOutput::error("Search needs the Silo app; DuckDuckGo refused plain HTTP."));
             }
-            (Engine::Duckduckgo, false, duckduckgo(&page.body), page.status, page.body)
+            (Engine::Duckduckgo, false, duckduckgo(&page.body), page.status, page.body, false)
         }
         Err(e) => return Ok(ToolOutput::error(format!("Search failed: {e}"))),
     };
@@ -292,7 +292,7 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
     let hits: Vec<Hit> = hits.into_iter().filter(|h| seen.insert(h.url.clone())).take(limit).collect();
     let metadata = json!({"engine": engine.name(), "rendered": rendered, "results": hits});
     if hits.is_empty() {
-        let text = if needs_render(status, &page) == Some(Verdict::Blocked) {
+        let text = if blocked || needs_render(status, &page) == Some(Verdict::Blocked) {
             format!("No results: {} showed a bot check.", engine.name())
         } else {
             format!("No results for {query:?}.")
