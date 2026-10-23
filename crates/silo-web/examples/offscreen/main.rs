@@ -5,6 +5,7 @@
 mod bundle;
 mod nav;
 mod server;
+mod sigchld;
 mod tunnel;
 
 use std::path::PathBuf;
@@ -133,7 +134,9 @@ fn run() -> Result<()> {
             .chain(std::env::var("SILO_WEB_SWITCHES").ok().into_iter().flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>()))
             .collect(),
     };
+    let probe = sigchld::Probe::new()?;
     let runtime = Runtime::init(config)?;
+    probe.check("after init")?;
     let handling = app.respondsToSelector(sel!(isHandlingSendEvent));
     println!("offscreen: CEF initialized; NSApp answers isHandlingSendEvent: {handling}");
 
@@ -142,7 +145,7 @@ fn run() -> Result<()> {
     let idle = Duration::from_secs(20);
     pump_for(&runtime, idle);
     println!("offscreen: idled {idle:?} with no browser");
-    if let Err(err) = tunnel::run(&runtime) {
+    if let Err(err) = probe.check("idle").and_then(|()| tunnel::run(&runtime)) {
         runtime.shutdown(Duration::from_secs(5))?;
         return Err(err);
     }
@@ -154,6 +157,7 @@ fn run() -> Result<()> {
 
     let result = (|| {
         wait_for(&runtime, &browser, PINK, (640, 400), "first paint")?;
+        probe.check("first paint")?;
         let none = Modifiers::default();
         browser.mouse_move(160.0, 100.0, none, &[]);
         browser.mouse_button(160.0, 100.0, MouseButton::Left, true, 1, none);
@@ -165,7 +169,9 @@ fn run() -> Result<()> {
         wait_for(&runtime, &browser, BLUE, (640, 400), "after key press")?;
         browser.resize(ViewSize { width: 200, height: 100, scale: 1.0 });
         wait_for(&runtime, &browser, BLUE, (200, 100), "after resize to 200x100@1x")?;
-        nav::run(&runtime, &browser)
+        nav::run(&runtime, &browser)?;
+        pump_for(&runtime, Duration::from_secs(2));
+        probe.check("after navigation")
     })();
     println!("offscreen: events {:?}", browser.take_events());
     browser.close();

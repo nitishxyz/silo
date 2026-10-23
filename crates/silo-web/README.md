@@ -39,3 +39,5 @@ Silo.app/Contents/Frameworks/Silo Helper (Plugin).app/Contents/MacOS/Silo Helper
   of the example binary, and the framework is a symlink into `CEF_PATH`.
 - It re-execs itself inside that bundle.
 - It checks IOSurface pixels after the first paint, a mouse click, a key press and a resize.
+- It checks that tokio's SIGCHLD handler survives (a tokio child is seen exiting at once) after
+  init, an idle engine, the first paint and navigation.
