@@ -444,6 +444,9 @@ fn mode_label(mode: ApprovalMode) -> &'static str {
     }
 }
 
+/// The tallest a question or approval card gets before it scrolls.
+const CARD_H: f32 = 320.0;
+
 /// A small text button.
 fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
     div()
@@ -1511,11 +1514,13 @@ impl AgentPane {
                         let id = q.question_id.clone();
                         let answer = option.clone();
                         // A long option wraps inside the card instead of running past it.
-                        chip(("agent-option", i), option.clone())
+                        // The text in its own shrinkable box: a bare text child keeps its one-line width.
+                        chip(("agent-option", i), SharedString::default())
                             .max_w_full()
                             .h_auto()
                             .min_h(px(24.0))
                             .py(px(3.0))
+                            .child(div().min_w_0().child(option.clone()))
                             .bg(theme::control_fill())
                             .when(active, |el| {
                                 el.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer_question(id.clone(), answer.clone(), cx)))
@@ -1584,7 +1589,9 @@ impl AgentPane {
                 )
             }
         };
-        Some(div().flex_none().max_h(px(320.0 * t)).overflow_hidden().opacity(t).relative().top(px((1.0 - t) * 8.0)).child(body).into_any_element())
+        // A card taller than the cap (a long question in a narrow pane) scrolls instead of losing its end.
+        let body = div().id("agent-card").max_h(px(CARD_H)).overflow_y_scroll().child(body);
+        Some(div().flex_none().max_h(px(CARD_H * t)).overflow_hidden().opacity(t).relative().top(px((1.0 - t) * 8.0)).child(body).into_any_element())
     }
 
     /// The bars stacked above the composer (subagents, todos, queue). Only
