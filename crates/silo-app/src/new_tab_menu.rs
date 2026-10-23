@@ -182,14 +182,24 @@ impl Workspace {
 
     fn row_supported(&self, row: &Row) -> bool {
         let command = row.command();
-        command.feature().is_none_or(|f| self.host_supports(f)) && (command != Command::NewAgentTab || self.agents_here())
+        command.feature().is_none_or(|f| self.host_supports(f)) && (command != Command::NewAgentTab || self.agents_offered(self.active_host))
+    }
+
+    /// What an unsupported row says.
+    fn row_note(&self, row: &Row) -> String {
+        if row.command() == Command::NewAgentTab
+            && let Some(note) = self.agents_not_offered()
+        {
+            return note;
+        }
+        self.not_supported()
     }
 
     /// Open row `index`; a row the host can't open stays, saying so.
     fn choose_new_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.new_tab_menu.chooser.as_ref().and_then(|c| c.rows.get(index).cloned()) else { return };
         if !self.row_supported(&row) {
-            let note = self.not_supported();
+            let note = self.row_note(&row);
             if let Some(chooser) = self.new_tab_menu.chooser.as_mut() {
                 chooser.note = Some(note);
             }
@@ -218,7 +228,7 @@ impl Workspace {
                 Row::Open(url) => ("globe", format!("Open {url}"), Vec::new(), None),
             };
             // A host without the feature: muted, saying so instead of the shortcut.
-            let hint = if supported { hint } else { Some(self.not_supported()) };
+            let hint = if supported { hint } else { Some(self.row_note(row)) };
             let label = StyledText::new(label).with_highlights(ranges.into_iter().map(|r| (r, highlight)).collect::<Vec<_>>());
             list = list.child(
                 div()

@@ -190,8 +190,9 @@ impl Workspace {
             self.flash(Status::info("Switch to This Mac to manage its server"), cx);
             return;
         }
-        if matches!(command, Command::NewAgent | Command::NewAgentTab) && !self.agents_here() {
-            let note = self.not_supported();
+        if matches!(command, Command::NewAgent | Command::NewAgentTab)
+            && let Some(note) = self.agents_not_offered()
+        {
             self.flash(Status::info(note), cx);
             return;
         }
@@ -376,8 +377,8 @@ impl Workspace {
             Command::OpenSettings => self.open_settings(window, cx),
             Command::AppearanceComfortable => self.set_density(crate::hosts::Density::Comfortable, cx),
             Command::AppearanceCompact => self.set_density(crate::hosts::Density::Compact, cx),
-            Command::ShowPaneHeaders => self.set_pane_headers(true, cx),
-            Command::HidePaneHeaders => self.set_pane_headers(false, cx),
+            Command::ShowPaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(true), cx),
+            Command::HidePaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(false), cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),
             Command::CheckForUpdates => {
                 let me = cx.entity_id();
@@ -433,7 +434,7 @@ impl Workspace {
             Command::CommandPalette => false,
             Command::CheckForUpdates => self.updater.read(cx).enabled(),
             Command::NewSession => connected,
-            Command::NewAgent | Command::NewAgentTab => connected && local && self.view.is_some(),
+            Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
