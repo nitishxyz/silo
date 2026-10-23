@@ -394,8 +394,24 @@ mod tests {
     fn old_server(home: &Path) -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, u32, tokio::task::JoinHandle<()>) {
         use silo_proto::{Frame, kind, read_frame, write_frame};
         std::fs::create_dir_all(home.join("bin")).unwrap();
-        std::os::unix::fs::symlink("/bin/sleep", home.join("bin/silo")).unwrap();
-        let mut child = std::process::Command::new(home.join("bin/silo")).arg("60").spawn().unwrap();
+        // Linux names a script's process after the script; macOS after its interpreter, but its
+        // sleep runs under any name (uutils' multicall sleep on Ubuntu 26.04 refuses another name).
+        if cfg!(target_os = "linux") {
+            std::fs::write(home.join("bin/silo"), "#!/bin/sh\nsleep 60\n").unwrap();
+            std::fs::set_permissions(home.join("bin/silo"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        } else {
+            std::os::unix::fs::symlink("/bin/sleep", home.join("bin/silo")).unwrap();
+        }
+        // A fork elsewhere in the test process may briefly hold the fresh script open for writing.
+        let mut child = (0..50)
+            .find_map(|_| match std::process::Command::new(home.join("bin/silo")).arg("60").spawn() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                }
+                spawned => Some(spawned.unwrap()),
+            })
+            .expect("spawn the old server");
         let pid = child.id();
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
         rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
