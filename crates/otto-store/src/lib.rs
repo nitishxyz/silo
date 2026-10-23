@@ -346,6 +346,19 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The session's events after its last one of `kinds` (all of them when there is none).
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn events_after_last(&self, session_id: &str, kinds: &[&str]) -> Result<Vec<Event>> {
+        let kinds = serde_json::to_string(kinds)?;
+        let after: i64 = self.connection.query_row(
+            "SELECT coalesce(max(seq),0) FROM events WHERE session_id=? AND kind IN (SELECT value FROM json_each(?))",
+            params![session_id, kinds],
+            |r| r.get(0),
+        )?;
+        self.events_since(session_id, after, usize::MAX)
+    }
+
     /// # Errors
     /// Returns database or decoding errors.
     pub fn items(&self, session_id: &str) -> Result<Vec<Item>> {

@@ -154,25 +154,9 @@ impl SessionMirror {
                 }
             }
             Event::ItemDone { item } => self.put(item.clone()),
-            Event::TextDelta { item_id, text } => {
+            Event::TextDelta { item_id, .. } | Event::ReasoningDelta { item_id, .. } => {
                 if let Some(i) = self.indices.get(item_id) {
-                    let parts = &mut self.items[*i].parts;
-                    if let Some(Part::Text { text: existing, .. }) = parts.last_mut() {
-                        existing.push_str(text);
-                    } else {
-                        parts.push(Part::text(text));
-                    }
-                }
-            }
-            Event::ReasoningDelta { item_id, text, summary } => {
-                if let Some(i) = self.indices.get(item_id) {
-                    let parts = &mut self.items[*i].parts;
-                    if !matches!(parts.last(), Some(Part::Reasoning { .. })) {
-                        parts.push(Part::Reasoning { summary: None, text: None, opaque: None });
-                    }
-                    if let Some(Part::Reasoning { summary: s, text: t, .. }) = parts.last_mut() {
-                        if *summary { s } else { t }.get_or_insert_default().push_str(text);
-                    }
+                    event.append_delta(&mut self.items[*i].parts);
                 }
             }
             Event::ToolInputDelta { call_id, delta } => self.tools.entry(call_id.clone()).or_default().input_delta.push_str(delta),
@@ -293,6 +277,24 @@ impl SessionMirror {
         }
         let mut persisted = persisted.clone();
         let mut remaining = Self::delta_text(&mut persisted).cloned().unwrap_or_default();
+        // An empty record (a thinking block that streams no text) consumes its empty live twin; left in the
+        // overlay it would be projected again after every later record, a new empty part at the item's end.
+        if remaining.is_empty() {
+            if let Some(i) = live.iter_mut().position(|e| Self::delta_key(e) == Some(key) && Self::delta_text(e).is_some_and(|t| t.is_empty())) {
+                live.remove(i);
+            }
+            return;
+        }
+        // Live deltas start where the subscription did, which may be inside this record (a block
+        // opened mid-reply): skip the record's head the overlay never saw.
+        let overlay: String =
+            live.iter().filter(|e| Self::delta_key(e) == Some(key)).filter_map(|e| Self::delta_text(&mut e.clone()).cloned()).collect();
+        if !remaining.starts_with(&overlay)
+            && !overlay.starts_with(&remaining)
+            && let Some(i) = remaining.char_indices().skip(1).map(|(i, _)| i).find(|i| overlay.starts_with(&remaining[*i..]))
+        {
+            remaining.drain(..i);
+        }
         live.retain_mut(|event| {
             if Self::delta_key(event) != Some(key) {
                 return true;

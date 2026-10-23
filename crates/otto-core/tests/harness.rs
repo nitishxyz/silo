@@ -331,6 +331,32 @@ async fn the_view_times_reasoning_and_tool_calls_from_the_journal() {
 }
 
 #[tokio::test]
+async fn a_view_taken_mid_reply_holds_the_text_streamed_so_far() {
+    let dir = tempfile::tempdir().unwrap();
+    let hang = StreamEvent::Finish { reason: FinishReason::Other("hang".into()), response_id: None };
+    let model = Scripted::new(vec![vec![
+        StreamEvent::ReasoningDelta { text: "hmm".into(), summary: false },
+        StreamEvent::TextDelta { text: "Hello, ".into() },
+        StreamEvent::TextDelta { text: "world".into() },
+        hang,
+    ]]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let session = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    say(&session, "go", Delivery::Queue).await;
+    let view = until(&runtime, &session.id, |v| v.items.last().is_some_and(|i| i.role == Role::Assistant && i.text() == "Hello, world")).await;
+    let open = view.items.last().unwrap();
+    assert!(matches!(&open.parts[0], Part::Reasoning { text: Some(t), .. } if t == "hmm"));
+    assert_eq!(view.items.iter().filter(|i| i.id == open.id).count(), 1);
+    // A reply stopped unfinished isn't history: an idle view holds only finished items.
+    let id = open.id.clone();
+    session.cancel().await.unwrap();
+    let view = until(&runtime, &session.id, |v| v.turn_started_at.is_none()).await;
+    assert!(view.items.iter().all(|i| i.id != id));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn closing_a_child_that_holds_nothing_changes_nothing() {
     // Closing a sub-agent's block hands it back only while its report is held:
     // a child that already reported, or never stopped, has nothing to send.

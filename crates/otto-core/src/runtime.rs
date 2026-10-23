@@ -596,6 +596,26 @@ pub(crate) fn part_times(s: &Store, id: &str, items: &[otto_llm::Item]) -> Resul
         .collect();
     Ok(otto_proto::timing::part_times(items, &marks))
 }
+/// Items started and not yet done (a reply being written), with their deltas journaled up to `upto`:
+/// a view taken mid-reply shows the text already streamed.
+pub(crate) fn open_items(s: &Store, id: &str, upto: i64) -> Result<Vec<otto_llm::Item>> {
+    let mut open: Vec<otto_llm::Item> = Vec::new();
+    for (seq, event) in s.events_after_last(id, &["item.done", "turn.started", "turn.finished"])?.into_iter().map(decode) {
+        if seq > upto {
+            break;
+        }
+        match &event {
+            Event::ItemStarted { item_id, role } => open.push(otto_llm::Item::new(item_id, *role, vec![])),
+            Event::TextDelta { item_id, .. } | Event::ReasoningDelta { item_id, .. } => {
+                if let Some(item) = open.iter_mut().find(|i| i.id == *item_id) {
+                    event.append_delta(&mut item.parts);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(open)
+}
 pub(crate) fn record(event: &Event, turn: i64, step: i64) -> Result<EventRecord> {
     let value = serde_json::to_value(event)?;
     Ok(EventRecord { turn, step, kind: value["event"].as_str().unwrap_or("error").into(), payload: value["data"].clone() })

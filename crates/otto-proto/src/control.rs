@@ -570,4 +570,26 @@ impl Event {
     pub fn is_live_delta(&self) -> bool {
         matches!(self, Self::TextDelta { .. } | Self::ReasoningDelta { .. } | Self::ToolInputDelta { .. } | Self::ToolProgress { .. })
     }
+    /// Append a text or reasoning delta to the parts of the item it streams into.
+    pub fn append_delta(&self, parts: &mut Vec<otto_llm::Part>) {
+        use otto_llm::Part;
+        match self {
+            Self::TextDelta { text, .. } => {
+                if let Some(Part::Text { text: existing, .. }) = parts.last_mut() {
+                    existing.push_str(text);
+                } else {
+                    parts.push(Part::text(text));
+                }
+            }
+            Self::ReasoningDelta { text, summary, .. } => {
+                if !matches!(parts.last(), Some(Part::Reasoning { .. })) {
+                    parts.push(Part::Reasoning { summary: None, text: None, opaque: None });
+                }
+                if let Some(Part::Reasoning { summary: s, text: t, .. }) = parts.last_mut() {
+                    if *summary { s } else { t }.get_or_insert_default().push_str(text);
+                }
+            }
+            _ => {}
+        }
+    }
 }

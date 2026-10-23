@@ -331,3 +331,45 @@ fn live_reasoning_tool_input_progress_and_loss_reconcile() {
     mirror.apply(5, &Event::TextDelta { item_id: "i".into(), text: "missing prefix tail".into() });
     assert_eq!(mirror.item("i").unwrap().text(), "missing prefix tail");
 }
+
+#[test]
+fn an_empty_thinking_delta_is_consumed_and_never_reappears_at_the_end() {
+    // A thinking block that streams no text (Claude without `display`), then the reply.
+    let mut mirror = SessionMirror::new(view(0));
+    mirror.apply(1, &Event::ItemStarted { item_id: "i".into(), role: serde_json::from_value(json!("assistant")).unwrap() });
+    let think = Event::ReasoningDelta { item_id: "i".into(), text: String::new(), summary: false };
+    let text = |t: &str| Event::TextDelta { item_id: "i".into(), text: t.into() };
+    mirror.apply_live(1, &think);
+    mirror.apply_live(1, &text("Build the runtime"));
+    mirror.apply(2, &think);
+    mirror.apply_live(2, &text(" first."));
+    mirror.apply(3, &text("Build the runtime first."));
+    mirror.apply_live(3, &text(" Then"));
+    let kinds = |m: &SessionMirror| m.item("i").unwrap().parts.iter().map(|p| matches!(p, Part::Reasoning { .. })).collect::<Vec<_>>();
+    assert_eq!(kinds(&mirror), [true, false], "thinking, then one text part: no empty thinking after it");
+    assert_eq!(mirror.item("i").unwrap().text(), "Build the runtime first. Then");
+}
+
+#[test]
+fn a_snapshot_taken_mid_reply_shows_its_text_and_live_deltas_continue_it() {
+    // The view carries the reply being written with the text journaled so far.
+    let assistant = || serde_json::from_value(json!("assistant")).unwrap();
+    let mut v = view(4);
+    v.items.push(Item::new("i", assistant(), vec![Part::text("Hello, ")]));
+    let mut mirror = SessionMirror::new(v);
+    assert_eq!(mirror.item("i").unwrap().text(), "Hello, ", "at once");
+    let delta = |text: &str| Event::TextDelta { item_id: "i".into(), text: text.into() };
+    // `wor` was streamed before the subscription (still buffered, not journaled): live starts after it.
+    mirror.apply_live(4, &delta("ld"));
+    mirror.apply_live(4, &delta("!"));
+    // The buffered record lands: what the overlay didn't see fills in, nothing twice.
+    mirror.apply(5, &delta("world"));
+    assert_eq!(mirror.item("i").unwrap().text(), "Hello, world!");
+    mirror.apply_live(5, &delta(" Bye"));
+    assert_eq!(mirror.item("i").unwrap().text(), "Hello, world! Bye");
+    mirror.apply(6, &delta("! Bye"));
+    assert_eq!(mirror.item("i").unwrap().text(), "Hello, world! Bye");
+    mirror.apply(7, &Event::ItemDone { item: Item::new("i", assistant(), vec![Part::text("Hello, world! Bye")]) });
+    assert_eq!(mirror.items.len(), 1);
+    assert_eq!(mirror.item("i").unwrap().text(), "Hello, world! Bye");
+}
