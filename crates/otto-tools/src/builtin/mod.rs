@@ -10,6 +10,7 @@ pub mod render;
 pub mod search;
 pub mod shell;
 pub mod tree;
+pub mod undo_edit;
 pub mod update_todos;
 pub mod web_fetch;
 pub mod web_search;

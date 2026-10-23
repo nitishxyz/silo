@@ -458,7 +458,8 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
             meta["effort"] = serde_json::json!(agent.effort);
         }
         let family = crate::session::family(model.as_ref());
-        let (grant, loadable, denied) = cx.runtime.grants(&agent, &family, current.parent_id.clone()).await?;
+        let narrow: Option<Vec<String>> = serde_json::from_value(meta["grant"].clone()).unwrap_or_default();
+        let (grant, loadable, denied) = cx.runtime.grants(&agent, &family, current.parent_id.clone(), narrow.as_deref()).await?;
         meta["tools"] = serde_json::json!(grant);
         meta["loadable"] = serde_json::json!(loadable);
         meta["denied_tools"] = serde_json::json!(denied);

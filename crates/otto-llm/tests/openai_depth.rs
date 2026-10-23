@@ -13,6 +13,7 @@ use std::time::Duration;
 
 const COMPACTION: &str = include_str!("fixtures/openai/compaction.sse");
 const TOOLS: &str = include_str!("fixtures/openai/tools.sse");
+const SHELL: &str = include_str!("fixtures/openai/shell.sse");
 const XAI: &str = include_str!("fixtures/xai/reasoning.sse");
 
 fn parts(events: &[StreamEvent]) -> Vec<Part> {
@@ -62,6 +63,75 @@ fn compact_endpoint_window_replaces_the_summarized_items() {
     assert_eq!(body["input"][2]["content"][0]["text"], "Add a day");
     // Another provider never receives the window.
     assert_eq!(convert::request_for(&req, "xai")["input"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn shell_call_commands_run_as_entries_and_answer_once() {
+    let events = testing::collect_events(stream::stream(testing::chunked(SHELL.as_bytes(), 5), "gpt-5.1")).await;
+    let parts = parts(&events);
+    let calls: Vec<_> = parts
+        .iter()
+        .filter_map(|p| {
+            if let Part::ToolCall { call_id, name, input, kind, opaque } = p {
+                Some((call_id.as_str(), name.as_str(), input.clone(), *kind, opaque.is_some()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("call_sh", "shell", json!({"command":"ls src","timeout_ms":5000}), CallKind::Function, true),
+            ("call_sh_1", "shell", json!({"command":"cat README.md","timeout_ms":5000}), CallKind::Function, false),
+            ("call_local", "shell", json!({"command":"git log -1 '--format=%s it'\\''s'","cwd":"/tmp/x"}), CallKind::Function, true),
+        ]
+    );
+    assert!(events.iter().any(|e| matches!(e, StreamEvent::Finish { reason: FinishReason::ToolUse, .. })));
+    let result = |id: &str, text: &str, is_error: bool| Part::ToolResult {
+        call_id: id.into(),
+        content: vec![ResultPart::Text { text: text.into() }],
+        is_error,
+    };
+    let req = Request {
+        model: "gpt-5.1".into(),
+        items: vec![
+            Item::user_text("u", "look around"),
+            Item::new("a", Role::Assistant, parts),
+            Item::new(
+                "t",
+                Role::Tool,
+                vec![result("call_sh", "lib.rs", false), result("call_sh_1", "no such file", true), result("call_local", "fix", false)],
+            ),
+        ],
+        ..Request::default()
+    };
+    // One raw item and one output per call id; each command's output in order.
+    let input = convert::request(&req)["input"].as_array().unwrap().clone();
+    assert_eq!(input.len(), 5);
+    assert_eq!((input[1]["type"].as_str(), input[1]["call_id"].as_str()), (Some("shell_call"), Some("call_sh")));
+    assert_eq!(input[2]["type"], "local_shell_call");
+    let exit = |code: i32| json!({"type":"exit","exit_code":code});
+    assert_eq!(
+        input[3],
+        json!({"type":"shell_call_output","call_id":"call_sh","output":[
+            {"stdout":"lib.rs","stderr":"","outcome":exit(0)},{"stdout":"no such file","stderr":"","outcome":exit(1)}]})
+    );
+    assert_eq!(input[4], json!({"type":"function_call_output","call_id":"call_local","output":"fix"}));
+    // Another provider gets plain calls of our `shell`, one per command.
+    let other = convert::request_for(&req, "xai")["input"].as_array().unwrap().clone();
+    let types: Vec<_> = other.iter().map(|i| (i["type"].as_str().unwrap(), i["call_id"].as_str().unwrap_or_default())).collect();
+    assert_eq!(
+        types[1..],
+        [
+            ("function_call", "call_sh"),
+            ("function_call", "call_sh_1"),
+            ("function_call", "call_local"),
+            ("function_call_output", "call_sh"),
+            ("function_call_output", "call_sh_1"),
+            ("function_call_output", "call_local")
+        ]
+    );
 }
 
 #[tokio::test]

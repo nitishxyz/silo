@@ -11,6 +11,14 @@ fn string(v: &Value, key: &str) -> String {
 fn texts(v: &Value) -> Option<String> {
     v.as_array().map(|a| a.iter().filter_map(|p| p["text"].as_str()).collect())
 }
+/// A `local_shell_call` argument as a shell word.
+fn quote(arg: &str) -> String {
+    if !arg.is_empty() && arg.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c)) {
+        arg.into()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
 fn parts(item: &Value, model: &str, provider: &str) -> Result<Vec<Part>, LlmError> {
     let opaque = |model: &str, data: Value| Opaque { provider: provider.into(), model: model.into(), data };
     Ok(match item["type"].as_str().unwrap_or_default() {
@@ -57,6 +65,37 @@ fn parts(item: &Value, model: &str, provider: &str) -> Result<Vec<Part>, LlmErro
                 kind: if custom { CallKind::Custom } else { CallKind::Function },
                 opaque: raw,
             }]
+        }
+        // Each command of a shell call runs as its own `shell` entry: the first
+        // keeps the call id and the raw item, the rest get `{call_id}_{n}`, and
+        // `convert` answers the call once with every command's output.
+        "shell_call" | "local_shell_call" => {
+            let action = &item["action"];
+            let commands: Vec<String> = match action["commands"].as_array() {
+                Some(commands) => commands.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                None => vec![action["command"].as_array().into_iter().flatten().filter_map(Value::as_str).map(quote).collect::<Vec<_>>().join(" ")],
+            };
+            let id = string(item, "call_id");
+            commands
+                .into_iter()
+                .enumerate()
+                .map(|(n, command)| {
+                    let mut input = serde_json::json!({"command":command});
+                    if let Some(timeout) = action["timeout_ms"].as_u64() {
+                        input["timeout_ms"] = timeout.into();
+                    }
+                    if let Some(cwd) = action["working_directory"].as_str() {
+                        input["cwd"] = cwd.into();
+                    }
+                    Part::ToolCall {
+                        call_id: if n == 0 { id.clone() } else { format!("{id}_{n}") },
+                        name: "shell".into(),
+                        input,
+                        kind: CallKind::Function,
+                        opaque: (n == 0).then(|| opaque(model, item.clone())),
+                    }
+                })
+                .collect()
         }
         // Server-side compaction (`context_management`): opaque, replayed as-is.
         "compaction" => vec![Part::Compaction { summary: None, opaque: Some(opaque(model, item.clone())) }],

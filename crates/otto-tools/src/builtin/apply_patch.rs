@@ -256,5 +256,8 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
             return Err(ToolError::failed(format!("Patch rolled back after {e}; rollback errors: {failures:?}")));
         }
     }
+    for (p, new) in &changes {
+        super::undo_edit::record(&cx, p, originals[p].as_deref(), new.as_deref());
+    }
     Ok(ToolOutput::text(format!("Applied patch to {} paths", changes.len())).with_metadata(json!({"files":metadata})))
 }

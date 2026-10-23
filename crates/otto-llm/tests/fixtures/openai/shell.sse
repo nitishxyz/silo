@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"resp_shell","model":"gpt-5.1"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"shell_call","id":"sh_1","call_id":"call_sh","status":"in_progress","action":{"commands":[]}}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"shell_call","id":"sh_1","call_id":"call_sh","status":"completed","action":{"commands":["ls src","cat README.md"],"timeout_ms":5000}}}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"local_shell_call","id":"lsh_1","call_id":"call_local","status":"completed","action":{"type":"exec","command":["git","log","-1","--format=%s it's"],"working_directory":"/tmp/x"}}}
+
+data: {"type":"response.completed","response":{"id":"resp_shell","status":"completed"}}
+

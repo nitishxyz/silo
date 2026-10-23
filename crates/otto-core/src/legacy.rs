@@ -35,9 +35,11 @@ fn call(name: &str, input: &Value, raw: Option<&str>) -> Option<(&'static str, V
             }
             Some("create") => ("write", json!({"path":text("path"),"content":text("file_text")})),
             Some("str_replace") => ("edit", json!({"path":text("path"),"old_string":text("old_str"),"new_string":text("new_str")})),
+            Some("undo_edit") => ("undo_edit", json!({"path":text("path")})),
             _ => ("edit", input.clone()),
         },
-        (_, Some("shell_call")) => {
+        // Today's shell calls are already one `shell` entry per command (`otto-llm`).
+        (_, Some("shell_call")) if input["commands"].is_array() => {
             let commands: Vec<&str> = input["commands"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
             ("shell", json!({"command":commands.join("\n")}))
         }

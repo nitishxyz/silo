@@ -49,6 +49,7 @@ pub fn tools_with(family: &str, host: &shell::Host, web: &web_fetch::Web) -> Vec
         Arc::new(web_search::WebSearch::new(web.clone())),
         Arc::new(ask_user::AskUser::default()),
         Arc::new(update_todos::UpdateTodos::default()),
+        Arc::new(undo_edit::UndoEdit::default()),
     ];
     if family.eq_ignore_ascii_case("openai") {
         tools.push(Arc::new(apply_patch::ApplyPatch::default()));

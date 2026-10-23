@@ -168,6 +168,10 @@ pub fn compacted(response: &Value, provider: &str) -> Vec<crate::StreamEvent> {
 pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
     let mut input = Vec::new();
     let mut kinds: HashMap<&str, CallKind> = HashMap::new();
+    // A shell call's command entries (`stream`): each part's call id to the
+    // call's own id and whether it is a `local_shell_call`; the call's one output.
+    let mut shells: HashMap<&str, (&str, bool)> = HashMap::new();
+    let mut outputs: HashMap<&str, usize> = HashMap::new();
     for item in items {
         for part in &item.parts {
             let role = match item.role {
@@ -197,7 +201,20 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                 },
                 Part::ToolCall { call_id, name, input: args, kind, opaque } => {
                     kinds.insert(call_id.as_str(), *kind);
-                    match (kind, own(opaque)) {
+                    let raw = own(opaque);
+                    if let Some(local) = raw.as_ref().and_then(|r| match r["type"].as_str() {
+                        Some("shell_call") => Some(false),
+                        Some("local_shell_call") => Some(true),
+                        _ => None,
+                    }) {
+                        shells.insert(call_id.as_str(), (call_id.as_str(), local));
+                    } else if let Some(&group) =
+                        call_id.rsplit_once('_').and_then(|(id, _)| shells.get(id)).filter(|_| name == "shell" && raw.is_none())
+                    {
+                        shells.insert(call_id.as_str(), group);
+                        continue;
+                    }
+                    match (kind, raw) {
                         (_, Some(raw)) => input.push(raw),
                         (CallKind::Function, None) => {
                             input.push(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":args.to_string()}))
@@ -206,6 +223,27 @@ pub fn input(items: &[crate::Item], provider: &str) -> Vec<Value> {
                             input.push(json!({"type":"custom_tool_call","call_id":call_id,"name":name,"input":args.as_str().unwrap_or_default()}))
                         }
                         (CallKind::Hosted, None) => {}
+                    }
+                }
+                Part::ToolResult { call_id, content, is_error } if shells.contains_key(call_id.as_str()) => {
+                    let (id, local) = shells[call_id.as_str()];
+                    let text = content
+                        .iter()
+                        .filter_map(|p| if let ResultPart::Text { text } = p { Some(text.as_str()) } else { None })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let at = *outputs.entry(id).or_insert_with(|| {
+                        input.push(if local {
+                            json!({"type":"function_call_output","call_id":id,"output":""})
+                        } else {
+                            json!({"type":"shell_call_output","call_id":id,"output":[]})
+                        });
+                        input.len() - 1
+                    });
+                    if local {
+                        input[at]["output"] = text.into();
+                    } else if let Some(output) = input[at]["output"].as_array_mut() {
+                        output.push(json!({"stdout":text,"stderr":"","outcome":{"type":"exit","exit_code":i32::from(*is_error)}}));
                     }
                 }
                 Part::ToolResult { call_id, content, .. } => {

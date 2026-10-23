@@ -511,6 +511,13 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         }
         deltas.flush(&cx).await?;
         drop(stream);
+        // Limits a provider reports out of band (Kimi's polled usage), off the turn's path.
+        let (model, runtime, provider) = (live.model.clone(), cx.runtime.clone(), live.row.provider.as_str().to_owned());
+        tokio::spawn(async move {
+            if let Some(plan) = model.plan_usage().await {
+                runtime.record_plan(&provider, plan);
+            }
+        });
         requeue_native(&cx).await?;
         settle(&cx, &live, &item, &lookup, &usage, turn, step).await?;
         let calls = item.tool_calls().map(|(id, name, value)| (id.to_owned(), name.to_owned(), value.clone())).collect::<Vec<_>>();
@@ -677,6 +684,8 @@ async fn execute(
                 }
             },
         }
+    } else if cx.live().row.meta["grant"].is_array() {
+        Decision::Deny { reason: format!("{name} is not among the tools this sub-agent was given. Available tools: {offered}") }
     } else {
         Decision::Deny { reason: format!("unknown tool: {name}. Available tools: {offered}") }
     };

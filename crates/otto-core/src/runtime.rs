@@ -59,6 +59,9 @@ pub struct CreateSession {
     pub task: Option<String>,
     /// Reasoning effort; `None` keeps the agent's, else the model's default.
     pub effort: Option<otto_llm::Effort>,
+    /// A delegated child's tools: a subset of its agent's grant (O5 per-subagent
+    /// grants); a name outside it is an error listing the available ones.
+    pub tools: Option<Vec<String>>,
 }
 /// `session.update`: given fields only, from the session's next model request.
 #[derive(Clone, Debug, Default)]
@@ -376,7 +379,30 @@ impl Runtime {
         let resolved = self.0.config.models.resolve(&provider, &model)?;
         let family = crate::session::family(resolved.as_ref());
         let window = resolved.info().caps.context_window;
-        let (grant, loadable, denied) = self.grants(&agent, &family, options.parent_id.clone()).await?;
+        if let Some(names) = &options.tools {
+            let (grant, _, denied) = self.grants(&agent, &family, options.parent_id.clone(), None).await?;
+            let granted = |n: &String| grant.iter().any(|p| crate::tools::pattern(p, n)) && !denied.iter().any(|d| crate::tools::pattern(d, n));
+            let mut known: Vec<String> = self
+                .builtins(&family)
+                .into_iter()
+                .chain(self.extra_tools())
+                .chain(self.source_tools(Path::new(&root)).await)
+                .map(|t| t.spec().name.clone())
+                .chain(crate::tools::session_specs().into_iter().map(|s| s.name))
+                .filter(granted)
+                .collect();
+            known.sort_unstable();
+            known.dedup();
+            let unknown: Vec<&str> = names.iter().filter(|n| !known.contains(n)).map(String::as_str).collect();
+            if !unknown.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "tools not available to agent {agent_name}: {}; available: {}",
+                    unknown.join(", "),
+                    known.join(", ")
+                )));
+            }
+        }
+        let (grant, loadable, denied) = self.grants(&agent, &family, options.parent_id.clone(), options.tools.as_deref()).await?;
         let effort = options
             .effort
             .map(serde_json::to_value)
@@ -395,7 +421,7 @@ impl Runtime {
                     model,
                     title: options.title,
                     cwd: options.cwd.to_string_lossy().into_owned(),
-                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"loadable":loadable,"denied_tools":denied,"task":task,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum"))),"context":{"used":0,"window":window}}),
+                    meta: serde_json::json!({"max_steps":options.max_steps,"tools":grant,"loadable":loadable,"denied_tools":denied,"task":task,"grant":options.tools,"effort":effort,"native_compaction":config.native_compaction,"approval_mode":approval_mode.or_else(||config.approval_mode.map(|m|serde_json::to_value(m).expect("mode enum"))),"context":{"used":0,"window":window}}),
                 })?)
             })
             .await?;
@@ -405,12 +431,14 @@ impl Runtime {
     }
     /// The tools `agent` is granted on a model of `family`, narrowed by the
     /// parent's grant: the whole grant, the part behind `load_tools` (`None`:
-    /// each tool's own default), and the denied patterns.
+    /// each tool's own default), and the denied patterns. `narrow` (a delegated
+    /// child's own `tools`) keeps just those names of the grant.
     pub(crate) async fn grants(
         &self,
         agent: &crate::agents::Agent,
         family: &str,
         parent: Option<String>,
+        narrow: Option<&[String]>,
     ) -> Result<(Vec<String>, Option<Vec<String>>, Vec<String>)> {
         let listed = !agent.tools.is_empty() || !agent.loadable.is_empty();
         let mut grant: Vec<String> = if !listed {
@@ -437,6 +465,12 @@ impl Runtime {
         let kept = |tool: &String| !denied.iter().any(|d| crate::tools::pattern(d, tool));
         grant.retain(kept);
         loadable.iter_mut().for_each(|l| l.retain(kept));
+        if let Some(narrow) = narrow {
+            let within =
+                |patterns: &[String]| narrow.iter().filter(|n| patterns.iter().any(|p| crate::tools::pattern(p, n))).cloned().collect::<Vec<_>>();
+            grant = within(&grant);
+            loadable = loadable.map(|l| within(&l));
+        }
         if (loadable.as_ref().is_some_and(|l| !l.is_empty())
             || otto_tools::registry::tools_for_family(family)
                 .into_iter()

@@ -43,6 +43,9 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
     let action = input["action"].as_str().unwrap_or("");
     let text = input["message"].as_str().or_else(|| input["task"].as_str()).map(str::to_owned);
     let target = input["session_id"].as_str();
+    // The label the parent gave the child; the task's start stands in for none.
+    let title = input["title"].as_str().map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty());
+    let title = |task: &str| title.clone().map_or_else(|| task.chars().take(80).collect::<String>(), |t| t.chars().take(60).collect());
     if let Some(target) = target
         && !children.iter().any(|c| c.id == target)
     {
@@ -54,8 +57,16 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
             if children.iter().filter(|c| running(c)).count() >= MAX_RUNNING {
                 return Err(Error::Invalid(format!("{MAX_RUNNING} subagents are already running; wait for one or stop it")));
             }
+            let tools: Option<Vec<String>> =
+                serde_json::from_value(input["tools"].clone()).map_err(|_| Error::Invalid("tools must be a list of tool names".into()))?;
             if let Some(child) = target {
+                if tools.is_some() {
+                    return Err(Error::Invalid("tools apply to a new child only; omit session_id".into()));
+                }
                 // reuse_session: continue an existing child with a new task.
+                if input["title"].as_str().is_some_and(|t| !t.trim().is_empty()) {
+                    cx.runtime.rename(child, title(&task)).await?;
+                }
                 cx.runtime.prompt_child(child, vec![InputPart::Text { text: task }], Delivery::Queue).await?;
                 cx.emit(
                     Event::SubagentChanged { parent: cx.row.id.clone(), child: child.into(), status: SessionStatus::Busy },
@@ -100,8 +111,9 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     agent: name.into(),
                     provider: inherit.then(|| live.row.provider.clone()),
                     model: inherit.then(|| live.row.model.clone()),
-                    title: task.chars().take(80).collect(),
+                    title: title(&task),
                     task: Some(task.clone()),
+                    tools,
                     ..Default::default()
                 })
                 .await?;

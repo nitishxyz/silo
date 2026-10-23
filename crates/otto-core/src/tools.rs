@@ -36,20 +36,21 @@ pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
     all
 }
 
-/// `copy_attachment` comes with `write` and `web_search` with `web_fetch`: a grant fixed before
-/// they existed still reaches them.
-fn implied(name: &str) -> Option<&'static str> {
+/// `copy_attachment` comes with `write`, `web_search` with `web_fetch` and `undo_edit` with
+/// the edit tools: a grant fixed before they existed still reaches them.
+fn implied(name: &str) -> &'static [&'static str] {
     match name {
-        "copy_attachment" => Some("write"),
-        "web_search" => Some("web_fetch"),
-        _ => None,
+        "copy_attachment" => &["write"],
+        "web_search" => &["web_fetch"],
+        "undo_edit" => &["edit", "apply_patch", "write"],
+        _ => &[],
     }
 }
 
 fn allowed(live: &Live, name: &str) -> bool {
-    let names = [Some(name), implied(name)];
-    let list =
-        |key: &str| live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| names.iter().flatten().any(|n| pattern(p, n))));
+    let list = |key: &str| {
+        live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| [name].iter().chain(implied(name)).any(|n| pattern(p, n))))
+    };
     list("tools").unwrap_or(true) && !list("denied_tools").unwrap_or(false)
 }
 
@@ -165,10 +166,11 @@ pub(crate) fn session_specs() -> Vec<ToolSpec> {
         ("skill", "Load a skill's instructions by name", json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
         (
             "subagent",
-            "Run child agents in the background. delegate {task, agent, session_id? to reuse a child} returns at once; the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry.",
+            "Run child agents in the background. delegate {task, agent, title, tools?, session_id? to reuse a child} returns at once (title: a 2-5 word label of what the child does, shown in the UI; on a reused child it renames it; tools: only these of the agent's tools for a new child); the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry.",
             json!({"type":"object","properties":{
                 "action":{"type":"string","enum":["delegate","list","status","message","stop","retry"]},
-                "task":{"type":"string"},"message":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"string"},
+                "task":{"type":"string"},"title":{"type":"string","description":"2-5 word label of what this child works on"},"message":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"string"},
+                "tools":{"type":"array","items":{"type":"string"},"description":"Narrow a new child to these of its agent's tools"},
                 "delivery":{"type":"string","enum":["queue","steer","interrupt"]}},"required":["action","agent"]}),
         ),
     ]

@@ -789,7 +789,11 @@ impl Model for ScriptedModel {
 async fn delegate_tool_delivers_outbox() {
     let (_dir, r, s, _) = setup(
         vec![
-            vec![call("child", "subagent", serde_json::json!({"action":"delegate","task":"inspect project","agent":"build"}))],
+            vec![call(
+                "child",
+                "subagent",
+                serde_json::json!({"action":"delegate","task":"inspect project","agent":"build","title":"  Inspect   the project "}),
+            )],
             text("done"),
             text("done"),
             text("done"),
@@ -816,6 +820,52 @@ async fn delegate_tool_delivers_outbox() {
     })
     .await
     .unwrap();
+    // The child carries the label the parent gave it, not the start of its task.
+    let project = s.view().await.unwrap().info.project_id;
+    let children: Vec<_> =
+        r.list_sessions(&project, false).await.unwrap().into_iter().filter(|c| c.parent_id.as_deref() == Some(s.id.as_str())).collect();
+    assert_eq!(children.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Inspect the project"]);
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegated_tools_narrow_the_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = ScriptedModel::new(vec![vec![call("sh", "shell", serde_json::json!({"command":"true"}))], text("done")]);
+    let r = Runtime::new(RuntimeConfig {
+        store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        models: Arc::new(Resolver(model.clone())),
+        state_dir: dir.path().join("state"),
+        user_config_dir: dir.path().join("user"),
+    })
+    .await
+    .unwrap();
+    // `browser_test` stands in for silo's deferred terminal_*/browser_* tools.
+    r.add_tools(vec![deferred_tool()]);
+    let project = r.open_project(dir.path()).await.unwrap();
+    let parent = r.create_session(CreateSession { project_id: project.id.clone(), cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let child = |tools: &[&str]| CreateSession {
+        project_id: project.id.clone(),
+        cwd: dir.path().into(),
+        parent_id: Some(parent.id.clone()),
+        agent: "build".into(),
+        tools: Some(tools.iter().map(|t| (*t).to_owned()).collect()),
+        ..Default::default()
+    };
+    let error = r.create_session(child(&["read", "teleport"])).await.err().unwrap().to_string();
+    assert!(error.contains("teleport") && error.contains("available: ") && error.contains("browser_test") && error.contains("shell"), "{error}");
+    let s = r.create_session(child(&["read", "browser_test"])).await.unwrap();
+    let mut names: Vec<_> = r.tools(&s.id).await.unwrap().into_iter().map(|t| t.name).collect();
+    names.sort();
+    assert_eq!(names, ["browser_test", "load_tools", "read"]);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    finish(&mut live).await;
+    let mut offered: Vec<_> = model.requests.lock().unwrap()[0].tools.iter().map(|t| t.name.clone()).collect();
+    offered.sort();
+    assert_eq!(offered, ["load_tools", "read"]);
+    let view = s.view().await.unwrap();
+    assert!(serde_json::to_string(&view.items).unwrap().contains("shell is not among the tools this sub-agent was given"));
     r.shutdown().await.unwrap();
 }
 
