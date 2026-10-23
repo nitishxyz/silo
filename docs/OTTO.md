@@ -462,7 +462,32 @@ pub struct ToolSpec {
 `read`, `write`, `edit`/`multiedit` (str_replace family), `apply_patch` (patch family), `ls`, `tree`, `glob`,
 `search` (ripgrep's `grep` + `ignore` crates), `shell` (one-shot, pipes, timeout, background jobs), `web_fetch`,
 `web_search` (hosted when the provider has it), `update_todos`, `ask_user`, `skill`, `load_tools`, `subagent`
-(delegate/list/message/stop/retry), `wait`.
+(delegate/list/message/stop/retry), `wait`; deferred (through `load_tools`): `copy_attachment`.
+
+- **New tools are deferred.** Any tool added from here on is `Loading::Deferred` (in `load_tools`' index with the
+  first sentence of its description, loaded by name) unless it is part of the core edit/run loop. Improvements to
+  an existing eager tool (`read`) keep it eager.
+
+- **`read` media**: images (PNG, JPEG, GIF, WebP, TIFF, BMP) are decoded with the `image` crate, turned upright,
+  downscaled to `max_edge` (default 1568 px, never upscaled) and recompressed (PNG for transparency or a PNG
+  source that fits, else JPEG at `quality`, default 85) under 3.7 MB, so the base64 stays below the 5 MB
+  per-image limit; small files pass unchanged. The text says `shot.png 3024×1964 → 1568×1018`. PDFs become a
+  document part: sent to models whose catalog caps list `pdf` and providers that take documents (Anthropic,
+  OpenAI, Gemini, OpenRouter); everyone else gets a note that it wasn't sent. `~/` and absolute paths work under
+  the usual path policy. `attachment_id` reads an attachment instead of `path`.
+- **Attachments** (`otto-tools/src/attachments.rs`): `attachment.put {session_id, name, mime, data_base64,
+  append_to?}` → `{id, name, mime, size}` stores the original bytes at
+  `<state>/attachments/<session>/<id>-<name>` (metadata in `<id>.json`, ids `att_` + 8 hex). Files up to 25 MiB
+  (`MAX_ATTACHMENT`), sent in chunks of at most 8 MiB (`ATTACHMENT_CHUNK`, under `MAX_FRAME`): later chunks pass
+  the id as `append_to`. A prompt names them with `InputPart::Attachment {id}`; the model gets
+  `[attachment att_3f2a9c1b: shot.png, image/png, 812 KB — copy_attachment can save it into the project]`
+  (pointing at the deferred tool) and, for images on vision models, the image
+  downscaled as above. Forks copy them; archiving deletes them with the spilled outputs (and the 7-day expiry of
+  archived sessions covers both). Older `InputPart::Image` prompts stay as they are.
+- **`copy_attachment {attachment_id, path, overwrite?}`** (deferred): copies the original bytes into the project (parents
+  created, an existing file refused unless `overwrite`), effects `write`, so the path policy and approvals apply.
+  It finds the session's attachments, then its ancestors'. Returns the path and size. A grant fixed before it
+  existed (sessions created earlier, agents listing `write`) reaches it through `write`.
 
 ### 5.2 Policy
 
@@ -608,6 +633,34 @@ session stops its jobs. `terminal_open {visible: false}` parks a terminal next t
 block announces itself with a `block:<id>` progress message; closing its block stops the command (`stopped
 (closed)`). The agent block shows Open / Stop on such lines, `Needs you` for `waiting_for_input`, and background
 cards that finish when their report arrives (docs/AGENT_BLOCK.md §4f).
+
+### 6.3 Web: rendered fetch and search (decided 2026-10-23)
+
+Plain HTTP `web_fetch` fails on bot protection, JavaScript-built pages and consent walls. Decisions:
+
+- **New tools are loadable, not first class.** Every tool added from here on is `Loading::Deferred` (found through
+  `load_tools` by name, prefix or query) unless it is part of the core edit/run loop. `web_fetch` stays eager
+  (existing); `web_search` is deferred.
+- **`web_fetch` renders when HTTP fails.** It tries plain HTTP first; when the result looks blocked or empty
+  (403/429/503 challenge pages, known bot-wall markers, a JS shell with almost no text), it loads the URL in a hidden
+  silo browser (CEF), waits for load and network quiet (bounded), extracts the main content as markdown, and closes
+  the page. Result: title, final URL, markdown (output limits as usual); optional `screenshot: true` (image of the
+  viewport) and `selector` (limit to an element). `render: true|false` forces either path. Without the silo app
+  (CLI only, remote otto) it stays HTTP and says rendering needs the app.
+- **Agent profile.** Rendered fetches use a persistent `agent` browser profile (cookies, consent remembered), never
+  the user's default profile.
+- **Headless browsers in the app (closes a gap).** Today a browser block in an unshown tab has no pane and reports
+  `no_app`. The app gets a host for off-screen browsers that belong to no pane (windowless CEF already renders off
+  screen): browser blocks in unshown tabs work for every `browser_*` tool, and `web_fetch`/`web_search` pages live
+  there too, never visible, never in a layout.
+- **`web_search {query, limit?}`** works for every provider: it renders a search engine results page in the same
+  hidden browser (agent profile) and returns `[{title, url, snippet}]`. Engine: one configurable default, with
+  the parser per engine kept small. Provider server-side search (Anthropic `web_search_*`) stays available where
+  it exists; otto's own `web_search` is the provider-neutral one.
+
+Open details for the implementer: the engine default (and its terms/ToS fit), the blocked/empty heuristic, wait
+limits, and how the otto daemon reaches the app (it already calls silo tools through `otto-silo-tools`; rendered
+fetch is a silo tool such as `browser_fetch` that otto's `web_fetch` calls when silo is connected).
 
 ---
 

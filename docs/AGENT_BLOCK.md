@@ -87,13 +87,23 @@ See §8 for status.
   block began; a paragraph's last line at its blank line, a heading's or code line's at its newline; all of it when
   the stream ends); the message's height glides (`Glide`) open for it (what it measured less the line being
   written, so at the bottom the transcript scrolls smoothly), and once the height drawn is within 4 of its slot
-  (and at least 60 ms after it completed) it fades in (`UI_FAST`) right where it ends up: nothing slides out from
-  under a clip, and the message may draw at most 4 past its height (the gap above the activity row). A burst is
-  staggered 40 ms apart, never more than 160 ms behind; a code block draws only its complete lines (nothing before
-  the first), a list marker and an item come in with their first line. Line opacity is a highlight `fade_out`: gpui
-  blends a highlight's colour over the text's, so a transparent colour does nothing.
+  (and at least 60 ms after it completed) it sweeps in left to right right where it ends up: a soft edge 20% of the
+  line wide, at a constant speed (250 ms for a full-width line, at least 50 ms; × `slowdown`), the next line
+  starting halfway through. Nothing slides out from under a clip, and the message may draw at most 4 past its
+  height (the gap above the activity row). A line never starts more than 200 ms after it completed (past that, a
+  burst cascades a frame apart rather than starting together); queued further than 100 ms behind, sweeps speed up
+  (down to 0.4×). Lines held while their slot opens are released in order, each halfway through the one before
+  (within the same cap). Text sweeps across its own laid-out width, cut into
+  ~16 highlight `fade_out` segments from its glyph x positions (only lines mid-sweep; gpui blends a highlight's
+  colour over the text's, so a transparent colour does nothing); a code line sweeps across its own width (its
+  characters × the mono advance, at most the box's visible width, the mask running under the right padding where
+  long lines show) under a gradient mask of the box's colour. A code block draws only its complete lines (nothing
+  before the first); the box fades in during the first sixth of its first line's sweep, and that line's text sweeps
+  in the rest (a mask under the box's own fade would let the whole line through). A list marker comes in as its
+  item's first line starts. Text already there (a
+  block opened mid-stream) and rewrapped lines after a width change show at once.
   Parsing goes through `markdown::Doc`: a top-level block followed by another is final, only the open last one
-  parses again (at most once a frame). Reduce Motion: same reveal, no fade or glide.
+  parses again (at most once a frame). Reduce Motion: lines show at once, no glide.
 - **Hover actions** under a finished answer: copy, retry.
 - **Approvals and questions:** a card pinned above the composer (the one other framed element), keyboard: ⏎ allow,
   esc deny, plus "Always" when the decision supports it; questions show options + free text.
@@ -248,7 +258,7 @@ Units are points.
   around the circle; nothing touches the border.
 - **Footer insets symmetric:** left item starts at the composer's text start (aligned with the placeholder), right
   icon ends at the send circle's center line mirrored (same inset as the left); model exactly centered. Image icon
-  muted by default (no green); disabled at 40% when the model takes no images; hover fill like other icon buttons.
+  muted by default (no green); hover fill like other icon buttons. (Now the `plus` attach button, see §4g.)
 - **List rows** (providers, sessions, models): one row height, logo column centered on the two-line text block,
   status/plan line in the same muted style, the action column right-aligned with equal widths — `Disconnect` sits in
   the same column and right edge as `Sign in`, as a quiet button of the same height. Primary = filled, secondary =
@@ -267,9 +277,9 @@ Units are points.
 - **Composer:** mono 14/20; the `⋮` is a circle mirroring the send circle (bottom-left, same size and inset, no fill
   at rest), text at `TEXT_X` = inset + circle + 10. Send circle bottom-right; dark → light when there is text (180 ms);
   it never turns into stop. Height eases between line counts (editor `animate_growth`), pushing the transcript
-  smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the image glyph ends under
+  smoothly. Footer: the agent label's glyphs start under the `⋮` circle's left edge and the attach glyph ends under
   the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
-  image muted, 40% and inert when the model takes no images.
+  attach muted, always on (§4g).
 - **Slash menu:** `/new /sessions /model /effort /agent /mode auto|ask|plan /providers /clear` (`/clear` also drops
   attachments); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
@@ -379,6 +389,19 @@ Units are points.
   for Custom only, an optional key pill below; it saves with `auth.login {base_url}` (no key needed). A local
   provider shows Connected once its server answers; otherwise the dialog says `Saved, but no server answers there`.
 
+## 4g. Attachments
+
+- **Any file:** the footer's `plus` (`Attach files`, the file picker), ⌘V and a drop anywhere on the pane attach
+  files of any kind, several at once; folders are skipped. ⌘V takes copied files first, then text, then a copied
+  image (as `Pasted image.png`). Over 25 MB: the notice says `name is over 25 MB` and the rest still attach.
+- **Chips** (`agent/attach.rs`): name and kind glyph (a 16 px thumbnail for images, `file-text` otherwise), never a
+  path; `×` removes one. On send each file is uploaded with `attachment.put` (8 MB chunks) and the prompt names
+  them (`InputPart::Attachment`); a failed send puts the text and the chips back.
+- **Transcript:** a user message shows its files' chips above the bubble (thumbnails made in the background from
+  the image otto sent with it, by `item#part`); otto's `[attachment …]` notes are hidden from the bubble. Older
+  inline images show as `Image` chips. `copy_attachment` reads `Copied shot.png → assets/shot.png` with the size;
+  `read` of an attachment reads `Read attachment`.
+
 ## 5. Session switcher
 
 Click the title or `history` in the pane header, `/sessions`, or ⌘J with the agent block focused. A popover under the
@@ -432,6 +455,11 @@ Known gaps:
 - Recorded times come from the coalesced journal, so a reloaded step can read up to 50 ms shorter than it did live;
   a forked session's copied items have none.
 - The effort clamp knows only models in the bundled catalog; an unlisted one gets its provider's common set.
+- Attachments: an image sent to a model without vision has no thumbnail in the transcript (its chip shows the
+  `image` glyph); `read` of an attachment says `Read attachment`, not its name; a failed `copy_attachment` reads
+  `Copied attachment → path` in red.
+- A block opened on a session mid-reply shows `Thinking…` until that reply's item completes: the deltas before it
+  subscribed aren't in the snapshot, so the reply then comes in whole (revealed line by line, capped as above).
 - No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
   can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
   and attachment chips disappear at once.
