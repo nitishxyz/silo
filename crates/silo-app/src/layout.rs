@@ -543,9 +543,10 @@ impl Workspace {
             .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), icon: d.icon, offset })))
             .children(rule)
             .children(progress);
-        // A float's full header moves it (its middle and buttons keep their press).
+        // A float's full header moves it (its middle and buttons keep their
+        // press). It sits inside the float card's 1pt border.
         let header = match self.float_rect(id).filter(|_| full && floating) {
-            Some(rect) => self.float_grab(header, id, rect.clamped(), crate::floats::Grab::Move, cx),
+            Some(rect) => self.float_grab(header, id, rect.clamped(), crate::floats::Grab::Move, 1.0, cx),
             None => header,
         };
         header.into_any_element()

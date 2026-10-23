@@ -111,6 +111,9 @@ pub struct Workspace {
     /// The tab being dragged (window id), while its drag lasts.
     pub(crate) tab_dragging: Option<String>,
     pub(crate) float_drag: Option<crate::floats::FloatDrag>,
+    /// Where the last press on a float's grab landed: a drag starts past
+    /// gpui's threshold, and the float keeps the point first pressed.
+    pub(crate) float_press: std::rc::Rc<std::cell::Cell<gpui::Point<gpui::Pixels>>>,
     /// A press on empty titlebar space that moves the window once dragged.
     pub(crate) titlebar_move: bool,
     /// The window surface easing toward the focused block's backdrop, the
@@ -271,6 +274,7 @@ impl Workspace {
             tab_drop: None,
             tab_dragging: None,
             float_drag: None,
+            float_press: std::rc::Rc::default(),
             titlebar_move: false,
             blend: crate::adaptive::Blend::new(theme::background()),
             blend_theme: theme::background(),

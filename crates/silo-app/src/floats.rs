@@ -85,10 +85,10 @@ impl Workspace {
                 // A full header moves it itself; otherwise a thin strip
                 // along the top does (over a browser's shrunk header too).
                 let mover = (self.header_mode(&id) != HeaderMode::Full).then(|| {
-                    self.float_grab(grip(&id, Grab::Move), &id, r, Grab::Move, cx).absolute().top_0().left_0().right(px(MOVER_INSET)).h(px(GRIP))
+                    self.float_grab(grip(&id, Grab::Move), &id, r, Grab::Move, 0.0, cx).absolute().top_0().left_0().right(px(MOVER_INSET)).h(px(GRIP))
                 });
                 let resizer = self
-                    .float_grab(grip(&id, Grab::Resize), &id, r, Grab::Resize, cx)
+                    .float_grab(grip(&id, Grab::Resize), &id, r, Grab::Resize, 0.0, cx)
                     .absolute()
                     .right_0()
                     .bottom_0()
@@ -123,20 +123,36 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// `el` drags float `id` (header: move, corner: resize).
-    pub(crate) fn float_grab<E: StatefulInteractiveElement>(&self, el: E, id: &str, rect: FloatRect, grab: Grab, cx: &mut Context<Self>) -> E {
+    /// `el` drags float `id` (header: move, corner: resize); `inset`: how far
+    /// inside the float `el` starts (a header, inside the card's border).
+    pub(crate) fn float_grab<E: StatefulInteractiveElement>(
+        &self,
+        el: E,
+        id: &str,
+        rect: FloatRect,
+        grab: Grab,
+        inset: f32,
+        cx: &mut Context<Self>,
+    ) -> E {
         let workspace = cx.entity().downgrade();
         let block = id.to_owned();
-        el.on_drag(Dragged { block: id.to_owned() }, move |_, offset, _, cx| {
-            let drag = FloatDrag { block: block.clone(), grab, offset, start: rect, rect, docked: false };
-            _ = workspace.update(cx, |this, _| this.float_drag = Some(drag));
-            let workspace = workspace.clone();
-            // The preview lives exactly as long as the drag.
-            cx.new(|cx| {
-                cx.on_release(move |_, cx| _ = workspace.update(cx, |this, cx| this.float_drag_end(cx))).detach();
-                Grip
-            })
-        })
+        let (press, pressed) = (self.float_press.clone(), self.float_press.clone());
+        // gpui measures the offset where the drag starts, past its threshold:
+        // measured from the press instead, the float doesn't jump.
+        el.on_mouse_down(gpui::MouseButton::Left, move |e, _, _| press.set(e.position)).on_drag(
+            Dragged { block: id.to_owned() },
+            move |_, offset, window, cx| {
+                let offset = offset - (window.mouse_position() - pressed.get()) + gpui::point(px(inset), px(inset));
+                let drag = FloatDrag { block: block.clone(), grab, offset, start: rect, rect, docked: false };
+                _ = workspace.update(cx, |this, _| this.float_drag = Some(drag));
+                let workspace = workspace.clone();
+                // The preview lives exactly as long as the drag.
+                cx.new(|cx| {
+                    cx.on_release(move |_, cx| _ = workspace.update(cx, |this, cx| this.float_drag_end(cx))).detach();
+                    Grip
+                })
+            },
+        )
     }
 }
 
