@@ -130,6 +130,16 @@ pub enum Row {
         key: String,
         text: String,
     },
+    /// A sub-agent's turn ended (otto's `Subagent completion:` notice): one quiet line that opens the child.
+    Report {
+        key: String,
+        child: String,
+        title: String,
+        /// `Done`, `Stopped` or `Error`.
+        status: Status,
+        /// Its error, else the start of its reply (the tooltip).
+        note: Option<String>,
+    },
 }
 
 /// A file the user attached, shown as a chip on their message.
@@ -226,7 +236,7 @@ impl Row {
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Row::User { key, .. } | Row::Text { key, .. } | Row::Marker { key, .. } => key,
+            Row::User { key, .. } | Row::Text { key, .. } | Row::Marker { key, .. } | Row::Report { key, .. } => key,
             Row::Group(g) => &g.key,
         }
     }
@@ -498,6 +508,25 @@ fn job_reports(items: &[Item]) -> HashMap<String, (JobEnd, String)> {
     jobs
 }
 
+/// A sub-agent completion otto delivered (`Subagent completion: child <id> (<agent>, "<title>") finished turn N
+/// with status S.`, then optional notes, `Error: …` and `Result:` with its reply) as its row.
+fn report(key: &str, text: &str, cx: &Ctx<'_>) -> Option<Row> {
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let (child, head) = first.strip_prefix("Subagent completion: child ")?.split_once(" (")?;
+    let (who, tail) = head.rsplit_once(") finished turn ")?;
+    let (agent, title) = who.split_once(", \"").map_or((who, ""), |(a, t)| (a, t.strip_suffix('"').unwrap_or(t)));
+    let status = match tail.rsplit_once(" with status ")?.1.trim_end_matches('.') {
+        "done" => Status::Done,
+        "stopped" | "cancelled" | "interrupted" => Status::Stopped,
+        _ => Status::Error,
+    };
+    let (notes, result) = rest.split_once("Result:\n").map_or((rest, None), |(n, r)| (n, Some(r)));
+    let error = notes.lines().find_map(|l| l.strip_prefix("Error: "));
+    let note = error.or(result).map(str::trim).filter(|n| !n.is_empty()).map(|n| clip(&display(n, cx.cwd, cx.home), 300));
+    let title = if title.trim().is_empty() { agent } else { title }.trim().to_owned();
+    Some(Row::Report { key: key.to_owned(), child: child.to_owned(), title, status, note })
+}
+
 /// A shell call that became a job: its id, block and whether it waited for
 /// input, from the result's metadata or (loaded from history) its text.
 struct ShellJob {
@@ -537,6 +566,9 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     let last = input.items.len().checked_sub(1);
     let mut rows = Vec::new();
     let mut lines = Vec::new();
+    // The item of the last text: a reply streams only while its item ends the transcript (a turn otto started
+    // with a notice, a sub-agent's or a job's, must not stream the finished reply before it again).
+    let mut said = None;
     let flush = |rows: &mut Vec<Row>, lines: &mut Vec<Line>, live: bool, stopped: bool| {
         if !lines.is_empty() {
             rows.push(Row::Group(group(std::mem::take(lines), live, stopped, &cx)));
@@ -562,6 +594,7 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                     match part {
                         Part::Text { text, .. } if !text.trim().is_empty() => {
                             // Text blocks with nothing shown between them read as one (the stream joined them).
+                            said = Some(ix);
                             if let Some(Row::Text { text: prev, .. }) = joined.and_then(|r| rows.get_mut(r)) {
                                 prev.push_str(text);
                                 continue;
@@ -590,7 +623,13 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                 flush(&mut rows, &mut lines, false, false);
                 rows.push(Row::Marker { key: item.id.clone(), text: "Context compacted".into() });
             }
-            Role::System | Role::Tool => {}
+            Role::System => {
+                if let Some(row) = item.parts.iter().find_map(|p| if let Part::System { text } = p { report(&item.id, text, &cx) } else { None }) {
+                    flush(&mut rows, &mut lines, false, false);
+                    rows.push(row);
+                }
+            }
+            Role::Tool => {}
         }
     }
     for (id, t) in pending {
@@ -606,7 +645,10 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     }
     let stopped = matches!(input.turn, Some(TurnStatus::Cancelled | TurnStatus::Interrupted));
     flush(&mut rows, &mut lines, running, stopped);
-    if running && let Some(Row::Text { streaming, .. }) = rows.last_mut() {
+    if running
+        && said == last
+        && let Some(Row::Text { streaming, .. }) = rows.last_mut()
+    {
         *streaming = true;
     }
     rows
@@ -955,7 +997,12 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         "subagent" => match str_at(input, "action").unwrap_or("delegate") {
             "delegate" => {
                 line.desc = str_at(input, "agent").map(str::to_owned);
-                (Kind::Subagent, "Delegating", "Delegated", clip(str_at(input, "task").unwrap_or(""), 80))
+                (
+                    Kind::Subagent,
+                    "Delegating",
+                    "Delegated",
+                    clip(str_at(input, "title").filter(|t| !t.trim().is_empty()).or_else(|| str_at(input, "task")).unwrap_or(""), 80),
+                )
             }
             "list" => (Kind::Subagent, "Listing subagents", "Listed subagents", String::new()),
             "message" => (Kind::Subagent, "Messaging subagent", "Messaged subagent", String::new()),
@@ -1523,6 +1570,57 @@ mod tests {
         assert!(matches!(&rows[2], Row::Marker { text, .. } if text == "Context compacted"));
     }
 
+    fn system(id: &str, text: &str) -> Item {
+        Item::new(id, Role::System, vec![Part::System { text: text.into() }])
+    }
+
+    #[test]
+    fn a_subagent_completion_reports_and_the_finished_reply_does_not_stream_again() {
+        let done = "Subagent completion: child s_9 (build, \"Fix the (flaky) test\") finished turn 1 with status done.\nResult:\nAll green in /work/app/src.";
+        let items = vec![user("u", "go"), assistant("a", vec![Part::text("Delegated.")]), system("outbox-1", done)];
+        let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Running), &Times::default(), 0);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0", "outbox-1"]);
+        assert!(matches!(&rows[1], Row::Text { streaming: false, .. }));
+        assert_eq!(
+            rows[2],
+            Row::Report {
+                key: "outbox-1".into(),
+                child: "s_9".into(),
+                title: "Fix the (flaky) test".into(),
+                status: Status::Done,
+                note: Some("All green in src.".into())
+            }
+        );
+        // The new turn's reply streams after it.
+        let mut more = items.clone();
+        more.push(assistant("a2", vec![Part::text("It pas")]));
+        let rows = build_rows(&more, &HashMap::new(), Some(TurnStatus::Running), &Times::default(), 0);
+        assert!(matches!(&rows[1], Row::Text { streaming: false, .. }));
+        assert!(matches!(&rows[3], Row::Text { streaming: true, .. }));
+    }
+
+    #[test]
+    fn subagent_reports_read_their_title_status_and_error() {
+        let report = |text: &str| build_rows(&[system("o", text)], &HashMap::new(), None, &Times::default(), 0).pop();
+        let failed = "Subagent completion: child s_1 (build, \"Port it\") finished turn 2 with status error.\nError: Rate limited\nResult:\nhalf";
+        assert!(
+            matches!(report(failed), Some(Row::Report { title, status: Status::Error, note: Some(n), .. }) if title == "Port it" && n == "Rate limited")
+        );
+        let stopped =
+            "Subagent completion: child s_2 (plan, \"\") finished turn 1 with status stopped.\nThe user stopped this sub-agent and handed it back.";
+        assert!(matches!(report(stopped), Some(Row::Report { title, status: Status::Stopped, note: None, .. }) if title == "plan"));
+        assert_eq!(report("Subagent says hi"), None);
+    }
+
+    #[test]
+    fn a_turn_started_by_a_job_notice_does_not_stream_the_last_reply_again() {
+        let notice = system("n", "Background shell j1 (cargo build) exited with code 0.\nok");
+        let items = vec![user("u", "build it"), assistant("a", vec![Part::text("Started the build.")]), notice];
+        let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Running), &Times::default(), 0);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0"]);
+        assert!(matches!(&rows[1], Row::Text { streaming: false, .. }));
+    }
+
     #[test]
     fn non_text_parts_group_until_text() {
         let items = vec![
@@ -1831,6 +1929,15 @@ mod tests {
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Asked Which branch?", Some("main")));
         let line = tool("d", "subagent", &json!({"action": "delegate", "task": "Review the diff", "agent": "plan"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Delegated Review the diff", Some("interrupted"), Status::Error));
+        let line = tool(
+            "d",
+            "subagent",
+            &json!({"action": "delegate", "task": "Review the diff in depth", "title": "Diff review", "agent": "plan"}),
+            None,
+            None,
+            &cx,
+        );
+        assert_eq!(line.title, "Delegated Diff review");
         // A subagent line names its child: from the delegate result, or the input of other actions.
         let line =
             tool("d", "subagent", &json!({"action": "delegate", "task": "t"}), None, Some(&ok(r#"{"session_id":"s9","status":"started"}"#)), &cx);

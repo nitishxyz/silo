@@ -872,7 +872,7 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Marker { .. }) => 12.0,
+            Some(Row::Marker { .. } | Row::Report { .. }) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
@@ -927,7 +927,7 @@ impl AgentPane {
         let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
             (None, _) => 16.0,
             (Some(Row::User { .. }), _) => 20.0,
-            (Some(Row::Marker { .. }), _) | (Some(_), Row::Marker { .. }) => 12.0,
+            (Some(Row::Marker { .. } | Row::Report { .. }), _) | (Some(_), Row::Marker { .. } | Row::Report { .. }) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Group(_)), Row::User { .. }) => 28.0,
             (Some(Row::Text { .. }), _) => 4.0,
@@ -949,6 +949,7 @@ impl AgentPane {
                 .child(div().flex_none().child(text.clone()))
                 .child(div().flex_1().h(px(1.0)).bg(rgb(theme::border())))
                 .into_any_element(),
+            Row::Report { key, child, title, status, note } => Self::render_report(key, child, title, *status, note.as_deref(), cx),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
         let content = match enter {
@@ -959,6 +960,31 @@ impl AgentPane {
             div().w_full().flex().justify_center().px(px(20.0)).pt(px(top)).child(div().w_full().max_w(px(COLUMN)).child(content)).into_any_element();
         keep_moving(window);
         row
+    }
+
+    /// `bot  Sub-agent finished · title`, quiet; a click opens the child, its error or reply is the tooltip.
+    fn render_report(key: &str, child: &str, title: &str, status: Status, note: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let (verb, color) = match status {
+            Status::Error => ("failed", theme::danger()),
+            Status::Stopped => ("stopped", theme::muted()),
+            _ => ("finished", theme::muted()),
+        };
+        let label = if title.is_empty() { format!("Sub-agent {verb}") } else { format!("Sub-agent {verb} · {title}") };
+        let child = child.to_owned();
+        div()
+            .id(gpui::ElementId::Name(format!("report-{key}").into()))
+            .h(px(LINE_H))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(13.0))
+            .text_color(rgb(color))
+            .cursor_pointer()
+            .child(div().w(px(16.0)).flex_none().flex().justify_center().child(icon("bot", 13.0, color)))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+            .when_some(note.map(str::to_owned), |el, note| el.tooltip(Tooltip::text(note)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_session_block(child.clone(), cx)))
+            .into_any_element()
     }
 
     fn group_started(&self, g: &Group) -> Option<u64> {
@@ -1317,7 +1343,7 @@ impl AgentPane {
             .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), theme::foreground(), &self.scroll))
             .collect();
         self.parsed.insert(key.to_owned(), doc);
-        let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. }));
+        let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. } | Row::Report { .. }));
         let actions = answer.then(|| {
             let copy = text.to_owned();
             let question = self.rows[..ix].iter().rev().find_map(|r| if let Row::User { key, .. } = r { Some(key.clone()) } else { None });
@@ -1480,7 +1506,12 @@ impl AgentPane {
                     .map(|(i, option)| {
                         let id = q.question_id.clone();
                         let answer = option.clone();
+                        // A long option wraps inside the card instead of running past it.
                         chip(("agent-option", i), option.clone())
+                            .max_w_full()
+                            .h_auto()
+                            .min_h(px(24.0))
+                            .py(px(3.0))
                             .bg(theme::control_fill())
                             .when(active, |el| {
                                 el.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer_question(id.clone(), answer.clone(), cx)))
@@ -1489,12 +1520,13 @@ impl AgentPane {
                     })
                     .collect();
                 card.child(
+                    // The question wraps: its icon stays with the first line.
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap(px(8.0))
-                        .child(icon("question", 16.0, theme::muted()))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(q.question.clone())),
+                        .child(div().flex_none().h(px(20.0)).flex().items_center().child(icon("question", 16.0, theme::muted())))
+                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(q.question.clone())),
                 )
                 .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
                 .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))

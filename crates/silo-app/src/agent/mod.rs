@@ -1050,7 +1050,7 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } | Row::Marker { .. } => {}
+                Row::Text { .. } | Row::User { .. } | Row::Marker { .. } | Row::Report { .. } => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
