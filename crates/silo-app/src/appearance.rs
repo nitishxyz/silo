@@ -63,7 +63,7 @@ impl Workspace {
             return None;
         }
         let density = self.density();
-        let headers = self.pane_headers();
+        let headers = self.pane_headers().every();
         let row = |id: &'static str, label: &'static str, checked: bool| {
             div()
                 .id(id)
@@ -118,7 +118,7 @@ impl Workspace {
                 .child(div().h(px(1.0)).mx(px(4.0)).my(px(4.0)).bg(rgb(theme::border())))
                 .child(
                     row("appearance-headers", "Show Pane Headers", headers)
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_pane_headers(!headers, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_pane_headers(crate::pane_header::PaneHeaders::all(!headers), cx))),
                 )
                 .child(div().h(px(1.0)).mx(px(4.0)).my(px(4.0)).bg(rgb(theme::border())))
                 .child(

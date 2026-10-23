@@ -130,7 +130,7 @@ impl Workspace {
         let ui_font = UiFontSettings { family: self.ui_font_family().to_owned(), choices: theme::ui_fonts(cx), missing: ui.missing };
         SettingsSnapshot {
             density: self.density(),
-            show_pane_headers: self.pane_headers(),
+            pane_headers: self.pane_headers(),
             match_running_app: self.match_running_app(),
             material: self.material().0,
             material_unavailable: self.material().1.err().map(crate::material::Unavailable::reason),
@@ -247,6 +247,9 @@ impl Workspace {
             self.refresh_devices(cx);
             let snapshot = self.settings_snapshot(None, cx);
             let panel = cx.new(|cx| SettingsPanel::new(snapshot, window, cx));
+            let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+            let place = self.agents_place();
+            panel.update(cx, |panel, cx| panel.set_agents_context(self.rt.clone(), place, cwd, cx));
             let sub = cx.subscribe_in(&panel, window, |this, _, event: &SettingsEvent, window, cx| this.settings_event(event, window, cx));
             let devices = cx.spawn(async move |this, cx| {
                 loop {
@@ -270,6 +273,10 @@ impl Workspace {
     }
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An agent with unsaved changes asks first.
+        if self.settings.as_ref().is_some_and(|m| !m.panel.update(cx, |panel, cx| panel.may_leave(cx))) {
+            return;
+        }
         if self.settings.take().is_some() {
             self.refocus_terminal(window, cx);
             cx.notify();
@@ -394,8 +401,10 @@ impl Workspace {
                 self.set_density(*density, cx);
                 Outcome::default()
             }
-            SettingsEvent::SetPaneHeaders(show) => {
-                self.set_pane_headers(*show, cx);
+            SettingsEvent::SetPaneHeaders(block, show) => {
+                let mut headers = self.pane_headers();
+                headers.set(*block, *show);
+                self.set_pane_headers(headers, cx);
                 Outcome::default()
             }
             SettingsEvent::SetMatchRunningApp(on) => {
@@ -714,7 +723,7 @@ mod tests {
         let mut prefs = TerminalPrefs::default();
         terminal_change(&SettingsEvent::SetCursorBlink(false)).unwrap()(&mut prefs);
         assert!(!prefs.cursor_blink);
-        assert!(terminal_change(&SettingsEvent::SetPaneHeaders(true)).is_none());
+        assert!(terminal_change(&SettingsEvent::SetPaneHeaders(crate::pane_header::HeaderBlock::Agent, true)).is_none());
     }
 
     #[test]

@@ -518,6 +518,7 @@ impl Workspace {
                 if !matches!(&old, Some(HostState::Unreachable(old)) if old == reason) {
                     self.refresh_settings(None, cx);
                 }
+                self.agents_host_up(host, false, cx);
                 if active {
                     self.motion.reset();
                     self.status = Some(if self.hosts[host].paused.load(std::sync::atomic::Ordering::Acquire) {
@@ -652,6 +653,12 @@ impl Workspace {
         }
         for (pane, _) in self.browsers.values() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
+        }
+        // Agent panes reconnect now rather than at their next retry.
+        self.agents_host_up(host, true, cx);
+        if let Some(modal) = &self.settings {
+            let place = self.agents_place();
+            modal.panel.update(cx, |panel, cx| panel.set_agents_place(place, cx));
         }
         let preferred = self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.take());
         if let Some(block) = self.wanted_block.take() {
@@ -840,6 +847,9 @@ impl Workspace {
 
     fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
         self.ahead_of = None;
+        if self.view.as_ref().is_none_or(|old| old.session.id != view.session.id) {
+            tracing::info!(session = %view.session.id, windows = view.session.windows.len(), "session shown");
+        }
         window.set_window_title(&format!("{} — silo", view.session.name));
         if self.active_host == 0 {
             let id = view.session.id.clone();
@@ -865,7 +875,7 @@ impl Workspace {
         let browsers = of_kind(crate::browser_pane::Kind::Browser);
         let agents = of_kind(crate::browser_pane::Kind::Agent);
         let mut unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
-        if !self.agents_here() {
+        if !self.agents_on(self.active_host) {
             unsupported.extend(agents.iter().cloned());
         }
         if let Some(active) = &active {
@@ -1021,11 +1031,9 @@ impl Workspace {
                 && let Some((frame, mut slot)) = pane.read(cx).ghost()
             {
                 // Grow the terminal's slot to the whole card: header and outline.
-                let title = self.pane_headers().then(|| crate::layout::header_labels(pane.read(cx).info.as_ref()).0);
-                if title.is_some() {
-                    slot.origin.y -= px(crate::layout::HEADER_HEIGHT);
-                    slot.size.height += px(crate::layout::HEADER_HEIGHT);
-                }
+                let mode = self.header_mode(id);
+                let title = (mode != crate::pane_header::HeaderMode::Hidden).then(|| crate::layout::header_labels(pane.read(cx).info.as_ref()).0);
+                slot = crate::pane_header::with_header(slot, mode);
                 if self.density() == hosts::Density::Comfortable {
                     slot = slot.dilate(px(1.0));
                 }
@@ -1255,8 +1263,13 @@ impl Workspace {
         self.state.density
     }
 
-    pub(crate) fn pane_headers(&self) -> bool {
-        self.state.show_pane_headers
+    pub(crate) fn pane_headers(&self) -> crate::pane_header::PaneHeaders {
+        self.state.pane_headers
+    }
+
+    /// How much of block `id`'s header shows: its type's setting.
+    pub(crate) fn header_mode(&self, id: &str) -> crate::pane_header::HeaderMode {
+        crate::pane_header::header_mode(crate::browser_pane::kind_of(self.block_info(id)), self.pane_headers())
     }
 
     pub(crate) fn set_density(&mut self, density: hosts::Density, cx: &mut Context<Self>) {
@@ -1264,9 +1277,9 @@ impl Workspace {
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.density = density, cx));
     }
 
-    pub(crate) fn set_pane_headers(&mut self, show: bool, cx: &mut Context<Self>) {
-        tracing::debug!(show, "pane headers");
-        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.show_pane_headers = show, cx));
+    pub(crate) fn set_pane_headers(&mut self, headers: crate::pane_header::PaneHeaders, cx: &mut Context<Self>) {
+        tracing::debug!(?headers, "pane headers");
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.pane_headers = headers, cx));
     }
 
     pub(crate) fn match_running_app(&self) -> bool {
@@ -1441,8 +1454,8 @@ impl Workspace {
         match command {
             Command::AppearanceComfortable => self.state.density == hosts::Density::Comfortable,
             Command::AppearanceCompact => self.state.density == hosts::Density::Compact,
-            Command::ShowPaneHeaders => self.state.show_pane_headers,
-            Command::HidePaneHeaders => !self.state.show_pane_headers,
+            Command::ShowPaneHeaders => self.state.pane_headers.every(),
+            Command::HidePaneHeaders => self.state.pane_headers.none(),
             _ => false,
         }
     }

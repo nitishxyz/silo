@@ -139,6 +139,10 @@ checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs`
   `enum PaneKind { Terminal(Entity<Pane>), Browser(Entity<BrowserPane>) }`, chosen by `BlockInfo.kind`.
 - Chrome is concise: a single 28 px row in the pane with back/forward/reload, URL field (`text_field.rs`), and a
   favicon and title shown only when unfocused.
+  - **Now (2026-10):** no row of its own. Back/forward, reload or stop, the security indicator, the address and the
+    zoom pill are the pane header's middle (`BlockHeader for BrowserPane`, `pane_header.rs`); the page fills the rest.
+    No title in the header (the tab shows it); the page load is the header's progress line. A browser's header
+    can't be hidden: with every other block type's header off it shrinks to that middle (no icon, no pane buttons).
   - Cmd-L focuses the URL field; Cmd-[ / Cmd-] go back/forward; Cmd-R reloads; Cmd-+/- zoom.
 - **IME:** `BrowserPane` implements `EntityInputHandler` and forwards to `ime_set_composition` /
   `ime_commit_text` / `ime_finish_composing_text`. Candidate-window bounds come from

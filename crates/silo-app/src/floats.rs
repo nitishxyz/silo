@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use gpui::{AnyElement, Bounds, Context, Div, DragMoveEvent, Pixels, Point, Stateful, Window, div, prelude::*, px, relative, rgb};
+use gpui::{AnyElement, Bounds, Context, DragMoveEvent, Pixels, Point, Window, div, prelude::*, px, relative, rgb};
 use silo_proto::{
     control::{Dock, Method},
     model::{Axis, FloatRect, WindowInfo},
@@ -11,7 +11,7 @@ use silo_proto::{
 
 use crate::theme::Continuous as _;
 use crate::{
-    layout::HEADER_HEIGHT,
+    pane_header::HeaderMode,
     radius::{self, CardCorners},
     theme,
     workspace::Workspace,
@@ -82,11 +82,13 @@ impl Workspace {
             .map(|f| {
                 let dragged = self.float_drag.as_ref().filter(|d| d.block == f.id);
                 let (id, r) = (f.id.clone(), dragged.map_or(f.rect, |d| d.rect).clamped());
-                // Without headers, a thin strip along the top moves it.
-                let header = if self.pane_headers() { HEADER_HEIGHT } else { GRIP };
-                let mover = self.float_grip(&id, r, Grab::Move, cx).absolute().top_0().left_0().right(px(MOVER_INSET)).h(px(header));
+                // A full header moves it itself; otherwise a thin strip
+                // along the top does (over a browser's shrunk header too).
+                let mover = (self.header_mode(&id) != HeaderMode::Full).then(|| {
+                    self.float_grab(grip(&id, Grab::Move), &id, r, Grab::Move, cx).absolute().top_0().left_0().right(px(MOVER_INSET)).h(px(GRIP))
+                });
                 let resizer = self
-                    .float_grip(&id, r, Grab::Resize, cx)
+                    .float_grab(grip(&id, Grab::Resize), &id, r, Grab::Resize, cx)
                     .absolute()
                     .right_0()
                     .bottom_0()
@@ -112,7 +114,7 @@ impl Workspace {
                         }
                     }))
                     .child(card)
-                    .child(mover)
+                    .children(mover)
                     .child(resizer)
                     .into_any_element()
             })
@@ -121,24 +123,20 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// A handle that drags float `id` (header: move, corner: resize).
-    fn float_grip(&self, id: &str, rect: FloatRect, grab: Grab, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `el` drags float `id` (header: move, corner: resize).
+    pub(crate) fn float_grab<E: StatefulInteractiveElement>(&self, el: E, id: &str, rect: FloatRect, grab: Grab, cx: &mut Context<Self>) -> E {
         let workspace = cx.entity().downgrade();
         let block = id.to_owned();
-        // Occluding: the terminal below must not start a selection.
-        div().id(gpui::ElementId::Name(format!("float-{grab:?}-{id}").into())).occlude().on_drag(
-            Dragged { block: id.to_owned() },
-            move |_, offset, _, cx| {
-                let drag = FloatDrag { block: block.clone(), grab, offset, start: rect, rect, docked: false };
-                _ = workspace.update(cx, |this, _| this.float_drag = Some(drag));
-                let workspace = workspace.clone();
-                // The preview lives exactly as long as the drag.
-                cx.new(|cx| {
-                    cx.on_release(move |_, cx| _ = workspace.update(cx, |this, cx| this.float_drag_end(cx))).detach();
-                    Grip
-                })
-            },
-        )
+        el.on_drag(Dragged { block: id.to_owned() }, move |_, offset, _, cx| {
+            let drag = FloatDrag { block: block.clone(), grab, offset, start: rect, rect, docked: false };
+            _ = workspace.update(cx, |this, _| this.float_drag = Some(drag));
+            let workspace = workspace.clone();
+            // The preview lives exactly as long as the drag.
+            cx.new(|cx| {
+                cx.on_release(move |_, cx| _ = workspace.update(cx, |this, cx| this.float_drag_end(cx))).detach();
+                Grip
+            })
+        })
     }
 }
 
@@ -183,6 +181,12 @@ impl Workspace {
 
 /// Share of a pane's width or height that docks a dropped float.
 const ZONE: f32 = 0.3;
+
+/// A handle over float `id`. Occluding: the terminal below must not start
+/// a selection.
+fn grip(id: &str, grab: Grab) -> gpui::Stateful<gpui::Div> {
+    div().id(gpui::ElementId::Name(format!("float-{grab:?}-{id}").into())).occlude()
+}
 
 /// The (invisible) drag preview: the float itself follows the pointer.
 struct Grip;

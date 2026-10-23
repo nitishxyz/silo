@@ -270,7 +270,7 @@ enum FontTarget {
 #[derive(Clone, Debug)]
 pub struct SettingsSnapshot {
     pub density: Density,
-    pub show_pane_headers: bool,
+    pub pane_headers: crate::pane_header::PaneHeaders,
     pub match_running_app: bool,
     pub material: crate::material::Material,
     /// Why Frosted cannot render now (the choice is kept).
@@ -302,7 +302,7 @@ impl Default for SettingsSnapshot {
     fn default() -> Self {
         Self {
             density: Density::Comfortable,
-            show_pane_headers: true,
+            pane_headers: crate::pane_header::PaneHeaders::default(),
             match_running_app: true,
             material: crate::material::Material::Solid,
             material_unavailable: None,
@@ -337,7 +337,8 @@ pub enum ServerAction {
 pub enum SettingsEvent {
     Close,
     SetDensity(Density),
-    SetPaneHeaders(bool),
+    /// Show a block type's headers.
+    SetPaneHeaders(crate::pane_header::HeaderBlock, bool),
     /// Card padding and chrome take on the running app's background.
     SetMatchRunningApp(bool),
     SetMaterial(crate::material::Material),
@@ -385,6 +386,7 @@ pub enum SettingsEvent {
 pub(crate) enum Section {
     Appearance,
     Terminal,
+    Agents,
     Keyboard,
     Notifications,
     Hosts,
@@ -393,12 +395,14 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    const ALL: [Self; 7] = [Self::Appearance, Self::Terminal, Self::Keyboard, Self::Notifications, Self::Hosts, Self::Server, Self::About];
+    const ALL: [Self; 8] =
+        [Self::Appearance, Self::Terminal, Self::Agents, Self::Keyboard, Self::Notifications, Self::Hosts, Self::Server, Self::About];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
+            Self::Agents => "Agents",
             Self::Keyboard => "Keyboard",
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
@@ -411,6 +415,7 @@ impl Section {
         match self {
             Self::Appearance => "settings-shapes",
             Self::Terminal => "terminal",
+            Self::Agents => "agent",
             Self::Keyboard => "settings-keyboard",
             Self::Notifications => "settings-bell",
             Self::Hosts => "globe",
@@ -424,6 +429,7 @@ impl Section {
         match self {
             Self::Appearance => 0x008b_5cf6,
             Self::Terminal => 0x0014_b8a6,
+            Self::Agents => 0x0022_c55e,
             Self::Keyboard => 0x0063_66f1,
             Self::Notifications => 0x00ef_4444,
             Self::Hosts => 0x000e_a5e9,
@@ -437,6 +443,7 @@ impl Section {
         let own = match self {
             Self::Appearance => "general preferences layout theme colors",
             Self::Terminal => "preview settings file json configuration config edit open reload finder",
+            Self::Agents => "agents agent otto prompt tools model effort approvals new clone delete reset subagent",
             Self::Keyboard => "shortcuts keys commands bindings",
             Self::Notifications => "alerts banners dock badge needs you done error",
             Self::Hosts => "remote local address add remove iroh notifications notify",
@@ -514,6 +521,8 @@ pub struct SettingsPanel {
     places: Places,
     building: std::cell::Cell<Section>,
     search: Entity<TextField>,
+    /// Settings › Agents (its own view: it talks to otto).
+    agents: Entity<crate::settings_agents::AgentsSettings>,
     query: String,
     pending_server: Option<ServerAction>,
     pending_remove: Option<String>,
@@ -614,6 +623,7 @@ impl SettingsPanel {
             places: Places::default(),
             building: std::cell::Cell::new(Section::Appearance),
             search,
+            agents: cx.new(|_| crate::settings_agents::AgentsSettings::new()),
             query: String::new(),
             pending_server: None,
             pending_remove: None,
@@ -673,6 +683,28 @@ impl SettingsPanel {
         focus.focus(window, cx);
     }
 
+    /// The runtime for otto calls, the active pane's host and its folder (Settings › Agents).
+    pub fn set_agents_context(
+        &mut self,
+        rt: tokio::runtime::Handle,
+        place: crate::settings_agents::Place,
+        cwd: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents.update(cx, |agents, cx| agents.set_context(rt, place, cwd, cx));
+    }
+
+    /// The active host connected: Settings › Agents follows what it supports.
+    pub fn set_agents_place(&mut self, place: crate::settings_agents::Place, cx: &mut Context<Self>) {
+        self.agents.update(cx, |agents, cx| agents.set_place(place, cx));
+    }
+
+    /// Whether the panel may close or change pages: an agent with unsaved
+    /// changes asks first (asked already: they are discarded).
+    pub fn may_leave(&mut self, cx: &mut Context<Self>) -> bool {
+        self.agents.update(cx, |agents, cx| agents.may_leave(cx))
+    }
+
     /// Ask to confirm a server action inline (nothing is running).
     pub fn confirm_server(&mut self, action: ServerAction, cx: &mut Context<Self>) {
         self.pending_server = Some(action);
@@ -707,6 +739,9 @@ impl SettingsPanel {
     }
 
     fn select(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section != self.selected && !self.may_leave(cx) {
+            return;
+        }
         self.selected = section;
         self.theme_menu = None;
         self.font_menu = None;
@@ -1546,18 +1581,40 @@ impl SettingsPanel {
         let mut out = Vec::new();
         match section {
             Section::Appearance => {
-                out.push(self.group(
-                    Some("Layout"),
-                    vec![
-                        Self::row(SettingId::PaneDensity.label(), None, Some(self.density_control(cx)), narrow),
-                        Self::row(
-                            SettingId::PaneHeaders.label(),
-                            None,
-                            Some(Self::switch("settings-headers", "Pane headers", s.show_pane_headers, SettingsEvent::SetPaneHeaders, cx)),
-                            false,
-                        ),
-                    ],
-                ));
+                out.push(self.group(Some("Layout"), vec![Self::row(SettingId::PaneDensity.label(), None, Some(self.density_control(cx)), narrow)]));
+                {
+                    use crate::pane_header::HeaderBlock;
+                    let headers = s.pane_headers;
+                    out.push(self.group(
+                        Some("Block headers"),
+                        vec![
+                            Self::row(
+                                SettingId::TerminalHeaders.label(),
+                                None,
+                                Some(Self::switch(
+                                    "settings-headers-terminal",
+                                    "Terminal headers",
+                                    headers.terminal,
+                                    |on| SettingsEvent::SetPaneHeaders(HeaderBlock::Terminal, on),
+                                    cx,
+                                )),
+                                false,
+                            ),
+                            Self::row(
+                                SettingId::AgentHeaders.label(),
+                                Some("Browsers always show their address bar".into()),
+                                Some(Self::switch(
+                                    "settings-headers-agent",
+                                    "Agent headers",
+                                    headers.agent,
+                                    |on| SettingsEvent::SetPaneHeaders(HeaderBlock::Agent, on),
+                                    cx,
+                                )),
+                                false,
+                            ),
+                        ],
+                    ));
+                }
                 let mut colors = vec![Self::row(SettingId::Theme.label(), None, Some(self.theme_dropdown("settings-appearance-theme", cx)), false)];
                 if SettingId::MatchRunningApp.visible(s) {
                     colors.push(Self::row(
@@ -1605,6 +1662,10 @@ impl SettingsPanel {
                 ));
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
+            Section::Agents => {
+                self.agents.update(cx, |agents, cx| agents.ensure_loaded(cx));
+                out.push(self.agents.clone().into_any_element());
+            }
             Section::Notifications => out.extend(self.notifications_page(cx)),
             Section::Keyboard => {
                 let show_all = self.query.is_empty() || self.text_matches(&format!("{} {}", section.label(), section.keywords()));
@@ -2099,7 +2160,11 @@ impl Render for SettingsPanel {
             }
             content = content.children(self.page(section, narrow, cx));
         }
-        let title = if searching { "Search Results" } else { self.selected.label() };
+        let title: gpui::SharedString = match self.selected {
+            _ if searching => "Search Results".into(),
+            Section::Agents => self.agents.read(cx).title().into(),
+            section => section.label().into(),
+        };
         let gutter = if compact { 20.0 } else { 28.0 };
 
         div()
@@ -2120,7 +2185,10 @@ impl Render for SettingsPanel {
                 if this.theme_menu_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
                 } else if event.keystroke.key == "escape" {
-                    cx.emit(SettingsEvent::Close);
+                    let agents = this.agents.clone();
+                    if !(this.selected == Section::Agents && this.query.is_empty() && agents.update(cx, |a, cx| a.escape(cx))) {
+                        cx.emit(SettingsEvent::Close);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -2217,7 +2285,7 @@ mod tests {
     fn defaults_only_offer_supported_layout_preferences() {
         let snapshot = SettingsSnapshot::default();
         assert_eq!(snapshot.density, Density::Comfortable);
-        assert!(snapshot.show_pane_headers);
+        assert_eq!(snapshot.pane_headers, crate::pane_header::PaneHeaders::all(true));
         assert!(!snapshot.server.can_start && !snapshot.server.can_stop && !snapshot.server.can_restart);
         assert!(snapshot.shortcuts.is_empty());
     }
@@ -2257,7 +2325,7 @@ mod tests {
 
     #[test]
     fn sidebar_sections_have_search_terms_and_icons() {
-        assert_eq!(Section::ALL.len(), 7);
+        assert_eq!(Section::ALL.len(), 8);
         assert_eq!(Section::ALL[0], Section::Appearance, "Settings opens on Appearance");
         assert!(!Section::ALL.iter().any(|s| s.label() == "General"));
         for section in Section::ALL {

@@ -5,6 +5,7 @@
 use crate::{
     hosts::NotifyField,
     material::Material,
+    pane_header::HeaderBlock,
     settings_panel::{ColorSlot, CursorShape, Density, Section, SettingsEvent, SettingsSnapshot},
     terminal_prefs,
 };
@@ -12,7 +13,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingId {
     PaneDensity,
-    PaneHeaders,
+    TerminalHeaders,
+    AgentHeaders,
     Theme,
     MatchRunningApp,
     WindowMaterial,
@@ -74,7 +76,24 @@ macro_rules! setting {
 
 pub const SETTINGS: &[Setting] = &[
     setting!(SettingId::PaneDensity, "Pane density", "Pane density", Appearance, Some("Layout"), Choice, "density compact comfortable cards layout"),
-    setting!(SettingId::PaneHeaders, "Pane headers", "Pane headers", Appearance, Some("Layout"), Toggle, "pane headers titles bar"),
+    setting!(
+        SettingId::TerminalHeaders,
+        "Terminal headers",
+        "Terminal",
+        Appearance,
+        Some("Block headers"),
+        Toggle,
+        "pane block headers header titles bar terminal shell program folder hide show"
+    ),
+    setting!(
+        SettingId::AgentHeaders,
+        "Agent headers",
+        "Agent",
+        Appearance,
+        Some("Block headers"),
+        Toggle,
+        "pane block headers header titles bar agent otto session history new hide show"
+    ),
     setting!(SettingId::Theme, "Theme", "Theme", Terminal, None, Choice, "theme colors palette light dark scheme"),
     setting!(
         SettingId::MatchRunningApp,
@@ -272,6 +291,15 @@ impl SettingId {
         })
     }
 
+    /// The block type whose header this setting shows.
+    fn header_block(self) -> Option<HeaderBlock> {
+        match self {
+            Self::TerminalHeaders => Some(HeaderBlock::Terminal),
+            Self::AgentHeaders => Some(HeaderBlock::Agent),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn setting(self) -> &'static Setting {
         SETTINGS.iter().find(|s| s.id == self).expect("every setting is declared")
@@ -299,8 +327,10 @@ impl SettingId {
         if let Some(field) = self.notify_field() {
             return Some(s.notify.get(field));
         }
+        if let Some(block) = self.header_block() {
+            return Some(s.pane_headers.get(block));
+        }
         Some(match self {
-            Self::PaneHeaders => s.show_pane_headers,
             Self::MatchRunningApp => s.match_running_app,
             Self::TintWithApp => s.tint_with_app,
             Self::TranslucentApps => s.translucent_apps,
@@ -317,8 +347,10 @@ impl SettingId {
         if let Some(field) = self.notify_field() {
             return Some(SettingsEvent::SetNotify(field, on));
         }
+        if let Some(block) = self.header_block() {
+            return Some(SettingsEvent::SetPaneHeaders(block, on));
+        }
         Some(match self {
-            Self::PaneHeaders => SettingsEvent::SetPaneHeaders(on),
             Self::MatchRunningApp => SettingsEvent::SetMatchRunningApp(on),
             Self::TintWithApp => SettingsEvent::SetTintWithApp(on),
             Self::TranslucentApps => SettingsEvent::SetTranslucentApps(on),
@@ -334,8 +366,10 @@ impl SettingId {
         if let Some(field) = self.notify_field() {
             return s.notify.set(field, on);
         }
+        if let Some(block) = self.header_block() {
+            return s.pane_headers.set(block, on);
+        }
         match self {
-            Self::PaneHeaders => s.show_pane_headers = on,
             Self::MatchRunningApp => s.match_running_app = on,
             Self::TintWithApp => s.tint_with_app = on,
             Self::TranslucentApps => s.translucent_apps = on,
@@ -497,6 +531,16 @@ mod tests {
             }
         }
         assert_eq!(SettingId::Theme.choices(&s).len(), terminal_prefs::THEMES.len());
+    }
+
+    #[test]
+    fn each_block_type_has_its_own_header_setting() {
+        let mut s = SettingsSnapshot::default();
+        SettingId::TerminalHeaders.set_on(&mut s, false);
+        assert_eq!((SettingId::TerminalHeaders.on(&s), SettingId::AgentHeaders.on(&s)), (Some(false), Some(true)));
+        assert!(matches!(SettingId::AgentHeaders.toggled(false), Some(SettingsEvent::SetPaneHeaders(HeaderBlock::Agent, false))));
+        let words = section_keywords(Section::Appearance);
+        assert!(["block headers", "terminal", "agent"].iter().all(|w| words.contains(w)), "{words}");
     }
 
     #[test]

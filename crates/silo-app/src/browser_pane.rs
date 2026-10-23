@@ -1,5 +1,6 @@
-//! One browser block: a CEF page painted as a surface, a slim address strip,
-//! engine state reported to the server (as owner) and server commands applied.
+//! One browser block: a CEF page painted as a surface, navigation and the
+//! address in the pane header ([`crate::pane_header::BlockHeader`]), engine
+//! state reported to the server (as owner) and server commands applied.
 
 use std::time::{Duration, Instant};
 
@@ -9,8 +10,6 @@ use silo_proto::{
     model::{BlockInfo, BlockKind, BrowserState, HistoryEntry},
 };
 
-/// Height of the address strip.
-pub const STRIP: f32 = 28.0;
 /// Engine changes are reported at most this often.
 pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -1485,69 +1484,86 @@ fn cursor_style(cursor: silo_web::Cursor) -> gpui::CursorStyle {
     }
 }
 
-impl BrowserPane {
-    fn strip(&self, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        use crate::theme::Continuous as _;
-        use gpui::{div, prelude::*, px, rgb};
-        let palette = self.palette;
-        let button = |id: &'static str, glyph: &'static str, tip: &'static str, enabled: bool| {
-            div()
-                .id(id)
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .continuous(crate::radius::CONTROL)
-                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(palette.hover())))
-                .tooltip(crate::tooltip::Tooltip::text(tip))
-                .child(crate::assets::icon(glyph, 13.0, if enabled { palette.ink } else { palette.icon }))
-        };
-        let loading = self.loading();
-        let reload = if loading {
-            button("browser-reload", "close", "Stop  ⌘.", true).on_click(cx.listener(|this, _, _, _| this.stop()))
-        } else {
-            button("browser-reload", "reload", "Reload  ⌘R", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload()))
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        let progress = (loading && self.progress < 1.0)
-            .then(|| div().absolute().left_0().bottom_0().h(px(2.0)).w(gpui::relative(self.progress.max(0.05) as f32)).bg(rgb(palette.accent)));
-        div()
-            .relative()
+/// The browser's header: navigation and the address in the middle, the page
+/// load as the header's progress line. No title: the tab shows it.
+impl crate::pane_header::BlockHeader for BrowserPane {
+    fn header(
+        &mut self,
+        style: crate::pane_header::HeaderStyle,
+        _: Option<&BlockInfo>,
+        cx: &mut gpui::Context<Self>,
+    ) -> crate::pane_header::HeaderParts {
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _, div, px};
+        let middle = div()
             .flex()
-            .flex_none()
+            .flex_row()
             .items_center()
             .gap(px(2.0))
-            .h(px(STRIP))
-            .px(px(4.0))
-            .border_b_1()
-            .border_color(palette.tint(0.13))
+            .flex_1()
+            .min_w_0()
             .text_size(px(12.0))
-            .child(button("browser-back", "back", "Back  ⌘←", self.history_step(-1)).on_click(cx.listener(|this, _, _, _| this.back())))
-            .child(button("browser-forward", "forward", "Forward  ⌘→", self.history_step(1)).on_click(cx.listener(|this, _, _, _| this.forward())))
-            .child(reload)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .flex_1()
-                    .min_w_0()
-                    .px(px(6.0))
-                    .when(palette.alpha < 1.0, |el| el.h(px(22.0)).continuous(crate::radius::CONTROL).bg(palette.tint(0.07)))
-                    .child(self.security_indicator(cx))
-                    .child(self.address_text(cx))
-                    .children(self.zoom_pill(cx)),
-            )
-            .children(progress)
-            .children(self.security_open.then(|| self.security_popover(cx)))
+            .children(self.nav_buttons(style, cx))
+            .child(self.address_box(cx))
+            .into_any_element();
+        let mut parts = crate::pane_header::HeaderParts::new(middle, self.title());
+        #[allow(clippy::cast_possible_truncation)]
+        let progress = (self.loading() && self.progress < 1.0).then_some(self.progress as f32);
+        parts.progress = progress;
+        parts.rule = true;
+        parts
+    }
+}
+
+impl BrowserPane {
+    /// Back, Forward, and Reload or Stop.
+    fn nav_buttons(&self, style: crate::pane_header::HeaderStyle, cx: &mut gpui::Context<Self>) -> [gpui::AnyElement; 3] {
+        use crate::pane_header::{button, keep_press};
+        use gpui::{IntoElement as _, StatefulInteractiveElement as _};
+        let palette = self.palette;
+        let nav = |id: &'static str, glyph: &'static str, tip: &'static str, enabled: bool| {
+            keep_press(button(id, glyph, tip, if enabled { palette.ink } else { palette.icon }, enabled, style))
+        };
+        let reload = if self.loading() {
+            nav("browser-reload", "close", "Stop  ⌘.", true).on_click(cx.listener(|this, _, _, _| this.stop()))
+        } else {
+            nav("browser-reload", "reload", "Reload  ⌘R", self.page.is_some()).on_click(cx.listener(|this, _, _, _| this.reload()))
+        };
+        [
+            nav("browser-back", "back", "Back  ⌘←", self.history_step(-1)).on_click(cx.listener(|this, _, _, _| this.back())).into_any_element(),
+            nav("browser-forward", "forward", "Forward  ⌘→", self.history_step(1))
+                .on_click(cx.listener(|this, _, _, _| this.forward()))
+                .into_any_element(),
+            reload.into_any_element(),
+        ]
+    }
+
+    /// The security indicator, the address and the zoom pill. Presses stay
+    /// here: the field takes them, never a pane drag.
+    fn address_box(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px};
+        let palette = self.palette;
+        crate::pane_header::keep_press(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .flex_1()
+                .min_w_0()
+                .px(px(6.0))
+                .when(palette.alpha < 1.0, |el| el.h(px(22.0)).continuous(crate::radius::CONTROL).bg(palette.tint(0.07))),
+        )
+        .child(self.security_indicator(cx))
+        .child(self.address_text(cx))
+        .children(self.zoom_pill(cx))
+        .into_any_element()
     }
 
     fn url(&self) -> &str {
         self.blocked.as_deref().or_else(|| self.state.as_ref().map(|s| s.url.as_str())).unwrap_or_default()
     }
 
-    /// Lock, open lock + "Not secure", or info; opens the popover.
+    /// Lock, open lock + "Not secure", or info; opens the popover under it.
     fn security_indicator(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
         use crate::address::Security;
         use crate::theme::Continuous as _;
@@ -1562,6 +1578,7 @@ impl BrowserPane {
         let label = (security == Security::NotSecure && !self.editing).then_some("Not secure");
         div()
             .id("browser-security")
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -1580,6 +1597,7 @@ impl BrowserPane {
             }))
             .child(crate::assets::icon(glyph, 12.0, palette.icon))
             .children(label.map(|l| div().pr(px(2.0)).text_size(px(11.0)).text_color(rgb(palette.muted)).child(l)))
+            .children(self.security_open.then(|| self.security_popover(cx)))
             .into_any_element()
     }
 
@@ -1657,8 +1675,8 @@ impl BrowserPane {
         let card = div()
             .id("browser-security-popover")
             .absolute()
-            .top(px(STRIP - 2.0))
-            .left(px(84.0))
+            .top(px(21.0))
+            .left(px(-2.0))
             .w(px(260.0))
             .p(px(10.0))
             .flex()
@@ -1845,7 +1863,7 @@ impl gpui::Render for BrowserPane {
                 )
             })
             .children(arrow);
-        div().flex().flex_col().size_full().min_w_0().min_h_0().child(self.strip(cx)).child(page)
+        div().flex().flex_col().size_full().min_w_0().min_h_0().child(page)
     }
 }
 

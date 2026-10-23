@@ -202,7 +202,7 @@ impl Workspace {
                 },
                 cx,
             ),
-            Method::AppPaneHeaders { visible, .. } => self.set_pane_headers(visible, cx),
+            Method::AppPaneHeaders { visible, .. } => self.set_pane_headers(crate::pane_header::PaneHeaders::all(visible), cx),
             Method::AppFullScreen { on, .. } => {
                 let now = window.is_fullscreen();
                 let want = on.unwrap_or(!now);

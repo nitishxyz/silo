@@ -17,16 +17,14 @@ use crate::{
     assets::icon,
     hosts::Density,
     motion::{self, Edge},
+    pane_header::{self, BUTTON, HeaderMode, HeaderParts, HeaderStyle},
     radius::{self, CardCorners},
     theme,
-    tooltip::Tooltip,
     workspace::Workspace,
 };
 
 /// Height of a pane header.
 pub const HEADER_HEIGHT: f32 = 28.0;
-/// Pane header action buttons.
-const BUTTON: f32 = 22.0;
 /// Comfortable: margin around the cards and gap between them. Card radii
 /// come from [`radius`].
 const OUTER: f32 = 8.0;
@@ -309,7 +307,7 @@ impl Workspace {
         let comfortable = floating || self.density() == Density::Comfortable;
         let frosted = self.frosted();
         let browser = self.browsers.contains_key(id);
-        let headers = self.pane_headers();
+        let mode = self.header_mode(id);
         // Corners just inside the 1px outline, for overlays (wash, drop
         // outline, docks) and the page that fill the card's rounded clip.
         let fill = corners.inset(1.0);
@@ -396,9 +394,12 @@ impl Workspace {
             .bg(palette.fill())
             .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(fill_color))))
             .rounded_clip()
-            .when(headers, |el| {
+            .when(mode != HeaderMode::Hidden, |el| {
                 el.child(
-                    div().flex_none().when_some(fade, |el, f| el.opacity(f)).child(self.render_pane_header(id, active, zoomed, swap, palette, cx)),
+                    div()
+                        .flex_none()
+                        .when_some(fade, |el, f| el.opacity(f))
+                        .child(self.render_pane_header(id, mode, active, zoomed, swap, palette, cx)),
                 )
             })
             .child(content)
@@ -425,57 +426,35 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The shared frame around block `id`'s [`HeaderParts`]. `Middle`:
+    /// the parts' middle alone (a browser among hidden headers).
+    #[allow(clippy::too_many_arguments)]
     fn render_pane_header(
         &self,
         id: &str,
+        mode: HeaderMode,
         active: bool,
         zoomed: bool,
         swap: Option<&str>,
         palette: crate::adaptive::Chrome,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (ink, muted, icon_color, accent) = (palette.ink, palette.muted, palette.icon, palette.accent);
-        let info = self
-            .panes
-            .get(id)
-            .and_then(|(p, _)| p.read(cx).info.clone())
-            .or_else(|| self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id).cloned()));
-        let browser = self.browsers.get(id).map(|(p, _)| p.read(cx).title());
-        let glyph = self.block_icon(id);
-        // An agent on its chat screen: the session title opens the switcher,
-        // and History / New Session join the pane buttons (not on a sub-agent:
-        // its strip leads back to the main agent instead).
-        let agent = self.agents.get(id).map(|(p, _)| p.clone());
-        let session = agent.as_ref().and_then(|p| p.read(cx).header_title());
-        let (name, cwd) = match browser {
-            Some(title) => (title, None),
-            None if session.is_some() => (session.clone().unwrap_or_default(), None),
-            None if info.as_ref().is_some_and(|i| i.kind == silo_proto::model::BlockKind::Agent) => {
-                (info.map(|i| i.title).filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent".into()), None)
-            }
-            None => header_labels(info.as_ref()),
-        };
-        let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: name.clone().into(), icon: glyph });
-        let block = id.to_owned();
+        let (icon_color, accent) = (palette.icon, palette.accent);
         // Comfortable: the corner button sits inside the card's top corner,
         // 1pt border + (header - button) / 2 in, so it nests concentrically.
         let control = match self.density() {
             Density::Comfortable => radius::concentric(radius::CARD, 1.0 + (HEADER_HEIGHT - BUTTON) / 2.0),
             Density::Compact => radius::CONTROL,
         };
+        let style = HeaderStyle { active, palette, control };
+        let info = self.block_info(id).cloned();
+        let parts = self.header_parts(id, style, info.as_ref(), cx);
+        let full = mode == HeaderMode::Full;
+        let glyph = self.block_icon(id);
+        let dragged = swap.map(|w| DraggedPane { window_id: w.to_owned(), block_id: id.to_owned(), label: parts.label.clone(), icon: glyph });
+        let block = id.to_owned();
         let button = |action: &'static str, glyph: &'static str, tip: &'static str| {
-            div()
-                .id(gpui::ElementId::Name(format!("pane-{action}-{id}").into()))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(BUTTON))
-                .continuous(control)
-                .cursor_pointer()
-                .hover(|s| s.bg(palette.hover()))
-                .tooltip(Tooltip::text(tip))
-                .child(icon(glyph, 13.0, icon_color))
+            pane_header::button(gpui::ElementId::Name(format!("pane-{action}-{id}").into()), glyph, tip, icon_color, true, style)
         };
         let on = |f: fn(&mut Workspace, String, &mut Context<Workspace>)| {
             let block = block.clone();
@@ -494,42 +473,16 @@ impl Workspace {
                 this.close_block_id(block.clone(), window, cx);
             })
         };
-        let session_controls = session.is_some().then(|| agent.clone()).flatten().filter(|p| !p.read(cx).is_subagent()).map(|pane| {
-            let (p1, p2, p3) = (pane.clone(), pane.clone(), pane);
-            let title = div()
-                .id(gpui::ElementId::Name(format!("pane-agent-title-{id}").into()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .min_w_0()
-                .pl(px(5.0))
-                .pr(px(3.0))
-                .h(px(BUTTON))
-                .continuous(control)
-                .cursor_pointer()
-                .hover(|s| s.bg(palette.hover()))
-                .child(div().min_w_0().overflow_hidden().text_ellipsis().text_color(rgb(if active { ink } else { muted })).child(name.clone()))
-                .child(icon("chevron-down", 11.0, icon_color))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| p1.update(cx, |p, cx| p.open_sessions(window, cx)));
-            let history = button("agent-history", "history", "Sessions  ⌘J")
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| p2.update(cx, |p, cx| p.open_sessions(window, cx)));
-            let new = button("agent-new", "new-session", "New Session  /new")
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| p3.update(cx, |p, cx| p.start_new_session(window, cx)));
-            (title, history, new)
-        });
-        let (agent_title, agent_buttons) = match session_controls {
-            Some((title, history, new)) => (Some(title), Some([history, new])),
-            None => (None, None),
-        };
         let focus_block = block.clone();
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
-        let status = self.render_status_mark(id, palette, cx);
-        let progress = self.render_progress_bar(id, palette);
-        div()
+        let status = if full { self.render_status_mark(id, palette, cx) } else { None };
+        // The block's own progress (a page loading) takes the status line's place.
+        let progress = match parts.progress {
+            Some(f) => Some(div().absolute().left_0().bottom_0().h(px(2.0)).w(relative(f.max(0.05))).bg(rgb(accent)).into_any_element()),
+            None => self.render_progress_bar(id, palette),
+        };
+        let rule = parts.rule.then(|| div().absolute().left_0().right_0().bottom_0().h(px(1.0)).bg(palette.tint(0.13)));
+        let header = div()
             .id(gpui::ElementId::Name(format!("pane-header-{id}").into()))
             .relative()
             .flex()
@@ -537,59 +490,49 @@ impl Workspace {
             .flex_none()
             .items_center()
             .h(px(HEADER_HEIGHT))
-            .pl(px(10.0))
+            .pl(px(if full { 10.0 } else { 4.0 }))
             .pr(px(4.0))
             .gap(px(6.0))
             .font_family(theme::ui_font())
             .text_size(px(11.5))
-            .child({
+            .when(full, |el| {
                 let color = if active { accent } else { icon_color };
-                self.block_icon_view(id, "header", 12.0, color, cx)
+                el.child(self.block_icon_view(id, "header", 12.0, color, cx))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .gap(px(6.0))
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .map(|el| match agent_title {
-                        // The title's hover fill reaches past its text; the text keeps its place.
-                        Some(title) => el.items_center().ml(px(-5.0)).child(title),
-                        None => el.child(div().flex_none().text_color(rgb(if active { ink } else { muted })).child(name)),
-                    })
-                    .children(cwd.map(|c| div().min_w_0().text_ellipsis().text_color(rgb(muted)).child(c))),
-            )
+            .child(div().flex().flex_row().items_center().flex_1().min_w_0().h_full().child(parts.middle))
             .children(status)
             // Actions show on the active pane, and on any pane while the
             // pointer is over it; they keep their space so nothing shifts.
             // In a pane too narrow for every button the row shrinks and,
             // right-aligned, is clipped from the left: Close stays visible.
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_shrink(1.0)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .justify_end()
-                    .items_center()
-                    .when(!active, |el| el.opacity(0.0).group_hover(card_group(id), |s| s.opacity(1.0)))
-                    .children(agent_buttons.into_iter().flatten())
-                    // A float can't be split or zoomed: Close only.
-                    .when(!floating, |el| {
-                        el.child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))
-                            .child(button("split-down", "split-down", "Split Down  ⇧⌘D").on_click(split_down))
-                            .child(
-                                button("zoom", if zoomed { "unzoom" } else { "zoom" }, if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" })
+            .when(full, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_shrink(1.0)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .justify_end()
+                        .items_center()
+                        .when(!active, |el| el.opacity(0.0).group_hover(card_group(id), |s| s.opacity(1.0)))
+                        .children(parts.actions)
+                        // A float can't be split or zoomed: Close only.
+                        .when(!floating, |el| {
+                            el.child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))
+                                .child(button("split-down", "split-down", "Split Down  ⇧⌘D").on_click(split_down))
+                                .child(
+                                    button(
+                                        "zoom",
+                                        if zoomed { "unzoom" } else { "zoom" },
+                                        if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" },
+                                    )
                                     .on_click(zoom),
-                            )
-                    })
-                    .child(button("close", "close", "Close Pane  ⌘W").on_click(close)),
-            )
+                                )
+                        })
+                        .child(button("close", "close", "Close Pane  ⌘W").on_click(close)),
+                )
+            })
             // Clicking the header focuses its pane.
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -598,8 +541,28 @@ impl Workspace {
                 }),
             )
             .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), icon: d.icon, offset })))
-            .children(progress)
-            .into_any_element()
+            .children(rule)
+            .children(progress);
+        // A float's full header moves it (its middle and buttons keep their press).
+        let header = match self.float_rect(id).filter(|_| full && floating) {
+            Some(rect) => self.float_grab(header, id, rect.clamped(), crate::floats::Grab::Move, cx),
+            None => header,
+        };
+        header.into_any_element()
+    }
+
+    /// Block `id`'s header parts, from the pane showing it; a block with no
+    /// pane here gets its labels.
+    fn header_parts(&self, id: &str, style: HeaderStyle, info: Option<&BlockInfo>, cx: &mut Context<Self>) -> HeaderParts {
+        if let Some((pane, _)) = self.panes.get(id) {
+            pane_header::parts(pane, style, info, cx)
+        } else if let Some((pane, _)) = self.browsers.get(id) {
+            pane_header::parts(pane, style, info, cx)
+        } else if let Some((pane, _)) = self.agents.get(id) {
+            pane_header::parts(pane, style, info, cx)
+        } else {
+            pane_header::fallback(info, style)
+        }
     }
 
     /// Swaps two panes of a window: locally at once, then on the server,
