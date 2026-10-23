@@ -14,6 +14,10 @@ use crate::upgrade;
 
 /// Longest download of one release file.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Longest request for a file's size before a download with progress.
+const SIZE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often a download's progress is reported.
+pub const PROGRESS_POLL: Duration = Duration::from_millis(250);
 
 /// Longest `<binary> --version`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,26 +34,107 @@ pub type FetchError = (&'static str, String);
 /// `curl` is missing or failed, the file is larger than `max`, or the
 /// download took longer than [`DOWNLOAD_TIMEOUT`].
 pub async fn fetch(url: &str, dest: &Path, https: bool, max: u64) -> Result<Option<()>, FetchError> {
+    fetch_with_progress(url, dest, https, max, None::<fn(u64, Option<u64>)>).await
+}
+
+/// [`fetch`], calling `on_progress` with the bytes downloaded and the
+/// file's size (when the server tells it, asked first) about every
+/// [`PROGRESS_POLL`].
+///
+/// # Errors
+/// As [`fetch`].
+pub async fn fetch_with_progress(
+    url: &str,
+    dest: &Path,
+    https: bool,
+    max: u64,
+    on_progress: Option<impl Fn(u64, Option<u64>) + Send + Sync>,
+) -> Result<Option<()>, FetchError> {
+    let total = match on_progress {
+        Some(_) => size_of(url, https).await,
+        None => None,
+    };
     tracing::info!(url, "release: downloading");
     let mut curl = tokio::process::Command::new("curl");
     curl.args(["-fsSL", "--retry", "3", "--max-filesize", &max.to_string()]);
     if https {
         curl.args(["--proto", "=https", "--proto-redir", "=https"]);
     }
-    let run = curl.arg("-o").arg(dest).arg(url).stdin(std::process::Stdio::null()).kill_on_drop(true).output();
-    let out = match tokio::time::timeout(DOWNLOAD_TIMEOUT, run).await {
+    let run =
+        tokio::time::timeout(DOWNLOAD_TIMEOUT, curl.arg("-o").arg(dest).arg(url).stdin(std::process::Stdio::null()).kill_on_drop(true).output());
+    let report = |done: u64| {
+        if let Some(f) = &on_progress {
+            f(done, total);
+        }
+    };
+    let run = async {
+        if on_progress.is_none() {
+            return run.await;
+        }
+        poll_size(dest, &report, run).await
+    };
+    let out = match run.await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(("download", "the host needs curl to download releases".into())),
         Ok(Err(e)) => return Err(("download", format!("run curl: {e}"))),
         Err(_) => return Err(("download", format!("downloading {url} timed out"))),
     };
     match out.status.code() {
-        Some(0) => Ok(Some(())),
+        Some(0) => {
+            report(std::fs::metadata(dest).map_or(0, |m| m.len()));
+            Ok(Some(()))
+        }
         // HTTP error (404 for a missing asset or release).
         Some(22) => Ok(None),
         Some(63) => Err(("too_large", format!("{url} is larger than {max} bytes"))),
         _ => Err(("download", format!("download {url}: {}", String::from_utf8_lossy(&out.stderr).trim()))),
     }
+}
+
+/// Run `work`, calling `report` with `path`'s size every [`PROGRESS_POLL`]
+/// (0 while it doesn't exist).
+pub async fn poll_size<T>(path: &Path, report: impl Fn(u64), work: impl Future<Output = T>) -> T {
+    let mut tick = tokio::time::interval(PROGRESS_POLL);
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            out = &mut work => return out,
+            _ = tick.tick() => report(std::fs::metadata(path).map_or(0, |m| m.len())),
+        }
+    }
+}
+
+/// The size of `url`'s file from a HEAD request (redirects followed), if
+/// the server tells it.
+async fn size_of(url: &str, https: bool) -> Option<u64> {
+    let mut curl = tokio::process::Command::new("curl");
+    curl.args(["-sIL", "--max-time", &SIZE_TIMEOUT.as_secs().to_string()]);
+    if https {
+        curl.args(["--proto", "=https", "--proto-redir", "=https"]);
+    }
+    let run = curl.arg(url).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).output();
+    let out = tokio::time::timeout(SIZE_TIMEOUT, run).await.ok()?.ok()?;
+    content_length(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The final response's `Content-Length` in `curl -I` output (one header
+/// block per redirect; a `file://` URL's has no status line), if that
+/// response succeeded and is not empty.
+#[must_use]
+pub fn content_length(headers: &str) -> Option<u64> {
+    let (mut ok, mut length) = (true, None);
+    for line in headers.lines() {
+        if line.starts_with("HTTP/") {
+            ok = line.split_whitespace().nth(1).is_some_and(|code| code.starts_with('2'));
+            length = None;
+        } else if let Some((name, value)) = line.split_once(':')
+            && ok
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().ok();
+        }
+    }
+    length.filter(|&n| n > 0)
 }
 
 /// `path`'s lowercase hex SHA-256, as in `sha256sum` output.
@@ -281,6 +366,40 @@ mod tests {
         let path = std::env::temp_dir().join(format!("silo-release-sha-{}", std::process::id()));
         std::fs::write(&path, b"abc").unwrap();
         assert_eq!(sha256_file(&path).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn sizes_from_headers() {
+        let github = "HTTP/2 302 \r\nlocation: https://x/y\r\ncontent-length: 0\r\n\r\nHTTP/2 200 \r\nContent-Length: 209715200\r\naccept-ranges: bytes\r\n\r\n";
+        assert_eq!(content_length(github), Some(209_715_200), "the final response's");
+        assert_eq!(content_length("Content-Length: 5\r\nAccept-ranges: bytes\r\n"), Some(5), "file://");
+        assert_eq!(content_length("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\n"), None, "an error page's");
+        assert_eq!(content_length("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nHTTP/1.1 403 Forbidden\r\n\r\n"), None);
+        assert_eq!(content_length("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"), None);
+        assert_eq!(content_length("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"), None);
+        assert_eq!(content_length(""), None);
+    }
+
+    #[tokio::test]
+    async fn polls_a_growing_file() {
+        let path = std::env::temp_dir().join(format!("silo-release-poll-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let seen = std::sync::Mutex::new(Vec::new());
+        // Written between the polls (at 0, 250, 500 and 750 ms).
+        let grow = async {
+            tokio::time::sleep(PROGRESS_POLL / 2).await;
+            for _ in 0..3 {
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+                std::io::Write::write_all(&mut file, &[0; 100]).unwrap();
+                tokio::time::sleep(PROGRESS_POLL).await;
+            }
+            "done"
+        };
+        assert_eq!(poll_size(&path, |n| seen.lock().unwrap().push(n), grow).await, "done");
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.first(), Some(&0), "not there yet");
+        assert!(seen.is_sorted() && seen.iter().any(|&n| n > 0) && *seen.last().unwrap() <= 300, "{seen:?}");
         std::fs::remove_file(path).unwrap();
     }
 }

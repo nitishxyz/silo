@@ -13,7 +13,7 @@ use std::{
 
 use gpui::{App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Task};
 
-use silo_client::update::{self, Failure, Feed};
+use silo_client::update::{self, Failure, Feed, Phase};
 
 use crate::{hosts_state::HostsState, status::Status};
 
@@ -24,6 +24,8 @@ const FIRST_CHECK: Duration = Duration::from_secs(15);
 const TICK: Duration = Duration::from_secs(30 * 60);
 /// Time between automatic checks.
 const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// Least time between two progress updates of the pill.
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,7 +33,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum State {
     Idle,
     /// A newer release is being downloaded and checked.
-    Downloading(String),
+    Downloading {
+        version: String,
+        phase: Phase,
+    },
     Ready {
         version: String,
         staged: PathBuf,
@@ -85,6 +90,8 @@ pub enum PillKind {
     Ready,
     /// Outlined, with a spinner.
     Busy,
+    /// Outlined, with a progress line (percent).
+    Progress(u8),
     /// Outlined.
     Blocked,
 }
@@ -93,7 +100,21 @@ pub enum PillKind {
 pub fn pill(state: &State) -> Option<(String, String, PillKind)> {
     Some(match state {
         State::Idle => return None,
-        State::Downloading(version) => (format!("Downloading {version}…"), format!("Downloading Silo {version}"), PillKind::Busy),
+        State::Downloading { version, phase: Phase::Download { done: 0, total: None } } => {
+            (format!("Downloading {version}…"), format!("Downloading Silo {version}"), PillKind::Busy)
+        }
+        State::Downloading { version, phase: Phase::Download { done, total: None } } => {
+            let mb = update::megabytes(*done);
+            (format!("Downloading {version} · {mb} MB"), format!("Downloading Silo {version} ({mb} MB)"), PillKind::Busy)
+        }
+        State::Downloading { version, phase: Phase::Download { done, total: Some(total) } } => (
+            format!("Downloading {version} · {}", update::downloaded(*done, Some(*total))),
+            format!("Downloading Silo {version} ({} of {} MB)", update::megabytes(*done), update::megabytes(*total)),
+            PillKind::Progress(update::percent(*done, *total)),
+        ),
+        State::Downloading { version, phase: Phase::Verify } => {
+            (format!("Verifying {version}…"), format!("Verifying Silo {version}"), PillKind::Busy)
+        }
         State::Installing => ("Updating…".into(), "Installing and restarting".into(), PillKind::Busy),
         State::Ready { version, .. } => ("Update".into(), ready(version), PillKind::Ready),
         State::Blocked { version, reason } => ("Can't Update".into(), format!("Silo {version} is available. {reason}."), PillKind::Blocked),
@@ -190,7 +211,7 @@ impl Updater {
         }
         if self.check.is_some() {
             let status = match &self.state {
-                State::Downloading(version) => Status::progress(format!("Downloading Silo {version}…")),
+                State::Downloading { version, .. } => Status::progress(format!("Downloading Silo {version}…")),
                 _ => Status::progress("Checking for updates…"),
             };
             return self.tell(status, cx);
@@ -222,14 +243,27 @@ impl Updater {
                 }
             };
             tracing::info!(version, "update: newer release, downloading");
+            let (progress, mut phases) = tokio::sync::watch::channel(Phase::Download { done: 0, total: None });
             let _ = this.update(cx, |this, cx| {
-                this.state = State::Downloading(version.clone());
+                this.state = State::Downloading { version: version.clone(), phase: *phases.borrow() };
                 this.tell(Status::progress(format!("Downloading Silo {version}…")), cx);
+                // Until `prepare` drops `progress`; at most every PROGRESS_EVERY.
+                let downloading = version.clone();
+                cx.spawn(async move |this, cx| {
+                    while phases.changed().await.is_ok() {
+                        let phase = *phases.borrow_and_update();
+                        if this.update(cx, |this, cx| this.progress(&downloading, phase, cx)).is_err() {
+                            return;
+                        }
+                        cx.background_executor().timer(PROGRESS_EVERY).await;
+                    }
+                })
+                .detach();
                 cx.notify();
             });
             let prepared = {
                 let version = version.clone();
-                rt.spawn(async move { update::prepare(&feed, &version, &app, &running).await }).await
+                rt.spawn(async move { update::prepare(&feed, &version, &app, &running, Some(&progress)).await }).await
             };
             let _ = this.update(cx, |this, cx| match prepared.map_err(|e| Failure::Retry(e.to_string())).and_then(|r| r) {
                 Ok(staged) => {
@@ -261,6 +295,17 @@ impl Updater {
         self.tell(status, cx);
         self.requesters.clear();
         cx.notify();
+    }
+
+    /// The download of `version` reached `phase` (ignored once it is over).
+    fn progress(&mut self, version: &str, phase: Phase, cx: &mut Context<Self>) {
+        if let State::Downloading { version: v, phase: p } = &mut self.state
+            && v == version
+            && *p != phase
+        {
+            *p = phase;
+            cx.notify();
+        }
     }
 
     /// Put the staged app in place, open it and quit. Only over this very
@@ -364,7 +409,15 @@ mod tests {
     #[test]
     fn the_pill_shows_downloads_and_installs_with_a_spinner() {
         assert_eq!(pill(&State::Idle), None);
-        assert_eq!(pill(&State::Downloading("0.1.8".into())), Some(("Downloading 0.1.8…".into(), "Downloading Silo 0.1.8".into(), PillKind::Busy)));
+        let downloading = |phase| State::Downloading { version: "0.1.8".into(), phase };
+        let started = downloading(Phase::Download { done: 0, total: None });
+        assert_eq!(pill(&started), Some(("Downloading 0.1.8…".into(), "Downloading Silo 0.1.8".into(), PillKind::Busy)));
+        let sized = downloading(Phase::Download { done: 84_000_000, total: Some(200_000_000) });
+        assert_eq!(pill(&sized), Some(("Downloading 0.1.8 · 42%".into(), "Downloading Silo 0.1.8 (84 of 200 MB)".into(), PillKind::Progress(42))));
+        let unknown = downloading(Phase::Download { done: 84_000_000, total: None });
+        assert_eq!(pill(&unknown), Some(("Downloading 0.1.8 · 84 MB".into(), "Downloading Silo 0.1.8 (84 MB)".into(), PillKind::Busy)));
+        let verifying = downloading(Phase::Verify);
+        assert_eq!(pill(&verifying), Some(("Verifying 0.1.8…".into(), "Verifying Silo 0.1.8".into(), PillKind::Busy)));
         assert_eq!(pill(&State::Installing), Some(("Updating…".into(), "Installing and restarting".into(), PillKind::Busy)));
         let ready = State::Ready { version: "0.1.8".into(), staged: PathBuf::from("/tmp/x") };
         assert_eq!(pill(&ready), Some(("Update".into(), super::ready("0.1.8"), PillKind::Ready)));

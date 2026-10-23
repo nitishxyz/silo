@@ -145,9 +145,18 @@ async fn for_each_target<'a>(targets: &[&'a Target], update: impl AsyncFn(&'a Ta
 
 #[cfg(target_os = "macos")]
 async fn update_app(feed: &Feed, version: &str, app: &Path) -> anyhow::Result<()> {
-    println!("downloading Silo {version}…");
     let running = update::signature(app).await.map_err(|e| anyhow!("can't update Silo.app: {e}"))?;
-    let staged = update::prepare(feed, version, app, &running).await.map_err(|e| anyhow!("can't update Silo.app: {e}"))?;
+    let (progress, phases) = tokio::sync::watch::channel(update::Phase::Download { done: 0, total: None });
+    let shown = std::io::IsTerminal::is_terminal(&std::io::stderr()).then(|| tokio::spawn(show_progress(version.to_owned(), phases)));
+    if shown.is_none() {
+        println!("downloading Silo {version}…");
+    }
+    let staged = update::prepare(feed, version, app, &running, Some(&progress)).await;
+    drop(progress);
+    if let Some(shown) = shown {
+        let _ = shown.await;
+    }
+    let staged = staged.map_err(|e| anyhow!("can't update Silo.app: {e}"))?;
     let pids = update::running_apps(app);
     if let Err(error) = update::install(&staged, app) {
         let _ = update::replaced(&staged).map(std::fs::remove_dir_all);
@@ -175,6 +184,32 @@ async fn update_app(feed: &Feed, version: &str, app: &Path) -> anyhow::Result<()
 #[cfg(not(target_os = "macos"))]
 async fn update_app(_: &Feed, _: &str, _: &Path) -> anyhow::Result<()> {
     bail!("Silo.app updates only on macOS")
+}
+
+/// The line on stderr for `version` at `phase`.
+#[must_use]
+pub fn progress_line(version: &str, phase: update::Phase) -> String {
+    match phase {
+        update::Phase::Download { done: 0, total: None } => format!("downloading Silo {version}…"),
+        update::Phase::Download { done, total } => format!("downloading Silo {version}… {}", update::downloaded(done, total)),
+        update::Phase::Verify => format!("verifying Silo {version}…"),
+    }
+}
+
+/// One updating line on stderr (a terminal) until `phases`' sender is
+/// gone, then cleared.
+#[cfg(target_os = "macos")]
+async fn show_progress(version: String, mut phases: tokio::sync::watch::Receiver<update::Phase>) {
+    use std::io::Write as _;
+    loop {
+        eprint!("\r\x1b[K{}", progress_line(&version, *phases.borrow_and_update()));
+        let _ = std::io::stderr().flush();
+        if phases.changed().await.is_err() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    eprint!("\r\x1b[K");
 }
 
 async fn update_binary(feed: &Feed, version: &str, exe: &Path, up: bool) -> anyhow::Result<()> {
@@ -244,6 +279,15 @@ mod tests {
         assert_eq!(*tried.lock().unwrap(), [app.clone(), binary.clone()], "the binary is updated after the app failed");
         assert_eq!(for_each_target(&[&app, &binary], async |_| bail!("no")).await, 2);
         assert_eq!(for_each_target(&[&binary], async |_| Ok(())).await, 0);
+    }
+
+    #[test]
+    fn progress_lines() {
+        use update::Phase;
+        assert_eq!(progress_line("0.1.8", Phase::Download { done: 0, total: None }), "downloading Silo 0.1.8…");
+        assert_eq!(progress_line("0.1.8", Phase::Download { done: 84_000_000, total: Some(200_000_000) }), "downloading Silo 0.1.8… 42%");
+        assert_eq!(progress_line("0.1.8", Phase::Download { done: 84_000_000, total: None }), "downloading Silo 0.1.8… 84 MB");
+        assert_eq!(progress_line("0.1.8", Phase::Verify), "verifying Silo 0.1.8…");
     }
 
     #[test]

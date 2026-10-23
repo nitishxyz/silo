@@ -1124,8 +1124,10 @@ has merged.
     header's ✕ (`layout.rs`) and the tab's ✕ (`titlebar.rs`), Close Session, Stop Server and Restart Server (the
     app's Restart is `server.shutdown`, the service starts it again). `new_shell` still sends `force: false`: it
     closes a block without a process, which is never busy.
-  - **The setting** is in Settings › Terminal › Closing, not General: there is no General page (Settings opens on
-    Appearance). It is `AppState.confirm_close` (`app.json`, default on), finder/API key `confirm_close`.
+  - **The setting** is in Settings › Terminal › Closing, not General: General is a sidebar group, not a page
+    (Settings opens on Appearance). The sidebar groups its pages: General (Appearance, Keyboard, Notifications),
+    Terminal, Browser, Connections (Hosts, Server), then About; otto's settings are in the agent pane
+    (`docs/AGENT_BLOCK.md` §4h). It is `AppState.confirm_close` (`app.json`, default on), finder/API key `confirm_close`.
   - A failed `blocks.busy` (an older server, a dropped connection) counts as nothing busy; the `force: false` close
     that follows is still checked by a server that has the guard.
   - **Stop Server** now runs its local stop (launchd disable + bootout, detach, "Server stopped") only once the

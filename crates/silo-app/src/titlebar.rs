@@ -670,8 +670,10 @@ impl Workspace {
     }
 
     /// The Update pill: outlined with a spinner while a release downloads
-    /// or installs, accent-filled once one is staged (a click installs it
-    /// and restarts), outlined when this copy of Silo cannot be replaced.
+    /// (a progress line along its bottom once its size is known), is
+    /// verified or installs, accent-filled once one is staged (a click
+    /// installs it and restarts), outlined when this copy of Silo cannot be
+    /// replaced.
     fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::updater::PillKind;
         let (label, tooltip, kind) = crate::updater::pill(self.updater.read(cx).state())?;
@@ -697,6 +699,19 @@ impl Workspace {
                 }
             })
             .when(kind == PillKind::Busy, |el| el.child(crate::browser_pane::spinner("update", 12.0, chrome.muted, cx)))
+            .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
+                el.relative().child(
+                    div()
+                        .absolute()
+                        .bottom(px(2.0))
+                        .left(px(11.0))
+                        .right(px(11.0))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(chrome.tint(0.12))
+                        .child(div().h_full().rounded_full().w(gpui::relative(f32::from(percent) / 100.0)).bg(rgb(chrome.accent))),
+                )
+            })
             .child(label)
             .tooltip(crate::tooltip::Tooltip::below(tooltip, TITLEBAR_HEIGHT))
             .map(claim_press);

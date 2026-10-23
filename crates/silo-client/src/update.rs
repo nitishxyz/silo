@@ -362,6 +362,40 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// How far [`prepare`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The app image is downloading: `done` of `total` bytes (`None`: the
+    /// server didn't say).
+    Download { done: u64, total: Option<u64> },
+    /// Checksum, mount, signature checks and copy.
+    Verify,
+}
+
+/// Where [`prepare`] reports its [`Phase`].
+pub type Progress = tokio::sync::watch::Sender<Phase>;
+
+/// `done` of `total` in whole percent, 100 only once complete.
+#[must_use]
+pub fn percent(done: u64, total: u64) -> u8 {
+    u8::try_from(done.min(total) * 100 / total.max(1)).unwrap_or(100)
+}
+
+/// Bytes in whole (decimal) megabytes, as Finder counts them.
+#[must_use]
+pub fn megabytes(bytes: u64) -> u64 {
+    (bytes + 500_000) / 1_000_000
+}
+
+/// How much is downloaded: `42%`, or `84 MB` with no known size.
+#[must_use]
+pub fn downloaded(done: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) => format!("{}%", percent(done, total)),
+        None => format!("{} MB", megabytes(done)),
+    }
+}
+
 /// `<app's folder>/.silo-update.<pid>`.
 fn stage_dir(app: &Path) -> PathBuf {
     app.with_file_name(format!("{STAGE_PREFIX}{}", std::process::id()))
@@ -379,26 +413,34 @@ fn fresh_stage(app: &Path) -> Result<PathBuf, Failure> {
 }
 
 /// Download release `version`'s app image into `dir`, checked against
-/// the release's checksums.
+/// the release's checksums, reporting to `progress`.
 ///
 /// # Errors
 /// Not published or not downloadable ([`Failure::Retry`]), not matching
 /// ([`Failure::Invalid`]).
-pub async fn download_image(feed: &Feed, version: &str, dir: &Path) -> Result<PathBuf, Failure> {
+pub async fn download_image(feed: &Feed, version: &str, dir: &Path, progress: Option<&Progress>) -> Result<PathBuf, Failure> {
     let image = upgrade::app_image(version);
     let sums = dir.join(upgrade::CHECKSUMS);
-    let fetch = async |file: &str, to: &Path, max: u64| -> Result<(), Failure> {
+    let fetch = async |file: &str, to: &Path, max: u64, progress: Option<&Progress>| -> Result<(), Failure> {
         let url = feed.asset(version, file).map_err(Failure::Invalid)?;
-        release::fetch(&url, to, feed.https, max)
+        let report = progress.map(|tx| {
+            move |done: u64, total: Option<u64>| {
+                tx.send_replace(Phase::Download { done, total });
+            }
+        });
+        release::fetch_with_progress(&url, to, feed.https, max, report)
             .await
             .map_err(|(_, e)| Failure::Retry(e))?
             .ok_or_else(|| Failure::Retry(format!("{file} is not published")))
     };
-    fetch(upgrade::CHECKSUMS, &sums, MAX_LATEST).await?;
+    fetch(upgrade::CHECKSUMS, &sums, MAX_LATEST, None).await?;
     let sums = std::fs::read_to_string(&sums).map_err(|e| Failure::Retry(e.to_string()))?;
     let expected = upgrade::checksum(&sums, &image).ok_or_else(|| Failure::Invalid(format!("{image} is not in the checksums")))?.to_ascii_lowercase();
     let path = dir.join(&image);
-    fetch(&image, &path, MAX_IMAGE).await?;
+    fetch(&image, &path, MAX_IMAGE, progress).await?;
+    if let Some(tx) = progress {
+        tx.send_replace(Phase::Verify);
+    }
     if release::sha256_file(&path).map_err(|e| Failure::Retry(e.to_string()))? != expected {
         let _ = std::fs::remove_file(&path);
         return Err(Failure::Invalid(format!("{image} does not match the release's {}", upgrade::CHECKSUMS)));
@@ -446,15 +488,15 @@ async fn unpack(image: &Path, dir: &Path, version: &str, running: &Signature, de
 }
 
 /// Download, check and stage release `version` of the Silo.app at `app`
-/// (signed as `running`); the staged app.
+/// (signed as `running`), reporting to `progress`; the staged app.
 ///
 /// # Errors
 /// [`Failure`].
-pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature) -> Result<PathBuf, Failure> {
+pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature, progress: Option<&Progress>) -> Result<PathBuf, Failure> {
     let stage = fresh_stage(app)?;
     let staged = stage.join("Silo.app");
     let result = async {
-        let image = download_image(feed, version, &stage).await?;
+        let image = download_image(feed, version, &stage, progress).await?;
         let mounts = PrivateDir::new().map_err(|e| Failure::Retry(format!("create a temporary folder: {e}")))?;
         let unpacked = unpack(&image, mounts.path(), version, running, &staged).await;
         let _ = std::fs::remove_file(&image);
@@ -783,6 +825,20 @@ mod tests {
     }
 
     #[test]
+    fn download_amounts() {
+        assert_eq!(percent(0, 200), 0);
+        assert_eq!(percent(84, 200), 42);
+        assert_eq!(percent(199, 200), 99, "100 only once complete");
+        assert_eq!(percent(200, 200), 100);
+        assert_eq!(percent(300, 200), 100, "never past it");
+        assert_eq!(megabytes(84_400_000), 84);
+        assert_eq!(megabytes(84_600_000), 85);
+        assert_eq!(megabytes(0), 0);
+        assert_eq!(downloaded(84_000_000, Some(200_000_000)), "42%");
+        assert_eq!(downloaded(84_000_000, None), "84 MB");
+    }
+
+    #[test]
     fn feeds() {
         assert_eq!(
             Feed::github().asset("0.1.2", "Silo-0.1.2.dmg").unwrap(),
@@ -989,12 +1045,14 @@ mod tests {
             feed(&dir, &[("SHA256SUMS", sums.as_bytes()), ("Silo-0.1.2.dmg", b"image"), ("Silo-0.1.3.dmg", b"tampered"), ("Silo-0.1.4.dmg", b"x")]);
         let out = dir.join("out");
         std::fs::create_dir(&out).unwrap();
-        let image = download_image(&feed, "0.1.2", &out).await.unwrap();
+        let (progress, phases) = tokio::sync::watch::channel(Phase::Download { done: 0, total: None });
+        let image = download_image(&feed, "0.1.2", &out, Some(&progress)).await.unwrap();
         assert_eq!(std::fs::read(&image).unwrap(), b"image");
-        assert!(matches!(download_image(&feed, "0.1.3", &out).await, Err(Failure::Invalid(e)) if e.contains("does not match")));
+        assert_eq!(*phases.borrow(), Phase::Verify, "checked after the download");
+        assert!(matches!(download_image(&feed, "0.1.3", &out, None).await, Err(Failure::Invalid(e)) if e.contains("does not match")));
         assert!(!out.join("Silo-0.1.3.dmg").exists(), "a mismatch is not kept");
-        assert!(matches!(download_image(&feed, "0.1.4", &out).await, Err(Failure::Invalid(e)) if e.contains("not in the checksums")));
-        assert!(matches!(download_image(&feed, "0.1.5", &dir.join("missing")).await, Err(Failure::Retry(_))), "not downloadable");
+        assert!(matches!(download_image(&feed, "0.1.4", &out, None).await, Err(Failure::Invalid(e)) if e.contains("not in the checksums")));
+        assert!(matches!(download_image(&feed, "0.1.5", &dir.join("missing"), None).await, Err(Failure::Retry(_))), "not downloadable");
         std::fs::write(dir.join("feed/latest.json"), br#"{"tag_name":"v0.1.2"}"#).unwrap();
         assert_eq!(check_latest(&feed, "0.1.1").await.unwrap().as_deref(), Some("0.1.2"));
         assert_eq!(check_latest(&feed, "0.1.2").await.unwrap(), None);
@@ -1082,18 +1140,18 @@ mod tests {
         let feed = feed(&dir, &[("SHA256SUMS", sums.as_bytes()), ("Silo-0.1.2.dmg", &good), ("Silo-0.1.3.dmg", &mislabelled)]);
         let running = signature(&app).await.unwrap();
         assert_eq!(running.1, Identity::AdHoc);
-        let staged = prepare(&feed, "0.1.2", &app, &running).await.unwrap();
+        let staged = prepare(&feed, "0.1.2", &app, &running, None).await.unwrap();
         assert_eq!(staged, stage_dir(&app).join("Silo.app"));
         assert_eq!(version_of(&staged), "0.1.2");
         let left: Vec<_> = std::fs::read_dir(stage_dir(&app)).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left, ["Silo.app"], "only the app stays staged");
         // The image of 0.1.3 holds 0.1.2: refused, nothing staged.
-        let error = prepare(&feed, "0.1.3", &app, &running).await.unwrap_err();
+        let error = prepare(&feed, "0.1.3", &app, &running, None).await.unwrap_err();
         assert!(matches!(&error, Failure::Invalid(e) if e.contains("not 0.1.3")), "{error:?}");
         assert!(!stage_dir(&app).exists());
         // A team-signed app never takes the ad-hoc one.
         let team = (APP_ID.to_owned(), Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() });
-        let error = prepare(&feed, "0.1.2", &app, &team).await.unwrap_err();
+        let error = prepare(&feed, "0.1.2", &app, &team, None).await.unwrap_err();
         assert!(matches!(&error, Failure::Invalid(e) if e.contains("not as the installed copy")), "{error:?}");
     }
 }
