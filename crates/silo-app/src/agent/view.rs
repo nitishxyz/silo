@@ -857,21 +857,7 @@ impl AgentPane {
             (Some(Row::Group(_)), Row::Group(_)) => 4.0,
         };
         let content = match &row {
-            Row::User { text, .. } => div()
-                .flex()
-                .justify_end()
-                .child(
-                    div()
-                        .max_w(relative(0.8))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .continuous(14.0)
-                        .bg(rgb(ink(0.06)))
-                        .text_color(rgb(ink(0.85)))
-                        .line_height(px(21.0))
-                        .child(text.clone()),
-                )
-                .into_any_element(),
+            Row::User { text, files, .. } => self.render_user(text, files, cx),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
         };
@@ -1202,7 +1188,7 @@ impl AgentPane {
         doc.update(text);
         let blocks = doc.blocks();
         let reduce = cx.reduce_motion();
-        // Streaming: lines show once complete and fade in (`reveal`); blocks fully shown draw as usual.
+        // Streaming: lines show once complete and sweep in (`reveal`); blocks fully shown draw as usual.
         let mut reveal = self.reveals.remove(key);
         let shown = reveal.as_mut().map(|r| r.frame(key, blocks, text, streaming, self.width.get(), now, reduce));
         let fx = reveal.as_ref().zip(shown.as_ref()).map(|(r, s)| Fx { lines: &s.lines, wraps: &r.wraps });
@@ -1457,7 +1443,7 @@ impl AgentPane {
                 key: "queue",
                 icon: icon("clock", 14.0, theme::warning()).into_any_element(),
                 label: "Queued",
-                summary: Some(text(if first.is_empty() { "Image".into() } else { first }).into_any_element()),
+                summary: Some(text(if first.is_empty() { "Attachment".into() } else { first }).into_any_element()),
                 note: format!("{n} queued"),
                 open_label: "Queued messages".into(),
                 open_note: format!("{n} waiting"),
@@ -1514,7 +1500,7 @@ impl AgentPane {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(rgb(theme::foreground()))
-                    .child(if text.is_empty() { "Image".to_owned() } else { text }),
+                    .child(if text.is_empty() { "Attachment".to_owned() } else { text }),
             )
             .map(|el| match id {
                 // Not confirmed by otto yet: nothing to act on.
@@ -1718,7 +1704,7 @@ impl AgentPane {
                     .bg(rgb(ink(0.08)))
                     .text_size(px(12.0))
                     .text_color(rgb(theme::muted()))
-                    .child(icon("image", 12.0, theme::muted()))
+                    .child(super::attach::glyph(a.thumb.clone(), &a.mime))
                     .child(div().max_w(px(160.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(a.name.clone()))
                     .child(
                         div()
@@ -1806,9 +1792,6 @@ impl AgentPane {
         // Reasoning is on when the session asks for some effort (the provider's default reads as off).
         let effort = self.effort();
         let thinking = effort.is_some_and(|e| e != Effort::None);
-        let vision = model
-            .as_ref()
-            .is_some_and(|(p, id)| catalog.is_some_and(|c| c.models.iter().any(|m| m.id == *id && m.provider.as_str() == p && m.caps.vision)));
         let tooltip = self.usage();
         let agent_button = div()
             .id("agent-agent")
@@ -1880,18 +1863,12 @@ impl AgentPane {
             .items_center()
             .justify_center()
             .continuous(6.0)
-            .tooltip(Tooltip::text(if vision { "Attach image" } else { "This model can't read images" }))
-            .child(icon("image", 14.0, muted))
-            .map(|el| {
-                if vision {
-                    el.cursor_pointer()
-                        .hover(|s| s.bg(theme::hover_fill()))
-                        .active(|s| s.scale(0.92))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.attach_image(cx)))
-                } else {
-                    el.opacity(0.4)
-                }
-            });
+            .tooltip(Tooltip::text("Attach files"))
+            .child(icon("plus", 14.0, muted))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover_fill()))
+            .active(|s| s.scale(0.92))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.attach_files(cx)));
         // At the circles' outer edges: the agent label starts under the ⋮
         // circle's left edge, the image glyph ends under the send circle's
         // right edge (button paddings 6 and 4).
@@ -2364,28 +2341,69 @@ fn render_detail(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll:
 }
 
 /// A streaming message's line reveal while drawing its blocks not yet fully shown: each leaf's line
-/// starts and opacities (`reveal::Shown::lines`; a leaf not in it shows), and where each leaf's wrapped
-/// lines are reported after layout.
+/// starts and sweep progress (`reveal::Shown::lines`; a leaf not in it shows), and where each leaf's
+/// wrapped lines are reported after layout.
 struct Fx<'a> {
     lines: &'a std::collections::HashMap<String, Vec<(usize, f32)>>,
     wraps: &'a std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, reveal::Wrap>>>,
 }
 
-/// Opacity at `at` (a byte or line index) of a leaf's `lines`: shown when it isn't revealing.
+/// Value at `at` (a byte or line index) of a leaf's `lines` (opacity, or a code line's progress): 1 when it isn't revealing.
 fn line_alpha(lines: Option<&[(usize, f32)]>, at: usize) -> f32 {
     lines.map_or(1.0, |l| l.iter().rev().find(|(s, _)| *s <= at).map_or(0.0, |(_, a)| *a))
 }
 
-/// Where each wrapped line of a laid out text starts.
+/// Reports a revealed code box's character advance as a share of the width its lines show in (the element's,
+/// less the left padding: a long line runs under the right one).
+fn code_cell(fx: &Fx, id: &str) -> impl IntoElement {
+    let (wraps, id) = (fx.wraps.clone(), id.to_owned());
+    gpui::canvas(
+        move |bounds, window, _| {
+            let ts = window.text_system();
+            let advance = ts.em_advance(ts.resolve_font(&gpui::font(mono())), px(reveal::CODE_FONT)).map_or(0.0, f32::from);
+            let inner = f32::from(bounds.size.width) - reveal::CODE_PAD_X;
+            wraps.borrow_mut().entry(id).or_default().cell = if inner > 0.0 { advance / inner } else { 0.0 };
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// Where each wrapped line of a laid out text starts, its width as a share of the text's, and its sweep segments.
 fn wrap_of(layout: &gpui::TextLayout) -> reveal::Wrap {
-    let mut starts = Vec::new();
+    let lines = layout.line_layouts();
+    let full = lines.iter().filter_map(|l| l.wrap_width).map(f32::from).fold(0.0, f32::max);
+    let full = if full > 0.0 { full } else { lines.iter().map(|l| f32::from(l.width())).fold(1.0, f32::max) };
+    let mut wrap = reveal::Wrap { line_h: f32::from(layout.line_height()), ..reveal::Wrap::default() };
     let mut at = 0;
-    for line in layout.line_layouts() {
-        starts.push(at);
-        starts.extend(line.wrap_boundaries.iter().map(|b| at + line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index));
+    for line in &lines {
+        let un = &line.unwrapped_layout;
+        // Each visual line's first glyph (byte, x) in the unwrapped line, and its glyphs.
+        let mut firsts = vec![(0, 0.0)];
+        firsts.extend(line.wrap_boundaries.iter().map(|b| {
+            let g = &un.runs[b.run_ix].glyphs[b.glyph_ix];
+            (g.index, f32::from(g.position.x))
+        }));
+        let mut glyphs: Vec<Vec<(usize, f32)>> = vec![Vec::new(); firsts.len()];
+        let mut k = 0;
+        for g in un.runs.iter().flat_map(|r| &r.glyphs) {
+            while k + 1 < firsts.len() && g.index >= firsts[k + 1].0 {
+                k += 1;
+            }
+            glyphs[k].push((at + g.index, f32::from(g.position.x) - firsts[k].1));
+        }
+        for (k, (start, x0)) in firsts.iter().enumerate() {
+            let width = (firsts.get(k + 1).map_or(f32::from(un.width), |f| f.1) - x0).max(0.0);
+            wrap.starts.push(at + start);
+            wrap.widths.push(width / full);
+            wrap.cuts.push(reveal::cuts(glyphs[k].iter().copied(), width, reveal::SEGMENTS));
+        }
         at += line.len() + 1;
     }
-    reveal::Wrap { starts, line_h: f32::from(layout.line_height()) }
+    wrap
 }
 
 /// Styled runs of an inline: emphasis, code, links, and the opacity of each wrapped line while it's revealed.
@@ -2469,9 +2487,10 @@ fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u3
 /// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
 fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
     let lines = fx.and_then(|f| f.lines.get(id)).map(Vec::as_slice);
-    // A revealed text reports its wrapped lines once laid out.
+    // A revealed text reports its wrapped lines once laid out; a line sweeping in is cut into segments.
     let text = |inline: &Inline| {
-        let (el, layout) = inline_text(id, inline, lines, fg);
+        let fades = fx.zip(lines).map(|(f, l)| reveal::fades(l, f.wraps.borrow().get(id)));
+        let (el, layout) = inline_text(id, inline, fades.as_deref(), fg);
         let report = fx.map(|f| {
             let (wraps, id) = (f.wraps.clone(), id.to_owned());
             gpui::canvas(
@@ -2507,32 +2526,53 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                 .into_any_element()
         }
         // A revealed box draws only its complete lines: nothing before the first; long lines scroll sideways.
-        Block::Code { .. } if lines.is_some_and(<[_]>::is_empty) => div().into_any_element(),
+        // It comes in as its first line starts; a line sweeping in has a mask of the box's colour over its own
+        // width, within the visible part (the box doesn't scroll it). The box reports a character's advance
+        // as a share of its visible width (from before its first line), so its lines sweep at a constant speed.
+        Block::Code { .. } if lines.is_some_and(<[_]>::is_empty) => div().relative().children(fx.map(|f| code_cell(f, id))).into_any_element(),
         Block::Code { text, .. } => {
             let el = div()
                 .id(gpui::ElementId::Name(id.to_owned().into()))
-                .mb(px(10.0))
-                .px(px(12.0))
-                .py(px(10.0))
+                .mb(px(reveal::CODE_MARGIN))
+                .px(px(reveal::CODE_PAD_X))
+                .py(px(reveal::CODE_PAD_Y))
                 .continuous(8.0)
                 .bg(rgb(faint()))
                 .font_family(mono())
-                .text_size(px(12.5))
+                .text_size(px(reveal::CODE_FONT))
                 .line_height(px(reveal::CODE_LINE))
                 .flex()
-                .items_start()
-                .when(lines.is_some(), |el| el.opacity(line_alpha(lines, 0)));
-            scroll
-                .scroller(id, el, true)
-                .child(div().flex_none().min_w_full().flex().flex_col().children(
-                    text.lines().take(lines.map_or(usize::MAX, <[_]>::len)).enumerate().map(|(v, l)| {
-                        div().whitespace_nowrap().when(v > 0 && lines.is_some(), |el| el.opacity(line_alpha(lines, v))).child(if l.is_empty() {
-                            " ".to_owned()
-                        } else {
-                            l.to_owned()
-                        })
-                    }),
+                .items_start();
+            let code = scroll.scroller(id, el, true).child(div().flex_none().min_w_full().flex().flex_col().children(
+                text.lines().take(lines.map_or(usize::MAX, <[_]>::len)).enumerate().map(|(v, l)| {
+                    div()
+                        .whitespace_nowrap()
+                        .when(lines.is_some() && reveal::code_line(v, line_alpha(lines, v)) <= 0.0, |el| el.opacity(0.0))
+                        .child(if l.is_empty() { " ".to_owned() } else { l.to_owned() })
+                }),
+            ));
+            let (Some(lines), Some(f)) = (lines, fx) else { return code.into_any_element() };
+            let cell = f.wraps.borrow().get(id).map_or(0.0, |w| w.cell);
+            let masks = lines.iter().map(|(v, p)| (*v, reveal::code_line(*v, *p))).filter(|(_, p)| *p > 0.0 && *p < 1.0).map(|(v, p)| {
+                let share = reveal::code_share(text.lines().nth(v).unwrap_or(""), cell);
+                let [(a, ma), (b, mb)] = reveal::mask(p);
+                #[allow(clippy::cast_precision_loss)]
+                let top = reveal::CODE_PAD_Y + v as f32 * reveal::CODE_LINE;
+                div().absolute().left(px(reveal::CODE_PAD_X)).right_0().top(px(top)).h(px(reveal::CODE_LINE)).bg(linear_gradient(
+                    90.0,
+                    linear_color_stop(hsla(faint(), ma), a * share),
+                    linear_color_stop(hsla(faint(), mb), b * share),
                 ))
+            });
+            let shown = reveal::code_box(line_alpha(Some(lines), 0));
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .when(shown < 1.0, |el| el.opacity(shown))
+                .child(code)
+                .children(masks)
+                .child(code_cell(f, id))
                 .into_any_element()
         }
         Block::List { start, items } => div()
@@ -2541,10 +2581,10 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
             .flex_col()
             .children(items.iter().enumerate().map(|(i, blocks)| {
                 let marker = start.map_or_else(|| "•".to_owned(), |s| format!("{}.", s + i as u64));
-                // A revealed item's marker comes in with its first line.
+                // A revealed item's marker comes in as its first line starts sweeping.
                 let shown = match fx {
                     Some(_) if blocks.is_empty() => 0.0,
-                    Some(f) => f.lines.get(&format!("{id}-{i}-0")).map_or(1.0, |l| l.first().map_or(0.0, |(_, a)| *a)),
+                    Some(f) => f.lines.get(&format!("{id}-{i}-0")).map_or(1.0, |l| l.first().map_or(0.0, |(_, p)| reveal::sweep(0.0, *p))),
                     None => 1.0,
                 };
                 div()

@@ -28,7 +28,7 @@ otto-llm = { workspace = true, default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false }
 idna = "1"
 qrcode = { version = "0.14", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg", "gif", "webp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -18,6 +18,10 @@ pub enum EditorEvent {
     Escape,
     /// ↑ / ↓ / Tab while [`Editor::nav`] is on (a menu over the composer).
     Nav(Nav),
+    /// Pasted files ([`Editor::files`] on).
+    Files(Vec<std::path::PathBuf>),
+    /// A pasted image as PNG ([`Editor::files`] on).
+    Image(Vec<u8>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +56,8 @@ pub struct Editor {
     pub animate_growth: bool,
     /// ↑ / ↓ / Tab go to a menu instead of moving the caret.
     pub nav: bool,
+    /// Pasted files and images become [`EditorEvent::Files`] / [`EditorEvent::Image`].
+    pub files: bool,
     grow: Rc<Cell<Grow>>,
 }
 
@@ -135,6 +141,7 @@ impl Editor {
             single_line: false,
             animate_growth: false,
             nav: false,
+            files: false,
             grow: Rc::default(),
         }
     }
@@ -345,7 +352,20 @@ impl Editor {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if self.files {
+            // Files beat text (Finder also puts their names there), text beats an image.
+            let contents = crate::clipboard::Contents::of(&item);
+            if !contents.paths.is_empty() {
+                return cx.emit(EditorEvent::Files(contents.paths));
+            }
+            if contents.text.is_none()
+                && let Some(png) = contents.image.and_then(|(format, bytes)| crate::clipboard::png(format, bytes))
+            {
+                return cx.emit(EditorEvent::Image(png));
+            }
+        }
+        if let Some(text) = item.text() {
             self.insert(&text.replace("\r\n", "\n"), cx);
         }
     }

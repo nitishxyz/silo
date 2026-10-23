@@ -113,9 +113,54 @@ pub struct Group {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
-    User { key: String, text: String },
+    User { key: String, text: String, files: Vec<FileChip> },
     Group(Group),
     Text { key: String, text: String, streaming: bool },
+}
+
+/// A file the user attached, shown as a chip on their message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChip {
+    pub name: String,
+    pub mime: String,
+    /// Images: `item#part` of the image sent with it (the thumbnail).
+    pub image: Option<String>,
+}
+
+/// An attachment note otto adds to a prompt (`[attachment att_…: name, mime, size — hint]`): its name and mime.
+#[must_use]
+pub fn attachment_note(text: &str) -> Option<(&str, &str)> {
+    let body = text.trim().strip_prefix("[attachment att_")?.strip_suffix(']')?;
+    let body = body.rsplit_once(" — ").map_or(body, |(note, _)| note);
+    let (_, rest) = body.split_once(": ")?;
+    let mut parts = rest.rsplitn(3, ", ");
+    let (_size, mime, name) = (parts.next()?, parts.next()?, parts.next()?);
+    Some((name, mime))
+}
+
+/// A user item's text without attachment notes, and its files: attached
+/// ones by their notes, images sent inline as `Image`.
+#[must_use]
+pub fn user_message(item: &Item) -> (String, Vec<FileChip>) {
+    let mut text = String::new();
+    let mut files: Vec<FileChip> = Vec::new();
+    for (pi, part) in item.parts.iter().enumerate() {
+        match part {
+            Part::Text { text: t, .. } => match attachment_note(t) {
+                Some((name, mime)) => files.push(FileChip { name: name.to_owned(), mime: mime.to_owned(), image: None }),
+                None => text.push_str(t),
+            },
+            Part::Image(media) => {
+                let key = Some(format!("{}#{pi}", item.id));
+                match files.iter_mut().rev().find(|f| f.image.is_none() && media.name.as_deref() == Some(f.name.as_str())) {
+                    Some(file) => file.image = key,
+                    None => files.push(FileChip { name: media.name.clone().unwrap_or_else(|| "Image".into()), mime: media.mime.clone(), image: key }),
+                }
+            }
+            _ => {}
+        }
+    }
+    (text.trim().to_owned(), files)
 }
 
 impl Row {
@@ -412,12 +457,12 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     for (ix, item) in input.items.iter().enumerate() {
         match item.role {
             Role::User => {
-                let text = item.text();
-                if text.trim().is_empty() {
+                let (text, files) = user_message(item);
+                if text.is_empty() && files.is_empty() {
                     continue;
                 }
                 flush(&mut rows, &mut lines, false, false);
-                rows.push(Row::User { key: item.id.clone(), text: text.trim().to_owned() });
+                rows.push(Row::User { key: item.id.clone(), text, files });
             }
             Role::Assistant => {
                 for (pi, part) in item.parts.iter().enumerate() {
@@ -613,7 +658,29 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     let mut quiet = false;
     let path = |key: &str| str_at(input, key).map(|p| rel(p, cx.cwd));
     let (kind, run, done, subject): (Kind, &str, &str, String) = match name {
-        "read" => (Kind::Read, "Reading", "Read", path("path").unwrap_or_default()),
+        "read" => (
+            Kind::Read,
+            "Reading",
+            "Read",
+            path("path").or_else(|| str_at(input, "attachment_id").map(|_| "attachment".to_owned())).unwrap_or_default(),
+        ),
+        "copy_attachment" => {
+            let dest = path("path").unwrap_or_default();
+            let name = meta["name"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| text.strip_prefix("Copied ").and_then(|t| t.rsplit_once(" to ")).map(|(name, _)| name.to_owned()))
+                .unwrap_or_else(|| "attachment".into());
+            line.files = vec![dest.clone()];
+            line.desc = text
+                .trim_end()
+                .strip_suffix(')')
+                .and_then(|t| t.rsplit_once(" ("))
+                .map(|(_, size)| size.to_owned())
+                .filter(|_| status == Status::Done);
+            quiet = true;
+            (Kind::Edit, "Copying", "Copied", format!("{name} → {dest}"))
+        }
         "ls" | "tree" => (Kind::List, "Listing", "Listed", path("path").filter(|p| !p.is_empty() && p != ".").unwrap_or_else(|| "files".into())),
         "glob" | "search" | "grep" => {
             let glob = name == "glob";
@@ -1874,5 +1941,55 @@ mod tests {
         assert_eq!(dur(3_700_000), "1h 1m");
         assert_eq!(short(1_234), "1.2s");
         assert_eq!(clip("  first line\nsecond", 5), "firs…");
+    }
+
+    #[test]
+    fn user_messages_show_attachments_as_chips() {
+        use otto_llm::{Media, MediaSource};
+        let image = |name: Option<&str>| {
+            Part::Image(Media { mime: "image/png".into(), source: MediaSource::Base64 { data: "AA".into() }, name: name.map(str::to_owned) })
+        };
+        let item = Item::new(
+            "u1",
+            Role::User,
+            vec![
+                Part::text("[attachment att_3f2a9c1b: shot, final.png, image/png, 812 KB — copy_attachment can save it into the project]"),
+                image(Some("shot, final.png")),
+                Part::text("[attachment att_00000001: spec.pdf, application/pdf, 1.2 MB]"),
+                Part::text("add these"),
+                image(None),
+            ],
+        );
+        let (text, files) = user_message(&item);
+        assert_eq!(text, "add these");
+        assert_eq!(
+            files,
+            [
+                FileChip { name: "shot, final.png".into(), mime: "image/png".into(), image: Some("u1#1".into()) },
+                FileChip { name: "spec.pdf".into(), mime: "application/pdf".into(), image: None },
+                FileChip { name: "Image".into(), mime: "image/png".into(), image: Some("u1#4".into()) },
+            ]
+        );
+        assert_eq!(attachment_note("[attachment att_1: a.txt, text/plain, 3 B]"), Some(("a.txt", "text/plain")));
+        assert_eq!(attachment_note("[attachment] hi"), None);
+        assert_eq!(attachment_note("see [attachment att_1: a, b, c]"), None);
+    }
+
+    #[test]
+    fn copy_attachment_reads_as_copied_name_to_path() {
+        let cx = Ctx { cwd: Some("/w"), times: &Times::default(), now: 0, running: false, stopped: false, jobs: &HashMap::new() };
+        let input = json!({"attachment_id": "att_3f2a9c1b", "path": "/w/assets/shot.png"});
+        let line = tool("c", "copy_attachment", &input, None, Some(&("Copied shot.png to /w/assets/shot.png (812 KB)".into(), false)), &cx);
+        assert_eq!((line.title.as_str(), line.desc.as_deref(), line.detail.is_none()), ("Copied shot.png → assets/shot.png", Some("812 KB"), true));
+        assert_eq!(line.files, ["assets/shot.png"]);
+        let live = ToolState {
+            name: "copy_attachment".into(),
+            status: ToolStatus::Done,
+            output: Some(json!({"content": [], "metadata": {"path": "/w/assets/shot.png", "bytes": 3, "name": "shot.png"}})),
+            ..ToolState::default()
+        };
+        assert_eq!(tool("c", "copy_attachment", &input, Some(&live), None, &cx).title, "Copied shot.png → assets/shot.png");
+        let read = tool("r", "read", &json!({"attachment_id": "att_3f2a9c1b"}), None, Some(&("shot.png 40×30".into(), false)), &cx);
+        assert_eq!(read.title, "Read attachment");
     }
 }

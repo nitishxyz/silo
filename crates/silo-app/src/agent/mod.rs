@@ -6,6 +6,7 @@
 //! children of it, so "the pane is focused" is `focus.contains_focused(..)`.
 //! ⌘J (with focus in the pane) opens the session switcher.
 
+mod attach;
 mod client;
 mod editor;
 mod markdown;
@@ -32,6 +33,7 @@ use otto_client::{ClientError, Connection, FollowerState, SessionCreateOptions, 
 use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, InputPart, Method, ProjectInfo, SessionInfo, TurnStatus};
 
 use crate::text_field::{FieldEvent, TextField};
+use attach::{Attachment, upload};
 use client::Catalog;
 use editor::{Editor, EditorEvent, Nav};
 use signin::SignIn;
@@ -285,8 +287,10 @@ pub struct AgentPane {
     reveals: HashMap<String, reveal::Reveal>,
     /// Scroll chaining of the boxes inside the transcript (details, code blocks).
     scroll: std::rc::Rc<scroll::Inner>,
-    /// Images attached to the next prompt.
+    /// Files attached to the next prompt.
     attachments: Vec<Attachment>,
+    /// Thumbnails of the transcript's images by `item#part` (`None` while made).
+    thumbs: HashMap<String, Option<std::sync::Arc<gpui::Image>>>,
     /// Bars above the composer by key: expanded motion, and when each appeared.
     bars: HashMap<&'static str, crate::motion::Toggle>,
     bar_shown: HashMap<&'static str, Instant>,
@@ -336,6 +340,7 @@ impl AgentPane {
         let editor = cx.new(|cx| {
             let mut e = Editor::new("Ask anything", cx);
             e.animate_growth = true;
+            e.files = true;
             e
         });
         let filter = cx.new(|cx| TextField::new("Filter", cx));
@@ -418,6 +423,7 @@ impl AgentPane {
             reveals: HashMap::new(),
             scroll,
             attachments: Vec::new(),
+            thumbs: HashMap::new(),
             bars: HashMap::new(),
             bar_shown: HashMap::new(),
             subagent_calls: 0,
@@ -937,6 +943,16 @@ impl AgentPane {
                 }
                 cx.notify();
             }
+            EditorEvent::Files(paths) => self.attach_paths(paths.clone(), cx),
+            EditorEvent::Image(png) => {
+                let png = png.clone();
+                let read = cx.background_executor().spawn(async move { Attachment::new("Pasted image.png".into(), png) });
+                cx.spawn(async move |this, cx| {
+                    let attachment = read.await;
+                    let _ = this.update(cx, |this, cx| this.add_attachments(vec![attachment], cx));
+                })
+                .detach();
+            }
         }
     }
 
@@ -1102,7 +1118,7 @@ impl AgentPane {
         self.queue_edits.retain(|id, edit| queue.iter().any(|q| &q.id == id && Some(q.delivery) != *edit));
         let mut rows = self.built.clone();
         if let Some(p) = self.optimistic.as_ref().filter(|p| !p.text.is_empty()) {
-            rows.push(Row::User { key: OPTIMISTIC.to_owned(), text: p.text.clone() });
+            rows.push(Row::User { key: OPTIMISTIC.to_owned(), text: p.text.clone(), files: Vec::new() });
         }
         self.sync_rows(rows);
     }
@@ -1138,11 +1154,10 @@ impl AgentPane {
         self.editor.update(cx, |e, cx| e.set_text("", cx));
         self.list.set_follow_mode(gpui::FollowMode::Tail);
         self.unseen = false;
-        let mut input: Vec<InputPart> =
-            std::mem::take(&mut self.attachments).into_iter().map(|a| InputPart::Image { mime: a.mime, data_base64: a.data }).collect();
-        if !text.is_empty() {
-            input.push(InputPart::Text { text: text.clone() });
-        }
+        // Uploaded to the session first; the prompt names them (kept if the send fails).
+        let files = std::mem::take(&mut self.attachments);
+        let uploads: Vec<Attachment> = files.clone();
+        let words = (!text.is_empty()).then(|| InputPart::Text { text: text.clone() });
         if self.error.is_some() {
             // The shown session can't be opened: this prompt starts a new one.
             self.session_id = None;
@@ -1162,7 +1177,10 @@ impl AgentPane {
             let steer = delivery == Delivery::Steer;
             self.run(
                 cx,
-                move |c| async move { c.prompt(&id, input, delivery).await },
+                move |c| async move {
+                    let input = upload(&c, &id, uploads, words).await?;
+                    c.prompt(&id, input, delivery).await
+                },
                 move |this, result, cx| match result {
                     // Known by id from now on: it leaves the pane's list once otto's queue has it.
                     Ok(accepted) if steer => {
@@ -1172,7 +1190,7 @@ impl AgentPane {
                         this.show_rows();
                     }
                     Ok(_) => {}
-                    Err(error) => this.unsend(text, error, cx),
+                    Err(error) => this.unsend(text, files, error, cx),
                 },
             );
             return;
@@ -1191,6 +1209,7 @@ impl AgentPane {
             cx,
             move |c| async move {
                 let info = c.session_create(options).await?;
+                let input = upload(&c, &info.id, uploads, words).await?;
                 c.prompt(&info.id, input, Delivery::Queue).await?;
                 Ok(info)
             },
@@ -1202,14 +1221,14 @@ impl AgentPane {
                     this.follow(cx);
                     this.refresh_sessions(cx);
                 }
-                Err(error) => this.unsend(text, error, cx),
+                Err(error) => this.unsend(text, files, error, cx),
             },
         );
     }
 
     /// A send failed: its optimistic feedback goes, the draft returns to the
-    /// composer and the notice says why.
-    fn unsend(&mut self, text: String, error: String, cx: &mut Context<Self>) {
+    /// composer with its attachments and the notice says why.
+    fn unsend(&mut self, text: String, files: Vec<Attachment>, error: String, cx: &mut Context<Self>) {
         self.steers.retain(|s| s.text != text);
         if self.optimistic.as_ref().is_some_and(|p| p.text == text) {
             self.optimistic = None;
@@ -1218,6 +1237,9 @@ impl AgentPane {
         }
         self.notice = Some(error);
         self.restored = true;
+        if self.attachments.is_empty() {
+            self.attachments = files;
+        }
         self.editor.update(cx, |e, cx| e.set_text(text, cx));
     }
 
@@ -1609,19 +1631,40 @@ impl AgentPane {
         list.into_iter().map(|(_, _, m)| m).collect()
     }
 
-    /// Pick images for the next prompt.
-    fn attach_image(&mut self, cx: &mut Context<Self>) {
+    /// Pick files for the next prompt.
+    fn attach_files(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
-            let read = cx.background_executor().spawn(async move { paths.iter().filter_map(|p| Attachment::read(p)).collect::<Vec<_>>() });
-            let images = read.await;
-            let _ = this.update(cx, |this, cx| {
-                this.attachments.extend(images);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.attach_paths(paths, cx));
         })
         .detach();
+    }
+
+    /// Dropped, pasted or picked files for the next prompt (folders are skipped).
+    fn attach_paths(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let read =
+            cx.background_executor().spawn(async move { paths.iter().filter(|p| !p.is_dir()).map(|p| Attachment::read(p)).collect::<Vec<_>>() });
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
+            let _ = this.update(cx, |this, cx| this.add_attachments(read, cx));
+        })
+        .detach();
+    }
+
+    /// Read attachments join the composer; a failed one says why in the notice.
+    fn add_attachments(&mut self, read: Vec<Result<Attachment, String>>, cx: &mut Context<Self>) {
+        let mut failed = Vec::new();
+        for r in read {
+            match r {
+                Ok(a) => self.attachments.push(a),
+                Err(e) => failed.push(e),
+            }
+        }
+        if !failed.is_empty() {
+            self.notice = Some(failed.join("; "));
+        }
+        cx.notify();
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1666,31 +1709,6 @@ fn user_count(rows: &[Row], text: &str) -> usize {
 /// The text parts of an input, joined.
 pub(super) fn input_text(input: &[InputPart]) -> String {
     input.iter().filter_map(|p| if let InputPart::Text { text } = p { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ")
-}
-
-/// An image for the next prompt.
-struct Attachment {
-    name: String,
-    mime: String,
-    data: String,
-    /// Added at (the chip fades in).
-    at: Instant,
-}
-
-impl Attachment {
-    fn read(path: &std::path::Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        let mime = match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            _ => return None,
-        };
-        let bytes = std::fs::read(path).ok()?;
-        let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Self { name, mime: mime.to_owned(), data: data_encoding::BASE64.encode(&bytes), at: Instant::now() })
-    }
 }
 
 fn session_label(s: &SessionInfo) -> String {
@@ -1744,7 +1762,20 @@ impl Focusable for AgentPane {
 
 impl Render for AgentPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_pane(window, cx)
+        use gpui::{ParentElement as _, Styled as _, prelude::*};
+        // Files dropped anywhere on the pane attach to the next prompt.
+        let drop = gpui::div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .drag_over::<gpui::ExternalPaths>(|s, _, _, _| s.bg(gpui::rgb(crate::theme::accent()).opacity(0.06)))
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                let focus = this.editor.read(cx).focus.clone();
+                focus.focus(window, cx);
+                this.attach_paths(paths.paths().to_vec(), cx);
+            }));
+        gpui::div().relative().size_full().child(self.render_pane(window, cx)).child(drop)
     }
 }
 
