@@ -191,14 +191,6 @@ fn subscription_login(provider: String, device: bool) -> Method {
     Method::AuthLogin { provider, mode: AuthMode::Subscription, api_key: None, device, base_url: None }
 }
 
-/// The sign-in screen's and dialog's note on a remote target.
-fn signs_in_on(target: &Otto, host: Option<&str>) -> Option<String> {
-    match target {
-        Otto::Remote { .. } => host.map(|host| format!("Signs in on {host}")),
-        Otto::Local => None,
-    }
-}
-
 /// Providers offered for sign-in, in daemon order; rows with no sign-in modes
 /// (the test model) are left out.
 fn providers(auth: &[AuthStatus]) -> Vec<&AuthStatus> {
@@ -913,7 +905,6 @@ impl AgentPane {
         let managing = auth.iter().any(|a| a.signed_in);
         let (title, subtitle) =
             if managing { ("Providers", "Connect the models otto can use") } else { ("Sign in to start", "Choose a model provider") };
-        let subtitle = signs_in_on(&self.target, self.host.as_deref()).unwrap_or_else(|| subtitle.to_owned());
         let shown = providers(&auth);
         let count = shown.len();
         let mut list = div().w_full().mt(px(22.0)).flex().flex_col();
@@ -1115,7 +1106,6 @@ impl AgentPane {
             Step::Blocked(blocked) => Some(blocked),
             _ => None,
         };
-        let on_host = signs_in_on(&self.target, self.host.as_deref());
         let primary = if spent { "Try again" } else { primary };
         let pill = match &step {
             Step::ApiKey => Some(self.key_field.clone()),
@@ -1278,7 +1268,6 @@ impl AgentPane {
                     .child(div().flex_1().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(close.mr(px(-6.0))),
             )
-            .children(on_host.map(|on| div().text_size(px(12.0)).text_color(rgb(muted)).child(on)))
             .child(div().mt(px(4.0)).text_size(px(12.5)).text_color(rgb(muted)).child(line))
             .children(body.map(|body| div().mt(px(16.0)).child(body)))
             .children(error_line)
@@ -1435,12 +1424,6 @@ mod tests {
         assert_eq!(bind, Blocked::Bind);
         assert_eq!(bind.message(), "Couldn't listen for the sign-in.");
         assert!(!bind.use_code(), "only Cancel");
-    }
-
-    #[test]
-    fn remote_targets_name_their_host() {
-        assert_eq!(signs_in_on(&Otto::Remote { id: "host-1".into() }, Some("mini")).as_deref(), Some("Signs in on mini"));
-        assert_eq!(signs_in_on(&Otto::Local, None), None);
     }
 
     #[test]
