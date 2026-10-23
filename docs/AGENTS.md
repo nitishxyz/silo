@@ -68,9 +68,9 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 - The owner must have advertised feature `browser_actions` (`silo_proto::compat::feature::BROWSER_ACTIONS`). It may
   be local or remote: remote hosts' browser blocks run in per-host profiles (`silo-web/src/profile.rs`), so an
   agent on host X only reaches pages of host X's blocks.
-- No owner, or an owner without the feature: `no_app` ("No Silo app is showing this browser block: …"). An app
-  claims a browser block (`own_block` `request`) as soon as it runs its page, so a block in a session the app shows
-  works without the user focusing it; a block in a session nobody has open has no engine.
+- No owner: the local app that advertised `browser_host` (§4.1) runs it off screen. An owner without the feature,
+  or no owner and no such app: `no_app` ("No Silo app is running this browser block: …"). An app claims a browser
+  block (`own_block` `request`) as soon as it runs its page.
 - Timeout: `APP_TIMEOUT`, or the call's `timeout_ms + 5 s` when it has one (max 120 s).
 - Only the owner may reply; a reply for another request is `not_found` (as `app.reply` today).
 
@@ -91,6 +91,13 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 | `browser.console` | `since?: u64, level?: string, limit?: u32` | `{messages: [{id, level, text, url?, line?, at}]}` | view |
 | `browser.network` | `since?: u64, limit?: u32, failed_only?: bool` | `{requests: [{id, method, url, status?, type, failed?: string, at}]}` | view |
 | `browser.screenshot` | `target?, full_page?: bool, format?: png\|jpeg, quality?` | `{mime, data_base64, width, height}` | view |
+
+`browser.fetch {url, timeout_ms?, screenshot?: bool, selector?}` (no `block_id`, control on the server) →
+`{url, title, status?: u16, html, timed_out, truncated, screenshot?: {mime, data_base64, width, height}}` goes to
+the local `browser_host` app (never a remote one) and loads `url` in a hidden page there (§4.1). Errors:
+`no_app` (no such app), `timeout` (nothing rendered in time; a page that rendered but never settled returns its
+HTML with `timed_out: true`), `navigation` (DNS, TLS, connection), `bad_request` (selector matched nothing, not
+http(s)). Server timeout 120 s, queue included.
 
 `target` is a ref from the last snapshot (`e12`) or a CSS selector (anything not matching `^e\d+$`).
 
@@ -159,8 +166,24 @@ network, dialog handling and `evaluate` with element args. We follow that design
 - The app accepts `browser.*` requests from **any** host for a block it owns and renders (not only the local one, as
   `app.*` requests are).
 
-Later: headless engine on the server so browser tools work with no app attached; `silo browser cdp <block>` exposing
-a scoped CDP endpoint for Playwright.
+### 4.1 Off-screen host (`silo-app/src/browser_host.rs`)
+
+The app (feature `browser_host`) hosts the browsers no pane shows, on the local server only:
+
+- **Blocks.** A `browser.*` request for a block no window has a pane for (an unshown tab, a session no window
+  shows, a block nobody owns) runs in the host: it makes a windowless `BrowserPane` (same entity a window uses,
+  800×600, never in a layout), claims the block and executes. A window showing the block adopts that entity (no
+  reload, same history, refs and console), and a window that stops showing it (switching session or host, closing
+  the window) hands it back instead of closing the page. A hosted page closes when its block closes, its session
+  closes or the local server disconnects. A window whose pane's block lost its owner runs the request itself and
+  claims the block. Hidden pages keep rendering (no `was_hidden`), like panes in unshown tabs always have.
+- **Fetches.** `browser.fetch` opens a page in the persistent `agent` profile (`<home>/web/profiles/agent`, made
+  like a server profile: own cookies and storage, never the user's `default`), loads the URL, waits for the load
+  event and then network quiet (≤ 2 requests in flight for 500 ms; a Cloudflare-style challenge page keeps
+  waiting), bounded by `timeout_ms` (default 15 s, max 60 s), reads `outerHTML` (of `selector`, if given), takes
+  the viewport screenshot if asked (1280×800), and closes the page. At most 3 fetch pages at once; the rest queue.
+
+Later: `silo browser cdp <block>` exposing a scoped CDP endpoint for Playwright.
 
 ## 5. `silo-tools`
 
@@ -186,6 +209,12 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 §3.3 method: `browser_snapshot`, `browser_find`, `browser_click`, `browser_hover`, `browser_fill`,
 `browser_fill_form`, `browser_type`, `browser_press`, `browser_scroll`, `browser_wait_for`, `browser_dialog`,
 `browser_eval`, `browser_console`, `browser_network`, `browser_screenshot` (an image result).
+
+`browser_fetch {url, timeout_ms?, screenshot?, selector?}` (`browser.fetch`, §3.3): JSON `{url, title, status?,
+html, timed_out, truncated}` (capped like every tool result) plus the screenshot as an image part. Validation
+(`silo_tools::fetch_params`): http(s) URL, `timeout_ms` capped at 60000, non-empty `selector`. The typed
+`Tools::fetch(&input) -> anyhow::Result<BrowserFetchResult>` returns the uncapped result; its errors downcast to
+`RpcError` with the codes above.
 
 ### 5.3 Other
 
@@ -235,6 +264,23 @@ that is not short and read-only runs in a parked command block owned by the agen
 its nearest ancestor), through `Tools::spawn_command`, `watch` and `stop`; new terminals open next to that block
 too. Without silo or such a block, pipes run it. Results have the same shape either way.
 
+Rendered fetches for `web_fetch`/`web_search`: `otto_silo_tools::connect(config) -> Silo {tools, terminals,
+renderer}` (`silo()` is `connect` without the renderer), sharing the one connection. The renderer implements
+`otto_tools::builtin::render::Renderer`:
+
+```rust
+#[async_trait] pub trait Renderer: Send + Sync {
+    async fn render(&self, request: RenderRequest, cx: &ToolCx) -> Result<Rendered, RenderError>;
+}
+pub struct RenderRequest { pub url: String, pub timeout_ms: Option<u64>, pub screenshot: bool, pub selector: Option<String> }
+pub struct Rendered { pub url: String, pub title: String, pub status: Option<u16>, pub html: String,
+                      pub timed_out: bool, pub screenshot: Option<(String /* mime */, String /* base64 */)> }
+pub enum RenderError { NoApp(String), Timeout(String), Navigation(String), Failed(String) }
+```
+
+`NoApp`: silo not running, no `browser_host` app, or a server without `browser.fetch`. It calls `browser.fetch`
+directly (not through otto's policy: the calling tool's own policy applies).
+
 ## 8. Phases
 
 | Phase | Scope | Status |
@@ -248,7 +294,8 @@ too. Without silo or such a block, pipes run it. Results have the same shape eit
 Otto honours `Loading::Deferred` through `load_tools` (names or query), with loaded names persisted per session;
 browser schemas stay out of prompts until loaded. Native provider tool search is not yet used.
 Known gaps:
-- Browser tools need a Silo app showing the block's session (no headless engine yet).
+- Browser tools and `browser_fetch` need the Silo app running on the server's Mac (a remote host's browser blocks
+  run only in an app that shows them).
 - `browser_navigate` back/forward retries once after 1.1 s, because a followed link reaches the block's history only
   after the engine's report.
 - `wait_for` defaults to 10 s.
@@ -261,6 +308,11 @@ Known gaps:
 - Tools: against a real server (`silo-server` test harness): open, run (exit and output), send/read, wait on
   `silo report done` from inside the block, wait on quiet output and on text, list, close.
 - MCP: `initialize` → `tools/list` → `tools/call terminal_run` over stdio.
+- Fetch and host: `browser.fetch` routing (`no_app` without a `browser_host` app, forwarded to one), unowned blocks
+  to the local host (`app_bridge` unit test, `agent_api.rs`); `browser_fetch` descriptor, input validation and
+  `no_app` against a real server (`silo-tools/tests/fetch.rs`); renderer error mapping (`otto-silo-tools`); the
+  host's adoption bookkeeping, request routing, load/network-quiet tracking and fetch slots
+  (`silo-app/src/browser_host.rs` unit tests, no CEF).
 - App: snapshot formatting, pruning and stable refs on recorded AX trees (unit tests, no CEF).
 - Live, Oct 2026: a dev bundle (`scripts/ui-env.sh`, throwaway `SILO_HOME`) and `silo mcp` driving a local test
   page. Covered: snapshot, depth, find, fill, fill_form (text, select, checkbox), click by ref and selector, type

@@ -461,12 +461,13 @@ pub struct ToolSpec {
 
 `read`, `write`, `edit`/`multiedit` (str_replace family), `apply_patch` (patch family), `ls`, `tree`, `glob`,
 `search` (ripgrep's `grep` + `ignore` crates), `shell` (one-shot, pipes, timeout, background jobs), `web_fetch`,
-`web_search` (hosted when the provider has it), `update_todos`, `ask_user`, `skill`, `load_tools`, `subagent`
-(delegate/list/message/stop/retry), `wait`; deferred (through `load_tools`): `copy_attachment`.
+`update_todos`, `ask_user`, `skill`, `load_tools`, `subagent` (delegate/list/message/stop/retry), `wait`; deferred
+(through `load_tools`): `copy_attachment`, `web_search` (§6.3; provider-hosted search stays where it exists).
 
 - **New tools are deferred.** Any tool added from here on is `Loading::Deferred` (in `load_tools`' index with the
   first sentence of its description, loaded by name) unless it is part of the core edit/run loop. Improvements to
   an existing eager tool (`read`) keep it eager.
+- **`web_fetch {url, render?, screenshot?, selector?}`** and **`web_search {query, limit?}`**: see §6.3.
 
 - **`read` media**: images (PNG, JPEG, GIF, WebP, TIFF, BMP) are decoded with the `image` crate, turned upright,
   downscaled to `max_edge` (default 1568 px, never upscaled) and recompressed (PNG for transparency or a PNG
@@ -634,7 +635,7 @@ block announces itself with a `block:<id>` progress message; closing its block s
 (closed)`). The agent block shows Open / Stop on such lines, `Needs you` for `waiting_for_input`, and background
 cards that finish when their report arrives (docs/AGENT_BLOCK.md §4f).
 
-### 6.3 Web: rendered fetch and search (decided 2026-10-23)
+### 6.3 Web: rendered fetch and search (decided 2026-10-23, built)
 
 Plain HTTP `web_fetch` fails on bot protection, JavaScript-built pages and consent walls. Decisions:
 
@@ -658,9 +659,33 @@ Plain HTTP `web_fetch` fails on bot protection, JavaScript-built pages and conse
   the parser per engine kept small. Provider server-side search (Anthropic `web_search_*`) stays available where
   it exists; otto's own `web_search` is the provider-neutral one.
 
-Open details for the implementer: the engine default (and its terms/ToS fit), the blocked/empty heuristic, wait
-limits, and how the otto daemon reaches the app (it already calls silo tools through `otto-silo-tools`; rendered
-fetch is a silo tool such as `browser_fetch` that otto's `web_fetch` calls when silo is connected).
+**As built (silo side, docs/AGENTS.md §3.3, §4.1, §7):** the app's off-screen host (`silo-app/src/browser_host.rs`,
+feature `browser_host`): a browser block no window shows runs there for every `browser_*` tool, and a window showing
+it adopts the same page (no reload) and hands it back when it stops; the page closes with its block. The persistent
+`agent` profile. Silo's deferred `browser_fetch` (`browser.fetch`: load, then network quiet, ≤ 60 s; `selector`,
+`screenshot`; 3 pages at once, the rest queued; `no_app`, `timeout`, `navigation`), and the `Renderer` contract
+(`otto_silo_tools::connect(..).renderer`).
+
+**As built (otto side):** both tools reach silo's `browser_fetch` (docs/AGENTS.md) through
+`otto_tools::builtin::render::Renderer` (`Runtime::set_renderer`; shared with the engine as `web_fetch::Web`);
+without one, or on `no_app`, they behave as without the app. Both are `network` (approvals as before;
+`web_search` is also reached by a `web_fetch` grant). HTML helpers are regex-based (`otto-tools/src/html.rs`):
+simple CSS selectors, main content (`main`/`[role=main]`, else the largest `article`, else the body without
+nav/aside/header/footer; a candidate with under 200 characters and under a third of the body's text loses), markdown.
+- **Heuristic** (`web_fetch::needs_render`): blocked when 403/429/503 carries a challenge marker (Cloudflare `Just
+  a moment`/`cf-chl`/`challenge-platform`/`Attention Required`, DataDome, PerimeterX, Akamai `Access Denied`,
+  captcha, `unusual traffic`, DDoS-Guard), or a page with under 200 characters of text carries an unmistakable
+  one; empty when under 200 characters and ≥3 scripts, an empty app root (`#root`, `#app`, `#__next`, …,
+  `<app-root>`) or an "enable JavaScript" notice. Non-HTML never renders.
+- **`web_fetch`**: `render: true` or `screenshot: true` go straight to the browser; `render: false` never renders.
+  Output `Title:`/`URL:`/`Status:` (non-2xx)/`Note:` lines, then markdown; `Note: rendered in browser`, a note when
+  the page had not settled, or why it couldn't render (`…rendering it needs the Silo app`, `rendering failed: …`).
+  A `selector` filters the fetched HTML on the HTTP path and is passed to the browser otherwise.
+- **`web_search`** (deferred): engine `search_engine` in config.json (`duckduckgo` default, `bing`, `google`), one
+  parser each (`web_search::{duckduckgo, bing, google}`), redirect wrappers unwrapped (DDG `uddg=`, Google
+  `/url?q=`, Bing `/ck/a?u=a1…`), ads dropped. Rendered Google pages link through opaque `/goto?url=` tokens:
+  `web_search::resolve` reads each redirect's `Location` (no follow, 8 s) and drops hits it can't resolve. Without the app it asks DuckDuckGo's HTML endpoint over plain HTTP
+  and, only if that is turned away (202 bot check), says search needs the app. Text list plus `metadata.results`.
 
 ---
 

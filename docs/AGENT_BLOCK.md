@@ -54,12 +54,17 @@ See §8 for status.
 - **Grouping rule:** within a turn, every non-text part (reasoning, any tool call/result, errors) goes into the
   current group; only assistant **text** ends a group. Tools after text open a new group. Typical turn: one group,
   then the answer.
-- **Live group:** at most ~6 visible lines; older lines fade out at the top under a gradient mask and the list
-  auto-scrolls; hovering pauses auto-scroll. Reasoning streams as dim text under a `Thinking` line, then becomes
+- **Live group:** at most ~6 visible lines (plus room for an open detail); older lines fade out at the top under a
+  gradient mask. The window is an inner box (`scroll.rs` rules): pinned to its newest line, scrolled up in it, it
+  stays put while lines arrive below, with a bottom fade, until scrolled back down (`scroll::Pin`). Its header is
+  the turn's one indicator while it ends the transcript; otherwise the activity row is. Reasoning streams as dim
+  text under a `Thinking` line (its newest
+  lines at the bottom of a window up to four lines tall, older ones moving up under a top fade), then becomes
   `Thought for Ns ›`.
 - **Fold:** when text starts after the group, or the turn ends, the group folds (~500 ms after its last line) into
   one header line: `› Worked for 42s · read 3 files · ran 2 commands, 1 failed · edited 1 file`. Click toggles a
-  nested full list (`⌄`). Reloaded sessions start folded.
+  nested full list (`⌄`). Reloaded sessions start folded. A group of thinking only folds at once, its line gone in
+  the fold's first third (it would repeat the header).
 - **Timing:** wall time, as seen live. A step runs from when it first appears to when it finishes, so time spent
   waiting for an approval or an answer counts; a group's `Worked for` spans its first step's start to its last
   step's end. A live header shows the turn's clock (`Working for` since the turn started, as the activity row it
@@ -72,7 +77,9 @@ See §8 for status.
   comes from `SessionView.turn_started_at` and running calls' from `RunningToolCall.started_at`.
 - **Line kinds:** reasoning (`Thought for Ns`), read/ls/tree/glob/search (`Read x`, `Searched for q  N results`),
   shell (`Ran cmd  1.2s` / `Failed to run cmd  exit N`), edit/write/multiedit/apply_patch (`Edited f  +a −d`),
-  web_fetch, silo terminal/browser tools (`Opened browser localhost:3000  ↗`), subagents, ask_user, errors. Running
+  web (`Searched the web for "q"  N results`, `Fetched example.com/path  rendered`, `Couldn't fetch …`; details: the
+  results, the page's markdown), silo terminal/browser tools (`Opened browser localhost:3000  ↗`), subagents,
+  ask_user, errors. Running
   titles are present tense (`Running …`) and shimmer. Failed: red icon + red title. Stopped by the user (■, `job
   kill`, a closed block, a stopped turn or sub-agent stop cutting a call off): a muted stop square, neutral title
   (`Stopped cargo test`; other tools `Read a.rs  stopped`), counted apart in the fold (`ran 2 commands, 1 stopped`).
@@ -96,12 +103,17 @@ See §8 for status.
   (within the same cap). Text sweeps across its own laid-out width, cut into
   ~16 highlight `fade_out` segments from its glyph x positions (only lines mid-sweep; gpui blends a highlight's
   colour over the text's, so a transparent colour does nothing); a code line sweeps across its own width (its
-  characters × the mono advance, at most the box's visible width, the mask running under the right padding where
+  display width × the mono advance: tabs to the next stop of 4 (drawn as spaces), East Asian wide characters and
+  emoji two cells; at most the box's visible width, the mask running under the right padding where
   long lines show) under a gradient mask of the box's colour. A code block draws only its complete lines (nothing
   before the first); the box fades in during the first sixth of its first line's sweep, and that line's text sweeps
   in the rest (a mask under the box's own fade would let the whole line through). A list marker comes in as its
-  item's first line starts. Text already there (a
-  block opened mid-stream) and rewrapped lines after a width change show at once.
+  item's first line starts. Text already there (a block opened mid-reply: otto's `session.view` carries the reply
+  being written with what's been journaled, and live deltas continue it) and rewrapped lines after a width change
+  show at once; later lines sweep as usual. Only the last row reveals: once any row follows a message (a group, the
+  next text) it settles at once, full height and all shown, so its glide never fights the newer row's. Its rows
+  keep their keys through `item.done` (text rows by their place among the item's texts, `item#tN`, not part index),
+  so a finished reply looks as its last streaming frame did.
   Parsing goes through `markdown::Doc`: a top-level block followed by another is final, only the open last one
   parses again (at most once a frame). Reduce Motion: lines show at once, no glide.
 - **Hover actions** under a finished answer: copy, retry.
@@ -407,8 +419,11 @@ Units are points.
   them (`InputPart::Attachment`); a failed send puts the text and the chips back.
 - **Transcript:** a user message shows its files' chips above the bubble (thumbnails made in the background from
   the image otto sent with it, by `item#part`); otto's `[attachment …]` notes are hidden from the bubble. Older
-  inline images show as `Image` chips. `copy_attachment` reads `Copied shot.png → assets/shot.png` with the size;
-  `read` of an attachment reads `Read attachment`.
+  inline images show as `Image` chips. `copy_attachment` reads `Copied shot.png → assets/shot.png` with the size,
+  failed `Couldn't copy shot.png: already exists` (the reason in a few words, no path); `read` of an attachment
+  reads `Read shot.png` (the result's name, else the message's note). A model without vision isn't sent images
+  (otto puts a `not sent` line in their place at request time; `read` answers with name, size and dimensions), but
+  the image stays in the message, so its chip keeps the thumbnail.
 
 ## 5. Session switcher
 
@@ -463,11 +478,8 @@ Known gaps:
 - Recorded times come from the coalesced journal, so a reloaded step can read up to 50 ms shorter than it did live;
   a forked session's copied items have none.
 - The effort clamp knows only models in the bundled catalog; an unlisted one gets its provider's common set.
-- Attachments: an image sent to a model without vision has no thumbnail in the transcript (its chip shows the
-  `image` glyph); `read` of an attachment says `Read attachment`, not its name; a failed `copy_attachment` reads
-  `Copied attachment → path` in red.
-- A block opened on a session mid-reply shows `Thinking…` until that reply's item completes: the deltas before it
-  subscribed aren't in the snapshot, so the reply then comes in whole (revealed line by line, capped as above).
+- Web tool lines match `web_search`/`web_fetch` on their metadata (`results`, `rendered`) and notes; a change to
+  those shapes needs `transcript::tool` to follow.
 - No remote-host agent blocks; hover actions are copy and retry only; jump `↗` needs the block in a session this app
   can show. Leaving animations exist for popovers, cards, the tray list and the activity pill; removed transcript rows
   and attachment chips disappear at once.
