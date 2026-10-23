@@ -328,3 +328,15 @@ async fn web_search_renders_the_configured_engine() {
     let out = WebSearch::new(web(&broken, Engine::Duckduckgo)).call(json!({"query": "x"}), cx()).await.unwrap();
     assert!(out.is_error && text(&out) == "Search failed: nothing loaded");
 }
+
+#[tokio::test]
+async fn google_goto_links_are_kept_for_resolving() {
+    // Recorded from a rendered results page: links are opaque `/goto?url=` redirects.
+    let hits = web_search::google(&fixture("google_goto.html"));
+    assert_eq!(hits.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), ["Rust Programming Language", "Rust Tutorial"]);
+    assert!(hits.iter().all(|h| h.url.starts_with("https://www.google.com/goto?url=")), "{hits:#?}");
+    assert!(hits[0].snippet.starts_with("Rust is blazingly fast and memory-efficient"), "{hits:#?}");
+    // Other links pass through untouched (no request).
+    let plain = web_search::google(&fixture("google.html"));
+    assert_eq!(web_search::resolve(plain.clone()).await, plain);
+}

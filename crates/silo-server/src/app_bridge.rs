@@ -67,10 +67,14 @@ fn eligible(client: &ClientEntry) -> bool {
     owner_app(client) && client.events.is_some() && client.supports(Some(feature::APP_REQUESTS))
 }
 
-/// The [`target`] app that also hosts browsers no pane shows.
+/// The most recently active [`eligible`] app that also hosts browsers no
+/// pane shows.
 fn browser_host(reg: &Registry) -> Option<ClientId> {
-    let id = target(reg, None).ok()?;
-    reg.clients.get(&id).filter(|c| c.supports(Some(feature::BROWSER_HOST))).map(|_| id)
+    reg.clients
+        .iter()
+        .filter(|(_, c)| eligible(c) && c.supports(Some(feature::BROWSER_HOST)))
+        .max_by_key(|(id, c)| (c.active_at, **id))
+        .map(|(id, _)| *id)
 }
 
 /// The app a request goes to: `explicit` if given (it must be eligible),
@@ -210,7 +214,7 @@ mod tests {
         let spawn = SpawnSpec::default();
         let created = reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Browser, url: None, agent: None }).unwrap();
         assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP);
-        let _plain = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS]);
+        let plain = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS]);
         assert_eq!(browser_target(&reg, &created.block_id).unwrap_err().code, RpcError::NO_APP, "an app without a host");
         assert_eq!(browser_host(&reg), None);
         let remote = client(&mut reg, ClientRole::App, true, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
@@ -218,6 +222,8 @@ mod tests {
         let host = client(&mut reg, ClientRole::App, false, &[feature::APP_REQUESTS, feature::BROWSER_ACTIONS, feature::BROWSER_HOST]);
         assert_eq!(browser_target(&reg, &created.block_id).unwrap(), host);
         assert_eq!(browser_host(&reg), Some(host));
+        reg.clients.get_mut(&plain).unwrap().active_at = Some(std::time::Instant::now());
+        assert_eq!(browser_host(&reg), Some(host), "a more active app without a host does not hide it");
         // An owned block stays with its owner.
         reg.own(remote, std::slice::from_ref(&created.block_id), Some(silo_proto::control::OwnMode::Take)).unwrap();
         assert_eq!(browser_target(&reg, &created.block_id).unwrap(), remote);

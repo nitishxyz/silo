@@ -335,6 +335,9 @@ pub struct BrowserPane {
     /// In the off-screen host (`browser_host.rs`): the page opens without
     /// a layout, at the last (or a default) size.
     offscreen: bool,
+    /// The page's first document committed (or its first load ended):
+    /// actions before it would act on the engine's blank start page.
+    committed: bool,
     _subs: Vec<gpui::Subscription>,
     /// Focus subscriptions of the window showing the pane.
     window_subs: Vec<gpui::Subscription>,
@@ -413,6 +416,7 @@ impl BrowserPane {
             smart_zoom: None,
             page_scale: 1.0,
             offscreen: false,
+            committed: false,
             _subs: subs,
             window_subs: Vec::new(),
         }
@@ -458,9 +462,9 @@ impl BrowserPane {
         self.ensure_page(cx);
     }
 
-    /// Whether the page exists and answers CDP.
+    /// Whether the page exists, answers CDP and shows its first document.
     pub(crate) fn page_ready(&self) -> bool {
-        self.page.as_ref().is_some_and(|p| p.ready())
+        self.committed && self.page.as_ref().is_some_and(|p| p.ready())
     }
 
     /// The page could not open (bad address, engine failure).
@@ -739,6 +743,7 @@ impl BrowserPane {
                 let page = std::rc::Rc::new(page);
                 crate::web::register(page.clone(), dirty, Some(cx.weak_entity()));
                 self.page = Some(page);
+                self.committed = false;
                 self.span = Span::at(state.index);
                 self.engine_url = state.url.clone();
                 self.error = None;
@@ -761,6 +766,7 @@ impl BrowserPane {
             let Some(state) = self.state.as_mut() else { break };
             match event {
                 silo_web::Event::UrlChanged { url, back_forward } => {
+                    self.committed = true;
                     if follow_url(state, &mut self.span, &url, back_forward) {
                         self.engine_url.clone_from(&url);
                     }
@@ -795,6 +801,7 @@ impl BrowserPane {
                         self.progress = 0.0;
                         self.blocked = None;
                     } else {
+                        self.committed = true;
                         self.span.jump = None;
                     }
                     changed = true;

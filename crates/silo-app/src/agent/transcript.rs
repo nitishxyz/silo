@@ -186,7 +186,7 @@ fn copy_failure(text: &str) -> &'static str {
         "a folder is in the way"
     } else if t.contains("unknown attachment") || t.contains("no attachments") {
         "no such attachment"
-    } else if t.contains("permission denied") || t.contains("read-only") {
+    } else if t.contains("permission denied") || t.contains("not permitted") || t.contains("read-only") {
         "permission denied"
     } else if t.contains("no space") {
         "disk full"
@@ -2255,6 +2255,8 @@ mod tests {
         assert_eq!(line.title, "Couldn't copy attachment: no such attachment");
         let line = tool("c", "copy_attachment", &input, None, Some(&("Failed: Permission denied (os error 13)".into(), true)), &named);
         assert_eq!(line.title, "Couldn't copy screenshot.png: permission denied");
+        let line = tool("c", "copy_attachment", &input, None, Some(&("Failed: Operation not permitted (os error 1)".into(), true)), &named);
+        assert_eq!(line.title, "Couldn't copy screenshot.png: permission denied", "EPERM (a system folder)");
         // The user's notes name attachments by id.
         let items = [Item::new(
             "u",

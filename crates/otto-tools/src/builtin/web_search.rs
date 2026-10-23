@@ -144,7 +144,8 @@ pub fn bing(page: &str) -> Vec<Hit> {
 
 /// Google (rendered or basic HTML): links holding an `h3`, outside the ad
 /// blocks (`#tads`, `#tvcap`, `#bottomads`, `[data-text-ad]`), with the
-/// snippet from their result block.
+/// snippet from their result block. Rendered pages link through opaque
+/// `/goto?url=` redirects, kept as they are for [`resolve`].
 #[must_use]
 pub fn google(page: &str) -> Vec<Hit> {
     let doc = html::Doc::parse(page);
@@ -158,7 +159,7 @@ pub fn google(page: &str) -> Vec<Hit> {
             }
             let url = unwrap(&link.attr("href")?, "https://www.google.com/")?;
             let host = url.host_str().unwrap_or("");
-            if is_google(host) || host.ends_with("googleadservices.com") {
+            if (is_google(host) && !is_goto(&url)) || host.ends_with("googleadservices.com") {
                 return None;
             }
             let block = ["div.g", "div.MjjYud", "div.Gx5Zad", "div[data-hveid]"].iter().find_map(|s| doc.closest(link, s));
@@ -177,6 +178,37 @@ pub fn google(page: &str) -> Vec<Hit> {
 
 fn hit(title: String, url: Url, snippet: String) -> Option<Hit> {
     (!title.is_empty()).then(|| Hit { title, url: url.into(), snippet })
+}
+
+fn is_goto(url: &Url) -> bool {
+    is_google(url.host_str().unwrap_or("")) && url.path() == "/goto"
+}
+
+/// `hits` with Google's `/goto` redirects replaced by their targets (each
+/// redirect read without following it); a hit whose target can't be read
+/// is dropped.
+pub async fn resolve(hits: Vec<Hit>) -> Vec<Hit> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .expect("static client");
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, mut hit) in hits.into_iter().enumerate() {
+        let client = client.clone();
+        tasks.spawn(async move {
+            if Url::parse(&hit.url).is_ok_and(|u| is_goto(&u)) {
+                let response = client.get(&hit.url).send().await.ok()?;
+                let target = response.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+                let target = Url::parse(target).ok().filter(|u| matches!(u.scheme(), "http" | "https") && !is_goto(u))?;
+                hit.url = target.into();
+            }
+            Some((i, hit))
+        });
+    }
+    let mut out: Vec<(usize, Hit)> = tasks.join_all().await.into_iter().flatten().collect();
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// DuckDuckGo turned a plain request away (its bot check answers 202).
@@ -238,7 +270,15 @@ async fn run(web: &Web, input: &Value, cx: &ToolCx) -> Result<ToolOutput, ToolEr
     let engine = web.engine;
     let request = RenderRequest { url: engine.url(query).into(), ..RenderRequest::default() };
     let (engine, rendered, hits, status, page) = match web.render(request, cx).await {
-        Ok(page) => (engine, true, engine.results(&page.html), page.status.unwrap_or(200), page.html),
+        Ok(page) => {
+            let mut hits = engine.results(&page.html);
+            if engine == Engine::Google {
+                // A few spare for duplicates.
+                hits.truncate(limit + 4);
+                hits = resolve(hits).await;
+            }
+            (engine, true, hits, page.status.unwrap_or(200), page.html)
+        }
         Err(RenderError::NoApp(_)) => {
             let page = http(Engine::Duckduckgo.url(query)).await?;
             if duckduckgo_blocked(page.status, &page.body) {
