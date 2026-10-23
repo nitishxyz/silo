@@ -249,6 +249,57 @@ async fn http_401_refresh_retry_and_count_tokens() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn plan_usage_only_for_a_subscription() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let (header_end, length) = loop {
+                let mut buf = [0; 4096];
+                let read = socket.read(&mut buf).await.unwrap();
+                assert!(read > 0);
+                raw.extend_from_slice(&buf[..read]);
+                if let Some(pos) = raw.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&raw[..pos]).to_lowercase();
+                    break (pos + 4, headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().trim().parse::<usize>().unwrap());
+                }
+            };
+            while raw.len() < header_end + length {
+                let mut buf = [0; 4096];
+                let read = socket.read(&mut buf).await.unwrap();
+                raw.extend_from_slice(&buf[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nanthropic-ratelimit-unified-5h-utilization: 0.62\r\nanthropic-ratelimit-unified-5h-reset: 1800006000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{TEXT}",
+                TEXT.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let config = |auth, mode| AnthropicConfig {
+        base_url: endpoint.clone(),
+        auth,
+        mode,
+        model: anthropic::model_info("claude-sonnet-4-6").unwrap(),
+        betas: vec![],
+        http: HttpClient::new().unwrap(),
+        retry: RetryPolicy::default(),
+        idle_timeout: Duration::from_secs(5),
+    };
+    let plans = |events: Vec<StreamEvent>| events.into_iter().filter(|e| matches!(e, StreamEvent::PlanUsage(_))).count();
+    let key = AnthropicModel::new(config(CredentialSource::api_key("k"), AuthMode::ApiKey));
+    let events = testing::collect_events(key.stream(request(), CallCx::default()).await.unwrap()).await;
+    assert_eq!(parts(&events), vec![Part::text("Hello!")]);
+    assert_eq!(plans(events), 0, "an API key never reports plan usage");
+    let sub = AnthropicModel::new(config(CredentialSource::Static(credential("t")), AuthMode::Subscription));
+    let events = testing::collect_events(sub.stream(request(), CallCx::default()).await.unwrap()).await;
+    assert_eq!(plans(events), 1);
+    server.await.unwrap();
+}
+
 #[test]
 fn media_strict_tools_inline_changes_and_foreign_reasoning() {
     let mut req = request();

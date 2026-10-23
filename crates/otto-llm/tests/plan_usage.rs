@@ -140,10 +140,14 @@ async fn the_responses_stream_reports_rate_limit_events() {
     .iter()
     .map(|v| format!("data: {v}\n\n"))
     .collect::<String>();
-    let bytes = futures::stream::iter([Ok(bytes::Bytes::from(sse))]);
+    let bytes = futures::stream::iter([Ok(bytes::Bytes::from(sse.clone()))]);
     let events: Vec<_> = otto_llm::openai::stream::stream(bytes, "gpt-x").map(Result::unwrap).collect().await;
     let plans: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::PlanUsage(p) = e { Some(p.clone()) } else { None }).collect();
     assert_eq!(plans, vec![PlanUsage { windows: vec![window("primary", "5-hour", 0.5, None)] }]);
+    let stream = otto_llm::openai::stream::stream(futures::stream::iter([Ok(bytes::Bytes::from(sse))]), "gpt-x");
+    let events: Vec<_> = otto_llm::plan_usage::subscription_only(false, stream).map(Result::unwrap).collect().await;
+    assert!(events.iter().all(|e| !matches!(e, StreamEvent::PlanUsage(_))), "an API key never reports plan usage");
+    assert!(events.iter().any(|e| matches!(e, StreamEvent::Finish { .. })), "{events:?}");
 }
 
 #[test]

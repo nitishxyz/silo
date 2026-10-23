@@ -223,11 +223,20 @@ mod parse {
         (!usage.is_empty()).then_some(usage)
     }
 
-    /// [`from_headers`] of an HTTP response.
+    /// [`from_headers`] of an HTTP response; `None` unless it answered a subscription credential.
     #[must_use]
-    pub fn from_response(response: &reqwest::Response) -> Option<PlanUsage> {
+    pub fn from_response(response: &reqwest::Response, subscription: bool) -> Option<PlanUsage> {
+        if !subscription {
+            return None;
+        }
         let pairs: Vec<(&str, &str)> = response.headers().iter().filter_map(|(n, v)| Some((n.as_str(), v.to_str().ok()?))).collect();
         from_headers(pairs, unix_now())
+    }
+
+    /// `stream` without [`StreamEvent::PlanUsage`] unless it answers a subscription credential.
+    pub fn subscription_only(subscription: bool, stream: EventStream) -> EventStream {
+        use futures::StreamExt;
+        if subscription { stream } else { Box::pin(stream.filter(|e| std::future::ready(!matches!(e, Ok(StreamEvent::PlanUsage(_)))))) }
     }
 
     /// `stream`, after a [`StreamEvent::PlanUsage`] when there is one.

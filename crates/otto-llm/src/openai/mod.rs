@@ -240,7 +240,8 @@ mod client {
                 req.model = self.config.model.id.clone();
             }
             let mut body = convert::request_for(&req, self.provider());
-            if self.config.mode == AuthMode::Subscription {
+            let subscription = self.config.mode == AuthMode::Subscription;
+            if subscription {
                 subscription::shape(&mut body, cx.session.as_deref());
             }
             // `/responses/compact` has no custom summarization prompt; `instructions` stays the system prompt.
@@ -248,7 +249,7 @@ mod client {
                 return self.compact(&body, &cx).await;
             }
             if self.websocket() {
-                return self.stream_ws(body, req.model, cx).await;
+                return Ok(crate::plan_usage::subscription_only(subscription, self.stream_ws(body, req.model, cx).await?));
             }
             let credential = self.config.auth.current().await?;
             let response = match self.send(&body, &credential, &cx).await {
@@ -258,10 +259,13 @@ mod client {
                 }
                 result => result?,
             };
-            let plan = crate::plan_usage::from_response(&response);
-            Ok(crate::plan_usage::prepend(
-                plan,
-                stream::stream_for(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), req.model, self.provider()),
+            let plan = crate::plan_usage::from_response(&response, subscription);
+            Ok(crate::plan_usage::subscription_only(
+                subscription,
+                crate::plan_usage::prepend(
+                    plan,
+                    stream::stream_for(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), req.model, self.provider()),
+                ),
             ))
         }
         fn session(&self) -> Option<&dyn ModelSession> {

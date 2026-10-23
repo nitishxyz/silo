@@ -415,8 +415,11 @@ How much of a subscription's limits is used, for the agent block's footer ring (
 - **API keys and local models:** neither family appears, so nothing.
 - Labels from the window length: 300 min `5-hour`, 10080 `Weekly`, else `{n}d` / `{n}h`; a per-model suffix
   follows (`Weekly Opus`); unknown lengths use the window's name.
-- Evidence: none of these headers or events are in our fixtures; names follow Claude Code's and the Codex CLI's
-  handling and need a live check.
+- Evidence: Claude live (2026-10-24, subscription): `-unified-5h-utilization` (a fraction), `-5h-reset`, `-5h-status`
+  plus window-less `-unified-{status,reset,representative-claim,fallback,fallback-percentage,overage-status,
+  overage-disabled-reason}`; no `7d` header on that response, so only `5-hour` was recorded. Codex names follow the
+  Codex CLI and are unchecked (no ChatGPT plan to test with).
+- Only responses to a subscription (OAuth) credential are parsed; API-key responses never report plan usage.
 
 otto-core keeps the latest per **provider** (merged by window name) in memory and in `<state>/plan_usage.json`
 (read at start). Each report is announced as the global, unjournaled event `plan.usage {provider, usage}`;
