@@ -33,8 +33,11 @@ const LIVE_LINES: f32 = 6.0;
 /// Streaming reasoning's window: four of its lines and the gap below.
 const STREAM_H: f32 = 4.0 * 18.0 + 4.0;
 const TEXT: f32 = 13.5;
+/// Space above and below an open `›` detail: the box sits between its row and the next with equal room, so the
+/// row after it keeps its rhythm instead of reading as attached to the box.
+const DETAIL_GAP: f32 = 8.0;
 /// Height of an open `›` detail (240 max plus its margins).
-const DETAIL_H: f32 = 250.0;
+const DETAIL_H: f32 = 240.0 + 2.0 * DETAIL_GAP;
 /// The composer's text line height.
 const COMPOSER_LINE: f32 = 20.0;
 /// Indent of a group's lines under its header.
@@ -1186,7 +1189,11 @@ impl AgentPane {
         let detail = (openness > 0.0)
             .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, &self.scroll)))
             .flatten()
-            .map(|d| div().when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(d));
+            // The gap is the wrapper's padding: a margin on the box collapsed out of the (block) line, so the next row
+            // overlapped the box once it was fully open.
+            .map(|d| {
+                div().py(px(DETAIL_GAP)).when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(d)
+            });
         let enter = self.entered.get(&key).and_then(|at| eased(*at, ENTER, now, cx));
         let (shift, alpha) = enter.map_or((0.0, 1.0), |t| ((1.0 - t) * 6.0, t));
         div().relative().top(px(shift)).opacity(alpha * dim).child(row).children(stream).children(detail).into_any_element()
@@ -2354,8 +2361,6 @@ fn render_detail(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll:
     let base = div()
         .id(gpui::ElementId::Name(id.clone().into()))
         .ml(px(24.0))
-        .mt(px(2.0))
-        .mb(px(6.0))
         .px(px(10.0))
         .py(px(8.0))
         .continuous(8.0)
