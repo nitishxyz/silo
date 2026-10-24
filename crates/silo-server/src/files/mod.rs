@@ -13,7 +13,7 @@ use std::{collections::HashSet, path::PathBuf};
 use serde_json::Value;
 use silo_proto::{
     control::{FilesSetParams, Method, RpcError},
-    model::{BlockInfo, BlockKind, FilesState, TermSize},
+    model::{BlockInfo, BlockKind, FileHighlight, FilesState, TermSize},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -133,8 +133,18 @@ impl FilesBlock {
         if state.active.as_ref().is_some_and(|a| !state.open.contains(a)) {
             state.active = state.open.last().cloned();
         }
+        for (path, marks) in params.highlights.unwrap_or_default() {
+            let path = paths::normalize(&path)?;
+            let marks = clean_highlights(marks)?;
+            if marks.is_empty() {
+                state.highlights.remove(&path);
+            } else {
+                state.highlights.insert(path, marks);
+            }
+        }
         let open = state.open.clone();
         state.scroll.retain(|path, _| open.contains(path));
+        state.highlights.retain(|path, _| open.contains(path));
         let resync = (&state.open, &state.expanded) != (&self.state.open, &self.state.expanded);
         let changed = state != self.state;
         self.state = state;
@@ -154,6 +164,28 @@ impl FilesBlock {
 
 /// Most paths one `files.changed` lists.
 pub const CHANGED_MAX: usize = 1000;
+
+/// Highlights as stored: 1-based ranges with `start <= end` (a reversed
+/// one is turned round), notes trimmed and cut to
+/// [`FileHighlight::NOTE_MAX`] characters, empty notes dropped.
+///
+/// # Errors
+/// `bad_request` for line 0 or more than [`FileHighlight::PER_FILE`].
+pub fn clean_highlights(marks: Vec<FileHighlight>) -> Result<Vec<FileHighlight>, RpcError> {
+    if marks.len() > FileHighlight::PER_FILE {
+        return Err(RpcError::bad_request(format!("at most {} highlights per file", FileHighlight::PER_FILE)));
+    }
+    marks
+        .into_iter()
+        .map(|m| {
+            if m.start == 0 || m.end == 0 {
+                return Err(RpcError::bad_request("highlight lines start at 1"));
+            }
+            let note = m.note.map(|n| n.trim().chars().take(FileHighlight::NOTE_MAX).collect::<String>()).filter(|n| !n.is_empty());
+            Ok(FileHighlight { start: m.start.min(m.end), end: m.start.max(m.end), note })
+        })
+        .collect()
+}
 
 /// Changed absolute `paths` relative to canonical `root`, sorted and
 /// deduplicated, and whether some were left out ([`CHANGED_MAX`]).

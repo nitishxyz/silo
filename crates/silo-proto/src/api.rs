@@ -267,6 +267,7 @@ pub fn examples() -> Vec<Method> {
             tree: None,
             expanded: Some(vec!["src".into()]),
             scroll: Some([("src/main.rs".to_owned(), 120)].into()),
+            highlights: None,
         }),
         M::FilesRoot(FilesRootParams { block_id: b(), path: "~/src/silo".into() }),
         M::ServerInfo {},

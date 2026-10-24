@@ -12,7 +12,7 @@ use silo_proto::{
         ContentKind, Created, Event, FileFound, FileImage, FileKind, FileList, FileRead, FilesFindParams, FilesListParams, FilesReadImageParams,
         FilesReadParams, FilesRootParams, FilesSetParams, Method, RpcError, SpawnSpec,
     },
-    model::{Axis, BlockInfo, BlockKind, FilesState, TermSize},
+    model::{Axis, BlockInfo, BlockKind, FileHighlight, FilesState, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -350,10 +350,58 @@ async fn prepare(control: &Control, root: &Path) -> (Created, FilesState) {
     assert_eq!((state.active.as_deref(), state.tree, state.expanded.as_slice()), (Some("src/model.rs"), false, ["src".to_owned()].as_slice()));
     assert_eq!(state.scroll, [("src/main.rs".to_owned(), 40)].into(), "only open tabs keep a scroll");
     // Closing the active tab shows the last one; omitted fields stay.
-    let state: FilesState = control.call(Method::FilesSet(FilesSetParams { open: Some(vec!["src/main.rs".into()]), ..set(&id) })).await.unwrap();
+    let marks = [("src/main.rs".to_owned(), vec![mark(1, 1, Some("entry"))])].into();
+    let state: FilesState = control
+        .call(Method::FilesSet(FilesSetParams { open: Some(vec!["src/main.rs".into()]), highlights: Some(marks), ..set(&id) }))
+        .await
+        .unwrap();
     assert_eq!((state.active.as_deref(), state.tree, state.scroll.len()), (Some("src/main.rs"), false, 1));
+    assert_eq!(state.highlights["src/main.rs"], [mark(1, 1, Some("entry"))], "highlights are saved with the block");
     assert_eq!(info(control, &created).await.files.as_deref().unwrap().clone(), state);
     (created, state)
+}
+
+fn mark(start: u64, end: u64, note: Option<&str>) -> FileHighlight {
+    FileHighlight { start, end, note: note.map(str::to_owned) }
+}
+
+#[tokio::test]
+async fn highlights_belong_to_their_tab() {
+    let (home, root) = temp("highlights");
+    let task = start(&home).await;
+    let (control, _) = connect(&home).await;
+    let created = files(&control, &root).await;
+    let id = created.block_id.clone();
+    let call = |params: FilesSetParams| control.call::<FilesState>(Method::FilesSet(params));
+
+    // Opened and marked in one call; reversed ranges turn round, notes are trimmed.
+    let marks = [("src/main.rs".to_owned(), vec![mark(9, 3, Some("  here ")), mark(12, 12, Some(" "))])].into();
+    let state = call(FilesSetParams { active: Some("src/main.rs".into()), highlights: Some(marks), ..set(&id) }).await.unwrap();
+    assert_eq!(state.highlights["src/main.rs"], [mark(3, 9, Some("here")), mark(12, 12, None)]);
+    // A path not open keeps none; line 0 and too many are refused.
+    let marks = [("a.txt".to_owned(), vec![mark(1, 2, None)])].into();
+    let state = call(FilesSetParams { highlights: Some(marks), ..set(&id) }).await.unwrap();
+    assert!(!state.highlights.contains_key("a.txt"));
+    let zero = [("src/main.rs".to_owned(), vec![mark(0, 2, None)])].into();
+    assert_eq!(code(&call(FilesSetParams { highlights: Some(zero), ..set(&id) }).await.unwrap_err()), "bad_request");
+    let many = [("src/main.rs".to_owned(), vec![mark(1, 1, None); FileHighlight::PER_FILE + 1])].into();
+    assert_eq!(code(&call(FilesSetParams { highlights: Some(many), ..set(&id) }).await.unwrap_err()), "bad_request");
+    // Other changes leave them; an empty list clears them.
+    let state = call(FilesSetParams { tree: Some(false), ..set(&id) }).await.unwrap();
+    assert_eq!(state.highlights["src/main.rs"].len(), 2);
+    let state = call(FilesSetParams { highlights: Some([("src/main.rs".to_owned(), vec![])].into()), ..set(&id) }).await.unwrap();
+    assert!(state.highlights.is_empty());
+    // Closing the tab drops its highlights.
+    let marks = [("src/main.rs".to_owned(), vec![mark(1, 1, None)])].into();
+    call(FilesSetParams { highlights: Some(marks), ..set(&id) }).await.unwrap();
+    let state = call(FilesSetParams { open: Some(vec![]), ..set(&id) }).await.unwrap();
+    assert!(state.highlights.is_empty() && state.active.is_none());
+    // Older peers: a state without the field reads as none, and none is not written.
+    let old: FilesState = serde_json::from_value(serde_json::json!({"root": "/x"})).unwrap();
+    assert!(old.highlights.is_empty());
+    assert!(serde_json::to_value(&old).unwrap().get("highlights").is_none());
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
 }
 
 #[tokio::test]

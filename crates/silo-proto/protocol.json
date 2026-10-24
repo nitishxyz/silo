@@ -511,6 +511,31 @@
         ],
         "type": "object"
       },
+      "FileHighlight": {
+        "properties": {
+          "end": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "FilesState": {
         "properties": {
           "active": {
@@ -526,6 +551,15 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "highlights": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/$defs/FileHighlight"
+              },
+              "type": "array"
+            },
+            "type": "object"
           },
           "open": {
             "default": [],
@@ -4710,6 +4744,31 @@
             ],
             "type": "object"
           },
+          "FileHighlight": {
+            "properties": {
+              "end": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
           "FilesState": {
             "properties": {
               "active": {
@@ -4725,6 +4784,15 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "highlights": {
+                "additionalProperties": {
+                  "items": {
+                    "$ref": "#/$defs/FileHighlight"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
               },
               "open": {
                 "default": [],
@@ -7068,6 +7136,33 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "FileHighlight": {
+            "properties": {
+              "end": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "active": {
@@ -7083,6 +7178,15 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "highlights": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/$defs/FileHighlight"
+              },
+              "type": "array"
+            },
+            "type": "object"
           },
           "open": {
             "default": [],
@@ -7117,6 +7221,33 @@
     },
     "files.set": {
       "params": {
+        "$defs": {
+          "FileHighlight": {
+            "properties": {
+              "end": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "active": {
@@ -7134,6 +7265,18 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          },
+          "highlights": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/$defs/FileHighlight"
+              },
+              "type": "array"
+            },
+            "type": [
+              "object",
               "null"
             ]
           },
@@ -7170,6 +7313,33 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "FileHighlight": {
+            "properties": {
+              "end": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "active": {
@@ -7185,6 +7355,15 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "highlights": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/$defs/FileHighlight"
+              },
+              "type": "array"
+            },
+            "type": "object"
           },
           "open": {
             "default": [],
@@ -8918,6 +9097,31 @@
             ],
             "type": "object"
           },
+          "FileHighlight": {
+            "properties": {
+              "end": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
           "FilesState": {
             "properties": {
               "active": {
@@ -8933,6 +9137,15 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "highlights": {
+                "additionalProperties": {
+                  "items": {
+                    "$ref": "#/$defs/FileHighlight"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
               },
               "open": {
                 "default": [],

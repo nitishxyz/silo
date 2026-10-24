@@ -439,6 +439,27 @@ pub struct FilesState {
     /// Top line per open tab.
     #[serde(default)]
     pub scroll: std::collections::BTreeMap<String, u64>,
+    /// Marked line ranges per open tab (an agent's `files_show`); they go
+    /// with the tab when it closes. Additive: older peers ignore it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub highlights: std::collections::BTreeMap<String, Vec<FileHighlight>>,
+}
+
+/// Lines `start..=end` (1-based) of a file marked in a files block, with
+/// an optional short note shown beside them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileHighlight {
+    pub start: u64,
+    pub end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl FileHighlight {
+    /// Most highlights per file.
+    pub const PER_FILE: usize = 50;
+    /// Longest note, in characters.
+    pub const NOTE_MAX: usize = 300;
 }
 
 fn shown() -> bool {
@@ -456,7 +477,15 @@ impl FilesState {
     /// A fresh state showing `root`: no tabs, the tree shown.
     #[must_use]
     pub fn new(root: String) -> Self {
-        Self { root, open: Vec::new(), active: None, tree: true, expanded: Vec::new(), scroll: std::collections::BTreeMap::new() }
+        Self {
+            root,
+            open: Vec::new(),
+            active: None,
+            tree: true,
+            expanded: Vec::new(),
+            scroll: std::collections::BTreeMap::new(),
+            highlights: std::collections::BTreeMap::new(),
+        }
     }
 }
 

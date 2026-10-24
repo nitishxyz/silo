@@ -68,6 +68,11 @@ pub struct FilesSetParams {
     /// dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<BTreeMap<String, u64>>,
+    /// Marked lines per tab, replacing that tab's (an empty list clears
+    /// them). Applied after `open` and `active`; paths still not open are
+    /// dropped. Older servers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlights: Option<BTreeMap<String, Vec<crate::model::FileHighlight>>>,
 }
 
 /// `files.root`: show another directory; the view state starts afresh.
