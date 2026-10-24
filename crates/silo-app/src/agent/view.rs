@@ -2986,7 +2986,9 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
         // width, within the visible part (the box doesn't scroll it). The box reports a character's advance
         // as a share of its visible width (from before its first line), so its lines sweep at a constant speed.
         Block::Code { .. } if lines.is_some_and(<[_]>::is_empty) => div().relative().children(fx.map(|f| code_cell(f, id))).into_any_element(),
-        Block::Code { text, .. } => {
+        Block::Code { text, lang } => {
+            // Fenced code naming a language is coloured by `crate::syntax` (cached per text).
+            let syntax = lang.as_deref().and_then(crate::syntax::Language::from_name).and_then(|l| crate::syntax::cached_lines(l, text));
             let el = div()
                 .id(gpui::ElementId::Name(id.to_owned().into()))
                 .mb(px(reveal::CODE_MARGIN))
@@ -3003,10 +3005,15 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
             let code = scroll.scroller(id, el, true).child(div().flex_none().min_w_full().flex().flex_col().children(
                 text.lines().take(lines.map_or(usize::MAX, <[_]>::len)).enumerate().map(|(v, l)| {
                     let shown = if l.is_empty() { " ".to_owned() } else { reveal::expand_tabs(l).into_owned() };
-                    div()
-                        .whitespace_nowrap()
-                        .when(lines.is_some() && reveal::code_line(v, line_alpha(lines, v)) <= 0.0, |el| el.opacity(0.0))
-                        .child(super::select::code_line(id, starts.get(v).copied().unwrap_or(0), l, shown))
+                    div().whitespace_nowrap().when(lines.is_some() && reveal::code_line(v, line_alpha(lines, v)) <= 0.0, |el| el.opacity(0.0)).child(
+                        super::select::code_line(
+                            id,
+                            starts.get(v).copied().unwrap_or(0),
+                            l,
+                            shown,
+                            syntax.as_ref().and_then(|s| s.get(v)).map(|spans| crate::syntax::styles(spans, faint())).unwrap_or_default(),
+                        ),
+                    )
                 }),
             ));
             let (Some(lines), Some(f)) = (lines, fx) else { return code.into_any_element() };

@@ -5,10 +5,11 @@
 //! [`Language`], [`highlight`] the whole text into capture spans, then
 //! [`styles`] turns them into gpui highlights from the theme's syntax table.
 //! Grammars are the crates Zed uses; the queries are each grammar's own
-//! (see `queries/NOTICE`; Zed's are GPL and not used).
-// Used by the Files block and agent pane next; nothing calls it yet.
-#![allow(dead_code)]
+//! (see `queries/NOTICE`; Zed's are GPL and not used). The agent pane's
+//! code blocks go through [`cached_lines`]; the Files block highlights off
+//! the UI thread.
 
+mod cache;
 mod capture;
 mod config;
 mod highlight;
@@ -17,15 +18,13 @@ mod style;
 #[cfg(test)]
 mod tests;
 
-// Used by the Files block and agent pane next; nothing calls it yet.
-#[allow(unused_imports)]
+pub use cache::{Lines, cached_lines};
+#[allow(unused_imports, reason = "the tests use them through `super::*`")]
 pub use capture::{Capture, NONE, key_for};
-// Used by the Files block and agent pane next; nothing calls it yet.
-#[allow(unused_imports)]
-pub use highlight::{MAX_BYTES, MAX_LINE_CHARS, by_line, highlight, highlightable};
-// Used by the Files block and agent pane next; nothing calls it yet.
-#[allow(unused_imports)]
+#[allow(unused_imports, reason = "the tests use them through `super::*`")]
+pub use highlight::{MAX_BYTES, MAX_LINE_CHARS};
+pub use highlight::{by_line, highlight, highlightable};
 pub use language::Language;
-// Used by the Files block and agent pane next; nothing calls it yet.
-#[allow(unused_imports)]
-pub use style::{capture_style, highlight_styles, styles};
+pub use style::styles;
+#[allow(unused_imports, reason = "the tests use them through `super::*`")]
+pub use style::{capture_style, highlight_styles};

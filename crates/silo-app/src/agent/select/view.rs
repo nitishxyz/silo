@@ -139,8 +139,15 @@ pub(in crate::agent) fn line_starts(text: &str) -> Vec<usize> {
 }
 
 /// Code line `src` (starting at byte `base` of code block `leaf`) drawn as `shown` (tabs expanded; a space
-/// for an empty line), its selected part highlighted.
-pub(in crate::agent) fn code_line(leaf: &str, base: usize, src: &str, shown: String) -> AnyElement {
+/// for an empty line), coloured by `syntax` (byte ranges of `src`), its selected part highlighted.
+pub(in crate::agent) fn code_line(
+    leaf: &str,
+    base: usize,
+    src: &str,
+    shown: String,
+    syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
+) -> AnyElement {
+    let syntax: Vec<_> = syntax.into_iter().map(|(r, s)| (text::to_shown(src, r.start)..text::to_shown(src, r.end), s)).collect();
     let highlights = selected(leaf)
         .and_then(|(r, bg)| {
             // An empty line wholly inside shows its space selected.
@@ -150,9 +157,9 @@ pub(in crate::agent) fn code_line(leaf: &str, base: usize, src: &str, shown: Str
                 let (a, b) = (r.start.clamp(base, base + src.len()) - base, r.end.clamp(base, base + src.len()) - base);
                 (a < b).then(|| text::to_shown(src, a)..text::to_shown(src, b))?
             };
-            Some(text::overlay(Vec::new(), range, bg))
+            Some(text::overlay(syntax.clone(), range, bg))
         })
-        .unwrap_or_default();
+        .unwrap_or(syntax);
     let styled = StyledText::new(shown).with_highlights(highlights);
     let layout = styled.layout().clone();
     register(leaf, base, Some(src), &layout, styled.into_any_element())

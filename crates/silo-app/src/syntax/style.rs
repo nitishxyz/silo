@@ -51,6 +51,7 @@ pub fn styles(spans: &[(Range<usize>, Capture)], bg: u32) -> Vec<(Range<usize>, 
 /// [`highlight`] then [`styles`]: `source` as `lang`, ready for
 /// `StyledText::with_highlights`.
 #[must_use]
+#[allow(dead_code, reason = "the tests' shorthand")]
 pub fn highlight_styles(lang: Language, source: &str, bg: u32) -> Vec<(Range<usize>, HighlightStyle)> {
     styles(&highlight(lang, source), bg)
 }

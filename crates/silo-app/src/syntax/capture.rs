@@ -12,6 +12,7 @@ pub const NONE: &str = "none";
 
 impl Capture {
     #[must_use]
+    #[allow(dead_code, reason = "the tests read captures by name")]
     pub const fn name(self) -> &'static str {
         self.0
     }
