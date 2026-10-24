@@ -146,6 +146,16 @@
               "null"
             ]
           },
+          "files": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FilesState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -215,6 +225,10 @@
           },
           {
             "const": "agent",
+            "type": "string"
+          },
+          {
+            "const": "files",
             "type": "string"
           },
           {
@@ -494,6 +508,51 @@
         },
         "required": [
           "index"
+        ],
+        "type": "object"
+      },
+      "FilesState": {
+        "properties": {
+          "active": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expanded": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "open": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scroll": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "tree": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
         ],
         "type": "object"
       },
@@ -1756,6 +1815,41 @@
           },
           "event": {
             "const": "session.watchers",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "block_id",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "files.changed",
             "type": "string"
           }
         },
@@ -3990,6 +4084,10 @@
                 "type": "string"
               },
               {
+                "const": "files",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -4144,6 +4242,10 @@
               },
               {
                 "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "files",
                 "type": "string"
               },
               {
@@ -4406,6 +4508,16 @@
                   "null"
                 ]
               },
+              "files": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FilesState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -4475,6 +4587,10 @@
               },
               {
                 "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "files",
                 "type": "string"
               },
               {
@@ -4591,6 +4707,51 @@
             "required": [
               "process",
               "since"
+            ],
+            "type": "object"
+          },
+          "FilesState": {
+            "properties": {
+              "active": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expanded": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "open": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "scroll": {
+                "additionalProperties": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "default": {},
+                "type": "object"
+              },
+              "tree": {
+                "default": true,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "root"
             ],
             "type": "object"
           },
@@ -6604,6 +6765,458 @@
         "type": "object"
       }
     },
+    "files.find": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "title": "FileFound",
+        "type": "object"
+      }
+    },
+    "files.list": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FileEntry": {
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/FileKind"
+              },
+              "mtime": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "size": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FileKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "FileKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "file",
+                  "dir",
+                  "symlink"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/$defs/FileEntry"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "entries"
+        ],
+        "title": "FileList",
+        "type": "object"
+      }
+    },
+    "files.read": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ContentKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              },
+              {
+                "const": "binary",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/ContentKind"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "mtime": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "mime",
+          "size",
+          "mtime"
+        ],
+        "title": "FileRead",
+        "type": "object"
+      }
+    },
+    "files.read_image": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "data_base64": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "mtime": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "mime",
+          "size",
+          "mtime",
+          "data_base64"
+        ],
+        "title": "FileImage",
+        "type": "object"
+      }
+    },
+    "files.root": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expanded": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "open": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scroll": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "tree": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "FilesState",
+        "type": "object"
+      }
+    },
+    "files.set": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "expanded": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scroll": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "tree": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expanded": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "open": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scroll": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "tree": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "FilesState",
+        "type": "object"
+      }
+    },
     "grant.create": {
       "params": {
         "$defs": {
@@ -7720,6 +8333,10 @@
                 "type": "string"
               },
               {
+                "const": "files",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -8099,6 +8716,16 @@
                   "null"
                 ]
               },
+              "files": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FilesState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -8168,6 +8795,10 @@
               },
               {
                 "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "files",
                 "type": "string"
               },
               {
@@ -8284,6 +8915,51 @@
             "required": [
               "process",
               "since"
+            ],
+            "type": "object"
+          },
+          "FilesState": {
+            "properties": {
+              "active": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expanded": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "open": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "scroll": {
+                "additionalProperties": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "default": {},
+                "type": "object"
+              },
+              "tree": {
+                "default": true,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "root"
             ],
             "type": "object"
           },
@@ -9245,6 +9921,10 @@
               },
               {
                 "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "files",
                 "type": "string"
               },
               {

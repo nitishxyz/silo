@@ -28,6 +28,7 @@ fn spawn(id: &str, script: &str) -> BlockHandle {
         pid: None,
         browser: None,
         agent: None,
+        files: None,
     };
     let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), script.into()], cwd: Some(std::env::temp_dir()), env: Vec::new() };
     let (notes, _) = unbounded_channel();

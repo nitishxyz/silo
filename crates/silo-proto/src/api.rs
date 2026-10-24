@@ -12,7 +12,8 @@ use crate::control::{
     ServerInfo, ServiceSocket, SizeInfo, SpawnSpec,
 };
 use crate::data::{ClipKind, ClipboardLocation};
-use crate::model::{Axis, BlockKind, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
+use crate::files::*;
+use crate::model::{Axis, BlockKind, FilesState, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
 
 /// The description of method `name`; `None` for an unknown method.
 #[must_use]
@@ -110,6 +111,11 @@ fn result_schema(method: &Method) -> Schema {
         M::BrowserNetwork(_) => schema_for!(BrowserNetworkResult),
         M::BrowserScreenshot(_) => schema_for!(BrowserScreenshotResult),
         M::BrowserFetch(_) => schema_for!(BrowserFetchResult),
+        M::FilesList(_) => schema_for!(FileList),
+        M::FilesRead(_) => schema_for!(FileRead),
+        M::FilesReadImage(_) => schema_for!(FileImage),
+        M::FilesFind(_) => schema_for!(FileFound),
+        M::FilesSet(_) | M::FilesRoot(_) => schema_for!(FilesState),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -250,6 +256,19 @@ pub fn examples() -> Vec<Method> {
             quality: None,
         }),
         M::BrowserFetch(BrowserFetchParams { url: "https://example.com".into(), timeout_ms: None, screenshot: None, selector: Some("main".into()) }),
+        M::FilesList(FilesListParams { block_id: b(), path: "src".into() }),
+        M::FilesRead(FilesReadParams { block_id: b(), path: "src/main.rs".into(), max_bytes: None }),
+        M::FilesReadImage(FilesReadImageParams { block_id: b(), path: "docs/logo.png".into() }),
+        M::FilesFind(FilesFindParams { block_id: b(), query: "mainrs".into(), limit: Some(20) }),
+        M::FilesSet(FilesSetParams {
+            block_id: b(),
+            open: Some(vec!["src/main.rs".into(), "Cargo.toml".into()]),
+            active: Some("src/main.rs".into()),
+            tree: None,
+            expanded: Some(vec!["src".into()]),
+            scroll: Some([("src/main.rs".to_owned(), 120)].into()),
+        }),
+        M::FilesRoot(FilesRootParams { block_id: b(), path: "~/src/silo".into() }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

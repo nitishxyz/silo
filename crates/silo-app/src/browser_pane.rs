@@ -29,7 +29,8 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     match info.map(|i| i.kind) {
         Some(BlockKind::Browser) => Kind::Browser,
         Some(BlockKind::Agent) => Kind::Agent,
-        Some(BlockKind::Unknown) => Kind::Unsupported,
+        // No files view yet: unsupported rather than a terminal.
+        Some(BlockKind::Files | BlockKind::Unknown) => Kind::Unsupported,
         _ => Kind::Terminal,
     }
 }
@@ -2052,6 +2053,7 @@ mod tests {
             pid: None,
             browser: (kind == BlockKind::Browser).then(|| BrowserState::new("about:blank".into())),
             agent: (kind == BlockKind::Agent).then(Default::default),
+            files: None,
         }
     }
 

@@ -13,6 +13,7 @@ pub mod bundle;
 pub mod close_guard;
 pub mod conn;
 pub mod drops;
+pub mod files;
 pub mod grants;
 pub mod handoff;
 pub mod layout_cmds;

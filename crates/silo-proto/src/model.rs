@@ -345,6 +345,9 @@ pub enum BlockKind {
     Browser,
     /// An otto session shown as a chat; no process.
     Agent,
+    /// A read-only view of a directory on the server (feature `files`);
+    /// no process.
+    Files,
     /// A block kind of a newer server: shown as unsupported.
     #[serde(other)]
     Unknown,
@@ -409,6 +412,52 @@ pub struct BlockInfo {
     /// Shown otto session; `Some` exactly when `kind` is [`BlockKind::Agent`].
     #[serde(default)]
     pub agent: Option<AgentState>,
+    /// View state; `Some` exactly when `kind` is [`BlockKind::Files`]
+    /// (boxed: most blocks have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Box<FilesState>>,
+}
+
+/// Server-held state of a files block (docs/FILES_BLOCK.md §1). Paths are
+/// relative to `root`, `/`-separated, without `.` or `..` components.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FilesState {
+    /// Absolute, canonical path; the block never reads outside it.
+    pub root: String,
+    /// Open tabs, in order.
+    #[serde(default)]
+    pub open: Vec<String>,
+    /// The tab shown.
+    #[serde(default)]
+    pub active: Option<String>,
+    /// The tree is shown.
+    #[serde(default = "shown")]
+    pub tree: bool,
+    /// Expanded directories in the tree.
+    #[serde(default)]
+    pub expanded: Vec<String>,
+    /// Top line per open tab.
+    #[serde(default)]
+    pub scroll: std::collections::BTreeMap<String, u64>,
+}
+
+fn shown() -> bool {
+    true
+}
+
+impl FilesState {
+    /// Most open tabs.
+    pub const OPEN_MAX: usize = 100;
+    /// Most expanded directories.
+    pub const EXPANDED_MAX: usize = 1000;
+    /// Longest path accepted.
+    pub const PATH_MAX: usize = 4096;
+
+    /// A fresh state showing `root`: no tabs, the tree shown.
+    #[must_use]
+    pub fn new(root: String) -> Self {
+        Self { root, open: Vec::new(), active: None, tree: true, expanded: Vec::new(), scroll: std::collections::BTreeMap::new() }
+    }
 }
 
 /// Server-held state of an agent block; the app sets it with `agent.set`.

@@ -2040,6 +2040,7 @@ mod tests {
             pid: None,
             browser: None,
             agent: None,
+            files: None,
         }
     }
 

@@ -21,6 +21,10 @@ libc.workspace = true
 rustix.workspace = true
 futures.workspace = true
 sha2 = "0.10"
+data-encoding.workspace = true
+# Files blocks: `.gitignore`-aware walks and folder watches.
+ignore = "0.4"
+notify = "8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { workspace = true, features = ["NSData"] }
@@ -28,7 +32,6 @@ objc2-app-kit = { workspace = true, features = ["NSPasteboard"] }
 
 [dev-dependencies]
 silo-client.workspace = true
-data-encoding.workspace = true
 
 # One binary for the files in tests/it.rs (one link instead of one
 # per file); files needing a process of their own stay separate.

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::agent::*;
+pub use crate::files::*;
 
 use crate::{
     access::{Grant, Granted, Rights, Scope},
@@ -220,6 +221,18 @@ pub enum Method {
     BrowserScreenshot(BrowserScreenshotParams),
     #[serde(rename = "browser.fetch")]
     BrowserFetch(BrowserFetchParams),
+    #[serde(rename = "files.list")]
+    FilesList(FilesListParams),
+    #[serde(rename = "files.read")]
+    FilesRead(FilesReadParams),
+    #[serde(rename = "files.read_image")]
+    FilesReadImage(FilesReadImageParams),
+    #[serde(rename = "files.find")]
+    FilesFind(FilesFindParams),
+    #[serde(rename = "files.set")]
+    FilesSet(FilesSetParams),
+    #[serde(rename = "files.root")]
+    FilesRoot(FilesRootParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -258,6 +271,8 @@ pub enum Method {
     SessionCreate {
         #[serde(default)]
         name: Option<String>,
+        /// Files blocks: `cwd` is the root (default: the cwd of the block
+        /// split or of the active window's focused block, else `$HOME`).
         #[serde(default)]
         spawn: SpawnSpec,
         #[serde(default)]
@@ -281,6 +296,8 @@ pub enum Method {
     #[serde(rename = "window.create")]
     WindowCreate {
         session_id: SessionId,
+        /// Files blocks: `cwd` is the root (default: the cwd of the block
+        /// split or of the active window's focused block, else `$HOME`).
         #[serde(default)]
         spawn: SpawnSpec,
         #[serde(default)]
@@ -314,6 +331,8 @@ pub enum Method {
     BlockSplit {
         block_id: BlockId,
         axis: Axis,
+        /// Files blocks: `cwd` is the root (default: the cwd of the block
+        /// split or of the active window's focused block, else `$HOME`).
         #[serde(default)]
         spawn: SpawnSpec,
         #[serde(default)]
@@ -781,6 +800,12 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.network", "Read captured network requests."),
     ("browser.screenshot", "Capture the page or an element as an image."),
     ("browser.fetch", "Load a URL in a hidden page of the app (agent profile) and return its rendered HTML."),
+    ("files.list", "List a directory of a files block."),
+    ("files.read", "Read a file of a files block as text, or describe a binary."),
+    ("files.read_image", "Read an image (png, jpeg, gif, webp, svg) of a files block, base64."),
+    ("files.find", "Fuzzy-find files under a files block's root, skipping ignored paths."),
+    ("files.set", "Change a files block's tabs, tree, expanded folders or scroll."),
+    ("files.root", "Show another directory in a files block."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),
@@ -790,18 +815,18 @@ pub const METHODS: &[(&str, &str)] = &[
     ("ping", "Liveness probe; answers once the server's state is reachable."),
     ("events.subscribe", "Start receiving sequenced events on this connection."),
     ("session.list", "List sessions."),
-    ("session.create", "Create a session with one window running a shell, command or browser."),
+    ("session.create", "Create a session with one window running a shell, command, browser, agent or files."),
     ("session.view", "Full session tree and block metadata."),
     ("session.rename", "Rename a session."),
     ("session.close", "Close a session and terminate its processes."),
-    ("window.create", "Add a window (tab) with a terminal or browser block to a session."),
+    ("window.create", "Add a window (tab) with a terminal, browser, agent or files block to a session."),
     ("window.select", "Make a window the session's active window."),
     ("window.step", "Select the window delta places from the active one, wrapping."),
     ("window.close", "Close a window and its blocks."),
     ("window.rename", "Set or clear a window's name."),
     ("window.move", "Move a window to a new index."),
     ("block.view", "One block's metadata and status."),
-    ("block.split", "Split a block, starting a new terminal or browser next to it."),
+    ("block.split", "Split a block, starting a new terminal, browser, agent or files block next to it."),
     ("block.spawn", "Start a parked terminal or command block owned by a block."),
     ("block.park", "Take a block out of its layout; it keeps running, parked."),
     ("block.reveal", "Show a parked block as a float or a split."),
@@ -1053,6 +1078,7 @@ pub const EVENTS: &[&str] = &[
     "block.attention",
     "block.command_finished",
     "session.watchers",
+    "files.changed",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1120,6 +1146,17 @@ pub enum Event {
     /// Who watches a session's blocks changed; no revision bump.
     #[serde(rename = "session.watchers")]
     SessionWatchers { session_id: SessionId, watchers: Vec<Watcher> },
+    /// Files changed on disk under a files block's watched folders (the
+    /// root, expanded folders and open files' folders), debounced. Paths
+    /// are relative to the root (empty: the root); `truncated` when there
+    /// were too many to list: re-read everything shown.
+    #[serde(rename = "files.changed")]
+    FilesChanged {
+        block_id: BlockId,
+        paths: Vec<String>,
+        #[serde(default)]
+        truncated: bool,
+    },
 }
 
 /// Who made a call: a client's label and, for a process in one of this

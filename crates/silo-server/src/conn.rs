@@ -788,6 +788,12 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::BrowserScreenshot(_)
         | Method::BrowserFetch(_) => crate::app_bridge::handle(server, client_id, method).await,
         Method::BlockCommands { .. } | Method::TerminalCommandOutput { .. } => crate::prompts::handle(server, client_id, method).await,
+        Method::FilesList(_)
+        | Method::FilesRead(_)
+        | Method::FilesReadImage(_)
+        | Method::FilesFind(_)
+        | Method::FilesSet(_)
+        | Method::FilesRoot(_) => crate::files::handle(server, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }
         | Method::WindowStep { .. }

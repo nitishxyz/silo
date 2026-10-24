@@ -417,6 +417,13 @@ pub enum Note {
     /// Terminal content or configuration changed for the first time since
     /// the last [`Checkpoint`]; sent once per checkpoint.
     Dirty(BlockId),
+    /// Files changed under a files block's watched folders (absolute
+    /// paths), seen by its watcher on canonical `root`.
+    FilesChanged {
+        block_id: BlockId,
+        root: std::path::PathBuf,
+        paths: Vec<std::path::PathBuf>,
+    },
 }
 
 pub struct BlockHandle {

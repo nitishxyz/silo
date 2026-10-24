@@ -3,6 +3,7 @@
 mod browser;
 mod close_guard;
 mod compat;
+mod files;
 mod handoff_block;
 mod lifecycle;
 mod line_mode;

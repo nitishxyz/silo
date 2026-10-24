@@ -604,6 +604,8 @@ impl Workspace {
                     view.watchers.clone_from(watchers);
                 }
             }
+            // No files view yet (docs/FILES_BLOCK.md §6 step 3).
+            ConnEvent::Event(Event::FilesChanged { .. }) => {}
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some((pane, _)) = self.browsers.get(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));

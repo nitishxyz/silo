@@ -29,6 +29,7 @@ fn info(id: &str) -> BlockInfo {
         pid: None,
         browser: None,
         agent: None,
+        files: None,
     }
 }
 

@@ -42,6 +42,9 @@ pub mod feature {
     /// `block.spawn` takes `kind: browser` (and `url`): a parked browser.
     /// Older servers ignore the kind and spawn a shell, so gate on it.
     pub const PARKED_BROWSERS: &str = "parked_browsers";
+    /// Files blocks (`kind: files`), the `files.*` methods and
+    /// `files.changed` (docs/FILES_BLOCK.md).
+    pub const FILES: &str = "files";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -49,7 +52,8 @@ pub mod feature {
 }
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS];
+pub const FEATURES: &[&str] =
+    &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS, feature::FILES];
 
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this
