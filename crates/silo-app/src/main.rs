@@ -51,6 +51,7 @@ mod settings_table;
 mod share;
 mod status;
 mod switcher;
+mod syntax;
 mod terminal_prefs;
 mod text_field;
 mod theme;

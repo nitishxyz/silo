@@ -594,6 +594,145 @@ fn update_blue_for(light: bool) -> u32 {
     if light { 0x0000_64d2 } else { 0x000a_6ce8 }
 }
 
+// ---- syntax colours (code in the Files block and agent code blocks) ----
+
+/// Where a syntax colour comes from in the current terminal palette, so code
+/// takes every built-in theme's own colours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SyntaxInk {
+    /// The theme foreground.
+    Foreground,
+    /// An ANSI palette slot, 0–15.
+    Ansi(u8),
+    /// Halfway between two ANSI slots: orange is red and yellow.
+    Blend(u8, u8),
+    /// The foreground faded this far toward the background.
+    Faded(f32),
+}
+
+/// A syntax table entry: a colour plus font style.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyntaxStyle {
+    pub ink: SyntaxInk,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl SyntaxStyle {
+    const fn ink(ink: SyntaxInk) -> Self {
+        Self { ink, bold: false, italic: false, underline: false }
+    }
+    const fn bold(self) -> Self {
+        Self { bold: true, ..self }
+    }
+    const fn italic(self) -> Self {
+        Self { italic: true, ..self }
+    }
+    const fn underline(self) -> Self {
+        Self { underline: true, ..self }
+    }
+}
+
+const RED: SyntaxInk = SyntaxInk::Ansi(1);
+const GREEN: SyntaxInk = SyntaxInk::Ansi(2);
+const YELLOW: SyntaxInk = SyntaxInk::Ansi(3);
+const BLUE: SyntaxInk = SyntaxInk::Ansi(4);
+const MAGENTA: SyntaxInk = SyntaxInk::Ansi(5);
+const CYAN: SyntaxInk = SyntaxInk::Ansi(6);
+const ORANGE: SyntaxInk = SyntaxInk::Blend(1, 3);
+const FG: SyntaxInk = SyntaxInk::Foreground;
+const COMMENT: SyntaxInk = SyntaxInk::Faded(0.5);
+const SUBTLE: SyntaxInk = SyntaxInk::Faded(0.35);
+const PUNCTUATION: SyntaxInk = SyntaxInk::Faded(0.12);
+
+/// The syntax table, keyed by tree-sitter capture name. A capture takes the
+/// entry of its longest dotted prefix (`function.method` → `function`).
+/// Keys and colours follow Zed's One Dark / One Light, each mapped to the
+/// nearest terminal palette slot; the `text.*`, `escape`, `delimiter`,
+/// `*.builtin` and `comment.documentation` keys are the names the upstream
+/// grammars' queries use where Zed's differ.
+pub const SYNTAX: &[(&str, SyntaxStyle)] = &[
+    ("attribute", SyntaxStyle::ink(BLUE)),
+    ("boolean", SyntaxStyle::ink(ORANGE)),
+    ("comment", SyntaxStyle::ink(COMMENT)),
+    ("comment.doc", SyntaxStyle::ink(SUBTLE)),
+    ("comment.documentation", SyntaxStyle::ink(SUBTLE)),
+    ("constant", SyntaxStyle::ink(YELLOW)),
+    ("constant.builtin", SyntaxStyle::ink(ORANGE)),
+    ("constructor", SyntaxStyle::ink(BLUE)),
+    ("delimiter", SyntaxStyle::ink(PUNCTUATION)),
+    ("diff.minus", SyntaxStyle::ink(RED)),
+    ("diff.plus", SyntaxStyle::ink(GREEN)),
+    ("embedded", SyntaxStyle::ink(FG)),
+    ("emphasis", SyntaxStyle::ink(BLUE).italic()),
+    ("emphasis.strong", SyntaxStyle::ink(ORANGE).bold()),
+    ("enum", SyntaxStyle::ink(CYAN)),
+    ("escape", SyntaxStyle::ink(SUBTLE)),
+    ("function", SyntaxStyle::ink(BLUE)),
+    ("keyword", SyntaxStyle::ink(MAGENTA)),
+    ("label", SyntaxStyle::ink(BLUE)),
+    ("link_text", SyntaxStyle::ink(BLUE).italic()),
+    ("link_uri", SyntaxStyle::ink(CYAN).underline()),
+    ("number", SyntaxStyle::ink(ORANGE)),
+    ("operator", SyntaxStyle::ink(CYAN)),
+    ("preproc", SyntaxStyle::ink(MAGENTA)),
+    ("property", SyntaxStyle::ink(RED)),
+    ("punctuation", SyntaxStyle::ink(PUNCTUATION)),
+    ("punctuation.list_marker", SyntaxStyle::ink(RED)),
+    ("punctuation.special", SyntaxStyle::ink(RED)),
+    ("selector", SyntaxStyle::ink(YELLOW)),
+    ("selector.pseudo", SyntaxStyle::ink(BLUE)),
+    ("string", SyntaxStyle::ink(GREEN)),
+    ("string.escape", SyntaxStyle::ink(SUBTLE)),
+    ("string.regex", SyntaxStyle::ink(ORANGE)),
+    ("string.special", SyntaxStyle::ink(ORANGE)),
+    ("tag", SyntaxStyle::ink(BLUE)),
+    ("text.emphasis", SyntaxStyle::ink(FG).italic()),
+    ("text.literal", SyntaxStyle::ink(GREEN)),
+    ("text.reference", SyntaxStyle::ink(BLUE)),
+    ("text.strong", SyntaxStyle::ink(FG).bold()),
+    ("text.title", SyntaxStyle::ink(RED).bold()),
+    ("text.uri", SyntaxStyle::ink(CYAN).underline()),
+    ("title", SyntaxStyle::ink(RED).bold()),
+    ("type", SyntaxStyle::ink(CYAN)),
+    ("variable", SyntaxStyle::ink(FG)),
+    ("variable.builtin", SyntaxStyle::ink(ORANGE)),
+    ("variable.parameter", SyntaxStyle::ink(RED)),
+    ("variable.special", SyntaxStyle::ink(ORANGE)),
+    ("variant", SyntaxStyle::ink(BLUE)),
+];
+
+/// Minimum contrast of syntax colours on the code's background: palette
+/// colours that fall short (yellow on a light theme) step toward the ink.
+pub const SYNTAX_CONTRAST: f32 = 3.0;
+
+/// The [`SYNTAX`] entry named exactly `key`.
+#[must_use]
+pub fn syntax_style(key: &str) -> Option<SyntaxStyle> {
+    SYNTAX.iter().find(|(k, _)| *k == key).map(|&(_, s)| s)
+}
+
+/// `ink` in the current theme, reading on `bg` (the code's background).
+#[must_use]
+pub fn syntax_color(ink: SyntaxInk, bg: u32) -> u32 {
+    let config = terminal_config();
+    syntax_color_in(&config.palette, config.foreground, config.background, ink, bg)
+}
+
+/// [`syntax_color`] for a given palette, foreground and theme background.
+#[must_use]
+pub fn syntax_color_in(palette: &[u32; 16], fg: u32, theme_bg: u32, ink: SyntaxInk, bg: u32) -> u32 {
+    let slot = |i: u8| palette[usize::from(i) % 16];
+    let base = match ink {
+        SyntaxInk::Foreground => fg,
+        SyntaxInk::Ansi(i) => slot(i),
+        SyntaxInk::Blend(a, b) => mix(slot(a), slot(b), 0.5),
+        SyntaxInk::Faded(t) => mix(fg, theme_bg, t),
+    };
+    reading(base, ink_for(bg, theme_bg, fg), &[bg], 0.0, SYNTAX_CONTRAST)
+}
+
 /// This app's desired terminal configuration, reported to the server for
 /// every attached block.
 #[must_use]

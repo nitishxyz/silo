@@ -31,6 +31,23 @@ qrcode = { version = "0.14", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg", "gif", "webp"] }
 unicode-width = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tree-sitter.workspace = true
+streaming-iterator.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-css.workspace = true
+tree-sitter-diff.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-html.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-md.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-toml-ng.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-yaml.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
