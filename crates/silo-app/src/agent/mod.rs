@@ -10,6 +10,7 @@ mod attach;
 pub(crate) mod client;
 pub(crate) mod editor;
 mod header;
+mod jobs;
 mod markdown;
 pub(crate) mod mention;
 mod pill_input;
@@ -385,6 +386,8 @@ pub struct AgentPane {
     /// Subagent calls seen (the session list is refreshed when they change).
     subagent_calls: usize,
     subs: subagents::Subs,
+    /// Background shell jobs: detaches in flight.
+    shell_jobs: jobs::ShellJobs,
     /// The send circle lights up when there is something to send.
     send_ready: crate::motion::Toggle,
     /// The activity row at the transcript's end (`Thinking…` + Stop).
@@ -538,6 +541,7 @@ impl AgentPane {
             bar_shown: HashMap::new(),
             subagent_calls: 0,
             subs: subagents::Subs::default(),
+            shell_jobs: jobs::ShellJobs::default(),
             send_ready: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             activity: crate::motion::Toggle::new(false, crate::motion::UI),
             bottom_shown: crate::motion::Toggle::new(false, crate::motion::UI),
@@ -861,6 +865,7 @@ impl AgentPane {
         self.parsed.clear();
         self.title.clear();
         self.reset_subagents();
+        self.reset_jobs();
         self.update = Update::default();
         self.set_running(false, None);
         // A prompt that is creating this session keeps its bubble.

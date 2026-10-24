@@ -471,3 +471,54 @@ async fn nonreading_socket_is_closed_without_harming_other_clients() {
     healthy.call(Method::Ping {}).await.unwrap();
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_detached_shell_call_returns_and_its_job_reports_later() {
+    let f = Fixture::new(vec![call("shell", json!({"command":"sleep 0.4; printf finished"})), text("carry on"), text("seen")]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let session = f.session(&client).await;
+    let follower = SessionFollower::new(client.clone(), &session.id).await.unwrap();
+    assert!(client.detach_shell(&session.id, "call1").await.unwrap_err().to_string().contains("no running shell command"));
+    prompt(&client, &session.id).await;
+    // Detach it once it runs: the call returns `Started <job>` and the turn goes on.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.detach_shell(&session.id, "call1").await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mirror = finished(&follower).await;
+    let started = mirror.items.iter().flat_map(|i| &i.parts).find_map(|p| match p {
+        Part::ToolResult { content, .. } => content.iter().find_map(|c| match c {
+            otto_llm::ResultPart::Text { text } => Some(text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    });
+    let started = started.unwrap();
+    assert!(started.starts_with("Started job-"), "{started}");
+    let job = started["Started ".len()..].split(':').next().unwrap().to_owned();
+    let listed = client.jobs(&session.id).await.unwrap();
+    assert_eq!((listed.len(), listed[0].job_id.as_str(), listed[0].call_id.as_str()), (1, job.as_str(), "call1"));
+    assert!(client.kill_job(&session.id, "job-none").await.is_err());
+    // Its report arrives as a message and starts a turn.
+    let mut changes = follower.changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = changes.borrow_and_update().clone();
+            let reported = state.mirror.items.iter().flat_map(|i| &i.parts).any(|p| {
+                matches!(p, Part::System { text } if text.starts_with(&format!("Background shell {job} (")) && text.ends_with("exited with code 0.\nfinished"))
+            });
+            if reported && state.mirror.items.last().is_some_and(|i| i.text() == "seen") {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(client.jobs(&session.id).await.unwrap()[0].completed);
+    server.shutdown().await.unwrap();
+}

@@ -699,6 +699,37 @@ impl Runtime {
     pub async fn compact(&self, id: &str) -> Result<()> {
         self.session(id).await?.compact().await
     }
+    fn jobs(&self) -> Arc<otto_tools::builtin::shell::Jobs> {
+        self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).jobs.clone()
+    }
+    /// The user detaches session `id`'s running shell call `call_id` (`shell.detach`).
+    pub async fn detach_shell(&self, id: &str, call_id: &str) -> Result<()> {
+        self.session(id).await?;
+        if self.jobs().detach(id, call_id) { Ok(()) } else { Err(Error::Invalid(format!("no running shell command {call_id}"))) }
+    }
+    /// Session `id`'s background shell jobs (`job.list`).
+    pub async fn shell_jobs(&self, id: &str) -> Result<Vec<otto_proto::JobInfo>> {
+        self.session(id).await?;
+        Ok(self
+            .jobs()
+            .list(id)
+            .await
+            .into_iter()
+            .map(|j| otto_proto::JobInfo {
+                job_id: j.job_id,
+                command: j.command,
+                call_id: j.call_id,
+                block_id: j.block_id,
+                started_at: j.started_at,
+                completed: j.completed,
+            })
+            .collect())
+    }
+    /// Stop session `id`'s job `job_id` (`job.kill`).
+    pub async fn kill_job(&self, id: &str, job_id: &str) -> Result<()> {
+        self.session(id).await?;
+        if self.jobs().kill(id, job_id).await { Ok(()) } else { Err(Error::Invalid(format!("no job {job_id} in this session"))) }
+    }
     pub async fn fork(&self, id: &str, at_seq: i64) -> Result<SessionHandle> {
         let id = id.to_owned();
         let from = id.clone();

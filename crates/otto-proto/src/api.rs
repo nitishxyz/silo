@@ -75,6 +75,7 @@ fn result_schema(method: &Method) -> Schema {
         M::FilesComplete { .. } => schema_for!(Vec<FileMatch>),
         M::ConfigGet { .. } => schema_for!(ConfigValue),
         M::PlanUsage { .. } => schema_for!(Vec<ProviderPlan>),
+        M::JobList { .. } => schema_for!(Vec<JobInfo>),
         M::ServerShutdown {}
         | M::Ping {}
         | M::SessionUnsubscribe { .. }
@@ -86,6 +87,8 @@ fn result_schema(method: &Method) -> Schema {
         | M::SessionCancel { .. }
         | M::SessionHandBack { .. }
         | M::SessionCompact { .. }
+        | M::ShellDetach { .. }
+        | M::JobKill { .. }
         | M::ApprovalAnswer { .. }
         | M::QuestionAnswer { .. }
         | M::AuthLoginCancel { .. }
@@ -147,6 +150,9 @@ pub fn examples() -> Vec<Method> {
         M::SessionCancel { session_id: "s1".into() },
         M::SessionHandBack { session_id: "s1".into() },
         M::SessionCompact { session_id: "s1".into() },
+        M::ShellDetach { session_id: "s1".into(), call_id: "call1".into() },
+        M::JobList { session_id: "s1".into() },
+        M::JobKill { session_id: "s1".into(), job_id: "job-1".into() },
         M::ApprovalAnswer { session_id: "s1".into(), approval_id: "a1".into(), decision: ApprovalDecision::Allow, note: None },
         M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into() },
         M::ModelList { provider: None },

@@ -172,6 +172,15 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             runtime.compact(&session_id).await.map_err(core_error)?;
             Ok(json!({}))
         }
+        Method::ShellDetach { session_id, call_id } => {
+            runtime.detach_shell(&session_id, &call_id).await.map_err(core_error)?;
+            Ok(json!({}))
+        }
+        Method::JobList { session_id } => Ok(json!(runtime.shell_jobs(&session_id).await.map_err(core_error)?)),
+        Method::JobKill { session_id, job_id } => {
+            runtime.kill_job(&session_id, &job_id).await.map_err(core_error)?;
+            Ok(json!({}))
+        }
         Method::ApprovalAnswer { session_id, approval_id, decision, note } => {
             runtime.answer_approval_with_note(&session_id, &approval_id, decision, note).await.map_err(core_error)?;
             Ok(json!({}))

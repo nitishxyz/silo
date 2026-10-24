@@ -308,6 +308,18 @@ impl Connection {
     pub async fn compact(&self, session_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionCompact { session_id: session_id.into() }).await
     }
+    /// Detach a running shell call: it returns now and its command runs on as a background job.
+    pub async fn detach_shell(&self, session_id: &str, call_id: &str) -> Result<Empty> {
+        self.call_typed(Method::ShellDetach { session_id: session_id.into(), call_id: call_id.into() }).await
+    }
+    /// The session's background shell jobs.
+    pub async fn jobs(&self, session_id: &str) -> Result<Vec<JobInfo>> {
+        self.call_typed(Method::JobList { session_id: session_id.into() }).await
+    }
+    /// Stop one of the session's background shell jobs.
+    pub async fn kill_job(&self, session_id: &str, job_id: &str) -> Result<Empty> {
+        self.call_typed(Method::JobKill { session_id: session_id.into(), job_id: job_id.into() }).await
+    }
     /// Withdraw a pending input (queued, or a steer the model has not taken yet).
     pub async fn queue_remove(&self, session_id: &str, input_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionQueueRemove { session_id: session_id.into(), input_id: input_id.into() }).await

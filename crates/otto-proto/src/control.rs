@@ -189,6 +189,16 @@ pub enum Method {
     SessionHandBack { session_id: SessionId },
     #[serde(rename = "session.compact")]
     SessionCompact { session_id: SessionId },
+    /// Detach the session's running `shell` call `call_id`: the call returns now
+    /// (`Started <job_id>`) and its command runs on as a background job.
+    #[serde(rename = "shell.detach")]
+    ShellDetach { session_id: SessionId, call_id: String },
+    /// The session's background shell jobs, running or recently ended.
+    #[serde(rename = "job.list")]
+    JobList { session_id: SessionId },
+    /// Stop one of the session's jobs; its report says it was stopped.
+    #[serde(rename = "job.kill")]
+    JobKill { session_id: SessionId, job_id: String },
     #[serde(rename = "approval.answer")]
     ApprovalAnswer { session_id: SessionId, approval_id: String, decision: ApprovalDecision, note: Option<String> },
     #[serde(rename = "question.answer")]
@@ -303,6 +313,9 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.cancel", "Cancel the current turn and its children."),
     ("session.hand_back", "Hand a stopped sub-agent back: its held report goes to the parent now."),
     ("session.compact", "Compact session history."),
+    ("shell.detach", "Detach a running shell call: it returns now and its command runs on as a background job."),
+    ("job.list", "List a session's background shell jobs."),
+    ("job.kill", "Stop a session's background shell job."),
     ("approval.answer", "Resolve a pending tool approval."),
     ("question.answer", "Answer a pending question."),
     ("model.list", "List available provider models."),

@@ -67,6 +67,17 @@ impl Kind {
     }
 }
 
+/// A shell call's running background job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobRef {
+    pub id: String,
+    /// As shown (clipped, `~` for home).
+    pub command: String,
+    pub block: Option<String>,
+    /// It waits for input in its block.
+    pub waiting: bool,
+}
+
 /// Inline detail under a line, shown by its `›`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Detail {
@@ -90,6 +101,10 @@ pub struct Line {
     pub reveal: Option<String>,
     /// A running command's block: closing it stops the command.
     pub stop: Option<String>,
+    /// A running foreground `shell` call (its call id): the user can detach it (`shell.detach`).
+    pub detach: Option<String>,
+    /// The background job this shell call runs on as, while it runs (the Shells bar).
+    pub job: Option<JobRef>,
     /// The child session a subagent call names (`↗` opens it).
     pub session: Option<String>,
     /// Streaming reasoning text, while it streams.
@@ -556,7 +571,7 @@ fn shell_job(text: &str, meta: &Value) -> Option<ShellJob> {
         let block = meta["block_id"].as_str().map(str::to_owned);
         return Some(ShellJob { id: id.to_owned(), block, waiting: meta["status"] == "waiting_for_input" });
     }
-    let word_after = |key: &str| text.split_once(key).and_then(|(_, r)| r.split([' ', ')', ',', ';']).next()).map(str::to_owned);
+    let word_after = |key: &str| text.split_once(key).and_then(|(_, r)| r.split([' ', ')', ',', ';', ':']).next()).map(str::to_owned);
     if text.starts_with("waiting_for_input:") {
         return Some(ShellJob { id: word_after("(job ")?, block: word_after("to block "), waiting: true });
     }
@@ -671,7 +686,7 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
 }
 
 impl Line {
-    fn new(key: &str, kind: Kind) -> Self {
+    pub(super) fn new(key: &str, kind: Kind) -> Self {
         Self {
             key: key.to_owned(),
             kind,
@@ -681,6 +696,8 @@ impl Line {
             detail: None,
             reveal: None,
             stop: None,
+            detach: None,
+            job: None,
             session: None,
             stream: None,
             files: Vec::new(),
@@ -893,7 +910,8 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                     quiet = true;
                     line.detail = (job.waiting && !screen.trim().is_empty()).then(|| Detail::Mono(tail(screen)));
                     line.reveal.clone_from(&job.block);
-                    line.stop = job.block;
+                    line.stop.clone_from(&job.block);
+                    line.job = Some(JobRef { id: job.id, command: cmd.clone(), block: job.block, waiting: job.waiting });
                 }
                 (None, _) => {
                     // Stopped by the user (its block closed, or the turn stopped) or by its timeout.
@@ -921,6 +939,8 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                     if status == Status::Running {
                         line.reveal = live.and_then(|t| t.messages.iter().rev().find_map(|m| m.strip_prefix("block:"))).map(str::to_owned);
                         line.stop.clone_from(&line.reveal);
+                        // Seen running live: otto can still detach it.
+                        line.detach = live.is_some().then(|| call_id.to_owned());
                     }
                 }
             }
@@ -2073,6 +2093,16 @@ mod tests {
         let cx_live = Ctx { running: true, stopped: false, jobs: &none, ..cx };
         let line = tool("r", "shell", &json!({"command": "cargo build"}), Some(&live), None, &cx_live);
         assert_eq!((line.status, line.reveal.as_deref(), line.stop.as_deref()), (Status::Running, Some("b3"), Some("b3")));
+        // Seen running: the user can detach it; it then runs on as a job (the Shells bar), from metadata or history.
+        assert_eq!(line.detach.as_deref(), Some("r"));
+        assert!(line.job.is_none());
+        let detached = "Started job-d1 in block b3: the user detached this command and it runs on in the background.";
+        let line = tool("r", "shell", &json!({"command": "cargo build"}), None, Some(&(detached.into(), false)), &cx_live);
+        assert_eq!((line.status, line.desc.as_deref(), line.detach.as_deref()), (Status::Running, Some("background"), None));
+        assert_eq!(line.job, Some(JobRef { id: "job-d1".into(), command: "cargo build".into(), block: Some("b3".into()), waiting: false }));
+        let piped = "Started job-d2: the user detached this command and it runs on in the background.";
+        let line = tool("p", "shell", &json!({"command": "gh run watch"}), None, Some(&(piped.into(), false)), &cx_live);
+        assert_eq!(line.job.map(|j| (j.id, j.block)), Some(("job-d2".into(), None)));
         // Waiting for input (from history text): needs the user.
         let waiting =
             "waiting_for_input: the command waits for input (job job-w2). Answer with terminal_send to block b5, or ask the user.\nPassword:";

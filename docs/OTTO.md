@@ -40,7 +40,9 @@ subscription refresh; the models.dev catalog refresh.
 - Automatic titles are tried once per session actor; a restarted daemon may try a still-untitled session once more.
   The Claude plan comes from `/api/oauth/profile` at login and refresh (best effort, not verified live); older
   stored credentials report none until their next refresh.
-- O5 shell: every model gets the full `shell` (`command`, `cwd`, `timeout_ms`, `background`). Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
+- O5 shell: every model gets the full `shell` (`command`, `cwd`, `timeout_ms`, `background`). The user can detach a
+  running foreground call (`shell.detach`), which then reports like a background one; `job.list` / `job.kill` list and
+  stop a session's jobs. Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
   restarted)` system item at startup (no turn starts). `waiting_for_input` is a heuristic (`line_prompt`: canonical
   tty, cursor ending a non-empty line, 2 s quiet); a prompt that ends with a newline, or a raw-mode one, isn't seen
   and the call runs to its timeout. The agent block recognises job reports by their system text
@@ -733,6 +735,18 @@ session stops its jobs. `terminal_open {visible: false}` parks a terminal next t
 block announces itself with a `block:<id>` progress message; closing its block stops the command (`stopped
 (closed)`). The agent block shows Open / Stop on such lines, `Needs you` for `waiting_for_input`, and background
 cards that finish when their report arrives (docs/AGENT_BLOCK.md §4f).
+
+**Detach (built 2026-10-24):** while a foreground `shell` call runs, `shell.detach {session_id, call_id}` makes it
+return now with `Started <job_id>[ in block <id>]: the user detached this command …` (metadata `job_id`, `block_id`,
+`background`, `detached`) and the command runs on as a job: in its block, watched as a background command (an
+explicit `timeout_ms` keeps what is left of it, the 120 s default no longer applies); through pipes, the command runs
+in its own task from the start, so the call only stops waiting (its progress stops; a dropped call, a cancelled turn
+or the timeout still kill it before then). A full job table (64) refuses and the call stays in the foreground.
+`job.list {session_id}` lists `JobInfo {job_id, command, call_id, block_id?, started_at, completed}`; `job.kill
+{session_id, job_id}` stops one (its report says `was stopped (cancelled)`). The `shell` description steers finite
+long work — test suites, builds, deploys, `gh run watch`, `gh pr checks --watch`, polling loops — to `background:
+true` (do other work or end the turn; the report starts a turn when idle; don't poll with `job` or `sleep`), and
+only what never exits (dev servers, file watchers) or is driven interactively to `terminal_open`.
 
 ### 6.3 Web: rendered fetch and search (decided 2026-10-23, built)
 

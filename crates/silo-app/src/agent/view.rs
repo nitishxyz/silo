@@ -214,7 +214,7 @@ fn provider_logo(provider: &str) -> Option<&'static str> {
 }
 
 /// A square icon button.
-fn icon_button(id: impl Into<gpui::ElementId>, name: &'static str, size: f32, side: f32, color: u32) -> gpui::Stateful<gpui::Div> {
+pub(super) fn icon_button(id: impl Into<gpui::ElementId>, name: &'static str, size: f32, side: f32, color: u32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
@@ -1233,6 +1233,10 @@ impl AgentPane {
                 },
             ))
             .when(has_detail, |el| el.child(chevron(openness, 12.0, muted)))
+            .children(line.detach.clone().map(|call| {
+                let pending = self.shell_jobs.detaching.contains(&call);
+                super::jobs::detach_button(&key, call, pending, cx)
+            }))
             .children(reveal.map(|block| {
                 icon_button(gpui::ElementId::Name(format!("reveal-{key}").into()), "arrow-up-right", 12.0, 20.0, muted)
                     .tooltip(Tooltip::text("Open"))
@@ -1631,6 +1635,7 @@ impl AgentPane {
         let text = |s: String| div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(fg)).child(s);
 
         bars.extend(self.subagent_bar(cx));
+        bars.extend(self.jobs_bar(cx));
 
         if !self.todos.is_empty() {
             let (done, total) = transcript::progress(&self.todos);
@@ -1828,6 +1833,7 @@ impl AgentPane {
             let icon_name = match key {
                 "queue" => "clock",
                 "subagents" => "bot",
+                "jobs" => "terminal",
                 _ => "list-todo",
             };
             let tint = match key {

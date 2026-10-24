@@ -85,6 +85,24 @@ pub struct SessionInfo {
     pub plan: Option<otto_llm::PlanUsage>,
 }
 
+/// A session's background shell command (`job.list`): started with
+/// `background`, after waiting for input, or detached (`shell.detach`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JobInfo {
+    pub job_id: String,
+    pub command: String,
+    /// The shell call that started it.
+    pub call_id: String,
+    /// Its terminal block, when it runs in one.
+    #[serde(default)]
+    pub block_id: Option<String>,
+    /// Unix milliseconds.
+    pub started_at: i64,
+    /// It ended and reported; listed until it expires (five minutes) or its output is read.
+    #[serde(default)]
+    pub completed: bool,
+}
+
 /// A provider's subscription limits as its last response reported them (`plan.usage`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderPlan {

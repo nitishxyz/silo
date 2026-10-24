@@ -393,11 +393,21 @@ Units are points.
 - **Steer:** ⏎ while a turn runs sends with `Delivery::Steer`: otto injects it at the next step boundary and the
   agent continues without stopping. Placeholder `Message the agent`, send tooltip `Steer  ⏎`. ⌘⏎ stays New Pane.
 - **Bars above the composer** (InputQueueBar/TodosBar/SubagentsBar of the otto web app): one chrome for all, top to
-  bottom Sub-agents, Todos, Queue. The bottom-most bar tucks under the composer (top radius 12, open bottom); bars
+  bottom Sub-agents, Shells, Todos, Queue. The bottom-most bar tucks under the composer (top radius 12, open bottom); bars
   above it float (radius 12, full border, 6 gap). Each has a 34 header that crossfades between collapsed
   (`icon · Label | current item … note ⌃`) and expanded (`icon Title … note ⌄`, divider) with its 28 rows below
   (height + opacity, chevron turns), and rises from behind what's below (a bottom-anchored clip) when it appears.
   Wrappers must not carry negative margins: taffy then sizes the composer column wrong and the composer slides out.
+  - **Shells** (`agent/jobs.rs`): the shown session's running background shell jobs, from the transcript (a
+    `shell` result with a `job_id` and no `Background shell <id> …` report yet: `background: true`, a command
+    waiting for input, or one the user detached). `terminal · Shells | first command … N running` (`Needs input`,
+    warning, while one waits); a row per job: spinner (or `terminal` in warning), command, `Running` / `Needs
+    input`; on hover the note gives way to `↗` (its block, when it runs in one; a click on the row opens it too)
+    and `■` (`job.kill`; an older otto without it: closing its block). A row leaves when its report arrives.
+  - **Detach:** a running foreground `shell` line (seen live) has a bordered `Detach` button before its `↗` / `■`
+    (`shell.detach {session_id, call_id}`): the call returns `Started <job_id>` at once, the turn goes on, and the
+    command runs on as a job (the Shells bar), reporting when it exits like a background one. Dimmed while the
+    request is out; a refusal (it already ended) shows in the notice.
   - **Queue:** `clock · Queued | first … N queued`; expanded `Queued messages · N waiting`, numbered rows from otto's
     queue (`queue.changed` / `session.view`, empty subagent wake-ups hidden): pending steers first, noted `Next step`,
     then inputs waiting for the turn, `After turn`. A steer just sent shows from the pane until otto lists it (matched
