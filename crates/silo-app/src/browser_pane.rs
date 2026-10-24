@@ -1901,7 +1901,7 @@ impl gpui::Render for BrowserPane {
 impl crate::workspace::Workspace {
     /// The browser pane of `block`, created on first sight.
     pub(crate) fn ensure_browser(&mut self, block: &str, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        if self.browsers.contains_key(block) {
+        if self.blocks.browser(block).is_some() {
             return;
         }
         let host = &self.hosts[self.active_host].info;
@@ -1930,7 +1930,7 @@ impl crate::workspace::Workspace {
             }
             cx.notify();
         });
-        self.browsers.insert(block.to_owned(), (pane, sub));
+        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Browser(pane), sub);
     }
 
     /// Split `block` with a new browser (popup, New Browser, Open URL).
@@ -1975,7 +1975,7 @@ impl crate::workspace::Workspace {
 
     /// Focus the pending new browser's address bar once its pane exists.
     pub(crate) fn focus_new_browser(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let Some(pane) = self.address_pending.as_ref().and_then(|b| self.browsers.get(b)).map(|(p, _)| p.clone()) else { return };
+        let Some(pane) = self.address_pending.as_ref().and_then(|b| self.blocks.browser(b)).cloned() else { return };
         self.address_pending = None;
         pane.update(cx, |pane, cx| pane.focus_address(window, cx));
     }

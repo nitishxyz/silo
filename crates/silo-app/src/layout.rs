@@ -316,7 +316,7 @@ impl Workspace {
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         let comfortable = floating || self.density() == Density::Comfortable;
         let frosted = self.frosted();
-        let browser = self.browsers.contains_key(id);
+        let browser = self.blocks.browser(id).is_some();
         let mode = self.header_mode(id);
         // Corners just inside the 1px outline, for overlays (wash, drop
         // outline, docks) and the page that fill the card's rounded clip.
@@ -345,14 +345,14 @@ impl Workspace {
             Some((_, cover)) => self.card_chrome(fill_color).toward_floating(cover),
             None => self.card_chrome(fill_color),
         };
-        if let Some((pane, _)) = self.browsers.get(id) {
+        if let Some(pane) = self.blocks.browser(id) {
             let page = if comfortable { (fill.bottom_left, fill.bottom_right) } else { (0.0, 0.0) };
             pane.update(cx, |pane, cx| {
                 pane.set_palette(palette, cx);
                 pane.set_corners(page, cx);
             });
         }
-        if let Some((pane, _)) = self.panes.get(id) {
+        if let Some(pane) = self.blocks.terminal(id) {
             let translucency = self.translucency(id, fill_color, palette, cx);
             pane.update(cx, |pane, cx| {
                 pane.set_translucency(translucency, cx);

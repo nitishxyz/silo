@@ -160,7 +160,7 @@ impl Workspace {
         if self.icon_spins(id) {
             return crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx);
         }
-        let pane = self.browsers.get(id).map(|(p, _)| p.read(cx));
+        let pane = self.blocks.browser(id).map(|p| p.read(cx));
         match pane.map_or(Icon::Glyph(self.block_icon(id)), crate::browser_pane::BrowserPane::icon) {
             Icon::Spinner => crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx),
             Icon::Favicon => match pane.and_then(crate::browser_pane::BrowserPane::favicon_image) {

@@ -317,14 +317,14 @@ impl Workspace {
                 }
             }
             Command::Copy => {
-                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                if let Some(browser) = block.as_ref().and_then(|b| self.blocks.browser(b)) {
                     browser.read(cx).edit(silo_web::Edit::Copy);
                 } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.copy(cx));
                 }
             }
             Command::Paste => {
-                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                if let Some(browser) = block.as_ref().and_then(|b| self.blocks.browser(b)) {
                     browser.read(cx).edit(silo_web::Edit::Paste);
                 } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.paste(cx));
@@ -332,7 +332,7 @@ impl Workspace {
             }
             Command::SelectAll => {
                 self.close_palette(window, cx);
-                if let Some((browser, _)) = block.as_ref().and_then(|b| self.browsers.get(b)) {
+                if let Some(browser) = block.as_ref().and_then(|b| self.blocks.browser(b)) {
                     browser.read(cx).edit(silo_web::Edit::SelectAll);
                 } else if let Some(pane) = self.focused_pane(window, cx) {
                     pane.update(cx, |pane, cx| pane.select_all(cx));

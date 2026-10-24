@@ -120,14 +120,14 @@ impl crate::workspace::Workspace {
         if host != self.active_host {
             return;
         }
-        for (pane, _) in self.agents.values() {
+        for (_, pane) in self.blocks.agents() {
             pane.update(cx, |pane, cx| pane.set_host_up(up, cx));
         }
     }
 
     /// The agent pane of `block`, created on first sight.
     pub(crate) fn ensure_agent(&mut self, block: &str, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        if self.agents.contains_key(block) {
+        if self.blocks.agent(block).is_some() {
             return;
         }
         let Some(target) = self.agent_target(self.active_host) else { return };
@@ -157,11 +157,11 @@ impl crate::workspace::Workspace {
             }
             cx.notify();
         });
-        self.agents.insert(block.to_owned(), (pane, sub));
+        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Agent(pane), sub);
     }
 
     pub(crate) fn agent_focused(&self, window: &gpui::Window, cx: &gpui::App) -> Option<String> {
-        self.agents.iter().find(|(_, (p, _))| p.read(cx).focus.contains_focused(window, cx)).map(|(id, _)| id.clone())
+        self.blocks.agents().find(|(_, p)| p.read(cx).focus.contains_focused(window, cx)).map(|(id, _)| id.clone())
     }
 
     /// Jump to `block` named by a tool call, in whichever session holds it;
@@ -248,7 +248,7 @@ impl crate::workspace::Workspace {
     /// Focus the pending new agent's composer once its pane exists (or show
     /// its otto settings, for Otto Settings).
     pub(crate) fn focus_new_agent(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let Some(pane) = self.composer_pending.as_ref().and_then(|b| self.agents.get(b)).map(|(p, _)| p.clone()) else { return };
+        let Some(pane) = self.composer_pending.as_ref().and_then(|b| self.blocks.agent(b)).cloned() else { return };
         self.composer_pending = None;
         if std::mem::take(&mut self.otto_settings_pending) {
             pane.update(cx, |pane, cx| pane.open_otto_settings(Entry::Palette, window, cx));
@@ -261,7 +261,7 @@ impl crate::workspace::Workspace {
     /// the active host, if it runs agents.
     pub(crate) fn open_otto_settings(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let front = self.agent_focused(window, cx).or_else(|| self.focused_block(window, cx));
-        let pane = front.and_then(|b| self.agents.get(&b)).map(|(p, _)| p.clone());
+        let pane = front.and_then(|b| self.blocks.agent(&b)).cloned();
         let host = &self.hosts[self.active_host].info.name;
         match settings_route(pane.is_some(), self.agents(self.active_host), host) {
             SettingsRoute::Front => {

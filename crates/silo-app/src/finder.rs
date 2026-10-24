@@ -437,10 +437,10 @@ impl Workspace {
     }
 
     fn block_label(&self, block: &str, cx: &gpui::App) -> String {
-        if let Some((pane, _)) = self.browsers.get(block) {
+        if let Some(pane) = self.blocks.browser(block) {
             return pane.read(cx).title();
         }
-        if let Some((pane, _)) = self.panes.get(block) {
+        if let Some(pane) = self.blocks.terminal(block) {
             return pane.read(cx).title();
         }
         self.block_info(block).map_or_else(|| "shell".into(), crate::pane::block_title)

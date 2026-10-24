@@ -72,12 +72,8 @@ pub struct Workspace {
     pub(crate) wanted_session: Option<String>,
     /// Block to focus once the host connects (a clicked notification).
     wanted_block: Option<String>,
-    pub(crate) panes: HashMap<String, (Entity<Pane>, Subscription)>,
-    /// Browser blocks' panes (terminal blocks are in `panes`).
-    pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
-    /// Agent blocks' panes (local host only).
-    pub(crate) agents: HashMap<String, (Entity<crate::agent::AgentPane>, Subscription)>,
-    pub(crate) files: HashMap<String, (Entity<crate::files::FilesPane>, Subscription)>,
+    /// Every block's pane, of every kind (`blocks.rs`).
+    pub(crate) blocks: crate::blocks::Blocks,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
     /// A blank browser this client created: its address bar gets focus
@@ -256,10 +252,7 @@ impl Workspace {
             divider_drag: None,
             wanted_session,
             wanted_block: None,
-            panes: HashMap::new(),
-            browsers: HashMap::new(),
-            agents: HashMap::new(),
-            files: HashMap::new(),
+            blocks: crate::blocks::Blocks::default(),
             server_focus: None,
             address_pending: None,
             composer_pending: None,
@@ -351,13 +344,13 @@ impl Workspace {
         if self.active_cache(cx).is_none() {
             return;
         }
-        let panes = &self.panes;
-        self.checkpointed.retain(|id, _| panes.contains_key(id));
+        let terminals: Vec<String> = self.blocks.terminals().map(|(id, _)| id.clone()).collect();
+        self.checkpointed.retain(|id, _| terminals.contains(id));
         let now = Instant::now();
         let due = self
-            .panes
-            .iter()
-            .filter(|(id, (pane, _))| {
+            .blocks
+            .terminals()
+            .filter(|(id, pane)| {
                 self.checkpointed.get(*id).is_none_or(|t| now - *t >= cache::CHECKPOINT_INTERVAL) && pane.read(cx).needs_checkpoint()
             })
             .min_by_key(|(id, _)| self.checkpointed.get(*id).copied())
@@ -369,14 +362,14 @@ impl Workspace {
 
     /// Checkpoint every changed pane (app quit, leaving the host).
     fn checkpoint_all(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self.panes.keys().cloned().collect();
+        let ids: Vec<String> = self.blocks.terminals().map(|(id, _)| id.clone()).collect();
         for id in ids {
             self.checkpoint_block(&id, cx);
         }
     }
 
     fn checkpoint_block(&mut self, id: &str, cx: &mut Context<Self>) {
-        let (Some(writer), Some((pane, _))) = (self.active_cache(cx), self.panes.get(id)) else {
+        let (Some(writer), Some(pane)) = (self.active_cache(cx), self.blocks.terminal(id)) else {
             return;
         };
         if let Some(checkpoint) = pane.update(cx, |pane, _| pane.checkpoint()) {
@@ -424,9 +417,9 @@ impl Workspace {
         let host = self.hosts.get(self.active_host).map(|h| h.info.name.clone()).unwrap_or_default();
         let session = self.view.as_ref().map(|v| v.session.name.clone()).unwrap_or_default();
         let title = self
-            .panes
-            .get(block)
-            .map(|(p, _)| p.read(cx).title())
+            .blocks
+            .terminal(block)
+            .map(|p| p.read(cx).title())
             .or_else(|| self.block_info(block).map(crate::pane::block_title))
             .unwrap_or_default();
         crate::block_status::trusted_label(&host, &session, &title)
@@ -575,10 +568,7 @@ impl Workspace {
             ConnEvent::Event(Event::SessionClosed { session_id }) => {
                 if self.view.as_ref().is_some_and(|v| v.session.id == *session_id) {
                     // Its blocks are gone with it: nothing to disown.
-                    self.panes.clear();
-                    self.browsers.clear();
-                    self.agents.clear();
-                    self.files.clear();
+                    self.blocks.clear();
                     self.view = None;
                     self.server_focus = None;
                     self.address_pending = None;
@@ -611,7 +601,7 @@ impl Workspace {
             // No files view yet (docs/FILES_BLOCK.md §6 step 3).
             ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
-                if let Some((pane, _)) = self.browsers.get(block_id) {
+                if let Some(pane) = self.blocks.browser(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
                 }
             }
@@ -626,7 +616,7 @@ impl Workspace {
                 }
             }
             ConnEvent::Event(Event::CommandFinished { block_id, record, .. }) => {
-                if let Some((pane, _)) = self.panes.get(block_id) {
+                if let Some(pane) = self.blocks.terminal(block_id) {
                     pane.update(cx, |pane, cx| pane.command_finished(record.clone(), cx));
                 }
             }
@@ -661,13 +651,13 @@ impl Workspace {
         self.motion.reset();
         self.clear_status();
         self.upgrade_connected(cx);
-        for (pane, _) in self.panes.values() {
+        for (_, pane) in self.blocks.terminals() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
-        for (pane, _) in self.browsers.values() {
+        for (_, pane) in self.blocks.browsers() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
-        for (pane, _) in self.files.values() {
+        for (_, pane) in self.blocks.files_panes() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         // Agent panes reconnect now rather than at their next retry.
@@ -731,7 +721,7 @@ impl Workspace {
         self.checkpoint_all(cx);
         self.checkpointed.clear();
         let mirrors: Vec<(String, silo_client::Mirror)> =
-            self.panes.iter().map(|(id, (pane, _))| (id.clone(), pane.update(cx, |pane, _| pane.take_mirror()))).collect();
+            self.blocks.terminals().map(|(id, pane)| (id.clone(), pane.update(cx, |pane, _| pane.take_mirror()))).collect();
         let host = self.active_host;
         self.shared.update(cx, |shared, _| shared.put_restored(host, mirrors));
     }
@@ -739,12 +729,10 @@ impl Workspace {
     /// Drop every pane (closing its data stream) and give up ownership; this
     /// Mac's browsers go on in the off-screen host.
     pub(crate) fn detach_view(&mut self, cx: &mut Context<Self>) {
-        let mut blocks: Vec<String> = self.panes.keys().cloned().collect();
-        self.panes.clear();
+        let mut blocks: Vec<String> = self.blocks.terminals().map(|(id, _)| id.clone()).collect();
         blocks.extend(self.hand_back_browsers(cx));
-        self.agents.clear();
         self.stash_files(cx);
-        self.files.clear();
+        self.blocks.clear();
         self.view = None;
         self.server_focus = None;
         self.address_pending = None;
@@ -758,7 +746,8 @@ impl Workspace {
     /// Give the browser panes to the off-screen host; the blocks it does not
     /// take (remote hosts').
     fn hand_back_browsers(&mut self, cx: &mut App) -> Vec<String> {
-        let panes = self.browsers.drain().map(|(_, (pane, _))| pane).collect();
+        let ids: Vec<String> = self.blocks.browsers().map(|(id, _)| id.clone()).collect();
+        let panes = ids.iter().filter_map(|id| self.blocks.remove(id)?.into_browser()).collect();
         crate::browser_host::BrowserHost::keep(panes, cx)
     }
 
@@ -889,20 +878,18 @@ impl Workspace {
         // Panes for every block of the active window; keep panes of other
         // windows that are still alive, drop the rest.
         let all: Vec<String> = view.session.windows.iter().flat_map(crate::floats::window_blocks).collect();
-        self.panes.retain(|id, _| all.contains(id));
         // A browser leaving every window but still alive (parked) runs on
         // in the off-screen host: same page, no reload.
-        let parked: Vec<String> = self.browsers.keys().filter(|id| !all.contains(id) && view.blocks.iter().any(|b| &b.id == *id)).cloned().collect();
+        let parked: Vec<String> =
+            self.blocks.browsers().map(|(id, _)| id).filter(|id| !all.contains(id) && view.blocks.iter().any(|b| &b.id == *id)).cloned().collect();
         if !parked.is_empty() {
-            let panes = parked.iter().filter_map(|id| self.browsers.remove(id)).map(|(pane, _)| pane).collect();
+            let panes = parked.iter().filter_map(|id| self.blocks.remove(id)?.into_browser()).collect();
             let left = crate::browser_host::BrowserHost::keep(panes, cx);
             if !left.is_empty() {
                 self.call(Method::DisownBlock { block_ids: left });
             }
         }
-        self.browsers.retain(|id, _| all.contains(id));
-        self.agents.retain(|id, _| all.contains(id));
-        self.files.retain(|id, _| all.contains(id));
+        self.blocks.retain(|id, _| all.iter().any(|a| a == id));
         let active = self.active_window().cloned();
         let of_kind =
             |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
@@ -921,7 +908,7 @@ impl Workspace {
                     self.ensure_agent(&block, window, cx);
                 } else if files.contains(&block) {
                     self.ensure_files(&block, window, cx);
-                } else if !self.panes.contains_key(&block) && !unsupported.contains(&block) {
+                } else if !self.blocks.contains(&block) && !unsupported.contains(&block) {
                     let control = self.control();
                     let rt = self.rt.clone();
                     let id = block.clone();
@@ -964,13 +951,13 @@ impl Workspace {
                         }
                         PaneEvent::Backdrop => cx.notify(),
                     });
-                    self.panes.insert(block, (pane, subscription));
+                    self.blocks.insert(block, crate::blocks::BlockPane::Terminal(pane), subscription);
                 }
             }
         }
         // Browsers in tabs not shown render slowly (still painting: screenshots and timers work).
         let shown: Vec<String> = active.as_ref().map(crate::floats::window_blocks).unwrap_or_default();
-        for (id, (pane, _)) in &self.browsers {
+        for (id, pane) in self.blocks.browsers() {
             pane.update(cx, |pane, _| pane.set_hidden(!shown.contains(id)));
         }
         let infos = view.blocks.clone();
@@ -1054,7 +1041,7 @@ impl Workspace {
         let body = Bounds::new(point(px(0.), px(TITLEBAR_HEIGHT)), size(viewport.width, viewport.height - px(TITLEBAR_HEIGHT)));
         let old_blocks = old_active.layout.blocks();
         for id in blocks.removed.iter().filter(|id| old_blocks.contains(id)) {
-            if let Some((pane, _)) = self.panes.get(id)
+            if let Some(pane) = self.blocks.terminal(id)
                 && let Some((frame, mut slot)) = pane.read(cx).ghost()
             {
                 // Grow the terminal's slot to the whole card: header and outline.
@@ -1160,12 +1147,12 @@ impl Workspace {
 
     pub(crate) fn focused_pane(&self, window: &Window, cx: &gpui::App) -> Option<Entity<Pane>> {
         let block = self.focused_block(window, cx)?;
-        self.panes.get(&block).map(|(p, _)| p.clone())
+        self.blocks.terminal(&block).cloned()
     }
 
     pub(crate) fn cwd_of(&self, block: &str, cx: &gpui::App) -> Option<String> {
-        match self.panes.get(block) {
-            Some((p, _)) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
+        match self.blocks.terminal(block) {
+            Some(p) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
             None => self.block_info(block).filter(|i| matches!(i.kind, BlockKind::Agent | BlockKind::Files)).and_then(|i| i.cwd.clone()),
         }
     }
@@ -1302,9 +1289,9 @@ impl Workspace {
         if !adaptive {
             return None;
         }
-        match (self.panes.get(id), self.browsers.get(id)) {
-            (Some((pane, _)), _) => pane.read(cx).backdrop(),
-            (None, Some((pane, _))) => pane.read(cx).backdrop(),
+        match (self.blocks.terminal(id), self.blocks.browser(id)) {
+            (Some(pane), _) => pane.read(cx).backdrop(),
+            (None, Some(pane)) => pane.read(cx).backdrop(),
             (None, None) => None,
         }
     }
@@ -1377,7 +1364,7 @@ impl Workspace {
         let byte = |a: f32| (a.clamp(0.0, 1.0) * 255.0).round() as u8;
         self.frosted().then(|| silo_render::Translucency {
             card: fill,
-            veiled: self.translucent_apps().then(|| self.panes.get(id).and_then(|(p, _)| p.read(cx).backdrop())).flatten(),
+            veiled: self.translucent_apps().then(|| self.blocks.terminal(id).and_then(|p| p.read(cx).backdrop())).flatten(),
             opaque_alpha: byte(crate::material::CELL_OPAQUE.max(card.alpha)),
         })
     }
@@ -1430,7 +1417,7 @@ impl Workspace {
         let mut veil = alpha(surface, &[]);
         for id in self.active_window().map(crate::floats::window_blocks).unwrap_or_default() {
             let fill = self.card_fill(&id, cx);
-            let fg_text = self.panes.contains_key(&id) && theme::contrast(fg, fill) >= theme::TEXT_CONTRAST;
+            let fg_text = self.blocks.terminal(&id).is_some() && theme::contrast(fg, fill) >= theme::TEXT_CONTRAST;
             veil = veil.max(if fg_text { alpha(fill, &[fg]) } else { alpha(fill, &[]) });
         }
         veil
@@ -1513,12 +1500,12 @@ impl Workspace {
         if let Some(name) = &w.name {
             return name.clone();
         }
-        if let Some((pane, _)) = self.browsers.get(&w.focused) {
+        if let Some(pane) = self.blocks.browser(&w.focused) {
             return pane.read(cx).title();
         }
-        self.panes.get(&w.focused).map_or_else(
+        self.blocks.terminal(&w.focused).map_or_else(
             || self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == w.focused)).map_or_else(|| "shell".into(), crate::pane::block_title),
-            |(p, _)| p.read(cx).title(),
+            |p| p.read(cx).title(),
         )
     }
 }

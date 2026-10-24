@@ -62,7 +62,7 @@ pub fn split_path(path: &str) -> Option<(String, String)> {
 
 impl Workspace {
     pub(crate) fn ensure_files(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.files.contains_key(block) {
+        if self.blocks.files(block).is_some() {
             return;
         }
         let info = self.block_info(block).cloned();
@@ -83,7 +83,7 @@ impl Workspace {
             }
             cx.notify();
         });
-        self.files.insert(block.to_owned(), (pane, sub));
+        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Files(pane), sub);
     }
 
     /// The unsaved tabs a close of `target` would lose, per Files block.
@@ -102,12 +102,12 @@ impl Workspace {
                 .filter(|v| &v.session.id == id)
                 .map(|v| v.session.windows.iter().flat_map(crate::floats::window_blocks).collect())
                 .unwrap_or_default(),
-            CloseTarget::StopServer | CloseTarget::RestartServer => self.files.keys().cloned().collect(),
+            CloseTarget::StopServer | CloseTarget::RestartServer => self.blocks.files_panes().map(|(id, _)| id.clone()).collect(),
         };
         blocks
             .into_iter()
             .filter_map(|b| {
-                let unsaved = self.files.get(&b)?.0.read(cx).unsaved();
+                let unsaved = self.blocks.files(&b)?.read(cx).unsaved();
                 (!unsaved.is_empty()).then_some((b, unsaved))
             })
             .collect()
@@ -151,7 +151,7 @@ impl Workspace {
     fn proceed(&mut self, after: AfterUnsaved, window: &mut Window, cx: &mut Context<Self>) {
         match after {
             AfterUnsaved::Tabs { block, paths } => {
-                if let Some((pane, _)) = self.files.get(&block) {
+                if let Some(pane) = self.blocks.files(&block) {
                     pane.update(cx, |pane, cx| paths.iter().for_each(|p| pane.close_now(p, cx)));
                 }
             }
@@ -174,7 +174,7 @@ impl Workspace {
         let files = dialog.files.clone();
         let mut waits = Vec::new();
         for (block, paths) in &files {
-            if let Some((pane, _)) = self.files.get(block) {
+            if let Some(pane) = self.blocks.files(block) {
                 waits.extend(crate::files::save_all(&pane.clone(), paths, cx));
             }
         }
@@ -306,14 +306,14 @@ impl Workspace {
     /// The view's Files panes are going (another session or host shown):
     /// their unsaved tabs wait for the blocks' next panes.
     pub(crate) fn stash_files(&self, cx: &mut Context<Self>) {
-        for (pane, _) in self.files.values() {
+        for (_, pane) in self.blocks.files_panes() {
             pane.update(cx, |pane, cx| pane.stash(cx));
         }
     }
 
     /// `files.changed` for one of this window's Files blocks.
     pub(crate) fn files_changed(&mut self, block: &str, paths: &[String], truncated: bool, cx: &mut Context<Self>) {
-        if let Some((pane, _)) = self.files.get(block) {
+        if let Some(pane) = self.blocks.files(block) {
             pane.update(cx, |pane, cx| pane.files_changed(paths, truncated, cx));
         }
     }

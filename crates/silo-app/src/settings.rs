@@ -318,7 +318,7 @@ impl Workspace {
     }
 
     fn apply_theme_to_panes(&self, reach: Reach, cx: &mut Context<Self>) {
-        for (pane, _) in self.panes.values() {
+        for (_, pane) in self.blocks.terminals() {
             pane.update(cx, |pane, cx| match reach {
                 Reach::Servers => pane.apply_theme(cx),
                 Reach::Local => pane.preview_theme(cx),

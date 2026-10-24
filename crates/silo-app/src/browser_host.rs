@@ -253,7 +253,7 @@ impl BrowserHost {
                 .iter()
                 .filter_map(|w| w.downcast::<Workspace>())
                 .filter_map(|w| w.read(cx).ok())
-                .any(|w| w.active_host == host && w.browsers.contains_key(block))
+                .any(|w| w.active_host == host && w.blocks.browser(block).is_some())
         };
         if let Some(hosted) = self.remote.get_mut(&host) {
             hosted.apply(&event.event, |pane| pane.read(cx).info.as_ref().map(|i| i.session_id.clone()));
@@ -384,7 +384,7 @@ fn shown(block: &str, cx: &App) -> bool {
         .iter()
         .filter_map(|w| w.downcast::<Workspace>())
         .filter_map(|w| w.read(cx).ok())
-        .any(|w| w.hosts.get(w.active_host).is_some_and(|h| h.info.local) && w.browsers.contains_key(block))
+        .any(|w| w.hosts.get(w.active_host).is_some_and(|h| h.info.local) && w.blocks.browser(block).is_some())
 }
 
 fn reply(rt: &tokio::runtime::Handle, control: Control, request_id: String, result: Result<Value, RpcError>) {

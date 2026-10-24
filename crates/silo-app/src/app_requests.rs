@@ -71,8 +71,7 @@ impl Workspace {
         let Some(block) = call.params.get("block_id").and_then(Value::as_str) else { return };
         // A block nobody owns comes to this app; a window with its pane runs it.
         let owns = |workspace: &Workspace| {
-            workspace.active_host == host
-                && workspace.browsers.get(block).is_some_and(|(pane, _)| pane.read(cx).is_owner() || pane.read(cx).unowned())
+            workspace.active_host == host && workspace.blocks.browser(block).is_some_and(|pane| pane.read(cx).is_owner() || pane.read(cx).unowned())
         };
         if !owns(self) {
             return;
@@ -86,7 +85,7 @@ impl Workspace {
             return;
         }
         let Some(control) = self.hosts.get(host).and_then(|host| host.control.clone()) else { return };
-        let Some((pane, _)) = self.browsers.get(block) else { return };
+        let Some(pane) = self.blocks.browser(block) else { return };
         let executor = pane.update(cx, |pane, cx| {
             if pane.unowned() {
                 pane.claim();
@@ -295,7 +294,7 @@ impl Workspace {
             return self.focused_pane(window, cx).ok_or_else(|| RpcError::not_found("a focused terminal"));
         };
         self.focus_block(block, window, cx);
-        self.panes.get(block).map(|(pane, _)| pane.clone()).ok_or_else(|| RpcError::not_found(format!("terminal {block}")))
+        self.blocks.terminal(block).cloned().ok_or_else(|| RpcError::not_found(format!("terminal {block}")))
     }
 
     /// Run an edit command in `block` (focusing it first), or the focused one.
