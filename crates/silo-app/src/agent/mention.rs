@@ -219,8 +219,9 @@ pub fn paint(chips: &[Chip], pos: impl Fn(usize) -> Option<Point<Pixels>>, line_
     }
 }
 
-/// `text` with its chips inline (a sent message's bubble).
-pub fn inline(text: &str, chips: &[Chip]) -> AnyElement {
+/// `text` with its chips inline (a sent message's bubble), `selected` (a range, its colour) highlighted; and
+/// its layout.
+pub fn inline(text: &str, chips: &[Chip], selected: Option<(Range<usize>, Hsla)>) -> (AnyElement, gpui::TextLayout) {
     let mut chips: Vec<Chip> = chips.iter().filter(|c| c.fits(text)).cloned().collect();
     chips.sort_by_key(|c| c.range.start);
     chips.dedup_by(|b, a| b.range.start < a.range.end);
@@ -233,14 +234,20 @@ pub fn inline(text: &str, chips: &[Chip]) -> AnyElement {
             HighlightStyle { strikethrough: strike, fade_out: c.missing.then_some(0.4), ..Default::default() },
         ));
     }
+    if let Some((range, bg)) = selected {
+        highlights = super::select::overlay(highlights, range, bg);
+    }
     let styled = StyledText::new(text.to_owned()).with_highlights(highlights);
     let layout = styled.layout().clone();
-    let back = canvas(|_, _, _| {}, move |_, _, window, cx| paint(&chips, |i| layout.position_for_index(i), layout.line_height(), window, cx))
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
-    div().relative().child(back).child(styled).into_any_element()
+    let back = {
+        let layout = layout.clone();
+        canvas(|_, _, _| {}, move |_, _, window, cx| paint(&chips, |i| layout.position_for_index(i), layout.line_height(), window, cx))
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+    };
+    (div().relative().child(back).child(styled).into_any_element(), layout)
 }
 
 #[cfg(test)]

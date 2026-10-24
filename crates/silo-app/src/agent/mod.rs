@@ -20,6 +20,7 @@ mod reveal;
 mod ring;
 mod rows;
 mod scroll;
+mod select;
 pub(crate) mod settings;
 mod settings_agents;
 mod signin;
@@ -421,6 +422,8 @@ pub struct AgentPane {
     /// Each provider's subscription usage as otto last reported it (`plan.rs`).
     plans: HashMap<String, otto_llm::PlanUsage>,
     plan_watch: Option<Task<()>>,
+    /// Text selected in the transcript (`select.rs`).
+    select: select::Select,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -563,6 +566,7 @@ impl AgentPane {
             parsed: HashMap::new(),
             plans: HashMap::new(),
             plan_watch: None,
+            select: select::Select::new(cx.focus_handle()),
             _subscriptions: subscriptions,
         };
         pane.load(cx);

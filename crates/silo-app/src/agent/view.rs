@@ -798,7 +798,8 @@ impl AgentPane {
             let place = self.project.as_ref().and_then(|p| std::path::Path::new(&p.root).file_name().map(|n| n.to_string_lossy().into_owned()));
             return (7, centered(empty_state("What should we work on?", place).into_any_element()));
         }
-        (8, gpui::list(self.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx))).size_full().into_any_element())
+        let list = gpui::list(self.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx))).size_full();
+        (8, self.selectable(list.into_any_element(), cx))
     }
 
     /// `↓ New activity` while scrolled up and something arrived below; it rises in and sinks away.
@@ -952,6 +953,8 @@ impl AgentPane {
             return row;
         }
         let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
+        // Its texts register for selection and paint what of them is selected.
+        let _select = self.select_scope(ix, row.key());
         let now = Instant::now();
         // Gap above the row; a paragraph already ends with 8 of its own.
         let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
@@ -2810,20 +2813,30 @@ fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u3
             highlights.push((a..b, h));
         }
     }
+    // What of it is selected: painted behind its glyphs, over a code span's tint.
+    if let Some((range, bg)) = super::select::selected(id) {
+        highlights = super::select::overlay(highlights, range, bg);
+    }
     let styled = StyledText::new(text).with_highlights(highlights).with_font_family_overrides(code_ranges);
     let layout = styled.layout().clone();
     if inline.links.is_empty() {
-        return (styled.into_any_element(), layout);
+        return (super::select::register(id, 0, None, &layout, styled.into_any_element()), layout);
     }
     let ranges: Vec<_> = inline.links.iter().map(|(r, _)| r.clone()).collect();
     let urls: Vec<String> = inline.links.iter().map(|(_, u)| u.clone()).collect();
     let el = InteractiveText::new(gpui::ElementId::Name(id.to_owned().into()), styled)
         .on_click(ranges, move |ix, _, cx| cx.open_url(&urls[ix]))
         .into_any_element();
-    (el, layout)
+    (super::select::register(id, 0, None, &layout, el), layout)
 }
 
 /// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
+/// A block drawn as a settled transcript text draws it (a test view's rows).
+#[cfg(test)]
+pub(super) fn render_settled(id: &str, block: &Block, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
+    render_block(id, block, None, theme::foreground(), scroll)
+}
+
 fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
     let lines = fx.and_then(|f| f.lines.get(id)).map(Vec::as_slice);
     // A revealed text reports its wrapped lines once laid out; a line sweeping in is cut into segments.
@@ -2882,12 +2895,14 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                 .line_height(px(reveal::CODE_LINE))
                 .flex()
                 .items_start();
+            let starts = super::select::line_starts(text);
             let code = scroll.scroller(id, el, true).child(div().flex_none().min_w_full().flex().flex_col().children(
                 text.lines().take(lines.map_or(usize::MAX, <[_]>::len)).enumerate().map(|(v, l)| {
+                    let shown = if l.is_empty() { " ".to_owned() } else { reveal::expand_tabs(l).into_owned() };
                     div()
                         .whitespace_nowrap()
                         .when(lines.is_some() && reveal::code_line(v, line_alpha(lines, v)) <= 0.0, |el| el.opacity(0.0))
-                        .child(if l.is_empty() { " ".to_owned() } else { reveal::expand_tabs(l).into_owned() })
+                        .child(super::select::code_line(id, starts.get(v).copied().unwrap_or(0), l, shown))
                 }),
             ));
             let (Some(lines), Some(f)) = (lines, fx) else { return code.into_any_element() };

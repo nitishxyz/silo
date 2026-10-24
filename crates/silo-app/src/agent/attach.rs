@@ -149,7 +149,11 @@ impl AgentPane {
                 .bg(rgb(ink(0.06)))
                 .text_color(rgb(ink(0.85)))
                 .line_height(px(21.0))
-                .map(|el| if mentions.is_empty() { el.child(text.to_owned()) } else { el.child(super::mention::inline(text, mentions)) })
+                .map(|el| {
+                    // Selectable as the row's one leaf; mentions show as chips inline.
+                    let (text_el, layout) = super::mention::inline(text, mentions, super::select::selected(super::select::USER));
+                    el.child(super::select::register(super::select::USER, 0, None, &layout, text_el))
+                })
         });
         div()
             .flex()
