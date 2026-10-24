@@ -411,7 +411,9 @@ pub enum Method {
     #[serde(rename = "block.float")]
     BlockFloat { block_id: BlockId, rect: Option<FloatRect> },
     /// Set a float's `rect` and raise it, or `dock` it into the layout.
-    /// Exactly one of `rect` and `dock`.
+    /// Exactly one of `rect` and `dock`. Servers with feature
+    /// `dock_sides` also dock a tiled block (taking it out of its place
+    /// first) and honour `Dock.before`; older ones dock floats only.
     #[serde(rename = "block.move")]
     BlockMove { block_id: BlockId, rect: Option<FloatRect>, dock: Option<Dock> },
     #[serde(rename = "layout.ratio")]
@@ -837,7 +839,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("block.zoom", "Zoom or unzoom a block within its window."),
     ("block.swap", "Swap two blocks' positions within the same window layout."),
     ("block.float", "Float a tiled block above its window's layout."),
-    ("block.move", "Move and raise a float (rect), or dock it next to a tiled block (dock)."),
+    ("block.move", "Move and raise a float (rect), or dock a float or tiled block on any side of another tiled block of its window (dock)."),
     ("layout.ratio", "Change the ratio of a split in a window layout."),
     ("layout.grow", "Grow or shrink the split a block sits in."),
     ("layout.edge", "Move a block's edge in a direction."),
@@ -1288,11 +1290,15 @@ pub enum Reveal {
 }
 
 /// `block.move` docking target: split `target` along `axis`, the docked
-/// block second.
+/// block second (right or below), or first (left or above) with `before`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Dock {
     pub target: BlockId,
     pub axis: Axis,
+    /// Feature `dock_sides`: older servers ignore it and dock second, so
+    /// clients send it only to servers advertising that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub before: bool,
 }
 
 /// The `{}` result of methods that only acknowledge.

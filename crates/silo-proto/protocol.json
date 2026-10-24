@@ -3849,6 +3849,9 @@
               "axis": {
                 "$ref": "#/$defs/Axis"
               },
+              "before": {
+                "type": "boolean"
+              },
               "target": {
                 "type": "string"
               }

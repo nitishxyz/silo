@@ -1158,23 +1158,33 @@ impl Registry {
         Ok(())
     }
 
-    /// Set a float's rect and raise it, or dock it next to a tiled block of
-    /// its window.
+    /// Set a float's rect and raise it, or dock a float or tiled block on a
+    /// side of another tiled block of its window (a tiled one leaves its
+    /// place first, its parent split collapsing). Docking focuses the block
+    /// and unzooms.
     pub fn move_block(&mut self, block_id: &str, rect: Option<FloatRect>, dock: Option<Dock>) -> Result<(), RpcError> {
         let (si, wi) = self.locate(block_id)?;
         let window = &mut self.sessions[si].windows[wi];
-        let index = window.floating(block_id).ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not floating")))?;
+        let floating = window.floating(block_id);
         match (rect, dock) {
             (Some(rect), None) => {
+                let index = floating.ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not floating")))?;
                 window.floats.remove(index);
                 window.floats.push(Float { id: block_id.to_owned(), rect: rect.clamped() });
             }
-            (None, Some(Dock { target, axis })) => {
+            (None, Some(Dock { target, axis, before })) => {
+                if target == block_id {
+                    return Err(RpcError::bad_request("cannot dock a block next to itself"));
+                }
                 if !window.layout.contains(&target) {
                     return Err(RpcError::bad_request(format!("block {target} is not tiled in this window")));
                 }
-                window.floats.remove(index);
-                window.layout.split(&target, block_id.to_owned(), axis);
+                if let Some(index) = floating {
+                    window.floats.remove(index);
+                    window.layout.split_at(&target, block_id.to_owned(), axis, before);
+                } else if !window.layout.dock(block_id, &target, axis, before) {
+                    return Err(RpcError::bad_request(format!("block {block_id} is not tiled in this window")));
+                }
                 window.focus(block_id);
                 window.zoomed = false;
             }
@@ -1683,11 +1693,14 @@ mod tests {
         let rect = FloatRect { x: 0.9, y: 0.0, w: 0.5, h: 0.01 };
         reg.move_block("b", Some(rect), None).unwrap();
         assert_eq!(changed(&mut rx).session.windows[0].floats[0].rect, rect.clamped());
-        let dock = || Some(Dock { target: "a".into(), axis: Axis::Vertical });
+        let dock = || Some(Dock { target: "a".into(), axis: Axis::Vertical, before: false });
         assert_eq!(reg.move_block("b", None, None).unwrap_err().code, "bad_request");
         assert_eq!(reg.move_block("b", Some(rect), dock()).unwrap_err().code, "bad_request");
         assert_eq!(reg.move_block("a", Some(rect), None).unwrap_err().code, "bad_request", "a is tiled");
-        assert_eq!(reg.move_block("b", None, Some(Dock { target: "d".into(), axis: Axis::Vertical })).unwrap_err().code, "bad_request");
+        assert_eq!(
+            reg.move_block("b", None, Some(Dock { target: "d".into(), axis: Axis::Vertical, before: false })).unwrap_err().code,
+            "bad_request"
+        );
         assert!(rx.try_recv().is_err(), "rejected moves emit nothing");
 
         reg.move_block("b", None, dock()).unwrap();
@@ -1696,6 +1709,76 @@ mod tests {
         assert_eq!(w.layout.blocks(), ["a", "b", "c"]);
         assert!(w.floats.is_empty());
         assert_eq!((w.focused.as_str(), view.session.revision), ("b", 4));
+    }
+
+    fn tiled_layout(reg: &Registry) -> &Layout {
+        &reg.sessions[0].windows[0].layout
+    }
+
+    #[test]
+    fn move_docks_a_tiled_block_on_each_side() {
+        let split = |axis, ratio, first: Layout, second: Layout| Layout::Split { axis, ratio, first: Box::new(first), second: Box::new(second) };
+        let (a, b, c) = (Layout::block("a"), Layout::block("b"), Layout::block("c"));
+        for (axis, before) in [(Axis::Horizontal, true), (Axis::Horizontal, false), (Axis::Vertical, true), (Axis::Vertical, false)] {
+            let (mut reg, mut rx) = registry();
+            reg.move_block("c", None, Some(Dock { target: "a".into(), axis, before })).unwrap();
+            let view = changed(&mut rx);
+            let w = &view.session.windows[0];
+            let docked = if before { split(axis, 0.5, c.clone(), a.clone()) } else { split(axis, 0.5, a.clone(), c.clone()) };
+            // c's old split (b / c) collapsed into b.
+            assert_eq!(w.layout, split(Axis::Horizontal, 0.3, docked, b.clone()), "{axis:?} {before}");
+            assert_eq!((w.focused.as_str(), view.session.revision), ("c", 2));
+        }
+    }
+
+    #[test]
+    fn move_docks_under_a_block_in_a_nested_split_and_unzooms() {
+        // a | (b / c): drag c under a, giving (a / c) | b.
+        let (mut reg, mut rx) = registry();
+        reg.zoom("b", true).unwrap();
+        changed(&mut rx);
+        reg.move_block("c", None, Some(Dock { target: "a".into(), axis: Axis::Vertical, before: false })).unwrap();
+        let view = changed(&mut rx);
+        let w = &view.session.windows[0];
+        let Layout::Split { axis: Axis::Horizontal, ratio, first, second } = &w.layout else { panic!("{:?}", w.layout) };
+        assert_eq!(*ratio, 0.3);
+        assert!(matches!(&**first, Layout::Split { axis: Axis::Vertical, ratio, .. } if *ratio == 0.5));
+        assert_eq!((first.blocks(), second.blocks()), (vec!["a".to_owned(), "c".to_owned()], vec!["b".to_owned()]));
+        assert_eq!((w.focused.as_str(), w.zoomed), ("c", false));
+
+        // Down to one block beside another: fine.
+        reg.move_block("a", None, Some(Dock { target: "b".into(), axis: Axis::Horizontal, before: false })).unwrap();
+        reg.move_block("c", None, Some(Dock { target: "b".into(), axis: Axis::Vertical, before: true })).unwrap();
+        assert_eq!(tiled_layout(&reg).blocks(), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn move_docks_a_float_before_its_target() {
+        let (mut reg, mut rx) = registry();
+        reg.float("b", None).unwrap();
+        changed(&mut rx);
+        reg.move_block("b", None, Some(Dock { target: "a".into(), axis: Axis::Horizontal, before: true })).unwrap();
+        let w = &changed(&mut rx).session.windows[0];
+        assert_eq!((w.layout.blocks(), w.floats.is_empty(), w.focused.as_str()), (vec!["b".to_owned(), "a".into(), "c".into()], true, "b"));
+    }
+
+    #[test]
+    fn move_refuses_docking_on_itself_another_window_or_a_float() {
+        let (mut reg, mut rx) = registry();
+        let dock = |target: &str| Some(Dock { target: target.into(), axis: Axis::Vertical, before: true });
+        let err = reg.move_block("a", None, dock("a")).unwrap_err();
+        assert!(err.code == "bad_request" && err.message.contains("itself"), "{err}");
+        let err = reg.move_block("a", None, dock("d")).unwrap_err();
+        assert!(err.code == "bad_request" && err.message.contains("not tiled in this window"), "{err}");
+        assert_eq!(reg.move_block("d", None, dock("a")).unwrap_err().code, "bad_request", "from another window");
+        assert_eq!(reg.move_block("zz", None, dock("a")).unwrap_err().code, "not_found");
+        assert_eq!(reg.move_block("a", None, dock("zz")).unwrap_err().code, "bad_request");
+        assert!(rx.try_recv().is_err(), "rejected moves emit nothing");
+        reg.float("b", None).unwrap();
+        changed(&mut rx);
+        assert_eq!(reg.move_block("a", None, dock("b")).unwrap_err().code, "bad_request", "floats are no target");
+        assert!(rx.try_recv().is_err());
+        assert_eq!(tiled_layout(&reg).blocks(), ["a", "c"]);
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub mod feature {
     /// Files blocks (`kind: files`), the `files.*` methods and
     /// `files.changed` (docs/FILES_BLOCK.md).
     pub const FILES: &str = "files";
+    /// `block.move` docks tiled blocks too, and `Dock.before` docks on the
+    /// left or above. Older servers dock floats only, always right or
+    /// below (ignoring `before`), so gate on it.
+    pub const DOCK_SIDES: &str = "dock_sides";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -53,7 +57,7 @@ pub mod feature {
 
 /// Everything this build supports beyond protocol 1.
 pub const FEATURES: &[&str] =
-    &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS, feature::FILES];
+    &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS, feature::FILES, feature::DOCK_SIDES];
 
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this

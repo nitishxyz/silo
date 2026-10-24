@@ -191,17 +191,39 @@ impl Layout {
         }
     }
 
-    /// Replace leaf `target` with a split of it and `new`.
+    /// Replace leaf `target` with a split of it and `new`, `new` second.
     pub fn split(&mut self, target: &str, new: BlockId, axis: Axis) -> bool {
+        self.split_at(target, new, axis, false)
+    }
+
+    /// Replace leaf `target` with an even split of it and `new`; `before`
+    /// puts `new` first (left or above), else second (right or below).
+    pub fn split_at(&mut self, target: &str, new: BlockId, axis: Axis, before: bool) -> bool {
         match self {
             Self::Block { id } if id == target => {
-                let old = Self::block(id.clone());
-                *self = Self::Split { axis, ratio: 0.5, first: Box::new(old), second: Box::new(Self::block(new)) };
+                let (old, new) = (Box::new(Self::block(id.clone())), Box::new(Self::block(new)));
+                let (first, second) = if before { (new, old) } else { (old, new) };
+                *self = Self::Split { axis, ratio: 0.5, first, second };
                 true
             }
             Self::Block { .. } | Self::Unknown => false,
-            Self::Split { first, second, .. } => first.split(target, new.clone(), axis) || second.split(target, new, axis),
+            Self::Split { first, second, .. } => first.split_at(target, new.clone(), axis, before) || second.split_at(target, new, axis, before),
         }
+    }
+
+    /// Move leaf `block` next to leaf `target`: out of its place (its
+    /// parent split collapses) and into an even split of `target` along
+    /// `axis`, first when `before`. False, leaving the tree as is, unless
+    /// both are distinct leaves of this tree.
+    pub fn dock(&mut self, block: &str, target: &str, axis: Axis, before: bool) -> bool {
+        if block == target || !self.contains(block) || !self.contains(target) {
+            return false;
+        }
+        // `target` stays, so the tree never empties.
+        let mut rest = std::mem::replace(self, Self::Unknown).remove(block).expect("target remains");
+        let docked = rest.split_at(target, block.to_owned(), axis, before);
+        *self = rest;
+        docked
     }
 
     /// Remove leaf `target`, collapsing its parent split. Returns `None` if
@@ -886,6 +908,66 @@ mod tests {
         assert!(!layout.swap("a", "a"));
         assert!(!layout.swap("a", "x"));
         assert!(layout.swap("c", "a"));
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn split_at_places_the_new_leaf_on_either_side() {
+        let mut layout = Layout::block("a");
+        assert!(layout.split_at("a", "b".into(), Axis::Horizontal, true));
+        assert_eq!(layout.blocks(), ["b", "a"]);
+        assert!(layout.split_at("a", "c".into(), Axis::Vertical, false));
+        assert_eq!(layout.blocks(), ["b", "a", "c"]);
+        assert!(!layout.split_at("x", "d".into(), Axis::Vertical, true));
+    }
+
+    fn split(axis: Axis, ratio: f32, first: Layout, second: Layout) -> Layout {
+        Layout::Split { axis, ratio, first: Box::new(first), second: Box::new(second) }
+    }
+
+    #[test]
+    fn dock_moves_a_leaf_to_each_side_of_another() {
+        let (a, b, c) = (Layout::block("a"), Layout::block("b"), Layout::block("c"));
+        // a | b | c (b and c nested); dock c on each side of a.
+        let start = split(Axis::Horizontal, 0.3, a.clone(), split(Axis::Horizontal, 0.6, b.clone(), c.clone()));
+        let cases = [
+            (Axis::Horizontal, true, split(Axis::Horizontal, 0.5, c.clone(), a.clone())),
+            (Axis::Horizontal, false, split(Axis::Horizontal, 0.5, a.clone(), c.clone())),
+            (Axis::Vertical, true, split(Axis::Vertical, 0.5, c.clone(), a.clone())),
+            (Axis::Vertical, false, split(Axis::Vertical, 0.5, a.clone(), c.clone())),
+        ];
+        for (axis, before, docked) in cases {
+            let mut layout = start.clone();
+            assert!(layout.dock("c", "a", axis, before), "{axis:?} {before}");
+            // c's old split collapsed into b; a's slot keeps the root ratio.
+            assert_eq!(layout, split(Axis::Horizontal, 0.3, docked, b.clone()), "{axis:?} {before}");
+        }
+    }
+
+    #[test]
+    fn dock_under_a_leaf_in_a_nested_split() {
+        // (a | b) with c below both: drag c under a, giving (a / c) | b.
+        let (a, b, c) = (Layout::block("a"), Layout::block("b"), Layout::block("c"));
+        let mut layout = split(Axis::Vertical, 0.7, split(Axis::Horizontal, 0.4, a.clone(), b.clone()), c.clone());
+        assert!(layout.dock("c", "a", Axis::Vertical, false));
+        assert_eq!(layout, split(Axis::Horizontal, 0.4, split(Axis::Vertical, 0.5, a.clone(), c.clone()), b.clone()));
+        // And back up above b, deep in the other branch.
+        assert!(layout.dock("c", "b", Axis::Vertical, true));
+        assert_eq!(layout, split(Axis::Horizontal, 0.4, a.clone(), split(Axis::Vertical, 0.5, c.clone(), b.clone())));
+        // Two leaves: docking just rearranges them.
+        let mut two = split(Axis::Horizontal, 0.3, a.clone(), b.clone());
+        assert!(two.dock("a", "b", Axis::Vertical, false));
+        assert_eq!(two, split(Axis::Vertical, 0.5, b, a));
+    }
+
+    #[test]
+    fn dock_refuses_itself_and_strangers() {
+        let mut layout = Layout::block("a");
+        layout.split("a", "b".into(), Axis::Horizontal);
+        let before = layout.clone();
+        assert!(!layout.dock("a", "a", Axis::Vertical, false));
+        assert!(!layout.dock("x", "a", Axis::Vertical, false));
+        assert!(!layout.dock("a", "x", Axis::Vertical, false));
         assert_eq!(layout, before);
     }
 

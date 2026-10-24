@@ -37,7 +37,7 @@ impl Workspace {
     pub(crate) fn dock_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(block) = self.focused_block(window, cx).filter(|b| self.float_rect(b).is_some()) else { return };
         let Some(target) = self.active_window().and_then(|w| w.layout.blocks().first().cloned()) else { return };
-        self.call(Method::BlockMove { block_id: block, rect: None, dock: Some(Dock { target, axis: Axis::Horizontal }) });
+        self.call(Method::BlockMove { block_id: block, rect: None, dock: Some(Dock { target, axis: Axis::Horizontal, before: false }) });
     }
 
     /// Pointer moved during a float drag; `ev.bounds` is the window body.
@@ -191,7 +191,7 @@ impl Workspace {
         if let Some(drag) = self.float_drag.as_mut() {
             drag.docked = true;
         }
-        self.call(Method::BlockMove { block_id: block.to_owned(), rect: None, dock: Some(Dock { target: target.to_owned(), axis }) });
+        self.call(Method::BlockMove { block_id: block.to_owned(), rect: None, dock: Some(Dock { target: target.to_owned(), axis, before: false }) });
     }
 }
 
