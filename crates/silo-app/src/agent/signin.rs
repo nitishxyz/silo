@@ -50,7 +50,8 @@ pub(super) struct SignIn {
     landing: Option<(String, Act, Instant)>,
     /// Provider (empty: none in particular) and a short reason, shown in its row.
     error: Option<(String, String)>,
-    /// Provider whose `Disconnect` asks once more.
+    /// Provider whose row asks to confirm `Disconnect` (its actions become
+    /// `Cancel` / `Disconnect`); kept until the logout lands.
     confirm: Option<String>,
     /// Rows that just turned Connected, for their fade-in.
     connected: HashMap<String, Instant>,
@@ -65,6 +66,69 @@ enum Act {
     Subscribe,
     Key,
     Disconnect,
+}
+
+impl SignIn {
+    /// The provider being logged out (in flight, or waiting for the reloaded status).
+    fn disconnecting(&self) -> Option<&str> {
+        let busy = self.busy.as_ref().map(|(p, a)| (p, *a));
+        busy.or(self.landing.as_ref().map(|(p, a, _)| (p, *a))).filter(|(_, a)| *a == Act::Disconnect).map(|(p, _)| p.as_str())
+    }
+
+    fn confirming(&self, provider: &str) -> bool {
+        self.confirm.as_deref() == Some(provider)
+    }
+
+    /// `Disconnect` on a row: ask to confirm there (moving any other row's ask).
+    fn arm(&mut self, provider: &str) {
+        if self.disconnecting().is_none() {
+            self.confirm = Some(provider.to_owned());
+            self.error = None;
+        }
+    }
+
+    /// `Cancel`, Esc or a click elsewhere; a logout in flight stays. Whether one was dropped.
+    fn disarm(&mut self) -> bool {
+        self.disconnecting().is_none() && self.confirm.take().is_some()
+    }
+
+    /// The confirming `Disconnect`: whether the logout of `provider` starts.
+    fn begin_logout(&mut self, provider: &str) -> bool {
+        if !self.confirming(provider) || self.disconnecting().is_some() {
+            return false;
+        }
+        self.busy = Some((provider.to_owned(), Act::Disconnect));
+        self.error = None;
+        true
+    }
+
+    /// The logout's answer: whether `provider` is still signed in (by an environment variable), or the error.
+    fn logged_out(&mut self, provider: String, result: Result<bool, String>, now: Instant) {
+        self.busy = None;
+        self.connected.remove(&provider);
+        match result {
+            // The confirm button keeps spinning until the row shows it.
+            Ok(false) => self.landing = Some((provider, Act::Disconnect, now)),
+            Ok(true) => {
+                self.confirm = None;
+                self.error = Some((provider, "Still connected by an environment variable".into()));
+            }
+            Err(error) => {
+                self.confirm = None;
+                self.error = Some((provider, error));
+            }
+        }
+    }
+}
+
+/// The confirm line of a row about to disconnect.
+fn disconnect_prompt(status: &AuthStatus) -> String {
+    let name = super::view::provider_name(&status.provider);
+    if status.mode == AuthMode::ApiKey {
+        format!("Disconnect {name}? You'll need to add a key again; one set in the environment stays in effect.")
+    } else {
+        format!("Disconnect {name}? You'll need to sign in again.")
+    }
 }
 
 struct Dialog {
@@ -386,6 +450,8 @@ pub(super) enum Kind {
     Outline,
     /// Text only, fill on hover.
     Quiet,
+    /// Filled red: confirms a destructive action.
+    Danger,
 }
 
 /// A button's state: `loading` keeps its width and swaps the label for a spinner.
@@ -414,6 +480,7 @@ impl AgentPane {
         let id: SharedString = id.into();
         let (fill, text) = match kind {
             Kind::Primary => (Some(rgb(theme::foreground())), theme::background()),
+            Kind::Danger => (Some(rgb(theme::danger())), 0x00ff_ffff),
             Kind::Outline | Kind::Quiet => (None, theme::foreground()),
         };
         let ring = BoxShadow {
@@ -460,7 +527,7 @@ impl AgentPane {
             .cursor_pointer()
             .focus_visible(move |s| s.shadow(vec![ring]))
             .map(|el| match kind {
-                Kind::Primary => el.hover(|s| s.opacity(0.88)),
+                Kind::Primary | Kind::Danger => el.hover(|s| s.opacity(0.88)),
                 Kind::Outline => el.hover(|s| s.bg(theme::hover_fill())),
                 Kind::Quiet => el.hover(|s| s.bg(theme::hover_fill()).text_color(rgb(theme::foreground()))),
             })
@@ -519,7 +586,9 @@ impl AgentPane {
     pub(super) fn signin_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.dialog_open() {
             self.dialog_cancel(cx);
-        } else if self.signin.confirm.take().is_some() {
+        } else if self.signin.confirm.is_some() {
+            // Swallowed even while the logout runs (it can't be called back).
+            self.signin.disarm();
             cx.notify();
         } else {
             return self.otto_settings_escape(window, cx);
@@ -948,9 +1017,9 @@ impl AgentPane {
 
     /// Disconnect; a key from the environment stays in effect and is reported.
     fn logout(&mut self, provider: String, cx: &mut Context<Self>) {
-        self.signin.confirm = None;
-        self.signin.busy = Some((provider.clone(), Act::Disconnect));
-        self.signin.error = None;
+        if !self.signin.begin_logout(&provider) {
+            return;
+        }
         let p = provider.clone();
         self.run(
             cx,
@@ -959,17 +1028,12 @@ impl AgentPane {
                 Ok(c.auth_status().await?.into_iter().any(|a| a.provider == p && a.signed_in))
             },
             move |this, result, cx| {
-                this.signin.busy = None;
-                this.signin.connected.remove(&provider);
-                match result {
-                    Ok(still) => {
-                        if still {
-                            this.signin.error = Some((provider, "Still connected by an environment variable".into()));
-                        }
-                        cx.set_global(super::client::AuthChanged);
-                    }
-                    Err(error) => this.signin.error = Some((provider, short(&error))),
+                let reload = result.is_ok();
+                this.signin.logged_out(provider, result.map_err(|e| short(&e)), Instant::now());
+                if reload {
+                    cx.set_global(super::client::AuthChanged);
                 }
+                cx.notify();
             },
         );
         cx.notify();
@@ -1027,9 +1091,12 @@ impl AgentPane {
         let now = Instant::now();
         let provider = status.provider.clone();
         // The reloaded status shows it (or the reload failed): stop spinning.
-        if self.signin.landing.as_ref().is_some_and(|(p, _, at)| *p == provider && (status.signed_in || now >= *at + Duration::from_secs(5))) {
-            self.signin.landing = None;
-            if status.signed_in {
+        let landed = |act: Act| if act == Act::Disconnect { !status.signed_in } else { status.signed_in };
+        if self.signin.landing.as_ref().is_some_and(|(p, a, at)| *p == provider && (landed(*a) || now >= *at + Duration::from_secs(5))) {
+            let act = self.signin.landing.take().map(|(_, a, _)| a);
+            if act == Some(Act::Disconnect) {
+                self.signin.confirm = None;
+            } else if status.signed_in {
                 self.signin.connected.insert(provider.clone(), now);
             }
         }
@@ -1039,7 +1106,9 @@ impl AgentPane {
         let state = |act: Act| State { enabled: !locked || spinning == Some(act), loading: spinning == Some(act) };
         let error = self.signin.error.as_ref().filter(|(p, _)| *p == provider).map(|(_, e)| e.clone());
         let fade = self.signin.connected.get(&provider).and_then(|at| eased(*at, LAND, now, cx));
+        let asking = status.signed_in && endpoint(&provider).is_none() && self.signin.confirming(&provider);
         let second = match (&error, status.signed_in) {
+            _ if asking => div().text_color(rgb(theme::foreground())).child(disconnect_prompt(status)),
             (Some(e), _) => div().text_color(rgb(theme::danger())).child(e.clone()),
             (None, true) => div()
                 .flex()
@@ -1069,35 +1138,54 @@ impl AgentPane {
                 )
                 .when_some(fade, |el, t| el.opacity(t)),
             )
-        } else if status.signed_in {
-            let asking = self.signin.confirm.as_deref() == Some(provider.as_str());
+        } else if asking {
+            // Confirm in place: `Cancel` keeps the connection, red `Disconnect` drops it.
+            // A click anywhere else cancels too (not while the logout runs).
             let p2 = provider.clone();
+            let disconnecting = self.signin.disconnecting().is_some();
             div()
-                .child(
-                    self.button(
-                        format!("signin-logout-{i}"),
-                        Kind::Quiet,
-                        if asking { "Disconnect?" } else { "Disconnect" },
-                        ROW_BUTTON,
-                        state(Act::Disconnect),
-                        cx,
-                        move |this, _, cx| {
-                            if this.signin.confirm.as_deref() == Some(p.as_str()) {
-                                this.logout(p.clone(), cx);
-                            } else {
-                                this.signin.confirm = Some(p.clone());
-                                cx.notify();
-                            }
-                        },
-                    )
-                    .when(asking, |el| el.text_color(rgb(theme::danger())))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if !hovered && this.signin.confirm.as_deref() == Some(p2.as_str()) {
-                            this.signin.confirm = None;
-                            cx.notify();
-                        }
-                    })),
-                )
+                .flex()
+                .gap(px(6.0))
+                .child(self.button(
+                    format!("signin-logout-cancel-{i}"),
+                    Kind::Outline,
+                    "Cancel",
+                    ROW_BUTTON,
+                    State { enabled: !disconnecting, loading: false },
+                    cx,
+                    |this, _, cx| {
+                        this.signin.disarm();
+                        cx.notify();
+                    },
+                ))
+                .child(self.button(
+                    format!("signin-logout-confirm-{i}"),
+                    Kind::Danger,
+                    "Disconnect",
+                    ROW_BUTTON,
+                    state(Act::Disconnect),
+                    cx,
+                    move |this, _, cx| this.logout(p2.clone(), cx),
+                ))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if this.signin.disarm() {
+                        cx.notify();
+                    }
+                }))
+        } else if status.signed_in {
+            div()
+                .child(self.button(
+                    format!("signin-logout-{i}"),
+                    Kind::Quiet,
+                    "Disconnect",
+                    ROW_BUTTON,
+                    state(Act::Disconnect),
+                    cx,
+                    move |this, _, cx| {
+                        this.signin.arm(&p);
+                        cx.notify();
+                    },
+                ))
                 .when_some(fade, |el, t| el.opacity(t))
         } else {
             let p2 = provider.clone();
@@ -1593,5 +1681,65 @@ mod tests {
         sub.plan = Some("Max".into());
         assert_eq!(connection_label(&sub), "Connected · Max");
         assert_eq!(connection_label(&status("openai", vec![])), "Connected · API key");
+    }
+
+    #[test]
+    fn disconnect_arms_then_cancels() {
+        let mut s = SignIn { error: Some(("openai".into(), "old".into())), ..SignIn::default() };
+        s.arm("openai");
+        assert!(s.confirming("openai"));
+        assert_eq!(s.error, None, "the ask replaces a stale error");
+        assert!(s.disarm(), "Cancel / Esc / a click elsewhere");
+        assert_eq!(s.confirm, None);
+        assert!(!s.disarm(), "nothing left to cancel");
+        assert!(!s.begin_logout("openai"), "no logout without the ask");
+        assert_eq!(s.busy, None);
+    }
+
+    #[test]
+    fn confirming_disconnect_logs_out_and_lands() {
+        let mut s = SignIn::default();
+        s.arm("anthropic");
+        assert!(!s.begin_logout("openai"), "only the asking row");
+        assert!(s.begin_logout("anthropic"));
+        assert_eq!(s.busy, Some(("anthropic".into(), Act::Disconnect)));
+        assert!(!s.begin_logout("anthropic"), "once");
+        // In flight: the ask stays (its button spins), nothing cancels or moves it.
+        assert!(!s.disarm());
+        s.arm("openai");
+        assert!(s.confirming("anthropic"));
+        let now = Instant::now();
+        s.logged_out("anthropic".into(), Ok(false), now);
+        assert_eq!(s.busy, None);
+        assert_eq!(s.landing, Some(("anthropic".into(), Act::Disconnect, now)));
+        assert_eq!(s.disconnecting(), Some("anthropic"));
+        assert!(s.confirming("anthropic"), "until the reloaded status shows it");
+    }
+
+    #[test]
+    fn failed_or_env_kept_disconnect_shows_the_error() {
+        for (result, error) in [(Ok(true), "Still connected by an environment variable"), (Err("Daemon gone".to_owned()), "Daemon gone")] {
+            let mut s = SignIn::default();
+            s.arm("openai");
+            assert!(s.begin_logout("openai"));
+            s.logged_out("openai".into(), result, Instant::now());
+            assert_eq!(s.confirm, None, "back to the normal row");
+            assert_eq!(s.landing, None);
+            assert_eq!(s.error, Some(("openai".into(), error.into())));
+        }
+    }
+
+    #[test]
+    fn arming_another_provider_moves_the_ask() {
+        let mut s = SignIn::default();
+        s.arm("anthropic");
+        s.arm("openai");
+        assert!(s.confirming("openai"));
+        assert!(!s.confirming("anthropic"));
+        assert!(!s.begin_logout("anthropic"));
+        let mut sub = status("anthropic", vec![]);
+        assert_eq!(disconnect_prompt(&sub), "Disconnect Anthropic? You'll need to add a key again; one set in the environment stays in effect.");
+        sub.mode = AuthMode::Subscription;
+        assert_eq!(disconnect_prompt(&sub), "Disconnect Anthropic? You'll need to sign in again.");
     }
 }
