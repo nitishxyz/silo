@@ -637,7 +637,8 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
     pending.retain(|(_, t)| !t.name.is_empty() || streaming(t).is_some());
-    pending.sort_by_key(|(id, _)| input.times.seq(id));
+    // In the order seen; calls not yet timed (a view without `Times`) by id, never by hash order.
+    pending.sort_by(|(a, _), (b, _)| input.times.seq(a).cmp(&input.times.seq(b)).then_with(|| a.cmp(b)));
     let last = input.items.len().checked_sub(1);
     let mut rows = Vec::new();
     let mut lines = Vec::new();

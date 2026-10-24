@@ -9,6 +9,8 @@ use super::*;
 struct Session {
     m: SessionMirror,
     seq: i64,
+    /// Observed after every event, as the pane does: first-seen order.
+    times: Times,
 }
 
 impl Session {
@@ -16,7 +18,7 @@ impl Session {
     /// held still being written (a session loaded mid-call).
     fn new(streaming: Value) -> Self {
         let view = serde_json::from_value(json!({"info":{"id":"s","project_id":"p","agent":"a","provider":"p","model":"m","title":"t","cwd":"/work/app","status":"busy","created_at":0,"updated_at":0,"last_seq":1,"usage":{"usage":{"input":0,"output":0},"cost_usd":0.0}},"items":[serde_json::to_value(Item::user_text("u", "go")).unwrap()],"pending_approvals":[],"pending_questions":[],"queue":[],"running_tool_calls":[],"streaming_tool_calls":streaming,"seq":1})).unwrap();
-        let mut s = Self { m: SessionMirror::new(view), seq: 1 };
+        let mut s = Self { m: SessionMirror::new(view), seq: 1, times: Times::live() };
         s.event(Event::TurnStarted { turn: 1 });
         s.event(Event::ItemStarted { item_id: "a".into(), role: Role::Assistant });
         s
@@ -25,6 +27,8 @@ impl Session {
     fn event(&mut self, event: Event) {
         self.seq += 1;
         self.m.apply(self.seq, &event);
+        let running = self.m.turn.is_some_and(|t| t.1 == TurnStatus::Running);
+        self.times.observe(&self.m.items, &self.m.tools, running, HashMap::new(), u64::try_from(self.seq).unwrap_or(0));
     }
 
     fn start(&mut self, call: &str, name: &str) {
@@ -48,18 +52,9 @@ impl Session {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let times = Times::default();
+        let times = &self.times;
         let m = &self.m;
-        build(&Input {
-            items: &m.items,
-            tools: &m.tools,
-            turn: m.turn.map(|t| t.1),
-            error: None,
-            cwd: Some("/work/app"),
-            home: None,
-            times: &times,
-            now: 0,
-        })
+        build(&Input { items: &m.items, tools: &m.tools, turn: m.turn.map(|t| t.1), error: None, cwd: Some("/work/app"), home: None, times, now: 0 })
     }
 
     /// The live group's key and its line for `call`, if shown.
@@ -204,9 +199,10 @@ fn every_tool_shows_from_its_start_and_keeps_its_row_through_call_and_result() {
 #[test]
 fn a_call_without_arguments_shows_from_its_start() {
     let mut s = Session::new(json!([]));
-    s.start("c", "ls");
-    assert_eq!(s.line("c").unwrap().1.title, "Listing files");
-    s.start("d", "browser_snapshot");
+    // Ids against start order: the rows follow when calls started, not their ids or a hash.
+    s.start("d", "ls");
+    assert_eq!(s.line("d").unwrap().1.title, "Listing files");
+    s.start("c", "browser_snapshot");
     let titles: Vec<String> = s
         .rows()
         .iter()
@@ -214,8 +210,8 @@ fn a_call_without_arguments_shows_from_its_start() {
         .flat_map(|g| g.lines.iter().map(|l| l.title.clone()))
         .collect();
     assert_eq!(titles, ["Listing files", "Reading page"], "in the order they started");
-    s.call("c", "ls", &json!({}));
-    assert_eq!(s.line("c").unwrap().1.title, "Listing files");
+    s.call("d", "ls", &json!({}));
+    assert_eq!(s.line("d").unwrap().1.title, "Listing files");
 }
 
 #[test]
