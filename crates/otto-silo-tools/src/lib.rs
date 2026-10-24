@@ -188,8 +188,15 @@ impl Tool for SiloTool {
         &self.spec
     }
 
-    async fn call(&self, input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, mut input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
         let tools = self.shared.tools(&cx.cwd).await?;
+        // One connection serves every session: relative paths start from
+        // this session's folder, not the first caller's.
+        if self.spec.name == "files_show"
+            && let Some(input) = input.as_object_mut()
+        {
+            input.entry("cwd").or_insert_with(|| Value::String(cx.cwd.to_string_lossy().into_owned()));
+        }
         let anchor = match self.shared.control().await {
             Some(control) => self.shared.anchor(&tools, &control, &cx.sessions).await,
             None => None,
@@ -274,6 +281,8 @@ mod tests {
         assert_eq!(spec("terminal_run").source, Source::Silo);
         assert!(!spec("terminal_run").effects.read_only());
         assert!(spec("terminal_read").effects.read_only());
+        let show = spec("files_show");
+        assert_eq!((show.loading, show.effects.read_only()), (Loading::Deferred, true), "loaded on demand, like the browser tools");
     }
 
     #[test]

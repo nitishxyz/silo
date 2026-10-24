@@ -72,6 +72,19 @@ struct Fields {
     body: String,
     screenshot: bool,
     selector: String,
+    path: String,
+    line: u64,
+    highlight: Vec<Highlight>,
+}
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct Highlight {
+    /// First line, 1-based.
+    start: u64,
+    /// Last line, inclusive (start for one line).
+    end: u64,
+    /// A short label shown beside the lines.
+    note: Option<String>,
 }
 #[derive(JsonSchema)]
 #[allow(dead_code)]
@@ -204,6 +217,13 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
             true,
         ),
         ("session_list", "List visible sessions.", "", "", true),
+        (
+            "files_show",
+            "Show the user a file in Silo: opens it in a Files block beside your block (reusing one in your window whose folder holds the file), scrolls to `line` or the first highlight, and marks each `highlight` range (1-based, inclusive lines) with a tinted background and its optional short `note` as a label. Use it to point at code you are explaining, reviewing or just changed. It returns no contents; read files with your own tools. `path` is absolute, ~/…, or relative to your working directory; a folder opens the block there. Calling it again for the same file replaces its highlights (none given clears them); they go when the user closes the tab.",
+            "path line highlight block_id",
+            "path",
+            true,
+        ),
         ("notify", "Notify the user on the agent's block, or block_id when outside a block.", "block_id title body", "body", false),
     ];
     let schema = serde_json::to_value(schema_for!(Fields)).expect("schema serializes");
@@ -217,6 +237,6 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         }
         let mut input_schema = json!({"type":"object", "properties": properties, "required": required.split_whitespace().collect::<Vec<_>>(), "additionalProperties": false});
         if let Some(defs) = schema.get("$defs") { input_schema["$defs"] = defs.clone(); }
-        ToolDescriptor { name: name.into(), description: description.into(), input_schema, effects: Effects { read, write: !read, process: !read }, deferred: name.starts_with("browser_") }
+        ToolDescriptor { name: name.into(), description: description.into(), input_schema, effects: Effects { read, write: !read, process: !read }, deferred: name.starts_with("browser_") || name == "files_show" }
     }).collect()
 }

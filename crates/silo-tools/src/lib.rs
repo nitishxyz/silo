@@ -1,6 +1,7 @@
 //! Tools over an ordinary Silo control connection.
 
 mod descriptors;
+pub mod files;
 
 use std::{
     collections::BTreeMap,
@@ -91,6 +92,8 @@ pub struct Tools {
     subscribed: OnceCell<()>,
     shell: Mutex<Option<String>>,
     run_lock: Mutex<()>,
+    /// `files_show` calls one at a time: two at once would each open a block.
+    show_lock: Mutex<()>,
 }
 
 impl Drop for Tools {
@@ -109,7 +112,16 @@ impl Tools {
                 let _ = out.send(event);
             }
         });
-        Self { control, cx, events: tx, fan, subscribed: OnceCell::new(), shell: Mutex::new(None), run_lock: Mutex::new(()) }
+        Self {
+            control,
+            cx,
+            events: tx,
+            fan,
+            subscribed: OnceCell::new(),
+            shell: Mutex::new(None),
+            run_lock: Mutex::new(()),
+            show_lock: Mutex::new(()),
+        }
     }
 
     #[must_use]
@@ -174,6 +186,7 @@ impl Tools {
             }
             "terminal_wait" => self.wait(&input, anchor).await?,
             "terminal_list" => self.list().await?,
+            "files_show" => self.show(&input, anchor).await?,
             "terminal_close" => {
                 self.control
                     .call_value(Method::BlockClose { block_id: self.block(&input, anchor)?, force: input["force"].as_bool().unwrap_or(false) })
@@ -254,6 +267,69 @@ impl Tools {
     pub async fn fetch(&self, input: &Value) -> anyhow::Result<BrowserFetchResult> {
         let params = fetch_params(input)?;
         self.control.call(Method::BrowserFetch(params)).await
+    }
+
+    /// `files_show`: open `path` in a Files block beside `anchor` (reusing
+    /// one in its window whose root holds the path), scrolled to the line,
+    /// with the highlights marked. Input `cwd` (set by hosts such as otto
+    /// per call) overrides the context's for relative paths.
+    async fn show(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<Value> {
+        if !self.control.peer_supports(silo_proto::compat::feature::FILES) {
+            bail!("this Silo server has no Files blocks (update it)");
+        }
+        let cwd = input["cwd"].as_str().map(PathBuf::from).or_else(|| self.cx.cwd.clone());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let show = files::parse(input, cwd.as_deref(), home.as_deref())?;
+        // The server's roots are canonical: compare like with like.
+        let target = tokio::fs::canonicalize(&show.path).await.with_context(|| format!("{} does not exist", show.path.display()))?;
+        let dir = tokio::fs::metadata(&target).await?.is_dir();
+        let cwd = match cwd {
+            Some(cwd) => tokio::fs::canonicalize(&cwd).await.ok(),
+            None => None,
+        };
+        let _lock = self.show_lock.lock().await;
+        let anchor = input["block_id"].as_str().or(anchor).map(str::to_owned);
+        let reused = match &anchor {
+            Some(anchor) => {
+                let view: BlockView = self.control.call(Method::BlockView { block_id: anchor.clone() }).await?;
+                let session: SessionView = self.control.call(Method::SessionView { session_id: view.block.session_id }).await?;
+                files::reusable(&session, anchor, &target)
+            }
+            None => None,
+        };
+        let created = reused.is_none();
+        let (block, root) = match reused {
+            Some(found) => found,
+            None => {
+                let root = files::new_root(&target, dir, cwd.as_deref());
+                let spawn = SpawnSpec { cwd: Some(root.to_string_lossy().into_owned()), ..Default::default() };
+                let method = match &anchor {
+                    Some(anchor) => {
+                        Method::BlockSplit { block_id: anchor.clone(), axis: Axis::Horizontal, spawn, kind: BlockKind::Files, url: None, agent: None }
+                    }
+                    None => {
+                        let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
+                        let session = &self.cx.default_session;
+                        match sessions.iter().find(|s| s.name == *session || s.id == *session) {
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Files, url: None },
+                            None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Files, url: None },
+                        }
+                    }
+                };
+                let created: Created = self.control.call(method).await?;
+                (created.block_id, root)
+            }
+        };
+        let rel = files::relative(&root, &target).context("the file is outside the Files block's folder")?;
+        if dir || rel.is_empty() {
+            return Ok(json!({"block_id": block, "root": root, "created": created}));
+        }
+        let state: silo_proto::model::FilesState = self.control.call(Method::FilesSet(files::set_params(&block, &rel, &show))).await?;
+        let marked = state.highlights.get(&rel).map_or(0, Vec::len);
+        Ok(json!({
+            "block_id": block, "root": root, "path": rel, "created": created,
+            "line": files::focus_line(&show), "highlights": marked,
+        }))
     }
 
     fn block(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<String> {
