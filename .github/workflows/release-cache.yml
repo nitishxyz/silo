@@ -1,0 +1,76 @@
+name: release-cache
+
+# Keeps the release builds' Rust caches warm on `main`. A cache belongs to
+# the ref that saved it, and a tag may restore only its own and the default
+# branch's: release.yml runs on a new tag every time, so without these it
+# always starts cold (the macOS app build: ~20 min cold, ~6 min warm).
+#
+# Only dependencies and toolchains make the cache stale (rust-cache keys on
+# Cargo.lock, the Cargo.tomls and rustc), so this runs when those change, on
+# a weekly schedule for new stable Rust releases, or by hand. It builds what
+# release.yml builds, in the same cache keys, and nothing else: no signing,
+# packaging or tests. It never gates a release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - "crates/*/Cargo.toml"
+      - GHOSTTY_REV
+      - scripts/build-ghostty.sh
+      - scripts/fetch-cef.sh
+      - .github/workflows/release-cache.yml
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cache
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  warm:
+    name: warm (${{ matrix.os }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      # Must match release.yml's matrix: runner and cache key.
+      matrix:
+        include:
+          - { os: linux, arch: x86_64, runner: ubuntu-22.04, jobs: 2 }
+          - { os: linux, arch: aarch64, runner: ubuntu-22.04-arm, jobs: 2 }
+          - { os: macos, arch: aarch64, runner: macos-15, jobs: 3 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.arch }}
+      - uses: ./.github/actions/ghostty
+      - if: matrix.os == 'macos'
+        uses: ./.github/actions/cef
+      - run: cargo fetch --locked
+      - name: Build silo
+        if: matrix.os == 'linux'
+        run: cargo build -p silo-cli --release --locked
+      # The same three builds as scripts/bundle-macos.sh, without bundling or
+      # signing (the bundle step only copies and signs these outputs).
+      - name: Build the app's binaries
+        if: matrix.os == 'macos'
+        run: |
+          set -eu
+          cargo build --release --locked -p silo-cli -p silo-menubar -p otto-cli --bins
+          cargo build --release --locked -p silo-web --bin silo-web-helper
+          cargo build --release --locked -p silo-app --no-default-features --features runtime_shaders

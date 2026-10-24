@@ -86,10 +86,13 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # Restores the cache release-cache.yml keeps warm on main. A tag never
+      # saves one: no later tag could restore it (caches are per ref), and
+      # each would take ~3 GB of the repository's 10 GB cache budget.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
-          cache-on-failure: true
+          save-if: ${{ github.ref_type != 'tag' }}
       - name: Use this workflow's signing tooling
         if: matrix.os == 'macos' && inputs.tag != ''
         run: |
