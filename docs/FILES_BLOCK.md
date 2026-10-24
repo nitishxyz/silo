@@ -7,7 +7,7 @@ draws it.
 Decided on 2026-10-24:
 - File tabs live in the block header.
 - The file tree is on the right, and a button in the header collapses it.
-- The first version is read-only. Editing comes later.
+- The first version is read-only. Editing comes later. (Built on 2026-10-25: §2 `files.write`, §4 Editing.)
 - Syntax highlighting uses tree-sitter, following Zed's grammars and `highlights.scm` queries.
 - It opens from the block launcher. `launcher.rs` already has a slot for the Files kind.
 
@@ -49,11 +49,26 @@ rights to change its state.
 | Method | Params | Result |
 |---|---|---|
 | `files.list` | `path` (dir) | entries: `name, kind (file/dir/symlink), size, mtime` |
-| `files.read` | `path`, `max_bytes?` (default 2 MiB) | `text` (UTF-8) or `binary` (`mime`, `size`), `truncated`, `mtime`, `size` |
+| `files.read` | `path`, `max_bytes?` (default 2 MiB) | `text` (UTF-8) or `binary` (`mime`, `size`), `truncated`, `mtime`, `size`, and `sha256` for text read whole |
 | `files.read_image` | `path` | bytes plus `mime`, for png, jpeg, gif, webp and svg, up to 20 MiB |
 | `files.find` | `query`, `limit` | fuzzy-matched paths under root; skips `.git`, `target`, `node_modules` and `.gitignore`d paths |
 | `files.set` | partial `FilesState` (open, active, tree, expanded, scroll, highlights) | the updated state, broadcast as `block.changed` |
 | `files.root` | `path` | re-root the block (interact rights) |
+| `files.write` | `path`, `text`, `base?` (`mtime`, `size`, `sha256?`), `force?` | `path`, `mtime`, `size`, `sha256` of the file written (interact rights) |
+| `files.create` | `path`, `text?` | as `files.write`; a new file, its folder must exist (interact rights) |
+
+**Writing** (feature `files_write`; older servers answer `method_not_found` and the app keeps their files read-only):
+- `files.write` replaces an existing regular file atomically: the text goes to a temporary file in the same folder
+  (`.name.silo-<pid>-<random>.tmp`), which takes the old file's mode (and its owner and group when the server may set
+  them), is synced, and is renamed over the file. A symlink inside the root writes its target; the link stays.
+- `base` is the version the edit started from (what `files.read` or the last write returned). When the file is no
+  longer it, the write is refused with `conflict` (its `data` is the file's `mtime` and `size` now), unless `force`.
+  With a `sha256` the contents alone decide (a touched file is no conflict, two writes in one millisecond are told
+  apart); without, the time and size do. No `base`: written whatever is there.
+- A file without write permission (or in a folder that can't be written, which the rename needs) is refused with
+  `read_only` and says so ("src/x.rs is read-only"). Over 8 MiB (`FileWritten::MAX_BYTES`, so the request fits in a
+  frame) is `too_large`. Folders and special files are `bad_request`; a missing file is `not_found`.
+- `files.create` refuses a taken path with `exists` (a dangling link counts). The app doesn't use it yet.
 
 **Events:** `files.changed { block_id, paths }`. The server watches the root (FSEvents on macOS, inotify on Linux,
 through the `notify` crate), debounced to 150 ms, and sends changed paths relative to the root. Clients re-read
@@ -63,7 +78,7 @@ paths that are open, and re-list directories that are expanded.
 - Paths are joined to the root, canonicalised and must stay under the root's canonical form. That rejects `..` and
   symlinks that escape.
 - Symlinks inside the root are followed, and their targets are checked too.
-- There are size caps, and no writes.
+- There are size caps. Writes follow the same rules: the path (and a link's target) must resolve under the root.
 
 ## 3. Syntax highlighting (app side, `silo-app/src/syntax/`)
 
@@ -98,10 +113,13 @@ This follows Zed (`crates/grammars`, `crates/language`), but in a much smaller f
 ## 4. App
 
 Built in `silo-app/src/files/` (`mod.rs`: state and calls, `view.rs`: header, tree and finder, `text.rs`: the text
-viewer, `model.rs`: the logic without gpui, tested) and `files_block.rs` (the workspace side).
+viewer, `model.rs`: the logic without gpui, tested, `editor.rs`: editing, saving and the changed-on-disk bar,
+`edit.rs`: the editing logic without gpui, tested) and `files_block.rs` (the workspace side, with the unsaved-changes
+dialog).
 
 **Block header**, left to right:
-- File tabs: name (with its folder when two open tabs share a name), a dot when the file changed on disk since the
+- File tabs: name (with its folder when two open tabs share a name), a filled dot in place of the × while the tab
+  has unsaved edits (the × on hover), a dot when the file changed on disk since the
   tab was last shown, × to close (shown on the active tab, and on hover), middle-click to close. The tab strip
   scrolls sideways when it overflows. With no tab open, the header shows the root's name and path.
 - For a markdown tab: a Rendered | Source switch.
@@ -129,6 +147,31 @@ viewer, `model.rs`: the logic without gpui, tested) and `files_block.rs` (the wo
   - Arrow keys navigate (once the tree has focus), → / ← expand and collapse (or move into / up to the parent),
     ↩ opens.
 
+**Editing** (`files/editor.rs`, the text logic in `files/edit.rs`): a text or code tab is edited in place when the
+server has `files_write`, its whole text is loaded (a truncated file after Load all) and it is at most 8 MiB.
+Markdown edits in Source; Rendered stays read-only and shows the edited text. Images and binaries are never edited.
+- A caret (blinking, accent-coloured) at the selection's head; a click places it, the selection model above extends
+  to it. Typing and input methods come through gpui's `EntityInputHandler` (marked text underlined while composing).
+- Return keeps the line's indentation, one level more after `{`, `(` or `[` (and a `:` ending a Python line); between
+  a pair the closer goes to its own line. Tab indents to the next stop (or each selected line), ⇧Tab outdents; the
+  file's indentation is detected (tabs, or 2, 4 or 8 spaces; 4 when unknown). Backspace in leading spaces goes back
+  to the previous stop. Pasted and typed line breaks take the file's own (`\n` or `\r\n`).
+- Undo steps: a run of typing until a pause of a second or a space after a word; a run of backspaces or deletes;
+  anything else (Return, Tab, paste, cut) is a step of its own. A tab is clean whenever its text is the one saved,
+  undoing back to it included.
+- Colours follow the text while typing (spans shifted on the edited line) and the file is highlighted again off the
+  UI thread once typing pauses (120 ms, 400 ms over 256 KB).
+- ⌘S saves with `files.write` from the version read. Unsaved text is the app's only (no server state). It is kept
+  per tab, with its caret, through renders and tab switches; while another session is shown it waits in the app
+  (`files::Stash`) for the block's next pane. A tab with edits closed elsewhere (another window) stays open here.
+- On `files.changed`: a clean tab reads the file again silently (unless it is the version it has, e.g. its own
+  save). A tab with edits keeps them; when the file is no longer the version they started from, a bar says "Changed
+  on disk." with **Reload (lose your edits)** and **Keep mine**; saving after Keep mine forces the write. A save
+  refused with `conflict` shows the same bar. otto's edit and write tools reach the tabs this way.
+- Closing a tab with edits (×, middle-click, ⌘W), or closing its pane, tab or session, asks: "Save changes to
+  “main.rs”?" with Save (↩), Don't Save (⌘⌫) and Cancel (esc). Save writes every listed tab and closes when all
+  were saved; a refusal keeps it open with the bar or the error showing.
+
 **Keys inside the block:**
 
 | Key | Action |
@@ -140,7 +183,25 @@ viewer, `model.rs`: the logic without gpui, tested) and `files_block.rs` (the wo
 | ⌘F | Find in the file (smart case; ↩ / ↓ next, ↑ previous, ⌘G / ⇧⌘G too, esc closes) |
 | ⌘L | Go to line (`12` or `12:5`) |
 | ⌘C / ⌘A | Copy the selection / select all |
-| ↑ ↓ ← → / PgUp PgDn / Home End | Scroll the viewer |
+| ↑ ↓ ← → / PgUp PgDn / Home End | Scroll the viewer (read-only tabs) |
+| ⌘S | Save the tab (editable tabs; any mode, Rendered markdown too) |
+
+Editable tabs (in the viewer; ⇧ with any move extends the selection):
+
+| Key | Action |
+|---|---|
+| ← → / ↑ ↓ | A character / a line (keeping the column) |
+| ⌥← ⌥→ | A word |
+| ⌘← ⌘→, Home End | The line's first non-blank (again: its start) / its end |
+| ⌘↑ ⌘↓, ⌘Home ⌘End | The text's start / end |
+| PgUp PgDn | A page (the view moves with it) |
+| ⌫ / ⌥⌫ / ⌘⌫ | Delete a character (in leading spaces, to the previous indent stop) / a word / to the line's start |
+| ⌦ / ⌥⌦ / ⌘⌦ | Delete forward a character / a word / to the line's end |
+| ↩ | New line with auto-indent |
+| ⇥ / ⇧⇥ | Indent (at the caret, or each selected line) / outdent |
+| ⌘A ⌘C ⌘X ⌘V | Select all, copy, cut, paste |
+| ⌘Z / ⇧⌘Z | Undo / redo |
+| esc | Collapse the selection to the caret |
 
 Selection works like the agent pane's: press and drag, double-click a word, triple-click a line, ⇧-click extends,
 dragging past the top or bottom scrolls. It is kept on the text (lines and bytes), so it survives scrolling and a
@@ -172,8 +233,10 @@ otto-silo-tools. It is a deferred tool (loaded on demand, like the browser tools
   replaces that tab's highlights (none given clears them). A folder only opens or reuses the block.
 - It returns `{ block_id, root, path, created, line, highlights }`, not the file's contents.
 
-**Later:** live edits. When otto edits a file that a Files tab has open, the tab shows the change as it lands, which
-`files.changed` already gives us. A diff view against `HEAD` comes after that.
+**Live edits** (built): when otto edits a file that a Files tab has open, `files.changed` brings the change and the
+tab follows the reload rules of §4 Editing (a clean tab shows it as it lands; one with edits shows the bar).
+
+**Later:** a diff view against `HEAD`.
 
 ## 6. Order of work
 
@@ -190,7 +253,10 @@ otto-silo-tools. It is a deferred tool (loaded on demand, like the browser tools
    (Built.)
 4. **The CLI `silo files` command and the otto tool** (built as `files_show`, with highlights; the CLI is not).
 
-**Later:** editing, diffs, PDF preview, a git status column in the tree, and search across files.
+5. **Editing** (built): `files.write` / `files.create` (feature `files_write`) and the editor in the viewer (§4).
+
+**Later:** diffs, PDF preview, a git status column in the tree, search across files, creating files from the app
+(`files.create` is there), and asking about unsaved tabs when the app quits.
 
 ## 7. Open questions
 
