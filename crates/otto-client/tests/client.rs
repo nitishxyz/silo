@@ -450,3 +450,40 @@ fn a_snapshot_taken_mid_reply_shows_its_text_and_live_deltas_continue_it() {
     assert_eq!(mirror.items.len(), 1);
     assert_eq!(mirror.item("i").unwrap().text(), "Hello, world! Bye");
 }
+
+#[test]
+fn a_tool_call_streams_its_input_then_runs_then_finishes() {
+    use otto_client::ToolStatus;
+    let mut m = SessionMirror::new(view(0));
+    m.apply(1, &Event::ToolInputStart { call_id: "c".into(), name: "write".into() });
+    assert_eq!((m.tools["c"].name.as_str(), m.tools["c"].status), ("write", ToolStatus::Input), "named before any input");
+    assert_eq!(m.apply_live(1, &Event::ToolInputDelta { call_id: "c".into(), delta: "{\"path\":".into() }), ApplyResult::Applied);
+    assert_eq!(m.tools["c"].name, "write", "a live delta keeps the name");
+    m.apply(2, &Event::ToolInputDelta { call_id: "c".into(), delta: "{\"path\":".into() });
+    assert_eq!((m.tools["c"].input_delta.as_str(), m.tools["c"].status), ("{\"path\":", ToolStatus::Input));
+    m.apply(3, &Event::ToolCall { call_id: "c".into(), name: "write".into(), input: json!({"path": "a"}) });
+    assert_eq!(m.tools["c"].status, ToolStatus::Running);
+    m.apply(4, &Event::ToolResult { call_id: "c".into(), is_error: true, output: json!("no"), item_id: "r".into() });
+    assert_eq!(m.tools["c"].status, ToolStatus::Error);
+    // A no-argument call: named, then called, never a delta.
+    m.apply(5, &Event::ToolInputStart { call_id: "d".into(), name: "ls".into() });
+    m.apply(6, &Event::ToolCall { call_id: "d".into(), name: "ls".into(), input: json!({}) });
+    assert_eq!((m.tools["d"].input_delta.as_str(), m.tools["d"].status), ("", ToolStatus::Running));
+}
+
+#[test]
+fn tool_input_start_is_a_sequenced_event() {
+    let message: ServerMessage =
+        serde_json::from_value(json!({"seq": 3, "session_id": "s", "event": "tool.input_start", "data": {"call_id": "c", "name": "ls"}})).unwrap();
+    assert!(matches!(message, ServerMessage::Event { seq: 3, .. }), "known to this client");
+}
+
+#[test]
+fn a_view_taken_mid_call_seeds_the_streaming_input_and_later_deltas_continue_it() {
+    let mut v = view(4);
+    v.streaming_tool_calls = vec![StreamingToolCall { call_id: "c".into(), name: "write".into(), input_delta: "{\"path\":".into() }];
+    let mut m = SessionMirror::new(v);
+    assert_eq!((m.tools["c"].name.as_str(), m.tools["c"].status), ("write", otto_client::ToolStatus::Input));
+    m.apply(5, &Event::ToolInputDelta { call_id: "c".into(), delta: "\"a\"}".into() });
+    assert_eq!(m.tools["c"].input_delta, "{\"path\":\"a\"}");
+}

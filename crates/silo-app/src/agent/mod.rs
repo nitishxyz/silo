@@ -13,6 +13,7 @@ mod header;
 mod jobs;
 mod markdown;
 pub(crate) mod mention;
+mod partial_json;
 mod pill_input;
 mod plan;
 mod reveal;
@@ -366,6 +367,8 @@ pub struct AgentPane {
     /// Groups the user opened (folded) or closed (live).
     toggled: HashSet<String>,
     details: HashSet<String>,
+    /// Edit previews opened as the model wrote them (they close when the call ends, unless the user toggled them).
+    previews: HashSet<String>,
     /// Open `›` details' box heights as last laid out (a live window's budget makes room for exactly that).
     detail_h: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
     /// Live groups' windows following their newest line (scrolled up in one, it stays put).
@@ -530,6 +533,7 @@ impl AgentPane {
             fold_at: HashMap::new(),
             toggled: HashSet::new(),
             details: HashSet::new(),
+            previews: HashSet::new(),
             live_pins: HashMap::new(),
             detail_h: std::rc::Rc::default(),
             reveals: HashMap::new(),
@@ -854,6 +858,7 @@ impl AgentPane {
         self.live_pins.clear();
         self.toggled.clear();
         self.details.clear();
+        self.previews.clear();
         self.detail_h.borrow_mut().clear();
         self.anims.clear();
         self.line_status.clear();
@@ -986,6 +991,7 @@ impl AgentPane {
         self.todos = todos;
         self.built = rows;
         self.show_rows();
+        self.sync_previews(cx);
         // A turn that ended before it was seen running: its reply is there.
         if self.optimistic.is_none() && !running && !matches!(self.built.last(), Some(Row::User { .. }) | None) {
             self.sent_at = None;

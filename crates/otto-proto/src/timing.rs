@@ -33,8 +33,17 @@ pub struct Mark {
 }
 
 /// The journal events timing reads.
-pub const MARKS: &[&str] =
-    &["reasoning.delta", "text.delta", "tool.input_delta", "tool.call", "tool.result", "item.started", "item.done", "turn.finished"];
+pub const MARKS: &[&str] = &[
+    "reasoning.delta",
+    "text.delta",
+    "tool.input_start",
+    "tool.input_delta",
+    "tool.call",
+    "tool.result",
+    "item.started",
+    "item.done",
+    "turn.finished",
+];
 
 /// Times of the reasoning parts and tool calls of `items`, from `marks` in journal order.
 #[must_use]
@@ -55,7 +64,7 @@ pub fn part_times(items: &[Item], marks: &[Mark]) -> Vec<PartTime> {
                 let end = marks[i + 1..].iter().find(|n| n.kind != "reasoning.delta" || n.item_id != m.item_id).map(|n| n.at);
                 runs.entry(item).or_default().push((m.at, end));
             }
-            ("tool.input_delta" | "tool.call", _, Some(call)) => {
+            ("tool.input_start" | "tool.input_delta" | "tool.call", _, Some(call)) => {
                 first.entry(call).or_insert(i);
             }
             ("tool.result", _, Some(call)) => result.entry(call).or_default().push(i),

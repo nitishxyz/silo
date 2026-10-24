@@ -1180,6 +1180,34 @@
               "call_id": {
                 "type": "string"
               },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "name"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "tool.input_start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
               "delta": {
                 "type": "string"
               }
@@ -15637,6 +15665,25 @@
             ],
             "type": "string"
           },
+          "StreamingToolCall": {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "input_delta": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "name",
+              "input_delta"
+            ],
+            "type": "object"
+          },
           "Usage": {
             "properties": {
               "cache_read": {
@@ -15735,6 +15782,12 @@
           "seq": {
             "format": "int64",
             "type": "integer"
+          },
+          "streaming_tool_calls": {
+            "items": {
+              "$ref": "#/$defs/StreamingToolCall"
+            },
+            "type": "array"
           },
           "turn_started_at": {
             "format": "int64",
@@ -17168,6 +17221,34 @@
               },
               "event": {
                 "const": "reasoning.delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "call_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "call_id",
+                  "name"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "tool.input_start",
                 "type": "string"
               }
             },
@@ -18807,6 +18888,34 @@
               },
               "event": {
                 "const": "reasoning.delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "call_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "call_id",
+                  "name"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "tool.input_start",
                 "type": "string"
               }
             },

@@ -52,13 +52,17 @@ impl SessionMirror {
     #[must_use]
     pub fn new(view: SessionView) -> Self {
         let indices = view.items.iter().enumerate().map(|(i, item)| (item.id.clone(), i)).collect();
-        let tools = view
+        let mut tools: HashMap<String, ToolState> = view
             .running_tool_calls
             .into_iter()
             .map(|c| {
                 (c.call_id, ToolState { name: c.name, input: c.input, status: ToolStatus::Running, started_at: c.started_at, ..ToolState::default() })
             })
             .collect();
+        // Calls the model was still writing when the view was taken: their input so far (later deltas continue it).
+        for c in view.streaming_tool_calls {
+            tools.entry(c.call_id).or_insert(ToolState { name: c.name, input_delta: c.input_delta, ..ToolState::default() });
+        }
         Self {
             info: view.info,
             items: view.items,
@@ -157,6 +161,13 @@ impl SessionMirror {
             Event::TextDelta { item_id, .. } | Event::ReasoningDelta { item_id, .. } => {
                 if let Some(i) = self.indices.get(item_id) {
                     event.append_delta(&mut self.items[*i].parts);
+                }
+            }
+            Event::ToolInputStart { call_id, name } => {
+                // The call exists from here, its input still streaming (`ToolStatus::Input`).
+                let t = self.tools.entry(call_id.clone()).or_default();
+                if t.name.is_empty() {
+                    t.name.clone_from(name);
                 }
             }
             Event::ToolInputDelta { call_id, delta } => self.tools.entry(call_id.clone()).or_default().input_delta.push_str(delta),

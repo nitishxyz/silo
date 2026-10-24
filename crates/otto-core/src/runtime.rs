@@ -863,6 +863,28 @@ pub(crate) fn open_items(s: &Store, id: &str, upto: i64) -> Result<Vec<otto_llm:
     }
     Ok(open)
 }
+/// Tool calls the model is still writing (named, input streaming, not yet `tool.call`) up to `upto`.
+pub(crate) fn open_inputs(s: &Store, id: &str, upto: i64) -> Result<Vec<otto_proto::StreamingToolCall>> {
+    let mut open: Vec<otto_proto::StreamingToolCall> = Vec::new();
+    for (seq, event) in s.events_after_last(id, &["item.done", "turn.started", "turn.finished"])?.into_iter().map(decode) {
+        if seq > upto {
+            break;
+        }
+        match event {
+            Event::ToolInputStart { call_id, name } => {
+                open.push(otto_proto::StreamingToolCall { call_id, name, input_delta: String::new() });
+            }
+            Event::ToolInputDelta { call_id, delta } => {
+                if let Some(call) = open.iter_mut().find(|c| c.call_id == call_id) {
+                    call.input_delta.push_str(&delta);
+                }
+            }
+            Event::ToolCall { call_id, .. } => open.retain(|c| c.call_id != call_id),
+            _ => {}
+        }
+    }
+    Ok(open)
+}
 pub(crate) fn record(event: &Event, turn: i64, step: i64) -> Result<EventRecord> {
     let value = serde_json::to_value(event)?;
     Ok(EventRecord { turn, step, kind: value["event"].as_str().unwrap_or("error").into(), payload: value["data"].clone() })

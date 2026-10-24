@@ -113,6 +113,8 @@ pub struct Line {
     pub files: Vec<String>,
     /// `desc` is the call's running time: kept current while it shows.
     pub clock: bool,
+    /// `detail` previews an edit the model is still writing (shown open, following its newest lines).
+    pub preview: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -450,6 +452,48 @@ fn pending_tools<'a>(items: &[Item], tools: &'a HashMap<String, ToolState>) -> V
     tools.iter().filter(|(id, _)| !called.contains(id.as_str())).collect()
 }
 
+/// A call the model is still writing (`ToolStatus::Input`): its name and its input as far as it arrived. The
+/// name is otto's (`tool.input_start`); a daemon that doesn't send it leaves it to the input's keys, so only
+/// edits show early there. `None`: nothing to show yet.
+fn streaming(t: &ToolState) -> Option<(&str, Value)> {
+    if t.status != ToolStatus::Input || !t.input.is_null() {
+        return None;
+    }
+    let raw = t.input_delta.trim_start();
+    // A path names the row once whole (not letter by letter); other text shows as it arrives.
+    let partial = super::partial_json::parse(raw).map(|mut p| {
+        if let (Some(key @ ("path" | "file_path")), Value::Object(map)) = (p.open.as_deref(), &mut p.value) {
+            map.remove(key);
+        }
+        p.value
+    });
+    let name = if t.name.is_empty() { guess(partial.as_ref(), raw)? } else { t.name.as_str() };
+    let input = match partial {
+        Some(value) => value,
+        // A custom tool's input is its text (OpenAI's `apply_patch`).
+        None if name == "apply_patch" && !raw.is_empty() => Value::String(t.input_delta.clone()),
+        None => Value::Object(serde_json::Map::new()),
+    };
+    Some((name, input))
+}
+
+/// An unnamed call's tool, from the keys of its input so far: only the edit tools (their keys say which).
+fn guess(input: Option<&Value>, raw: &str) -> Option<&'static str> {
+    let Some(input) = input else { return raw.starts_with("*** Begin Patch").then_some("apply_patch") };
+    let has = |key: &str| input.get(key).is_some();
+    if has("edits") {
+        Some("multiedit")
+    } else if has("old_string") || has("new_string") {
+        Some("edit")
+    } else if has("patch") {
+        Some("apply_patch")
+    } else if has("path") && has("content") {
+        Some("write")
+    } else {
+        None
+    }
+}
+
 fn results(items: &[Item]) -> HashMap<&str, (String, bool)> {
     let mut map = HashMap::new();
     for item in items {
@@ -592,7 +636,7 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     let results = results(input.items);
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
-    pending.retain(|(_, t)| !t.name.is_empty());
+    pending.retain(|(_, t)| !t.name.is_empty() || streaming(t).is_some());
     pending.sort_by_key(|(id, _)| input.times.seq(id));
     let last = input.items.len().checked_sub(1);
     let mut rows = Vec::new();
@@ -664,7 +708,11 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
         }
     }
     for (id, t) in pending {
-        lines.push(tool(id, &t.name, &t.input, Some(t), None, &cx));
+        lines.push(match streaming(t) {
+            // Shown as it will run, from what of its input arrived: the same row, filling in.
+            Some((name, input)) => tool(id, name, &input, Some(t), None, &cx),
+            None => tool(id, &t.name, &t.input, Some(t), None, &cx),
+        });
     }
     if let Some(error) = input.error.map(str::trim).filter(|e| !e.is_empty()) {
         lines.push(Line {
@@ -702,6 +750,7 @@ impl Line {
             stream: None,
             files: Vec::new(),
             clock: false,
+            preview: false,
         }
     }
 }
@@ -983,6 +1032,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                 many => format!("{} files", many.len()),
             };
             line.files = edit.files;
+            line.preview = status == Status::Running && live.is_some_and(|t| t.status == ToolStatus::Input) && line.detail.is_some();
             if name == "write" { (Kind::Edit, "Writing", "Wrote", subject) } else { (Kind::Edit, "Editing", "Edited", subject) }
         }
         // Web tools (otto-tools `web_fetch`/`web_search`): matched on their robust fields (metadata `rendered`,
@@ -1577,6 +1627,9 @@ pub fn short(ms: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     if ms < 10_000 { format!("{:.1}s", ms as f64 / 1000.0) } else { dur(ms) }
 }
+
+#[cfg(test)]
+mod streaming;
 
 #[cfg(test)]
 mod tests {

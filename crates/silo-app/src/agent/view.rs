@@ -484,6 +484,29 @@ impl AgentPane {
         entry.1.set(open, now, reduce);
     }
 
+    /// Edits the model is still writing open their preview as they appear (the box follows its newest lines); one
+    /// opened so closes again once its call ends, unless the user toggled it meanwhile.
+    pub(super) fn sync_previews(&mut self, cx: &App) {
+        let mut flips = Vec::new();
+        for g in self.rows.iter().filter_map(|r| if let Row::Group(g) = r { Some(g) } else { None }) {
+            for line in &g.lines {
+                if line.preview {
+                    if self.previews.insert(line.key.clone()) && self.details.insert(line.key.clone()) {
+                        flips.push((line.key.clone(), g.key.clone(), true));
+                    }
+                } else if !matches!(line.status, Status::Running | Status::Pending | Status::Waiting(_))
+                    && self.previews.remove(&line.key)
+                    && self.details.remove(&line.key)
+                {
+                    flips.push((line.key.clone(), g.key.clone(), false));
+                }
+            }
+        }
+        for (key, row, open) in flips {
+            self.flip(format!("det:{key}"), row, open, cx);
+        }
+    }
+
     /// 0 (closed) … 1 (open) of motion `key`; `open` once it settled.
     fn openness(&self, key: &str, open: bool, now: Instant, cx: &App) -> f32 {
         self.anims.get(key).map_or(if open { 1.0 } else { 0.0 }, |(_, t)| toggled(t, now, cx))
@@ -1208,6 +1231,8 @@ impl AgentPane {
                 if !has_detail {
                     return;
                 }
+                // The user decides from here: an edit preview no longer closes by itself.
+                this.previews.remove(&detail_key);
                 let open = !this.details.remove(&detail_key);
                 if open {
                     this.details.insert(detail_key.clone());
@@ -1318,6 +1343,14 @@ impl AgentPane {
             }
             other => other.map(|(el, _)| el),
         };
+        // An edit being written: its preview follows the newest lines (scrolled up in it, it stays put).
+        if line.preview && openness > 0.0 {
+            let handle = self.scroll.handle(&format!("detail-{key}"));
+            let pin = self.live_pins.entry(format!("detail-{key}")).or_default();
+            if let Some(y) = pin.follow(f32::from(handle.offset().y), f32::from(handle.max_offset().y)) {
+                handle.set_offset(gpui::point(handle.offset().x, px(y)));
+            }
+        }
         let detail = (openness > 0.0)
             .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, &self.scroll)))
             .flatten()

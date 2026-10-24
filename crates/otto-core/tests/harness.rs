@@ -880,3 +880,68 @@ async fn threshold_compaction_is_requested_and_its_checkpoint_replaces_history()
     other.shutdown().await.unwrap();
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_streamed_tool_call_starts_with_its_name_before_any_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let delta = |d: &str| StreamEvent::ToolInputDelta { call_id: "c1".into(), delta: d.into() };
+    let start = |id: &str| StreamEvent::ToolInputStart { call_id: id.into(), name: "no_such_tool".into() };
+    let model = Scripted::new(vec![
+        vec![
+            start("c1"),
+            delta("{\"path\":"),
+            delta("\"a.rs\"}"),
+            call("c1", "no_such_tool", serde_json::json!({"path": "a.rs"})),
+            // A call without arguments streams no input at all.
+            start("c2"),
+            call("c2", "no_such_tool", serde_json::json!({})),
+            StreamEvent::Finish { reason: FinishReason::ToolUse, response_id: None },
+        ],
+        text("done"),
+    ]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let session = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let (_, mut live) = runtime.subscribe(&session.id, 0).await.unwrap();
+    say(&session, "go", Delivery::Queue).await;
+    let mut seen = vec![];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match live.recv().await.unwrap().1 {
+                Event::ToolInputStart { call_id, name } => seen.push(format!("start {call_id} {name}")),
+                Event::ToolInputDelta { call_id, delta } => seen.push(format!("delta {call_id} {delta}")),
+                Event::ToolCall { call_id, .. } => seen.push(format!("call {call_id}")),
+                Event::TurnFinished { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(seen, ["start c1 no_such_tool", "delta c1 {\"path\":", "delta c1 \"a.rs\"}", "start c2 no_such_tool", "call c1", "call c2",]);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_view_taken_mid_call_holds_the_input_streamed_so_far() {
+    let dir = tempfile::tempdir().unwrap();
+    let delta = |d: &str| StreamEvent::ToolInputDelta { call_id: "c1".into(), delta: d.into() };
+    let model = Scripted::new(vec![vec![
+        StreamEvent::ToolInputStart { call_id: "c1".into(), name: "write".into() },
+        delta("{\"path\":\"a.rs\","),
+        delta("\"content\":\"fn"),
+        StreamEvent::Finish { reason: FinishReason::Other("hang".into()), response_id: None },
+    ]]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let session = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    say(&session, "go", Delivery::Queue).await;
+    let view = until(&runtime, &session.id, |v| v.streaming_tool_calls.first().is_some_and(|c| c.input_delta.ends_with("fn"))).await;
+    let call = &view.streaming_tool_calls[0];
+    assert_eq!((call.call_id.as_str(), call.name.as_str(), call.input_delta.as_str()), ("c1", "write", "{\"path\":\"a.rs\",\"content\":\"fn"));
+    assert!(view.running_tool_calls.is_empty());
+    runtime.cancel(&session.id).await.unwrap();
+    let view = until(&runtime, &session.id, |v| v.info.status != otto_proto::SessionStatus::Busy).await;
+    assert!(view.streaming_tool_calls.is_empty(), "an idle session streams nothing");
+    runtime.shutdown().await.unwrap();
+}

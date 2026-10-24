@@ -221,6 +221,15 @@ pub struct RunningToolCall {
     pub started_at: Option<i64>,
 }
 
+/// A tool call the model is still writing: named (`tool.input_start`), its input as far as it streamed.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StreamingToolCall {
+    pub call_id: String,
+    pub name: String,
+    /// The raw input text so far (an incomplete JSON object, or a custom tool's text).
+    pub input_delta: String,
+}
+
 /// Snapshot at `seq`; subscribe with `after_seq = seq` to continue it.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionView {
@@ -230,6 +239,9 @@ pub struct SessionView {
     pub pending_questions: Vec<PendingQuestion>,
     pub queue: Vec<QueuedInput>,
     pub running_tool_calls: Vec<RunningToolCall>,
+    /// Calls whose input still streams (not yet `tool.call`), so a view taken mid-call shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streaming_tool_calls: Vec<StreamingToolCall>,
     pub seq: i64,
     /// When the running turn started (ms since the Unix epoch); `None` when idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -955,8 +955,11 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `callback: {port, path}` when the provider redirects the browser to a loopback listener (OpenAI's browser
   login: `{1455, "/auth/callback"}`), so a client on another machine can forward it.
 - Events: `session.changed`, `turn.started/finished`, `item.started`, `text.delta`, `reasoning.delta`,
-  `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
+  `tool.input_start`, `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
   `question.asked`, `usage`, `compaction`, `subagent.changed`, `queue.changed`, `error`.
+- `tool.input_start {call_id, name}` (additive) opens every model-written call before its input streams (a call
+  without arguments may stream none); a view taken mid-call lists such calls in `streaming_tool_calls`
+  (`{call_id, name, input_delta}`, the raw input so far).
 - `SessionInfo.context: {used, window}` (additive): `used` is the last step's prompt as the provider reported it
   (`input + cache_read + cache_write`), `window` the session model's `context_window` (0 when unknown). Kept in
   session meta (`meta.context`): each step's `usage` event writes it and carries it (`usage.context`), a

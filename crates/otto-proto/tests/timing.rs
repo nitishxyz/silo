@@ -38,6 +38,8 @@ fn reasoning_runs_until_what_follows_and_calls_until_their_result() {
         mark("reasoning.delta", 1_050, Some("a"), None),
         mark("reasoning.delta", 3_000, Some("a"), None),
         mark("text.delta", 4_000, Some("a"), None),
+        // The call is timed from its start: its name, before any input streams.
+        mark("tool.input_start", 4_400, None, Some("c1")),
         mark("tool.input_delta", 4_500, None, Some("c1")),
         mark("item.done", 5_000, Some("a"), None),
         mark("tool.call", 5_010, None, Some("c1")),
@@ -48,7 +50,7 @@ fn reasoning_runs_until_what_follows_and_calls_until_their_result() {
     ];
     let times = part_times(&[item], &marks);
     let at = |part: u32, started_at: i64, finished_at: Option<i64>| PartTime { item_id: "a".into(), part, started_at, finished_at };
-    assert_eq!(times, [at(0, 1_050, Some(4_000)), at(2, 4_500, Some(6_000)), at(3, 5_000, Some(9_000))]);
+    assert_eq!(times, [at(0, 1_050, Some(4_000)), at(2, 4_400, Some(6_000)), at(3, 5_000, Some(9_000))]);
 }
 
 #[test]

@@ -587,6 +587,7 @@ pub const EVENTS: &[&str] = &[
     "item.done",
     "text.delta",
     "reasoning.delta",
+    "tool.input_start",
     "tool.input_delta",
     "tool.call",
     "tool.progress",
@@ -623,6 +624,10 @@ pub enum Event {
     TextDelta { item_id: String, text: String },
     #[serde(rename = "reasoning.delta")]
     ReasoningDelta { item_id: String, text: String, summary: bool },
+    /// The model began a tool call: its name is known, its input streams next
+    /// (`tool.input_delta`, none for a call without arguments), then `tool.call`.
+    #[serde(rename = "tool.input_start")]
+    ToolInputStart { call_id: String, name: String },
     #[serde(rename = "tool.input_delta")]
     ToolInputDelta { call_id: String, delta: String },
     #[serde(rename = "tool.call")]

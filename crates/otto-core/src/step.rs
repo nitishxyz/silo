@@ -477,6 +477,9 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                 StreamEvent::ReasoningDelta { text, summary } => {
                     deltas.push(&cx, Event::ReasoningDelta { item_id: item.id.clone(), text, summary }, turn, step).await?;
                 }
+                StreamEvent::ToolInputStart { call_id, name } => {
+                    cx.emit(Event::ToolInputStart { call_id, name }, Projection::None, turn, step).await?;
+                }
                 StreamEvent::ToolInputDelta { call_id, delta } => {
                     cx.emit(Event::ToolInputDelta { call_id, delta }, Projection::None, turn, step).await?;
                 }
