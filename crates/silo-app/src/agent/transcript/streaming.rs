@@ -1,4 +1,5 @@
-//! Tool calls shown while the model still writes them (`tool.input_start`, `tool.input_delta`).
+//! Tool calls shown while the model still writes them (`tool.input_start`, `tool.input_delta`), and a compaction
+//! as its summary streams (`compaction.started`, `compaction.delta`).
 
 use otto_client::SessionMirror;
 use otto_proto::Event;
@@ -60,6 +61,7 @@ impl Session {
             turn: m.turn.map(|t| t.1),
             error: None,
             retrying: None,
+            compactions: &m.compactions,
             cwd: Some("/work/app"),
             home: None,
             times,
@@ -262,4 +264,25 @@ fn a_finished_turn_shows_no_streaming_call_as_running() {
     s.event(Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: otto_llm::Usage::default() });
     let (_, line) = s.line("c").unwrap();
     assert_eq!((line.status, line.preview), (Status::Stopped, false));
+}
+
+#[test]
+fn an_auto_compaction_streams_in_the_thread_and_folds_once_stored() {
+    let mut s = Session::new(json!([]));
+    s.call("c1", "read", &json!({"path": "a.rs"}));
+    s.result("c1", "fn a() {}");
+    s.event(Event::CompactionStarted { id: "k".into(), trigger: "auto".into() });
+    for text in ["## Goal\n", "Ship the ", "form."] {
+        assert_eq!(s.m.apply_live(s.seq, &Event::CompactionDelta { id: "k".into(), text: text.into() }), otto_client::ApplyResult::Applied);
+    }
+    let rows = s.rows();
+    let Some(Row::Compaction(c)) = rows.last() else { panic!("{rows:?}") };
+    assert_eq!((c.title(), c.summary.as_str()), ("Compacting context (auto)".into(), "## Goal\nShip the form."));
+    assert!(indicator_is_group(&rows));
+    let checkpoint = Item::new("k", Role::System, vec![Part::Compaction { summary: Some("## Goal\nShip the form.".into()), opaque: None }]);
+    s.event(Event::ItemDone { item: checkpoint });
+    s.event(Event::Compaction { through_seq: 4, summary: Some("## Goal\nShip the form.".into()), id: Some("k".into()) });
+    let rows = s.rows();
+    let Some(Row::Compaction(c)) = rows.last() else { panic!("{rows:?}") };
+    assert_eq!((c.key.as_str(), c.title()), ("k#compaction", "Context compacted · 2 messages summarised".into()));
 }

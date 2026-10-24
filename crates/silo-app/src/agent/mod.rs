@@ -977,6 +977,7 @@ impl AgentPane {
             turn,
             error: m.last_error.as_ref().map(|e| e.1.as_str()),
             retrying: m.retrying.as_ref(),
+            compactions: &m.compactions,
             cwd: cwd.as_deref(),
             home: self.home.as_deref(),
             times: &self.times,
@@ -1077,7 +1078,7 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } | Row::Marker { .. } | Row::Report { .. } => {}
+                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
@@ -1295,7 +1296,8 @@ impl AgentPane {
         self.compacting.is_some() && self.compacting == self.session_id
     }
 
-    /// `/compact`: summarize the shown session's history on its own otto; the transcript gets otto's marker.
+    /// `/compact`: summarize the shown session's history on its own otto; the transcript shows it as it runs
+    /// (otto's `compaction.*` events). Sending waits until it ends.
     fn compact(&mut self, cx: &mut Context<Self>) {
         let session = self.updatable();
         if let Some(why) = compact_refusal(session.is_some(), self.running, self.compacting()) {

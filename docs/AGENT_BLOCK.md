@@ -345,11 +345,20 @@ Units are points.
   the send circle's right edge (inset by the circles' inset; hover fills reach past them), model exactly centered;
   attach muted, always on (§4g).
 - **Slash menu:** `/new /sessions /compact /model /effort /agent /mode auto|ask /providers /settings /clear` (`/clear` also
-  drops attachments; `/compact` calls `session.compact` on the pane's otto: a quiet `Compacting…` strip and no sending
-  until it returns (the draft stays), otto's compaction marker and a count back to 0 after; refused inline with no
+  drops attachments; `/compact` calls `session.compact` on the pane's otto: no sending until it returns (the draft
+  stays), the compaction card in the thread and a count back to 0 after; refused inline with no
   session or while a turn runs, never queued; `/providers` and `/settings` open the Otto settings, §4h); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps
   the text, menu stays closed until the `/` goes); the current mode
   is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
+- **Compaction card** (otto's `compaction.started` / `.delta` / `compaction` / `.failed`, `/compact` or auto): a
+  tool-style row in the thread. Running: spinner, `Compacting context (auto)` or `(/compact)` shimmering, the summary
+  streaming into a 160 tall box that follows its newest lines (scrolled up in it, it stays put); auto compaction
+  ending a running turn is its indicator (Stop on the right, no activity row). Done: `history Context compacted · N
+  messages summarised` (users' and the agent's messages since the checkpoint before), muted, a click opens the
+  summary as markdown (selectable while open; otto's verbatim context for the model is left out). Failed: red with
+  its error under it; stopped: muted `Compaction stopped`. A stored checkpoint (a reopened session) is the folded
+  card; a threshold checkpoint opens its reply. Keyed `<checkpoint item>#compaction`, so the running card becomes
+  the stored one in place.
 - **Rows** (`agent/rows.rs`): one 44 tall row (28 icon column, title + muted subtitle, trailing check/note/buttons,
   selected/hover/pressed fills) for the switcher and provider rows; a small search pill above filterable lists.
   The composer's popups (`@`, `/`, model, agent and effort pickers, `⋮`) use `rows::menu`: one-line 28 rows, a 14

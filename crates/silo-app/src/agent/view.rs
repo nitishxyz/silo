@@ -24,6 +24,10 @@ use crate::{
     tooltip::Tooltip,
 };
 
+/// Most height of a compaction's summary while it streams (it follows its newest lines).
+const COMPACTION_H: f32 = 160.0;
+/// The most lines of it drawn while it streams.
+const STREAMED_LINES: usize = 80;
 /// Width of the reading column.
 const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
@@ -518,7 +522,7 @@ impl AgentPane {
         self.running
             || self.awaiting()
             || self.editor.read(cx).growing(now, reduce)
-            || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live))
+            || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live) || matches!(r, Row::Compaction(c) if c.running()))
             || self.entered.values().any(|at| motion::enter(*at, ENTER, now, reduce).is_some())
             || self.fold_at.values().any(|at| now < *at || motion::enter(*at, FOLD, now, reduce).is_some())
     }
@@ -538,7 +542,10 @@ impl AgentPane {
         // their window opens as lines arrive and streaming reasoning glides; and streaming text, whose height glides.
         let mut settled = Vec::new();
         for (ix, row) in self.rows.iter().enumerate() {
-            if matches!(row, Row::Group(g) if g.live) || matches!(row, Row::Text { key, .. } if self.reveals.contains_key(key)) {
+            if matches!(row, Row::Group(g) if g.live)
+                || matches!(row, Row::Text { key, .. } if self.reveals.contains_key(key))
+                || matches!(row, Row::Compaction(c) if c.running())
+            {
                 self.list.remeasure_items(ix..ix + 1);
             }
             if let Row::Group(g) = row
@@ -903,7 +910,7 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Marker { .. } | Row::Report { .. }) => 12.0,
+            Some(Row::Compaction(_) | Row::Report { .. }) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
@@ -960,7 +967,7 @@ impl AgentPane {
         let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
             (None, _) => 16.0,
             (Some(Row::User { .. }), _) => 20.0,
-            (Some(Row::Marker { .. } | Row::Report { .. }), _) | (Some(_), Row::Marker { .. } | Row::Report { .. }) => 12.0,
+            (Some(Row::Compaction(_) | Row::Report { .. }), _) | (Some(_), Row::Compaction(_) | Row::Report { .. }) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Group(_)), Row::User { .. }) => 28.0,
             (Some(Row::Text { .. }), _) => 4.0,
@@ -971,17 +978,7 @@ impl AgentPane {
             Row::User { text, files, mentions, .. } => self.render_user(text, files, mentions, cx),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
-            Row::Marker { text, .. } => div()
-                .h(px(LINE_H))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .text_size(px(12.0))
-                .text_color(rgb(theme::muted()))
-                .child(div().flex_1().h(px(1.0)).bg(rgb(theme::border())))
-                .child(div().flex_none().child(text.clone()))
-                .child(div().flex_1().h(px(1.0)).bg(rgb(theme::border())))
-                .into_any_element(),
+            Row::Compaction(c) => self.render_compaction(ix, c, now, cx),
             Row::Report { key, child, title, status, note } => Self::render_report(key, child, title, *status, note.as_deref(), cx),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
@@ -1021,6 +1018,117 @@ impl AgentPane {
             .when_some(note.map(str::to_owned), |el, note| el.tooltip(Tooltip::text(note)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_session_block(child.clone(), cx)))
             .into_any_element()
+    }
+
+    /// A compaction, drawn as a tool row: `Compacting context (auto)` with a spinner and the summary streaming into a
+    /// bounded box that follows its newest lines (Stop on the right while it's the turn's indicator); then
+    /// `Context compacted · 12 messages summarised`, a click opening the summary as markdown; or why it failed.
+    fn render_compaction(&mut self, ix: usize, c: &transcript::Compaction, now: Instant, cx: &mut Context<Self>) -> AnyElement {
+        use otto_client::CompactionStatus;
+        let muted = theme::muted();
+        let key = c.key.clone();
+        let running = c.running();
+        let (failed, cancelled) = match &c.status {
+            CompactionStatus::Failed { cancelled, .. } => (!cancelled, *cancelled),
+            _ => (false, false),
+        };
+        let can_open = c.status == CompactionStatus::Done && !c.summary.is_empty();
+        let open = can_open && self.toggled.contains(&key);
+        let openness = if can_open { self.openness(&format!("cmp:{key}"), open, now, cx) } else { 0.0 };
+        let glyph = if running {
+            crate::browser_pane::spinner(&key, 13.0, muted, cx)
+        } else if failed {
+            icon("x-circle", 14.0, theme::danger()).into_any_element()
+        } else if cancelled {
+            icon("stop", 12.0, muted).into_any_element()
+        } else {
+            icon("history", 14.0, muted).into_any_element()
+        };
+        let shown = c.title();
+        let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| {
+            if running {
+                el.child(shimmer(&shown, now, self.epoch, cx))
+            } else if failed {
+                el.text_color(rgb(theme::danger())).child(shown)
+            } else {
+                el.text_color(rgb(muted)).child(shown)
+            }
+        });
+        // Auto compaction ending a running turn is its indicator (no activity row): Stop goes here.
+        let indicator = running && self.running && ix + 1 == self.rows.len();
+        let toggle_key = key.clone();
+        let header = div()
+            .id(gpui::ElementId::Name(format!("cmp-{key}").into()))
+            .h(px(LINE_H))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .when(can_open, |el| el.cursor_pointer())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if !can_open {
+                    return;
+                }
+                let open = !this.toggled.remove(&toggle_key);
+                if open {
+                    this.toggled.insert(toggle_key.clone());
+                }
+                this.flip(format!("cmp:{toggle_key}"), toggle_key.clone(), open, cx);
+                cx.notify();
+            }))
+            .child(div().w(px(16.0)).flex_none().flex().justify_center().child(glyph))
+            .child(title)
+            .when(can_open, |el| el.child(chevron(openness, 12.0, muted)))
+            .when(indicator, |el| el.children(self.queued_note()).child(div().flex_1()).child(self.stop_button(cx)));
+        let mut column = div().text_size(px(13.0)).flex().flex_col().child(header);
+        // Streaming: a bounded box pinned to its newest lines (scrolled up in it, it stays put).
+        if running && !c.summary.trim().is_empty() {
+            let id = format!("cmp-stream-{key}");
+            let handle = self.scroll.handle(&id);
+            let pin = self.live_pins.entry(id.clone()).or_default();
+            if let Some(y) = pin.follow(f32::from(handle.offset().y), f32::from(handle.max_offset().y)) {
+                handle.set_offset(gpui::point(handle.offset().x, px(y)));
+            }
+            let base = div()
+                .id(gpui::ElementId::Name(id.clone().into()))
+                .ml(px(24.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .continuous(8.0)
+                .bg(rgb(ink(0.04)))
+                .text_size(px(12.0))
+                .line_height(px(17.0))
+                .text_color(rgb(muted))
+                .max_h(px(COMPACTION_H));
+            // Its newest lines only: laid out every frame while it streams.
+            let lines: Vec<&str> = c.summary.lines().collect();
+            let tail = lines[lines.len().saturating_sub(STREAMED_LINES)..].join("\n");
+            column = column.child(div().py(px(4.0)).child(self.scroll.scroller(&id, base, false).child(tail)));
+        } else {
+            self.live_pins.remove(&format!("cmp-stream-{key}"));
+        }
+        if failed && let CompactionStatus::Failed { message, .. } = &c.status {
+            column =
+                column.child(div().pl(px(24.0)).text_size(px(12.0)).line_height(px(17.0)).text_color(rgb(theme::danger())).child(message.clone()));
+        }
+        // Open: the summary as markdown (parsed only while open; selection reads it from there).
+        if openness > 0.0 {
+            let mut doc = self.parsed.remove(&key).unwrap_or_default();
+            doc.update(&c.summary, false);
+            let blocks: Vec<AnyElement> = doc
+                .blocks()
+                .iter()
+                .enumerate()
+                .map(|(i, block)| render_block(&format!("{key}-{i}"), block, None, theme::foreground(), &self.scroll))
+                .collect();
+            self.parsed.insert(key.clone(), doc);
+            let body = div().ml(px(24.0)).px(px(12.0)).pt(px(10.0)).pb(px(2.0)).continuous(8.0).bg(rgb(ink(0.04))).flex().flex_col().children(blocks);
+            column = column.child(
+                div().py(px(DETAIL_GAP)).when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(body),
+            );
+        } else {
+            self.parsed.remove(&key);
+        }
+        column.into_any_element()
     }
 
     fn group_started(&self, g: &Group) -> Option<u64> {
@@ -1481,12 +1589,8 @@ impl AgentPane {
             .notice
             .clone()
             .map(|n| div().pb(px(8.0)).px(px(pill_input::HALO + pill_input::TEXT_X)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(n));
-        // Sending waits for the host or a compaction; the transcript and the text stay.
-        let waiting = if self.reconnecting() {
-            Some(format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default()))
-        } else {
-            self.compacting().then(|| "Compacting…".to_owned())
-        };
+        // Sending waits for the host (and for a `/compact`, which the transcript shows); the text stays.
+        let waiting = self.reconnecting().then(|| format!("Reconnecting to {}…", self.host.as_deref().unwrap_or_default()));
         let strip = waiting.map(|text| {
             div()
                 .pb(px(8.0))

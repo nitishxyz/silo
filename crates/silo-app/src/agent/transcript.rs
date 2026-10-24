@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use otto_client::{Retrying, ToolState, ToolStatus};
+use otto_client::{Compacting, CompactionStatus, Retrying, ToolState, ToolStatus};
 use otto_llm::{Item, Part, ResultPart, Role};
 use otto_proto::{SessionStatus, TurnStatus};
 use serde_json::Value;
@@ -147,11 +147,9 @@ pub enum Row {
         text: String,
         streaming: bool,
     },
-    /// A quiet line between turns: `Context compacted` where otto compacted the history.
-    Marker {
-        key: String,
-        text: String,
-    },
+    /// Otto compacting the history: its summary streaming in, then folded (`Context compacted`) with the summary
+    /// inside, or why it failed.
+    Compaction(Compaction),
     /// A sub-agent's turn ended (otto's `Subagent completion:` notice): one quiet line that opens the child.
     Report {
         key: String,
@@ -162,6 +160,68 @@ pub enum Row {
         /// Its error, else the start of its reply (the tooltip).
         note: Option<String>,
     },
+}
+
+/// A compaction of the history, live or stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compaction {
+    /// `<checkpoint item id>#compaction`: the same while it runs and once stored.
+    pub key: String,
+    /// `auto` or `manual`; empty when unknown (a stored checkpoint, or one begun before the pane loaded).
+    pub trigger: String,
+    pub status: CompactionStatus,
+    /// The summary as shown: as it streams, or the model's summary (otto's verbatim context for the model left out).
+    pub summary: String,
+    /// The messages it summarised (users' and the agent's since the checkpoint before), when known.
+    pub messages: Option<usize>,
+}
+
+impl Compaction {
+    fn live(c: &Compacting) -> Self {
+        Self { key: compaction_key(&c.id), trigger: c.trigger.clone(), status: c.status.clone(), summary: shown_summary(&c.summary), messages: None }
+    }
+
+    fn stored(id: &str, summary: Option<&str>, messages: usize) -> Self {
+        Self {
+            key: compaction_key(id),
+            trigger: String::new(),
+            status: CompactionStatus::Done,
+            summary: shown_summary(summary.unwrap_or_default()),
+            messages: Some(messages),
+        }
+    }
+
+    #[must_use]
+    pub fn running(&self) -> bool {
+        self.status == CompactionStatus::Running
+    }
+
+    /// `Compacting context (auto)`, `Context compacted · 12 messages summarised`, `Compaction failed`.
+    #[must_use]
+    pub fn title(&self) -> String {
+        match &self.status {
+            CompactionStatus::Running => match self.trigger.as_str() {
+                "auto" => "Compacting context (auto)".into(),
+                "manual" => "Compacting context (/compact)".into(),
+                _ => "Compacting context".into(),
+            },
+            CompactionStatus::Done => match self.messages {
+                Some(n) if n > 0 => format!("Context compacted · {}", plural(n, "message summarised", "messages summarised")),
+                _ => "Context compacted".into(),
+            },
+            CompactionStatus::Failed { cancelled: true, .. } => "Compaction stopped".into(),
+            CompactionStatus::Failed { .. } => "Compaction failed".into(),
+        }
+    }
+}
+
+fn compaction_key(id: &str) -> String {
+    format!("{id}#compaction")
+}
+
+/// A checkpoint's summary as read: otto's own ends with context for the model (`COMPACTION_CONTEXT`), left out.
+fn shown_summary(summary: &str) -> String {
+    summary.split(otto_proto::COMPACTION_CONTEXT).next().unwrap_or_default().trim().to_owned()
 }
 
 /// A file the user attached, shown as a chip on their message.
@@ -258,17 +318,18 @@ impl Row {
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Row::User { key, .. } | Row::Text { key, .. } | Row::Marker { key, .. } | Row::Report { key, .. } => key,
+            Row::User { key, .. } | Row::Text { key, .. } | Row::Report { key, .. } => key,
             Row::Group(g) => &g.key,
+            Row::Compaction(c) => &c.key,
         }
     }
 }
 
-/// The running turn's indicator is the live group's header (it ends the transcript), not the activity row.
-/// There is only ever one of them.
+/// The running turn's indicator is the live group's header (it ends the transcript), or a compaction running at
+/// the end, not the activity row. There is only ever one of them.
 #[must_use]
 pub fn indicator_is_group(rows: &[Row]) -> bool {
-    matches!(rows.last(), Some(Row::Group(g)) if g.live)
+    matches!(rows.last(), Some(Row::Group(g)) if g.live) || matches!(rows.last(), Some(Row::Compaction(c)) if c.running())
 }
 
 /// A group of thinking only (its header says all its line does).
@@ -527,6 +588,8 @@ pub struct Input<'a> {
     pub error: Option<&'a str>,
     /// The model request waits to be retried (`model.retrying`), while the turn runs.
     pub retrying: Option<&'a Retrying>,
+    /// Compactions seen live (`SessionMirror::compactions`).
+    pub compactions: &'a [Compacting],
     pub cwd: Option<&'a str>,
     /// The daemon user's home (`hello.home`): paths under it read `~/…`.
     pub home: Option<&'a str>,
@@ -647,6 +710,13 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     // In the order seen; calls not yet timed (a view without `Times`) by id, never by hash order.
     pending.sort_by(|(a, _), (b, _)| input.times.seq(a).cmp(&input.times.seq(b)).then_with(|| a.cmp(b)));
     let last = input.items.len().checked_sub(1);
+    // Compactions seen live and not stored yet: in the place of the item that will hold the checkpoint (threshold
+    // compaction, inside a reply), else where they began.
+    let stored = |id: &str| input.items.iter().any(|i| i.id == id && i.parts.iter().any(|p| matches!(p, Part::Compaction { .. })));
+    let live: Vec<&Compacting> = input.compactions.iter().filter(|c| !stored(&c.id)).collect();
+    let placed = |c: &&Compacting| input.items.iter().any(|i| i.id == c.id);
+    // Messages since the last checkpoint: what the next one summarises.
+    let mut messages = 0;
     let mut rows = Vec::new();
     let mut lines = Vec::new();
     // The item of the last text: a reply streams only while its item ends the transcript (a turn otto started
@@ -658,12 +728,17 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
         }
     };
     for (ix, item) in input.items.iter().enumerate() {
+        for c in live.iter().filter(|c| if placed(c) { c.id == item.id } else { c.at == ix }) {
+            flush(&mut rows, &mut lines, false, false);
+            rows.push(Row::Compaction(Compaction::live(c)));
+        }
         match item.role {
             Role::User => {
                 let (text, files, mentions) = user_message(item);
                 if text.is_empty() && files.is_empty() {
                     continue;
                 }
+                messages += 1;
                 flush(&mut rows, &mut lines, false, false);
                 rows.push(Row::User { key: item.id.clone(), text, files, mentions });
             }
@@ -695,16 +770,24 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                         Part::ToolCall { call_id, name, input: args, .. } => {
                             lines.push(tool(call_id, name, args, input.tools.get(call_id), results.get(call_id.as_str()), &cx));
                         }
+                        // Threshold compaction: the provider's checkpoint opens the reply.
+                        Part::Compaction { summary, .. } => {
+                            flush(&mut rows, &mut lines, false, false);
+                            rows.push(Row::Compaction(Compaction::stored(&item.id, summary.as_deref(), std::mem::take(&mut messages))));
+                            joined = None;
+                        }
                         _ => {}
                     }
                     if lines.len() > shown {
                         joined = None;
                     }
                 }
+                messages += 1;
             }
             Role::System if item.parts.iter().any(|p| matches!(p, Part::Compaction { .. })) => {
                 flush(&mut rows, &mut lines, false, false);
-                rows.push(Row::Marker { key: item.id.clone(), text: "Context compacted".into() });
+                let summary = item.parts.iter().find_map(|p| if let Part::Compaction { summary, .. } = p { summary.as_deref() } else { None });
+                rows.push(Row::Compaction(Compaction::stored(&item.id, summary, std::mem::take(&mut messages))));
             }
             Role::System => {
                 if let Some(row) = item.parts.iter().find_map(|p| if let Part::System { text } = p { report(&item.id, text, &cx) } else { None }) {
@@ -714,6 +797,11 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
             }
             Role::Tool => {}
         }
+    }
+    // Compactions begun after the last item.
+    for c in live.iter().filter(|c| !placed(c) && c.at >= input.items.len()) {
+        flush(&mut rows, &mut lines, false, false);
+        rows.push(Row::Compaction(Compaction::live(c)));
     }
     for (id, t) in pending {
         lines.push(match streaming(t) {
@@ -1719,7 +1807,7 @@ mod tests {
     }
 
     fn build_rows(items: &[Item], tools: &HashMap<String, ToolState>, turn: Option<TurnStatus>, times: &Times, now: u64) -> Vec<Row> {
-        build(&Input { items, tools, turn, error: None, retrying: None, cwd: Some("/work/app"), home: None, times, now })
+        build(&Input { items, tools, turn, error: None, retrying: None, compactions: &[], cwd: Some("/work/app"), home: None, times, now })
     }
 
     fn group_of(row: &Row) -> &Group {
@@ -1735,14 +1823,96 @@ mod tests {
         times.spans.insert(key.into(), Span { start: Some(start), end, seq });
     }
 
+    fn checkpoint(id: &str, summary: &str) -> Item {
+        Item::new(id, Role::System, vec![Part::Compaction { summary: Some(summary.into()), opaque: None }])
+    }
+
+    fn compacting(id: &str, trigger: &str, summary: &str, status: CompactionStatus, at: usize) -> Compacting {
+        Compacting { id: id.into(), trigger: trigger.into(), summary: summary.into(), status, at }
+    }
+
+    fn with_compactions(items: &[Item], compactions: &[Compacting], turn: Option<TurnStatus>) -> Vec<Row> {
+        let times = Times::default();
+        build(&Input { items, tools: &HashMap::new(), turn, error: None, retrying: None, compactions, cwd: None, home: None, times: &times, now: 0 })
+    }
+
+    fn card(row: &Row) -> &Compaction {
+        match row {
+            Row::Compaction(c) => c,
+            other => panic!("not a compaction: {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_compaction_is_a_marker_between_turns() {
-        let compaction = Item::new("c", Role::System, vec![Part::Compaction { summary: Some("so far".into()), opaque: None }]);
+    fn a_stored_compaction_is_a_folded_card_counting_what_it_summarised() {
+        let summary = format!("## Goal\nShip it.{}[user] hi\nOriginal user instructions (verbatim):\nhi", otto_proto::COMPACTION_CONTEXT);
         let other = Item::new("s", Role::System, vec![Part::System { text: "note".into() }]);
-        let items = vec![user("u", "hi"), assistant("a", vec![Part::text("Hello.")]), compaction, other, user("u2", "more")];
-        let rows = build_rows(&items, &HashMap::new(), None, &Times::default(), 0);
-        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0", "c", "u2"]);
-        assert!(matches!(&rows[2], Row::Marker { text, .. } if text == "Context compacted"));
+        let items = vec![
+            user("u", "hi"),
+            assistant("a", vec![Part::text("Hello.")]),
+            checkpoint("c", &summary),
+            other,
+            user("u2", "more"),
+            assistant("a2", vec![Part::text("Sure.")]),
+            checkpoint("c2", "Again."),
+        ];
+        let rows = with_compactions(&items, &[], None);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0", "c#compaction", "u2", "a2#t0", "c2#compaction"]);
+        let c = card(&rows[2]);
+        assert_eq!((c.status.clone(), c.title()), (CompactionStatus::Done, "Context compacted · 2 messages summarised".into()));
+        // What otto keeps for the model after the summary is not shown.
+        assert_eq!(c.summary, "## Goal\nShip it.");
+        assert_eq!(card(&rows[5]).messages, Some(2), "counted from the checkpoint before");
+    }
+
+    #[test]
+    fn a_running_compaction_streams_at_the_end_and_is_the_indicator() {
+        let items =
+            vec![user("u", "go"), assistant("a", vec![call("c1", "read", json!({"path": "x"}))]), tool_item("t", vec![result("c1", "x", false)])];
+        let live = [compacting("k", "auto", "## Goal\nShi", CompactionStatus::Running, 3)];
+        let rows = with_compactions(&items, &live, Some(TurnStatus::Running));
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "g:c1", "k#compaction"]);
+        assert!(!group_of(&rows[1]).live, "the compaction is the turn's newest activity");
+        let c = card(&rows[2]);
+        assert_eq!((c.title(), c.summary.as_str()), ("Compacting context (auto)".into(), "## Goal\nShi"));
+        assert!(indicator_is_group(&rows));
+        let manual = [compacting("k", "manual", "", CompactionStatus::Running, 3)];
+        assert_eq!(card(&with_compactions(&items, &manual, None)[2]).title(), "Compacting context (/compact)");
+        // Stored, it keeps its row: the same key, now folded.
+        let mut stored = items.clone();
+        stored.push(checkpoint("k", "## Goal\nShip it."));
+        let rows = with_compactions(&stored, &live, Some(TurnStatus::Running));
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "g:c1", "k#compaction"]);
+        assert_eq!(card(&rows[2]).status, CompactionStatus::Done);
+        assert!(!indicator_is_group(&rows));
+    }
+
+    #[test]
+    fn a_failed_compaction_stays_where_it_began_with_its_error() {
+        let items = vec![user("u", "go"), assistant("a", vec![Part::text("Done.")]), user("u2", "next")];
+        let failed = CompactionStatus::Failed { message: "empty compaction summary".into(), cancelled: false };
+        let live = [compacting("k", "manual", "", failed.clone(), 2)];
+        let rows = with_compactions(&items, &live, None);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "a#t0", "k#compaction", "u2"]);
+        let c = card(&rows[2]);
+        assert_eq!((c.title(), &c.status), ("Compaction failed".into(), &failed));
+        let stopped = [compacting("k", "auto", "Go", CompactionStatus::Failed { message: "Stopped".into(), cancelled: true }, 2)];
+        assert_eq!(card(&with_compactions(&items, &stopped, None)[2]).title(), "Compaction stopped");
+    }
+
+    #[test]
+    fn a_threshold_compaction_opens_its_reply() {
+        // Streaming: the reply's item exists (no parts yet), the card goes in its place.
+        let items = vec![user("u", "go"), assistant("r", vec![])];
+        let live = [compacting("r", "auto", "Summary: build a website", CompactionStatus::Running, 2)];
+        let rows = with_compactions(&items, &live, Some(TurnStatus::Running));
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "r#compaction"]);
+        // Stored: the checkpoint is the reply's first part, the text after it.
+        let reply =
+            assistant("r", vec![Part::Compaction { summary: Some("Summary: build a website".into()), opaque: None }, Part::text("Next, the form.")]);
+        let rows = with_compactions(&[user("u", "go"), reply], &[], None);
+        assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "r#compaction", "r#t0"]);
+        assert_eq!(card(&rows[1]).title(), "Context compacted · 1 message summarised");
     }
 
     fn system(id: &str, text: &str) -> Item {
@@ -2338,6 +2508,7 @@ mod tests {
             turn: Some(TurnStatus::Error),
             error: Some("rate limited"),
             retrying: None,
+            compactions: &[],
             cwd: None,
             home: None,
             times: &times,
@@ -2361,6 +2532,7 @@ mod tests {
             turn: Some(TurnStatus::Error),
             error: Some(error),
             retrying: None,
+            compactions: &[],
             cwd: None,
             home: None,
             times: &times,
@@ -2395,6 +2567,7 @@ mod tests {
             turn: Some(turn),
             error: None,
             retrying: Some(&retrying),
+            compactions: &[],
             cwd: None,
             home: None,
             times: &times,

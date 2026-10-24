@@ -131,7 +131,8 @@ pub(super) fn edge_speed(y: f32, top: f32, bottom: f32) -> f32 {
     }
 }
 
-/// The pane's rows as selection sees them: user bubbles and assistant texts (as last parsed) have leaves.
+/// The pane's rows as selection sees them: user bubbles, assistant texts and open compaction summaries (as last
+/// parsed) have leaves.
 pub(super) struct Rows<'a> {
     pub rows: &'a [Row],
     pub parsed: &'a HashMap<String, Doc>,
@@ -157,7 +158,9 @@ impl Source for Rows<'_> {
                     block_leaves(key, doc.blocks())
                 }
             },
-            Row::Group(_) | Row::Marker { .. } | Row::Report { .. } => Vec::new(),
+            // A compaction's summary while it's open (the view parses it only then).
+            Row::Compaction(c) => self.parsed.get(&c.key).map(|doc| block_leaves(&c.key, doc.blocks())).unwrap_or_default(),
+            Row::Group(_) | Row::Report { .. } => Vec::new(),
         }
     }
 }
