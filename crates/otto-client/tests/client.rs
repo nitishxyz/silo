@@ -487,3 +487,23 @@ fn a_view_taken_mid_call_seeds_the_streaming_input_and_later_deltas_continue_it(
     m.apply(5, &Event::ToolInputDelta { call_id: "c".into(), delta: "\"a\"}".into() });
     assert_eq!(m.tools["c"].input_delta, "{\"path\":\"a\"}");
 }
+#[test]
+fn a_retry_wait_shows_until_the_stream_moves_on() {
+    let mut m = SessionMirror::new(view(0));
+    let retrying =
+        Event::ModelRetrying { class: "rate_limited".into(), message: "slow down".into(), delay_ms: 2000, attempt: 2, max_attempts: 3, at_ms: 1_000 };
+    m.apply(1, &Event::TurnStarted { turn: 1 });
+    m.apply(2, &retrying);
+    let shown = m.retrying.clone().unwrap();
+    assert_eq!((shown.class.as_str(), shown.delay_ms, shown.attempt, shown.max_attempts), ("rate_limited", 2000, 2, 3));
+    // Bookkeeping events leave it; the model's next event ends it.
+    m.apply(3, &Event::QueueChanged { queued: vec![] });
+    assert!(m.retrying.is_some());
+    m.apply(4, &Event::TextDelta { item_id: "a".into(), text: "hi".into() });
+    assert!(m.retrying.is_none());
+    // A turn that fails while waiting ends it too, and keeps its error.
+    m.apply(5, &retrying);
+    m.apply(6, &Event::Error { class: "quota_exhausted".into(), message: "Claude usage limit reached".into(), retryable: false });
+    assert!(m.retrying.is_none());
+    assert_eq!(m.last_error.as_ref().map(|e| e.1.as_str()), Some("Claude usage limit reached"));
+}

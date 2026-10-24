@@ -31,11 +31,16 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
         otto_proto::TurnStatus::Done
     };
     if let Err(error) = &result {
-        let class = match error {
-            Error::Model(e) => serde_json::to_value(e.class)?.as_str().unwrap_or("other").to_owned(),
-            _ => "other".into(),
+        let (class, message, retryable) = match error {
+            Error::Model(e) => {
+                let provider = cx.live().row.provider.clone();
+                let resets_in = if e.class == ErrorClass::QuotaExhausted { plan_reset(&cx, &provider) } else { None };
+                let class = serde_json::to_value(e.class)?.as_str().unwrap_or("other").to_owned();
+                (class, e.describe(&otto_llm::providers::display_name(&provider), resets_in), e.retryable())
+            }
+            _ => ("other".into(), error.to_string(), false),
         };
-        cx.emit(Event::Error { class, message: error.to_string(), retryable: false }, Projection::None, turn, 0).await?;
+        cx.emit(Event::Error { class, message, retryable }, Projection::None, turn, 0).await?;
     }
     let stored = match status {
         otto_proto::TurnStatus::Cancelled => otto_store::TurnStatus::Cancelled,
@@ -62,6 +67,26 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
         .await?;
     cx.emit(Event::TurnFinished { turn, status, usage }, Projection::TurnStatus(stored), turn, 0).await?;
     result
+}
+/// A retry wait as the `model.retrying` event.
+fn retrying(notice: &RetryNotice) -> Event {
+    let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    Event::ModelRetrying {
+        class: serde_json::to_value(notice.class).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "other".into()),
+        message: notice.message.clone(),
+        delay_ms: u64::try_from(notice.delay.as_millis()).unwrap_or(u64::MAX),
+        attempt: notice.attempt,
+        max_attempts: notice.max_attempts,
+        at_ms,
+    }
+}
+/// When `provider`'s spent plan windows reset (the last of them), from its last plan usage.
+fn plan_reset(cx: &Context, provider: &str) -> Option<std::time::Duration> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let now = i64::try_from(now).ok()?;
+    let plans = cx.runtime.plan_usage(Some(provider));
+    let at = plans.iter().flat_map(|p| &p.usage.windows).filter(|w| w.used >= 0.99).filter_map(|w| w.resets_at).filter(|at| *at > now).max()?;
+    Some(std::time::Duration::from_secs(u64::try_from(at - now).ok()?))
 }
 /// The input as a user item's parts and the `@` mentions in their text.
 async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<(Vec<Part>, Vec<Mention>)> {
@@ -424,7 +449,23 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             compaction: compaction.clone(),
             ..Default::default()
         };
-        let stream = tokio::select! {_=cancel.cancelled()=>return Ok(()),s=live.model.stream(request,CallCx{cancel:cancel.clone(),session:Some(cx.row.id.clone())})=>s};
+        // Waits to retry the request (inside the provider client) are shown as they start.
+        let (retry_tx, mut retry_rx) = tokio::sync::mpsc::unbounded_channel::<RetryNotice>();
+        let call = CallCx {
+            cancel: cancel.clone(),
+            session: Some(cx.row.id.clone()),
+            retry: Some(RetryHook::new(move |notice| drop(retry_tx.send(notice.clone())))),
+        };
+        let pending = live.model.stream(request, call);
+        tokio::pin!(pending);
+        let stream = loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                Some(notice) = retry_rx.recv() => cx.emit(retrying(&notice), Projection::None, turn, step).await.map(drop)?,
+                s = &mut pending => break s,
+            }
+        };
         let mut stream = match stream {
             Ok(s) => s,
             Err(e) if e.class == ErrorClass::ContextOverflow && !overflow => {

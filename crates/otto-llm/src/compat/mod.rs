@@ -292,7 +292,7 @@ mod client {
                     }
                 },
                 &self.config.retry,
-                &cx.cancel,
+                &cx,
             )
             .await?;
             Ok(stream::stream(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), req.model, dialect.id))

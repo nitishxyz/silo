@@ -601,6 +601,7 @@ pub const EVENTS: &[&str] = &[
     "subagent.changed",
     "queue.changed",
     "error",
+    "model.retrying",
     "plan.usage",
     "auth.changed",
 ];
@@ -662,6 +663,11 @@ pub enum Event {
     QueueChanged { queued: Vec<QueuedInput> },
     #[serde(rename = "error")]
     Error { class: String, message: String, retryable: bool },
+    /// The model request failed with `class` and is retried after `delay_ms`
+    /// (from `at_ms`, ms since the Unix epoch) as attempt `attempt` of
+    /// `max_attempts`; the turn is still running. The next stream event ends it.
+    #[serde(rename = "model.retrying")]
+    ModelRetrying { class: String, message: String, delay_ms: u64, attempt: u32, max_attempts: u32, at_ms: i64 },
     /// A response reported `provider`'s subscription limits (global, not journaled).
     #[serde(rename = "plan.usage")]
     PlanUsage { provider: String, usage: otto_llm::PlanUsage },

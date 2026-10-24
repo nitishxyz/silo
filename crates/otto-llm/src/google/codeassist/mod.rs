@@ -272,7 +272,7 @@ mod client {
                 match send_with_retry(
                     || self.config.http.client().post(&url).bearer_auth(token).header("user-agent", USER_AGENT).json(body),
                     &once,
-                    &cx.cancel,
+                    cx,
                 )
                 .await
                 {
@@ -294,15 +294,10 @@ mod client {
             for attempt in 0..attempts {
                 let error = match self.pass(&body, access, cx).await {
                     Ok(response) => return Ok(response),
+                    Err(error) if quota_wall(&error) => return Err(LlmError { class: ErrorClass::QuotaExhausted, ..error }),
                     Err(error) => error,
                 };
-                if attempt + 1 >= attempts || !error.retryable() || quota_wall(&error) {
-                    return Err(error);
-                }
-                tokio::select! {
-                    () = cx.cancel.cancelled() => return Err(LlmError::new(ErrorClass::Cancelled, "request cancelled")),
-                    () = tokio::time::sleep(self.config.retry.delay(attempt, &error)) => {}
-                }
+                crate::http::wait_to_retry(&self.config.retry, attempt, error, cx).await?;
             }
             unreachable!("at least one attempt")
         }
@@ -311,7 +306,8 @@ mod client {
     /// A 429 that is the account's quota, not a throttle: retrying cannot help.
     fn quota_wall(error: &LlmError) -> bool {
         let message = error.message.to_ascii_lowercase();
-        error.status == Some(429) && (message.contains("individual quota reached") || message.contains("resets in"))
+        error.class == ErrorClass::QuotaExhausted
+            || (error.status == Some(429) && (message.contains("individual quota reached") || message.contains("resets in")))
     }
 
     #[async_trait::async_trait]

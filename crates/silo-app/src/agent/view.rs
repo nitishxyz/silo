@@ -1087,6 +1087,18 @@ impl AgentPane {
             .when(indicator, |el| el.children(self.queued_note()).child(div().flex_1()).child(self.stop_button(cx)));
         let mut column = div().text_size(px(13.0)).flex().flex_col().child(header);
         if fold >= 1.0 {
+            // A closed group still says why its turn failed: the turn's error stays in sight under the header.
+            if openness <= 0.0 {
+                let errors: Vec<AnyElement> = g
+                    .lines
+                    .iter()
+                    .filter(|l| l.kind == transcript::Kind::Error)
+                    .map(|l| self.render_line(&key, l, false, 1.0, now, window, cx))
+                    .collect();
+                if !errors.is_empty() {
+                    column = column.child(div().pl(px(NEST)).flex().flex_col().children(errors));
+                }
+            }
             if openness > 0.0 {
                 let lines: Vec<AnyElement> = g.lines.iter().map(|l| self.render_line(&key, l, false, 1.0, now, window, cx)).collect();
                 // Grows to its lines (and any open details) while it opens.
@@ -1209,12 +1221,13 @@ impl AgentPane {
         });
         let t = swap.unwrap_or(1.0);
         let glyph = div().flex().opacity(t).scale(0.8 + 0.2 * t).child(glyph_of(line.status));
+        let shown = line.shown_title(self.now()).into_owned();
         let title = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().map(|el| match line.status {
-            Status::Running if newest => el.child(shimmer(&line.title, now, self.epoch, cx)),
-            Status::Error => el.text_color(rgb(theme::danger())).child(line.title.clone()),
-            Status::Input => el.text_color(rgb(theme::warning())).child(line.title.clone()),
-            Status::Pending => el.text_color(rgb(muted)).child(line.title.clone()),
-            _ => el.child(line.title.clone()),
+            Status::Running if newest => el.child(shimmer(&shown, now, self.epoch, cx)),
+            Status::Error => el.text_color(rgb(theme::danger())).child(shown),
+            Status::Input => el.text_color(rgb(theme::warning())).child(shown),
+            Status::Pending => el.text_color(rgb(muted)).child(shown),
+            _ => el.child(shown),
         });
         let detail_key = key.clone();
         let group = group.to_owned();

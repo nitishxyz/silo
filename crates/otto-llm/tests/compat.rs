@@ -131,6 +131,16 @@ async fn errors_and_truncation() {
     let cut = &DEEPSEEK[..DEEPSEEK.find("\"finish_reason\":\"tool_calls\"").unwrap() - 40];
     let results: Vec<_> = stream::stream(testing::chunked(cut.as_bytes(), 1), "m", "deepseek").collect().await;
     assert_eq!(results.last().unwrap().as_ref().unwrap_err().class, ErrorClass::Network);
+    // Mid-stream error chunks: OpenRouter's credits (402), Kimi's balance (429), and a plain throttle.
+    for (chunk, class) in [
+        (r#"{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}"#, ErrorClass::QuotaExhausted),
+        (r#"{"error":{"code":429,"type":"exceeded_current_quota_error","message":"insufficient balance"}}"#, ErrorClass::QuotaExhausted),
+        (r#"{"error":{"code":429,"message":"Rate limit exceeded, retry shortly"}}"#, ErrorClass::RateLimited),
+    ] {
+        let raw = format!("data: {chunk}\n\n");
+        let results: Vec<_> = stream::stream(testing::chunked(raw.as_bytes(), 0), "m", "kimi").collect().await;
+        assert_eq!(results.last().unwrap().as_ref().unwrap_err().class, class, "{chunk}");
+    }
 }
 
 #[test]

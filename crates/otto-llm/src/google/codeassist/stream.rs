@@ -27,15 +27,19 @@ pub struct State {
 fn api_error(error: &Value) -> LlmError {
     let code = error["code"].as_u64();
     let status = error["status"].as_str().unwrap_or_default();
+    let raw = error.to_string();
+    let wait = crate::http::body_retry_after(&raw);
     let class = match (code, status) {
-        (Some(429), _) | (_, "RESOURCE_EXHAUSTED") => ErrorClass::RateLimited,
+        // A throttle, or the account's quota when no short wait says otherwise.
+        (Some(429), _) | (_, "RESOURCE_EXHAUSTED") => crate::http::classify(429, &raw, wait),
+        (Some(402), _) => ErrorClass::QuotaExhausted,
         (Some(503), _) | (_, "UNAVAILABLE") => ErrorClass::Overloaded,
         (Some(401 | 403), _) | (_, "UNAUTHENTICATED" | "PERMISSION_DENIED") => ErrorClass::Auth,
         (Some(400 | 404), _) | (_, "INVALID_ARGUMENT" | "NOT_FOUND") => ErrorClass::InvalidRequest,
         (Some(504), _) | (_, "DEADLINE_EXCEEDED") => ErrorClass::Timeout,
         _ => ErrorClass::Server,
     };
-    let error_out = LlmError::new(class, error["message"].as_str().unwrap_or("Antigravity stream error"));
+    let error_out = LlmError::new(class, error["message"].as_str().unwrap_or("Antigravity stream error")).with_retry_after(wait);
     match code.and_then(|c| u16::try_from(c).ok()) {
         Some(code) => error_out.with_status(code),
         None => error_out,
@@ -287,8 +291,13 @@ mod tests {
         let quota = "data: {\"error\":{\"code\":429,\"message\":\"Individual quota reached. Resets in 2h\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n";
         let items: Vec<_> = stream(chunked(quota.as_bytes(), 2), "m").collect().await;
         let error = items.last().unwrap().as_ref().unwrap_err();
-        assert_eq!((error.class, error.status), (ErrorClass::RateLimited, Some(429)));
+        assert_eq!(
+            (error.class, error.status, error.retry_after),
+            (ErrorClass::QuotaExhausted, Some(429), Some(std::time::Duration::from_secs(7200)))
+        );
         assert!(error.message.contains("Resets in 2h"));
+        let throttle = json!({"code":429,"status":"RESOURCE_EXHAUSTED","message":"Too many requests","details":[{"retryDelay":"5s"}]});
+        assert_eq!(api_error(&throttle).class, ErrorClass::RateLimited);
         let items: Vec<_> = stream(chunked(b"data: {not json}\n\n", 2), "m").collect().await;
         assert_eq!(items.last().unwrap().as_ref().unwrap_err().class, ErrorClass::Other);
         assert_eq!(api_error(&json!({"status":"UNAVAILABLE","message":"x"})).class, ErrorClass::Overloaded);

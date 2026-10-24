@@ -1638,6 +1638,57 @@
         "properties": {
           "data": {
             "properties": {
+              "at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "class": {
+                "type": "string"
+              },
+              "delay_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "message",
+              "delay_ms",
+              "attempt",
+              "max_attempts",
+              "at_ms"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "model.retrying",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
               "provider": {
                 "type": "string"
               },
@@ -17695,6 +17746,57 @@
             "properties": {
               "data": {
                 "properties": {
+                  "at_ms": {
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "attempt": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "class": {
+                    "type": "string"
+                  },
+                  "delay_ms": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "max_attempts": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "class",
+                  "message",
+                  "delay_ms",
+                  "attempt",
+                  "max_attempts",
+                  "at_ms"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "model.retrying",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
                   "provider": {
                     "type": "string"
                   },
@@ -19349,6 +19451,57 @@
               },
               "event": {
                 "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "at_ms": {
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "attempt": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "class": {
+                    "type": "string"
+                  },
+                  "delay_ms": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "max_attempts": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "class",
+                  "message",
+                  "delay_ms",
+                  "attempt",
+                  "max_attempts",
+                  "at_ms"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "model.retrying",
                 "type": "string"
               }
             },

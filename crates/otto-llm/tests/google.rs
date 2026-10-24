@@ -91,6 +91,16 @@ async fn error_events_are_terminal() {
     assert_eq!(error.class, ErrorClass::Timeout);
     let truncated: Vec<_> = stream::stream(testing::chunked(&TOOLS.as_bytes()[..400], 1), "gemini-3.8-flash").collect().await;
     assert_eq!(truncated.last().unwrap().as_ref().unwrap_err().class, ErrorClass::Network);
+    // RESOURCE_EXHAUSTED: a spent quota unless a short retry delay makes it a per-minute throttle.
+    let exhausted = |details: &str| {
+        format!(
+            "event: error\ndata: {{\"error\":{{\"message\":\"You exceeded your current quota.\",\"code\":\"resource_exhausted\"{details}}},\"event_type\":\"error\"}}\n\n"
+        )
+    };
+    for (raw, class) in [(exhausted(""), ErrorClass::QuotaExhausted), (exhausted(r#","details":[{"retryDelay":"20s"}]"#), ErrorClass::RateLimited)] {
+        let results: Vec<_> = stream::stream(testing::chunked(raw.as_bytes(), 0), "gemini-3.8-flash").collect().await;
+        assert_eq!(results.last().unwrap().as_ref().unwrap_err().class, class, "{raw}");
+    }
 }
 
 #[test]

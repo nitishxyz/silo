@@ -231,7 +231,7 @@ mod client {
                     request
                 },
                 &config.retry,
-                &cx.cancel,
+                cx,
             )
             .await
         }

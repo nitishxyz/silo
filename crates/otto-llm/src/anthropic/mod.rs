@@ -125,7 +125,7 @@ mod client {
                         }
                     },
                     &self.config.retry,
-                    &cx.cancel,
+                    cx,
                 )
                 .await;
                 match result {

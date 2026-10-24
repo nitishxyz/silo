@@ -972,6 +972,7 @@ impl AgentPane {
             tools: &m.tools,
             turn,
             error: m.last_error.as_ref().map(|e| e.1.as_str()),
+            retrying: m.retrying.as_ref(),
             cwd: cwd.as_deref(),
             home: self.home.as_deref(),
             times: &self.times,

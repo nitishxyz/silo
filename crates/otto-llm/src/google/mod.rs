@@ -71,8 +71,7 @@ mod client {
             };
             let url = format!("{}/interactions", self.config.base_url.trim_end_matches('/'));
             let response =
-                send_with_retry(|| self.config.http.client().post(&url).header("x-goog-api-key", &key).json(&body), &self.config.retry, &cx.cancel)
-                    .await?;
+                send_with_retry(|| self.config.http.client().post(&url).header("x-goog-api-key", &key).json(&body), &self.config.retry, &cx).await?;
             Ok(stream::stream(byte_stream_with_idle_timeout(response, self.config.idle_timeout, cx.cancel), req.model))
         }
     }

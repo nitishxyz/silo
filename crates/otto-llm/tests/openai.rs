@@ -457,6 +457,16 @@ fn ws_steering_pending_and_failed_are_not_committed() {
         .unwrap_err();
     assert_eq!(error.class, ErrorClass::RateLimited);
     assert_eq!(error.message, "slow down");
+    // Spent quota over the socket: API billing, and the ChatGPT plan's window with its reset.
+    let error = openai::ws::Steering::new("gpt-6-astra")
+        .event(json!({"type":"error","error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota"}}))
+        .unwrap_err();
+    assert_eq!((error.class, error.status), (ErrorClass::QuotaExhausted, Some(429)));
+    let error = openai::ws::Steering::new("gpt-6-astra")
+        .event(json!({"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}))
+        .unwrap_err();
+    assert_eq!((error.class, error.retry_after), (ErrorClass::QuotaExhausted, Some(std::time::Duration::from_secs(600))));
+    assert!(!error.retryable());
 }
 
 #[test]

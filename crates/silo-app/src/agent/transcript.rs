@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use otto_client::{ToolState, ToolStatus};
+use otto_client::{Retrying, ToolState, ToolStatus};
 use otto_llm::{Item, Part, ResultPart, Role};
 use otto_proto::{SessionStatus, TurnStatus};
 use serde_json::Value;
@@ -43,6 +43,8 @@ pub enum Kind {
     Todos,
     Subagent,
     Error,
+    /// A passing note from otto (a retry wait): not a step, not counted.
+    Notice,
     Other,
 }
 
@@ -62,6 +64,7 @@ impl Kind {
             Kind::Todos => "list-todo",
             Kind::Subagent => "bot",
             Kind::Error => "x-circle",
+            Kind::Notice => "clock",
             Kind::Other => "circle",
         }
     }
@@ -115,6 +118,8 @@ pub struct Line {
     pub clock: bool,
     /// `detail` previews an edit the model is still writing (shown open, following its newest lines).
     pub preview: bool,
+    /// The title's `{left}` counts down to this time (pane ms): `in 12s`, then `now`.
+    pub until: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -520,6 +525,8 @@ pub struct Input<'a> {
     /// State of the latest turn.
     pub turn: Option<TurnStatus>,
     pub error: Option<&'a str>,
+    /// The model request waits to be retried (`model.retrying`), while the turn runs.
+    pub retrying: Option<&'a Retrying>,
     pub cwd: Option<&'a str>,
     /// The daemon user's home (`hello.home`): paths under it read `~/…`.
     pub home: Option<&'a str>,
@@ -723,6 +730,9 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
             ..Line::new("error", Kind::Error)
         });
     }
+    if running && let Some(retrying) = input.retrying {
+        lines.push(retry_line(retrying));
+    }
     let stopped = matches!(input.turn, Some(TurnStatus::Cancelled | TurnStatus::Interrupted));
     flush(&mut rows, &mut lines, running, stopped);
     if running
@@ -752,6 +762,19 @@ impl Line {
             files: Vec::new(),
             clock: false,
             preview: false,
+            until: None,
+        }
+    }
+    /// The title as shown at `now` (pane ms): a countdown filled in.
+    #[must_use]
+    pub fn shown_title(&self, now: u64) -> std::borrow::Cow<'_, str> {
+        match self.until {
+            Some(until) if self.title.contains("{left}") => {
+                let left = until.saturating_sub(now);
+                let left = if left < 500 { "now".to_owned() } else { format!("in {}", dur(left)) };
+                self.title.replace("{left}", &left).into()
+            }
+            _ => self.title.as_str().into(),
         }
     }
 }
@@ -766,7 +789,7 @@ fn group(lines: Vec<Line>, live: bool, stopped: bool, cx: &Ctx<'_>) -> Group {
 /// From the first line's start to the last line's end, when every line was seen live.
 fn duration(lines: &[Line], cx: &Ctx<'_>) -> Option<u64> {
     let (mut start, mut end) = (u64::MAX, 0);
-    for line in lines.iter().filter(|l| l.kind != Kind::Error) {
+    for line in lines.iter().filter(|l| !matches!(l.kind, Kind::Error | Kind::Notice)) {
         let span = cx.times.get(&line.key)?;
         start = start.min(span.start?);
         end = end.max(span.end.unwrap_or(cx.now));
@@ -835,6 +858,27 @@ pub fn summary(lines: &[Line], duration: Option<u64>, stopped: bool) -> String {
         Some(head) => std::iter::once(head).chain(parts).collect::<Vec<_>>().join(" · "),
         None if parts.is_empty() => if thought { "Thought" } else { "Worked" }.to_owned(),
         None => capitalize(&parts.join(" · ")),
+    }
+}
+
+/// `Rate limited, retrying in 12s (attempt 2/3)`, counting down to the retry; the provider's message in its detail.
+fn retry_line(r: &Retrying) -> Line {
+    let reason = match r.class.as_str() {
+        "rate_limited" => "Rate limited",
+        "overloaded" => "Provider overloaded",
+        "network" => "Network error",
+        "timeout" => "No response",
+        "server" => "Provider error",
+        _ => "Request failed",
+    };
+    let until = u64::try_from(r.at_ms).unwrap_or(0).saturating_add(r.delay_ms);
+    let message = r.message.trim();
+    Line {
+        title: format!("{reason}, retrying {{left}} (attempt {}/{})", r.attempt, r.max_attempts),
+        status: Status::Running,
+        detail: (!message.is_empty()).then(|| Detail::Text(message.to_owned())),
+        until: Some(until),
+        ..Line::new("retrying", Kind::Notice)
     }
 }
 
@@ -1675,7 +1719,7 @@ mod tests {
     }
 
     fn build_rows(items: &[Item], tools: &HashMap<String, ToolState>, turn: Option<TurnStatus>, times: &Times, now: u64) -> Vec<Row> {
-        build(&Input { items, tools, turn, error: None, cwd: Some("/work/app"), home: None, times, now })
+        build(&Input { items, tools, turn, error: None, retrying: None, cwd: Some("/work/app"), home: None, times, now })
     }
 
     fn group_of(row: &Row) -> &Group {
@@ -2293,6 +2337,7 @@ mod tests {
             tools: &HashMap::new(),
             turn: Some(TurnStatus::Error),
             error: Some("rate limited"),
+            retrying: None,
             cwd: None,
             home: None,
             times: &times,
@@ -2303,6 +2348,71 @@ mod tests {
         assert_eq!(g.summary, "Read 1 file · 1 error");
         let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Cancelled), &times, 0);
         assert_eq!(group_of(&rows[1]).summary, "Read 1 file · stopped");
+    }
+
+    #[test]
+    fn a_spent_quota_before_any_step_is_a_failed_group_with_its_words() {
+        let items = vec![user("u", "go")];
+        let error = "Claude usage limit reached — resets in 3h 12m\nYou've hit your limit";
+        let times = Times::default();
+        let input = Input {
+            items: &items,
+            tools: &HashMap::new(),
+            turn: Some(TurnStatus::Error),
+            error: Some(error),
+            retrying: None,
+            cwd: None,
+            home: None,
+            times: &times,
+            now: 0,
+        };
+        let rows = build(&input);
+        let g = group_of(&rows[1]);
+        assert!(g.failed && !g.live);
+        assert_eq!(g.summary, "1 error");
+        let line = &g.lines[0];
+        assert_eq!((line.title.as_str(), line.kind, line.status), ("Claude usage limit reached — resets in 3h 12m", Kind::Error, Status::Error));
+        assert_eq!(line.detail, Some(Detail::Text(error.into())));
+    }
+
+    #[test]
+    fn a_retry_wait_counts_down_in_the_live_group() {
+        let items =
+            vec![user("u", "go"), assistant("a", vec![call("c", "read", json!({"path": "x"}))]), tool_item("t", vec![result("c", "x", false)])];
+        let retrying = otto_client::Retrying {
+            class: "rate_limited".into(),
+            message: "slow down".into(),
+            delay_ms: 12_000,
+            attempt: 2,
+            max_attempts: 3,
+            at_ms: 1_000,
+        };
+        let times = Times::default();
+        let tools = HashMap::new();
+        let input = |turn| Input {
+            items: &items,
+            tools: &tools,
+            turn: Some(turn),
+            error: None,
+            retrying: Some(&retrying),
+            cwd: None,
+            home: None,
+            times: &times,
+            now: 1_000,
+        };
+        let rows = build(&input(TurnStatus::Running));
+        let g = group_of(&rows[1]);
+        assert!(g.live && !g.failed);
+        let line = g.lines.last().unwrap();
+        assert_eq!((line.kind, line.status), (Kind::Notice, Status::Running));
+        assert_eq!(line.shown_title(1_000), "Rate limited, retrying in 12s (attempt 2/3)");
+        assert_eq!(line.shown_title(10_000), "Rate limited, retrying in 3s (attempt 2/3)");
+        assert_eq!(line.shown_title(13_000), "Rate limited, retrying now (attempt 2/3)");
+        assert_eq!(line.detail, Some(Detail::Text("slow down".into())));
+        assert_eq!(g.summary, "Read 1 file", "the wait is no step");
+        // Once the turn is over it is gone.
+        let rows = build(&input(TurnStatus::Done));
+        assert!(group_of(&rows[1]).lines.iter().all(|l| l.kind != Kind::Notice));
     }
 
     #[test]

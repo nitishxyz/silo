@@ -859,8 +859,13 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `interrupt` cancels the current step and then continues with the new input. Pending inputs can be withdrawn
   (`session.queue_remove`) or moved between steer, queue and interrupt (`session.queue_update`) until the model has
   them; `queue.changed` lists steers first (`delivery: steer`), then the queue.
-- Errors: classified (`overloaded`, `rate_limited`, `context_overflow`, `auth`, `invalid_request`, `network`).
-  Retries happen inside the step; context overflow compacts and then retries once; auth asks the client to sign in.
+- Errors: classified (`overloaded`, `rate_limited`, `quota_exhausted`, `context_overflow`, `auth`, `invalid_request`,
+  `network`). Retries happen inside the provider client (up to 3 attempts, each wait within 30 s; a server asking
+  for longer is not waited on) and each wait is announced as `model.retrying {class, message, delay_ms, attempt,
+  max_attempts, at_ms}` until the next stream event. A spent quota/plan/credit balance (`quota_exhausted`, or a 429
+  asking to wait over a minute) is never retried: the turn ends with `error` in words (`Claude usage limit reached —
+  resets in 3h 12m`) and `retryable: false`. Context overflow compacts and then retries once; auth asks the client
+  to sign in.
 - Output-limit continuation: when the model hits `max_output` in the middle of text, continue automatically
   (bounded).
 

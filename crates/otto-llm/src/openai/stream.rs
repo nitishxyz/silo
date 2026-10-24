@@ -218,7 +218,7 @@ impl State {
                 let code = string(error, "code");
                 // WebSocket `error` events carry the HTTP status they stand for.
                 let status = v["status"].as_u64().and_then(|s| u16::try_from(s).ok()).filter(|s| *s >= 400).unwrap_or(match code.as_str() {
-                    "rate_limit_exceeded" => 429,
+                    "rate_limit_exceeded" | "insufficient_quota" | "usage_limit_reached" => 429,
                     "invalid_api_key" => 401,
                     "context_length_exceeded" => 400,
                     "server_error" => 500,

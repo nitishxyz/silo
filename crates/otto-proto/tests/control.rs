@@ -130,3 +130,16 @@ fn mention_and_file_complete_shapes() {
     );
     assert_eq!(serde_json::from_value::<Item>(wire).unwrap(), item);
 }
+
+#[test]
+fn model_retrying_is_additive_on_the_wire() {
+    let event = Event::ModelRetrying { class: "rate_limited".into(), message: "slow".into(), delay_ms: 2000, attempt: 2, max_attempts: 3, at_ms: 5 };
+    let wire = serde_json::to_value(ServerMessage::Event { seq: 3, session_id: Some("s".into()), event: Box::new(event) }).unwrap();
+    assert_eq!(
+        wire,
+        json!({"seq":3,"session_id":"s","event":"model.retrying","data":{"class":"rate_limited","message":"slow","delay_ms":2000,"attempt":2,"max_attempts":3,"at_ms":5}})
+    );
+    assert!(
+        matches!(serde_json::from_value::<ServerMessage>(wire).unwrap(), ServerMessage::Event { event, .. } if matches!(*event, Event::ModelRetrying { attempt: 2, .. }))
+    );
+}

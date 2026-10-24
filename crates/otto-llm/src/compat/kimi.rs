@@ -438,7 +438,7 @@ mod client {
             send_with_retry(
                 || self.config.http.client().post(url).headers(self.config.headers.clone()).bearer_auth(token).json(body),
                 &self.config.retry,
-                &cx.cancel,
+                cx,
             )
             .await
         }

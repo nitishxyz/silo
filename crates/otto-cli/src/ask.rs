@@ -72,7 +72,7 @@ async fn converse(
 ) -> Result<()> {
     let mut total = Usage::default();
     for step in 0..8 {
-        let mut stream = model.stream(request.clone(), CallCx { cancel: cancel.clone(), session: None }).await?;
+        let mut stream = model.stream(request.clone(), CallCx { cancel: cancel.clone(), session: None, ..CallCx::default() }).await?;
         let mut assistant = Item::new(format!("assistant-{step}"), Role::Assistant, vec![]);
         assistant.origin = Some(Origin { provider: model.info().provider.clone(), model: request.model.clone(), response_id: None });
         let mut usage = Usage::default();

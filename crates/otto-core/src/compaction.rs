@@ -144,7 +144,7 @@ async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, t
         compaction: Some(otto_llm::Compaction::Now { instructions: None }),
         ..Default::default()
     };
-    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: Some(cx.row.id.clone()) }).await?;
+    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: Some(cx.row.id.clone()), ..CallCx::default() }).await?;
     let mut checkpoint = None;
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
         if let StreamEvent::PartDone { part: part @ Part::Compaction { .. } } = event? {
@@ -194,7 +194,7 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
         max_output: Some((budget / 8).clamp(128, 4096) as u32),
         ..Default::default()
     };
-    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: None }).await?;
+    let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: None, ..CallCx::default() }).await?;
     let mut summary = String::new();
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
         if let StreamEvent::PartDone { part: Part::Text { text, .. } } = event? {

@@ -107,6 +107,18 @@ async fn terminal_errors_and_finish_reasons() {
     }
     let truncated: Vec<_> = stream::decode(testing::chunked(b"", 0), "m").collect().await;
     assert_eq!(truncated[0].as_ref().unwrap_err().class, ErrorClass::Network);
+    // Mid-stream: a plan's usage limit and billing end the turn as a spent quota; a plain throttle stays one.
+    let sse = |kind: &str, message: &str| {
+        format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{message}\"}}}}\n\n")
+    };
+    for (raw, class) in [
+        (sse("rate_limit_error", "You've reached your usage limit. Resets in 3h"), ErrorClass::QuotaExhausted),
+        (sse("billing_error", "Your credit balance is too low"), ErrorClass::QuotaExhausted),
+        (sse("rate_limit_error", "Too many requests"), ErrorClass::RateLimited),
+    ] {
+        let events: Vec<_> = stream::decode(testing::chunked(raw.as_bytes(), 0), "m").collect().await;
+        assert_eq!(events.last().unwrap().as_ref().unwrap_err().class, class, "{raw}");
+    }
 }
 #[tokio::test]
 async fn max_tokens_mid_tool_call_drops_the_call() {
@@ -404,7 +416,7 @@ async fn live_and_optional_recording() {
                 .json(&body)
         },
         &RetryPolicy::default(),
-        &cx.cancel,
+        &cx,
     )
     .await
     .unwrap();

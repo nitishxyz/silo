@@ -183,8 +183,11 @@ impl State {
                 self.done = true;
                 let error = &v["error"];
                 let code = string(error, "code").to_ascii_lowercase();
-                let class = if code.contains("resource_exhausted") || code.contains("rate") {
-                    ErrorClass::RateLimited
+                let raw = error.to_string();
+                let wait = crate::http::body_retry_after(&raw);
+                let class = if code.contains("resource_exhausted") || code.contains("rate") || code.contains("quota") {
+                    // Per-minute throttle or spent quota: the words and the wait tell.
+                    crate::http::classify(429, &format!("{code} {raw}"), wait)
                 } else if code.contains("unavailable") || code.contains("overloaded") {
                     ErrorClass::Overloaded
                 } else if code.contains("deadline") || code.contains("timeout") {
@@ -196,7 +199,7 @@ impl State {
                 } else {
                     ErrorClass::Server
                 };
-                return Err(LlmError::new(class, error["message"].as_str().unwrap_or("Gemini stream error")));
+                return Err(LlmError::new(class, error["message"].as_str().unwrap_or("Gemini stream error")).with_retry_after(wait));
             }
             _ => {}
         }

@@ -49,6 +49,41 @@ pub struct CallCx {
     pub cancel: CancellationToken,
     /// Session id, for cache keys and provider state.
     pub session: Option<String>,
+    /// Told before each wait to retry the request (rate limits, overload,
+    /// network), so the caller can show it; the call itself goes on.
+    pub retry: Option<RetryHook>,
+}
+
+/// A wait before retrying a model request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetryNotice {
+    pub class: crate::ErrorClass,
+    /// The provider's message for the failed attempt.
+    pub message: String,
+    pub delay: std::time::Duration,
+    /// The attempt about to be made (1-based; the first retry is 2).
+    pub attempt: u32,
+    pub max_attempts: u32,
+}
+
+/// Called (synchronously, never blocking) with each [`RetryNotice`].
+#[cfg(feature = "client")]
+#[derive(Clone)]
+pub struct RetryHook(std::sync::Arc<dyn Fn(&RetryNotice) + Send + Sync>);
+#[cfg(feature = "client")]
+impl RetryHook {
+    pub fn new(f: impl Fn(&RetryNotice) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+    pub fn notify(&self, notice: &RetryNotice) {
+        (self.0)(notice);
+    }
+}
+#[cfg(feature = "client")]
+impl std::fmt::Debug for RetryHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetryHook")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

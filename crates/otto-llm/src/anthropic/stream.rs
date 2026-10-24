@@ -260,15 +260,23 @@ impl State {
                 let error = &v["error"];
                 let class = match error["type"].as_str() {
                     Some("overloaded_error") => ErrorClass::Overloaded,
-                    Some("rate_limit_error") => ErrorClass::RateLimited,
+                    // A plan's usage limit arrives as a rate_limit_error too: its words tell.
+                    Some("rate_limit_error") => {
+                        let message = string(error, "message");
+                        crate::http::classify(429, &message, crate::http::body_retry_after(&message))
+                    }
+                    Some("billing_error") => ErrorClass::QuotaExhausted,
                     Some("authentication_error" | "permission_error") => ErrorClass::Auth,
                     Some("invalid_request_error") if string(error, "message").contains("prompt is too long") => ErrorClass::ContextOverflow,
-                    Some("invalid_request_error" | "not_found_error" | "billing_error" | "request_too_large") => ErrorClass::InvalidRequest,
+                    Some("invalid_request_error") if string(error, "message").contains("credit balance") => ErrorClass::QuotaExhausted,
+                    Some("invalid_request_error" | "not_found_error" | "request_too_large") => ErrorClass::InvalidRequest,
                     Some("timeout_error") => ErrorClass::Timeout,
                     Some("api_error") => ErrorClass::Server,
                     _ => ErrorClass::Other,
                 };
-                return Err(LlmError::new(class, string(error, "message")));
+                let message = string(error, "message");
+                let wait = crate::http::body_retry_after(&message);
+                return Err(LlmError::new(class, message).with_retry_after(wait));
             }
             _ => {}
         }

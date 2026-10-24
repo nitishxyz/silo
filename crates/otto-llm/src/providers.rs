@@ -40,6 +40,29 @@ pub const IDS: &[&str] = &[
     "custom",
 ];
 const XAI_URL: &str = "https://api.x.ai/v1";
+
+/// A provider's name as people say it (`anthropic` → `Claude`), for messages.
+#[must_use]
+pub fn display_name(provider: &str) -> String {
+    match provider {
+        "anthropic" => "Claude".into(),
+        "openai" => "OpenAI".into(),
+        "google" => "Gemini".into(),
+        "xai" => "xAI".into(),
+        "openrouter" => "OpenRouter".into(),
+        "deepseek" => "DeepSeek".into(),
+        "moonshotai" => "Kimi".into(),
+        compat::kimi::ID => "Kimi Code".into(),
+        google::codeassist::convert::PROVIDER => "Antigravity".into(),
+        "zai" => "Z.ai".into(),
+        "minimax" => "MiniMax".into(),
+        "lmstudio" => "LM Studio".into(),
+        other => {
+            let mut c = other.chars();
+            c.next().map_or_else(|| "The provider".into(), |f| f.to_uppercase().chain(c).collect())
+        }
+    }
+}
 /// Subscription providers whose model list comes from the provider (`catalog::remote`).
 pub const REMOTE: &[&str] = &[compat::kimi::ID, google::codeassist::convert::PROVIDER];
 

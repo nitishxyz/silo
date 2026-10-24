@@ -29,6 +29,18 @@ pub struct ToolState {
     /// When a call already running in the loaded view started (ms since the Unix epoch).
     pub started_at: Option<i64>,
 }
+/// A model request waiting to be retried (`model.retrying`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retrying {
+    pub class: String,
+    pub message: String,
+    pub delay_ms: u64,
+    /// The attempt about to be made (the first retry is 2).
+    pub attempt: u32,
+    pub max_attempts: u32,
+    /// When the wait began (ms since the Unix epoch).
+    pub at_ms: i64,
+}
 #[derive(Clone, Debug)]
 pub struct SessionMirror {
     pub info: SessionInfo,
@@ -44,6 +56,8 @@ pub struct SessionMirror {
     /// When the loaded items' timed parts ran (the view's journal times); later parts are seen live.
     pub part_times: Vec<PartTime>,
     pub last_error: Option<(String, String, bool)>,
+    /// The model request is waiting to be retried (`model.retrying`), until the next stream event.
+    pub retrying: Option<Retrying>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
     live: Vec<Event>,
@@ -75,6 +89,7 @@ impl SessionMirror {
             turn_started_at: view.turn_started_at,
             part_times: view.part_times,
             last_error: None,
+            retrying: None,
             indices,
             durable: None,
             live: Vec::new(),
@@ -139,6 +154,19 @@ impl SessionMirror {
         result
     }
     fn project(&mut self, event: &Event) {
+        // Any progress (or the turn's end) means the retry wait is over.
+        if !matches!(
+            event,
+            Event::ModelRetrying { .. }
+                | Event::SessionsChanged {}
+                | Event::SessionChanged { .. }
+                | Event::PlanUsage { .. }
+                | Event::AuthChanged {}
+                | Event::QueueChanged { .. }
+                | Event::SubagentChanged { .. }
+        ) {
+            self.retrying = None;
+        }
         match event {
             Event::SessionChanged { info } => self.info = info.clone(),
             Event::TurnStarted { turn } => {
@@ -230,6 +258,16 @@ impl SessionMirror {
             Event::Error { class, message, retryable } => {
                 self.last_error = Some((class.clone(), message.clone(), *retryable));
                 self.info.status = SessionStatus::Error;
+            }
+            Event::ModelRetrying { class, message, delay_ms, attempt, max_attempts, at_ms } => {
+                self.retrying = Some(Retrying {
+                    class: class.clone(),
+                    message: message.clone(),
+                    delay_ms: *delay_ms,
+                    attempt: *attempt,
+                    max_attempts: *max_attempts,
+                    at_ms: *at_ms,
+                });
             }
             Event::Compaction { .. } => self.info.context.used = 0,
             Event::PlanUsage { provider, usage } => {

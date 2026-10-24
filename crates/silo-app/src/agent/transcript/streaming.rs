@@ -54,7 +54,17 @@ impl Session {
     fn rows(&self) -> Vec<Row> {
         let times = &self.times;
         let m = &self.m;
-        build(&Input { items: &m.items, tools: &m.tools, turn: m.turn.map(|t| t.1), error: None, cwd: Some("/work/app"), home: None, times, now: 0 })
+        build(&Input {
+            items: &m.items,
+            tools: &m.tools,
+            turn: m.turn.map(|t| t.1),
+            error: None,
+            retrying: None,
+            cwd: Some("/work/app"),
+            home: None,
+            times,
+            now: 0,
+        })
     }
 
     /// The live group's key and its line for `call`, if shown.
