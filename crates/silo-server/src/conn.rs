@@ -14,7 +14,7 @@ use silo_proto::{
     },
     data::{ClientData, DataHello, MAX_CLIP_TEXT, Reject},
     kind,
-    model::short_client_name,
+    model::{BlockKind, short_client_name},
     read_frame, spawn_reader,
     upload::UploadHello,
     write_frame,
@@ -560,8 +560,13 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref() };
             to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
         }
-        Method::BlockSpawn { block_id, command, cwd, env, size } => {
-            to_value(server.registry.lock().unwrap().spawn_parked(&block_id, &command, cwd, env, size)?)
+        Method::BlockSpawn { block_id, command, cwd, env, size, kind, url } => {
+            let mut reg = server.registry.lock().unwrap();
+            match kind {
+                BlockKind::Terminal => to_value(reg.spawn_parked(&block_id, &command, cwd, env, size)?),
+                BlockKind::Browser => to_value(reg.spawn_parked_browser(&block_id, url.as_deref())?),
+                _ => Err(RpcError::bad_request("block.spawn makes terminal or browser blocks")),
+            }
         }
         Method::BlockPark { block_id } => {
             server.registry.lock().unwrap().park(&block_id)?;

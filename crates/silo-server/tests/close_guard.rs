@@ -427,8 +427,15 @@ async fn closing_an_owner_counts_its_running_parked_blocks() {
         agent: None,
     };
     let agent: Created = control.call(split).await.unwrap();
-    let spawn =
-        Method::BlockSpawn { block_id: agent.block_id.clone(), command: command(SLEEP).command, cwd: None, env: Default::default(), size: None };
+    let spawn = Method::BlockSpawn {
+        block_id: agent.block_id.clone(),
+        command: command(SLEEP).command,
+        cwd: None,
+        env: Default::default(),
+        size: None,
+        kind: BlockKind::Terminal,
+        url: None,
+    };
     let run: Created = control.call(spawn).await.unwrap();
     until_busy(&mut raw, &created.session_id, &[&run.block_id]).await;
 

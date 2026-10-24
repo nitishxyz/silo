@@ -39,6 +39,9 @@ pub mod feature {
     /// The app shows approval cards (`approval.requested`) and answers
     /// them: only such apps are asked to approve.
     pub const APPROVALS: &str = "approvals";
+    /// `block.spawn` takes `kind: browser` (and `url`): a parked browser.
+    /// Older servers ignore the kind and spawn a shell, so gate on it.
+    pub const PARKED_BROWSERS: &str = "parked_browsers";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -46,7 +49,7 @@ pub mod feature {
 }
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS];
+pub const FEATURES: &[&str] = &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS];
 
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this

@@ -122,7 +122,7 @@ All these are additive (protocol stays version 1); `protocol.json` is regenerate
 
 | Method | Params | Result | Access |
 |---|---|---|---|
-| `block.spawn` | `block_id` (owner), `command?: [string]` (empty: login shell), `cwd?`, `env?: {k: v}`, `size?` (default 200×50) | `Created` (`window_id` empty) | control on the owner's session |
+| `block.spawn` | `block_id` (owner), `command?: [string]` (empty: login shell), `cwd?`, `env?: {k: v}`, `size?` (default 200×50), `kind?: terminal\|browser`, `url?` (browser; default `about:blank`) | `Created` (`window_id` empty) | control on the owner's session |
 | `block.park` | `block_id` (not the only block of its window) | `{}` | control |
 | `block.reveal` | `block_id`, `as?: float\|split` (default float; in the owner's window, else the active one) | `{}` | control |
 
@@ -214,7 +214,7 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 
 ### 5.2 Browser
 
-`browser_open {url, place}` (a browser block), `browser_navigate {url | back | forward | reload}`, then one tool per
+`browser_open {url, place, visible}` (a browser block; `visible: false` parks it: `block.spawn {kind: browser}`, run by the off-screen host (§4.1) until revealed, gated on feature `parked_browsers`), `browser_navigate {url | back | forward | reload}`, then one tool per
 §3.3 method: `browser_snapshot`, `browser_find`, `browser_click`, `browser_hover`, `browser_fill`,
 `browser_fill_form`, `browser_type`, `browser_press`, `browser_scroll`, `browser_wait_for`, `browser_dialog`,
 `browser_eval`, `browser_console`, `browser_network`, `browser_screenshot` (an image result).

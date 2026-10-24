@@ -879,6 +879,17 @@ impl Workspace {
         // windows that are still alive, drop the rest.
         let all: Vec<String> = view.session.windows.iter().flat_map(crate::floats::window_blocks).collect();
         self.panes.retain(|id, _| all.contains(id));
+        // A browser leaving every window but still alive (parked) runs on
+        // in the off-screen host: same page, no reload.
+        let parked: Vec<String> =
+            self.browsers.keys().filter(|id| !all.contains(id) && view.blocks.iter().any(|b| &b.id == *id)).cloned().collect();
+        if !parked.is_empty() {
+            let panes = parked.iter().filter_map(|id| self.browsers.remove(id)).map(|(pane, _)| pane).collect();
+            let left = crate::browser_host::BrowserHost::keep(panes, cx);
+            if !left.is_empty() {
+                self.call(Method::DisownBlock { block_ids: left });
+            }
+        }
         self.browsers.retain(|id, _| all.contains(id));
         self.agents.retain(|id, _| all.contains(id));
         let active = self.active_window().cloned();

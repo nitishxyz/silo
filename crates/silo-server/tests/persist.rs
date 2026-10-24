@@ -479,6 +479,8 @@ async fn parked_command_blocks_are_dropped_on_restart() {
         cwd: Some("/tmp".into()),
         env: Default::default(),
         size: None,
+        kind: BlockKind::Terminal,
+        url: None,
     };
     let run: Created = control.call(spawn).await.unwrap();
     let before = view(&control, &main.session_id).await;

@@ -277,6 +277,8 @@ pub fn examples() -> Vec<Method> {
             cwd: Some("~/src".into()),
             env: [("PAGER".to_owned(), "cat".to_owned())].into(),
             size: Some(TermSize::new(200, 50)),
+            kind: BlockKind::Terminal,
+            url: None,
         },
         M::BlockPark { block_id: b() },
         M::BlockReveal { block_id: b(), reveal: Reveal::Float },

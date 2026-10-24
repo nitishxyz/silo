@@ -722,7 +722,8 @@ read-only commands (`otto_tools::builtin::shell::quick`: `git status|diff|log|sh
 run through pipes even with silo; everything else in command blocks.
 
 **As built:** `block.spawn {block_id: owner, command, cwd, env, size}` starts a parked block (no command: a login
-shell); `block.park`, `block.reveal {as: float|split}`; `SessionInfo.parked: [{id, owner}]`; closing the owner closes
+shell; `kind: browser, url` a parked browser, which the app's off-screen host runs on the first action and a window
+adopts when revealed; a browser parked from a window goes back to the host, page kept); `block.park`, `block.reveal {as: float|split}`; `SessionInfo.parked: [{id, owner}]`; closing the owner closes
 its parked blocks; a parked block closes when its program ends, and a command block's final screen and scrollback
 answer `terminal.capture` for 5 minutes; `Capture` gained `lifecycle`, `exited` and `line_prompt` (canonical tty,
 cursor ending a non-empty line). Blocks an owner parked (`block.spawn`) are dropped on a restart (hot upgrades carry

@@ -3970,6 +3970,25 @@
     "block.spawn": {
       "params": {
         "$defs": {
+          "BlockKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "terminal",
+                  "browser"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
           "TermSize": {
             "properties": {
               "cell_height": {
@@ -4032,6 +4051,10 @@
             "default": {},
             "type": "object"
           },
+          "kind": {
+            "$ref": "#/$defs/BlockKind",
+            "default": "terminal"
+          },
           "size": {
             "anyOf": [
               {
@@ -4042,6 +4065,13 @@
               }
             ],
             "default": null
+          },
+          "url": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

@@ -67,7 +67,69 @@ fn spawn(owner: &str, command: &[&str]) -> Method {
         cwd: Some("/tmp".into()),
         env: [("SILO_PARKED_TEST".to_owned(), "env-ok".to_owned())].into(),
         size: None,
+        kind: BlockKind::Terminal,
+        url: None,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_browsers_spawn_reveal_and_close_with_their_owner() {
+    let home = home("browser");
+    let (control, task) = start(&home).await;
+    assert!(control.peer_supports(silo_proto::compat::feature::PARKED_BROWSERS));
+    let shell = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
+    let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell, kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let browser = |url: Option<&str>, kind| Method::BlockSpawn {
+        block_id: main.block_id.clone(),
+        command: Vec::new(),
+        cwd: None,
+        env: Default::default(),
+        size: None,
+        kind,
+        url: url.map(str::to_owned),
+    };
+
+    // Parked, owned, a browser at its URL, in no layout.
+    let page: Created = control.call(browser(Some("https://example.com/"), BlockKind::Browser)).await.unwrap();
+    assert_eq!((page.session_id.as_str(), page.window_id.as_str()), (main.session_id.as_str(), ""));
+    let v = view(&control, &main.session_id).await;
+    assert_eq!(v.session.parked.iter().map(|p| (p.id.as_str(), p.owner.as_deref())).collect::<Vec<_>>(), [(
+        page.block_id.as_str(),
+        Some(main.block_id.as_str())
+    )]);
+    assert!(v.session.windows.iter().all(|w| !w.layout.contains(&page.block_id)));
+    let info = v.blocks.iter().find(|b| b.id == page.block_id).expect("parked blocks are in the view");
+    assert_eq!(info.kind, BlockKind::Browser);
+    assert_eq!(info.browser.as_ref().map(|b| b.url.as_str()), Some("https://example.com/"));
+    let blank: Created = control.call(browser(None, BlockKind::Browser)).await.unwrap();
+    let v = view(&control, &main.session_id).await;
+    let info = v.blocks.iter().find(|b| b.id == blank.block_id).unwrap();
+    assert_eq!(info.browser.as_ref().map(|b| b.url.as_str()), Some("about:blank"));
+
+    // Bad URLs and kinds other than terminal and browser are refused.
+    let bad = control.call::<Created>(browser(Some("file:///etc/passwd"), BlockKind::Browser)).await.unwrap_err();
+    assert_eq!(code(&bad), "bad_request");
+    let agent = control.call::<Created>(browser(None, BlockKind::Agent)).await.unwrap_err();
+    assert_eq!(code(&agent), "bad_request");
+    assert_eq!(view(&control, &main.session_id).await.session.parked.len(), 2);
+
+    // Revealed it is a split; closing the owner closes the one still parked.
+    control.call_value(Method::BlockReveal { block_id: page.block_id.clone(), reveal: Reveal::Split }).await.unwrap();
+    let v = view(&control, &main.session_id).await;
+    assert!(v.session.windows[0].layout.contains(&page.block_id));
+    let other: Created = control
+        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None })
+        .await
+        .unwrap();
+    control.call_value(Method::BlockClose { block_id: main.block_id.clone(), force: true }).await.unwrap();
+    let v = view(&control, &main.session_id).await;
+    assert!(v.session.parked.is_empty() && v.blocks.iter().all(|b| b.id != blank.block_id));
+    assert!(v.blocks.iter().any(|b| b.id == page.block_id) && v.blocks.iter().any(|b| b.id == other.block_id));
+
+    control.call_value(Method::ServerShutdown { force: true }).await.unwrap();
+    drop(control);
+    tokio::time::timeout(TIMEOUT, task).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[tokio::test(flavor = "multi_thread")]

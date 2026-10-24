@@ -56,6 +56,8 @@ async fn block(control: &Control, events: &mut silo_client::Events, owner: &str,
             cwd: Some(cwd.into()),
             env: [("PAGER".to_owned(), "cat".to_owned()), ("GIT_PAGER".to_owned(), "cat".to_owned())].into(),
             size: None,
+            kind: BlockKind::Terminal,
+            url: None,
         })
         .await
         .unwrap();

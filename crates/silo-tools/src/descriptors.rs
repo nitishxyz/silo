@@ -121,8 +121,8 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ("terminal_close", "Close a block; force is required for a busy program.", "block_id force", "", false),
         (
             "browser_open",
-            "Open an ordinary browser block. Its page runs in the Silo app that shows it, so the default (a split next to your own block) is what works best; a tab or session only runs once the user opens it. Take browser_snapshot for element refs before acting.",
-            "block_id url place session",
+            "Open an ordinary browser block (default: a split next to your own block). visible:false parks it next to your block, out of every layout: a background browser the Silo app runs off screen, with the same state, history and actions as a shown one (the user can reveal it; it closes with your block). Take browser_snapshot for element refs before acting.",
+            "block_id url place session visible",
             "url",
             false,
         ),

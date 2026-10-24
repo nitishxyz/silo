@@ -331,7 +331,9 @@ pub enum Method {
     /// command does, closing at once unless revealed (`terminal.capture`
     /// still answers with its final screen and scrollback for a while).
     /// Without one it runs the login shell. `window_id` of the result is
-    /// empty.
+    /// empty. With `kind: browser` it is a parked browser at `url` instead
+    /// (servers with feature `parked_browsers`; older ones spawn a shell),
+    /// run off screen by the app's browser host until revealed.
     #[serde(rename = "block.spawn")]
     BlockSpawn {
         block_id: BlockId,
@@ -345,6 +347,12 @@ pub enum Method {
         env: BTreeMap<String, String>,
         #[serde(default)]
         size: Option<TermSize>,
+        /// `terminal` (default) or `browser`.
+        #[serde(default)]
+        kind: BlockKind,
+        /// Browser blocks: the start URL (default `about:blank`).
+        #[serde(default)]
+        url: Option<String>,
     },
     /// Take a block out of its layout into its session's parked blocks; it
     /// keeps running.

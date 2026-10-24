@@ -949,6 +949,20 @@ impl Registry {
         Ok(Created { session_id, window_id: String::new(), block_id: id })
     }
 
+    /// `block.spawn` with `kind: browser`: a parked browser at `url` in the
+    /// session of `owner`, owned by it. No app runs its page until an
+    /// action reaches it (the off-screen host) or it is revealed.
+    pub fn spawn_parked_browser(&mut self, owner: &str, url: Option<&str>) -> Result<Created, RpcError> {
+        let si = self.session_index(owner).ok_or_else(|| RpcError::not_found(format!("block {owner}")))?;
+        let session_id = self.sessions[si].id.clone();
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url, agent: None };
+        let id = self.spawn_block(&session_id, &new, PARKED_SIZE)?;
+        self.sessions[si].parked.push(Parked { id: id.clone(), owner: Some(owner.to_owned()) });
+        self.session_changed(si);
+        self.sessions_changed();
+        Ok(Created { session_id, window_id: String::new(), block_id: id })
+    }
+
     /// `block.park`: take a block out of its window; it keeps running. The
     /// only block of a window stays.
     pub fn park(&mut self, block_id: &str) -> Result<(), RpcError> {

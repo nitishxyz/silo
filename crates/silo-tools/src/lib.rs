@@ -272,11 +272,35 @@ impl Tools {
         };
         let anchor = input["block_id"].as_str().or(anchor).map(str::to_owned);
         // Parked: in the anchor's session, in no layout, closed with it.
-        if !browser && input["visible"].as_bool() == Some(false) {
+        if input["visible"].as_bool() == Some(false) {
             let owner = anchor.context("visible:false requires block_id or SILO_BLOCK")?;
+            if browser {
+                // An older server would ignore the kind and spawn a shell.
+                if !self.control.peer_supports(silo_proto::compat::feature::PARKED_BROWSERS) {
+                    bail!("this Silo server cannot park browsers (update it); open a visible browser instead");
+                }
+                let spawn = Method::BlockSpawn {
+                    block_id: owner,
+                    command: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    size: None,
+                    kind: BlockKind::Browser,
+                    url,
+                };
+                return self.control.call(spawn).await;
+            }
             let created: Created = self
                 .control
-                .call(Method::BlockSpawn { block_id: owner, command: spawn.command, cwd: spawn.cwd, env: BTreeMap::new(), size: None })
+                .call(Method::BlockSpawn {
+                    block_id: owner,
+                    command: spawn.command,
+                    cwd: spawn.cwd,
+                    env: BTreeMap::new(),
+                    size: None,
+                    kind: BlockKind::Terminal,
+                    url: None,
+                })
                 .await?;
             self.type_command(&created.block_id, command.filter(|_| !exec)).await?;
             return Ok(created);
@@ -493,7 +517,10 @@ impl Tools {
         self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
         let command = vec![shell.to_owned(), "-lc".to_owned(), command.to_owned()];
         let size = Some(silo_proto::model::TermSize::new(COMMAND_COLUMNS, 50));
-        let created: Created = self.control.call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size }).await?;
+        let created: Created = self
+            .control
+            .call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size, kind: BlockKind::Terminal, url: None })
+            .await?;
         Ok(created.block_id)
     }
 
