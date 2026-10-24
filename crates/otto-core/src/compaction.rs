@@ -99,24 +99,59 @@ pub(crate) fn pairs(items: Vec<Item>) -> Vec<Item> {
     out
 }
 
-/// Context editing: keep the newest results whole; clear older ones once
-/// their total exceeds `budget` bytes. Pairs stay intact (only content changes).
+/// Context editing: keep the newest results whole; once all results exceed
+/// `budget` bytes, clear the oldest in chunks. Pairs stay intact (only content
+/// changes).
+///
+/// The amount cleared is a step function of the results' total size, which
+/// only grows, and is taken from the oldest end. So between steps the cleared
+/// set stays the same until the total passes the next chunk, and then only
+/// grows: the start of the prompt stays byte-identical and the provider's
+/// prompt cache keeps hitting. Counting back from the newest result instead
+/// moved the cut on every step and rewrote the whole cached prompt each time.
 pub(crate) fn edit(mut items: Vec<Item>, budget: usize) -> Vec<Item> {
-    let mut remaining = budget;
-    let mut seen = 0;
-    for item in items.iter_mut().rev().filter(|i| i.parts.iter().any(|p| matches!(p, Part::ToolResult { .. }))) {
-        seen += 1;
-        for part in &mut item.parts {
-            let Part::ToolResult { content, .. } = part else { continue };
-            let size: usize = content.iter().map(|c| if let ResultPart::Text { text } = c { text.len() } else { 4096 }).sum();
-            if seen <= KEEP_RESULTS || size <= remaining {
-                remaining = remaining.saturating_sub(size);
-            } else if !(content.len() == 1 && matches!(&content[0], ResultPart::Text { text } if text == CLEARED)) {
-                *content = vec![ResultPart::text(CLEARED)];
-            }
+    let size = |content: &[ResultPart]| -> usize { content.iter().map(|c| if let ResultPart::Text { text } = c { text.len() } else { 4096 }).sum() };
+    let results: Vec<(usize, usize, usize)> = items
+        .iter()
+        .enumerate()
+        .flat_map(|(i, item)| {
+            item.parts
+                .iter()
+                .enumerate()
+                .filter_map(move |(j, p)| if let Part::ToolResult { content, .. } = p { Some((i, j, content)) } else { None })
+        })
+        .map(|(i, j, content)| (i, j, size(content)))
+        .collect();
+    let target = clear_target(results.iter().map(|r| r.2).sum(), budget);
+    // The newest results (by item) are never cleared.
+    let mut kept_items: Vec<usize> = results.iter().map(|r| r.0).collect();
+    kept_items.dedup();
+    let protected: HashSet<usize> = kept_items.iter().rev().take(KEEP_RESULTS).copied().collect();
+    let mut cleared = 0;
+    for &(i, j, bytes) in &results {
+        if cleared >= target || protected.contains(&i) {
+            break;
+        }
+        cleared += bytes;
+        if let Part::ToolResult { content, .. } = &mut items[i].parts[j]
+            && !(content.len() == 1 && matches!(&content[0], ResultPart::Text { text } if text == CLEARED))
+        {
+            *content = vec![ResultPart::text(CLEARED)];
         }
     }
     items
+}
+
+/// Bytes of the oldest results to clear: none up to `budget`; past it, enough
+/// to leave about 60% of the budget, in steps of 40% of the budget, so the
+/// kept results range over 60–100% of the budget between steps.
+fn clear_target(total: usize, budget: usize) -> usize {
+    if total <= budget {
+        return 0;
+    }
+    let chunk = (budget * 2 / 5).max(1);
+    let floor = budget - chunk;
+    (total - floor) / chunk * chunk
 }
 
 /// Provider-native compaction is opt-in (session `native_compaction`), needs a
@@ -258,11 +293,51 @@ mod tests {
             items.push(call(&i.to_string()));
             items.push(result(&i.to_string(), 20_000));
         }
+        // 120 kB of results over a 50 kB budget: the oldest 80 kB are due (past the 30 kB floor in 20 kB steps), but
+        // the newest three results stay, so three are cleared.
         let edited = super::edit(super::pairs(items), 50_000);
         let texts: Vec<String> = edited.iter().filter(|i| i.role == Role::Tool).map(|i| serde_json::to_string(&i.parts).unwrap()).collect();
         assert_eq!(texts.len(), 6);
         assert!(texts[..3].iter().all(|t| t.contains("cleared")));
         assert!(texts[3..].iter().all(|t| !t.contains("cleared")));
+    }
+    #[test]
+    fn the_newest_results_are_never_cleared() {
+        let mut items = vec![Item::user_text("u", "go")];
+        for i in 0..4 {
+            items.push(call(&i.to_string()));
+            items.push(result(&i.to_string(), 100_000));
+        }
+        let edited = super::edit(super::pairs(items), 50_000);
+        let cleared: Vec<bool> =
+            edited.iter().filter(|i| i.role == Role::Tool).map(|i| serde_json::to_string(&i.parts).unwrap().contains("cleared")).collect();
+        assert_eq!(cleared, [true, false, false, false]);
+    }
+    /// The prompt cache needs a stable prefix: step after step, the cleared
+    /// results are the same until a chunk boundary, and then only grow, from
+    /// the oldest end.
+    #[test]
+    fn cleared_results_only_grow_from_the_oldest() {
+        let mut items = vec![Item::user_text("u", "go")];
+        let mut previous: Vec<bool> = Vec::new();
+        let mut changes = 0;
+        for i in 0..400 {
+            items.push(call(&i.to_string()));
+            items.push(result(&i.to_string(), 500 + (i * 7919) % 6_000));
+            let edited = super::edit(super::pairs(items.clone()), 100_000);
+            let cleared: Vec<bool> =
+                edited.iter().filter(|i| i.role == Role::Tool).map(|i| serde_json::to_string(&i.parts).unwrap().contains("cleared")).collect();
+            // A prefix: once a result is kept, every newer one is too.
+            assert!(cleared.windows(2).all(|w| w[0] || !w[1]), "step {i}: cleared is not a prefix");
+            // Only grows: everything cleared before stays cleared.
+            assert!(previous.iter().zip(&cleared).all(|(was, now)| !was || *now), "step {i}: a cleared result came back");
+            if previous.iter().filter(|c| **c).count() != cleared.iter().filter(|c| **c).count() {
+                changes += 1;
+            }
+            previous = cleared;
+        }
+        // ~1.3 MB of results over a 100 kB budget: a change every ~40 kB, not every step.
+        assert!(changes > 0 && changes < 40, "{changes} changes in 400 steps");
     }
     #[test]
     fn orphans_are_repaired() {
