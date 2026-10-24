@@ -33,9 +33,16 @@ async fn start(home: &Path) -> JoinHandle<()> {
         mdns: false,
         ..Default::default()
     };
+    let socket = paths::socket(home);
+    // A crash (`task.abort()`) leaves its socket file, which the restart
+    // replaces (unlink, then bind): only a new file that accepts counts,
+    // else the check can pass on the old one and the next connect find no
+    // socket at all (macOS CI, once). No client: a hello changes the run.
+    let inode = |path: &Path| std::fs::metadata(path).ok().map(|m| std::os::unix::fs::MetadataExt::ino(&m));
+    let stale = inode(&socket);
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     for _ in 0..300 {
-        if silo_client::server_running(home).await {
+        if inode(&socket).is_some_and(|ino| Some(ino) != stale) && silo_client::server_running(home).await {
             return task;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -158,7 +165,11 @@ async fn assert_restored(control: &Control, before: &SessionView, marks: &[(&str
     for old in &before.blocks {
         let new = block(&after, &old.id);
         assert_eq!(new.lifecycle, old.lifecycle);
-        assert_eq!(new.title, old.title);
+        // A block restored without its snapshot lost its program-set title:
+        // the first probe names it after its new shell, at any moment.
+        if marks.iter().any(|(id, _)| *id == old.id) {
+            assert_eq!(new.title, old.title);
+        }
         assert_eq!((new.session_id.as_str(), new.size, new.exited, new.owner), (old.session_id.as_str(), old.size, old.exited, None));
         assert_eq!(new.pid.is_some(), old.lifecycle == Lifecycle::Running);
     }
