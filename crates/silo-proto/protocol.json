@@ -7611,6 +7611,33 @@
         "type": "object"
       }
     },
+    "service.socket": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ServiceSocket",
+        "type": "object"
+      }
+    },
     "session.close": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

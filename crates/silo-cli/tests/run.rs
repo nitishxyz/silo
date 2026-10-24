@@ -43,7 +43,13 @@ async fn start(home: &Path) -> JoinHandle<()> {
 async fn silo(home: &Path, args: &[&str]) -> Output {
     let (home, args) = (home.to_owned(), args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>());
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new(env!("CARGO_BIN_EXE_silo")).args(&args).env("SILO_HOME", &home).stdin(Stdio::null()).output().unwrap()
+        std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
+            .args(&args)
+            .env_remove("OTTO_SILO_HOME")
+            .env("SILO_HOME", &home)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
     })
     .await
     .unwrap()

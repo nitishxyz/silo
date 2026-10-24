@@ -46,7 +46,13 @@ async fn start(home: &Path) -> JoinHandle<()> {
 async fn silo(home: &Path, args: &[&str]) -> Output {
     let (home, args) = (home.to_owned(), args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>());
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new(env!("CARGO_BIN_EXE_silo")).args(&args).env("SILO_HOME", &home).stdin(Stdio::null()).output().unwrap()
+        std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
+            .args(&args)
+            .env_remove("OTTO_SILO_HOME")
+            .env("SILO_HOME", &home)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
     })
     .await
     .unwrap()
@@ -60,6 +66,7 @@ impl ServerProcess {
     async fn start(home: &Path) -> Self {
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
             .args(["server", "--idle-exit", "0"])
+            .env_remove("OTTO_SILO_HOME")
             .env("SILO_HOME", home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -97,7 +104,7 @@ async fn silo_on_a_pty(home: &Path, args: &[&str], quiet: bool, prompt: &'static
         let (mut master, slave) = openpty();
         let stderr = if quiet { Stdio::null() } else { slave.try_clone().unwrap().into() };
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_silo"));
-        command.args(&args).env("SILO_HOME", &home).stdin(slave.try_clone().unwrap()).stdout(slave).stderr(stderr);
+        command.args(&args).env_remove("OTTO_SILO_HOME").env("SILO_HOME", &home).stdin(slave.try_clone().unwrap()).stdout(slave).stderr(stderr);
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
             command.pre_exec(|| {

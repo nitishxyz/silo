@@ -10,7 +10,7 @@ use silo_proto::{
     api, compat,
     control::{
         ApiMethod, BlockView, BrowserCommand, ClientHello, ClientRole, Empty, Event, GrantCreated, GrantKind, Grants, METHODS, Method, OfferSource,
-        PairInvite, PairedDevices, Pasted, Request, RpcError, ServerHello, ServerMessage,
+        PairInvite, PairedDevices, Pasted, Request, RpcError, ServerHello, ServerMessage, ServiceSocket,
     },
     data::{ClientData, DataHello, MAX_CLIP_TEXT, Reject},
     kind,
@@ -747,6 +747,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         }
         // Only join connections, answered in the control loop.
         Method::HostOffer { .. } => Err(RpcError::forbidden("host.offer")),
+        Method::ServiceSocket { name } => to_value(ServiceSocket { path: crate::tunnel::service_socket(server, &name).await? }),
         Method::GrantCreate { scope, rights, kind, ttl_secs, label } => grant_create(server, ctx, scope, rights, kind, ttl_secs, label).await,
         Method::GrantList {} => to_value(Grants { grants: server.auth().grants() }),
         Method::GrantRevoke { id } => {

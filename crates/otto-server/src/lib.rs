@@ -134,6 +134,7 @@ impl Server {
             server_id: uuid::Uuid::new_v4().to_string(),
             pid: std::process::id(),
             started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(i64::MAX),
+            silo_home: paths::silo_home().to_string_lossy().into_owned(),
         };
         let metadata = paths::Runtime {
             pid: info.pid,
@@ -141,6 +142,7 @@ impl Server {
             version: info.version.clone(),
             server_id: info.server_id.clone(),
             started_at: info.started_at,
+            silo_home: info.silo_home.clone().into(),
         };
         let settings = match tokio::fs::read(config.home.join("config.json")).await {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from)?,

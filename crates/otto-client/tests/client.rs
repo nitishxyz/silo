@@ -22,6 +22,7 @@ async fn hello(s: &mut DuplexStream) {
                 started_at: 0,
                 client_id: "c".into(),
                 home: "/home/u".into(),
+                silo_home: "/silo".into(),
             },
         )
         .unwrap(),
@@ -309,6 +310,7 @@ async fn rejects_incompatible_hello() {
                     started_at: 0,
                     client_id: "c".into(),
                     home: String::new(),
+                    silo_home: String::new(),
                 },
             )
             .unwrap(),

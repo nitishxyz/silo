@@ -967,13 +967,34 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
     A taken port is `PortBusy`.
 - **otto is embedded in `silo`** (phase 1): `silo otto <args…>` (hidden) runs `otto_cli::main_from` before silo's
   own runtime and logging, so tarballs, `silo update`, remote upgrade and install all carry otto. `silo server`
-  registers the `"otto"` service: it starts `silo otto server --daemon` (own process group, `SILO_HOME` set to
-  the server's home) in the default otto home through `otto_client::ensure_started`, and returns its socket. A
-  running daemon of an older version is asked to stop (`server.shutdown`) once none of its sessions is busy or
-  waiting for approval, then the current one starts; while one is busy the old daemon keeps serving. A daemon
+  registers the `"otto"` service: it starts `silo otto server --daemon` (own process group, `SILO_HOME` and
+  `OTTO_SILO_HOME` set to the server's homes) through `otto_client::ensure_started`, and returns its socket. A
+  running daemon of an older version serving this Silo home is asked to stop (`server.shutdown`) once none of
+  its sessions is busy or waiting for approval, then the current one starts; while one is busy the old daemon
+  keeps serving. A daemon
   with another protocol is not touched (it idles out). Processes otto starts itself (the daemon, the catalog
   refresh) run `<exe> otto …` when embedded. Clients reach a remote daemon with `Connection::connect_dial(Dial)`,
   which reconnects through the same dialer; a follower retries with a 250 ms to 5 s backoff.
+- **One otto daemon per Silo server** (decided 2026-10-24): each has its own socket, locks, db, sign-ins and
+  sessions, so a dev app (`SILO_HOME=/tmp/silo-otto`) never drives or shares the installed app's daemon.
+  - The otto home is `otto_proto::paths::home()`, used by `otto-silo`, `silo otto`, `silo server` and the app alike:
+    `$OTTO_SILO_HOME`; else, when the effective Silo home (`$SILO_HOME`, else Silo's default) is Silo's default,
+    the default otto home (Application Support / XDG state `otto-silo`, unchanged); else `<silo home>/otto`. So
+    `SILO_HOME=/tmp/silo-otto otto-silo auth login …` signs the dev daemon in. The config dir
+    (`OTTO_SILO_CONFIG_DIR`, `~/.config/otto-silo`) stays shared.
+  - The daemon records the Silo home its silo tools drive (`paths::silo_home()`) as `silo_home` in `hello`,
+    `server.info` and `runtime.json`. `otto_claim` runs in the background at every `silo server` start (incl.
+    `--adopt`/`--takeover` after an update) and before each `otto` service call: a daemon in this otto home that
+    serves another Silo home, or reports none (pre-`silo_home`), is asked to stop even when busy (its interrupted
+    turns resume at otto's next start), its lock is awaited and the service starts this server's own; an older
+    daemon serving this home goes through the upgrade path above (kept while busy). Only when such a daemon does
+    not stop is the result the error "otto here serves another Silo". At startup nothing is started when no daemon
+    runs; the first agent starts it. E.g. the installed app's server replaces a daemon a dev app started in the
+    default otto home.
+  - The local app reaches its daemon through its own server too: `Connection::connect_dial` with a dial that calls
+    `service.socket {name}` (owner only; the service's socket, or `not_found` / `unavailable`) on the app's silo
+    server and connects to it. A loopback `silo/tunnel/1` would need the app paired with its own server, so the
+    server only names the socket; starting and the home check stay in one place for local and remote.
 - **The remote agent flow** (A = the Mac, B = a paired host):
   1. B's `silo server` registers `"otto"` and advertises feature `otto`; A's app routes that host's agent blocks to
      `Otto::Remote{id}`.

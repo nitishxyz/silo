@@ -1,7 +1,7 @@
 //! The app's otto daemon connections, one per host (`docs/AGENT_BLOCK.md`
-//! §1): this Mac's on its socket, a remote host's through that host's
-//! tunnel (service `otto`). Also the calls the pane makes that are not
-//! plain `Connection` methods.
+//! §1), each through that host's silo server: this Mac's at the socket its
+//! `otto` service returns, a remote host's through its tunnel. Also the
+//! calls the pane makes that are not plain `Connection` methods.
 
 use std::{
     collections::HashMap,
@@ -12,6 +12,7 @@ use std::{
 use otto_client::{ClientError, Connection};
 use otto_proto::{AgentInfo, AuthStatus, ConfigValue, Method, ModelInfo, ProjectInfo};
 use silo_client::{transport::EndpointAddr, tunnel::TunnelDialer};
+use silo_proto::control::{Method as SiloMethod, ServiceSocket};
 
 use crate::hosts::Transport;
 
@@ -102,21 +103,36 @@ pub async fn dialer(id: &str) -> std::io::Result<Arc<TunnelDialer>> {
     })
 }
 
-/// Streams to remote host `id`'s otto daemon, each on its tunnel.
-fn dial(id: String) -> otto_client::Dial {
-    type Opened = std::pin::Pin<Box<dyn Future<Output = otto_client::Result<Box<dyn otto_client::Stream>>> + Send>>;
+type Opened = std::pin::Pin<Box<dyn Future<Output = otto_client::Result<Box<dyn otto_client::Stream>>> + Send>>;
+
+/// Streams to `otto`'s daemon, each from its host's silo server: through a
+/// remote host's tunnel (service `otto`), or on this Mac at the socket its own
+/// server's `service.socket` returns. Either server starts the daemon serving
+/// its Silo home, and refuses one serving another.
+fn dial(otto: Otto) -> otto_client::Dial {
     Arc::new(move || -> Opened {
-        let id = id.clone();
+        let otto = otto.clone();
         Box::pin(async move {
-            let stream = dialer(&id).await?.open_service(SERVICE).await?;
-            Ok(Box::new(stream) as Box<dyn otto_client::Stream>)
+            Ok(match otto {
+                Otto::Local => {
+                    Box::new(tokio::net::UnixStream::connect(local_socket(&silo_proto::paths::home()).await?).await?) as Box<dyn otto_client::Stream>
+                }
+                Otto::Remote { id } => Box::new(dialer(&id).await?.open_service(SERVICE).await?),
+            })
         })
     })
 }
 
-/// The shared connection to `otto`'s daemon. This Mac's starts `otto-silo`
-/// (next to the app executable) when no daemon runs; a remote host's runs
-/// through its tunnel and redials through it. A cached connection whose
+/// The `otto` service socket of the silo server serving `home` (this Mac's).
+async fn local_socket(home: &std::path::Path) -> std::io::Result<PathBuf> {
+    let failed = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
+    let (control, _events) = silo_client::Control::connect_local(&silo_proto::paths::socket(home), "silo-app-otto", true).await.map_err(failed)?;
+    let found: ServiceSocket = control.call(SiloMethod::ServiceSocket { name: SERVICE.into() }).await.map_err(failed)?;
+    Ok(found.path)
+}
+
+/// The shared connection to `otto`'s daemon, dialed through its host's silo
+/// server ([`dial`]) and redialed the same way. A cached connection whose
 /// daemon went away is dropped here, so the next call reconnects.
 pub async fn connection(otto: &Otto) -> Result<Connection, ClientError> {
     let slot = slots(|slots| slots.entry(otto.clone()).or_default().clone());
@@ -124,14 +140,7 @@ pub async fn connection(otto: &Otto) -> Result<Connection, ClientError> {
     if let Some(connection) = slot.as_ref().filter(|c| !c.is_closed()) {
         return Ok(connection.clone());
     }
-    let connection = match otto {
-        Otto::Local => {
-            let exe = std::env::current_exe()?;
-            let binary = exe.with_file_name(otto_proto::BINARY);
-            otto_client::connect_or_start(&otto_proto::paths::home(), &binary, &["server", "--daemon"]).await?
-        }
-        Otto::Remote { id } => Connection::connect_dial(dial(id.clone())).await?,
-    };
+    let connection = Connection::connect_dial(dial(otto.clone())).await?;
     *slot = Some(connection.clone());
     Ok(connection)
 }
@@ -293,6 +302,43 @@ mod tests {
         let keys: std::collections::HashSet<Option<Otto>> = [local, remote(&a), remote(&moved), remote(&b)].into_iter().collect();
         assert_eq!(keys.len(), 3);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// This Mac's daemon is the one its own silo server's `otto` service
+    /// names, not whatever runs in a shared otto home.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_otto_resolves_through_the_server() {
+        let home = PathBuf::from(format!("/tmp/silo-app-otto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let socket = home.join("otto/server.sock");
+        let named = socket.clone();
+        let service: silo_server::ServiceFn = Arc::new(move || {
+            let named = named.clone();
+            Box::pin(async move { Ok(named) })
+        });
+        let config = silo_server::Config {
+            home: home.clone(),
+            idle_exit: None,
+            relay: silo_client::transport::RelayConfig::Disabled,
+            mdns: false,
+            services: HashMap::from([(SERVICE.to_owned(), service)]),
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
+        let mut found = None;
+        for _ in 0..500 {
+            if silo_client::server_running(&home).await {
+                found = Some(local_socket(&home).await.unwrap());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(found, Some(socket));
+        let (control, _) = silo_client::Control::connect(&silo_proto::paths::socket(&home), "test").await.unwrap();
+        control.call_value(SiloMethod::ServerShutdown { force: false }).await.unwrap();
+        drop(control);
+        task.await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

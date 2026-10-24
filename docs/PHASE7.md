@@ -165,7 +165,7 @@ pub fn need(method: &Method) -> Need   // exhaustive match: a new Method without
 | interact · session | `window.select`, `window.step`, `ui.open_session` |
 | control · session | `session.rename`, `session.close`, `window.create/close/rename/move`, `block.split/close/zoom/swap/float/move`, `layout.ratio/grow/edge/equalize`, `terminal.clear`, `terminal.reset` |
 | control · server | `session.create`, every forwarded `app.*` except below |
-| owner · server | `server.log`, `pair.list`, `grant.list` |
+| owner · server | `server.log`, `pair.list`, `grant.list`, `service.socket` |
 | owner · server + approval | `server.shutdown`, `server.restart`, `pair.create`, `pair.revoke`, `grant.create`, `grant.revoke`, `app.hosts_add`, `app.hosts_remove` |
 
 Multi-block methods (`session.own_block {block_ids}`) need the right on every id. Paired devices keep exactly what

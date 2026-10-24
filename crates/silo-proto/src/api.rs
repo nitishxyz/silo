@@ -9,7 +9,7 @@ use crate::agent::*;
 use crate::control::{
     ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
     GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted, Reveal,
-    ServerInfo, SizeInfo, SpawnSpec,
+    ServerInfo, ServiceSocket, SizeInfo, SpawnSpec,
 };
 use crate::data::{ClipKind, ClipboardLocation};
 use crate::model::{Axis, BlockKind, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
@@ -173,6 +173,7 @@ fn result_schema(method: &Method) -> Schema {
         M::BrowserNavigate { .. } | M::BrowserBack { .. } | M::BrowserForward { .. } | M::BrowserReload { .. } => schema_for!(Empty),
         M::BrowserZoom { .. } | M::BrowserReport { .. } | M::AgentSet { .. } => schema_for!(Empty),
         M::HostOffer { .. } => schema_for!(Empty),
+        M::ServiceSocket { .. } => schema_for!(ServiceSocket),
         M::AppWindowNew { .. }
         | M::AppWindowCycle { .. }
         | M::AppSwitcher { .. }
@@ -326,6 +327,7 @@ pub fn examples() -> Vec<Method> {
         M::PairList {},
         M::PairRevoke { id: "7c3e5f0d9a1b4c6e8f2a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e".into() },
         M::HostOffer { ticket: "silo1aeaqcaibaeaq".into(), name: "mini".into() },
+        M::ServiceSocket { name: "otto".into() },
         M::GrantCreate {
             scope: Scope::Session { session_id: s() },
             rights: Rights::Interact,

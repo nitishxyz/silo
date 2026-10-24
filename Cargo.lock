@@ -7233,6 +7233,7 @@ dependencies = [
  "silo-client",
  "silo-proto",
  "silo-render",
+ "silo-server",
  "silo-vt",
  "silo-web",
  "tokio",

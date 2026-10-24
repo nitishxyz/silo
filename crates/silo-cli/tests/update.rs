@@ -20,6 +20,8 @@ impl Env {
         let out = Command::new(&self.bin)
             .args(args)
             .env("HOME", self.root.join("u"))
+            // Never the caller's otto home: `silo server` claims it at start.
+            .env_remove("OTTO_SILO_HOME")
             .env("SILO_HOME", self.root.join("h"))
             .env("SILO_UPDATE_FEED", format!("file://{}", self.root.join("f").display()))
             .env("SILO_SERVICE_MANAGER", "none")

@@ -672,6 +672,14 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 ..Default::default()
             };
             config.services.insert("otto".into(), otto_service(config.home.clone()));
+            // Replace a daemon in this otto home serving another Silo (or an
+            // older one) now, not at the first agent.
+            let silo_home = config.home.clone();
+            tokio::spawn(async move {
+                if let Err(error) = otto_claim(&silo_home, &otto_proto::paths::home()).await {
+                    tracing::warn!("otto: {error:#}");
+                }
+            });
             if takeover {
                 if let Err(error) = takeover_reporting(config, status).await {
                     if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
@@ -1365,38 +1373,69 @@ fn hand_back(session: String) {
 }
 
 /// The `otto` tunnel service: this silo's own otto daemon (`silo otto server
-/// --daemon`, told this server's home), started on demand. A compatible older
-/// daemon is stopped and replaced once none of its sessions is busy; until
-/// then it keeps serving.
+/// --daemon`, told this server's home), started on demand in its own otto
+/// home (`otto_proto::paths::home`, one per Silo home), after [`otto_claim`].
 fn otto_service(silo_home: PathBuf) -> silo_server::ServiceFn {
     std::sync::Arc::new(move || {
         let silo_home = silo_home.clone();
-        Box::pin(async move { otto_socket(&silo_home).await.map_err(|e| std::io::Error::other(format!("otto: {e:#}"))) })
+        Box::pin(async move { otto_socket(&silo_home, &otto_proto::paths::home()).await.map_err(|e| std::io::Error::other(format!("otto: {e:#}"))) })
     })
 }
 
-async fn otto_socket(silo_home: &std::path::Path) -> anyhow::Result<PathBuf> {
-    use otto_client::{ClientError, Connection};
-    let home = otto_proto::paths::home();
-    match Connection::connect(&home).await {
-        Ok(otto) if older(&otto.hello().version, env!("CARGO_PKG_VERSION")) => {
-            let sessions = otto.session_list(None, false).await?;
-            let busy = sessions.iter().any(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval));
-            if busy {
-                return Ok(otto_proto::paths::socket(&home));
-            }
-            tracing::info!(old = %otto.hello().version, "restarting an older otto daemon");
-            let _ = otto.call(otto_proto::Method::ServerShutdown {}).await;
-            drop(otto);
-            otto_released(&home).await?;
+async fn otto_socket(silo_home: &std::path::Path, home: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if !otto_claim(silo_home, home).await? {
+        let exe = std::env::current_exe().context("locate silo executable")?;
+        otto_client::ensure_started(
+            home,
+            &exe,
+            &["otto", "server", "--daemon"],
+            &[("SILO_HOME", silo_home.as_os_str()), ("OTTO_SILO_HOME", home.as_os_str())],
+        )
+        .await?;
+        // Another server may have started its own first.
+        if std::path::Path::new(&otto_client::Connection::connect(home).await?.hello().silo_home) != silo_home {
+            bail!("otto here serves another Silo");
         }
-        Ok(_) => return Ok(otto_proto::paths::socket(&home)),
-        Err(ClientError::Incompatible { .. }) => bail!("an incompatible otto is running; it stops when idle"),
-        Err(_) => {}
     }
-    let exe = std::env::current_exe().context("locate silo executable")?;
-    otto_client::ensure_started(&home, &exe, &["otto", "server", "--daemon"], &[("SILO_HOME", silo_home.as_os_str())]).await?;
-    Ok(otto_proto::paths::socket(&home))
+    Ok(otto_proto::paths::socket(home))
+}
+
+/// Make the daemon in otto `home`, if any, this server's (at server start and
+/// before each `otto` service call): one serving another or an unknown
+/// (pre-`silo_home`) Silo home is stopped even when busy; an older one serving
+/// this home only once none of its sessions is busy. Stopped turns resume when
+/// otto starts again. Whether a daemon to keep runs.
+async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyhow::Result<bool> {
+    use otto_client::{ClientError, Connection};
+    let otto = match Connection::connect(home).await {
+        Ok(otto) => otto,
+        Err(ClientError::Incompatible { .. }) => bail!("an incompatible otto is running; it stops when idle"),
+        Err(_) => return Ok(false),
+    };
+    let (version, serves) = (otto.hello().version.clone(), otto.hello().silo_home.clone());
+    let ours = std::path::Path::new(&serves) == silo_home;
+    if ours && !older(&version, env!("CARGO_PKG_VERSION")) {
+        return Ok(true);
+    }
+    if ours {
+        let sessions = otto.session_list(None, false).await?;
+        if sessions.iter().any(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)) {
+            return Ok(true);
+        }
+        tracing::info!(old = %version, "restarting an older otto daemon");
+    } else {
+        let serves = if serves.is_empty() { "an unknown Silo" } else { serves.as_str() };
+        tracing::warn!(%version, %serves, home = %home.display(), "replacing an otto daemon that serves another Silo");
+    }
+    let _ = otto.call(otto_proto::Method::ServerShutdown {}).await;
+    drop(otto);
+    match otto_released(home).await {
+        Err(error) if !ours => {
+            tracing::warn!("{error:#}");
+            bail!("otto here serves another Silo")
+        }
+        result => result.map(|()| false),
+    }
 }
 
 /// `theirs` is an older `major.minor.patch` than `ours` (pre-release suffixes ignored).
@@ -1538,6 +1577,97 @@ mod tests {
         assert!(!older("0.1.7", "0.1.7"));
         assert!(!older("0.2.0", "0.1.7"));
         assert!(!older("0.1.7-dev", "0.1.7"));
+    }
+
+    /// A fake otto daemon in a fresh otto home holding its lock: `version`,
+    /// serving `silo_home`, one session busy or not. It stops (lets go of the
+    /// lock and socket) on `server.shutdown` when `stops`. The home and
+    /// whether it was asked to stop.
+    async fn fake_otto(
+        name: &str,
+        version: &str,
+        silo_home: &str,
+        busy: bool,
+        stops: bool,
+    ) -> (PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use otto_proto::{Frame, Method, Request, ServerMessage, kind, read_frame, write_frame};
+        let home = std::env::temp_dir().join(format!("silo-otto-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let lock = std::fs::File::create(otto_proto::paths::server_lock(&home)).unwrap();
+        lock.try_lock().unwrap();
+        let listener = tokio::net::UnixListener::bind(otto_proto::paths::socket(&home)).unwrap();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (version, silo_home, flag, socket) = (version.to_owned(), silo_home.to_owned(), asked.clone(), otto_proto::paths::socket(&home));
+        tokio::spawn(async move {
+            let mut lock = Some(lock);
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame(&mut stream).await;
+                let hello = otto_proto::ServerHello {
+                    protocol: otto_proto::PROTOCOL,
+                    version: version.clone(),
+                    server_id: "s".into(),
+                    pid: 1,
+                    started_at: 0,
+                    client_id: "c".into(),
+                    home: String::new(),
+                    silo_home: silo_home.clone(),
+                };
+                let _ = write_frame(&mut stream, &Frame::json(kind::HELLO, &hello).unwrap()).await;
+                while let Ok(Some(frame)) = read_frame(&mut stream).await {
+                    let Ok(request) = frame.parse::<Request>() else { continue };
+                    let result = match request.method {
+                        Method::SessionList { .. } => {
+                            let status = if busy { "busy" } else { "idle" };
+                            serde_json::json!([{"id":"s","project_id":"p","agent":"a","provider":"p","model":"m","title":"t","cwd":"/","status":status,"created_at":0,"updated_at":0,"last_seq":0,"usage":{"usage":{"input":0,"output":0},"cost_usd":0.0}}])
+                        }
+                        _ => serde_json::json!({}),
+                    };
+                    let shutdown = matches!(request.method, Method::ServerShutdown {});
+                    let response = ServerMessage::Response { id: request.id, result: Some(result), error: None };
+                    let _ = write_frame(&mut stream, &Frame::json(kind::CONTROL, &response).unwrap()).await;
+                    if shutdown {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if stops {
+                            drop(lock.take());
+                            let _ = std::fs::remove_file(&socket);
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        (home, asked)
+    }
+
+    /// Whether `otto_claim` keeps the daemon, whether it asked it to stop,
+    /// and its error.
+    async fn claim(name: &str, version: &str, serves: &str, busy: bool, stops: bool) -> (Option<bool>, bool, String) {
+        let (home, asked) = fake_otto(name, version, serves, busy, stops).await;
+        let result = otto_claim(std::path::Path::new("/here/silo"), &home).await;
+        std::fs::remove_dir_all(&home).unwrap();
+        let error = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+        (result.ok(), asked.load(std::sync::atomic::Ordering::SeqCst), error)
+    }
+
+    /// This server's otto home holds its own daemon: a current one serving
+    /// this Silo is kept; one serving another or an unknown Silo is stopped
+    /// even when busy; an older one of this Silo only when idle.
+    #[tokio::test]
+    async fn otto_claim_replaces_a_daemon_of_another_silo() {
+        let current = env!("CARGO_PKG_VERSION");
+        assert_eq!(claim("ours", current, "/here/silo", false, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("other", current, "/elsewhere/silo", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("pre", current, "", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("old-busy", "0.0.1", "/here/silo", true, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("old-idle", "0.0.1", "/here/silo", false, true).await, (Some(false), true, String::new()));
+    }
+
+    /// A daemon of another Silo that does not stop is refused, never reused.
+    #[tokio::test]
+    async fn otto_claim_refuses_a_daemon_of_another_silo_that_stays() {
+        let (kept, asked, error) = claim("stays", env!("CARGO_PKG_VERSION"), "/elsewhere/silo", false, false).await;
+        assert_eq!((kept, asked, error.as_str()), (None, true, "otto here serves another Silo"));
     }
 
     #[test]

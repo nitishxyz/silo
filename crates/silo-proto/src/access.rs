@@ -327,7 +327,7 @@ pub fn need(method: &Method) -> Need {
         | M::AppCopyOutput { .. }
         | M::AppOpenShare { .. } => rights(Server, Control),
 
-        M::ServerLog { .. } | M::PairList {} | M::GrantList {} => rights(Server, Owner),
+        M::ServerLog { .. } | M::PairList {} | M::GrantList {} | M::ServiceSocket { .. } => rights(Server, Owner),
         M::ServerShutdown { .. }
         | M::ServerRestart { .. }
         | M::PairCreate { .. }

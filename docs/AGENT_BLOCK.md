@@ -18,11 +18,12 @@ See §8 for status.
   `error`). `block.report` must work on agent blocks (attention, tab marks, notifications), not only terminals.
 - One block shows one session at a time. Switching sessions only changes what the block shows; nothing is archived
   from the block. A session is created lazily on the first prompt (no empty sessions), in the block's `cwd`.
-- The otto daemon is the app's local one: `otto_client::connect_or_start(otto_proto::paths::home(), <otto-silo next
-  to the app executable>, &["server", "--daemon"])`. One shared connection per app. `otto-silo` ships in the
-  bundle (`scripts/dev-bundle.sh`, `scripts/bundle-macos.sh`, release workflow) next to `silo`. `silo` itself also
-  embeds otto (`silo otto …`, OTTO.md §9), which is how tarball-only hosts run it; the bundle still ships
-  `otto-silo` for the app.
+- The otto daemon is the one this Mac's silo server serves (one per Silo home, OTTO.md §9): the pane connects with
+  `Connection::connect_dial`, whose dial asks the app's own server for `service.socket {name: "otto"}` (the server
+  starts or checks the daemon exactly as for a tunnel) and connects to that socket. One shared connection per app,
+  redialed the same way. The app no longer starts a daemon itself; `otto-silo` still ships in the bundle
+  (`scripts/dev-bundle.sh`, `scripts/bundle-macos.sh`, release workflow) next to `silo`, which also embeds otto
+  (`silo otto …`).
 - Agent blocks of a remote host run on that host's otto: when its server advertises feature `otto` (it registered
   the tunnel service), the pane connects with `Connection::connect_dial` over `open_service("otto")` on the host's
   `TunnelDialer` (shared with its browser tunnel proxy; `agent/client.rs`, one connection per `Otto` target). The
@@ -375,7 +376,7 @@ Units are points.
   hints (`run otto-silo auth login …`) become "connect it with /providers"; a turn's `Auth:` error reads "The
   provider didn't accept the sign-in · /providers" (full text in its details).
 - **otto unreachable:** every request goes through the shared connection, which drops a cached connection whose
-  daemon went away and reconnects or starts `otto-silo` again. A send that still fails puts the draft back in the
+  daemon went away and redials through the server (which starts the daemon again). A send that still fails puts the draft back in the
   composer and says why in the notice slot above it.
 
 ## 4f. Running turn (review round 3)
@@ -615,8 +616,8 @@ Known gaps:
 - Sub-agents: an already-open child is found only in the shown silo session (otherwise a new block opens);
   `Returned` rows only cover children this pane saw out (running, waiting or held), so earlier turns' don't come back
   after a reload; a held report shows `Stopped` even after a reload. The close hand-back reaches the otto home of the
-  silo server's environment (`OTTO_SILO_HOME`, else the default), so an app pointed at another otto home gets none;
-  with no otto daemon running it is skipped, and otto's next start reports the held turn. Any session with a
+  silo server's environment (`otto_proto::paths::home`, the same daemon its `otto` service serves); with no otto
+  daemon running it is skipped, and otto's next start reports the held turn. Any session with a
   `parent_id` (forks too, which the app doesn't create today) gets the sub-agent strip; ⌘J in a sub-agent block still
   opens the switcher.
 - Live motion verified with `SILO_MOTION_SLOWDOWN=12` frames (handoff, arrivals under and past 6 lines, parallel

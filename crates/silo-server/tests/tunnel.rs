@@ -25,7 +25,7 @@ use silo_client::{
 };
 use silo_proto::{
     compat::feature,
-    control::{Method, PairInvite},
+    control::{Method, PairInvite, RpcError, ServiceSocket},
     paths,
 };
 use silo_server::ServiceFn;
@@ -346,6 +346,29 @@ async fn unpaired_device_cannot_open_a_service() {
     timeout(T, rc.closed()).await.unwrap();
 
     net.close().await.unwrap();
+    shutdown(control, task).await;
+}
+
+/// What the local app dials its own otto through: the service's socket, its
+/// errors as the tunnel's.
+#[tokio::test(flavor = "multi_thread")]
+async fn service_socket_answers_local_owners() {
+    let home = temp_home("svc-socket");
+    let socket = echo_socket(&home.join("svc"));
+    let services = HashMap::from([("echo".to_owned(), service(Some(socket.clone()))), ("down".to_owned(), service(None))]);
+    let (task, control) = start_with(&home, services).await;
+    let found: ServiceSocket = control.call(Method::ServiceSocket { name: "echo".into() }).await.unwrap();
+    assert_eq!(found.path, socket);
+    let mut s = tokio::net::UnixStream::connect(&found.path).await.unwrap();
+    s.write_all(b"hi").await.unwrap();
+    let mut back = [0u8; 2];
+    timeout(T, s.read_exact(&mut back)).await.unwrap().unwrap();
+    assert_eq!(&back, b"hi");
+    let code = |e: anyhow::Error| e.downcast::<RpcError>().map(|e| e.code).unwrap_or_default();
+    let unknown = control.call::<ServiceSocket>(Method::ServiceSocket { name: "otto".into() }).await.unwrap_err();
+    assert_eq!(code(unknown), "not_found");
+    let down = control.call::<ServiceSocket>(Method::ServiceSocket { name: "down".into() }).await.unwrap_err();
+    assert_eq!(code(down), "unavailable");
     shutdown(control, task).await;
 }
 

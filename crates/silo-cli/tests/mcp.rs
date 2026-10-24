@@ -29,7 +29,7 @@ async fn scenario(report_status: bool) {
         while !silo_client::server_running(&home).await { tokio::time::sleep(Duration::from_millis(10)).await; }
         let (control, _) = Control::connect(&paths::socket(&home), "mcp-test").await.unwrap();
         let created: Created = control.call(Method::SessionCreate { name: None, spawn: SpawnSpec { command: vec!["/bin/sh".into(), "-c".into(), SHELL.into()], ..Default::default() }, kind: BlockKind::Terminal, url: None }).await.unwrap();
-        let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_silo")).arg("mcp").env("SILO_HOME", &home).env_remove("SILO_TOKEN").env_remove("SILO_BLOCK").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().unwrap();
+        let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_silo")).arg("mcp").env_remove("OTTO_SILO_HOME").env("SILO_HOME", &home).env_remove("SILO_TOKEN").env_remove("SILO_BLOCK").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().unwrap();
         let mut stdin = process.stdin.take().unwrap();
         let mut stdout = BufReader::new(process.stdout.take().unwrap()).lines();
         let requests = [
@@ -50,7 +50,7 @@ async fn scenario(report_status: bool) {
         }
         drop(stdin);
         assert!(process.wait().await.unwrap().success());
-        let report = tokio::process::Command::new(env!("CARGO_BIN_EXE_silo")).args(["report", "done"]).env_remove("SILO_BLOCK").env("SILO_HOME", &home).output().await.unwrap();
+        let report = tokio::process::Command::new(env!("CARGO_BIN_EXE_silo")).args(["report", "done"]).env_remove("SILO_BLOCK").env_remove("OTTO_SILO_HOME").env("SILO_HOME", &home).output().await.unwrap();
         assert!(report.status.success()); assert!(report.stdout.is_empty() && report.stderr.is_empty());
         if report_status {
         let (wait_control, events) = Control::connect(&paths::socket(&home), "report-wait-test").await.unwrap();

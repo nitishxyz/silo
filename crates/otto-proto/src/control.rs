@@ -66,6 +66,9 @@ pub struct ServerHello {
     /// The daemon user's home directory, for shortening paths.
     #[serde(default)]
     pub home: String,
+    /// The Silo home whose server the daemon's silo tools drive (`paths::silo_home`).
+    #[serde(default)]
+    pub silo_home: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -75,6 +78,9 @@ pub struct ServerInfo {
     pub server_id: String,
     pub pid: u32,
     pub started_at: i64,
+    /// As in [`ServerHello::silo_home`].
+    #[serde(default)]
+    pub silo_home: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]

@@ -532,6 +532,11 @@ pub enum Method {
     /// `host.offered`.
     #[serde(rename = "host.offer")]
     HostOffer { ticket: String, name: String },
+    /// Owner only: the unix socket of registered service `name` (`"otto"`),
+    /// started on demand; what a tunnel to it reaches, for this machine's
+    /// clients.
+    #[serde(rename = "service.socket")]
+    ServiceSocket { name: String },
 
     /// A grant with a fresh bearer secret, shown once: an agent token or a
     /// share link. `ttl_secs` defaults to a day for links and to none for
@@ -831,6 +836,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("pair.list", "List paired devices (owner only)."),
     ("pair.revoke", "Forget a paired device and close its connections (owner only)."),
     ("host.offer", "Offer the caller's server to this one (join-invite connections only)."),
+    ("service.socket", "Start a registered service (otto) if needed and return its socket (owner only)."),
     ("grant.create", "Create an agent token or share link with scoped access (owner only)."),
     ("grant.list", "List grants (owner only)."),
     ("grant.revoke", "Remove a grant and close its connections (owner only)."),
@@ -1346,6 +1352,12 @@ pub struct PairedDevice {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PairedDevices {
     pub devices: Vec<PairedDevice>,
+}
+
+/// Result of `service.socket`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceSocket {
+    pub path: std::path::PathBuf,
 }
 
 /// Result of `grant.create`.

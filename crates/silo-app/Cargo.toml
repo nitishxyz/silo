@@ -45,3 +45,6 @@ raw-window-handle = "0.6"
 # Build with `--no-default-features` when the Xcode Metal toolchain exists.
 default = ["runtime_shaders"]
 runtime_shaders = ["gpui_platform/runtime_shaders"]
+
+[dev-dependencies]
+silo-server.workspace = true

@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -18,6 +19,8 @@ use tokio::{
     net::{TcpStream, UnixStream},
     sync::Semaphore,
 };
+
+use silo_proto::control::RpcError;
 
 use crate::Server;
 
@@ -127,6 +130,16 @@ async fn service(server: &Server, name: &str) -> Result<UnixStream, TunnelErrCod
         UnixStream::connect(path).await.map_err(|_| TunnelErrCode::Unavailable)
     };
     tokio::time::timeout(SERVICE_TIMEOUT, attempt).await.unwrap_or(Err(TunnelErrCode::Unavailable))
+}
+
+/// `service.socket`: what [`service`] connects to, for this machine's clients.
+pub(crate) async fn service_socket(server: &Server, name: &str) -> Result<PathBuf, RpcError> {
+    let socket = server.services.get(name).ok_or_else(|| RpcError::not_found(format!("service {name}")))?.clone();
+    match tokio::time::timeout(SERVICE_TIMEOUT, socket()).await {
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(error)) => Err(RpcError::new("unavailable", error.to_string())),
+        Err(_) => Err(RpcError::new("unavailable", format!("{name} did not start"))),
+    }
 }
 
 /// Resolve `host`, keep only server-private addresses, and connect to the

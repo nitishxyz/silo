@@ -10,7 +10,13 @@ use silo_proto::{
 };
 
 fn silo(home: &Path, args: &[&str]) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_silo")).args(args).env("SILO_HOME", home).stdin(std::process::Stdio::null()).output().unwrap()
+    std::process::Command::new(env!("CARGO_BIN_EXE_silo"))
+        .args(args)
+        .env_remove("OTTO_SILO_HOME")
+        .env("SILO_HOME", home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
 }
 
 async fn run(home: &Path, args: &[&str]) -> Output {
