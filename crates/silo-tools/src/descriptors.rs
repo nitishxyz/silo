@@ -130,7 +130,13 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
             "",
             true,
         ),
-        ("terminal_list", "List ordinary blocks, cwd, busy programs, status records and last command/exit.", "", "", true),
+        (
+            "block_list",
+            "List every block in every session (terminal, browser, agent, files): id, kind, title, cwd, status records and busy program; terminals also give their last command and exit code.",
+            "",
+            "",
+            true,
+        ),
         ("terminal_close", "Close a block; force is required for a busy program.", "block_id force", "", false),
         (
             "browser_open",

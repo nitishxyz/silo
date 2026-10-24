@@ -115,8 +115,11 @@ async fn scenario(report_status: bool) {
     assert_eq!(quiet["reason"], "quiet");
     let timeout = call(&tools, "terminal_wait", json!({"block_id":block,"text":"never-here","timeout_ms":50})).await;
     assert_eq!(timeout["reason"], "timeout");
-    let list = call(&tools, "terminal_list", json!({})).await;
+    let list = call(&tools, "block_list", json!({})).await;
     assert!(list["blocks"].as_array().unwrap().iter().any(|b| b["block"]["id"] == block));
+    // The old name answers the same.
+    let old = call(&tools, "terminal_list", json!({})).await;
+    assert!(old["blocks"].as_array().unwrap().iter().any(|b| b["block"]["id"] == block));
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(tools.call("terminal_wait", json!({"block_id":block}), cancelled).await.is_err());

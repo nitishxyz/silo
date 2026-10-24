@@ -209,7 +209,7 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 | `terminal_send` | Type `text`, then `keys` (`enter`, `tab`, `esc`, `up`, `ctrl-c`, …); `submit: true` sends Enter after a short pause (TUIs treat text+CR in one write as a paste) | `terminal.send` |
 | `terminal_read` | Screen text, or the last `lines` with scrollback | `terminal.capture` |
 | `terminal_wait` | Wait until any of: a status record updated after the call started enters one of `status` (default `done, blocked, error`); the next command finishes; output quiet for `quiet_ms`; `text` (regex) on screen; the block exits. Returns `{reason, status, screen}` | events + polling `terminal.capture` |
-| `terminal_list` | Blocks with title, kind, cwd, busy program, status records, last command and exit | `session.list`, `session.view`, `blocks.busy`, `block.commands` |
+| `block_list` | Every block of every session (any kind) with title, kind, cwd, busy program, status records; terminals add their last command and exit. `terminal_list` is its old name and still works | `session.list`, `session.view`, `blocks.busy`, `block.commands` |
 | `terminal_close` | Close a block (`force` for busy ones) | `block.close` |
 
 ### 5.2 Browser

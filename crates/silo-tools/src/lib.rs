@@ -185,7 +185,8 @@ impl Tools {
                 json!({"text": text, "truncated": truncated})
             }
             "terminal_wait" => self.wait(&input, anchor).await?,
-            "terminal_list" => self.list().await?,
+            // `terminal_list` is its old name, still answered for older agents and sessions.
+            "block_list" | "terminal_list" => self.list().await?,
             "files_show" => self.show(&input, anchor).await?,
             "terminal_close" => {
                 self.control

@@ -1301,7 +1301,7 @@ fn silo(name: &str) -> Option<(Kind, &'static str, &'static str, Option<&'static
         "terminal_send" => (Terminal, "Typing in terminal", "Typed in terminal", Some("text")),
         "terminal_read" => (Terminal, "Reading terminal", "Read terminal", None),
         "terminal_wait" => (Terminal, "Waiting for terminal", "Waited for terminal", None),
-        "terminal_list" => (Terminal, "Listing terminals", "Listed terminals", None),
+        "block_list" | "terminal_list" => (Terminal, "Listing blocks", "Listed blocks", None),
         "terminal_close" => (Terminal, "Closing terminal", "Closed terminal", None),
         "browser_open" => (Browser, "Opening browser", "Opened browser", Some("url")),
         "browser_navigate" => (Browser, "Navigating to", "Navigated to", Some("url")),
