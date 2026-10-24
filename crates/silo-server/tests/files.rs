@@ -351,10 +351,8 @@ async fn prepare(control: &Control, root: &Path) -> (Created, FilesState) {
     assert_eq!(state.scroll, [("src/main.rs".to_owned(), 40)].into(), "only open tabs keep a scroll");
     // Closing the active tab shows the last one; omitted fields stay.
     let marks = [("src/main.rs".to_owned(), vec![mark(1, 1, Some("entry"))])].into();
-    let state: FilesState = control
-        .call(Method::FilesSet(FilesSetParams { open: Some(vec!["src/main.rs".into()]), highlights: Some(marks), ..set(&id) }))
-        .await
-        .unwrap();
+    let state: FilesState =
+        control.call(Method::FilesSet(FilesSetParams { open: Some(vec!["src/main.rs".into()]), highlights: Some(marks), ..set(&id) })).await.unwrap();
     assert_eq!((state.active.as_deref(), state.tree, state.scroll.len()), (Some("src/main.rs"), false, 1));
     assert_eq!(state.highlights["src/main.rs"], [mark(1, 1, Some("entry"))], "highlights are saved with the block");
     assert_eq!(info(control, &created).await.files.as_deref().unwrap().clone(), state);
