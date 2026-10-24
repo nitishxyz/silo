@@ -2014,8 +2014,14 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
 }
 
 impl crate::workspace::Workspace {
-    /// Content bounds of any pane, terminal or browser.
+    /// Where a block is on screen. A tiled block of any kind has the cell the
+    /// layout measured for it, so new kinds need nothing here; a float falls
+    /// back to its pane's content bounds.
     pub(crate) fn block_bounds(&self, block: &str, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let tiled = self.active_window().is_some_and(|w| w.layout.contains(block));
+        if let Some(cell) = tiled.then(|| self.motion.measured.cells.borrow().get(block).copied()).flatten() {
+            return Some(cell);
+        }
         if let Some((pane, _)) = self.browsers.get(block) {
             return pane.read(cx).bounds();
         }
