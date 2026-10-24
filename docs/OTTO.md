@@ -876,8 +876,15 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   boundary, or a new turn starts when it is idle. The item and its acknowledgement commit in one transaction, so
   each entry is delivered exactly once. `Runtime::deliver_pending` (daemon start) wakes parents whose children
   finished while they were closed. This is the record remote delegation (§12.2) will reuse.
+- **A waiting child tells its parent.** When a child's `ask_user` or tool approval starts waiting, an outbox entry
+  from the child (version `-seq` of its `question.asked` / `approval.requested`, apart from the turn versions, so
+  once per item) wakes the parent with a notice: `Sub-agent "<title>" (child <id>) asks: <question> (options: …).
+  Answer with subagent answer {session_id, answer}.` / `… needs approval: <summary>. Only the user can approve it.`
+  Its delivery emits `subagent.changed` with `waiting_approval`. `subagent answer {session_id, answer}` answers the
+  child's oldest pending question of its turn (`question.answer`; an error when there is none, and for approvals,
+  which stay the user's). `status` also lists `pending_questions`. A notice the user answered first still arrives.
 - `delegate {task, agent, session_id?}` (reuse), `list`, `status`, `message{queue|steer|interrupt}`, `stop`,
-  `retry`; `agent` is required (the tool lists the agents; a missing or unknown one is an error naming them);
+  `retry`, `answer`; `agent` is required (the tool lists the agents; a missing or unknown one is an error naming them);
   depth 2, 4 running children; parent cancel stops its children; the agent's model, else the parent's;
   tool set = the agent's set ∩ the parent's grant, minus both deny lists.
 - **Per-subagent grants.** `delegate {…, tools: [names]}` narrows a new child to those of its agent's tools

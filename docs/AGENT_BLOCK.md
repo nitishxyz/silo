@@ -409,15 +409,22 @@ Units are points.
   - **Todos:** current item and `n/m done`; expanded, every item with its status icon.
   - **Sub-agents:** child sessions (`parent_id` = the shown session) that are busy or waiting, from `session.list`,
     refreshed on otto's `sessions.changed` (coalesced over 150 ms) and when subagent calls change or the turn
-  starts/ends; no polling. `bot · N running`, rows spinner (lock + `Needs approval` when waiting; a muted stop square
+  starts/ends; no polling. `bot · N running` (`Needs you` while a child waits), rows spinner (`Needs you` when waiting, question or lock icon; a muted stop square
   + `Stopped` while a child the user stopped holds its report, `SessionInfo.report_held`, with `Hand back` on hover in
   the note's place; `circle-check` + `Returned` once its report went to the parent) · agent · title · status, oldest
   first, returned last. A returned row stays while the parent's turn runs (or, the parent idle, through the turn its
   report starts) and fades out (opacity and height, 260 ms) when that turn ends. A row (hover fill, `↗` on hover)
   opens the child; so does `↗` on a transcript's subagent line.
+  - **A waiting child's cards in the parent:** for each waiting row the pane fetches the child's `session.view`
+    (on each session-list refresh) and, when the shown session has no card of its own, shows the oldest child's
+    question or approval card above the composer, headed `bot Sub-agent · <title>`. Its options, the composer
+    (typed answer) and Allow/Always/Deny answer the child (`question.answer` / `approval.answer` on the child); a
+    child's approval takes a click (no ⏎/esc hints or keys). No wire change.
 - **Sub-agent reports in the thread:** otto's `Subagent completion:` system item is a quiet `Row::Report` where it
   arrived (enters like any row, 12 gaps as a marker): `bot Sub-agent finished · <title>` (`stopped` muted, `failed`
-  in the error colour), its error or the first line of its reply as the tooltip; a click opens the child. A turn otto
+  in the error colour), its error or the first line of its reply as the tooltip; a click opens the child. A waiting
+  child's notice (`Sub-agent "<title>" (child <id>) asks: …` / `… needs approval: …`) is the same quiet row:
+  `Sub-agent asks · <title>` / `Sub-agent needs approval · <title>`, the question or summary as the tooltip. A turn otto
   starts with a notice (a report, a job's end) never streams the previous reply again: text streams only while its
   item ends the transcript.
 - **Sub-agent block:** opening a child focuses the agent block already showing it (the server's blocks carry

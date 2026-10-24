@@ -392,6 +392,8 @@ pub struct AgentPane {
     /// The composer area is shown (rises in after sign-in).
     bottom_shown: crate::motion::Toggle,
     card: Option<Card>,
+    /// The card is a waiting sub-agent's: its title.
+    card_from: Option<String>,
     card_anim: crate::motion::Toggle,
     /// Expand/collapse motion of folded groups (`grp:`) and details (`det:`), with their row's key.
     anims: HashMap<String, (String, crate::motion::Toggle)>,
@@ -540,6 +542,7 @@ impl AgentPane {
             activity: crate::motion::Toggle::new(false, crate::motion::UI),
             bottom_shown: crate::motion::Toggle::new(false, crate::motion::UI),
             card: None,
+            card_from: None,
             card_anim: crate::motion::Toggle::new(false, crate::motion::UI),
             anims: HashMap::new(),
             unseen_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
@@ -816,7 +819,7 @@ impl AgentPane {
                 {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
                     this.sessions = sessions;
-                    this.track_subagents();
+                    this.track_subagents(cx);
                     cx.notify();
                 }
             },
@@ -1446,7 +1449,11 @@ impl AgentPane {
             let chips = mention::within(e.text(), e.chips(), lead, lead + text.len());
             (text, chips)
         };
-        let question = self.mirror().and_then(|m| m.pending_questions.first()).map(|q| q.question_id.clone());
+        // The composer answers the card's question, a child's too.
+        let question = match self.live_card() {
+            Some((_, _, Card::Question(q))) => Some(q.question_id),
+            _ => None,
+        };
         if let (Some(question), false) = (question, text.is_empty()) {
             self.editor.update(cx, |e, cx| e.set_text("", cx));
             self.answer_question(question, text, cx);
@@ -1591,12 +1598,11 @@ impl AgentPane {
         );
     }
 
+    /// Answer the card's approval: the shown session's, or a waiting child's (the user's click either way).
     fn answer_approval(&mut self, decision: ApprovalDecision, cx: &mut Context<Self>) {
-        let (Some(id), Some(approval)) =
-            (self.session_id.clone(), self.mirror().and_then(|m| m.pending_approvals.first()).map(|a| a.approval_id.clone()))
-        else {
-            return;
-        };
+        let Some((id, _, Card::Approval(a, _))) = self.live_card() else { return };
+        let approval = a.approval_id;
+        self.subs.waits.iter_mut().filter(|w| w.id == id).for_each(|w| w.approvals.retain(|a| a.approval_id != approval));
         self.run(
             cx,
             move |c| async move { c.approval_answer(&id, &approval, decision, None).await },
@@ -1608,8 +1614,13 @@ impl AgentPane {
         );
     }
 
+    /// Answer question `question` of the shown session, or of the waiting child that asked it.
     fn answer_question(&mut self, question: String, answer: String, cx: &mut Context<Self>) {
-        let Some(id) = self.session_id.clone() else { return };
+        let child = self.subs.waits.iter_mut().find(|w| w.questions.iter().any(|q| q.question_id == question)).map(|w| {
+            w.questions.retain(|q| q.question_id != question);
+            w.id.clone()
+        });
+        let Some(id) = child.or_else(|| self.session_id.clone()) else { return };
         self.run(
             cx,
             move |c| async move { c.question_answer(&id, &question, answer).await },

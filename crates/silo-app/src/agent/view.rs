@@ -969,11 +969,14 @@ impl AgentPane {
         row
     }
 
-    /// `bot  Sub-agent finished · title`, quiet; a click opens the child, its error or reply is the tooltip.
+    /// `bot  Sub-agent finished · title` (or `asks` / `needs approval`), quiet; a click opens the child, its error or reply is the tooltip.
     fn render_report(key: &str, child: &str, title: &str, status: Status, note: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let (verb, color) = match status {
             Status::Error => ("failed", theme::danger()),
             Status::Stopped => ("stopped", theme::muted()),
+            // A waiting child's notice: its question or approval is the tooltip.
+            Status::Waiting(true) => ("asks", theme::muted()),
+            Status::Waiting(false) => ("needs approval", theme::muted()),
             _ => ("finished", theme::muted()),
         };
         let label = if title.is_empty() { format!("Sub-agent {verb}") } else { format!("Sub-agent {verb} · {title}") };
@@ -1479,13 +1482,8 @@ impl AgentPane {
     fn render_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = Instant::now();
         let reduce = cx.reduce_motion();
-        let live = self.mirror().and_then(|m| {
-            m.pending_questions
-                .first()
-                .cloned()
-                .map(Card::Question)
-                .or_else(|| m.pending_approvals.first().cloned().map(|a| Card::Approval(a, m.pending_approvals.len() - 1)))
-        });
+        // The shown session's own, else a waiting sub-agent's (labelled with its title).
+        let (live, from) = self.live_card().map_or((None, None), |(_, from, card)| (Some(card), from));
         match &live {
             Some(c) => {
                 if self.card.as_ref().map(Card::id) != Some(c.id()) || !self.card_anim.on() {
@@ -1493,6 +1491,7 @@ impl AgentPane {
                     self.card_anim.set(true, now, reduce);
                 }
                 self.card = live.clone();
+                self.card_from = from;
             }
             None => self.card_anim.set(false, now, reduce),
         }
@@ -1504,6 +1503,21 @@ impl AgentPane {
         let active = live.is_some();
         let card =
             div().mb(px(10.0)).p(px(14.0)).continuous(14.0).bg(rgb(raised())).border_1().border_color(rgb(ink(0.15))).flex().flex_col().gap(px(10.0));
+        // A sub-agent's card says whose it is; answering it answers the child.
+        let from = self.card_from.clone();
+        let keys = from.is_none();
+        let card = card.when_some(from, |el, title| {
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme::muted()))
+                    .child(icon("bot", 12.0, theme::muted()))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("Sub-agent · {title}"))),
+            )
+        });
         let body = match self.card.clone()? {
             Card::Question(q) => {
                 let options: Vec<AnyElement> = q
@@ -1590,9 +1604,15 @@ impl AgentPane {
                     div()
                         .flex()
                         .gap(px(6.0))
-                        .child(button("agent-allow", "Allow", "⏎", true).when(active, |el| el.on_click(answer(ApprovalDecision::Allow))))
+                        .child(
+                            button("agent-allow", "Allow", if keys { "⏎" } else { "" }, true)
+                                .when(active, |el| el.on_click(answer(ApprovalDecision::Allow))),
+                        )
                         .child(button("agent-always", "Always", "", false).when(active, |el| el.on_click(answer(ApprovalDecision::AlwaysAllow))))
-                        .child(button("agent-deny", "Deny", "esc", false).when(active, |el| el.on_click(answer(ApprovalDecision::Deny)))),
+                        .child(
+                            button("agent-deny", "Deny", if keys { "esc" } else { "" }, false)
+                                .when(active, |el| el.on_click(answer(ApprovalDecision::Deny))),
+                        ),
                 )
             }
         };

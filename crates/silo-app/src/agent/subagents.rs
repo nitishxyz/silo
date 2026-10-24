@@ -9,7 +9,7 @@ use std::{
 };
 
 use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px, rgb};
-use otto_proto::{Event, ServerMessage, SessionInfo, SessionStatus};
+use otto_proto::{Event, PendingApproval, PendingQuestion, ServerMessage, SessionInfo, SessionStatus};
 
 use super::{
     AgentPane, AgentPaneEvent,
@@ -39,7 +39,7 @@ impl SubState {
     fn note(self) -> &'static str {
         match self {
             Self::Running => "Running",
-            Self::Waiting => "Needs approval",
+            Self::Waiting => "Needs you",
             Self::Stopped => "Stopped",
             Self::Returned => "Returned",
         }
@@ -79,6 +79,17 @@ pub(super) struct Subs {
     watch: Option<Task<()>>,
     /// A coalesced session-list refresh is due.
     refreshing: bool,
+    /// What the waiting children ask, oldest child first.
+    pub(super) waits: Vec<ChildWait>,
+}
+
+/// A waiting child's pending questions and approvals: their cards show in the parent's pane.
+#[derive(Clone, Debug)]
+pub(super) struct ChildWait {
+    pub id: String,
+    pub title: String,
+    pub questions: Vec<PendingQuestion>,
+    pub approvals: Vec<PendingApproval>,
 }
 
 /// Running, waiting, or holding its report: it has not returned yet.
@@ -125,6 +136,7 @@ impl Subs {
     pub(super) fn reset(&mut self) {
         self.running.clear();
         self.returned.clear();
+        self.waits.clear();
         self.parent_running = false;
     }
 
@@ -171,10 +183,57 @@ impl AgentPane {
         self.parent_session().is_some()
     }
 
-    /// A fresh session list arrived: note children that started or returned.
-    pub(super) fn track_subagents(&mut self) {
+    /// A fresh session list arrived: note children that started or returned,
+    /// and fetch what the waiting ones ask (their cards show in this pane).
+    pub(super) fn track_subagents(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.session_id.clone() else { return };
-        self.subs.track(&self.sessions, &id, Instant::now());
+        let now = Instant::now();
+        self.subs.track(&self.sessions, &id, now);
+        let waiting: Vec<(String, String)> =
+            self.subs.rows(&self.sessions, &id, now).into_iter().filter(|r| r.state == SubState::Waiting).map(|r| (r.id, r.title)).collect();
+        if waiting.is_empty() {
+            self.subs.waits.clear();
+            return;
+        }
+        self.run(
+            cx,
+            move |c| async move {
+                let mut waits = Vec::new();
+                for (id, title) in waiting {
+                    let view = c.session_view(&id).await?;
+                    waits.push(ChildWait { id, title, questions: view.pending_questions, approvals: view.pending_approvals });
+                }
+                Ok(waits)
+            },
+            move |this, result, _| {
+                if let Ok(waits) = result
+                    && this.session_id.as_deref() == Some(id.as_str())
+                {
+                    this.subs.waits = waits;
+                }
+            },
+        );
+    }
+
+    /// The pending question or approval to show: the shown session's own, else a waiting child's (oldest child
+    /// first), with the session it belongs to and, for a child, its title.
+    pub(super) fn live_card(&self) -> Option<(String, Option<String>, super::Card)> {
+        use super::Card;
+        let own = self.mirror().and_then(|m| {
+            m.pending_questions
+                .first()
+                .cloned()
+                .map(Card::Question)
+                .or_else(|| m.pending_approvals.first().cloned().map(|a| Card::Approval(a, m.pending_approvals.len() - 1)))
+        });
+        if let Some(card) = own {
+            return Some((self.session_id.clone()?, None, card));
+        }
+        self.subs.waits.iter().find_map(|w| {
+            let card = w.questions.first().cloned().map(Card::Question);
+            let card = card.or_else(|| w.approvals.first().cloned().map(|a| Card::Approval(a, w.approvals.len() - 1)))?;
+            Some((w.id.clone(), Some(if w.title.is_empty() { "Sub-agent".into() } else { w.title.clone() }), card))
+        })
     }
 
     pub(super) fn reset_subagents(&mut self) {
@@ -188,7 +247,7 @@ impl AgentPane {
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
             s.report_held = false;
         }
-        self.track_subagents();
+        self.track_subagents(cx);
         self.run(
             cx,
             move |c| async move { c.hand_back(&session_id).await },
@@ -271,13 +330,15 @@ impl AgentPane {
         cx.emit(AgentPaneEvent::OpenSession { session_id, title });
     }
 
-    /// The Sub-agents bar: `bot · N running`, a row per child; a row opens the child.
+    /// The Sub-agents bar: `bot · N running` (`Needs you` while a child waits), a row per child; a row opens the child.
     pub(super) fn subagent_bar(&mut self, cx: &mut Context<Self>) -> Option<Bar> {
         let rows = self.subagent_rows();
         let first = rows.first()?.title.clone();
         let running = rows.iter().filter(|r| r.state.active()).count();
         let stopped = rows.iter().filter(|r| r.state == SubState::Stopped).count();
+        let waiting = rows.iter().any(|r| r.state == SubState::Waiting);
         let note = match (running, stopped) {
+            _ if waiting => SubState::Waiting.note().into(),
             (0, 0) => "Returned".into(),
             (0, n) => format!("{n} stopped"),
             (n, _) => format!("{n} running"),
@@ -310,7 +371,11 @@ impl AgentPane {
         let fit = self.fit();
         let group = gpui::SharedString::from(format!("subagent-{i}"));
         let glyph = match row.state {
-            SubState::Waiting => icon("lock", 13.0, theme::warning()).into_any_element(),
+            // A question, else an approval (lock).
+            SubState::Waiting => {
+                let asks = self.subs.waits.iter().any(|w| w.id == row.id && !w.questions.is_empty());
+                icon(if asks { "question" } else { "lock" }, 13.0, theme::warning()).into_any_element()
+            }
             SubState::Running => crate::browser_pane::spinner(&format!("sub-{i}"), 12.0, muted, cx),
             SubState::Stopped => icon("stop", 11.0, muted).into_any_element(),
             SubState::Returned => icon("circle-check", 13.0, muted).into_any_element(),

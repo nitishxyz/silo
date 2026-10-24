@@ -13,6 +13,10 @@
 //! for as long as the user keeps it: a later turn reports instead, the user
 //! hands it back (`Runtime::hand_back`), or the next start reports it as
 //! `stopped`.
+//!
+//! A child's pending question or approval is a notice for the parent (once per
+//! item, version `-seq`); the parent answers questions (`subagent answer`),
+//! approvals stay the user's.
 use crate::{CreateSession, Error, Result, session::Context};
 use otto_proto::{Delivery, Event, InputPart, SessionStatus};
 use otto_store::Projection;
@@ -138,6 +142,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     status["status"] = serde_json::to_value(view.info.status)?;
                     status["queued"] = json!(view.queue.len());
                     status["pending_approvals"] = json!(view.pending_approvals.len());
+                    status["pending_questions"] = json!(view.pending_questions.iter().map(|q| asked(&q.question, &q.options)).collect::<Vec<_>>());
                     status["last_message"] = json!(last_text(&view.items, 4000));
                     Ok(status.to_string())
                 }
@@ -154,6 +159,29 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                     let text = text.ok_or_else(|| Error::Invalid("message required".into()))?;
                     cx.runtime.prompt_child(child, vec![InputPart::Text { text }], delivery).await?;
                     Ok("sent".into())
+                }
+                "answer" => {
+                    let answer = input["answer"].as_str().filter(|a| !a.trim().is_empty()).ok_or_else(|| Error::Invalid("answer required".into()))?;
+                    let view = cx.runtime.view(child).await?;
+                    let pending: Vec<_> = view.pending_questions.iter().map(|q| q.question_id.clone()).collect();
+                    if pending.is_empty() {
+                        return Err(Error::Invalid(if view.pending_approvals.is_empty() {
+                            format!("{child} has no pending question")
+                        } else {
+                            format!("{child} waits for an approval, not a question; only the user can approve it")
+                        }));
+                    }
+                    // Oldest first: the order the child asked them in this turn.
+                    let id = child.to_owned();
+                    let asked = cx.runtime.db(move |s| Ok(s.events_after_last(&id, &["turn.started"])?)).await?;
+                    let question = asked
+                        .iter()
+                        .filter(|e| e.kind == "question.asked")
+                        .filter_map(|e| e.payload["question_id"].as_str())
+                        .find(|q| pending.iter().any(|p| p == q))
+                        .map_or_else(|| pending[0].clone(), str::to_owned);
+                    cx.runtime.answer_question(child, &question, answer.into()).await?;
+                    Ok("answered".into())
                 }
                 "retry" => {
                     let task = row.meta["task"].as_str().map(str::to_owned).or(text).ok_or_else(|| Error::Invalid("nothing to retry".into()))?;
@@ -331,6 +359,40 @@ pub(crate) async fn completed(cx: &Context, turn: i64, status: &str, error: Opti
     Ok(())
 }
 
+/// A child's question or approval (its event `seq`) waits: tell the parent
+/// once. Versions are `-seq`, apart from the turns completions use.
+pub(crate) async fn waiting(cx: &Context, seq: i64, kind: &str, item: &str, text: &str) {
+    if !subagent(&cx.row) {
+        return;
+    }
+    let title = cx.live().row.title.clone();
+    let who = format!("Sub-agent \"{title}\" (child {})", cx.row.id);
+    let notice = match kind {
+        "question" => format!("{who} asks: {text} Answer with subagent answer {{session_id, answer}}."),
+        _ => format!("{who} needs approval: {}. Only the user can approve it.", text.trim().trim_end_matches('.')),
+    };
+    let payload = json!({"notice":notice,"child":cx.row.id,"waiting":kind,"item":item,"title":title});
+    let (parent, child) = (cx.row.parent_id.clone().unwrap_or_default(), cx.row.id.clone());
+    let to = parent.clone();
+    if let Err(error) = cx.runtime.db(move |s| Ok(s.outbox_push(&to, &child, -seq, payload)?)).await {
+        tracing::warn!(session=%cx.row.id, %error, "subagent notice not recorded");
+        return;
+    }
+    let runtime = cx.runtime.clone();
+    tokio::spawn(async move {
+        if let Err(error) = runtime.wake(parent.clone()).await {
+            tracing::warn!(session=%parent, %error, "outbox wake deferred to the next start");
+        }
+    });
+}
+
+/// The question text with its options, as the parent's notice shows it.
+pub(crate) fn asked(question: &str, options: &[String]) -> String {
+    let question = question.trim();
+    let end = if question.ends_with(['?', '.', '!']) { "" } else { "." };
+    if options.is_empty() { format!("{question}{end}") } else { format!("{question} (options: {}).", options.join(", ")) }
+}
+
 /// Inject undelivered entries; each commits with its acknowledgement.
 pub(crate) async fn deliver(cx: &Context, turn: i64, step: i64) -> Result<()> {
     let id = cx.row.id.clone();
@@ -339,9 +401,33 @@ pub(crate) async fn deliver(cx: &Context, turn: i64, step: i64) -> Result<()> {
         let p = &entry.payload;
         // A session's own notice (a background command's result): its text.
         if let Some(text) = p["notice"].as_str() {
+            // The user answered the child's question or approval first: nothing to tell.
+            if let (Some(kind), Some(waiting)) = (p["waiting"].as_str(), p["item"].as_str()) {
+                let (child, key) = (entry.from_session.clone(), if kind == "question" { "question_id" } else { "approval_id" });
+                let events = cx.runtime.db(move |s| Ok(s.events_after_last(&child, &["turn.started"])?)).await?;
+                let ours = |e: &&otto_store::Event, end: &[&str]| e.payload[key] == waiting && end.iter().any(|k| e.kind.ends_with(k));
+                let pending = events.iter().any(|e| ours(&e, &[".asked", ".requested"]))
+                    && !events.iter().any(|e| e.kind == "turn.finished" || ours(&e, &[".resolved"]));
+                if !pending {
+                    let entry = entry.id.clone();
+                    cx.runtime.db(move |s| Ok(s.outbox_mark_delivered(&entry)?)).await?;
+                    continue;
+                }
+            }
             let item =
                 otto_llm::Item::new(format!("outbox-{}", entry.id), otto_llm::Role::System, vec![otto_llm::Part::System { text: text.into() }]);
             match cx.item(item, turn, step).await {
+                Ok(()) if p["waiting"].is_string() => {
+                    let child = entry.from_session;
+                    cx.emit(
+                        Event::SubagentChanged { parent: cx.row.id.clone(), child, status: SessionStatus::WaitingApproval },
+                        Projection::None,
+                        turn,
+                        step,
+                    )
+                    .await?;
+                    continue;
+                }
                 Ok(()) | Err(Error::Store(otto_store::Error::InvalidTransition(_))) => continue,
                 Err(error) => return Err(error),
             }

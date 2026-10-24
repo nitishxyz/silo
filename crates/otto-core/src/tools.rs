@@ -166,12 +166,12 @@ pub(crate) fn session_specs() -> Vec<ToolSpec> {
         ("skill", "Load a skill's instructions by name", json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
         (
             "subagent",
-            "Run child agents in the background. delegate {task, agent, title, tools?, session_id? to reuse a child} returns at once (title: a 2-5 word label of what the child does, shown in the UI; on a reused child it renames it; tools: only these of the agent's tools for a new child); the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry.",
+            "Run child agents in the background. delegate {task, agent, title, tools?, session_id? to reuse a child} returns at once (title: a 2-5 word label of what the child does, shown in the UI; on a reused child it renames it; tools: only these of the agent's tools for a new child); the child's result arrives later as a system message. Also list, status, message {session_id, message, delivery: queue|steer|interrupt}, stop, retry, answer {session_id, answer} (answers the child's oldest pending question; only the user can approve a child's tool approvals).",
             json!({"type":"object","properties":{
-                "action":{"type":"string","enum":["delegate","list","status","message","stop","retry"]},
-                "task":{"type":"string"},"title":{"type":"string","description":"2-5 word label of what this child works on"},"message":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"string"},
+                "action":{"type":"string","enum":["delegate","list","status","message","stop","retry","answer"]},
+                "task":{"type":"string"},"title":{"type":"string","description":"2-5 word label of what this child works on"},"message":{"type":"string"},"answer":{"type":"string","description":"Reply to the child's pending question"},"session_id":{"type":"string"},"agent":{"type":"string"},
                 "tools":{"type":"array","items":{"type":"string"},"description":"Narrow a new child to these of its agent's tools"},
-                "delivery":{"type":"string","enum":["queue","steer","interrupt"]}},"required":["action","agent"]}),
+                "delivery":{"type":"string","enum":["queue","steer","interrupt"]}},"required":["action"]}),
         ),
     ]
     .into_iter()

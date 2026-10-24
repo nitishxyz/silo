@@ -36,7 +36,8 @@ impl Bridge {
             })
             .await?;
         self.notify(format!("otto needs your permission to use {tool}"), "permission_prompt");
-        self.cx
+        let seq = self
+            .cx
             .emit(
                 Event::ApprovalRequested {
                     approval_id: id.clone(),
@@ -51,6 +52,7 @@ impl Bridge {
                 self.step,
             )
             .await?;
+        crate::subagents::waiting(&self.cx, seq, "approval", &id, summary).await;
         let result = tokio::select! {_=self.cancel.cancelled()=>ApprovalDecision::Deny,result=rx=>result.unwrap_or(ApprovalDecision::Deny)};
         self.cx
             .state(move |s| {
@@ -77,7 +79,8 @@ impl otto_tools::Approver for Bridge {
             .await
             .ok()?;
         self.notify(format!("otto asks: {question}"), "question");
-        self.cx
+        let seq = self
+            .cx
             .emit(
                 Event::QuestionAsked { question_id: id.clone(), call_id: call_id.into(), question: question.into(), options: options.to_vec() },
                 Projection::None,
@@ -86,6 +89,7 @@ impl otto_tools::Approver for Bridge {
             )
             .await
             .ok()?;
+        crate::subagents::waiting(&self.cx, seq, "question", &id, &crate::subagents::asked(question, options)).await;
         let result = tokio::select! {_=self.cancel.cancelled()=>None,result=rx=>result.ok()};
         self.cx
             .state(move |s| {

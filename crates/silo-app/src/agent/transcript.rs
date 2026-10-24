@@ -511,6 +511,9 @@ fn job_reports(items: &[Item]) -> HashMap<String, (JobEnd, String)> {
 /// A sub-agent completion otto delivered (`Subagent completion: child <id> (<agent>, "<title>") finished turn N
 /// with status S.`, then optional notes, `Error: …` and `Result:` with its reply) as its row.
 fn report(key: &str, text: &str, cx: &Ctx<'_>) -> Option<Row> {
+    if let Some(row) = waiting(key, text, cx) {
+        return Some(row);
+    }
     let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
     let (child, head) = first.strip_prefix("Subagent completion: child ")?.split_once(" (")?;
     let (who, tail) = head.rsplit_once(") finished turn ")?;
@@ -525,6 +528,19 @@ fn report(key: &str, text: &str, cx: &Ctx<'_>) -> Option<Row> {
     let note = error.or(result).map(str::trim).filter(|n| !n.is_empty()).map(|n| clip(&display(n, cx.cwd, cx.home), 300));
     let title = if title.trim().is_empty() { agent } else { title }.trim().to_owned();
     Some(Row::Report { key: key.to_owned(), child: child.to_owned(), title, status, note })
+}
+
+/// A sub-agent waiting for an answer or approval (`Sub-agent "<title>" (child <id>) asks: <question> Answer with …` /
+/// `… needs approval: <summary>. Only the user can approve it.`) as a report row in `Status::Waiting`.
+fn waiting(key: &str, text: &str, cx: &Ctx<'_>) -> Option<Row> {
+    let (title, rest) = text.strip_prefix("Sub-agent \"")?.split_once("\" (child ")?;
+    let (child, rest) = rest.split_once(") ")?;
+    let (question, note) = match rest.strip_prefix("asks: ") {
+        Some(q) => (true, q.rsplit_once(" Answer with subagent answer").map_or(q, |(q, _)| q)),
+        None => (false, rest.strip_prefix("needs approval: ")?.trim_end_matches(" Only the user can approve it.").trim_end_matches('.')),
+    };
+    let note = Some(clip(&display(note.trim(), cx.cwd, cx.home), 300)).filter(|n| !n.is_empty());
+    Some(Row::Report { key: key.to_owned(), child: child.to_owned(), title: title.trim().to_owned(), status: Status::Waiting(question), note })
 }
 
 /// A shell call that became a job: its id, block and whether it waited for
@@ -983,7 +999,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             if status == Status::Done && !text.trim().is_empty() {
                 line.desc = Some(clip(text, 40));
             }
-            (Kind::Ask, "Asking", "Asked", clip(str_at(input, "question").unwrap_or(""), 80))
+            (Kind::Ask, "Asking", "Asked", clip(&plain(str_at(input, "question").unwrap_or("")), 80))
         }
         "update_todos" => {
             let todos = parse_todos(input);
@@ -1341,6 +1357,35 @@ fn turn_error(error: &str) -> String {
 
 /// The first non-empty line, at most `max` characters.
 #[must_use]
+/// Markdown as one line of plain text: no backticks, emphasis asterisks, headings, quotes or list
+/// markers; `[text](url)` (and `![alt](url)`) keeps its text.
+fn plain(markdown: &str) -> String {
+    let mut out = String::new();
+    for line in markdown.lines() {
+        let line = line.trim_start().trim_start_matches(['#', '>']).trim_start();
+        let line = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("+ ")).unwrap_or(line);
+        let mut rest = line;
+        while let Some(at) = rest.find('[') {
+            out.push_str(rest[..at].strip_suffix('!').unwrap_or(&rest[..at]));
+            let link = rest[at + 1..].split_once("](").and_then(|(text, tail)| tail.split_once(')').map(|(_, after)| (text, after)));
+            match link {
+                Some((text, after)) => {
+                    out.push_str(text);
+                    rest = after;
+                }
+                None => {
+                    out.push('[');
+                    rest = &rest[at + 1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out.push(' ');
+    }
+    out.retain(|c| c != '`' && c != '*');
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn clip(text: &str, max: usize) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
     if line.chars().count() <= max {
@@ -1610,6 +1655,25 @@ mod tests {
             "Subagent completion: child s_2 (plan, \"\") finished turn 1 with status stopped.\nThe user stopped this sub-agent and handed it back.";
         assert!(matches!(report(stopped), Some(Row::Report { title, status: Status::Stopped, note: None, .. }) if title == "plan"));
         assert_eq!(report("Subagent says hi"), None);
+    }
+
+    #[test]
+    fn subagent_waiting_notices_are_quiet_rows_naming_the_child() {
+        let report = |text: &str| build_rows(&[system("o", text)], &HashMap::new(), None, &Times::default(), 0).pop();
+        let asks = "Sub-agent \"Port it\" (child s_1) asks: Which one? (options: a, b). Answer with subagent answer {session_id, answer}.";
+        assert_eq!(
+            report(asks),
+            Some(Row::Report {
+                key: "o".into(),
+                child: "s_1".into(),
+                title: "Port it".into(),
+                status: Status::Waiting(true),
+                note: Some("Which one? (options: a, b).".into())
+            })
+        );
+        let approval = "Sub-agent \"Port it\" (child s_1) needs approval: rm -rf build. Only the user can approve it.";
+        assert!(matches!(report(approval), Some(Row::Report { status: Status::Waiting(false), note: Some(n), .. }) if n == "rm -rf build"));
+        assert_eq!(report("Sub-agent Port it asks: hi"), None);
     }
 
     #[test]
@@ -1927,6 +1991,10 @@ mod tests {
         assert_eq!((line.title.as_str(), line.kind), ("Used mystery", Kind::Other));
         let line = tool("q", "ask_user", &json!({"question": "Which branch?"}), None, Some(&ok("main")), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Asked Which branch?", Some("main")));
+        // The question's markdown reads as plain text on its line.
+        let md = "## Pick\nMerge **`feat_x`** into [main](https://x.dev/main)?\n- *yes* [or not]";
+        let line = tool("q", "ask_user", &json!({"question": md}), None, Some(&ok("yes")), &cx);
+        assert_eq!(line.title, "Asked Pick Merge feat_x into main? yes [or not]");
         let line = tool("d", "subagent", &json!({"action": "delegate", "task": "Review the diff", "agent": "plan"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Delegated Review the diff", Some("interrupted"), Status::Error));
         let line = tool(

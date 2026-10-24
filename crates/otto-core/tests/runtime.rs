@@ -1450,3 +1450,150 @@ async fn every_offered_tool_schema_is_provider_safe() {
     assert!(problems.is_empty(), "{problems:#?}");
     r.shutdown().await.unwrap();
 }
+
+/// Poll `session`'s view until `ready` holds.
+async fn until(session: &SessionHandle, ready: impl Fn(&otto_proto::SessionView) -> bool) -> otto_proto::SessionView {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let view = session.view().await.unwrap();
+            if ready(&view) {
+                return view;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+fn systems(view: &otto_proto::SessionView, prefix: &str) -> Vec<String> {
+    view.items
+        .iter()
+        .flat_map(|i| &i.parts)
+        .filter_map(|p| if let Part::System { text } = p { Some(text.clone()) } else { None })
+        .filter(|t| t.starts_with(prefix))
+        .collect()
+}
+/// A parent (approving nothing itself) and a "build" child labelled `Check things`.
+async fn parent_and_child(
+    scripts: impl FnOnce(&str) -> Vec<Vec<StreamEvent>>,
+) -> (tempfile::TempDir, Runtime, SessionHandle, SessionHandle, Arc<ScriptedModel>) {
+    let (dir, r, parent, m) = setup(vec![], "build").await;
+    r.set_approval_mode(&parent.id, otto_proto::ApprovalMode::Auto).await.unwrap();
+    let project = parent.view().await.unwrap().info.project_id;
+    let child = r
+        .create_session(CreateSession {
+            project_id: project,
+            cwd: dir.path().into(),
+            parent_id: Some(parent.id.clone()),
+            agent: "build".into(),
+            title: "Check things".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    m.scripts.lock().unwrap().extend(scripts(&child.id));
+    (dir, r, parent, child, m)
+}
+
+#[tokio::test]
+async fn a_childs_question_reaches_the_parent_once_and_its_answer_continues_the_child() {
+    let (_dir, r, parent, child, _) = parent_and_child(|child| {
+        vec![
+            vec![call("q", "ask_user", serde_json::json!({"question":"Which one?","options":["one","two"]}))],
+            vec![call("a", "subagent", serde_json::json!({"action":"answer","session_id":child,"answer":"two","agent":"build"}))],
+            text("ok"),
+            text("ok"),
+            text("ok"),
+            text("ok"),
+        ]
+    })
+    .await;
+    prompt(&child).await;
+    let view = until(&parent, |v| !systems(v, "Subagent completion").is_empty()).await;
+    let notices = systems(&view, "Sub-agent \"Check things\"");
+    assert_eq!(
+        notices,
+        [format!(
+            "Sub-agent \"Check things\" (child {}) asks: Which one? (options: one, two). Answer with subagent answer {{session_id, answer}}.",
+            child.id
+        )]
+    );
+    assert!(serde_json::to_string(&view.items).unwrap().contains("answered"));
+    let done = until(&child, |v| v.info.status == otto_proto::SessionStatus::Idle && v.items.last().is_some_and(|i| i.text() == "ok")).await;
+    assert!(serde_json::to_string(&done.items).unwrap().contains("two"));
+    let (replay, _) = r.subscribe(&parent.id, 0).await.unwrap();
+    let waiting = replay
+        .iter()
+        .filter(|e| matches!(&e.1, Event::SubagentChanged { child: c, status: otto_proto::SessionStatus::WaitingApproval, .. } if *c == child.id));
+    assert_eq!(waiting.count(), 1);
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_childs_approval_reaches_the_parent_once_and_only_the_user_answers_it() {
+    let (_dir, r, parent, child, _) = parent_and_child(|child| {
+        vec![
+            vec![call("sh", "shell", serde_json::json!({"command":"true"}))],
+            vec![call("a", "subagent", serde_json::json!({"action":"answer","session_id":child,"answer":"yes","agent":"build"}))],
+            text("ok"),
+            text("ok"),
+            text("ok"),
+            text("ok"),
+        ]
+    })
+    .await;
+    let (_, mut live) = r.subscribe(&child.id, 0).await.unwrap();
+    prompt(&child).await;
+    let approval = loop {
+        if let Event::ApprovalRequested { approval_id, .. } = live.recv().await.unwrap().1 {
+            break approval_id;
+        }
+    };
+    let refused = "waits for an approval, not a question; only the user can approve it";
+    let view = until(&parent, |v| serde_json::to_string(&v.items).unwrap().contains(refused)).await;
+    let notices = systems(&view, &format!("Sub-agent \"Check things\" (child {}) needs approval: ", child.id));
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].ends_with(". Only the user can approve it."), "{}", notices[0]);
+    // Still waiting for the user, who approves it in the child.
+    assert_eq!(child.view().await.unwrap().pending_approvals.len(), 1);
+    child.answer_approval(&approval, ApprovalDecision::Allow).await.unwrap();
+    let view = until(&parent, |v| !systems(v, "Subagent completion").is_empty()).await;
+    assert_eq!(systems(&view, "Sub-agent \"Check things\"").len(), 1);
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn answering_a_child_without_a_question_is_an_error() {
+    let (_dir, r, parent, child, _) = parent_and_child(|child| {
+        vec![vec![call("a", "subagent", serde_json::json!({"action":"answer","session_id":child,"answer":"two","agent":"build"}))], text("ok")]
+    })
+    .await;
+    let (_, mut live) = r.subscribe(&parent.id, 0).await.unwrap();
+    prompt(&parent).await;
+    finish(&mut live).await;
+    let items = serde_json::to_string(&parent.view().await.unwrap().items).unwrap();
+    assert!(items.contains(&format!("{} has no pending question", child.id)), "{items}");
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_childs_question_the_user_answered_first_never_reaches_the_parent() {
+    let (_dir, r, parent, child, _) = parent_and_child(|_| {
+        vec![
+            vec![call("sh", "shell", serde_json::json!({"command":"sleep 1"}))],
+            vec![call("q", "ask_user", serde_json::json!({"question":"Which one?"}))],
+            text("ok"),
+            text("ok"),
+            text("ok"),
+        ]
+    })
+    .await;
+    prompt(&parent).await;
+    until(&parent, |v| serde_json::to_string(&v.items).unwrap().contains("sleep 1")).await;
+    prompt(&child).await;
+    let asked = until(&child, |v| !v.pending_questions.is_empty()).await;
+    child.answer_question(&asked.pending_questions[0].question_id, "two".into()).await.unwrap();
+    let view = until(&parent, |v| !systems(v, "Subagent completion").is_empty()).await;
+    assert!(systems(&view, "Sub-agent \"Check things\"").is_empty());
+    r.shutdown().await.unwrap();
+}
