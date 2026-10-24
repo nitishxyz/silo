@@ -38,6 +38,40 @@ fn event_table_is_exhaustive() {
     assert_eq!(tags, names);
 }
 
+/// The compaction events are additive: a client built before them skips the
+/// journaled ones as unknown and the live delta as `LiveUnknown`, and the
+/// `compaction` event keeps its old shape, its `id` optional both ways.
+#[test]
+fn compaction_events_are_additive() {
+    let started = json!({"seq": 3, "session_id": "s", "event": "compaction.started", "data": {"id": "c1", "trigger": "auto"}});
+    assert!(matches!(
+        serde_json::from_value::<ServerMessage>(started).unwrap(),
+        ServerMessage::Event { event, .. } if matches!(&*event, Event::CompactionStarted { id, trigger } if id == "c1" && trigger == "auto")
+    ));
+    let old = json!({"seq": 4, "session_id": "s", "event": "compaction", "data": {"through_seq": 2, "summary": "so far"}});
+    assert!(matches!(
+        serde_json::from_value::<ServerMessage>(old).unwrap(),
+        ServerMessage::Event { event, .. } if matches!(&*event, Event::Compaction { through_seq: 2, id: None, .. })
+    ));
+    let done = Event::Compaction { through_seq: 2, summary: None, id: Some("c1".into()) };
+    assert_eq!(serde_json::to_value(&done).unwrap()["data"]["id"], "c1");
+    let failed: Event = serde_json::from_value(json!({"event": "compaction.failed", "data": {"id": "c1", "message": "empty"}})).unwrap();
+    assert!(matches!(failed, Event::CompactionFailed { cancelled: false, .. }));
+    let delta = Event::CompactionDelta { id: "c1".into(), text: "Goal".into() };
+    assert!(delta.is_live_delta());
+    let wire = serde_json::to_value(ServerMessage::Live { live: true, id: 0, session_id: "s".into(), after_seq: 3, event: Box::new(delta) }).unwrap();
+    assert!(matches!(serde_json::from_value::<ServerMessage>(wire.clone()).unwrap(), ServerMessage::Live { after_seq: 3, .. }));
+    // An older client's event enum has no `compaction.delta`: its decoder takes the live frame as unknown.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "event", content = "data")]
+    #[allow(dead_code)]
+    enum Old {
+        #[serde(rename = "text.delta")]
+        TextDelta { item_id: String, text: String },
+    }
+    assert!(serde_json::from_value::<Old>(wire["event"].clone()).is_err());
+}
+
 #[test]
 fn state_paths() {
     let home = std::path::Path::new("/state");

@@ -485,9 +485,17 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         // Native steering (§7.2): only models whose live session can take it.
         let session = live.model.session().filter(|_| caps.steering);
         let mut steered = std::collections::HashMap::new();
+        // Provider threshold compaction inside this response: the journal seq it summarizes through, once it began.
+        let mut compacting: Option<i64> = None;
         loop {
             let event = tokio::select! {
-                _=cancel.cancelled()=>{deltas.flush(&cx).await?;return Ok(())},
+                _=cancel.cancelled()=>{
+                    deltas.flush(&cx).await?;
+                    if compacting.is_some() {
+                        crate::compaction::failed(&cx, &item.id, &Error::Closed, true, turn, step).await;
+                    }
+                    return Ok(())
+                },
                 _=tick.tick()=>{deltas.flush(&cx).await?;continue},
                 _=cx.steer_wake.notified(),if session.is_some()=>{
                     if let Some(session)=session {hand_off(&cx,session,&mut steered).await?;}
@@ -500,6 +508,9 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                 Ok(event) => event,
                 Err(error) => {
                     deltas.flush(&cx).await?;
+                    if compacting.take().is_some() {
+                        crate::compaction::failed(&cx, &item.id, &error, false, turn, step).await;
+                    }
                     if error.class == ErrorClass::ContextOverflow && !overflow {
                         overflow = true;
                         requeue_native(&cx).await?;
@@ -511,7 +522,20 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             };
             match event {
                 StreamEvent::Start { response_id, .. } => item.origin.as_mut().unwrap().response_id = response_id,
-                StreamEvent::PartDone { part } => item.parts.push(part),
+                StreamEvent::PartDone { part } => {
+                    if matches!(part, Part::Compaction { .. }) && compacting.is_none() {
+                        deltas.flush(&cx).await?;
+                        compacting = Some(threshold_started(&cx, &item.id, turn, step).await?);
+                    }
+                    item.parts.push(part);
+                }
+                StreamEvent::CompactionDelta { text } => {
+                    if compacting.is_none() {
+                        deltas.flush(&cx).await?;
+                        compacting = Some(threshold_started(&cx, &item.id, turn, step).await?);
+                    }
+                    crate::compaction::delta(&cx, &item.id, text);
+                }
                 StreamEvent::TextDelta { text } => {
                     deltas.push(&cx, Event::TextDelta { item_id: item.id.clone(), text }, turn, step).await?;
                 }
@@ -530,6 +554,9 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
                 // in a new response: close this item, then the user input.
                 StreamEvent::Steered { ids } => {
                     deltas.flush(&cx).await?;
+                    if let Some(through) = compacting.take() {
+                        threshold_done(&cx, &item, through, turn, step).await?;
+                    }
                     settle(&cx, &live, &item, &lookup, &usage, turn, step).await?;
                     for id in &ids {
                         if let Some(user) = steered.remove(id) {
@@ -563,6 +590,10 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             }
         });
         requeue_native(&cx).await?;
+        // The checkpoint is in this item: `compaction` first, so the step's usage (the prompt after it) stands.
+        if let Some(through) = compacting {
+            threshold_done(&cx, &item, through, turn, step).await?;
+        }
         settle(&cx, &live, &item, &lookup, &usage, turn, step).await?;
         let calls = item.tool_calls().map(|(id, name, value)| (id.to_owned(), name.to_owned(), value.clone())).collect::<Vec<_>>();
         if calls.is_empty() {
@@ -633,6 +664,24 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         }
     }
     Err(Error::Invalid("maximum steps per turn reached".into()))
+}
+/// The provider began compacting inside a step's response (threshold compaction): `compaction.started` under the
+/// item's id, which will hold the checkpoint. Returns the seq it summarizes through.
+async fn threshold_started(cx: &Context, id: &str, turn: i64, step: i64) -> Result<i64> {
+    let through = crate::compaction::last_seq(cx).await?;
+    cx.emit(Event::CompactionStarted { id: id.into(), trigger: "auto".into() }, Projection::None, turn, step).await?;
+    Ok(through)
+}
+/// The response that compacted ended: `compaction` with its checkpoint (`item` holds it), or `compaction.failed`.
+async fn threshold_done(cx: &Context, item: &Item, through: i64, turn: i64, step: i64) -> Result<()> {
+    match item.parts.iter().find_map(|p| if let Part::Compaction { summary, .. } = p { Some(summary.clone()) } else { None }) {
+        Some(summary) => {
+            let event = Event::Compaction { through_seq: through, summary: summary.filter(|s| !s.is_empty()), id: Some(item.id.clone()) };
+            cx.emit(event, Projection::None, turn, step).await?;
+        }
+        None => crate::compaction::failed(cx, &item.id, &"the provider returned no compaction", false, turn, step).await,
+    }
+    Ok(())
 }
 pub(crate) async fn apply_hook(
     cx: &Context,

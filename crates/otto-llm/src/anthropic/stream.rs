@@ -123,6 +123,13 @@ impl State {
                 match block["type"].as_str() {
                     Some("tool_use") => events.push(StreamEvent::ToolInputStart { call_id, name }),
                     Some("server_tool_use") => events.push(StreamEvent::HostedProgress { call_id, tool: name, status: "in_progress".into() }),
+                    // On-demand compaction sends the whole summary here.
+                    Some("compaction") => {
+                        let text = string(&block, "content");
+                        if !text.is_empty() {
+                            events.push(StreamEvent::CompactionDelta { text });
+                        }
+                    }
                     _ => {}
                 }
                 if self.blocks.insert(index, Block { value: block, input: String::new() }).is_some() {
@@ -162,6 +169,10 @@ impl State {
                                 Some(text) => append(&mut block.value, key, text),
                                 None => block.value[key] = value.clone(),
                             }
+                        }
+                        let text = string(delta, "content");
+                        if !text.is_empty() {
+                            events.push(StreamEvent::CompactionDelta { text });
                         }
                     }
                     _ => {}

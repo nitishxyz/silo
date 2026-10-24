@@ -1516,6 +1516,68 @@
         "properties": {
           "data": {
             "properties": {
+              "id": {
+                "type": "string"
+              },
+              "trigger": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "trigger"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "compaction.started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "compaction.delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "summary": {
                 "type": [
                   "string",
@@ -1534,6 +1596,38 @@
           },
           "event": {
             "const": "compaction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "cancelled": {
+                "default": false,
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "message"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "compaction.failed",
             "type": "string"
           }
         },
@@ -17624,6 +17718,68 @@
             "properties": {
               "data": {
                 "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "trigger"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "summary": {
                     "type": [
                       "string",
@@ -17642,6 +17798,38 @@
               },
               "event": {
                 "const": "compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "cancelled": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.failed",
                 "type": "string"
               }
             },
@@ -19342,6 +19530,68 @@
             "properties": {
               "data": {
                 "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "trigger"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "summary": {
                     "type": [
                       "string",
@@ -19360,6 +19610,38 @@
               },
               "event": {
                 "const": "compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "cancelled": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "event": {
+                "const": "compaction.failed",
                 "type": "string"
               }
             },

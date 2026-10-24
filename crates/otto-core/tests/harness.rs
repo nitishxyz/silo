@@ -945,3 +945,181 @@ async fn a_view_taken_mid_call_holds_the_input_streamed_so_far() {
     assert!(view.streaming_tool_calls.is_empty(), "an idle session streams nothing");
     runtime.shutdown().await.unwrap();
 }
+
+/// Decode a recorded Anthropic stream (otto-llm's fixtures) into the events a model returns.
+async fn anthropic_fixture(name: &str) -> Vec<StreamEvent> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../otto-llm/tests/fixtures/anthropic").join(name);
+    let raw = std::fs::read(path).unwrap();
+    testing::collect_events(anthropic::stream::decode(testing::chunked(&raw, 3), "claude-opus-5-5")).await
+}
+/// The compaction events of a session's journal and its live deltas, as short strings.
+async fn compaction_events(runtime: &Runtime, session: &str, deltas: &mut tokio::sync::broadcast::Receiver<Event>) -> (Vec<String>, String) {
+    let (journal, _) = runtime.subscribe(session, 0).await.unwrap();
+    let events = journal
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Event::CompactionStarted { id, trigger } => Some(format!("started {trigger} {id}")),
+            Event::Compaction { id, summary, .. } => Some(format!("done {} {}", id.as_deref().unwrap_or("-"), summary.is_some())),
+            Event::CompactionFailed { id, message, cancelled } => Some(format!("failed {id} {message} {cancelled}")),
+            Event::CompactionDelta { .. } => panic!("a compaction delta was journaled"),
+            _ => None,
+        })
+        .collect();
+    let mut text = String::new();
+    while let Ok(event) = deltas.try_recv() {
+        if let Event::CompactionDelta { text: t, .. } = event {
+            text.push_str(&t);
+        }
+    }
+    (events, text)
+}
+fn checkpoint_ids(items: &[Item]) -> Vec<String> {
+    items.iter().filter(|i| i.parts.iter().any(|p| matches!(p, Part::Compaction { .. }))).map(|i| i.id.clone()).collect()
+}
+fn summary_script(chunks: &[&str]) -> Vec<StreamEvent> {
+    let mut events: Vec<StreamEvent> = chunks.iter().map(|c| StreamEvent::TextDelta { text: (*c).into() }).collect();
+    events.push(StreamEvent::PartDone { part: Part::text(chunks.concat()) });
+    events.push(StreamEvent::Finish { reason: FinishReason::Stop, response_id: None });
+    events
+}
+/// A step whose prompt filled 90% of a 1000-token window: otto compacts after it.
+fn full_step() -> Vec<StreamEvent> {
+    vec![
+        call("c1", "no_such_tool", serde_json::json!({})),
+        StreamEvent::Usage(Usage { input: 900, ..Usage::default() }),
+        StreamEvent::Finish { reason: FinishReason::ToolUse, response_id: None },
+    ]
+}
+
+#[tokio::test]
+async fn manual_compaction_streams_its_summary_and_names_its_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = Scripted::new(vec![text("first"), summary_script(&["Goal: ", "ship it"])]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "hello", Delivery::Queue).await;
+    finish(&mut live).await;
+    s.compact().await.unwrap();
+    let ids = checkpoint_ids(&s.view().await.unwrap().items);
+    let (events, text) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    assert_eq!(events, [format!("started manual {}", ids[0]), format!("done {} true", ids[0])]);
+    assert_eq!(text, "Goal: ship it");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_compaction_mid_turn_streams_and_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let model =
+        with_caps(Caps { context_window: 1000, ..Default::default() }, vec![full_step(), summary_script(&["Next: ", "the form"]), text("done")]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "go", Delivery::Queue).await;
+    finish(&mut live).await;
+    let ids = checkpoint_ids(&s.view().await.unwrap().items);
+    let (events, text) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    assert_eq!(events, [format!("started auto {}", ids[0]), format!("done {} true", ids[0])]);
+    assert_eq!(text, "Next: the form");
+    assert_eq!(s.view().await.unwrap().items.last().unwrap().text(), "done");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_compaction_streams_the_providers_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = anthropic_fixture("compaction_now.sse").await;
+    let summary = now
+        .iter()
+        .find_map(|e| if let StreamEvent::PartDone { part: Part::Compaction { summary, .. } } = e { summary.clone() } else { None })
+        .unwrap();
+    let model = with_caps(Caps { native_compaction: true, ..Default::default() }, vec![text("first"), now]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    runtime.set_config(SessionDefaults { native_compaction: true, ..Default::default() }).unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "hello", Delivery::Queue).await;
+    finish(&mut live).await;
+    s.compact().await.unwrap();
+    assert!(matches!(model.requests.lock().unwrap()[1].compaction, Some(Compaction::Now { .. })));
+    let ids = checkpoint_ids(&s.view().await.unwrap().items);
+    let (events, text) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    assert_eq!(events, [format!("started manual {}", ids[0]), format!("done {} true", ids[0])]);
+    assert_eq!(text, summary);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn threshold_compaction_in_a_step_streams_under_its_item() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = with_caps(
+        Caps { native_compaction: true, context_window: 1000, ..Default::default() },
+        vec![anthropic_fixture("compaction_threshold.sse").await],
+    );
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    runtime.set_config(SessionDefaults { native_compaction: true, ..Default::default() }).unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "go", Delivery::Queue).await;
+    finish(&mut live).await;
+    let items = s.view().await.unwrap().items;
+    let ids = checkpoint_ids(&items);
+    // The checkpoint is a part of the step's reply, the text after it.
+    assert_eq!(items.last().unwrap().id, ids[0]);
+    assert_eq!(items.last().unwrap().text(), "Next, the contact form.");
+    let (events, text) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    assert_eq!(events, [format!("started auto {}", ids[0]), format!("done {} true", ids[0])]);
+    assert_eq!(text, "Summary: build a website; the landing page is done.");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_or_stopped_compaction_says_so() {
+    // An empty summary fails a manual compaction.
+    let dir = tempfile::tempdir().unwrap();
+    let model = Scripted::new(vec![text("first"), text("  ")]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id.clone(), cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "hello", Delivery::Queue).await;
+    finish(&mut live).await;
+    assert!(s.compact().await.is_err());
+    let (events, _) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    let id = events[0].strip_prefix("started manual ").unwrap().to_owned();
+    assert_eq!(events[1], format!("failed {id} empty compaction summary false"));
+    assert!(checkpoint_ids(&s.view().await.unwrap().items).is_empty());
+    runtime.shutdown().await.unwrap();
+    // Stopping the turn stops an auto compaction mid-summary.
+    let dir = tempfile::tempdir().unwrap();
+    let hang =
+        vec![StreamEvent::TextDelta { text: "Goal".into() }, StreamEvent::Finish { reason: FinishReason::Other("hang".into()), response_id: None }];
+    let model = with_caps(Caps { context_window: 1000, ..Default::default() }, vec![full_step(), hang]);
+    let runtime = Runtime::new(config(dir.path(), Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
+    let project = runtime.open_project(dir.path()).await.unwrap();
+    let s = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
+    let mut deltas = s.deltas();
+    let (_, mut live) = runtime.subscribe(&s.id, 0).await.unwrap();
+    say(&s, "go", Delivery::Queue).await;
+    let mut watch = s.deltas();
+    tokio::time::timeout(Duration::from_secs(5), async { while !matches!(watch.recv().await.unwrap(), Event::CompactionDelta { .. }) {} })
+        .await
+        .unwrap();
+    runtime.cancel(&s.id).await.unwrap();
+    finish(&mut live).await;
+    let (events, text) = compaction_events(&runtime, &s.id, &mut deltas).await;
+    let id = events[0].strip_prefix("started auto ").unwrap().to_owned();
+    assert_eq!(events[1], format!("failed {id} Stopped true"));
+    assert_eq!(text, "Goal");
+    runtime.shutdown().await.unwrap();
+}

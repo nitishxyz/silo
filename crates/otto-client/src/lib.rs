@@ -8,4 +8,4 @@ pub mod mirror;
 pub use autostart::{connect_or_start, ensure_started};
 pub use connection::{ClientError, Connection, Dial, Events, Result, SessionCreateOptions, SessionUpdate, Stream};
 pub use follower::{FollowerState, SessionFollower};
-pub use mirror::{ApplyResult, Retrying, SessionMirror, ToolState, ToolStatus};
+pub use mirror::{ApplyResult, Compacting, CompactionStatus, Retrying, SessionMirror, ToolState, ToolStatus};

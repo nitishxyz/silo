@@ -578,6 +578,11 @@ impl<'de> Deserialize<'de> for ServerMessage {
     }
 }
 
+/// Where the model's summary ends in otto's own checkpoint (`Part::Compaction`
+/// summary): what follows is the newest context and the user's instructions,
+/// verbatim, for the model rather than for display.
+pub const COMPACTION_CONTEXT: &str = "\nMost recent context (verbatim, truncated):\n";
+
 pub const EVENTS: &[&str] = &[
     "sessions.changed",
     "session.changed",
@@ -597,7 +602,10 @@ pub const EVENTS: &[&str] = &[
     "question.asked",
     "question.resolved",
     "usage",
+    "compaction.started",
+    "compaction.delta",
     "compaction",
+    "compaction.failed",
     "subagent.changed",
     "queue.changed",
     "error",
@@ -655,8 +663,36 @@ pub enum Event {
         #[serde(default)]
         context: ContextUse,
     },
+    /// Otto began compacting the history (additive). `trigger` is `manual`
+    /// (`session.compact`) or `auto` (the context filled up mid-turn, or the
+    /// provider compacted at its threshold). `id` names this compaction in
+    /// `compaction.delta`, `compaction` and `compaction.failed`, and is the id
+    /// of the item that will hold its `Part::Compaction`.
+    #[serde(rename = "compaction.started")]
+    CompactionStarted { id: String, trigger: String },
+    /// Summary text as the model writes it (additive, live only: never
+    /// journaled; the summary in `compaction` and the stored item are
+    /// authoritative).
+    #[serde(rename = "compaction.delta")]
+    CompactionDelta { id: String, text: String },
+    /// The history through `through_seq` was replaced by a checkpoint. `id`
+    /// (additive) is the `compaction.started` id, absent from older servers.
     #[serde(rename = "compaction")]
-    Compaction { through_seq: i64, summary: Option<String> },
+    Compaction {
+        through_seq: i64,
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// A compaction ended without a checkpoint (additive): the history is
+    /// unchanged. `cancelled`: the turn was stopped, not a failure.
+    #[serde(rename = "compaction.failed")]
+    CompactionFailed {
+        id: String,
+        message: String,
+        #[serde(default)]
+        cancelled: bool,
+    },
     #[serde(rename = "subagent.changed")]
     SubagentChanged { parent: SessionId, child: SessionId, status: SessionStatus },
     #[serde(rename = "queue.changed")]
@@ -679,7 +715,14 @@ pub enum Event {
 impl Event {
     #[must_use]
     pub fn is_live_delta(&self) -> bool {
-        matches!(self, Self::TextDelta { .. } | Self::ReasoningDelta { .. } | Self::ToolInputDelta { .. } | Self::ToolProgress { .. })
+        matches!(
+            self,
+            Self::TextDelta { .. }
+                | Self::ReasoningDelta { .. }
+                | Self::ToolInputDelta { .. }
+                | Self::ToolProgress { .. }
+                | Self::CompactionDelta { .. }
+        )
     }
     /// Append a text or reasoning delta to the parts of the item it streams into.
     pub fn append_delta(&self, parts: &mut Vec<otto_llm::Part>) {

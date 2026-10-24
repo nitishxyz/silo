@@ -41,6 +41,26 @@ pub struct Retrying {
     /// When the wait began (ms since the Unix epoch).
     pub at_ms: i64,
 }
+/// Where a compaction is (`compaction.started` → `compaction` or `compaction.failed`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompactionStatus {
+    Running,
+    Done,
+    Failed { message: String, cancelled: bool },
+}
+/// A compaction seen live: its summary as it streams, until its checkpoint
+/// item (`id`) arrives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compacting {
+    /// The id of the item that holds (or will hold) its checkpoint.
+    pub id: String,
+    /// `manual` or `auto`; empty when it began before this mirror.
+    pub trigger: String,
+    pub summary: String,
+    pub status: CompactionStatus,
+    /// How many items came before it: where it shows among them.
+    pub at: usize,
+}
 #[derive(Clone, Debug)]
 pub struct SessionMirror {
     pub info: SessionInfo,
@@ -58,6 +78,9 @@ pub struct SessionMirror {
     pub last_error: Option<(String, String, bool)>,
     /// The model request is waiting to be retried (`model.retrying`), until the next stream event.
     pub retrying: Option<Retrying>,
+    /// Compactions seen live, in order (`compaction.*`). One leaves when its
+    /// checkpoint item arrives; a failed one stays.
+    pub compactions: Vec<Compacting>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
     live: Vec<Event>,
@@ -90,6 +113,7 @@ impl SessionMirror {
             part_times: view.part_times,
             last_error: None,
             retrying: None,
+            compactions: Vec::new(),
             indices,
             durable: None,
             live: Vec::new(),
@@ -116,6 +140,11 @@ impl SessionMirror {
         }
         if after_seq > self.last_seq {
             return ApplyResult::Gap { expected: self.last_seq, got: after_seq };
+        }
+        // Compaction text is never journaled, so nothing replaces it: it adds up in place.
+        if let Event::CompactionDelta { .. } = event {
+            self.project(event);
+            return ApplyResult::Applied;
         }
         if self.durable.is_none() {
             self.durable = Some((self.items.clone(), self.tools.clone()));
@@ -176,6 +205,10 @@ impl SessionMirror {
                 self.last_error = None;
             }
             Event::TurnFinished { turn, status, .. } => {
+                // A compaction still running when its turn ended never reported its end: the turn stopped it.
+                for c in self.compactions.iter_mut().filter(|c| c.status == CompactionStatus::Running) {
+                    c.status = CompactionStatus::Failed { message: "Stopped".into(), cancelled: true };
+                }
                 self.turn = Some((*turn, *status));
                 self.turn_started_at = None;
                 self.info.status = if *status == TurnStatus::Error { SessionStatus::Error } else { SessionStatus::Idle };
@@ -185,7 +218,13 @@ impl SessionMirror {
                     self.put(Item::new(item_id, *role, vec![]));
                 }
             }
-            Event::ItemDone { item } => self.put(item.clone()),
+            Event::ItemDone { item } => {
+                // Its checkpoint is stored: the item shows it from here.
+                if item.parts.iter().any(|p| matches!(p, Part::Compaction { .. })) {
+                    self.compactions.retain(|c| c.id != item.id);
+                }
+                self.put(item.clone());
+            }
             Event::TextDelta { item_id, .. } | Event::ReasoningDelta { item_id, .. } => {
                 if let Some(i) = self.indices.get(item_id) {
                     event.append_delta(&mut self.items[*i].parts);
@@ -269,7 +308,45 @@ impl SessionMirror {
                     at_ms: *at_ms,
                 });
             }
-            Event::Compaction { .. } => self.info.context.used = 0,
+            Event::CompactionStarted { id, trigger } => {
+                self.compactions.retain(|c| c.id != *id);
+                self.compactions.push(Compacting {
+                    id: id.clone(),
+                    trigger: trigger.clone(),
+                    summary: String::new(),
+                    status: CompactionStatus::Running,
+                    at: self.items.len(),
+                });
+            }
+            Event::CompactionDelta { id, text } => match self.compactions.iter_mut().find(|c| c.id == *id) {
+                Some(c) => c.summary.push_str(text),
+                // Stored already: a straggler.
+                None if self.indices.get(id).is_some_and(|i| self.items[*i].parts.iter().any(|p| matches!(p, Part::Compaction { .. }))) => {}
+                // Begun before this mirror's view: shown from here on.
+                None => self.compactions.push(Compacting {
+                    id: id.clone(),
+                    trigger: String::new(),
+                    summary: text.clone(),
+                    status: CompactionStatus::Running,
+                    at: self.items.len(),
+                }),
+            },
+            Event::Compaction { summary, id, .. } => {
+                self.info.context.used = 0;
+                // An older server names none: the running one ended.
+                let done = self.compactions.iter_mut().filter(|c| id.as_ref().map_or(c.status == CompactionStatus::Running, |id| c.id == *id));
+                for c in done {
+                    c.status = CompactionStatus::Done;
+                    if let Some(summary) = summary {
+                        c.summary.clone_from(summary);
+                    }
+                }
+            }
+            Event::CompactionFailed { id, message, cancelled } => {
+                if let Some(c) = self.compactions.iter_mut().find(|c| c.id == *id) {
+                    c.status = CompactionStatus::Failed { message: message.clone(), cancelled: *cancelled };
+                }
+            }
             Event::PlanUsage { provider, usage } => {
                 if *provider == self.info.provider {
                     self.info.plan = Some(usage.clone());

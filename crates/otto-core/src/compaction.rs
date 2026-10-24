@@ -170,8 +170,22 @@ pub(crate) fn threshold(live: &Live, items: &[Item]) -> Option<otto_llm::Compact
     (window > 0 && native(live, items)).then(|| otto_llm::Compaction::Auto { threshold: window * 3 / 4, instructions: None })
 }
 
-/// Ask the provider to compact `items`; its checkpoint replaces them.
-async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, turn: i64, items: Vec<Item>) -> Result<String> {
+/// The session's newest journal sequence: what a checkpoint taken now summarizes through.
+pub(crate) async fn last_seq(cx: &Context) -> Result<i64> {
+    let id = cx.row.id.clone();
+    cx.runtime.db(move |s| Ok(s.session(&id)?.ok_or(Error::Closed)?.last_seq)).await
+}
+
+/// Summary text for display while compaction `id` streams: live only, never
+/// journaled (the finished checkpoint is).
+pub(crate) fn delta(cx: &Context, id: &str, text: String) {
+    if !text.is_empty() {
+        let _ = cx.deltas.send(otto_proto::Event::CompactionDelta { id: id.into(), text });
+    }
+}
+
+/// Ask the provider to compact `items`; its checkpoint replaces them, stored as item `id`.
+async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, turn: i64, id: &str, items: Vec<Item>) -> Result<String> {
     let request = Request {
         model: live.row.model.clone(),
         system: live.system.clone(),
@@ -182,19 +196,24 @@ async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, t
     let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: Some(cx.row.id.clone()), ..CallCx::default() }).await?;
     let mut checkpoint = None;
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
-        if let StreamEvent::PartDone { part: part @ Part::Compaction { .. } } = event? {
-            checkpoint = Some(part);
+        match event? {
+            StreamEvent::CompactionDelta { text } => delta(cx, id, text),
+            StreamEvent::PartDone { part: part @ Part::Compaction { .. } } => checkpoint = Some(part),
+            _ => {}
         }
     }
     let Some(part) = checkpoint else { return Err(Error::Invalid("the provider returned no compaction".into())) };
     let summary = if let Part::Compaction { summary, .. } = &part { summary.clone().unwrap_or_default() } else { String::new() };
-    let mut item = Item::new(crate::id(), Role::Assistant, vec![part]);
+    let mut item = Item::new(id, Role::Assistant, vec![part]);
     item.origin = Some(otto_llm::Origin { provider: live.row.provider.as_str().into(), model: live.row.model.clone(), response_id: None });
     cx.item(item, turn, 0).await?;
     Ok(summary)
 }
 
 /// Replace the history with a checkpoint summary. `trigger` is `manual` or `auto`.
+///
+/// Clients see `compaction.started`, the summary as `compaction.delta`s (live
+/// only), then `compaction` with the checkpoint, or `compaction.failed`.
 pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64, trigger: &str) -> Result<()> {
     let hook = crate::step::apply_hook(cx, "PreCompact", trigger, serde_json::json!({"trigger":trigger,"custom_instructions":""}), turn, 0).await?;
     if let Some(reason) = hook.deny {
@@ -206,19 +225,34 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
     if items.is_empty() {
         return Ok(());
     }
-    if native(&live, &items) {
-        let id = cx.row.id.clone();
-        let through = cx.runtime.db(move |s| Ok(s.session(&id)?.ok_or(Error::Closed)?.last_seq)).await?;
-        let summary = compact_native(cx, &live, cancel, turn, items).await?;
-        cx.emit(otto_proto::Event::Compaction { through_seq: through, summary: Some(summary).filter(|s| !s.is_empty()) }, Projection::None, turn, 0)
-            .await?;
+    let id = crate::id();
+    cx.emit(otto_proto::Event::CompactionStarted { id: id.clone(), trigger: trigger.into() }, Projection::None, turn, 0).await?;
+    let result = checkpoint(cx, &live, cancel, turn, &id, items, window).await;
+    if let Err(error) = &result {
+        failed(cx, &id, error, cancel.is_cancelled(), turn, 0).await;
+    }
+    result
+}
+
+/// Journal `compaction.failed` for compaction `id` (best effort: a closing session may not take it).
+pub(crate) async fn failed(cx: &Context, id: &str, error: &(dyn std::fmt::Display + Sync), cancelled: bool, turn: i64, step: i64) {
+    let message = if cancelled { "Stopped".to_owned() } else { error.to_string() };
+    let event = otto_proto::Event::CompactionFailed { id: id.into(), message, cancelled };
+    let _ = cx.emit(event, Projection::None, turn, step).await;
+}
+
+async fn checkpoint(cx: &Context, live: &Live, cancel: &CancellationToken, turn: i64, id: &str, items: Vec<Item>, window: u64) -> Result<()> {
+    if native(live, &items) {
+        let through = last_seq(cx).await?;
+        let summary = compact_native(cx, live, cancel, turn, id, items).await?;
+        let event = otto_proto::Event::Compaction { through_seq: through, summary: Some(summary).filter(|s| !s.is_empty()), id: Some(id.into()) };
+        cx.emit(event, Projection::None, turn, 0).await?;
         return Ok(());
     }
     let budget = usize::try_from(if window == 0 { 32000 } else { window / 2 }).unwrap_or(32000).clamp(1024, 128000);
     let instructions = bounded(&items.iter().filter(|i| i.role == Role::User).map(Item::text).collect::<Vec<_>>().join("\n"), budget / 4);
     let history = summary_input(&items, budget);
-    let id = cx.row.id.clone();
-    let through = cx.runtime.db(move |s| Ok(s.session(&id)?.ok_or(Error::Closed)?.last_seq)).await?;
+    let through = last_seq(cx).await?;
     let request = Request {
         model: live.row.model.clone(),
         system: vec![
@@ -232,9 +266,13 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
     let mut stream = live.model.stream(request, CallCx { cancel: cancel.clone(), session: None, ..CallCx::default() }).await?;
     let mut summary = String::new();
     while let Some(event) = tokio::select! {_=cancel.cancelled()=>return Err(Error::Closed),event=stream.next()=>event} {
-        if let StreamEvent::PartDone { part: Part::Text { text, .. } } = event? {
-            let remaining = budget.saturating_sub(summary.len());
-            summary.push_str(&bounded(&text, remaining));
+        match event? {
+            StreamEvent::TextDelta { text } => delta(cx, id, text),
+            StreamEvent::PartDone { part: Part::Text { text, .. } } => {
+                let remaining = budget.saturating_sub(summary.len());
+                summary.push_str(&bounded(&text, remaining));
+            }
+            _ => {}
         }
     }
     if summary.trim().is_empty() {
@@ -254,12 +292,12 @@ pub(crate) async fn compact(cx: &Context, cancel: &CancellationToken, turn: i64,
             )
         })
         .collect();
-    summary.push_str("\nMost recent context (verbatim, truncated):\n");
+    summary.push_str(otto_proto::COMPACTION_CONTEXT);
     summary.push_str(&tail.join("\n"));
     summary.push_str("\nOriginal user instructions (verbatim):\n");
     summary.push_str(&instructions);
-    cx.item(Item::new(crate::id(), Role::System, vec![Part::Compaction { summary: Some(summary.clone()), opaque: None }]), turn, 0).await?;
-    cx.emit(otto_proto::Event::Compaction { through_seq: through, summary: Some(summary) }, Projection::None, turn, 0).await?;
+    cx.item(Item::new(id, Role::System, vec![Part::Compaction { summary: Some(summary.clone()), opaque: None }]), turn, 0).await?;
+    cx.emit(otto_proto::Event::Compaction { through_seq: through, summary: Some(summary), id: Some(id.into()) }, Projection::None, turn, 0).await?;
     Ok(())
 }
 #[cfg(test)]

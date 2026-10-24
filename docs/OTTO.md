@@ -962,6 +962,12 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 - Events: `session.changed`, `turn.started/finished`, `item.started`, `text.delta`, `reasoning.delta`,
   `tool.input_start`, `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
   `question.asked`, `usage`, `compaction`, `subagent.changed`, `queue.changed`, `error`.
+- Compaction (additive): `compaction.started {id, trigger: manual|auto}`, then the summary as the model writes it in
+  `compaction.delta {id, text}` (live only, never journaled; an Anthropic threshold summary comes in one), then
+  `compaction {through_seq, summary, id}` or `compaction.failed {id, message, cancelled}`. `id` is the id of the
+  item that holds the checkpoint (`Part::Compaction`): its own system item, or for threshold compaction the step's
+  reply. Older clients skip the new events as unknown (journaled) or `LiveUnknown` (live); `compaction.id` is
+  optional both ways.
 - `tool.input_start {call_id, name}` (additive) opens every model-written call before its input streams (a call
   without arguments may stream none); a view taken mid-call lists such calls in `streaming_tool_calls`
   (`{call_id, name, input_delta}`, the raw input so far).

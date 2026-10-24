@@ -290,8 +290,39 @@ fn approvals_questions_tools_and_usage() {
     assert_eq!(m.info.usage.usage.input, 4);
     assert_eq!(m.info.usage.cost_usd, 0.1);
     assert_eq!(m.info.context, otto_proto::ContextUse { used: 4, window: 1000 });
-    m.apply(script.len() as i64 + 1, &Event::Compaction { through_seq: 1, summary: None });
+    m.apply(script.len() as i64 + 1, &Event::Compaction { through_seq: 1, summary: None, id: None });
     assert_eq!(m.info.context, otto_proto::ContextUse { used: 0, window: 1000 });
+}
+#[test]
+fn compactions_stream_live_and_give_way_to_their_checkpoint() {
+    let mut m = SessionMirror::new(view(0));
+    m.apply(1, &Event::ItemDone { item: Item::user_text("u", "hi") });
+    m.apply(2, &Event::CompactionStarted { id: "c".into(), trigger: "manual".into() });
+    assert_eq!(m.compactions[0].at, 1);
+    assert_eq!(m.compactions[0].status, CompactionStatus::Running);
+    // Live text adds up, and a durable event in between replays nothing twice.
+    assert_eq!(m.apply_live(2, &Event::CompactionDelta { id: "c".into(), text: "Goal: ".into() }), ApplyResult::Applied);
+    m.apply(3, &Event::QueueChanged { queued: vec![] });
+    assert_eq!(m.apply_live(3, &Event::CompactionDelta { id: "c".into(), text: "ship".into() }), ApplyResult::Applied);
+    m.apply(4, &Event::Usage { turn: 0, step: 0, usage: Usage::default(), cost_usd: None, context: ContextUse::default() });
+    assert_eq!(m.compactions[0].summary, "Goal: ship");
+    assert_eq!(m.apply_live(1, &Event::CompactionDelta { id: "c".into(), text: "stale".into() }), ApplyResult::Duplicate);
+    // The checkpoint item takes over; the live entry leaves.
+    let mut checkpoint = Item::user_text("c", "");
+    checkpoint.parts = vec![Part::Compaction { summary: Some("Goal: ship".into()), opaque: None }];
+    m.apply(5, &Event::ItemDone { item: checkpoint });
+    m.apply(6, &Event::Compaction { through_seq: 4, summary: Some("Goal: ship".into()), id: Some("c".into()) });
+    assert!(m.compactions.is_empty());
+    // A failure stays, with its message.
+    m.apply(7, &Event::CompactionStarted { id: "d".into(), trigger: "auto".into() });
+    m.apply(8, &Event::CompactionFailed { id: "d".into(), message: "empty compaction summary".into(), cancelled: false });
+    assert_eq!(m.compactions[0].status, CompactionStatus::Failed { message: "empty compaction summary".into(), cancelled: false });
+    // One the turn's end cut off reads as stopped; one that began before the view shows from its next delta.
+    m.apply(9, &Event::CompactionStarted { id: "e".into(), trigger: "auto".into() });
+    m.apply(10, &Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: Usage::default() });
+    assert!(matches!(m.compactions[1].status, CompactionStatus::Failed { cancelled: true, .. }));
+    m.apply_live(10, &Event::CompactionDelta { id: "f".into(), text: "late".into() });
+    assert_eq!((m.compactions[2].trigger.as_str(), m.compactions[2].summary.as_str()), ("", "late"));
 }
 #[tokio::test]
 async fn rejects_incompatible_hello() {

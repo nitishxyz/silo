@@ -38,6 +38,11 @@ pub enum StreamEvent {
         call_id: String,
         delta: String,
     },
+    /// Summary text of a provider compaction block as it streams (for display;
+    /// the block itself arrives as a `PartDone` with `Part::Compaction`).
+    CompactionDelta {
+        text: String,
+    },
     /// A hosted tool's status (`searching`, `in_progress`, …).
     HostedProgress {
         call_id: String,

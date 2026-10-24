@@ -18,6 +18,9 @@ async fn events(raw: &str, seed: u64, provider: &str) -> Vec<StreamEvent> {
 fn parts(events: &[StreamEvent]) -> Vec<Part> {
     events.iter().filter_map(|e| if let StreamEvent::PartDone { part } = e { Some(part.clone()) } else { None }).collect()
 }
+fn compaction_text(events: &[StreamEvent]) -> String {
+    events.iter().filter_map(|e| if let StreamEvent::CompactionDelta { text } = e { Some(text.as_str()) } else { None }).collect()
+}
 fn usage(events: &[StreamEvent]) -> Usage {
     events.iter().rev().find_map(|e| if let StreamEvent::Usage(u) = e { Some(u.clone()) } else { None }).unwrap()
 }
@@ -52,6 +55,7 @@ async fn compaction_on_demand_request_stream_and_replay() {
         let parts = parts(&events);
         let Part::Compaction { summary: Some(summary), opaque: Some(opaque) } = &parts[0] else { panic!("compaction: {parts:?}") };
         assert!(summary.starts_with("Summary of the conversation"));
+        assert_eq!(compaction_text(&events), *summary, "the summary streams for display");
         // The block replaces the history and goes first, byte-exact, with the beta on every later request.
         let next = request(vec![Item::new("c", Role::Assistant, parts.clone()), Item::user_text("u2", "Fields for Recipe?")]);
         let body = convert::body(&next).unwrap();
@@ -74,6 +78,7 @@ async fn compaction_threshold_delta_and_usage() {
     let events = events(THRESHOLD, 7, "anthropic").await;
     let parts = parts(&events);
     assert!(matches!(&parts[0], Part::Compaction { summary: Some(s), .. } if s.starts_with("Summary: build a website")));
+    assert_eq!(compaction_text(&events), "Summary: build a website; the landing page is done.");
     assert_eq!(parts[1], Part::text("Next, the contact form."));
     let u = usage(&events);
     assert_eq!((u.input, u.output), (203_000, 4_500));
