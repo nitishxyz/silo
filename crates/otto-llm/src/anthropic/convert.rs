@@ -17,9 +17,13 @@ pub fn body_for(req: &Request, provider: &str) -> Result<Value, LlmError> {
     let anthropic = provider == "anthropic";
     let native_system = anthropic && super::supports_mid_system(&req.model);
     let mut messages: Vec<Value> = Vec::new();
-    for item in &req.items {
-        // A system message must follow a user one (a subagent report waking an idle parent follows its reply).
-        let native_system = native_system && messages.last().is_some_and(|m| m["role"] != "assistant");
+    for (index, item) in req.items.iter().enumerate() {
+        // A system message must follow a user one (a subagent report waking an idle parent follows its reply), and
+        // must precede a reply or end the request: a notice followed by the user's next message (input queued
+        // behind it) goes as a user `<system-reminder>`, else the API refuses the request ("role 'system' must
+        // precede an 'assistant' message or end the array").
+        let followed = req.items[index + 1..].iter().find(|next| next.role != Role::System).is_none_or(|next| next.role == Role::Assistant);
+        let native_system = native_system && followed && messages.last().is_some_and(|m| m["role"] != "assistant");
         let role = match item.role {
             Role::Assistant => "assistant",
             Role::System if native_system => "system",

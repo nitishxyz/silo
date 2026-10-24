@@ -195,6 +195,32 @@ fn alternation_cache_tools_and_effort() {
     let body = convert::body(&woken).unwrap();
     assert_eq!(body["messages"][2]["role"], "user");
     assert!(body["messages"][2]["content"][0]["text"].as_str().unwrap().contains("<system-reminder>\nSubagent completion"));
+    // A notice the user's next message follows (input queued behind it) can't be a system message either: a system
+    // message must precede a reply or end the request.
+    let mut queued = req.clone();
+    queued.items = vec![
+        Item::user_text("u", "go"),
+        Item::new("a", Role::Assistant, vec![Part::text("on it")]),
+        Item::user_text("u2", "and this"),
+        Item::new("s", Role::System, vec![Part::System { text: "Subagent completion".into() }]),
+        Item::new("s2", Role::System, vec![Part::System { text: "Job finished".into() }]),
+        Item::user_text("u3", "also that"),
+        Item::new("a2", Role::Assistant, vec![Part::text("ok")]),
+        Item::user_text("u4", "next"),
+        Item::new("s3", Role::System, vec![Part::System { text: "before a reply".into() }]),
+        Item::new("a3", Role::Assistant, vec![Part::text("done")]),
+        Item::user_text("u5", "last"),
+        Item::new("s4", Role::System, vec![Part::System { text: "at the end".into() }]),
+    ];
+    let body = convert::body(&queued).unwrap();
+    let roles: Vec<&str> = body["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["user", "assistant", "user", "assistant", "user", "system", "assistant", "user", "system"]);
+    assert!(body["messages"][2].to_string().contains("<system-reminder>\\nSubagent completion"));
+    for (i, role) in roles.iter().enumerate() {
+        if *role == "system" {
+            assert!(roles.get(i + 1).is_none_or(|next| *next == "assistant"), "system at {i} precedes {:?}", roles.get(i + 1));
+        }
+    }
     req.model = "claude-haiku-4-5-20251001".into();
     assert_eq!(convert::body(&req).unwrap()["thinking"]["budget_tokens"], 8192);
     req.cache.disabled = true;
