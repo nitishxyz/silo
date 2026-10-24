@@ -843,6 +843,15 @@ impl Workspace {
         .detach();
     }
 
+    /// Whether `handle` is the window this workspace is the root of, from a
+    /// callback in `window`. Compare this, never window ids: gpui gives an
+    /// entity the window that last read it while drawing, so a callback's
+    /// `window` can be another one, and reading or updating "another"
+    /// window that is really this one panics (the entity is leased).
+    pub(crate) fn is_own_window(&self, handle: gpui::AnyWindowHandle, window: &Window, cx: &Context<Self>) -> bool {
+        is_root_window::<Self>(handle, window, cx.entity_id(), cx)
+    }
+
     pub(crate) fn active_window(&self) -> Option<&WindowInfo> {
         let view = self.view.as_ref()?;
         view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first())
@@ -1668,6 +1677,16 @@ fn tab_index(index: usize, tabs: usize) -> usize {
     if index == 8 { tabs.saturating_sub(1) } else { index }
 }
 
+/// Whether `handle` is the window whose root is `entity` (a `V`), asked
+/// from a callback running in `window` (see [`Workspace::is_own_window`]).
+pub(crate) fn is_root_window<V: 'static + Render>(handle: gpui::AnyWindowHandle, window: &Window, entity: gpui::EntityId, cx: &App) -> bool {
+    if handle.window_id() == window.window_handle().window_id() {
+        // The window being updated is out of gpui's map: ask it.
+        return window.root::<V>().flatten().is_some_and(|root| root.entity_id() == entity);
+    }
+    handle.downcast::<V>().and_then(|h| h.entity(cx).ok()).is_some_and(|root| root.entity_id() == entity)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1675,5 +1694,77 @@ mod tests {
         assert_eq!(super::tab_index(8, 3), 2);
         assert_eq!(super::tab_index(8, 12), 11);
         assert_eq!(super::tab_index(1, 3), 1);
+    }
+
+    /// The 0.1.9 crash: a view read while another window draws (the window
+    /// picker reads every workspace) becomes that window's in gpui, so its
+    /// callbacks get the other `window`. Telling windows apart by id then
+    /// reads the view's own, leased window: `double_lease_panic`.
+    mod own_window {
+        use std::{cell::RefCell, rc::Rc};
+
+        use gpui::{AnyWindowHandle, AppContext as _, Context, EventEmitter, IntoElement, Render, TestAppContext, Window, WindowHandle, div};
+
+        use super::super::is_root_window;
+
+        struct Bus;
+        impl EventEmitter<()> for Bus {}
+
+        #[derive(Default)]
+        struct Seen {
+            window: Option<AnyWindowHandle>,
+            own: Vec<(AnyWindowHandle, bool)>,
+            read_others: bool,
+        }
+
+        struct View {
+            /// Read while drawing, as the window picker does.
+            other: Option<WindowHandle<View>>,
+            _sub: Option<gpui::Subscription>,
+        }
+
+        impl Render for View {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                if let Some(other) = self.other {
+                    let _ = other.read(cx);
+                }
+                div()
+            }
+        }
+
+        #[gpui::test]
+        fn a_view_knows_its_window_after_another_window_reads_it(cx: &mut TestAppContext) {
+            let bus = cx.new(|_| Bus);
+            let seen = Rc::new(RefCell::new(Seen::default()));
+            let first = cx.add_window(|window, cx| {
+                let seen = seen.clone();
+                let sub = cx.subscribe_in(&bus, window, move |_: &mut View, _, (), window, cx| {
+                    let mut seen = seen.borrow_mut();
+                    seen.window = Some(window.window_handle());
+                    let me = cx.entity_id();
+                    for handle in cx.windows() {
+                        let own = is_root_window::<View>(handle, window, me, cx);
+                        seen.own.push((handle, own));
+                        // What app_requests does with the others: must not panic.
+                        if !own && let Some(other) = handle.downcast::<View>() {
+                            let _ = other.read(cx);
+                            seen.read_others = true;
+                        }
+                    }
+                });
+                View { other: None, _sub: Some(sub) }
+            });
+            let second = cx.add_window(|_, _| View { other: Some(first), _sub: None });
+            // The second window draws last, reading the first's view.
+            cx.update_window(second.into(), |_, window, cx| _ = window.draw(cx)).unwrap();
+
+            bus.update(cx, |_, cx| cx.emit(()));
+            let seen = seen.borrow();
+            let (first, second) = (AnyWindowHandle::from(first), AnyWindowHandle::from(second));
+            assert_eq!(seen.window, Some(second), "gpui hands the callback the window that drew it last");
+            assert!(seen.own.contains(&(first, true)), "{:?}", seen.own);
+            assert!(seen.own.contains(&(second, false)), "{:?}", seen.own);
+            assert!(seen.read_others);
+        }
     }
 }

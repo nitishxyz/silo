@@ -307,8 +307,9 @@ impl Workspace {
         theme::apply_font(cx);
         self.apply_theme_to_panes(reach, cx);
         window.refresh();
-        let this = window.window_handle();
-        for other in cx.windows().into_iter().filter(|w| *w != this).filter_map(|w| w.downcast::<Workspace>()) {
+        let others: Vec<_> =
+            cx.windows().into_iter().filter(|w| !self.is_own_window(*w, window, cx)).filter_map(|w| w.downcast::<Workspace>()).collect();
+        for other in others {
             let _ = other.update(cx, |workspace, window, cx| {
                 workspace.apply_theme_to_panes(reach, cx);
                 window.refresh();

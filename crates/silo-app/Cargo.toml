@@ -48,3 +48,4 @@ runtime_shaders = ["gpui_platform/runtime_shaders"]
 
 [dev-dependencies]
 silo-server.workspace = true
+gpui = { workspace = true, features = ["test-support"] }

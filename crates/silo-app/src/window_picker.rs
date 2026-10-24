@@ -19,6 +19,9 @@ pub struct WindowPicker {
     field: Entity<TextField>,
     filter: String,
     selected: usize,
+    /// The other windows' sessions, read when the picker opened: never
+    /// while drawing (`other_windows`).
+    others: Vec<(usize, String, AnyWindowHandle)>,
     _sub: Subscription,
 }
 
@@ -78,21 +81,23 @@ fn open_in_new_window(host: usize, id: String, cx: &mut App) {
     });
 }
 
-/// The session each other Silo window shows (host, session id).
-fn other_windows(window: &Window, cx: &App) -> Vec<(usize, String, AnyWindowHandle)> {
-    let current = window.window_handle().window_id();
-    cx.windows()
-        .into_iter()
-        .filter(|w| w.window_id() != current)
-        .filter_map(|w| {
-            let workspace = w.downcast::<Workspace>()?.read(cx).ok()?;
-            let id = workspace.view.as_ref()?.session.id.clone();
-            Some((workspace.active_host, id, w))
-        })
-        .collect()
-}
-
 impl Workspace {
+    /// The session each other Silo window shows (host, session id). Not
+    /// while drawing: an entity read in a window's draw becomes that
+    /// window's in gpui (its callbacks get that `window`), and the other
+    /// window's own requests then mistake which window is theirs.
+    fn other_windows(&self, window: &Window, cx: &Context<Self>) -> Vec<(usize, String, AnyWindowHandle)> {
+        cx.windows()
+            .into_iter()
+            .filter(|w| !self.is_own_window(*w, window, cx))
+            .filter_map(|w| {
+                let workspace = w.downcast::<Workspace>()?.read(cx).ok()?;
+                let id = workspace.view.as_ref()?.session.id.clone();
+                Some((workspace.active_host, id, w))
+            })
+            .collect()
+    }
+
     pub(crate) fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker.is_some() {
             self.close_picker(window, cx);
@@ -103,7 +108,8 @@ impl Workspace {
         let field = cx.new(|cx| TextField::new("Open or create a session…", cx));
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.picker_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
-        self.picker = Some(WindowPicker { field, filter: String::new(), selected: 0, _sub: sub });
+        let others = self.other_windows(window, cx);
+        self.picker = Some(WindowPicker { field, filter: String::new(), selected: 0, others, _sub: sub });
         // Deferred: a mouse-down that opened us may still focus its target.
         focus.focus(window, cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
@@ -172,8 +178,8 @@ impl Workspace {
         }
     }
 
-    fn shown(&self, host: usize, id: &str, window: &Window, cx: &App) -> Option<Shown> {
-        self.shown_in(host, id, &other_windows(window, cx))
+    fn shown(&self, host: usize, id: &str, window: &Window, cx: &Context<Self>) -> Option<Shown> {
+        self.shown_in(host, id, &self.other_windows(window, cx))
     }
 
     fn shown_in(&self, host: usize, id: &str, others: &[(usize, String, AnyWindowHandle)]) -> Option<Shown> {
@@ -206,7 +212,7 @@ impl Workspace {
 
     pub(crate) fn render_picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.picker.as_ref()?;
-        let others = other_windows(window, cx);
+        let others = &picker.others;
         let mut list = div().flex().flex_col().py(px(4.0));
         let mut index = 0;
         for row in self.picker_rows() {
@@ -214,7 +220,7 @@ impl Workspace {
                 Row::Header(host) => list.child(self.picker_header(host)),
                 Row::Divider => list.child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(theme::border()))),
                 Row::Item(item) => {
-                    let shown = if let Item::Session { host, id } = &item { self.shown_in(*host, id, &others) } else { None };
+                    let shown = if let Item::Session { host, id } = &item { self.shown_in(*host, id, others) } else { None };
                     index += 1;
                     list.child(self.picker_item(item, index - 1, index - 1 == picker.selected, shown, cx))
                 }

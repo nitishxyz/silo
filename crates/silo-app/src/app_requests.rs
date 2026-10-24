@@ -77,15 +77,12 @@ impl Workspace {
         if !owns(self) {
             return;
         }
-        let me = window.window_handle().window_id();
+        // Never read our own window through its handle (`is_own_window`).
         let windows = cx.window_stack().unwrap_or_else(|| cx.windows());
         let target = windows.iter().find(|handle| {
-            if handle.window_id() == me {
-                return true;
-            }
-            handle.downcast::<Workspace>().and_then(|w| w.read(cx).ok()).is_some_and(owns)
+            self.is_own_window(**handle, window, cx) || handle.downcast::<Workspace>().and_then(|w| w.read(cx).ok()).is_some_and(owns)
         });
-        if target.is_some_and(|handle| handle.window_id() != me) {
+        if target.is_some_and(|handle| !self.is_own_window(*handle, window, cx)) {
             return;
         }
         let Some(control) = self.hosts.get(host).and_then(|host| host.control.clone()) else { return };
@@ -122,20 +119,20 @@ impl Workspace {
 
     /// Whether this window runs `call`: the frontmost window showing its
     /// `block_id`, else the frontmost window.
-    fn runs_requests(&self, call: &AppCall, window: &Window, cx: &gpui::App) -> bool {
-        let me = window.window_handle().window_id();
+    fn runs_requests(&self, call: &AppCall, window: &Window, cx: &Context<Self>) -> bool {
         let block = call.params.get("block_id").and_then(Value::as_str);
         let windows: Vec<gpui::AnyWindowHandle> =
             cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().filter(|w| w.downcast::<Workspace>().is_some()).collect();
+        // Never read our own window through its handle (`is_own_window`).
         let shows = |handle: &gpui::AnyWindowHandle| {
             let Some(block) = block else { return true };
-            if handle.window_id() == me {
+            if self.is_own_window(*handle, window, cx) {
                 return self.block_info(block).is_some();
             }
             handle.downcast::<Workspace>().and_then(|w| w.read(cx).ok()).is_some_and(|w| w.block_info(block).is_some())
         };
         let target = windows.iter().find(|w| shows(w)).or(windows.first());
-        target.is_none_or(|w| w.window_id() == me)
+        target.is_none_or(|w| self.is_own_window(*w, window, cx))
     }
 
     /// Run an `app.*` method in this window.
