@@ -12,7 +12,7 @@ use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, SessionStatus
 use super::{
     AgentPane, AgentPaneEvent, Card, Conn, ENTER, FOLD, Overlay,
     editor::{Editor, EditorColors},
-    markdown::{Block, Inline},
+    markdown::{Align, Block, Inline},
     pill_input, reveal, ring,
     rows::{self, menu},
     transcript::{self, Detail, Group, Line, Row, Status, TodoStatus},
@@ -1343,7 +1343,7 @@ impl AgentPane {
     fn render_text(&mut self, ix: usize, key: &str, text: &str, streaming: bool, now: Instant, cx: &mut Context<Self>) -> AnyElement {
         // Parsed once per frame at most; completed blocks are kept as they are.
         let mut doc = self.parsed.remove(key).unwrap_or_default();
-        doc.update(text);
+        doc.update(text, streaming);
         let blocks = doc.blocks();
         let reduce = cx.reduce_motion();
         // Streaming: lines show once complete and sweep in (`reveal`); blocks fully shown draw as usual.
@@ -1556,7 +1556,7 @@ impl AgentPane {
                         // Markdown like a reply: code, emphasis, lists.
                         .child({
                             let mut doc = super::markdown::Doc::default();
-                            doc.update(&q.question);
+                            doc.update(&q.question, false);
                             div().flex_1().min_w_0().flex().flex_col().mb(px(-8.0)).children(doc.blocks().iter().enumerate().map(|(i, block)| {
                                 render_block(&format!("question-{}-{i}", q.question_id), block, None, theme::foreground(), &self.scroll)
                             }))
@@ -2872,8 +2872,14 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
             .pb(px(6.0))
             .flex()
             .flex_col()
-            .children(items.iter().enumerate().map(|(i, blocks)| {
-                let marker = start.map_or_else(|| "•".to_owned(), |s| format!("{}.", s + i as u64));
+            .children(items.iter().enumerate().map(|(i, item)| {
+                let blocks = &item.blocks;
+                // A task's box takes a bullet's place (follows a number).
+                let marker = match (start, item.task) {
+                    (None, Some(_)) => None,
+                    (None, None) => Some("•".to_owned()),
+                    (Some(s), _) => Some(format!("{}.", s + i as u64)),
+                };
                 // A revealed item's marker comes in as its first line starts sweeping.
                 let shown = match fx {
                     Some(_) if blocks.is_empty() => 0.0,
@@ -2887,10 +2893,15 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                         div()
                             .flex_none()
                             .min_w(px(16.0))
+                            .h(px(21.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
                             .text_color(rgb(theme::muted()))
                             .line_height(px(21.0))
                             .when(shown < 1.0, |el| el.opacity(shown))
-                            .child(marker),
+                            .children(marker)
+                            .children(item.task.map(checkbox)),
                     )
                     .child(
                         div()
@@ -2902,6 +2913,13 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                     )
             }))
             .into_any_element(),
+        // Nothing to draw yet: a table begun, its header row still being typed.
+        Block::Table { head, .. } if head.is_empty() => div().into_any_element(),
+        // A revealed table draws its rows given their space (the header first), each fading in as it sweeps.
+        Block::Table { .. } if lines.is_some_and(<[_]>::is_empty) => {
+            div().relative().children(fx.map(|f| table_report(f, id, None))).into_any_element()
+        }
+        Block::Table { align, head, rows } => render_table(id, align, head, rows, lines, fx, fg, scroll),
         Block::Quote(blocks) => div()
             .mb(px(8.0))
             .pl(px(12.0))
@@ -2930,6 +2948,115 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                 .into_any_element()
         }
     }
+}
+
+/// A task list item's box: an outline, or filled with a check.
+fn checkbox(checked: bool) -> gpui::Div {
+    let el = div().flex_none().size(px(14.0)).flex().items_center().justify_center().rounded(px(4.0));
+    if checked {
+        el.bg(rgb(theme::accent())).child(icon("check", 11.0, theme::background()))
+    } else {
+        el.border_1().border_color(rgb(theme::muted()))
+    }
+}
+
+/// Reports a revealed table's top (`row`: None) or a drawn row's bottom (from its first cell, as tall as the
+/// row), in window coordinates.
+fn table_report(fx: &Fx, id: &str, row: Option<usize>) -> impl IntoElement {
+    let (wraps, id) = (fx.wraps.clone(), id.to_owned());
+    gpui::canvas(
+        move |b, _, _| {
+            let mut wraps = wraps.borrow_mut();
+            let wrap = wraps.entry(id).or_default();
+            match row {
+                None => wrap.top = Some(f32::from(b.origin.y)),
+                Some(r) => {
+                    if wrap.rows.len() <= r {
+                        wrap.rows.resize(r + 1, 0.0);
+                    }
+                    wrap.rows[r] = f32::from(b.bottom());
+                }
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// A table cell's most width: longer text wraps in it; a table wider than the pane scrolls sideways.
+const CELL_MAX: f32 = 320.0;
+
+/// A table as a grid: each column as wide as its widest cell (up to [`CELL_MAX`], where text wraps), a
+/// header row in bold on the code box's tint, hairlines between rows and columns, the whole in a rounded
+/// border. It keeps its natural width: wider than the pane, it scrolls sideways (like a code box) instead
+/// of squashing its columns. `lines`: the rows given their space while it's revealed (header 0) and how far
+/// each has swept in.
+#[allow(clippy::too_many_arguments)]
+fn render_table(
+    id: &str,
+    align: &[Align],
+    head: &[Inline],
+    rows: &[Vec<Inline>],
+    lines: Option<&[(usize, f32)]>,
+    fx: Option<&Fx>,
+    fg: u32,
+    scroll: &std::rc::Rc<super::scroll::Inner>,
+) -> AnyElement {
+    let drawn = lines.map_or(rows.len() + 1, <[_]>::len).min(rows.len() + 1);
+    let last = drawn.saturating_sub(1);
+    let cols = align.len().max(1);
+    let mut cells: Vec<AnyElement> = Vec::with_capacity(drawn * cols);
+    for (r, row) in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)).take(drawn).enumerate() {
+        let alpha = if lines.is_some() { line_alpha(lines, r) } else { 1.0 };
+        for (c, cell) in row.iter().enumerate() {
+            let (text, _) = inline_text(&format!("{id}-r{r}-c{c}"), cell, None, fg);
+            // The header's tint stays inside the table's rounded corners.
+            let inner = px(7.0);
+            let el = div()
+                .relative()
+                .min_w(px(36.0))
+                .max_w(px(CELL_MAX))
+                .px(px(reveal::CELL_PAD_X))
+                .py(px(reveal::CELL_PAD_Y))
+                .border_color(rgb(theme::border()))
+                .when(c > 0, |el| el.border_l_1())
+                .when(r > 0, |el| el.border_t_1())
+                .when(r == 0, |el| {
+                    el.bg(rgb(faint()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .when(c == 0, |el| el.rounded_tl(inner))
+                        .when(c + 1 == cols, |el| el.rounded_tr(inner))
+                        .when(last == 0 && c == 0, |el| el.rounded_bl(inner))
+                        .when(last == 0 && c + 1 == cols, |el| el.rounded_br(inner))
+                })
+                .map(|el| match align.get(c).copied().unwrap_or_default() {
+                    Align::Center => el.text_center(),
+                    Align::Right => el.text_right(),
+                    Align::Left | Align::None => el,
+                })
+                .when(alpha < 1.0, |el| el.opacity(alpha))
+                .child(text)
+                .children(fx.filter(|_| c == 0 && lines.is_some()).map(|f| table_report(f, id, Some(r))));
+            cells.push(el.into_any_element());
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let grid = div()
+        .relative()
+        .flex_none()
+        .grid()
+        .grid_cols_max_content(cols.min(usize::from(u16::MAX)) as u16)
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .rounded(px(8.0))
+        .line_height(px(reveal::CELL_LINE))
+        .children(cells)
+        .children(fx.filter(|_| lines.is_some()).map(|f| table_report(f, id, None)));
+    let el = div().id(gpui::ElementId::Name(id.to_owned().into())).mb(px(reveal::TABLE_MARGIN)).flex().items_start();
+    scroll.scroller(id, el, true).child(grid).into_any_element()
 }
 
 #[cfg(test)]
@@ -3049,5 +3176,68 @@ mod tests {
         );
         let free = otto_proto::UsageTotals { cost_usd: 0.0, ..usage };
         assert!(!context_tip(ContextUse { used: 1, window: 10 }, &free).contains('$'), "no cost when unknown");
+    }
+
+    /// A table laid out in a window (gpui's test text system): its natural width, scrolling when wider.
+    mod table_layout {
+        use std::rc::Rc;
+
+        use gpui::{Context, IntoElement, ListAlignment, ListState, Render, TestAppContext, Window, div, prelude::*, px, size};
+
+        use super::super::{Align, Block, CELL_MAX, Inline, render_block};
+        use crate::agent::scroll::Inner;
+
+        struct Table {
+            block: Block,
+            scroll: Rc<Inner>,
+        }
+
+        impl Render for Table {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(render_block("t", &self.block, None, 0x00ff_ffff, &self.scroll))
+            }
+        }
+
+        fn cell(text: &str) -> Inline {
+            Inline { text: text.to_owned(), ..Inline::default() }
+        }
+
+        /// The table's grid bounds (the box's second child, after its scroll probe) and its scroll range, in a
+        /// window `width` wide.
+        fn layout(cx: &mut TestAppContext, block: Block, width: f32) -> (gpui::Bounds<gpui::Pixels>, gpui::Bounds<gpui::Pixels>, f32) {
+            let scroll = Inner::new(ListState::new(0, ListAlignment::Top, px(100.0)));
+            let (_, cx) = cx.add_window_view({
+                let scroll = scroll.clone();
+                move |_, _| Table { block, scroll }
+            });
+            cx.simulate_resize(size(px(width), px(600.0)));
+            cx.run_until_parked();
+            let handle = scroll.handle("t");
+            (handle.bounds(), handle.bounds_for_item(1).expect("the grid"), f32::from(handle.max_offset().x))
+        }
+
+        #[gpui::test]
+        fn a_wide_table_scrolls_sideways_and_long_cells_wrap(cx: &mut TestAppContext) {
+            let long = "a long cell that goes on and on with many words so that it must wrap ".repeat(4);
+            let block = Block::Table {
+                align: vec![Align::Left, Align::Right, Align::None],
+                head: vec![cell("Name"), cell("Size"), cell("Notes")],
+                rows: vec![vec![cell("first_identifier_here"), cell("12"), cell(&long)], vec![cell("b"), cell("3"), cell("short")]],
+            };
+            let (pane, grid, scroll) = layout(cx, block, 240.0);
+            assert!(grid.size.width > pane.size.width, "not squashed into the pane: {grid:?} in {pane:?}");
+            assert!(scroll > 0.0, "it scrolls sideways");
+            assert!(f32::from(grid.size.width) <= 3.0 * CELL_MAX + 2.0, "a long cell wraps at its most width: {grid:?}");
+            // Three rows, one of them several lines tall.
+            assert!(f32::from(grid.size.height) > 5.0 * super::super::reveal::CELL_LINE, "{grid:?}");
+        }
+
+        #[gpui::test]
+        fn a_narrow_table_keeps_its_natural_width(cx: &mut TestAppContext) {
+            let block = Block::Table { align: vec![Align::None; 2], head: vec![cell("a"), cell("b")], rows: vec![vec![cell("1"), cell("2")]] };
+            let (pane, grid, scroll) = layout(cx, block, 800.0);
+            assert!(grid.size.width < pane.size.width / 2.0, "not stretched to the pane: {grid:?} in {pane:?}");
+            assert!(scroll.abs() < 0.5);
+        }
     }
 }

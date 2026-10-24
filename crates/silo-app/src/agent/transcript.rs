@@ -1377,13 +1377,25 @@ fn turn_error(error: &str) -> String {
 
 /// The first non-empty line, at most `max` characters.
 #[must_use]
-/// Markdown as one line of plain text: no backticks, emphasis asterisks, headings, quotes or list
-/// markers; `[text](url)` (and `![alt](url)`) keeps its text.
+/// Markdown as one line of plain text: no backticks, emphasis asterisks, headings, quotes, list or task
+/// markers, or table pipes (a table's delimiter row goes); `[text](url)` (and `![alt](url)`) keeps its text.
 fn plain(markdown: &str) -> String {
     let mut out = String::new();
     for line in markdown.lines() {
         let line = line.trim_start().trim_start_matches(['#', '>']).trim_start();
         let line = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("+ ")).unwrap_or(line);
+        let line = ["[ ] ", "[x] ", "[X] "].iter().find_map(|m| line.strip_prefix(m)).unwrap_or(line);
+        // A table row: its cells, spaced; its delimiter row: nothing.
+        let row;
+        let line = if line.starts_with('|') {
+            if line.contains('-') && line.chars().all(|c| matches!(c, '|' | ':' | '-' | ' ' | '\t')) {
+                continue;
+            }
+            row = line.replace('|', " ");
+            row.as_str()
+        } else {
+            line
+        };
         let mut rest = line;
         while let Some(at) = rest.find('[') {
             out.push_str(rest[..at].strip_suffix('!').unwrap_or(&rest[..at]));
@@ -2015,6 +2027,10 @@ mod tests {
         let md = "## Pick\nMerge **`feat_x`** into [main](https://x.dev/main)?\n- *yes* [or not]";
         let line = tool("q", "ask_user", &json!({"question": md}), None, Some(&ok("yes")), &cx);
         assert_eq!(line.title, "Asked Pick Merge feat_x into main? yes [or not]");
+        // Tables and task lists too: cells spaced, no delimiter row, no checkboxes.
+        let md = "Which?\n\n| Option | Cost |\n|:--|--:|\n| `a` | 1 |\n\n- [ ] one\n- [x] two";
+        let line = tool("q", "ask_user", &json!({"question": md}), None, Some(&ok("a")), &cx);
+        assert_eq!(line.title, "Asked Which? Option Cost a 1 one two");
         let line = tool("d", "subagent", &json!({"action": "delegate", "task": "Review the diff", "agent": "plan"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Delegated Review the diff", Some("interrupted"), Status::Error));
         let line = tool(

@@ -49,15 +49,26 @@ pub const CODE_FONT: f32 = 12.5;
 pub const CODE_MARGIN: f32 = 10.0;
 /// A code box's padding and bottom margin around its lines.
 const CODE_BOX: f32 = 2.0 * CODE_PAD_Y + CODE_MARGIN;
+/// A table cell's padding (sideways, above and below) and line height, its bottom margin, and a one-line
+/// row's height (with its separator) before it was laid out.
+pub const CELL_PAD_X: f32 = 10.0;
+pub const CELL_PAD_Y: f32 = 5.0;
+pub const CELL_LINE: f32 = 20.0;
+pub const TABLE_MARGIN: f32 = 10.0;
+const ROW: f32 = CELL_LINE + 2.0 * CELL_PAD_Y + 1.0;
+/// A table's borders and bottom margin around its rows.
+const TABLE_BOX: f32 = 2.0 + TABLE_MARGIN;
 
 /// A leaf block's lines: wrapped text (a paragraph, which a blank line
-/// completes; a heading, which its newline completes) or fixed lines (code,
-/// a rule) that a newline completes.
+/// completes; a heading, which its newline completes), fixed lines (code,
+/// a rule) that a newline completes, or a table's rows (its header first): the
+/// streaming text holds only complete ones ([`super::markdown::Doc`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Para,
     Line,
     Fixed(usize),
+    Rows(usize),
 }
 
 /// Leaves of `block` in reading order, with the ids the view gives them (and a code block's text).
@@ -67,9 +78,10 @@ pub fn leaves<'a>(id: &str, block: &'a Block, out: &mut Vec<(String, Kind, &'a s
         Block::Heading(..) => out.push((id.to_owned(), Kind::Line, "")),
         Block::Code { text, .. } => out.push((id.to_owned(), Kind::Fixed(text.lines().count()), text)),
         Block::Rule => out.push((id.to_owned(), Kind::Fixed(1), "")),
+        Block::Table { head, rows, .. } => out.push((id.to_owned(), Kind::Rows(usize::from(!head.is_empty()) + rows.len()), "")),
         Block::List { items, .. } => {
-            for (i, blocks) in items.iter().enumerate() {
-                for (j, b) in blocks.iter().enumerate() {
+            for (i, item) in items.iter().enumerate() {
+                for (j, b) in item.blocks.iter().enumerate() {
                     leaves(&format!("{id}-{i}-{j}"), b, out);
                 }
             }
@@ -87,6 +99,7 @@ fn closed(source: &str, kind: Kind) -> bool {
     match kind {
         Kind::Para => source.trim_end_matches([' ', '\t']).ends_with("\n\n"),
         Kind::Line | Kind::Fixed(_) => source.ends_with('\n'),
+        Kind::Rows(_) => true,
     }
 }
 
@@ -221,7 +234,7 @@ pub fn fades(lines: &[(usize, f32)], wrap: Option<&Wrap>) -> Vec<(usize, f32)> {
 /// A leaf's visual lines, as last laid out: where each starts (bytes into its text), its width as a share
 /// of the text's, its sweep segments ([`cuts`]); the line height and its top (window coordinates, as the
 /// message's [`Reveal::origin`]). A code box reports only `cell`, a character's advance as a share of its
-/// visible width, and its top; a rule its top.
+/// visible width, and its top; a rule its top; a table its top and each drawn row's bottom (`rows`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wrap {
     pub starts: Vec<usize>,
@@ -230,6 +243,7 @@ pub struct Wrap {
     pub line_h: f32,
     pub cell: f32,
     pub top: Option<f32>,
+    pub rows: Vec<f32>,
 }
 
 /// What a frame shows of the message.
@@ -332,7 +346,7 @@ impl Reveal {
             let last = ix + 1 == leafs.len();
             let wrap = wraps.get(id);
             let count = match kind {
-                Kind::Fixed(n) => Some(*n),
+                Kind::Fixed(n) | Kind::Rows(n) => Some(*n),
                 Kind::Para | Kind::Line => wrap.map(|w| w.starts.len()),
             };
             // A code block just opened waits for its first line.
@@ -345,16 +359,18 @@ impl Reveal {
                 // Text and code lines sweep across their own width (a rule across the whole).
                 let share = match kind {
                     Kind::Fixed(_) if code.is_empty() => 1.0,
+                    Kind::Rows(_) => 1.0,
                     Kind::Fixed(_) => code_share(code.lines().nth(v).unwrap_or(""), wrap.map_or(0.0, |w| w.cell)),
                     _ => wrap.and_then(|w| w.widths.get(v)).copied().unwrap_or(1.0),
                 };
                 let (at, dur) = if instant { (now, Duration::ZERO) } else { pace(self.last, open_at, sweep_time(share, slow), lag) };
                 if !instant {
                     self.last = Some((at, dur));
-                    // A code line isn't drawn until it completes, so the last layout doesn't hold it (nor, for
-                    // the first, the box's padding).
+                    // A code line or a table row isn't drawn until it completes, so the last layout doesn't hold
+                    // it (nor, for the first, the box's padding).
                     let extra = match kind {
                         Kind::Fixed(_) => (v + 1 - before) as f32 * CODE_LINE + if before == 0 { CODE_BOX } else { 0.0 },
+                        Kind::Rows(_) => (v + 1 - before) as f32 * ROW + if before == 0 { TABLE_BOX } else { 0.0 },
                         _ => 0.0,
                     };
                     fresh.push((id.clone(), v, extra));
@@ -363,11 +379,21 @@ impl Reveal {
             }
             let top = wrap.and_then(|w| w.top).map(|t| t - origin);
             let line_h = wrap.map_or(TEXT_LINE, |w| w.line_h);
+            // A table's drawn rows report their bottoms; one not drawn yet is a one-line row below the last.
+            #[allow(clippy::cast_precision_loss)]
+            let row_end = |v: usize| {
+                let bottoms = wrap.map_or(&[][..], |w| &w.rows[..]);
+                match bottoms.get(v) {
+                    Some(b) => b - origin + 1.0,
+                    None => bottoms.last().map_or(top.unwrap_or(0.0) + 1.0, |b| b - origin + 1.0) + (v + 1 - bottoms.len()) as f32 * ROW,
+                }
+            };
             #[allow(clippy::cast_precision_loss)]
             let reach = |v: usize| {
                 top.map(|t| match kind {
                     Kind::Fixed(_) if code.is_empty() => t + 1.0,
                     Kind::Fixed(_) => t + 2.0 * CODE_PAD_Y + (v + 1) as f32 * CODE_LINE,
+                    Kind::Rows(_) => row_end(v),
                     _ => t + (v + 1) as f32 * line_h,
                 })
             };
@@ -399,16 +425,16 @@ impl Reveal {
             out.moving |= (0..arrivals.len()).any(|v| swept(v) < 1.0);
             let lines: Vec<(usize, f32)> = match (kind, count) {
                 (_, None) => vec![(0, 0.0)],
-                (Kind::Fixed(_), Some(_)) => (0..complete.min(given)).map(|v| (v, swept(v))).collect(),
+                (Kind::Fixed(_) | Kind::Rows(_), Some(_)) => (0..complete.min(given)).map(|v| (v, swept(v))).collect(),
                 (_, Some(c)) => (0..c).map(|v| (wrap.map_or(0, |w| w.starts[v]), swept(v))).collect(),
             };
             if last {
                 out.held = match kind {
-                    Kind::Fixed(_) => 0.0,
+                    Kind::Fixed(_) | Kind::Rows(_) => 0.0,
                     _ => count.map_or(1, |c| c - complete) as f32 * wrap.map_or(TEXT_LINE, |w| w.line_h),
                 };
             }
-            let waiting = matches!(kind, Kind::Fixed(_)) && given < complete;
+            let waiting = matches!(kind, Kind::Fixed(_) | Kind::Rows(_)) && given < complete;
             let shown_all = count.is_some() && !writing && !waiting && lines.iter().all(|(_, a)| *a >= 1.0);
             if !shown_all {
                 out.lines.insert(id.clone(), lines);
@@ -763,6 +789,39 @@ mod tests {
         let s = r.frame("k", &blocks, src, true, 400.0, now + Duration::from_secs(1), false);
         assert!(s.lines.contains_key("k-0-0-0") && s.lines["k-0-1-0"] == [(0, 0.0)]);
         assert_eq!(s.settled, 0, "the list is still being written");
+    }
+
+    #[test]
+    fn table_rows_come_in_one_by_one_once_complete() {
+        use crate::agent::markdown::Doc;
+        let now = Instant::now();
+        let mut r = Reveal::new(false, now);
+        let mut doc = Doc::default();
+        // The row being typed (`| 3`) isn't part of the streaming table: nothing waits on it.
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3";
+        doc.update(src, true);
+        let mut leafs = Vec::new();
+        leaves("k-0", &doc.blocks()[0], &mut leafs);
+        assert_eq!(leafs[0].1, Kind::Rows(2), "the header and one complete row");
+        let s = r.frame("k", doc.blocks(), src, true, 400.0, now, false);
+        assert_eq!(s.lines["k-0"], [(0, 0.0)], "the header is given its space first");
+        assert!(s.held.abs() < 1e-3, "no height held for a row being typed");
+        r.drawn = 1000.0;
+        let s = r.frame("k", doc.blocks(), src, true, 400.0, now + OPEN + SWEEP / 2 + 30 * MS, false);
+        let rows = &s.lines["k-0"];
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].1 > rows[1].1 && rows[1].1 > 0.0, "the next row starts halfway through the header: {rows:?}");
+        let s = r.frame("k", doc.blocks(), src, true, 400.0, now + Duration::from_secs(1), false);
+        assert!(!s.lines.contains_key("k-0") && !s.moving, "fully shown");
+        assert_eq!(s.settled, 0, "the table is still being written");
+        // The row completes: it sweeps in; the stream ends: done.
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
+        doc.update(src, false);
+        let later = now + Duration::from_secs(2);
+        let s = r.frame("k", doc.blocks(), src, false, 400.0, later, false);
+        assert_eq!(s.lines["k-0"].len(), 3);
+        let s = r.frame("k", doc.blocks(), src, false, 400.0, later + OPEN + SWEEP, false);
+        assert!(s.done && s.lines.is_empty());
     }
 
     #[test]
