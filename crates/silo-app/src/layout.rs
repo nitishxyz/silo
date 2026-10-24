@@ -327,12 +327,9 @@ impl Workspace {
             .pane_enter
             .get(id)
             .and_then(|(started, edge)| motion::progress(*started, motion::PANE_ENTER, now).map(|p| edge.offset(1.0 - p)));
-        let inner: AnyElement = match (self.panes.get(id), self.browsers.get(id), self.agents.get(id)) {
-            (Some((pane, _)), _, _) => pane.clone().into_any_element(),
-            (None, Some((pane, _)), _) => pane.clone().into_any_element(),
-            (None, None, Some((pane, _))) => pane.clone().into_any_element(),
-            (None, None, None) if self.files.contains_key(id) => self.files[id].0.clone().into_any_element(),
-            (None, None, None) => match crate::browser_pane::kind_of(self.block_info(id)) {
+        let inner: AnyElement = match self.block_pane(id) {
+            Some(pane) => pane.element(),
+            None => match crate::browser_pane::kind_of(self.block_info(id)) {
                 crate::browser_pane::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
                 crate::browser_pane::Kind::Agent => unsupported(self.agent_unsupported().into()),
                 _ => div().size_full().into_any_element(),
@@ -593,16 +590,9 @@ impl Workspace {
     /// Block `id`'s header parts, from the pane showing it; a block with no
     /// pane here gets its labels.
     fn header_parts(&self, id: &str, style: HeaderStyle, info: Option<&BlockInfo>, cx: &mut Context<Self>) -> HeaderParts {
-        if let Some((pane, _)) = self.panes.get(id) {
-            pane_header::parts(pane, style, info, cx)
-        } else if let Some((pane, _)) = self.browsers.get(id) {
-            pane_header::parts(pane, style, info, cx)
-        } else if let Some((pane, _)) = self.agents.get(id) {
-            pane_header::parts(pane, style, info, cx)
-        } else if let Some((pane, _)) = self.files.get(id) {
-            pane_header::parts(pane, style, info, cx)
-        } else {
-            pane_header::fallback(info, style)
+        match self.block_pane(id) {
+            Some(pane) => pane.header_parts(style, info, cx),
+            None => pane_header::fallback(info, style),
         }
     }
 

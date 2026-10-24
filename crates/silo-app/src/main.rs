@@ -12,6 +12,7 @@ mod approvals;
 mod assets;
 mod blink;
 mod block_status;
+mod blocks;
 mod browser_actions;
 mod browser_home;
 mod browser_host;

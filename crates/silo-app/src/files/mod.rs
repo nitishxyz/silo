@@ -241,6 +241,11 @@ impl FilesPane {
         self.load_all(cx);
     }
 
+    /// The body's bounds (viewer and tree), as last painted.
+    pub fn bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.body_bounds.get()
+    }
+
     /// The server's view of the block (a session view, `block.changed`).
     pub fn set_info(&mut self, info: BlockInfo, cx: &mut Context<Self>) {
         let state = info.files.as_deref().cloned();

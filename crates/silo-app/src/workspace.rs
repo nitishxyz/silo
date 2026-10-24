@@ -589,15 +589,8 @@ impl Workspace {
                 }
             }
             ConnEvent::Event(Event::BlockChanged { block }) => {
-                if let Some((pane, _)) = self.browsers.get(&block.id) {
-                    pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
-                } else if let Some((pane, _)) = self.agents.get(&block.id) {
-                    let session = block.agent.as_ref().and_then(|a| a.session_id.clone());
-                    pane.update(cx, |pane, cx| pane.show(session, block.cwd.clone(), cx));
-                } else if let Some((pane, _)) = self.panes.get(&block.id) {
-                    pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
-                } else if let Some((pane, _)) = self.files.get(&block.id) {
-                    pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
+                if let Some(pane) = self.block_pane(&block.id) {
+                    pane.set_info(block.clone(), cx);
                 }
                 if let Some(view) = self.view.as_mut()
                     && let Some(info) = view.blocks.iter_mut().find(|b| b.id == block.id)
@@ -982,15 +975,8 @@ impl Workspace {
         }
         let infos = view.blocks.clone();
         for info in infos {
-            if let Some((pane, _)) = self.browsers.get(&info.id) {
-                pane.update(cx, |pane, cx| pane.set_info(info, cx));
-            } else if let Some((pane, _)) = self.agents.get(&info.id) {
-                let session = info.agent.and_then(|a| a.session_id);
-                pane.update(cx, |pane, cx| pane.show(session, info.cwd, cx));
-            } else if let Some((pane, _)) = self.panes.get(&info.id) {
-                pane.update(cx, |pane, cx| pane.set_info(info, cx));
-            } else if let Some((pane, _)) = self.files.get(&info.id) {
-                pane.update(cx, |pane, cx| pane.set_info(info, cx));
+            if let Some(pane) = self.block_pane(&info.id) {
+                pane.set_info(info, cx);
             }
         }
         // Follow the server's focus when it changed (split, new window,
@@ -1000,13 +986,7 @@ impl Workspace {
             && self.add_host.is_none()
         {
             let focused = active.focused.clone();
-            let local = self.panes.values().any(|(p, _)| p.read(cx).focus.is_focused(window))
-                || self
-                    .browsers
-                    .values()
-                    .any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window))
-                || self.agents.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx))
-                || self.files_focused(window, cx).is_some();
+            let local = self.block_with_focus(window, cx).is_some();
             if self.server_focus.as_deref() != Some(&focused) || !local {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
@@ -1101,21 +1081,6 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn focus_block(&self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((pane, _)) = self.panes.get(block) {
-            let handle = pane.read(cx).focus.clone();
-            handle.focus(window, cx);
-        } else if let Some((pane, _)) = self.browsers.get(block) {
-            let handle = pane.read(cx).focus.clone();
-            handle.focus(window, cx);
-        } else if let Some((pane, _)) = self.agents.get(block) {
-            pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
-        } else if let Some((pane, _)) = self.files.get(block) {
-            let handle = pane.read(cx).focus.clone();
-            handle.focus(window, cx);
-        }
-    }
-
     /// Return keyboard focus to the terminal after closing an overlay.
     pub(crate) fn refocus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_window().map(|w| w.focused.clone()).filter(|b| self.has_pane(b)) {
@@ -1190,14 +1155,7 @@ impl Workspace {
     }
 
     pub(crate) fn focused_block(&self, window: &Window, cx: &gpui::App) -> Option<String> {
-        self.panes
-            .iter()
-            .find(|(_, (p, _))| p.read(cx).focus.is_focused(window))
-            .map(|(id, _)| id.clone())
-            .or_else(|| self.browser_focused(window, cx))
-            .or_else(|| self.agent_focused(window, cx))
-            .or_else(|| self.files_focused(window, cx))
-            .or_else(|| self.active_window().map(|w| w.focused.clone()))
+        self.block_with_focus(window, cx).or_else(|| self.active_window().map(|w| w.focused.clone()))
     }
 
     pub(crate) fn focused_pane(&self, window: &Window, cx: &gpui::App) -> Option<Entity<Pane>> {
@@ -1210,11 +1168,6 @@ impl Workspace {
             Some((p, _)) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
             None => self.block_info(block).filter(|i| matches!(i.kind, BlockKind::Agent | BlockKind::Files)).and_then(|i| i.cwd.clone()),
         }
-    }
-
-    /// Whether `block` has a pane of any kind here.
-    pub(crate) fn has_pane(&self, block: &str) -> bool {
-        self.panes.contains_key(block) || self.browsers.contains_key(block) || self.agents.contains_key(block) || self.files.contains_key(block)
     }
 
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {

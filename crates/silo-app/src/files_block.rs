@@ -311,13 +311,6 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn files_focused(&self, window: &Window, cx: &gpui::App) -> Option<String> {
-        self.files
-            .iter()
-            .find(|(_, (p, _))| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).tree_focus.is_focused(window))
-            .map(|(id, _)| id.clone())
-    }
-
     /// `files.changed` for one of this window's Files blocks.
     pub(crate) fn files_changed(&mut self, block: &str, paths: &[String], truncated: bool, cx: &mut Context<Self>) {
         if let Some((pane, _)) = self.files.get(block) {
