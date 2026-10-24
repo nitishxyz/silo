@@ -181,7 +181,7 @@ impl Workspace {
         if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll) {
             self.close_palette(window, cx);
         }
-        let launcher = matches!(command, Command::NewTabChooser | Command::SplitRightChooser | Command::SplitDownChooser | Command::NewPaneChooser);
+        let launcher = matches!(command, Command::NewTabChooser | Command::NewPaneChooser);
         if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll) && !launcher {
             self.close_launcher(window, cx);
         }
@@ -222,7 +222,7 @@ impl Workspace {
             Command::NewTerminalTab => self.new_window(window, cx),
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::NewAgentTab => self.new_agent_tab(window, cx),
-            Command::NewTabChooser | Command::SplitRightChooser | Command::SplitDownChooser | Command::NewPaneChooser => {
+            Command::NewTabChooser | Command::NewPaneChooser => {
                 self.toggle_launcher(command, window, cx);
             }
             Command::CloseTab => {
@@ -451,8 +451,6 @@ impl Workspace {
             | Command::SplitRight
             | Command::SplitDown
             | Command::NewPane
-            | Command::SplitRightChooser
-            | Command::SplitDownChooser
             | Command::NewPaneChooser
             | Command::NewBrowser
             | Command::OpenUrl

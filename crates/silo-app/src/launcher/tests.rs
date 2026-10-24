@@ -26,8 +26,8 @@ fn page(url: &str, title: &str) -> RecentPage {
     RecentPage { host: "local".into(), url: url.into(), title: title.into() }
 }
 
-fn split(via: Command) -> Target {
-    Target::Split { block: "b".into(), axis: Axis::Horizontal, via }
+fn split(side: Side, auto: Side) -> Target {
+    Target::Split { block: "b".into(), side, auto }
 }
 
 /// The kinds of `text`'s rows, in order (no recents).
@@ -133,19 +133,77 @@ fn rows_show_true_shortcuts() {
     assert_eq!(row_hint(Kind::Browser, &Target::Tab, Kind::Terminal).as_deref(), Some("⌥⌘T"));
     assert_eq!(row_hint(Kind::Terminal, &Target::Tab, Kind::Terminal).as_deref(), Some("⌘T"), "⌘T opens a terminal here");
     assert_eq!(row_hint(Kind::Terminal, &Target::Tab, Kind::Browser), None, "⌘T opens a browser here");
-    assert_eq!(row_hint(Kind::Terminal, &split(Command::SplitRight), Kind::Terminal).as_deref(), Some("⌘D"));
-    assert_eq!(row_hint(Kind::Terminal, &split(Command::SplitDown), Kind::Terminal).as_deref(), Some("⇧⌘D"));
-    assert_eq!(row_hint(Kind::Terminal, &split(Command::NewPane), Kind::Terminal).as_deref(), Some("⌘↩"));
-    assert_eq!(row_hint(Kind::Agent, &split(Command::NewPane), Kind::Terminal).as_deref(), Some("⇧⌘O"));
-    assert_eq!(row_hint(Kind::Agent, &split(Command::SplitRight), Kind::Terminal), None, "⇧⌘O picks its own side");
-    assert_eq!(row_hint(Kind::Browser, &split(Command::SplitDown), Kind::Terminal), None);
+    assert_eq!(row_hint(Kind::Terminal, &split(Side::Right, Side::Down), Kind::Terminal).as_deref(), Some("⌘D"));
+    assert_eq!(row_hint(Kind::Terminal, &split(Side::Down, Side::Right), Kind::Terminal).as_deref(), Some("⇧⌘D"));
+    assert_eq!(row_hint(Kind::Agent, &split(Side::Right, Side::Right), Kind::Terminal).as_deref(), Some("⇧⌘O"), "⌘↩'s side");
+    assert_eq!(row_hint(Kind::Agent, &split(Side::Down, Side::Right), Kind::Terminal), None, "⇧⌘O picks its own side");
+    assert_eq!(row_hint(Kind::Browser, &split(Side::Down, Side::Down), Kind::Terminal), None);
 }
 
 #[test]
-fn choosers_stand_for_their_instant_splits() {
-    assert_eq!(split_via(Command::SplitRightChooser), Some(Command::SplitRight));
-    assert_eq!(split_via(Command::SplitDownChooser), Some(Command::SplitDown));
-    assert_eq!(split_via(Command::NewPaneChooser), Some(Command::NewPane));
-    assert_eq!(split_via(Command::NewTabChooser), None, "a tab");
-    assert_eq!(split_via(Command::SplitRight), None);
+fn only_new_pane_chooses_a_side_starting_where_new_pane_splits() {
+    let wide = chooser_target(Command::NewPaneChooser, Some("b".into()), |_| Axis::Horizontal);
+    assert_eq!(wide, Some(split(Side::Right, Side::Right)), "⌘↩ splits a wide pane right");
+    let tall = chooser_target(Command::NewPaneChooser, Some("b".into()), |b| {
+        assert_eq!(b, "b");
+        Axis::Vertical
+    });
+    assert_eq!(tall, Some(split(Side::Down, Side::Down)), "⌘↩ splits a tall pane down");
+    assert_eq!(chooser_target(Command::NewPaneChooser, None, |_| Axis::Horizontal), None, "nothing focused");
+    assert_eq!(chooser_target(Command::NewTabChooser, Some("b".into()), |_| unreachable!()), Some(Target::Tab), "a tab has no side");
+    for axis in [Axis::Horizontal, Axis::Vertical] {
+        assert_eq!(Side::of_axis(axis).axis(), axis);
+    }
+}
+
+#[test]
+fn tab_and_left_right_cycle_the_side() {
+    assert_eq!(SIDES, [Side::Right, Side::Down], "splits put the new block second: no left or up");
+    assert_eq!(side_key("tab", false), Some(1));
+    assert_eq!(side_key("tab", true), Some(-1));
+    assert_eq!(side_key("right", false), Some(1));
+    assert_eq!(side_key("left", false), Some(-1));
+    assert_eq!(side_key("up", false), None, "↑↓ move through the rows");
+    assert_eq!(side_key("down", false), None);
+    assert_eq!(side_key("enter", false), None);
+    assert_eq!(side_key("a", false), None);
+    assert_eq!(Side::Right.step(1), Side::Down);
+    assert_eq!(Side::Down.step(1), Side::Right, "wraps");
+    assert_eq!(Side::Right.step(-1), Side::Down, "⇧tab wraps back");
+    assert_eq!(Side::Down.step(-1), Side::Right);
+    let mut side = Side::Right;
+    for key in ["tab", "tab", "right", "left"] {
+        side = side.step(side_key(key, false).unwrap());
+    }
+    assert_eq!(side, Side::Right);
+    assert_eq!(Side::Right.label(), "Right");
+    assert_eq!(Side::Down.label(), "Down");
+}
+
+#[test]
+fn confirming_splits_to_the_chosen_side() {
+    use silo_proto::control::Method;
+    assert_eq!(Side::Right.command(), Command::SplitRight);
+    assert_eq!(Side::Down.command(), Command::SplitDown);
+    let rows = [
+        (Row::Kind(Kind::Terminal, Vec::new()), BlockKind::Terminal, None),
+        (Row::Kind(Kind::Browser, Vec::new()), BlockKind::Browser, None),
+        (Row::Kind(Kind::Agent, Vec::new()), BlockKind::Agent, None),
+        (Row::Open { url: "https://a.dev/".into(), title: String::new() }, BlockKind::Browser, Some("https://a.dev/".to_owned())),
+        (Row::Run("make".into()), BlockKind::Terminal, None),
+    ];
+    for side in SIDES {
+        let want_axis = if *side == Side::Right { Axis::Horizontal } else { Axis::Vertical };
+        assert_eq!(side.axis(), want_axis);
+        for (row, want_kind, want_url) in &rows {
+            let Method::BlockSplit { block_id, axis, spawn, kind, url, agent } = split_method("b", *side, row, Some("/w".into())) else {
+                panic!("{row:?}: not a split");
+            };
+            assert_eq!((block_id.as_str(), axis, kind, &url), ("b", want_axis, *want_kind, want_url), "{side:?} {row:?}");
+            assert!(agent.is_none());
+            assert!(spawn.command.is_empty(), "a >command is typed into the shell, not spawned");
+            let cwd = if *want_kind == BlockKind::Browser { None } else { Some("/w".to_owned()) };
+            assert_eq!(spawn.cwd, cwd, "{row:?}");
+        }
+    }
 }

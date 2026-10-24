@@ -81,8 +81,12 @@ impl Workspace {
             );
         }
         let title = match &dialog.target {
-            Target::Tab => "New Tab",
-            Target::Split { via, .. } => via.title(),
+            Target::Tab => "New Tab".to_owned(),
+            Target::Split { side, .. } => format!("New Pane · {}", side.label()),
+        };
+        let footer = match &dialog.target {
+            Target::Tab => "↩ open · 1–9 pick · address · >command · @agent · esc cancel",
+            Target::Split { .. } => "↩ open · tab/←→ side · 1–9 pick · address · >command · @agent · esc cancel",
         };
         let empty = dialog.rows.is_empty();
         let card = div()
@@ -103,7 +107,8 @@ impl Workspace {
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let k = &event.keystroke;
                 let plain = !(k.modifiers.platform || k.modifiers.control || k.modifiers.alt || k.modifiers.shift);
-                if plain && this.launcher_digit(&k.key, window, cx) {
+                let side = !(k.modifiers.platform || k.modifiers.control || k.modifiers.alt);
+                if (plain && this.launcher_digit(&k.key, window, cx)) || (side && this.launcher_side_key(&k.key, k.modifiers.shift, cx)) {
                     cx.stop_propagation();
                 }
             }))
@@ -133,7 +138,7 @@ impl Workspace {
                     .border_color(rgb(theme::border()))
                     .text_size(px(11.5))
                     .text_color(rgb(theme::muted()))
-                    .child("↩ open · 1–9 pick · address · >command · @agent · esc cancel"),
+                    .child(footer),
             );
         let top = crate::workspace::TITLEBAR_HEIGHT + (f32::from(window.viewport_size().height) * 0.12).clamp(24.0, 120.0);
         Some(

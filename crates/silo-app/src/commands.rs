@@ -85,9 +85,7 @@ commands! {
     NewPane => "New Pane", "Panes", ["cmd-enter"], "Beside the focused pane, along its longer side";
     SplitRight => "Split Right", "Panes", ["cmd-d"];
     SplitDown => "Split Down", "Panes", ["cmd-shift-d"];
-    NewPaneChooser => "New Pane…", "Panes", ["ctrl-cmd-enter"], "Choose what opens beside the focused pane";
-    SplitRightChooser => "Split Right…", "Panes", ["ctrl-cmd-d"], "Choose what opens on the right";
-    SplitDownChooser => "Split Down…", "Panes", ["ctrl-cmd-shift-d"], "Choose what opens below";
+    NewPaneChooser => "New Pane…", "Panes", ["ctrl-cmd-enter"], "Choose what opens beside the focused pane, and on which side";
     ClosePane => "Close Pane", "Panes", ["cmd-w"];
     FocusNextPane => "Focus Next Pane", "Panes", ["cmd-]"];
     FocusPreviousPane => "Focus Previous Pane", "Panes", ["cmd-["];
@@ -179,14 +177,7 @@ impl Command {
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
             // The launcher's pick is the `kind` (and `url`) param.
-            Self::NewPane
-            | Self::SplitRight
-            | Self::SplitDown
-            | Self::NewPaneChooser
-            | Self::SplitRightChooser
-            | Self::SplitDownChooser
-            | Self::NewBrowser
-            | Self::NewAgent => Method("block.split"),
+            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewPaneChooser | Self::NewBrowser | Self::NewAgent => Method("block.split"),
             Self::OttoSettings => Method("app.settings_open"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
@@ -383,9 +374,14 @@ mod tests {
         assert_eq!(Command::NewTab.hint().as_deref(), Some("⌘T"));
         assert_eq!(Command::NewBrowserTab.hint().as_deref(), Some("⌥⌘T"));
         assert_eq!(Command::NewTabChooser.hint().as_deref(), Some("⌃⌘T"));
-        assert_eq!(Command::SplitRightChooser.hint().as_deref(), Some("⌃⌘D"));
-        assert_eq!(Command::SplitDownChooser.hint().as_deref(), Some("⌃⇧⌘D"));
         assert_eq!(Command::NewPaneChooser.hint().as_deref(), Some("⌃⌘↩"));
+        // ⌃⌘D is macOS Look Up: no chooser takes it (or ⌃⇧⌘D).
+        for c in Command::ALL {
+            assert!(!c.keys().iter().any(|k| *k == "ctrl-cmd-d" || *k == "ctrl-cmd-shift-d"), "{c:?}");
+        }
+        let choosers: Vec<_> =
+            Command::ALL.iter().filter(|c| c.title().ends_with('…') && c.keys().iter().any(|k| k.starts_with("ctrl-cmd-"))).collect();
+        assert_eq!(choosers, [&Command::NewTabChooser, &Command::NewPaneChooser], "exactly two chooser chords");
         assert_eq!(Command::SplitRight.hint().as_deref(), Some("⌘D"), "instant splits keep their keys");
         assert_eq!(Command::SplitDown.hint().as_deref(), Some("⇧⌘D"));
         assert_eq!(Command::NewTerminalTab.hint(), None);

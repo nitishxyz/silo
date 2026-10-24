@@ -8,7 +8,7 @@ use silo_proto::{
     model::BlockKind,
 };
 
-use super::{Dialog, Kind, Row, Target, digit_pick, intent_note, preselect, rows, same_kind, split_via, step};
+use super::{Dialog, Kind, Row, Target, chooser_target, digit_pick, intent_note, preselect, rows, same_kind, side_key, split_method, step};
 use crate::{
     commands::Command,
     text_field::{FieldEvent, TextField},
@@ -42,25 +42,12 @@ impl Workspace {
         crate::browser_home::listed(&crate::hosts_state::HostsState::global(cx).read(cx).app_state().recent_pages, &key)
     }
 
-    /// Open the launcher `chooser` stands for (New Tab…, Split Right…,
-    /// Split Down…, New Pane…), or close it if that one is open.
+    /// Open the launcher `chooser` stands for (New Tab… or New Pane…), or
+    /// close it if that one is open.
     pub(crate) fn toggle_launcher(&mut self, chooser: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let target = match split_via(chooser) {
-            None => Target::Tab,
-            Some(via) => {
-                let Some(block) = self.focused_block(window, cx) else { return };
-                let axis = match via {
-                    Command::SplitRight => silo_proto::model::Axis::Horizontal,
-                    Command::SplitDown => silo_proto::model::Axis::Vertical,
-                    _ => self.auto_axis(&block),
-                };
-                Target::Split { block, axis, via }
-            }
-        };
-        let same_target = |t: &Target| match (t, &target) {
-            (Target::Split { via: a, .. }, Target::Split { via: b, .. }) => a == b,
-            (a, b) => a == b,
-        };
+        let block = if chooser == Command::NewPaneChooser { self.focused_block(window, cx) } else { None };
+        let Some(target) = chooser_target(chooser, block, |b| self.auto_axis(b)) else { return };
+        let same_target = |t: &Target| matches!((t, &target), (Target::Tab, Target::Tab) | (Target::Split { .. }, Target::Split { .. }));
         if self.launcher.dialog.as_ref().is_some_and(|d| same_target(&d.target)) {
             return self.close_launcher(window, cx);
         }
@@ -101,6 +88,17 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Tab, ⇧tab, ← or → in a New Pane… dialog moves its side (the ghost
+    /// follows); true if it did. A tab's dialog leaves them to the field.
+    pub(super) fn launcher_side_key(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
+        let Some(delta) = side_key(key, shift) else { return false };
+        if !self.launcher.step_side(delta) {
+            return false;
+        }
+        cx.notify();
+        true
     }
 
     /// A digit typed into the empty field picks its row; true if it did.
@@ -157,23 +155,14 @@ impl Workspace {
                 let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Terminal, url: None };
                 self.launch_command(method, command, cx);
             }
-            (Target::Split { block, axis, .. }, row) => {
-                let cwd = self.cwd_of(&block, cx);
-                let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-                let split = |kind: BlockKind, spawn: SpawnSpec, url: Option<String>| Method::BlockSplit {
-                    block_id: block.clone(),
-                    axis,
-                    spawn,
-                    kind,
-                    url,
-                    agent: None,
-                };
+            (Target::Split { block, side, .. }, row) => {
+                let method = split_method(&block, side, &row, self.cwd_of(&block, cx));
                 match row {
-                    Row::Kind(Kind::Terminal, _) => self.split_block(block.clone(), axis, cx),
-                    Row::Kind(Kind::Browser, _) => self.create_browser(split(BlockKind::Browser, SpawnSpec::default(), None), window, cx),
-                    Row::Kind(Kind::Agent, _) => self.create_agent(split(BlockKind::Agent, spawn, None), cx),
-                    Row::Open { url, .. } => self.call(split(BlockKind::Browser, SpawnSpec::default(), Some(url))),
-                    Row::Run(command) => self.launch_command(split(BlockKind::Terminal, spawn, None), command, cx),
+                    Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), cx),
+                    Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
+                    Row::Kind(Kind::Agent, _) => self.create_agent(method, cx),
+                    Row::Open { .. } => self.call(method),
+                    Row::Run(command) => self.launch_command(method, command, cx),
                 }
             }
         }

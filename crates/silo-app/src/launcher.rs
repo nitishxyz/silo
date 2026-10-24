@@ -1,9 +1,11 @@
 //! The block launcher: a dialog over the whole window choosing what a new
-//! tab (⌃⌘T, the tab strip's +) or split (⌃⌘D, ⌃⇧⌘D, ⌃⌘↩) holds. Type to
-//! filter the kinds; an address opens a browser there, `>cmd` a terminal
-//! running `cmd`, `@name` an agent; 1–9 pick a row while nothing is typed.
-//! A split's destination shows as a ghost in the layout until a choice is
-//! made. ⌘T, ⌘D, ⇧⌘D and ⌘↩ skip it.
+//! tab (⌃⌘T, the tab strip's +) or pane (⌃⌘↩) holds. Type to filter the
+//! kinds; an address opens a browser there, `>cmd` a terminal running
+//! `cmd`, `@name` an agent; 1–9 pick a row while nothing is typed. A new
+//! pane's side (right or down: splits always put the new block second)
+//! starts where ⌘↩ would put it; tab/⇧tab or ←/→ change it, ↑↓ stay rows.
+//! Its destination shows as a ghost in the layout until a choice is made.
+//! ⌘T, ⌘D, ⇧⌘D and ⌘↩ skip it.
 
 mod actions;
 #[cfg(test)]
@@ -81,25 +83,104 @@ impl Kind {
     }
 }
 
+/// Which side of the focused pane a new pane takes. A split always puts
+/// the new block second (`Layout::split`, `block.split` takes only an
+/// axis), so there is no left or up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Right,
+    Down,
+}
+
+/// The sides offered, in tab order.
+pub const SIDES: &[Side] = &[Side::Right, Side::Down];
+
+impl Side {
+    /// Where ⌘↩ splits along `axis` (its automatic one).
+    pub fn of_axis(axis: Axis) -> Self {
+        match axis {
+            Axis::Horizontal => Self::Right,
+            Axis::Vertical => Self::Down,
+        }
+    }
+
+    pub fn axis(self) -> Axis {
+        match self {
+            Self::Right => Axis::Horizontal,
+            Self::Down => Axis::Vertical,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Right => "Right",
+            Self::Down => "Down",
+        }
+    }
+
+    /// The instant command splitting a terminal to this side.
+    pub fn command(self) -> Command {
+        match self {
+            Self::Right => Command::SplitRight,
+            Self::Down => Command::SplitDown,
+        }
+    }
+
+    /// The side `delta` steps on through [`SIDES`], wrapping.
+    #[must_use]
+    pub fn step(self, delta: isize) -> Self {
+        let at = SIDES.iter().position(|s| *s == self).unwrap_or(0);
+        SIDES[step(at, SIDES.len(), delta)]
+    }
+}
+
+/// How a key changes a new pane's side: tab / → forward, ⇧tab / ← back.
+/// ↑↓ stay row navigation; the field has no caret to move, so ←→ are free.
+pub fn side_key(key: &str, shift: bool) -> Option<isize> {
+    match key {
+        "tab" => Some(if shift { -1 } else { 1 }),
+        "right" if !shift => Some(1),
+        "left" if !shift => Some(-1),
+        _ => None,
+    }
+}
+
 /// Where a launch goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// A new tab.
     Tab,
-    /// A split of `block` along `axis`; `via` is the instant command this
-    /// is the chooser of (Split Right, Split Down or New Pane).
-    Split { block: String, axis: Axis, via: Command },
+    /// A split of `block` to `side`; `auto` is the side ⌘↩ would take
+    /// (where the dialog started).
+    Split { block: String, side: Side, auto: Side },
 }
 
-/// The instant split a split chooser stands for: what its target's axis
-/// and the Terminal row's shortcut come from.
-pub fn split_via(chooser: Command) -> Option<Command> {
+/// The target a chooser opens: New Pane… splits `block` (if any), starting
+/// on `auto`; anything else is a tab.
+pub fn chooser_target(chooser: Command, block: Option<String>, auto: impl FnOnce(&str) -> Axis) -> Option<Target> {
     match chooser {
-        Command::SplitRightChooser => Some(Command::SplitRight),
-        Command::SplitDownChooser => Some(Command::SplitDown),
-        Command::NewPaneChooser => Some(Command::NewPane),
-        _ => None,
+        Command::NewPaneChooser => {
+            let block = block?;
+            let side = Side::of_axis(auto(&block));
+            Some(Target::Split { block, side, auto: side })
+        }
+        _ => Some(Target::Tab),
     }
+}
+
+/// The `block.split` creating `row` beside `block` to `side`, as the
+/// instant commands make it (`cwd`: the split block's, for shells and
+/// agents; browsers start with no spawn).
+pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> silo_proto::control::Method {
+    use silo_proto::control::{Method, SpawnSpec};
+    let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
+    let (kind, spawn, url) = match row {
+        Row::Kind(Kind::Terminal, _) | Row::Run(_) => (BlockKind::Terminal, spawn, None),
+        Row::Kind(Kind::Browser, _) => (BlockKind::Browser, SpawnSpec::default(), None),
+        Row::Kind(Kind::Agent, _) => (BlockKind::Agent, spawn, None),
+        Row::Open { url, .. } => (BlockKind::Browser, SpawnSpec::default(), Some(url.clone())),
+    };
+    Method::BlockSplit { block_id: block.to_owned(), axis: side.axis(), spawn, kind, url, agent: None }
 }
 
 /// What the typed text asks for.
@@ -181,7 +262,7 @@ pub fn intent_note(text: &str) -> Option<String> {
 }
 
 /// The row selected for `text`: the kind the instant shortcut opens until
-/// something is typed (so ⌃⌘T ↩ is ⌘T and ⌃⌘D ↩ is ⌘D), then the best.
+/// something is typed (so ⌃⌘T ↩ is ⌘T and ⌃⌘↩ ↩ is ⌘↩), then the best.
 pub fn preselect(text: &str, rows: &[Row], same: Kind) -> usize {
     if text.trim().is_empty() { rows.iter().position(|r| matches!(r, Row::Kind(k, _) if *k == same)).unwrap_or(0) } else { 0 }
 }
@@ -213,10 +294,11 @@ pub fn same_kind(focused: Option<&str>, blocks: &[BlockInfo]) -> Kind {
 pub fn row_hint(kind: Kind, target: &Target, same: Kind) -> Option<String> {
     match target {
         Target::Tab => kind.tab_command().hint().or_else(|| (kind == same).then(|| Command::NewTab.hint()).flatten()),
-        // ⌘D, ⇧⌘D and ⌘↩ split with a terminal; ⇧⌘O an agent beside, as ⌘↩ does.
-        Target::Split { via, .. } => match kind {
-            Kind::Terminal => via.hint(),
-            Kind::Agent if *via == Command::NewPane => Command::NewAgent.hint(),
+        // ⌘D and ⇧⌘D split right and down with a terminal; ⇧⌘O an agent
+        // on ⌘↩'s side.
+        Target::Split { side, auto, .. } => match kind {
+            Kind::Terminal => side.command().hint(),
+            Kind::Agent if side == auto => Command::NewAgent.hint(),
             _ => None,
         },
     }
@@ -256,7 +338,18 @@ impl Launcher {
     /// for the ghost at its destination.
     pub fn ghost(&self) -> Option<(&str, Axis, Option<Kind>)> {
         let dialog = self.dialog.as_ref()?;
-        let Target::Split { block, axis, .. } = &dialog.target else { return None };
-        Some((block.as_str(), *axis, dialog.rows.get(dialog.selected).map(Row::kind)))
+        let Target::Split { block, side, .. } = &dialog.target else { return None };
+        Some((block.as_str(), side.axis(), dialog.rows.get(dialog.selected).map(Row::kind)))
+    }
+
+    /// Move a new pane's side by `delta`; false for a tab or a closed dialog.
+    pub fn step_side(&mut self, delta: isize) -> bool {
+        match self.dialog.as_mut().map(|d| &mut d.target) {
+            Some(Target::Split { side, .. }) => {
+                *side = side.step(delta);
+                true
+            }
+            _ => false,
+        }
     }
 }
