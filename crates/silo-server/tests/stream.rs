@@ -242,7 +242,12 @@ async fn slow_subscriber_is_cut_while_fast_one_keeps_up() {
     let mut fast = Client::attach(&block, 2, None);
     let start = fast.welcome().await.offset;
     let mut next = start;
-    let mut acks = 0u32;
+    // As a client acks (`silo_client` mirror: every 64 KiB). Not per frame
+    // count: a loaded runner coalesces output into 256 KiB frames, and 16 of
+    // those span the whole ring, so the ack fell out of it and the fast
+    // subscriber was cut too (linux CI).
+    const ACK_BYTES: u64 = 64 * 1024;
+    let mut acked = start;
     while next < TOTAL {
         let Some(frame) = fast.recv(Duration::from_secs(20)).await else {
             panic!("fast subscriber starved at {next} (cut: {})", fast.sink.is_cancelled());
@@ -250,8 +255,8 @@ async fn slow_subscriber_is_cut_while_fast_one_keeps_up() {
         if let ServerData::Output { offset, bytes } = ServerData::from_frame(frame).unwrap() {
             assert_eq!(offset, next, "gap in fast subscriber output");
             next += bytes.len() as u64;
-            acks += 1;
-            if acks.is_multiple_of(16) {
+            if next - acked >= ACK_BYTES {
+                acked = next;
                 block.send(BlockMsg::Ack { sub_id: 2, offset: next });
             }
         }
