@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use gpui::{AnyElement, Context, IntoElement, Window, canvas, div, prelude::*, px, relative, rgb};
 use silo_proto::{
-    control::Method,
+    compat::feature,
+    control::{Dock, Method},
     layout_ops::{self, MIN_RATIO},
     model::{Axis, BlockInfo, Layout, WindowInfo},
 };
@@ -370,25 +371,39 @@ impl Workspace {
             div().absolute().top_0().left_0().size_full().bg(rgb(fill_color).opacity(dim)).when(comfortable, |el| el.continuous_corners(fill))
         });
         let content = div().relative().flex_1().min_h_0().min_w_0().when_some(fade, |el, f| el.opacity(f)).child(inner);
-        // Drop target for a pane dragged by its header: an accent outline
-        // and tint while another pane of this window hovers it.
+        // Drop target for a pane dragged by its header: its edge bands dock
+        // the dragged pane on that side, the middle swaps the two (only
+        // swaps on hosts without `dock_sides`). A ghost shows where it goes.
         let drop = swap.map(|window_id| {
             let (window_id, target) = (window_id.to_owned(), id.to_owned());
             let check = (window_id.clone(), target.clone());
+            let hover = check.clone();
+            let sides = self.host_supports(feature::DOCK_SIDES);
+            let ghost = self.pane_drop.as_ref().filter(|(t, _)| t == id).map(|&(_, zone)| drop_ghost(zone, comfortable, fill));
             div()
                 .id(gpui::ElementId::Name(format!("pane-drop-{id}").into()))
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
-                .when(comfortable, |el| el.continuous_corners(fill))
                 .can_drop(move |d, _, _| d.downcast_ref::<DraggedPane>().is_some_and(|d| can_swap(d, &check.0, &check.1)))
-                .drag_over::<DraggedPane>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent())))
-                .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
-                    if can_swap(d, &window_id, &target) {
-                        this.swap_panes(&window_id, &d.block_id, &target, cx);
+                .on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<DraggedPane>, _, cx| {
+                    let over = ev.bounds.contains(&ev.event.position) && can_swap(ev.drag(cx), &hover.0, &hover.1);
+                    let zone = over.then(|| drop_zone(ev.event.position, ev.bounds, sides));
+                    this.set_pane_drop(&hover.1, zone, cx);
+                }))
+                .on_drop(cx.listener(move |this, d: &DraggedPane, window, cx| {
+                    let zone = this.pane_drop.take().filter(|(t, _)| *t == target).map_or(PaneDrop::Swap, |(_, zone)| zone);
+                    cx.notify();
+                    if !can_swap(d, &window_id, &target) {
+                        return;
+                    }
+                    match zone.dock() {
+                        Some((axis, before)) => this.dock_pane(&window_id, &d.block_id, &target, axis, before, window, cx),
+                        None => this.swap_panes(&window_id, &d.block_id, &target, cx),
                     }
                 }))
+                .children(ghost)
         });
         let card = div()
             .group(card_group(id))
@@ -545,7 +560,24 @@ impl Workspace {
                     this.focus_block(&focus_block, window, cx);
                 }),
             )
-            .when_some(dragged, |el, d| el.on_drag(d, |d, offset, _, cx| cx.new(|_| PanePill { label: d.label.clone(), icon: d.icon, offset })))
+            .when_some(dragged, |el, d| {
+                let workspace = cx.entity().downgrade();
+                el.on_drag(d, move |d, offset, _, cx| {
+                    let workspace = workspace.clone();
+                    // The drop preview lives exactly as long as the drag.
+                    cx.new(|cx| {
+                        cx.on_release(move |_, cx| {
+                            _ = workspace.update(cx, |this, cx| {
+                                if this.pane_drop.take().is_some() {
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
+                        PanePill { label: d.label.clone(), icon: d.icon, offset }
+                    })
+                })
+            })
             .children(rule)
             .children(progress);
         // A float's full header moves it (its middle and buttons keep their
@@ -569,6 +601,44 @@ impl Workspace {
         } else {
             pane_header::fallback(info, style)
         }
+    }
+
+    /// Record where a dragged pane would drop on `target`; `None` (the
+    /// pointer is elsewhere) clears it if it was on `target`.
+    fn set_pane_drop(&mut self, target: &str, zone: Option<PaneDrop>, cx: &mut Context<Self>) {
+        let next = match zone {
+            Some(zone) => Some((target.to_owned(), zone)),
+            None if self.pane_drop.as_ref().is_some_and(|(t, _)| t == target) => None,
+            None => return,
+        };
+        if self.pane_drop != next {
+            self.pane_drop = next;
+            cx.notify();
+        }
+    }
+
+    /// Moves pane `block` next to `target` in window `window_id` (along
+    /// `axis`, first when `before`): locally at once, focused and
+    /// unzoomed, then on the server, whose session.changed confirms it.
+    #[allow(clippy::too_many_arguments)]
+    fn dock_pane(&mut self, window_id: &str, block: &str, target: &str, axis: Axis, before: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(w) = window_mut(self, window_id) else { return };
+        let old = (w.layout.clone(), w.focused.clone(), w.zoomed);
+        if !w.layout.dock(block, target, axis, before) {
+            return;
+        }
+        block.clone_into(&mut w.focused);
+        w.zoomed = false;
+        self.focus_block(block, window, cx);
+        cx.notify();
+        let window_id = window_id.to_owned();
+        let revert = move |this: &mut Self| {
+            if let Some(w) = window_mut(this, &window_id) {
+                (w.layout, w.focused, w.zoomed) = old;
+            }
+        };
+        let dock = Dock { target: target.to_owned(), axis, before };
+        self.call_optimistic(Method::BlockMove { block_id: block.to_owned(), rect: None, dock: Some(dock) }, "Couldn't move pane", revert, cx);
     }
 
     /// Swaps two panes of a window: locally at once, then on the server,
@@ -713,6 +783,81 @@ impl Render for PanePill {
 /// and not zoomed.
 fn swap_window(w: &WindowInfo) -> Option<&str> {
     (!w.zoomed && w.layout.blocks().len() > 1).then_some(w.id.as_str())
+}
+
+/// Where on a pane a dragged pane lands: a side docks it there (the
+/// target keeps the other half), the middle swaps the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneDrop {
+    Swap,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl PaneDrop {
+    pub(crate) const SIDES: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    /// The split docking makes: its axis and whether the docked pane comes
+    /// first. `None` for a swap.
+    pub(crate) fn dock(self) -> Option<(Axis, bool)> {
+        match self {
+            Self::Swap => None,
+            Self::Left => Some((Axis::Horizontal, true)),
+            Self::Right => Some((Axis::Horizontal, false)),
+            Self::Top => Some((Axis::Vertical, true)),
+            Self::Bottom => Some((Axis::Vertical, false)),
+        }
+    }
+}
+
+/// Share of a pane's width (height) whose left and right (top and bottom)
+/// bands dock to that side, at most [`EDGE_MAX`] points each.
+const EDGE_SHARE: f32 = 0.25;
+const EDGE_MAX: f32 = 160.0;
+/// Comfortable: how far a docking ghost sits inside the target card.
+const GHOST_INSET: f32 = 4.0;
+
+/// The zone of pane `bounds` that the pointer at `at` is in: within an
+/// edge band, that side (in a corner, the edge it is relatively nearer);
+/// otherwise, or without `sides` (a host that only swaps), a swap.
+pub(crate) fn drop_zone(at: gpui::Point<gpui::Pixels>, bounds: gpui::Bounds<gpui::Pixels>, sides: bool) -> PaneDrop {
+    let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    if !sides || w <= 0.0 || h <= 0.0 {
+        return PaneDrop::Swap;
+    }
+    let (x, y) = (f32::from(at.x - bounds.origin.x), f32::from(at.y - bounds.origin.y));
+    let band = |len: f32| (len * EDGE_SHARE).min(EDGE_MAX);
+    let (bx, by) = (band(w), band(h));
+    // How deep into each band the pointer is, 0 at the edge, 1 at its end.
+    [(x / bx, PaneDrop::Left), ((w - x) / bx, PaneDrop::Right), (y / by, PaneDrop::Top), ((h - y) / by, PaneDrop::Bottom)]
+        .into_iter()
+        .filter(|&(depth, _)| (0.0..1.0).contains(&depth))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(PaneDrop::Swap, |(_, side)| side)
+}
+
+/// The ghost of a pane drop on its target, the same tint and accent
+/// outline throughout: the whole card for a swap, else the half the pane
+/// docks into (Comfortable: a rounded card just inside the target's;
+/// Compact: flush). `fill`: the target's corners inside its outline.
+fn drop_ghost(zone: PaneDrop, comfortable: bool, fill: CardCorners) -> gpui::Div {
+    let inset = px(if comfortable && zone != PaneDrop::Swap { GHOST_INSET } else { 0.0 });
+    let ghost = div().absolute().bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent()));
+    let ghost = match zone {
+        PaneDrop::Swap => ghost.inset_0(),
+        PaneDrop::Left => ghost.top(inset).bottom(inset).left(inset).right(relative(0.5)),
+        PaneDrop::Right => ghost.top(inset).bottom(inset).right(inset).left(relative(0.5)),
+        PaneDrop::Top => ghost.left(inset).right(inset).top(inset).bottom(relative(0.5)),
+        PaneDrop::Bottom => ghost.left(inset).right(inset).bottom(inset).top(relative(0.5)),
+    };
+    ghost.when(comfortable, |el| el.continuous_corners(fill.inset(f32::from(inset))))
+}
+
+/// Window `id` of the current session.
+fn window_mut<'a>(this: &'a mut Workspace, id: &str) -> Option<&'a mut WindowInfo> {
+    this.view.as_mut().and_then(|v| v.session.windows.iter_mut().find(|w| w.id == id))
 }
 
 /// Whether `dragged` may be dropped on pane `target` of window `window`.
@@ -922,6 +1067,41 @@ mod tests {
         assert!(can_swap(&dragged, "w", "b"));
         assert!(!can_swap(&dragged, "w", "a"));
         assert!(!can_swap(&dragged, "other", "b"));
+    }
+
+    #[test]
+    fn drop_zones_dock_on_edge_bands_and_swap_in_the_middle() {
+        let pane = gpui::Bounds::new(gpui::point(px(100.0), px(50.0)), gpui::size(px(400.0), px(200.0)));
+        let at = |x: f32, y: f32| drop_zone(gpui::point(px(100.0 + x), px(50.0 + y)), pane, true);
+        // Bands: 25% of each side (100pt across, 50pt down).
+        assert_eq!(at(200.0, 100.0), PaneDrop::Swap);
+        assert_eq!(at(10.0, 100.0), PaneDrop::Left);
+        assert_eq!(at(99.0, 100.0), PaneDrop::Left);
+        assert_eq!(at(101.0, 100.0), PaneDrop::Swap);
+        assert_eq!(at(390.0, 100.0), PaneDrop::Right);
+        assert_eq!(at(200.0, 5.0), PaneDrop::Top);
+        assert_eq!(at(200.0, 190.0), PaneDrop::Bottom);
+        // Corners: the edge the pointer is relatively nearer.
+        assert_eq!(at(10.0, 40.0), PaneDrop::Left, "10% into the left band, 80% into the top one");
+        assert_eq!(at(80.0, 5.0), PaneDrop::Top);
+        assert_eq!(at(395.0, 195.0), PaneDrop::Right);
+        // A large pane's bands stop at EDGE_MAX.
+        let big = gpui::Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(px(2000.0), px(1000.0)));
+        let big_at = |x: f32, y: f32| drop_zone(gpui::point(px(x), px(y)), big, true);
+        assert_eq!(big_at(EDGE_MAX - 1.0, 500.0), PaneDrop::Left);
+        assert_eq!(big_at(EDGE_MAX + 1.0, 500.0), PaneDrop::Swap);
+        assert_eq!(big_at(1000.0, 1000.0 - EDGE_MAX + 1.0), PaneDrop::Bottom);
+        // Outside, on hosts that only swap, or unmeasured: a swap.
+        assert_eq!(at(-5.0, 100.0), PaneDrop::Swap);
+        assert_eq!(drop_zone(gpui::point(px(105.0), px(100.0)), pane, false), PaneDrop::Swap);
+        assert_eq!(drop_zone(gpui::point(px(0.0), px(0.0)), gpui::Bounds::default(), true), PaneDrop::Swap);
+    }
+
+    #[test]
+    fn drop_sides_dock_on_their_axis_and_end() {
+        assert_eq!(PaneDrop::Swap.dock(), None);
+        let docks: Vec<_> = PaneDrop::SIDES.iter().map(|s| s.dock().unwrap()).collect();
+        assert_eq!(docks, [(Axis::Horizontal, true), (Axis::Horizontal, false), (Axis::Vertical, true), (Axis::Vertical, false)]);
     }
 
     #[test]

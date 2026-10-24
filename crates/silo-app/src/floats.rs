@@ -5,12 +5,14 @@ use std::time::Instant;
 
 use gpui::{AnyElement, Bounds, Context, DragMoveEvent, Pixels, Point, Window, div, prelude::*, px, relative, rgb};
 use silo_proto::{
+    compat::feature,
     control::{Dock, Method},
     model::{Axis, FloatRect, WindowInfo},
 };
 
 use crate::theme::Continuous as _;
 use crate::{
+    layout::PaneDrop,
     pane_header::HeaderMode,
     radius::{self, CardCorners},
     theme,
@@ -158,40 +160,62 @@ impl Workspace {
 
 impl Workspace {
     /// While a float is dragged: edge zones on tiled pane `target` that dock
-    /// it there. The server docks a block second, so only the right and
-    /// bottom edges are offered.
+    /// it there. Hosts without `dock_sides` dock a block second, so only
+    /// the right and bottom edges are offered there.
     pub(crate) fn dock_zones(&self, target: &str, fill: CardCorners, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if self.float_drag.as_ref().is_none_or(|d| d.grab != Grab::Move) {
             return Vec::new();
         }
-        [Axis::Horizontal, Axis::Vertical]
+        let sides = self.host_supports(feature::DOCK_SIDES);
+        PaneDrop::SIDES
             .into_iter()
-            .map(|axis| {
+            .filter(|&side| sides || matches!(side, PaneDrop::Right | PaneDrop::Bottom))
+            .map(|side| {
                 let target = target.to_owned();
-                let zone = div().id(gpui::ElementId::Name(format!("dock-{axis:?}-{target}").into())).absolute().right_0().bottom_0().occlude();
-                let corners = match axis {
-                    Axis::Horizontal => CardCorners { top_left: 0.0, bottom_left: 0.0, ..fill },
-                    Axis::Vertical => CardCorners { top_left: 0.0, top_right: 0.0, ..fill },
+                let zone = div().id(gpui::ElementId::Name(format!("dock-{side:?}-{target}").into())).absolute().occlude();
+                let hover = |s: gpui::StyleRefinement| s.bg(rgb(theme::accent()).opacity(0.08)).border_color(rgb(theme::accent()));
+                let zone = match side {
+                    PaneDrop::Left => zone
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(relative(ZONE))
+                        .continuous_corners(CardCorners { top_right: 0.0, bottom_right: 0.0, ..fill })
+                        .drag_over::<Dragged>(move |s, _, _, _| hover(s).border_l_2()),
+                    PaneDrop::Top => zone
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(relative(ZONE))
+                        .continuous_corners(CardCorners { bottom_left: 0.0, bottom_right: 0.0, ..fill })
+                        .drag_over::<Dragged>(move |s, _, _, _| hover(s).border_t_2()),
+                    PaneDrop::Right | PaneDrop::Swap => zone
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(relative(ZONE))
+                        .continuous_corners(CardCorners { top_left: 0.0, bottom_left: 0.0, ..fill })
+                        .drag_over::<Dragged>(move |s, _, _, _| hover(s).border_r_2()),
+                    PaneDrop::Bottom => zone
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(relative(ZONE))
+                        .continuous_corners(CardCorners { top_left: 0.0, top_right: 0.0, ..fill })
+                        .drag_over::<Dragged>(move |s, _, _, _| hover(s).border_b_2()),
                 };
-                let zone =
-                    match axis {
-                        Axis::Horizontal => zone.top_0().w(relative(ZONE)).continuous_corners(corners).drag_over::<Dragged>(|s, _, _, _| {
-                            s.bg(rgb(theme::accent()).opacity(0.08)).border_r_2().border_color(rgb(theme::accent()))
-                        }),
-                        Axis::Vertical => zone.left_0().h(relative(ZONE)).continuous_corners(corners).drag_over::<Dragged>(|s, _, _, _| {
-                            s.bg(rgb(theme::accent()).opacity(0.08)).border_b_2().border_color(rgb(theme::accent()))
-                        }),
-                    };
-                zone.on_drop(cx.listener(move |this, d: &Dragged, _, _| this.dock_float(&d.block, &target, axis))).into_any_element()
+                let (axis, before) = side.dock().unwrap_or((Axis::Horizontal, false));
+                zone.on_drop(cx.listener(move |this, d: &Dragged, _, _| this.dock_float(&d.block, &target, axis, before))).into_any_element()
             })
             .collect()
     }
 
-    fn dock_float(&mut self, block: &str, target: &str, axis: Axis) {
+    fn dock_float(&mut self, block: &str, target: &str, axis: Axis, before: bool) {
         if let Some(drag) = self.float_drag.as_mut() {
             drag.docked = true;
         }
-        self.call(Method::BlockMove { block_id: block.to_owned(), rect: None, dock: Some(Dock { target: target.to_owned(), axis, before: false }) });
+        let dock = Dock { target: target.to_owned(), axis, before };
+        self.call(Method::BlockMove { block_id: block.to_owned(), rect: None, dock: Some(dock) });
     }
 }
 

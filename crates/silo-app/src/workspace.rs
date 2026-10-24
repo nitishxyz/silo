@@ -113,6 +113,8 @@ pub struct Workspace {
     /// The tab being dragged (window id), while its drag lasts.
     pub(crate) tab_dragging: Option<String>,
     pub(crate) float_drag: Option<crate::floats::FloatDrag>,
+    /// The pane a dragged pane hovers and where on it the drop lands.
+    pub(crate) pane_drop: Option<(String, crate::layout::PaneDrop)>,
     /// Where the last press on a float's grab landed: a drag starts past
     /// gpui's threshold, and the float keeps the point first pressed.
     pub(crate) float_press: std::rc::Rc<std::cell::Cell<gpui::Point<gpui::Pixels>>>,
@@ -277,6 +279,7 @@ impl Workspace {
             tab_drop: None,
             tab_dragging: None,
             float_drag: None,
+            pane_drop: None,
             float_press: std::rc::Rc::default(),
             titlebar_move: false,
             blend: crate::adaptive::Blend::new(theme::background()),
