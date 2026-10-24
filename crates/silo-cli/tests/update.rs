@@ -77,10 +77,28 @@ fn patch(bytes: &mut [u8], from: &str, to: &str) -> usize {
 /// patch version and another build id (so its `silo up` takes over from
 /// this build's server), re-signed ad hoc on macOS.
 fn next_release(this: &Path, build: &str, dest: &Path) -> (String, String) {
-    let (core, last) = VERSION.rsplit_once('.').unwrap();
-    let last: u32 = last.parse().unwrap();
-    let next = format!("{core}.{}", last + 1);
-    assert_eq!(next.len(), VERSION.len(), "the test bumps the patch within its digits");
+    // The next patch, else minor, else major that keeps the version's length (the binary is patched in place):
+    // 0.1.8 → 0.1.9, 0.1.9 → 0.2.0.
+    let parts: Vec<u32> = VERSION.split('.').map(|p| p.parse().unwrap()).collect();
+    let next = (0..parts.len())
+        .rev()
+        .map(|i| {
+            parts
+                .iter()
+                .enumerate()
+                .map(|(j, p)| {
+                    match j.cmp(&i) {
+                        std::cmp::Ordering::Less => *p,
+                        std::cmp::Ordering::Equal => p + 1,
+                        std::cmp::Ordering::Greater => 0,
+                    }
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .find(|v| v.len() == VERSION.len())
+        .expect("a newer version of the same length");
     let other: String = build.chars().map(|c| if c == 'f' { '0' } else { char::from_digit(c.to_digit(16).unwrap() + 1, 16).unwrap() }).collect();
     let mut bytes = std::fs::read(this).unwrap();
     assert!(patch(&mut bytes, &format!("silo {VERSION}"), &format!("silo {next}")) + patch(&mut bytes, VERSION, &next) > 0);
