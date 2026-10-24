@@ -86,7 +86,8 @@ icons!(
     "provider-lmstudio",
     "arrow-right",
     "eye-off",
-    "plug"
+    "plug",
+    "sidebar-right"
 );
 
 #[cfg(test)]

@@ -77,6 +77,7 @@ pub struct Workspace {
     pub(crate) browsers: HashMap<String, (Entity<crate::browser_pane::BrowserPane>, Subscription)>,
     /// Agent blocks' panes (local host only).
     pub(crate) agents: HashMap<String, (Entity<crate::agent::AgentPane>, Subscription)>,
+    pub(crate) files: HashMap<String, (Entity<crate::files::FilesPane>, Subscription)>,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
     /// A blank browser this client created: its address bar gets focus
@@ -256,6 +257,7 @@ impl Workspace {
             panes: HashMap::new(),
             browsers: HashMap::new(),
             agents: HashMap::new(),
+            files: HashMap::new(),
             server_focus: None,
             address_pending: None,
             composer_pending: None,
@@ -573,6 +575,7 @@ impl Workspace {
                     self.panes.clear();
                     self.browsers.clear();
                     self.agents.clear();
+                    self.files.clear();
                     self.view = None;
                     self.server_focus = None;
                     self.address_pending = None;
@@ -589,6 +592,8 @@ impl Workspace {
                     let session = block.agent.as_ref().and_then(|a| a.session_id.clone());
                     pane.update(cx, |pane, cx| pane.show(session, block.cwd.clone(), cx));
                 } else if let Some((pane, _)) = self.panes.get(&block.id) {
+                    pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
+                } else if let Some((pane, _)) = self.files.get(&block.id) {
                     pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
                 }
                 if let Some(view) = self.view.as_mut()
@@ -608,7 +613,7 @@ impl Workspace {
                 }
             }
             // No files view yet (docs/FILES_BLOCK.md §6 step 3).
-            ConnEvent::Event(Event::FilesChanged { .. }) => {}
+            ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some((pane, _)) = self.browsers.get(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
@@ -664,6 +669,9 @@ impl Workspace {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         for (pane, _) in self.browsers.values() {
+            pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
+        }
+        for (pane, _) in self.files.values() {
             pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
         }
         // Agent panes reconnect now rather than at their next retry.
@@ -739,6 +747,7 @@ impl Workspace {
         self.panes.clear();
         blocks.extend(self.hand_back_browsers(cx));
         self.agents.clear();
+        self.files.clear();
         self.view = None;
         self.server_focus = None;
         self.address_pending = None;
@@ -896,11 +905,13 @@ impl Workspace {
         }
         self.browsers.retain(|id, _| all.contains(id));
         self.agents.retain(|id, _| all.contains(id));
+        self.files.retain(|id, _| all.contains(id));
         let active = self.active_window().cloned();
         let of_kind =
             |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
         let browsers = of_kind(crate::browser_pane::Kind::Browser);
         let agents = of_kind(crate::browser_pane::Kind::Agent);
+        let files = of_kind(crate::browser_pane::Kind::Files);
         let mut unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
         if !self.agents_on(self.active_host) {
             unsupported.extend(agents.iter().cloned());
@@ -911,6 +922,8 @@ impl Workspace {
                     self.ensure_browser(&block, window, cx);
                 } else if agents.contains(&block) && !unsupported.contains(&block) {
                     self.ensure_agent(&block, window, cx);
+                } else if files.contains(&block) {
+                    self.ensure_files(&block, window, cx);
                 } else if !self.panes.contains_key(&block) && !unsupported.contains(&block) {
                     let control = self.control();
                     let rt = self.rt.clone();
@@ -972,6 +985,8 @@ impl Workspace {
                 pane.update(cx, |pane, cx| pane.show(session, info.cwd, cx));
             } else if let Some((pane, _)) = self.panes.get(&info.id) {
                 pane.update(cx, |pane, cx| pane.set_info(info, cx));
+            } else if let Some((pane, _)) = self.files.get(&info.id) {
+                pane.update(cx, |pane, cx| pane.set_info(info, cx));
             }
         }
         // Follow the server's focus when it changed (split, new window,
@@ -986,7 +1001,8 @@ impl Workspace {
                     .browsers
                     .values()
                     .any(|(p, _)| p.read(cx).focus.contains_focused(window, cx) || p.read(cx).address.read(cx).focus.is_focused(window))
-                || self.agents.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx));
+                || self.agents.values().any(|(p, _)| p.read(cx).focus.contains_focused(window, cx))
+                || self.files_focused(window, cx).is_some();
             if self.server_focus.as_deref() != Some(&focused) || !local {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
@@ -1090,6 +1106,9 @@ impl Workspace {
             handle.focus(window, cx);
         } else if let Some((pane, _)) = self.agents.get(block) {
             pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
+        } else if let Some((pane, _)) = self.files.get(block) {
+            let handle = pane.read(cx).focus.clone();
+            handle.focus(window, cx);
         }
     }
 
@@ -1173,6 +1192,7 @@ impl Workspace {
             .map(|(id, _)| id.clone())
             .or_else(|| self.browser_focused(window, cx))
             .or_else(|| self.agent_focused(window, cx))
+            .or_else(|| self.files_focused(window, cx))
             .or_else(|| self.active_window().map(|w| w.focused.clone()))
     }
 
@@ -1184,13 +1204,13 @@ impl Workspace {
     pub(crate) fn cwd_of(&self, block: &str, cx: &gpui::App) -> Option<String> {
         match self.panes.get(block) {
             Some((p, _)) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
-            None => self.block_info(block).filter(|i| i.kind == BlockKind::Agent).and_then(|i| i.cwd.clone()),
+            None => self.block_info(block).filter(|i| matches!(i.kind, BlockKind::Agent | BlockKind::Files)).and_then(|i| i.cwd.clone()),
         }
     }
 
     /// Whether `block` has a pane of any kind here.
     pub(crate) fn has_pane(&self, block: &str) -> bool {
-        self.panes.contains_key(block) || self.browsers.contains_key(block) || self.agents.contains_key(block)
+        self.panes.contains_key(block) || self.browsers.contains_key(block) || self.agents.contains_key(block) || self.files.contains_key(block)
     }
 
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -76,6 +76,7 @@ commands! {
     NewTerminalTab => "New Terminal Tab", "Tabs", [];
     NewBrowserTab => "New Browser Tab", "Tabs", ["cmd-alt-t"];
     NewAgentTab => "New Agent Tab", "Tabs", [];
+    NewFilesTab => "New Files Tab", "Tabs", [], "The focused block's folder";
     NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"], "Choose a terminal, browser, agent, address or >command";
     CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
     RenameTab => "Rename Tab…", "Tabs", [];
@@ -109,6 +110,8 @@ commands! {
     // Agent
     NewAgent => "New Agent", "Agent", ["cmd-shift-o"], "An otto agent beside the focused pane";
     OttoSettings => "Otto Settings", "Agent", [], "Providers, models and agents of the agent in front";
+    // Files
+    NewFiles => "New Files Pane", "Files", [], "The focused block's folder, beside it";
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];
@@ -172,12 +175,16 @@ impl Command {
             Self::SwitchSession => Method("app.switcher"),
             Self::NextSession | Self::PreviousSession => Method("app.session_step"),
             // The chooser's pick is the `kind` param.
-            Self::NewTab | Self::NewTerminalTab | Self::NewBrowserTab | Self::NewAgentTab | Self::NewTabChooser => Method("window.create"),
+            Self::NewTab | Self::NewTerminalTab | Self::NewBrowserTab | Self::NewAgentTab | Self::NewFilesTab | Self::NewTabChooser => {
+                Method("window.create")
+            }
             Self::CloseTab => Method("window.close"),
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
             // The launcher's pick is the `kind` (and `url`) param.
-            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewPaneChooser | Self::NewBrowser | Self::NewAgent => Method("block.split"),
+            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewPaneChooser | Self::NewBrowser | Self::NewAgent | Self::NewFiles => {
+                Method("block.split")
+            }
             Self::OttoSettings => Method("app.settings_open"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
@@ -223,10 +230,13 @@ impl Command {
     }
 
     /// The host feature (`silo_proto::compat::feature`) the command needs;
-    /// none yet, every protocol-1 host has what these use.
+    /// Files blocks need a host with them, every protocol-1 host has the rest.
     #[must_use]
     pub fn feature(self) -> Option<&'static str> {
-        None
+        match self {
+            Self::NewFiles | Self::NewFilesTab => Some(silo_proto::compat::feature::FILES),
+            _ => None,
+        }
     }
 
     /// The shortcut hint in macOS notation, e.g. `⇧⌘N`.

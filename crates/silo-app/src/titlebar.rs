@@ -148,6 +148,7 @@ impl Workspace {
             crate::browser_pane::Kind::Browser => "globe",
             crate::browser_pane::Kind::Terminal => "terminal",
             crate::browser_pane::Kind::Agent => crate::agent_block::ICON,
+            crate::browser_pane::Kind::Files => crate::files_block::ICON,
             crate::browser_pane::Kind::Unsupported => "info",
         }
     }

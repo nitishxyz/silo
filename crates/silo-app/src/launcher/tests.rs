@@ -71,6 +71,24 @@ fn input_is_classified() {
     assert_eq!(classify("@"), Intent::Agent(String::new()));
     assert_eq!(classify("browser"), Intent::Filter("browser".into()), "a word is not an address");
     assert_eq!(classify("two words"), Intent::Filter("two words".into()));
+    assert_eq!(classify(" /etc/hosts "), Intent::Path("/etc/hosts".into()));
+    assert_eq!(classify("~/src"), Intent::Path("~/src".into()));
+    assert_eq!(classify("~"), Intent::Path("~".into()));
+    assert_eq!(classify("~user"), Intent::Filter("~user".into()), "only this user's home");
+}
+
+#[test]
+fn files_is_a_kind_and_a_path_opens_it() {
+    assert_eq!(kinds("fil"), vec![Kind::Files]);
+    assert_eq!(rows("~/src/app", &[]), vec![Row::Path("~/src/app".into())]);
+    assert_eq!(Row::Path("/x".into()).kind(), Kind::Files);
+    assert_eq!(
+        (Kind::Files.block_kind(), Kind::Files.tab_command(), Kind::Files.split_command()),
+        (BlockKind::Files, Command::NewFilesTab, Command::NewFiles)
+    );
+    assert_eq!(Kind::Files.split_command().feature(), Some(silo_proto::compat::feature::FILES), "hosts without Files blocks say so");
+    assert_eq!(digit_pick("4", "", rows("", &[]).len()), Some(3), "fourth in the list");
+    assert_eq!(rows("", &[])[3], Row::Kind(Kind::Files, Vec::new()));
 }
 
 #[test]
@@ -191,6 +209,7 @@ fn confirming_splits_to_the_chosen_side() {
         (Row::Kind(Kind::Agent, Vec::new()), BlockKind::Agent, None),
         (Row::Open { url: "https://a.dev/".into(), title: String::new() }, BlockKind::Browser, Some("https://a.dev/".to_owned())),
         (Row::Run("make".into()), BlockKind::Terminal, None),
+        (Row::Kind(Kind::Files, Vec::new()), BlockKind::Files, None),
     ];
     for side in SIDES {
         let want_axis = if *side == Side::Right { Axis::Horizontal } else { Axis::Vertical };
@@ -205,5 +224,8 @@ fn confirming_splits_to_the_chosen_side() {
             let cwd = if *want_kind == BlockKind::Browser { None } else { Some("/w".to_owned()) };
             assert_eq!(spawn.cwd, cwd, "{row:?}");
         }
+        // A typed path is the new Files block's root, whatever the split block's folder.
+        let Method::BlockSplit { kind, spawn, .. } = split_method("b", *side, &Row::Path("~/notes".into()), Some("/w".into())) else { panic!() };
+        assert_eq!((kind, spawn.cwd.as_deref()), (BlockKind::Files, Some("~/notes")));
     }
 }

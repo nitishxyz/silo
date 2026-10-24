@@ -106,8 +106,9 @@ pub fn with_header(slot: gpui::Bounds<gpui::Pixels>, mode: HeaderMode) -> gpui::
 pub fn header_mode(kind: Kind, headers: PaneHeaders) -> HeaderMode {
     let shown = |on: bool| if on { HeaderMode::Full } else { HeaderMode::Hidden };
     match kind {
-        Kind::Browser if headers.none() => HeaderMode::Middle,
-        Kind::Browser => HeaderMode::Full,
+        // Browsers and Files hold their address or tabs there.
+        Kind::Browser | Kind::Files if headers.none() => HeaderMode::Middle,
+        Kind::Browser | Kind::Files => HeaderMode::Full,
         Kind::Agent => shown(headers.get(HeaderBlock::Agent)),
         Kind::Terminal | Kind::Unsupported => shown(headers.get(HeaderBlock::Terminal)),
     }
@@ -315,6 +316,8 @@ mod tests {
     fn a_browser_keeps_a_shrunk_header_when_the_others_hide() {
         let none = PaneHeaders::all(false);
         assert_eq!(header_mode(Kind::Browser, none), HeaderMode::Middle);
+        assert_eq!(header_mode(Kind::Files, none), HeaderMode::Middle, "a Files block keeps its tabs");
+        assert_eq!(header_mode(Kind::Files, PaneHeaders::default()), HeaderMode::Full);
         assert_eq!(header_mode(Kind::Terminal, none), HeaderMode::Hidden);
         assert_eq!(header_mode(Kind::Agent, none), HeaderMode::Hidden);
         assert!((HeaderMode::Middle.height() - HEADER_HEIGHT).abs() < f32::EPSILON, "the same height, shrunk sideways");

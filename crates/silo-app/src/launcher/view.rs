@@ -22,6 +22,7 @@ impl Workspace {
                 Row::Open { url, title } if title.is_empty() => ("globe", format!("Open {url}"), Vec::new(), None),
                 Row::Open { url, title } => ("globe", title.clone(), Vec::new(), Some(url.clone())),
                 Row::Run(command) => ("terminal", format!("Run {command}"), Vec::new(), Some("in a new terminal".to_owned())),
+                Row::Path(path) => (crate::files_block::ICON, format!("Open {path}"), Vec::new(), Some("in Files".to_owned())),
             };
             let hint = matches!(row, Row::Kind(..)).then(|| row_hint(kind, &dialog.target, dialog.same)).flatten();
             // A host without the feature: muted, saying so instead of the shortcut.

@@ -222,6 +222,7 @@ impl Workspace {
             Command::NewTerminalTab => self.new_window(window, cx),
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::NewAgentTab => self.new_agent_tab(window, cx),
+            Command::NewFilesTab => self.new_files_tab(window, cx),
             Command::NewTabChooser | Command::NewPaneChooser => {
                 self.toggle_launcher(command, window, cx);
             }
@@ -280,6 +281,11 @@ impl Workspace {
             Command::NewAgent => {
                 if let Some(block) = block {
                     self.new_agent(block, cx);
+                }
+            }
+            Command::NewFiles => {
+                if let Some(block) = block {
+                    self.new_files(block, cx);
                 }
             }
             Command::AddHost => {
@@ -440,6 +446,7 @@ impl Workspace {
             Command::NewSession => connected,
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::OttoSettings => self.view.is_some(),
+            Command::NewFiles | Command::NewFilesTab => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES),
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab

@@ -24,6 +24,8 @@ mod commands;
 mod composition;
 mod conn;
 mod controls;
+mod files;
+mod files_block;
 mod finder;
 mod floats;
 mod fonts;

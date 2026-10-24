@@ -2935,8 +2935,7 @@ fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u3
 }
 
 /// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
-/// A block drawn as a settled transcript text draws it (a test view's rows).
-#[cfg(test)]
+/// A block drawn as a settled transcript text draws it (a test view's rows, the Files block's markdown).
 pub(super) fn render_settled(id: &str, block: &Block, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
     render_block(id, block, None, theme::foreground(), scroll)
 }

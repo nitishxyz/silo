@@ -331,6 +331,7 @@ impl Workspace {
             (Some((pane, _)), _, _) => pane.clone().into_any_element(),
             (None, Some((pane, _)), _) => pane.clone().into_any_element(),
             (None, None, Some((pane, _))) => pane.clone().into_any_element(),
+            (None, None, None) if self.files.contains_key(id) => self.files[id].0.clone().into_any_element(),
             (None, None, None) => match crate::browser_pane::kind_of(self.block_info(id)) {
                 crate::browser_pane::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
                 crate::browser_pane::Kind::Agent => unsupported(self.agent_unsupported().into()),
@@ -597,6 +598,8 @@ impl Workspace {
         } else if let Some((pane, _)) = self.browsers.get(id) {
             pane_header::parts(pane, style, info, cx)
         } else if let Some((pane, _)) = self.agents.get(id) {
+            pane_header::parts(pane, style, info, cx)
+        } else if let Some((pane, _)) = self.files.get(id) {
             pane_header::parts(pane, style, info, cx)
         } else {
             pane_header::fallback(info, style)

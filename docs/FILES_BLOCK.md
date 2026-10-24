@@ -27,8 +27,13 @@ FilesState {
   tree: bool,                // tree expanded (default true)
   expanded: Vec<String>,     // expanded directories in the tree
   scroll: Map<path, line>,   // per-tab top line, so tabs reopen where they were
+  highlights: Map<path, [FileHighlight { start, end, note? }]>,  // marked lines per tab (files_show)
 }
 ```
+
+`highlights` was added after the first version: `serde(default)` and not written while empty, so older peers read
+and write the state as before (an older server ignores `files.set`'s `highlights`; see `compat.rs`). Lines are
+1-based and inclusive; at most 50 per file, notes up to 300 characters. A tab's highlights go when the tab closes.
 
 This goes in `BlockInfo.files: Option<FilesState>`, sent in session views like `browser` is. The checkpoint saves it,
 so restore and upgrade keep it.
@@ -47,7 +52,7 @@ rights to change its state.
 | `files.read` | `path`, `max_bytes?` (default 2 MiB) | `text` (UTF-8) or `binary` (`mime`, `size`), `truncated`, `mtime`, `size` |
 | `files.read_image` | `path` | bytes plus `mime`, for png, jpeg, gif, webp and svg, up to 20 MiB |
 | `files.find` | `query`, `limit` | fuzzy-matched paths under root; skips `.git`, `target`, `node_modules` and `.gitignore`d paths |
-| `files.set` | partial `FilesState` (open, active, tree, expanded, scroll) | the updated state, broadcast as `block.changed` |
+| `files.set` | partial `FilesState` (open, active, tree, expanded, scroll, highlights) | the updated state, broadcast as `block.changed` |
 | `files.root` | `path` | re-root the block (interact rights) |
 
 **Events:** `files.changed { block_id, paths }`. The server watches the root (FSEvents on macOS, inotify on Linux,
@@ -80,61 +85,92 @@ This follows Zed (`crates/grammars`, `crates/language`), but in a much smaller f
     `function.method` falls back to `function`.
   - The output is a list of `(byte range, style)` per line, passed to `StyledText::with_highlights` as the agent
     pane's code blocks already are.
-- **Performance:** parse off the UI thread. Cache the tree and highlights per path and mtime. Re-parse on
-  `files.changed`. Files over 1 MiB, or with lines over 10k characters, get no highlighting.
+- **Performance:** the Files viewer parses off the UI thread (a background task per read, keeping the old colours
+  until the new ones are ready) and re-parses when `files.changed` re-reads the file. The agent pane's code blocks
+  are small: they are parsed on the UI thread once per distinct text (`syntax::cached_lines`, the last 64 texts kept,
+  up to 64 KB). Files over 1 MiB, or with lines over 10k characters, get no highlighting.
 - **Theme:** a `syntax` table in Silo's theme, with keys such as keyword, function, type, string, number, comment,
   constant, variable.special, property, punctuation, operator, tag, attribute and title. Defaults come from Zed's One
   Dark and One Light syntax colours, mapped to the nearest Silo theme colour.
 - **Reuse:** the agent pane's markdown code blocks (`agent/view.rs`) use the same highlighter for fenced code with a
-  language. This is the second consumer, so the module is shared and not specific to files.
+  language (built). This is the second consumer, so the module is shared and not specific to files.
 
 ## 4. App
 
+Built in `silo-app/src/files/` (`mod.rs`: state and calls, `view.rs`: header, tree and finder, `text.rs`: the text
+viewer, `model.rs`: the logic without gpui, tested) and `files_block.rs` (the workspace side).
+
 **Block header**, left to right:
-- File tabs: name, a dot when the file changed on disk since it was opened, × to close, middle-click to close, drag
-  to reorder.
-- `…` when tabs overflow.
-- ⌘P to find a file.
-- The tree toggle (a sidebar icon), on the right edge.
+- File tabs: name (with its folder when two open tabs share a name), a dot when the file changed on disk since the
+  tab was last shown, × to close (shown on the active tab, and on hover), middle-click to close. The tab strip
+  scrolls sideways when it overflows. With no tab open, the header shows the root's name and path.
+- For a markdown tab: a Rendered | Source switch.
+- A search button: find a file (⌘P).
+- The tree toggle (a sidebar icon), last before the pane buttons (split, zoom, close).
+- With every pane header hidden, a Files block keeps a shrunk header (its tabs only), as a browser does.
 
 **Body:**
 - **Viewer (left):**
-  - Text and code: monospace with a line-number gutter and syntax highlighting.
-  - Markdown: rendered with the agent pane's renderer (tables, task lists, code highlighting), with a header toggle
-    to switch between Rendered and Source.
-  - Images: shown fitted, with their size.
+  - Text and code: the terminal's monospace font with a line-number gutter, coloured by `crate::syntax`. Tabs are
+    drawn as 4 columns; lines are drawn up to 4000 characters. Long lines scroll sideways.
+  - Markdown: rendered with the agent pane's renderer (`agent::MarkdownView`: tables, task lists, highlighted code),
+    or its source. Rendered markdown has no text selection; switch to Source to select and copy.
+  - Images: fitted (never upscaled), with their type, pixel size and file size under them.
   - Binary files: a summary line, "binary · 3.2 MB · application/zip".
-  - Truncated files: a note and a "Load all" button, up to 20 MiB.
-- **Tree (right, about 240 px, resizable):**
-  - Lazy listing, with a disclosure arrow per folder.
-  - Click opens a file in a tab. ⌘-click opens it without switching to it.
-  - Hidden files are dimmed. `.git` is never shown.
-  - Arrow keys navigate, and → / ← expand and collapse.
+  - Truncated files (over 2 MiB): "Showing the first 2.1 MB of 14 MB" and a Load button, which reads up to
+    `FileRead::MAX_BYTES` (12 MiB: a reply must fit in a frame).
+  - Highlights (from `files_show`): a tint across the lines, an accent bar and accent line numbers in the gutter,
+    and the note as a small label at the right of the range's first line.
+- **Tree (right, 240 px to start, drag its left edge between 140 and 640 px):**
+  - Lazy listing: the root, and each expanded folder when it opens; a disclosure arrow per folder.
+  - Click opens a file in a tab and shows it. ⌘-click opens it without showing it. Click a folder to open or
+    close it.
+  - Hidden files are dimmed, links are in italics. `.git` is never shown.
+  - Arrow keys navigate (once the tree has focus), → / ← expand and collapse (or move into / up to the parent),
+    ↩ opens.
 
 **Keys inside the block:**
 
 | Key | Action |
 |---|---|
-| ⌘P | Find a file. The fuzzy finder reuses `agent/finder.rs` scoring and calls `files.find` |
-| ⌘W | Close the tab; the last tab closes the block |
+| ⌘P | Find a file: the palette's scoring (`finder::score`) over `files.find`'s paths, a match in the file name first. Open tabs first while nothing is typed |
+| ⌘W | Close the tab (or the open finder / find / go-to bar); with no tab open, close the block |
 | ⌃Tab / ⌃⇧Tab | Next / previous tab |
 | ⌘⇧E | Toggle the tree |
-| ⌘F | Find in the file |
-| ⌘L | Go to line |
-| ⌘C | Copy the selection |
+| ⌘F | Find in the file (smart case; ↩ / ↓ next, ↑ previous, ⌘G / ⇧⌘G too, esc closes) |
+| ⌘L | Go to line (`12` or `12:5`) |
+| ⌘C / ⌘A | Copy the selection / select all |
+| ↑ ↓ ← → / PgUp PgDn / Home End | Scroll the viewer |
 
-Selection and copy work like the agent pane's text selection (`agent/select.rs`).
+Selection works like the agent pane's: press and drag, double-click a word, triple-click a line, ⇧-click extends,
+dragging past the top or bottom scrolls. It is kept on the text (lines and bytes), so it survives scrolling and a
+re-read that keeps its lines.
+
+**State:** every change (tabs, tree shown, expanded folders, each tab's top line, saved 0.6 s after scrolling stops)
+goes through `files.set`; the server's `block.changed` brings other clients' and agents' changes, so two windows on
+one block show the same tabs. On `files.changed` the shown file is read again (keeping how much was loaded), other
+open files are dropped and get the dot, and listed folders whose entries changed are listed again.
 
 **Opening a Files block:**
-- The launcher's Files kind.
-- Typing a path in the launcher opens Files rooted at that directory, or at the file's directory with the file open.
-- The palette commands "New Files Pane" and "Open Folder…".
-- `silo files [path]` on the CLI.
+- The launcher's Files kind (row 4), as a tab or a pane. The root is the cwd of the split target or the focused
+  block (a terminal's, an agent's or another Files block's root), else `$HOME` (the server's fallback).
+- Typing a path in the launcher (`/…`, `~`, `~/…`) opens Files rooted at that folder. A file opens at its folder with
+  the file shown (the server says it's not a folder, and the app tries again with its parent).
+- The palette commands "New Files Pane" and "New Files Tab" (host feature `files`).
+- Not built yet: "Open Folder…", `silo files [path]`, drag to reorder tabs, `files.root` from the app.
 
 ## 5. otto
 
-A `files_open { path, line? }` tool in silo-tools (and otto-silo-tools). It opens or reuses a Files block next to the
-agent's block, then opens the file and scrolls to that line. This is how an agent says "look at this".
+`files_show { path, line?, highlight?: [{ start, end?, note? }] }` in silo-tools (`src/files.rs`), offered to otto by
+otto-silo-tools. It is a deferred tool (loaded on demand, like the browser tools) and read-only.
+
+- `path` is absolute, `~/…`, or relative to the agent's working directory (otto-silo-tools passes the session's
+  folder per call, as `cwd`). It must exist.
+- It reuses a Files block in the agent's window whose root holds the path (the deepest root), else splits one beside
+  the agent's block, rooted at the agent's folder when the path is inside it, else at the file's folder.
+- It opens the file's tab and shows it, scrolls so `line` (or the first highlight) is 5 lines from the top, and
+  replaces that tab's highlights (none given clears them). A folder only opens or reuses the block.
+- It returns `{ block_id, root, path, created, line, highlights }`, not the file's contents.
 
 **Later:** live edits. When otto edits a file that a Files tab has open, the tab shows the change as it lands, which
 `files.changed` already gives us. A diff view against `HEAD` comes after that.
@@ -151,7 +187,8 @@ agent's block, then opens the file and scrolls to that line. This is how an agen
 2. **Syntax module (app):** tree-sitter, the copied queries, the highlight map, the theme table, and tests (expected
    captures for a small sample per language). Switch the agent pane's code blocks to it.
 3. **Files block view:** header tabs, the tree on the right, the viewer, the finder, keys, and the launcher kind.
-4. **The CLI `silo files` command and the otto `files_open` tool.**
+   (Built.)
+4. **The CLI `silo files` command and the otto tool** (built as `files_show`, with highlights; the CLI is not).
 
 **Later:** editing, diffs, PDF preview, a git status column in the tree, and search across files.
 

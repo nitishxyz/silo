@@ -20,6 +20,8 @@ pub enum Kind {
     Browser,
     /// An otto session; a "Not supported" card on remote hosts.
     Agent,
+    /// A folder's files.
+    Files,
     /// A newer server's block kind: no pane, a "Not supported" card.
     Unsupported,
 }
@@ -29,8 +31,8 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     match info.map(|i| i.kind) {
         Some(BlockKind::Browser) => Kind::Browser,
         Some(BlockKind::Agent) => Kind::Agent,
-        // No files view yet: unsupported rather than a terminal.
-        Some(BlockKind::Files | BlockKind::Unknown) => Kind::Unsupported,
+        Some(BlockKind::Files) => Kind::Files,
+        Some(BlockKind::Unknown) => Kind::Unsupported,
         _ => Kind::Terminal,
     }
 }
@@ -52,6 +54,7 @@ pub fn icon_for(kind: Kind, loading: bool, favicon: bool) -> Icon {
         Kind::Browser if favicon => Icon::Favicon,
         Kind::Browser => Icon::Glyph("globe"),
         Kind::Agent => Icon::Glyph(crate::agent_block::ICON),
+        Kind::Files => Icon::Glyph(crate::files_block::ICON),
         Kind::Unsupported => Icon::Glyph("info"),
     }
 }

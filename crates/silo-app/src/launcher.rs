@@ -1,7 +1,8 @@
 //! The block launcher: a dialog over the whole window choosing what a new
 //! tab (⌃⌘T, the tab strip's +) or pane (⌃⌘↩) holds. Type to filter the
 //! kinds; an address opens a browser there, `>cmd` a terminal running
-//! `cmd`, `@name` an agent; 1–9 pick a row while nothing is typed. A new
+//! `cmd`, `@name` an agent, a path (`/…`, `~/…`) Files there; 1–9 pick a
+//! row while nothing is typed. A new
 //! pane's side (right or down: splits always put the new block second)
 //! starts where ⌘↩ would put it; tab/⇧tab or ←/→ change it, ↑↓ stay rows.
 //! Its destination shows as a ghost in the layout until a choice is made.
@@ -23,18 +24,19 @@ use crate::{
     text_field::TextField,
 };
 
-/// What a launcher row creates. A new kind (say a future `Files`) gets a
-/// variant here, its label, icon and command below, a place in [`SHOWN`],
-/// and its creation in `Workspace::launch`.
+/// What a launcher row creates. A new kind gets a variant here, its label,
+/// icon and command below, a place in [`SHOWN`], and its creation in
+/// `Workspace::launch`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Terminal,
     Browser,
     Agent,
+    Files,
 }
 
 /// The kinds listed, in order (their digits are 1, 2, 3…).
-pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent];
+pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent, Kind::Files];
 
 /// Recent pages listed under the kinds.
 const RECENTS: usize = 3;
@@ -45,6 +47,7 @@ impl Kind {
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
             Self::Agent => "Agent",
+            Self::Files => "Files",
         }
     }
 
@@ -53,6 +56,7 @@ impl Kind {
             Self::Terminal => "terminal",
             Self::Browser => "globe",
             Self::Agent => crate::agent_block::ICON,
+            Self::Files => crate::files_block::ICON,
         }
     }
 
@@ -61,6 +65,7 @@ impl Kind {
             Self::Terminal => BlockKind::Terminal,
             Self::Browser => BlockKind::Browser,
             Self::Agent => BlockKind::Agent,
+            Self::Files => BlockKind::Files,
         }
     }
 
@@ -70,6 +75,7 @@ impl Kind {
             Self::Terminal => Command::NewTerminalTab,
             Self::Browser => Command::NewBrowserTab,
             Self::Agent => Command::NewAgentTab,
+            Self::Files => Command::NewFilesTab,
         }
     }
 
@@ -79,6 +85,7 @@ impl Kind {
             Self::Terminal => Command::NewPane,
             Self::Browser => Command::NewBrowser,
             Self::Agent => Command::NewAgent,
+            Self::Files => Command::NewFiles,
         }
     }
 }
@@ -169,8 +176,8 @@ pub fn chooser_target(chooser: Command, block: Option<String>, auto: impl FnOnce
 }
 
 /// The `block.split` creating `row` beside `block` to `side`, as the
-/// instant commands make it (`cwd`: the split block's, for shells and
-/// agents; browsers start with no spawn).
+/// instant commands make it (`cwd`: the split block's, for shells, agents
+/// and Files; browsers start with no spawn; a typed path is Files there).
 pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> silo_proto::control::Method {
     use silo_proto::control::{Method, SpawnSpec};
     let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
@@ -178,6 +185,8 @@ pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> 
         Row::Kind(Kind::Terminal, _) | Row::Run(_) => (BlockKind::Terminal, spawn, None),
         Row::Kind(Kind::Browser, _) => (BlockKind::Browser, SpawnSpec::default(), None),
         Row::Kind(Kind::Agent, _) => (BlockKind::Agent, spawn, None),
+        Row::Kind(Kind::Files, _) => (BlockKind::Files, spawn, None),
+        Row::Path(path) => (BlockKind::Files, SpawnSpec { cwd: Some(path.clone()), ..SpawnSpec::default() }, None),
         Row::Open { url, .. } => (BlockKind::Browser, SpawnSpec::default(), Some(url.clone())),
     };
     Method::BlockSplit { block_id: block.to_owned(), axis: side.axis(), spawn, kind, url, agent: None }
@@ -194,12 +203,18 @@ pub enum Intent {
     Run(String),
     /// An agent (`@name`); the name, possibly empty.
     Agent(String),
+    /// Files at this path (`/…`, `~`, `~/…`): a folder, or a file in one.
+    Path(String),
 }
 
-/// Read `text`: `>cmd` runs, `@name` is an agent, an address (scheme,
-/// dotted host or localhost, as the palette reads one) opens, else filter.
+/// Read `text`: `>cmd` runs, `@name` is an agent, a path opens Files, an
+/// address (scheme, dotted host or localhost, as the palette reads one)
+/// opens a browser, else filter.
 pub fn classify(text: &str) -> Intent {
     let t = text.trim();
+    if t.starts_with('/') || t == "~" || t.starts_with("~/") {
+        return Intent::Path(t.to_owned());
+    }
     if let Some(command) = t.strip_prefix('>') {
         return Intent::Run(command.trim().to_owned());
     }
@@ -220,6 +235,8 @@ pub enum Row {
     Open { url: String, title: String },
     /// A terminal running this command.
     Run(String),
+    /// Files at this path.
+    Path(String),
 }
 
 impl Row {
@@ -228,6 +245,7 @@ impl Row {
             Self::Kind(kind, _) => *kind,
             Self::Open { .. } => Kind::Browser,
             Self::Run(_) => Kind::Terminal,
+            Self::Path(_) => Kind::Files,
         }
     }
 }
@@ -250,6 +268,7 @@ pub fn rows(text: &str, recents: &[RecentPage]) -> Vec<Row> {
         Intent::Run(command) if command.is_empty() => vec![Row::Kind(Kind::Terminal, Vec::new())],
         Intent::Run(command) => vec![Row::Run(command)],
         Intent::Agent(_) => vec![Row::Kind(Kind::Agent, Vec::new())],
+        Intent::Path(path) => vec![Row::Path(path)],
     }
 }
 

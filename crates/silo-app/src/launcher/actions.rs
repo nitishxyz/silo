@@ -56,7 +56,7 @@ impl Workspace {
         // One dialog at a time.
         self.close_switcher(window, cx);
         let placeholder =
-            if target == Target::Tab { "New tab: kind, address, >command, @agent" } else { "New pane: kind, address, >command, @agent" };
+            if target == Target::Tab { "New tab: kind, address, path, >command, @agent" } else { "New pane: kind, address, path, >command, @agent" };
         let field = cx.new(|cx| TextField::new(placeholder, cx));
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.launcher_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
@@ -148,6 +148,12 @@ impl Workspace {
         match (target, row) {
             (Target::Tab, Row::Kind(kind, _)) => self.run(kind.tab_command(), window, cx),
             (Target::Tab, Row::Open { url, .. }) => self.open_page_tab(url),
+            (Target::Tab, Row::Path(path)) => {
+                let Some(view) = &self.view else { return };
+                let spawn = SpawnSpec { cwd: Some(path), command: Vec::new(), size: None };
+                let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None };
+                self.open_files_path(method, cx);
+            }
             (Target::Tab, Row::Run(command)) => {
                 let Some(view) = &self.view else { return };
                 let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
@@ -161,7 +167,8 @@ impl Workspace {
                     Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), cx),
                     Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
                     Row::Kind(Kind::Agent, _) => self.create_agent(method, cx),
-                    Row::Open { .. } => self.call(method),
+                    Row::Kind(Kind::Files, _) | Row::Open { .. } => self.call(method),
+                    Row::Path(_) => self.open_files_path(method, cx),
                     Row::Run(command) => self.launch_command(method, command, cx),
                 }
             }
