@@ -1,5 +1,5 @@
-//! Files blocks: creation, reads under the root, path safety, view state
-//! that survives a restart and an upgrade, and folder watches.
+//! Files blocks: creation, reads and writes under the root, path safety,
+//! view state that survives a restart and an upgrade, and folder watches.
 
 use std::{
     path::{Path, PathBuf},
@@ -9,8 +9,8 @@ use std::{
 use silo_client::{Control, Events};
 use silo_proto::{
     control::{
-        ContentKind, Created, Event, FileFound, FileImage, FileKind, FileList, FileRead, FilesFindParams, FilesListParams, FilesReadImageParams,
-        FilesReadParams, FilesRootParams, FilesSetParams, Method, RpcError, SpawnSpec,
+        ContentKind, Created, Event, FileBase, FileFound, FileImage, FileKind, FileList, FileRead, FileWritten, FilesCreateParams, FilesFindParams,
+        FilesListParams, FilesReadImageParams, FilesReadParams, FilesRootParams, FilesSetParams, FilesWriteParams, Method, RpcError, SpawnSpec,
     },
     model::{Axis, BlockInfo, BlockKind, FileHighlight, FilesState, TermSize},
     paths,
@@ -398,6 +398,133 @@ async fn highlights_belong_to_their_tab() {
     let old: FilesState = serde_json::from_value(serde_json::json!({"root": "/x"})).unwrap();
     assert!(old.highlights.is_empty());
     assert!(serde_json::to_value(&old).unwrap().get("highlights").is_none());
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+async fn write(control: &Control, block: &str, path: &str, text: &str, base: Option<FileBase>, force: bool) -> anyhow::Result<FileWritten> {
+    control.call(Method::FilesWrite(FilesWriteParams { block_id: block.into(), path: path.into(), text: text.into(), base, force })).await
+}
+
+async fn create(control: &Control, block: &str, path: &str, text: &str) -> anyhow::Result<FileWritten> {
+    control.call(Method::FilesCreate(FilesCreateParams { block_id: block.into(), path: path.into(), text: text.into() })).await
+}
+
+fn base_of(read: &FileRead) -> FileBase {
+    FileBase { mtime: read.mtime, size: read.size, sha256: read.sha256.clone() }
+}
+
+fn written_base(w: &FileWritten) -> FileBase {
+    FileBase { mtime: w.mtime, size: w.size, sha256: Some(w.sha256.clone()) }
+}
+
+fn mode(path: &Path) -> u32 {
+    std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions()) & 0o7777
+}
+
+/// Names in `dir` that look like a write's temporary file.
+fn temps(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.contains(".silo-")).collect()
+}
+
+#[tokio::test]
+async fn writes_are_atomic_and_refuse_conflicts() {
+    let (home, root) = temp("write");
+    let task = start(&home).await;
+    let (control, _) = connect(&home).await;
+    let id = files(&control, &root).await.block_id;
+
+    // A whole text read carries its hash; a cut one doesn't.
+    let first = read(&control, &id, "a.txt", None).await.unwrap();
+    assert_eq!(first.sha256.as_deref(), Some("5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"), "sha256 of hello\\n");
+    assert_eq!(read(&control, &id, "a.txt", Some(2)).await.unwrap().sha256, None);
+
+    // Saved from the version read: the result is the next base.
+    let saved = write(&control, &id, "a.txt", "hello, world\n", Some(base_of(&first)), false).await.unwrap();
+    assert_eq!((saved.path.as_str(), saved.size), ("a.txt", 13));
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "hello, world\n");
+    let again = read(&control, &id, "a.txt", None).await.unwrap();
+    assert_eq!((again.mtime, again.size, again.sha256.as_deref()), (saved.mtime, saved.size, Some(saved.sha256.as_str())));
+    let saved = write(&control, &id, "a.txt", "third\n", Some(written_base(&saved)), false).await.unwrap();
+
+    // A stale base is a conflict, with the file as it is now; nothing is written.
+    let error = write(&control, &id, "a.txt", "stale\n", Some(base_of(&first)), false).await.unwrap_err();
+    let rpc = error.downcast_ref::<RpcError>().unwrap();
+    assert_eq!(rpc.code, RpcError::CONFLICT, "{rpc:?}");
+    assert_eq!(rpc.data.as_ref().unwrap()["size"], 6);
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "third\n");
+    // Changed by someone else: refused, then forced.
+    std::fs::write(root.join("a.txt"), "theirs\n").unwrap();
+    let error = write(&control, &id, "a.txt", "mine\n", Some(written_base(&saved)), false).await.unwrap_err();
+    assert_eq!(code(&error), RpcError::CONFLICT);
+    let forced = write(&control, &id, "a.txt", "mine\n", Some(written_base(&saved)), true).await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "mine\n");
+    // Without a hash, the time and size decide; with one, the contents do
+    // (a touched file is no conflict).
+    let timed = FileBase { sha256: None, ..written_base(&forced) };
+    let file = std::fs::File::options().write(true).open(root.join("a.txt")).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
+    drop(file);
+    assert_eq!(code(&write(&control, &id, "a.txt", "x\n", Some(timed), false).await.unwrap_err()), RpcError::CONFLICT);
+    write(&control, &id, "a.txt", "touched\n", Some(written_base(&forced)), false).await.unwrap();
+    // No base: written whatever is there.
+    write(&control, &id, "a.txt", "", None, false).await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "");
+
+    // Permissions are kept; the file is replaced (a new inode), not rewritten.
+    let main = root.join("src/main.rs");
+    std::fs::set_permissions(&main, std::os::unix::fs::PermissionsExt::from_mode(0o751)).unwrap();
+    let inode = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+    let before = inode(&main);
+    write(&control, &id, "src/main.rs", "fn main() { saved() }\n", None, false).await.unwrap();
+    assert_eq!(mode(&main), 0o751);
+    assert_ne!(inode(&main), before, "renamed over");
+    // A link inside the root writes its target and stays a link.
+    write(&control, &id, "main-link.rs", "fn main() { linked() }\n", None, false).await.unwrap();
+    assert!(std::fs::symlink_metadata(root.join("main-link.rs")).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), "fn main() { linked() }\n");
+    assert_eq!(mode(&main), 0o751);
+
+    // A read-only file is refused, and says so.
+    std::fs::set_permissions(root.join("e.txt"), std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+    let error = write(&control, &id, "e.txt", "no", None, true).await.unwrap_err();
+    let rpc = error.downcast_ref::<RpcError>().unwrap();
+    assert_eq!((rpc.code.as_str(), rpc.message.as_str()), (RpcError::READ_ONLY, "e.txt is read-only"));
+    assert_eq!(std::fs::read_to_string(root.join("e.txt")).unwrap(), "h\u{e9}llo");
+    // So is a file in a folder that can't be written (the rename needs it).
+    std::fs::create_dir(root.join("locked")).unwrap();
+    std::fs::write(root.join("locked/f.txt"), "f").unwrap();
+    std::fs::set_permissions(root.join("locked"), std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+    let error = write(&control, &id, "locked/f.txt", "g", None, false).await.unwrap_err();
+    assert_eq!(code(&error), RpcError::READ_ONLY, "{error:#}");
+    assert_eq!(std::fs::read_to_string(root.join("locked/f.txt")).unwrap(), "f");
+    std::fs::set_permissions(root.join("locked"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    // Escapes, folders, missing files and oversized texts are refused.
+    for path in ["../outside/secret.txt", "src/../../outside/secret.txt", "secret.txt", "escape/secret.txt"] {
+        assert_eq!(code(&write(&control, &id, path, "pwned", None, true).await.unwrap_err()), RpcError::FORBIDDEN, "{path}");
+    }
+    assert_eq!(std::fs::read_to_string(home.parent().unwrap().join("outside/secret.txt")).unwrap(), "secret");
+    for path in ["/etc/passwd", "~/x", "src"] {
+        assert_eq!(code(&write(&control, &id, path, "x", None, true).await.unwrap_err()), "bad_request", "{path}");
+    }
+    assert_eq!(code(&write(&control, &id, "nope.txt", "x", None, true).await.unwrap_err()), "not_found");
+    let big = "x".repeat(usize::try_from(FileWritten::MAX_BYTES).unwrap() + 1);
+    assert_eq!(code(&write(&control, &id, "a.txt", &big, None, true).await.unwrap_err()), "too_large");
+    assert!(temps(&root).is_empty() && temps(&root.join("src")).is_empty(), "no temporary files left");
+
+    // New files: made once, under the root only.
+    let made = create(&control, &id, "src/new.rs", "// new\n").await.unwrap();
+    assert_eq!((made.path.as_str(), made.size), ("src/new.rs", 7));
+    assert_eq!(std::fs::read_to_string(root.join("src/new.rs")).unwrap(), "// new\n");
+    assert_eq!(code(&create(&control, &id, "src/new.rs", "").await.unwrap_err()), RpcError::EXISTS);
+    assert_eq!(code(&create(&control, &id, "main-link.rs", "").await.unwrap_err()), RpcError::EXISTS);
+    assert_eq!(code(&create(&control, &id, "../outside/new.txt", "").await.unwrap_err()), RpcError::FORBIDDEN);
+    assert_eq!(code(&create(&control, &id, "escape/new.txt", "").await.unwrap_err()), RpcError::FORBIDDEN);
+    assert_eq!(code(&create(&control, &id, "missing/new.txt", "").await.unwrap_err()), "not_found");
+    assert_eq!(code(&create(&control, &id, "", "").await.unwrap_err()), "bad_request");
+    assert!(!home.parent().unwrap().join("outside/new.txt").exists());
+
     stop(control, task).await;
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
 }

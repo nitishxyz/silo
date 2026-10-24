@@ -233,6 +233,10 @@ pub enum Method {
     FilesSet(FilesSetParams),
     #[serde(rename = "files.root")]
     FilesRoot(FilesRootParams),
+    #[serde(rename = "files.write")]
+    FilesWrite(FilesWriteParams),
+    #[serde(rename = "files.create")]
+    FilesCreate(FilesCreateParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -808,6 +812,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("files.find", "Fuzzy-find files under a files block's root, skipping ignored paths."),
     ("files.set", "Change a files block's tabs, tree, expanded folders or scroll."),
     ("files.root", "Show another directory in a files block."),
+    ("files.write", "Save a text file of a files block atomically, refusing when it changed on disk since the edit's base."),
+    ("files.create", "Create a new file in a files block."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),
@@ -1003,6 +1009,13 @@ impl RpcError {
     /// its own terminal: `data.approval` is the id to answer with
     /// `approval.answer`, then repeat the call.
     pub const CONFIRM: &str = "confirm";
+    /// `files.write`: the file changed on disk since the edit's base;
+    /// `data` is the file now (`mtime`, `size`). Write again with `force`.
+    pub const CONFLICT: &str = "conflict";
+    /// `files.create`: the path is taken.
+    pub const EXISTS: &str = "exists";
+    /// The file or its folder can't be written (permissions).
+    pub const READ_ONLY: &str = "read_only";
 }
 
 impl std::fmt::Display for RpcError {

@@ -6836,6 +6836,57 @@
         "type": "object"
       }
     },
+    "files.create": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "mtime": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "mtime",
+          "size",
+          "sha256"
+        ],
+        "title": "FileWritten",
+        "type": "object"
+      }
+    },
     "files.find": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7042,6 +7093,12 @@
           },
           "path": {
             "type": "string"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "size": {
             "format": "uint64",
@@ -7396,6 +7453,98 @@
           "root"
         ],
         "title": "FilesState",
+        "type": "object"
+      }
+    },
+    "files.write": {
+      "params": {
+        "$defs": {
+          "FileBase": {
+            "properties": {
+              "mtime": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "size": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mtime",
+              "size"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileBase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path",
+          "text"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "mtime": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "mtime",
+          "size",
+          "sha256"
+        ],
+        "title": "FileWritten",
         "type": "object"
       }
     },

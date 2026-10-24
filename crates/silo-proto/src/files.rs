@@ -1,6 +1,8 @@
-//! Files blocks (docs/FILES_BLOCK.md): a read-only view of a directory on
-//! the server's machine. Every path is relative to the block's root
-//! ([`crate::model::FilesState::root`]); the empty path is the root.
+//! Files blocks (docs/FILES_BLOCK.md): a view of a directory on the
+//! server's machine, whose text files can be edited (`files.write`, feature
+//! [`crate::compat::feature::FILES_WRITE`]). Every path is relative to the
+//! block's root ([`crate::model::FilesState::root`]); the empty path is the
+//! root.
 
 use std::collections::BTreeMap;
 
@@ -73,6 +75,66 @@ pub struct FilesSetParams {
     /// dropped. Older servers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlights: Option<BTreeMap<String, Vec<crate::model::FileHighlight>>>,
+}
+
+/// The version of a file an edit started from: what `files.read` (or the
+/// last `files.write`) said. `files.write` refuses with
+/// [`crate::control::RpcError::CONFLICT`] when the file is no longer it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileBase {
+    /// Last modification, unix ms.
+    pub mtime: u64,
+    pub size: u64,
+    /// The contents' SHA-256 (lowercase hex). When given, it alone decides:
+    /// a file touched but not changed is no conflict, and two writes in one
+    /// millisecond are told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// `files.write`: replace an existing file's contents, atomically (a
+/// temporary file in its folder renamed over it, keeping its permissions).
+/// Needs interact rights. Older servers answer `method_not_found`: gate on
+/// [`crate::compat::feature::FILES_WRITE`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesWriteParams {
+    pub block_id: BlockId,
+    pub path: String,
+    /// The new contents, at most [`FileWritten::MAX_BYTES`].
+    pub text: String,
+    /// The version the edit started from; none: write whatever is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<FileBase>,
+    /// Write even when the file changed since `base`.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `files.create`: a new file (its folder must exist); refused with
+/// [`crate::control::RpcError::EXISTS`] when the path is taken.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesCreateParams {
+    pub block_id: BlockId,
+    pub path: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// `files.write`'s and `files.create`'s result: the file as written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileWritten {
+    pub path: String,
+    /// Last modification, unix ms.
+    pub mtime: u64,
+    pub size: u64,
+    /// SHA-256 of what was written (lowercase hex): the next write's base.
+    pub sha256: String,
+}
+
+impl FileWritten {
+    /// Most bytes one write takes: the request, JSON-escaped, must fit in
+    /// a frame ([`crate::MAX_FRAME`]).
+    pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 }
 
 /// `files.root`: show another directory; the view state starts afresh.
@@ -155,6 +217,10 @@ pub struct FileRead {
     /// `text` holds less than the whole file.
     #[serde(default)]
     pub truncated: bool,
+    /// SHA-256 of the whole file (lowercase hex), for text read whole: a
+    /// `files.write` base. Older servers leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl FileRead {

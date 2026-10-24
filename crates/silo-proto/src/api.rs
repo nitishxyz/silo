@@ -116,6 +116,7 @@ fn result_schema(method: &Method) -> Schema {
         M::FilesReadImage(_) => schema_for!(FileImage),
         M::FilesFind(_) => schema_for!(FileFound),
         M::FilesSet(_) | M::FilesRoot(_) => schema_for!(FilesState),
+        M::FilesWrite(_) | M::FilesCreate(_) => schema_for!(FileWritten),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -270,6 +271,14 @@ pub fn examples() -> Vec<Method> {
             highlights: None,
         }),
         M::FilesRoot(FilesRootParams { block_id: b(), path: "~/src/silo".into() }),
+        M::FilesWrite(FilesWriteParams {
+            block_id: b(),
+            path: "src/main.rs".into(),
+            text: "fn main() {}\n".into(),
+            base: Some(FileBase { mtime: 1_761_300_000_000, size: 12, sha256: None }),
+            force: false,
+        }),
+        M::FilesCreate(FilesCreateParams { block_id: b(), path: "src/new.rs".into(), text: String::new() }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

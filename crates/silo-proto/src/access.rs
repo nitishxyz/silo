@@ -237,7 +237,7 @@ pub fn need(method: &Method) -> Need {
         | M::FilesRead(_)
         | M::FilesReadImage(_)
         | M::FilesFind(_) => rights(Block(BLOCK), View),
-        M::FilesSet(_) | M::FilesRoot(_) => rights(Block(BLOCK), Interact),
+        M::FilesSet(_) | M::FilesRoot(_) | M::FilesWrite(_) | M::FilesCreate(_) => rights(Block(BLOCK), Interact),
         M::BlockReport(_)
         | M::BlockNotify(_)
         | M::BrowserClick(_)
@@ -431,6 +431,18 @@ mod tests {
         assert!(decode_secret(&link[1..]).is_none());
         assert_eq!(secret_hash(&secret).len(), 64);
         assert_ne!(secret_hash(&secret), secret_hash(&[8; SECRET_LEN]));
+    }
+
+    #[test]
+    fn files_writes_need_interact_rights_reads_view() {
+        use crate::files::{FilesCreateParams, FilesReadParams, FilesWriteParams};
+        let write = Method::FilesWrite(FilesWriteParams { block_id: "b".into(), path: "a".into(), text: String::new(), base: None, force: true });
+        let create = Method::FilesCreate(FilesCreateParams { block_id: "b".into(), path: "a".into(), text: String::new() });
+        let read = Method::FilesRead(FilesReadParams { block_id: "b".into(), path: "a".into(), max_bytes: None });
+        for method in [write, create] {
+            assert_eq!(need(&method), rights(Target::Block("block_id"), Rights::Interact), "{method:?}");
+        }
+        assert_eq!(need(&read), rights(Target::Block("block_id"), Rights::View));
     }
 
     #[test]

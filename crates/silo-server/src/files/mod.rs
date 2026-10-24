@@ -1,12 +1,13 @@
-//! Files blocks (docs/FILES_BLOCK.md): a read-only view of a directory,
-//! with no process behind it. The server holds the view state (tabs, tree,
-//! scroll), answers `files.*` reads under the block's root and watches the
-//! folders shown.
+//! Files blocks (docs/FILES_BLOCK.md): a view of a directory, with no
+//! process behind it. The server holds the view state (tabs, tree, scroll),
+//! answers `files.*` reads and writes under the block's root and watches the
+//! folders shown. Unsaved edits live in the app only.
 
 pub mod find;
 pub mod paths;
 pub mod read;
 pub mod watch;
+pub mod write;
 
 use std::{collections::HashSet, path::PathBuf};
 
@@ -237,6 +238,14 @@ pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> 
         Method::FilesFind(p) => {
             let root = root_of(server, &p.block_id)?;
             reply(&blocking(move || find::find(&root, &p.query, p.limit)).await?)
+        }
+        Method::FilesWrite(p) => {
+            let root = root_of(server, &p.block_id)?;
+            reply(&blocking(move || write::write(&root, &p.path, &p.text, p.base.as_ref(), p.force)).await?)
+        }
+        Method::FilesCreate(p) => {
+            let root = root_of(server, &p.block_id)?;
+            reply(&blocking(move || write::create(&root, &p.path, &p.text)).await?)
         }
         Method::FilesSet(p) => reply(&server.registry.lock().unwrap().files_set(p)?),
         Method::FilesRoot(p) => {

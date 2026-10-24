@@ -793,7 +793,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::FilesReadImage(_)
         | Method::FilesFind(_)
         | Method::FilesSet(_)
-        | Method::FilesRoot(_) => crate::files::handle(server, method).await,
+        | Method::FilesRoot(_)
+        | Method::FilesWrite(_)
+        | Method::FilesCreate(_) => crate::files::handle(server, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }
         | Method::WindowStep { .. }

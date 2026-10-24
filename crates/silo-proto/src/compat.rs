@@ -49,6 +49,10 @@ pub mod feature {
     /// left or above. Older servers dock floats only, always right or
     /// below (ignoring `before`), so gate on it.
     pub const DOCK_SIDES: &str = "dock_sides";
+    /// Files blocks can be edited: `files.write` (with conflict checks
+    /// against a base), `files.create`, and `files.read`'s `sha256`. Older
+    /// servers answer `method_not_found`, so the app keeps them read-only.
+    pub const FILES_WRITE: &str = "files_write";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -56,8 +60,16 @@ pub mod feature {
 }
 
 /// Everything this build supports beyond protocol 1.
-pub const FEATURES: &[&str] =
-    &[feature::ACCESS, feature::APP_REQUESTS, feature::STATUS, feature::APPROVALS, feature::PARKED_BROWSERS, feature::FILES, feature::DOCK_SIDES];
+pub const FEATURES: &[&str] = &[
+    feature::ACCESS,
+    feature::APP_REQUESTS,
+    feature::STATUS,
+    feature::APPROVALS,
+    feature::PARKED_BROWSERS,
+    feature::FILES,
+    feature::DOCK_SIDES,
+    feature::FILES_WRITE,
+];
 
 /// Features this build's server supports that a client advertises only
 /// once it handles them (`silo_client::advertise`), so no client of this

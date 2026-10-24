@@ -15,11 +15,11 @@ const HIDDEN: &[&str] = &[".git"];
 /// Bytes inspected for NULs when deciding text or binary.
 const SNIFF: usize = 8 * 1024;
 
-fn mtime(meta: &Metadata) -> u64 {
+pub(super) fn mtime(meta: &Metadata) -> u64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
 }
 
-fn io_error(path: &str, error: &std::io::Error) -> RpcError {
+pub(super) fn io_error(path: &str, error: &std::io::Error) -> RpcError {
     match error.kind() {
         std::io::ErrorKind::NotFound => RpcError::not_found(path),
         std::io::ErrorKind::PermissionDenied => RpcError::denied(format!("{path}: permission denied")),
@@ -163,7 +163,8 @@ pub fn read(root: &Path, rel: &str, max_bytes: Option<u64>) -> Result<FileRead, 
         Some(text) => (ContentKind::Text, String::from_utf8(text).ok(), named.unwrap_or("text/plain")),
         None => (ContentKind::Binary, None, magic.or(named).unwrap_or("application/octet-stream")),
     };
-    Ok(FileRead { path: rel, kind, text, mime: mime.to_owned(), size: meta.len(), mtime: mtime(&meta), truncated })
+    let sha256 = text.as_deref().filter(|_| !truncated).map(|t| super::write::sha256(t.as_bytes()));
+    Ok(FileRead { path: rel, kind, text, mime: mime.to_owned(), size: meta.len(), mtime: mtime(&meta), truncated, sha256 })
 }
 
 /// An image's bytes, base64.
