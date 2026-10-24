@@ -28,7 +28,7 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
   `default_model(&self) -> Option<(String, String)>`, `list(&self) -> Vec<ModelInfo>`.
 - `Runtime::new(RuntimeConfig) -> Result<Runtime>` performs recovery before returning.
 - `open_project(root) -> Result<ProjectInfo>` canonicalizes the root.
-- `create_session(CreateSession) -> Result<SessionHandle>`; zero `max_steps` selects 200.
+- `create_session(CreateSession) -> Result<SessionHandle>`; zero `max_steps` selects 999.
   `approval_mode: Option<otto_proto::ApprovalMode>` overrides new-session defaults.
 - `set_approval_mode(session_id: &str, mode: otto_proto::ApprovalMode) -> Result<()>`
   durably changes policy for subsequent tool preparation. SessionChanged and

@@ -373,7 +373,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         return Ok(());
     }
     let mut stop_continuations = 0;
-    let limit = cx.live().row.meta["max_steps"].as_u64().filter(|n| *n > 0).unwrap_or(200) as i64;
+    let limit = cx.live().row.meta["max_steps"].as_u64().filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_STEPS) as i64;
     let mut continuations = 0;
     let mut overflow = false;
     'steps: for step in 1..=limit {
@@ -663,8 +663,10 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             crate::compaction::compact(&cx, cancel, turn, "auto").await?;
         }
     }
-    Err(Error::Invalid("maximum steps per turn reached".into()))
+    Err(Error::Invalid(format!("maximum steps per turn reached ({limit})")))
 }
+/// Model requests one turn may make when the session sets no `max_steps`.
+pub(crate) const DEFAULT_MAX_STEPS: u64 = 999;
 /// The provider began compacting inside a step's response (threshold compaction): `compaction.started` under the
 /// item's id, which will hold the checkpoint. Returns the seq it summarizes through.
 async fn threshold_started(cx: &Context, id: &str, turn: i64, step: i64) -> Result<i64> {
