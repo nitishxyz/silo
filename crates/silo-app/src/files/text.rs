@@ -1,17 +1,19 @@
 //! The text viewer: a line-number gutter, lines coloured by `crate::syntax`,
 //! the selection, find matches and an agent's highlights; pointer
 //! selection like the agent pane's (press, drag, double-click a word,
-//! triple-click a line, ⇧-click extends, past an edge scrolls).
+//! triple-click a line, ⇧-click extends, past an edge scrolls). When the
+//! tab is editable (`editor.rs`) it draws the caret and the input method's
+//! marked text, and takes text input.
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, DispatchPhase, HighlightStyle, Hsla, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollStrategy, SharedString, StyledText, Window, div, prelude::*, px, rgb,
+    AnyElement, Context, DispatchPhase, ElementInputHandler, HighlightStyle, Hsla, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollStrategy, SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px, rgb,
 };
 
 use super::{
-    Drag, FilesPane, TextFile, marks_of,
+    Content, Drag, FilesPane, TextFile, marks_of,
     model::{self, Pos, Selection, Unit},
 };
 use crate::theme;
@@ -103,6 +105,30 @@ pub fn combine(syntax: &[(Range<usize>, HighlightStyle)], backgrounds: &[(Range<
     out
 }
 
+/// `spans` with bytes `marked` underlined (an input method's marked text).
+#[must_use]
+pub fn underline(spans: &[(Range<usize>, HighlightStyle)], marked: &Range<usize>, color: Hsla) -> Vec<(Range<usize>, HighlightStyle)> {
+    if marked.is_empty() {
+        return spans.to_vec();
+    }
+    let mut cuts: Vec<usize> = spans.iter().flat_map(|(r, _)| [r.start, r.end]).chain([marked.start, marked.end]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let line = UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false };
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mut style = spans.iter().find(|(r, _)| r.start <= a && b <= r.end).map(|(_, s)| *s).unwrap_or_default();
+        if marked.start <= a && b <= marked.end {
+            style.underline = Some(line);
+        }
+        if style != HighlightStyle::default() {
+            out.push((a..b, style));
+        }
+    }
+    out
+}
+
 fn alpha(c: u32, a: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
     h.a = a;
@@ -142,7 +168,23 @@ impl FilesPane {
         let gutter = gutter_width(lines, m.cell);
         let marks = marks_of(&self.state, path).to_vec();
         let syntax = file.syntax.clone();
-        let selection = self.selection;
+        // Editable: a caret (at the selection's head) while the viewer has focus, and text input.
+        let editable = self.writes() && file.edit.is_some();
+        let focused = self.focus.is_focused(window) && window.is_window_active();
+        let selection = if editable { Some(self.edit_selection(&doc)) } else { self.selection };
+        let blink = self.caret_phase(editable && focused, cx);
+        let caret = selection.filter(|_| blink).map(|s| {
+            let head = doc.clamp(s.head);
+            let line = doc.line(head.line);
+            #[allow(clippy::cast_precision_loss)]
+            let x = model::columns(&line[..head.col]) as f32 * m.cell;
+            (head.line, x)
+        });
+        let marked = file.edit.as_ref().and_then(|e| e.marked.clone()).filter(|_| editable).map(|r| {
+            let (a, b) = (doc.pos(r.start), doc.pos(r.end));
+            (a.line, a.col..if b.line == a.line { b.col } else { doc.line(a.line).len() })
+        });
+        let (caret_color, ink) = (rgb(theme::accent()), rgb(theme::foreground()).into());
         let find: Vec<(usize, Range<usize>)> = self.find.as_ref().map(|f| f.matches.clone()).unwrap_or_default();
         let current = self.find.as_ref().and_then(|f| f.current).map(|i| find[i].clone());
         let bg = theme::background();
@@ -174,8 +216,23 @@ impl FilesPane {
                     if shown.is_empty() {
                         shown.push(' ');
                     }
-                    let styled = StyledText::new(shown).with_highlights(combine(&spans, &backs));
-                    div().h(px(m.line)).pl(px(gutter + PAD)).pr(px(PAD * 2.0)).flex_none().whitespace_nowrap().child(styled)
+                    let mut styles = combine(&spans, &backs);
+                    if let Some((_, r)) = marked.as_ref().filter(|(l, _)| *l == ix) {
+                        styles = underline(&styles, &(model::to_shown(src, r.start.min(cut))..model::to_shown(src, r.end.min(cut))), ink);
+                    }
+                    let styled = StyledText::new(shown).with_highlights(styles);
+                    let caret = caret
+                        .filter(|(l, _)| *l == ix)
+                        .map(|(_, x)| div().absolute().top(px(2.0)).left(px(gutter + PAD + x - 0.5)).w(px(1.5)).h(px(m.line - 4.0)).bg(caret_color));
+                    div()
+                        .relative()
+                        .h(px(m.line))
+                        .pl(px(gutter + PAD))
+                        .pr(px(PAD * 2.0))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(styled)
+                        .children(caret)
                 })
                 .collect()
         })
@@ -249,14 +306,19 @@ impl FilesPane {
         let used = offset;
         let probe_handle = handle.clone();
         let pane = cx.entity().downgrade();
+        let input = editable.then(|| (self.focus.clone(), cx.entity()));
         // After the list in paint order: its bounds, its final offset (a scroll to a line lands in its
         // prepaint: draw again so the gutter follows), and pointer moves and releases anywhere.
         let probe = gpui::canvas(
             move |b, _, _| b,
-            move |b, _, window, _| {
+            move |b, _, window, cx| {
                 bounds.set(Some(b));
                 if probe_handle.0.borrow().base_handle.offset() != used {
                     window.refresh();
+                }
+                // Typing and input methods (marked text) reach the pane while it has focus.
+                if let Some((focus, pane)) = input {
+                    window.handle_input(&focus, ElementInputHandler::new(b, pane), cx);
                 }
                 let moves = pane.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
@@ -306,7 +368,7 @@ impl FilesPane {
     }
 
     /// The text position at window point `p`.
-    fn pos_at(&self, p: gpui::Point<gpui::Pixels>) -> Option<Pos> {
+    pub(super) fn pos_at(&self, p: gpui::Point<gpui::Pixels>) -> Option<Pos> {
         let doc = self.shown_doc()?;
         let bounds = self.text_bounds.get()?;
         let path = self.state.active.as_ref()?;
@@ -325,13 +387,25 @@ impl FilesPane {
             2 => Unit::Word,
             _ => Unit::Line,
         };
+        let editable = self.editing();
         self.selection = match self.selection {
             Some(mut sel) if e.modifiers.shift => {
                 sel.head = at;
                 Some(sel)
             }
+            // Editing, ⇧-click extends from the caret even before a selection.
+            None if e.modifiers.shift && editable => self.shown_doc().map(|doc| Selection { head: at, ..self.edit_selection(&doc) }),
             _ => Some(Selection::new(at, unit)),
         };
+        if let Some(Content::Text(file)) = self.state.active.as_ref().and_then(|a| self.contents.get_mut(a))
+            && let Some(state) = file.edit.as_mut()
+        {
+            // A click ends an undo step and any composing.
+            state.history.seal();
+            state.goal = None;
+            state.marked = None;
+        }
+        self.blink.reset();
         self.drag = Some(Drag::Select);
         cx.notify();
     }

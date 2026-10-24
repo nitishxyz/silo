@@ -1,11 +1,20 @@
 //! The pane's state against the server's: tabs, highlights, changes on
-//! disk, find, and drawing every kind of content. No server: calls are
-//! skipped, contents are put in place as a read would.
+//! disk, find, editing, and drawing every kind of content. No server: calls
+//! are skipped, contents are put in place as a read would, saves are
+//! answered by hand.
 
-use gpui::{TestAppContext, VisualTestContext};
-use silo_proto::model::{BlockInfo, BlockKind, FileHighlight, FilesState};
+use gpui::{AppContext as _, EntityInputHandler as _, KeyDownEvent, Keystroke, TestAppContext, VisualTestContext};
+use silo_proto::{
+    control::{ContentKind, FileRead, FileWritten, RpcError},
+    model::{BlockInfo, BlockKind, FileHighlight, FilesState},
+};
 
-use super::{Content, FilesPane, marks_of, model::Shown};
+use super::{
+    Content, FilesPane, FilesPaneEvent,
+    edit::Disk,
+    marks_of,
+    model::{Pos, Selection, Shown, Unit},
+};
 
 fn info(state: FilesState) -> BlockInfo {
     let mut info: BlockInfo = serde_json::from_value(
@@ -32,9 +41,37 @@ fn pane(cx: &mut TestAppContext) -> (gpui::Entity<FilesPane>, &mut VisualTestCon
     (pane, cx, rt)
 }
 
+fn read_of(path: &str, body: &str, mtime: u64) -> FileRead {
+    FileRead {
+        path: path.into(),
+        kind: ContentKind::Text,
+        text: Some(body.into()),
+        mime: "text/plain".into(),
+        size: body.len() as u64,
+        mtime,
+        truncated: false,
+        sha256: Some(format!("sha-of-{body}")),
+    }
+}
+
 fn text(pane: &mut FilesPane, path: &str, body: &str, cx: &mut gpui::Context<FilesPane>) {
     let shown = super::model::shown_as(path, "text/plain", true);
-    pane.set_text(path.into(), body.into(), shown, false, body.len() as u64, cx);
+    pane.set_text(path.into(), body.into(), shown, &read_of(path, body, 1), cx);
+}
+
+fn key(pane: &mut FilesPane, keys: &str, cx: &mut gpui::Context<FilesPane>) {
+    for k in keys.split(' ') {
+        let event = KeyDownEvent { keystroke: Keystroke::parse(k).unwrap(), is_held: false, prefer_character_input: false };
+        assert!(pane.edit_key(&event, cx), "{k} is an editing key");
+    }
+}
+
+fn caret(line: usize, col: usize) -> Option<Selection> {
+    Some(Selection::new(Pos { line, col }, Unit::Char))
+}
+
+fn shown_text(pane: &FilesPane) -> String {
+    pane.shown_doc().unwrap().text.clone()
 }
 
 #[gpui::test]
@@ -118,4 +155,178 @@ fn every_kind_of_content_draws(cx: &mut TestAppContext) {
     draw(cx);
     pane.update(cx, |pane, _| _ = pane.contents.insert("notes.txt".into(), Content::Failed("gone".into())));
     draw(cx);
+}
+
+#[gpui::test]
+fn typing_moving_and_undo_edit_the_shown_text(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    pane.update_in(cx, |pane, window, cx| {
+        text(pane, "src/main.rs", "fn main() {\n    x();\n}\n", cx);
+        assert!(pane.editing() && pane.unsaved().is_empty());
+        pane.selection = caret(1, 8);
+        // Characters come through the input handler; keys do the rest.
+        for c in ["y", "z"] {
+            pane.replace_text_in_range(None, c, window, cx);
+        }
+        assert_eq!(shown_text(pane), "fn main() {\n    x();yz\n}\n");
+        assert_eq!(pane.unsaved(), ["src/main.rs"], "unsaved: the tab says so");
+        key(pane, "enter", cx);
+        pane.replace_text_in_range(None, "w", window, cx);
+        assert_eq!(shown_text(pane), "fn main() {\n    x();yz\n    w\n}\n", "Return keeps the indent");
+        key(pane, "cmd-left shift-end backspace", cx);
+        assert_eq!(shown_text(pane), "fn main() {\n    x();yz\n    \n}\n");
+        key(pane, "alt-backspace up cmd-right", cx);
+        assert_eq!(pane.selection.unwrap().head, Pos { line: 1, col: 10 });
+        key(pane, "cmd-z cmd-z cmd-z cmd-z", cx);
+        assert_eq!(shown_text(pane), "fn main() {\n    x();\n}\n");
+        assert!(pane.unsaved().is_empty(), "undone to the file: clean");
+        key(pane, "cmd-shift-z", cx);
+        assert_eq!(shown_text(pane), "fn main() {\n    x();yz\n}\n");
+        // Tab and ⇧Tab across lines, matching the file's four spaces.
+        pane.select_all(cx);
+        key(pane, "tab", cx);
+        assert_eq!(shown_text(pane), "    fn main() {\n        x();yz\n    }\n");
+        key(pane, "shift-tab shift-tab", cx);
+        assert_eq!(shown_text(pane), "fn main() {\nx();yz\n}\n");
+        // ⌘X takes the selection to the clipboard; ⌘V brings it back.
+        pane.selection = Some(Selection { anchor: Pos { line: 1, col: 0 }, head: Pos { line: 1, col: 4 }, unit: Unit::Char });
+        key(pane, "cmd-x", cx);
+        assert_eq!(shown_text(pane), "fn main() {\nyz\n}\n");
+        assert_eq!(cx.read_from_clipboard().and_then(|i| i.text()).as_deref(), Some("x();"));
+        assert!(pane.paste(cx));
+        assert_eq!(shown_text(pane), "fn main() {\nx();yz\n}\n");
+    });
+}
+
+#[gpui::test]
+fn marked_text_composes_then_commits(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    pane.update_in(cx, |pane, window, cx| {
+        text(pane, "src/main.rs", "ab\n", cx);
+        pane.selection = caret(0, 1);
+        pane.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+        assert_eq!(shown_text(pane), "anib\n");
+        assert_eq!(pane.marked_text_range(window, cx), Some(1..3));
+        pane.replace_and_mark_text_in_range(None, "にほ", Some(2..2), window, cx);
+        assert_eq!(shown_text(pane), "aにほb\n");
+        assert_eq!(pane.marked_text_range(window, cx), Some(1..3), "UTF-16 units");
+        pane.replace_text_in_range(None, "日本", window, cx);
+        assert_eq!((shown_text(pane).as_str(), pane.marked_text_range(window, cx)), ("a日本b\n", None));
+        assert_eq!(pane.selected_text_range(false, window, cx).unwrap().range, 3..3);
+    });
+}
+
+#[gpui::test]
+fn edits_survive_switching_tabs_and_ask_before_closing(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = asked.clone();
+    let _sub = cx.update(|_, cx| {
+        cx.subscribe(&pane, move |_, event: &FilesPaneEvent, _| {
+            if let FilesPaneEvent::Unsaved(paths) = event {
+                seen.borrow_mut().push(paths.clone());
+            }
+        })
+    });
+    pane.update_in(cx, |pane, window, cx| {
+        text(pane, "src/main.rs", "one\n", cx);
+        text(pane, "notes.txt", "two\n", cx);
+        pane.selection = caret(0, 3);
+        pane.replace_text_in_range(None, "!", window, cx);
+        pane.open("notes.txt", true, cx);
+        assert_eq!(shown_text(pane), "two\n");
+        pane.open("src/main.rs", true, cx);
+        assert_eq!((shown_text(pane).as_str(), pane.selection.unwrap().head), ("one!\n", Pos { line: 0, col: 4 }), "text and caret kept");
+        // A clean tab's change on disk is taken; this one keeps its edits until asked.
+        pane.files_changed(&["src/main.rs".into()], false, cx);
+        assert_eq!(shown_text(pane), "one!\n");
+        // Closed elsewhere (another window): kept open here while it holds edits.
+        let mut elsewhere = pane.state.clone();
+        elsewhere.open.retain(|p| p != "src/main.rs");
+        elsewhere.active = Some("notes.txt".into());
+        pane.set_info(info(elsewhere), cx);
+        assert!(pane.state.open.contains(&"src/main.rs".to_owned()) && pane.unsaved() == ["src/main.rs"]);
+        pane.open("src/main.rs", true, cx);
+        pane.close("src/main.rs", cx);
+        assert!(pane.state.open.contains(&"src/main.rs".to_owned()), "not closed yet");
+    });
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), vec![vec!["src/main.rs".to_owned()]]);
+    pane.update(cx, |pane, cx| {
+        pane.close_now("src/main.rs", cx);
+        assert!(!pane.state.open.contains(&"src/main.rs".to_owned()) && pane.unsaved().is_empty());
+    });
+}
+
+#[gpui::test]
+fn the_disk_bar_saves_and_conflicts(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    pane.update_in(cx, |pane, window, cx| {
+        let path = "src/main.rs";
+        text(pane, path, "a\n", cx);
+        let state = |pane: &FilesPane| match pane.contents.get(path) {
+            Some(Content::Text(f)) => (f.edit.as_ref().unwrap().disk, f.edit.as_ref().unwrap().dirty()),
+            _ => panic!(),
+        };
+        // Read again unchanged (its own save, a touch): nothing happens.
+        assert!(pane.same_as_disk(path, &read_of(path, "a\n", 2)));
+        pane.selection = caret(0, 1);
+        pane.replace_text_in_range(None, "b", window, cx);
+        // Someone else wrote it: the edits stay, the bar asks.
+        pane.disk_read(path, read_of(path, "theirs\n", 3), cx);
+        assert_eq!(state(pane), (Disk::Changed, true));
+        assert!(pane.disk_bar(cx).is_some());
+        pane.keep_mine(path, cx);
+        assert_eq!(state(pane), (Disk::Kept, true));
+        assert!(pane.disk_bar(cx).is_none());
+        // A save refused as a conflict brings the bar back; a saved one is clean.
+        let current = match pane.contents.get(path) {
+            Some(Content::Text(f)) => f.edit.as_ref().unwrap().history.current(),
+            _ => panic!(),
+        };
+        let refused = Err(RpcError::new(RpcError::CONFLICT, "changed").into());
+        assert!(!pane.saved(path, current, refused, cx));
+        assert_eq!(state(pane), (Disk::Changed, true));
+        let written = FileWritten { path: path.into(), mtime: 4, size: 3, sha256: "sha-of-ab\n".into() };
+        assert!(pane.saved(path, current, Ok(written), cx));
+        assert_eq!(state(pane), (Disk::Same, false));
+        // Read again as saved: still the same file.
+        assert!(pane.same_as_disk(path, &read_of(path, "ab\n", 5)));
+        // Someone wrote exactly the edits: clean.
+        pane.replace_text_in_range(None, "c", window, cx);
+        pane.disk_read(path, read_of(path, "abc\n", 6), cx);
+        assert_eq!(state(pane), (Disk::Same, false));
+    });
+}
+
+#[gpui::test]
+fn unsaved_tabs_wait_for_the_blocks_next_pane(cx: &mut TestAppContext) {
+    let (pane, cx, rt) = pane(cx);
+    pane.update_in(cx, |pane, window, cx| {
+        text(pane, "src/main.rs", "kept\n", cx);
+        pane.selection = caret(0, 4);
+        pane.replace_text_in_range(None, "!", window, cx);
+        pane.stash(cx);
+    });
+    let handle = rt.handle().clone();
+    let again = cx.update(|window, cx| cx.new(|cx| FilesPane::new("b1".into(), Some(info(state())), handle, None, window, cx)));
+    again.update(cx, |pane, _| {
+        assert_eq!(pane.unsaved(), ["src/main.rs"]);
+        assert_eq!(shown_text(pane), "kept!\n");
+    });
+}
+
+#[gpui::test]
+fn an_edited_tab_draws_its_caret_and_marked_text(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    pane.update_in(cx, |pane, window, cx| {
+        text(pane, "src/main.rs", "fn main() {}\n", cx);
+        window.focus(&pane.focus, cx);
+        pane.selection = caret(0, 11);
+        pane.replace_and_mark_text_in_range(None, "x", None, window, cx);
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, cx| _ = window.draw(cx));
+    pane.update(cx, |pane, _| assert!(pane.caret_on, "a caret while focused"));
 }

@@ -163,8 +163,17 @@ impl Workspace {
         }
     }
 
-    /// Close Pane / Close Tab: ask if something runs, else close at once.
+    /// Close Pane / Close Tab: ask about unsaved files, then if something
+    /// runs, else close at once.
     pub(crate) fn close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ask_unsaved(&target, crate::files_block::AfterUnsaved::Close(target.clone()), window, cx) {
+            return;
+        }
+        self.close_checked(target, window, cx);
+    }
+
+    /// [`Self::close`] with unsaved files answered for.
+    pub(crate) fn close_checked(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         if let CloseTarget::Pane(block) = &target {
             let alone = self
                 .view

@@ -212,7 +212,11 @@ impl Workspace {
             }
             Command::CloseSession => {
                 if let Some(target) = self.close_target_of(command) {
-                    self.send_close(self.active_host, target, !self.confirm_close(), window, cx);
+                    let (host, force) = (self.active_host, !self.confirm_close());
+                    let after = crate::files_block::AfterUnsaved::Send { host, target: target.clone(), force };
+                    if !self.ask_unsaved(&target, after, window, cx) {
+                        self.send_close(host, target, force, window, cx);
+                    }
                 }
             }
             Command::SwitchSession => self.toggle_switcher(window, cx),

@@ -209,6 +209,9 @@ pub struct Doc {
     /// The line with the most columns (for the horizontal extent).
     pub widest: usize,
     pub widest_columns: usize,
+    /// The text is ASCII (UTF-16 offsets are byte offsets); edits only
+    /// ever clear it.
+    pub ascii: bool,
 }
 
 impl Doc {
@@ -217,8 +220,7 @@ impl Doc {
         let mut lines = Vec::new();
         let mut start = 0;
         for (i, _) in text.match_indices('\n') {
-            let end = if i > start && text.as_bytes()[i - 1] == b'\r' { i - 1 } else { i };
-            lines.push(start..end);
+            lines.push(start..line_end(&text, start, i));
             start = i + 1;
         }
         let end = text.len();
@@ -234,7 +236,8 @@ impl Doc {
                 (widest, widest_columns) = (i, columns);
             }
         }
-        Self { text, lines, widest, widest_columns }
+        let ascii = text.is_ascii();
+        Self { text, lines, widest, widest_columns, ascii }
     }
 
     #[must_use]
@@ -275,6 +278,107 @@ impl Doc {
         let line = self.line_count().saturating_sub(1);
         Pos { line, col: self.line(line).len() }
     }
+
+    /// `pos` clamped into the text, on a character boundary.
+    #[must_use]
+    pub fn clamp(&self, pos: Pos) -> Pos {
+        if pos.line >= self.line_count() {
+            return self.end();
+        }
+        let line = self.line(pos.line);
+        let mut col = pos.col.min(line.len());
+        while !line.is_char_boundary(col) {
+            col -= 1;
+        }
+        Pos { line: pos.line, col }
+    }
+
+    /// The byte offset of `pos` in [`Self::text`] (clamped).
+    #[must_use]
+    pub fn offset(&self, pos: Pos) -> usize {
+        let pos = self.clamp(pos);
+        self.lines[pos.line].start + pos.col
+    }
+
+    /// The line holding byte `offset` (its break counts as its own).
+    #[must_use]
+    pub fn line_of(&self, offset: usize) -> usize {
+        self.lines.partition_point(|r| r.start <= offset).saturating_sub(1)
+    }
+
+    /// The position of byte `offset` (one inside a `\r\n` is the line's end).
+    #[must_use]
+    pub fn pos(&self, offset: usize) -> Pos {
+        let line = self.line_of(offset.min(self.text.len()));
+        let range = &self.lines[line];
+        self.clamp(Pos { line, col: offset.saturating_sub(range.start).min(range.len()) })
+    }
+
+    /// Replace bytes `range` of the text with `text`, updating the line
+    /// table in place (the lines around the edit are scanned again, the
+    /// ones after it move). Returns the lines replaced: from `first`,
+    /// `removed` old lines became `added` new ones.
+    pub fn replace(&mut self, range: Range<usize>, text: &str) -> Splice {
+        let start = range.start.min(self.text.len());
+        let range = start..range.end.clamp(start, self.text.len());
+        let (first, last) = (self.line_of(range.start), self.line_of(range.end));
+        let tail = last + 1 < self.lines.len();
+        let delta = text.len().cast_signed() - range.len().cast_signed();
+        let old_next = if tail { self.lines[last + 1].start } else { self.text.len() };
+        self.ascii &= text.is_ascii();
+        self.text.replace_range(range, text);
+        let start = self.lines[first].start;
+        let end = old_next.saturating_add_signed(delta);
+        let mut fresh = Vec::new();
+        let mut from = start;
+        for (i, _) in self.text[start..end].match_indices('\n') {
+            let i = start + i;
+            fresh.push(from..line_end(&self.text, from, i));
+            from = i + 1;
+        }
+        if !tail {
+            fresh.push(from..self.text.len());
+        }
+        let added = fresh.len();
+        let removed = last - first + 1;
+        self.lines.splice(first..=last, fresh);
+        for r in &mut self.lines[first + added..] {
+            *r = r.start.saturating_add_signed(delta)..r.end.saturating_add_signed(delta);
+        }
+        // The widest line: kept when it is outside the edit and nothing new is wider.
+        let widest_edited = (first..=last).contains(&self.widest);
+        if self.widest > last {
+            self.widest = (self.widest + added).saturating_sub(removed);
+        }
+        let (mut widest, mut columns) = if widest_edited { (first, 0) } else { (self.widest, self.widest_columns) };
+        for ix in first..first + added {
+            let c = self::columns(self.line(ix));
+            if c > columns {
+                (widest, columns) = (ix, c);
+            }
+        }
+        if widest_edited && columns < self.widest_columns {
+            let fresh = Self::new(std::mem::take(&mut self.text));
+            *self = fresh;
+        } else {
+            (self.widest, self.widest_columns) = (widest, columns);
+        }
+        Splice { first, removed, added }
+    }
+}
+
+/// Lines an edit replaced ([`Doc::replace`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Splice {
+    pub first: usize,
+    pub removed: usize,
+    pub added: usize,
+}
+
+/// The end of the line from `start` broken at `\n` index `nl` (a `\r`
+/// before it is not part of the line).
+fn line_end(text: &str, start: usize, nl: usize) -> usize {
+    if nl > start && text.as_bytes()[nl - 1] == b'\r' { nl - 1 } else { nl }
 }
 
 /// Columns `text` takes, tabs to the next multiple of [`TAB`], wide

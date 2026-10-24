@@ -76,6 +76,7 @@ impl FilesPane {
         let tabs = self.state.open.iter().zip(labels).enumerate().map(|(i, (path, (name, dir)))| {
             let shown = active.as_deref() == Some(path.as_str());
             let changed = self.changed.contains(path);
+            let dirty = self.dirty(path);
             let group: SharedString = format!("files-tab-{i}").into();
             let (open, close, middle) = (path.clone(), path.clone(), path.clone());
             let ink = if shown && style.active { palette.ink } else { palette.secondary };
@@ -88,12 +89,33 @@ impl FilesPane {
                 .size(px(16.0))
                 .continuous(4.0)
                 .hover(|s| s.bg(palette.hover()))
-                .when(!shown, |el| el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
+                .relative()
+                .when(!shown && !dirty, |el| el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.close(&close, cx);
                 }))
-                .child(crate::assets::icon("close", 10.0, palette.icon));
+                // Unsaved: a dot in the ×'s place, the × on hover.
+                .when(dirty, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .group_hover(group.clone(), |s| s.opacity(0.0))
+                            .child(div().size(px(7.0)).rounded_full().bg(rgb(ink))),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(dirty, |el| el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
+                        .child(crate::assets::icon("close", 10.0, palette.icon)),
+                );
             let dot = changed.then(|| div().flex_none().size(px(6.0)).rounded_full().bg(rgb(palette.accent)));
             keep_press(
                 div()
@@ -180,8 +202,8 @@ impl FilesPane {
             let hint = if self.state.tree { "Pick a file in the tree, or press ⌘P to find one" } else { "Press ⌘P to find a file" };
             return centered(div().flex().flex_col().items_center().gap(px(4.0)).child("No file open").child(hint_text(hint)));
         };
-        let content = self.contents.remove(&path);
-        let body = match &content {
+        let mut content = self.contents.remove(&path);
+        let body = match &mut content {
             None | Some(Content::Loading) => centered(hint("Loading…")),
             Some(Content::Failed(error)) => centered(
                 div()
@@ -218,6 +240,12 @@ impl FilesPane {
                     .into_any_element()
             }
             Some(Content::Text(file)) => {
+                if file.markdown_stale && !self.source.contains(&path) {
+                    file.markdown_stale = false;
+                    if let Some(md) = file.markdown.as_mut() {
+                        md.set_source(&file.doc.text);
+                    }
+                }
                 let rendered = file.markdown.as_ref().filter(|_| !self.source.contains(&path));
                 let note = file.truncated.then(|| self.truncated_note(&path, file.doc.text.len() as u64, file.size, cx));
                 let main = match rendered {
@@ -279,6 +307,7 @@ impl FilesPane {
                 .text_size(px(12.5))
         };
         let mut out = Vec::new();
+        out.extend(self.disk_bar(cx));
         if let Some(find) = &self.find {
             let count = match (find.current, find.matches.len()) {
                 (_, 0) if find.field.read(cx).text.is_empty() => String::new(),
@@ -529,6 +558,12 @@ impl FilesPane {
                 self.close_bars(window, cx);
                 true
             }
+            "s" if m.platform && !m.shift && !m.control && !m.alt => {
+                self.save_active(cx);
+                true
+            }
+            // Editing: movement, deletes, Return, Tab, undo and cut (characters come through the input method).
+            _ if self.focus.is_focused(window) && self.editing() => self.edit_key(e, cx),
             "escape" if self.selection.is_some() => {
                 self.selection = None;
                 true
@@ -610,6 +645,22 @@ impl Render for FilesPane {
                 None => cx.propagate(),
             }))
             .on_action(cx.listener(|this, _: &act::SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &act::Paste, _, cx| {
+                if !this.paste(cx) {
+                    cx.propagate();
+                }
+            }))
+            // ⌘↑ ⌘↓ are the terminal's prompt jumps; editing, they go to the text's start and end.
+            .on_action(cx.listener(|this, _: &act::JumpToPreviousPrompt, _, cx| {
+                if !this.caret_to_end(false, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &act::JumpToNextPrompt, _, cx| {
+                if !this.caret_to_end(true, cx) {
+                    cx.propagate();
+                }
+            }))
             .on_key_down(cx.listener(Self::key_down))
             // A press anywhere else in the block (a picture, rendered markdown) focuses it.
             .on_mouse_down(

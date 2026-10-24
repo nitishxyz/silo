@@ -1,9 +1,13 @@
 //! The Files block (docs/FILES_BLOCK.md §4): tabs in the header, a viewer
-//! on the left, the folder tree on the right. Read-only. The server holds
-//! the view state (`FilesState`: tabs, the tree, scroll, highlights) and
-//! answers `files.*` reads; this pane draws it, changes it with
-//! `files.set` and re-reads what `files.changed` names.
+//! on the left, the folder tree on the right. Text files are edited in the
+//! viewer (`editor.rs`, `edit.rs`) and saved with `files.write` on servers
+//! that have it. The server holds the view state (`FilesState`: tabs, the
+//! tree, scroll, highlights) and answers `files.*` calls; this pane draws
+//! it, changes it with `files.set` and re-reads what `files.changed` names.
+//! Unsaved text lives here only.
 
+pub(crate) mod edit;
+mod editor;
 pub(crate) mod model;
 #[cfg(test)]
 mod tests;
@@ -27,7 +31,11 @@ use silo_proto::{
     model::{BlockInfo, FileHighlight, FilesState},
 };
 
-use self::model::{Doc, Selection, Shown};
+pub(crate) use self::editor::save_all;
+use self::{
+    edit::EditState,
+    model::{Doc, Selection, Shown},
+};
 use crate::text_field::{FieldEvent, TextField};
 
 /// The tree's width to start with, and its bounds.
@@ -46,6 +54,9 @@ pub enum FilesPaneEvent {
     Activated,
     /// Something its header shows changed.
     Header,
+    /// Closing these tabs would lose unsaved edits: ask first (Save / Don't
+    /// Save / Cancel), then [`FilesPane::close_now`].
+    Unsaved(Vec<String>),
 }
 
 /// What a tab holds once read.
@@ -66,6 +77,19 @@ pub(crate) struct TextFile {
     pub truncated: bool,
     pub size: u64,
     pub markdown: Option<crate::agent::MarkdownView>,
+    /// The markdown view shows an older text (edited since).
+    pub markdown_stale: bool,
+    pub lang: Option<crate::syntax::Language>,
+    /// Bumped by every change of `doc`: a highlight for an older one is
+    /// dropped.
+    pub version: u64,
+    /// Edits: present once the whole file is here (not truncated) and small
+    /// enough to save; used when the server can write.
+    pub edit: Option<EditState>,
+    /// The selection while another tab is shown.
+    pub cursor: Option<Selection>,
+    /// The highlight waiting for typing to pause.
+    highlighting: Option<Task<()>>,
 }
 
 /// The find bar (⌘F).
@@ -142,6 +166,12 @@ pub struct FilesPane {
     autoscroll: Option<Task<()>>,
     pub(crate) autoscroll_speed: f32,
     pub(crate) notice: Option<String>,
+    /// The caret's blink, and its timer while a caret shows.
+    blink: crate::blink::Blink,
+    caret_on: bool,
+    blink_task: Option<Task<()>>,
+    /// The last `TextFile::version` given out.
+    versions: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -192,8 +222,14 @@ impl FilesPane {
             autoscroll: None,
             autoscroll_speed: 0.0,
             notice: None,
+            blink: crate::blink::Blink::default(),
+            caret_on: false,
+            blink_task: None,
+            versions: 0,
             _subs: subs,
         };
+        // Unsaved tabs kept while the block was out of view (another session shown).
+        pane.unstash(cx);
         pane.load_all(cx);
         pane
     }
@@ -232,17 +268,44 @@ impl FilesPane {
             self.state = state;
             self.load_all(cx);
         } else {
+            // A tab closed elsewhere (another window, a client) stays open here while it holds edits.
+            let mut state = state;
+            let kept: Vec<String> = self.unsaved().into_iter().filter(|p| !state.open.contains(p)).collect();
+            state.open.extend(kept.iter().cloned());
             let active_changed = state.active != self.state.active;
+            if active_changed {
+                self.park_selection();
+            }
             self.state = state;
             if active_changed {
-                self.selection = None;
+                self.unpark_selection();
                 self.refind(cx);
+            }
+            if !kept.is_empty() {
+                let open = self.state.open.clone();
+                self.set(FilesSetParams { open: Some(open), ..FilesSetParams::default() }, cx);
             }
             self.forget_closed();
             self.load_needed(cx);
         }
         cx.emit(FilesPaneEvent::Header);
         cx.notify();
+    }
+
+    /// Keep the shown tab's selection with it while another tab shows.
+    fn park_selection(&mut self) {
+        let selection = self.selection.take();
+        if let Some(Content::Text(file)) = self.state.active.as_ref().and_then(|a| self.contents.get_mut(a)) {
+            file.cursor = selection;
+        }
+    }
+
+    /// The shown tab's selection, as it was left.
+    fn unpark_selection(&mut self) {
+        self.selection = match self.state.active.as_ref().and_then(|a| self.contents.get(a)) {
+            Some(Content::Text(file)) => file.cursor.map(|s| Selection { anchor: file.doc.clamp(s.anchor), head: file.doc.clamp(s.head), ..s }),
+            _ => None,
+        };
     }
 
     /// Drop what belongs to tabs no longer open.
@@ -332,29 +395,38 @@ impl FilesPane {
                 return;
             }
             match result {
+                // Unsaved edits stay; the bar or a notice says what happened.
+                _ if this.dirty(&path) => match result {
+                    Ok(read) => this.disk_read(&path, read, cx),
+                    Err(error) => this.notice = Some(format!("Couldn't check {} on disk: {}", model::name(&path), describe(&error))),
+                },
                 Err(error) => {
                     this.contents.insert(path, Content::Failed(describe(&error)));
                 }
+                Ok(read) if this.same_as_disk(&path, &read) => {}
                 Ok(read) => {
-                    let text = read.text.filter(|_| read.kind == ContentKind::Text);
+                    let text = read.text.clone().filter(|_| read.kind == ContentKind::Text);
                     match model::shown_as(&path, &read.mime, text.is_some()) {
                         Shown::Image => return this.read_image(path, cx),
                         Shown::Binary => {
                             this.contents.insert(path, Content::Binary { mime: read.mime, size: read.size });
                         }
-                        shown => this.set_text(path, text.unwrap_or_default(), shown, read.truncated, read.size, cx),
+                        shown => this.set_text(path, text.unwrap_or_default(), shown, &read, cx),
                     }
                 }
             }
+            cx.emit(FilesPaneEvent::Header);
             cx.notify();
         });
     }
 
-    fn set_text(&mut self, path: String, text: String, shown: Shown, truncated: bool, size: u64, cx: &mut Context<Self>) {
-        // A re-read keeps the rendered markdown's place and the old colours until the new ones are ready.
-        let (markdown, syntax) = match self.contents.remove(&path) {
-            Some(Content::Text(old)) => (old.markdown, old.syntax.filter(|_| old.doc.text.len() == text.len())),
-            _ => (None, None),
+    fn set_text(&mut self, path: String, text: String, shown: Shown, read: &FileRead, cx: &mut Context<Self>) {
+        let (truncated, size) = (read.truncated, read.size);
+        // A re-read keeps the rendered markdown's place, the old colours until the new ones are ready, and
+        // where the caret was.
+        let (markdown, syntax, cursor) = match self.contents.remove(&path) {
+            Some(Content::Text(old)) => (old.markdown, old.syntax.filter(|_| old.doc.text.len() == text.len()), old.cursor),
+            _ => (None, None, None),
         };
         let markdown = (shown == Shown::Markdown).then(|| match markdown {
             Some(mut view) => {
@@ -365,28 +437,28 @@ impl FilesPane {
         });
         let lang = crate::syntax::Language::detect(&path, text.lines().next());
         let doc = Rc::new(Doc::new(text));
-        if let Some(lang) = lang.filter(|_| crate::syntax::highlightable(&doc.text)) {
-            let (source, key) = (doc.clone(), path.clone());
-            let text = source.text.clone();
-            let task = cx.background_spawn(async move { crate::syntax::by_line(&text, &crate::syntax::highlight(lang, &text)) });
-            cx.spawn(async move |this, cx| {
-                let lines = task.await;
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(Content::Text(file)) = this.contents.get_mut(&key)
-                        && Rc::ptr_eq(&file.doc, &source)
-                    {
-                        file.syntax = Some(Rc::new(lines));
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
+        let edit = editor::editable_read(read).map(|base| EditState::new(base, &doc));
         // A re-read keeps the selection while its lines are still there.
         if self.state.active.as_deref() == Some(path.as_str()) && self.selection.is_some_and(|s| s.anchor.line.max(s.head.line) >= doc.line_count()) {
             self.selection = None;
         }
-        self.contents.insert(path.clone(), Content::Text(Box::new(TextFile { doc, shown, syntax, truncated, size, markdown })));
+        self.versions += 1;
+        let file = TextFile {
+            doc,
+            shown,
+            syntax,
+            truncated,
+            size,
+            markdown,
+            markdown_stale: false,
+            lang,
+            version: self.versions,
+            edit,
+            cursor,
+            highlighting: None,
+        };
+        self.contents.insert(path.clone(), Content::Text(Box::new(file)));
+        self.rehighlight(&path, Duration::ZERO, cx);
         if self.state.active.as_deref() == Some(path.as_str()) {
             self.refind(cx);
         }
@@ -444,8 +516,12 @@ impl FilesPane {
             self.list(dir, cx);
         }
         for path in reread {
-            if self.state.active.as_deref() == Some(path.as_str()) {
-                // Shown: read it again, keeping how much was loaded.
+            if self.saving(&path) {
+                // Its own save, likely: looked at once the save is answered.
+                self.recheck(&path);
+            } else if self.state.active.as_deref() == Some(path.as_str()) || self.dirty(&path) {
+                // Shown, or holding edits: read it again (keeping how much was loaded). A clean tab takes
+                // the new text; edits stay and the bar asks.
                 let all = matches!(self.contents.get(&path), Some(Content::Text(t)) if !t.truncated && t.size > FileRead::DEFAULT_BYTES);
                 self.read(path, all.then_some(FileRead::MAX_BYTES), cx);
             } else {
@@ -475,10 +551,13 @@ impl FilesPane {
         }
         self.save_scroll_now(cx);
         self.state.open.clone_from(&open);
-        if show {
+        if show && self.state.active.as_deref() != Some(path) {
+            self.park_selection();
             self.state.active = Some(path.to_owned());
+            self.unpark_selection();
+        }
+        if show {
             self.changed.remove(path);
-            self.selection = None;
             self.refind(cx);
         }
         let params = FilesSetParams { open: Some(open), active: show.then(|| path.to_owned()), ..FilesSetParams::default() };
@@ -488,7 +567,17 @@ impl FilesPane {
         cx.notify();
     }
 
+    /// Close tab `path`; with unsaved edits, ask first.
     pub(crate) fn close(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.dirty(path) {
+            cx.emit(FilesPaneEvent::Unsaved(vec![path.to_owned()]));
+            return;
+        }
+        self.close_now(path, cx);
+    }
+
+    /// Close tab `path`, dropping any unsaved edits.
+    pub fn close_now(&mut self, path: &str, cx: &mut Context<Self>) {
         let (open, active) = model::close_tab(&self.state.open, self.active(), path);
         if open == self.state.open {
             return;
@@ -505,6 +594,7 @@ impl FilesPane {
             if let Some(a) = &active {
                 self.changed.remove(a);
             }
+            self.unpark_selection();
             self.refind(cx);
         }
         let params = FilesSetParams { open: Some(open), active: Some(active.unwrap_or_default()), ..FilesSetParams::default() };

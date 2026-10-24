@@ -96,6 +96,8 @@ pub struct Workspace {
     pub(crate) picker: Option<crate::window_picker::WindowPicker>,
     /// Asking before a close that would end running programs.
     pub(crate) close_confirm: Option<crate::close_confirm::CloseConfirm>,
+    /// Save / Don't Save / Cancel before a close loses Files edits.
+    pub(crate) unsaved: Option<crate::files_block::UnsavedConfirm>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
     pub(crate) launcher: crate::launcher::Launcher,
@@ -269,6 +271,7 @@ impl Workspace {
             palette: None,
             picker: None,
             close_confirm: None,
+            unsaved: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
             launcher: crate::launcher::Launcher::default(),
@@ -747,6 +750,7 @@ impl Workspace {
         self.panes.clear();
         blocks.extend(self.hand_back_browsers(cx));
         self.agents.clear();
+        self.stash_files(cx);
         self.files.clear();
         self.view = None;
         self.server_focus = None;
@@ -1588,6 +1592,7 @@ impl Render for Workspace {
             && self.add_host.is_none()
             && self.share.is_none()
             && self.close_confirm.is_none()
+            && self.unsaved.is_none()
             && !self.appearance_menu.open
             && !self.launcher.is_open()
         {
@@ -1601,6 +1606,7 @@ impl Render for Workspace {
                     && this.share.is_none()
                     && this.settings.is_none()
                     && this.close_confirm.is_none()
+                    && this.unsaved.is_none()
                     && !this.appearance_menu.open
                     && !this.launcher.is_open()
                 {
@@ -1652,6 +1658,7 @@ impl Render for Workspace {
         let palette = self.render_palette(window, cx);
         let picker = self.render_picker(window, cx);
         let close_confirm = self.render_close_confirm(cx);
+        let unsaved = self.render_unsaved(cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1688,6 +1695,7 @@ impl Render for Workspace {
             .children(palette)
             .children(picker)
             .children(close_confirm)
+            .children(unsaved)
     }
 }
 
