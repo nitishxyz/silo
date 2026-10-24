@@ -1535,7 +1535,14 @@ impl AgentPane {
                         .items_start()
                         .gap(px(8.0))
                         .child(div().flex_none().h(px(20.0)).flex().items_center().child(icon("question", 16.0, theme::muted())))
-                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(q.question.clone())),
+                        // Markdown like a reply: code, emphasis, lists.
+                        .child({
+                            let mut doc = super::markdown::Doc::default();
+                            doc.update(&q.question);
+                            div().flex_1().min_w_0().flex().flex_col().mb(px(-8.0)).children(doc.blocks().iter().enumerate().map(|(i, block)| {
+                                render_block(&format!("question-{}-{i}", q.question_id), block, None, theme::foreground(), &self.scroll)
+                            }))
+                        }),
                 )
                 .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
                 .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))
