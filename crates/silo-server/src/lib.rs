@@ -428,10 +428,32 @@ pub async fn takeover(config: Config, fail_before_ready: bool) -> anyhow::Result
     });
     // The old server closed its endpoint before COMMIT. Not fatal: the
     // programs we now hold must not end here.
-    let net = Net::bind_with(&identity, config.net_options()).await.map_err(|error| format!("{error:#}"));
+    let net = rebind(&identity, &config).await;
     let remote = Remote { identity, auth, net };
     let start = Start { lock: ServerLock::adopt(lock), listener, notes_tx, notes_rx, persist, sessions, blocks, remote };
     serve(config, start).await
+}
+
+/// How long a successor retries a fixed port: as long as its predecessor
+/// may take to close the endpoint ([`close_net`]).
+const REBIND_WAIT: Duration = Duration::from_secs(3);
+
+/// The successor's endpoint. A fixed port may still be held by the old
+/// endpoint for a moment after it closed (its socket outlives `close` on a
+/// loaded machine), so that bind is retried for [`REBIND_WAIT`]; a random
+/// port cannot collide and fails at once.
+async fn rebind(identity: &Identity, config: &Config) -> Result<Net, String> {
+    let deadline = tokio::time::Instant::now() + REBIND_WAIT;
+    loop {
+        match Net::bind_with(identity, config.net_options()).await {
+            Ok(net) => return Ok(net),
+            Err(error) if config.port.is_some() && tokio::time::Instant::now() < deadline => {
+                tracing::debug!("rebind remote endpoint: {error:#}; retrying");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(format!("{error:#}")),
+        }
+    }
 }
 
 struct Remote {
