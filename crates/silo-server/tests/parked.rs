@@ -93,10 +93,10 @@ async fn parked_browsers_spawn_reveal_and_close_with_their_owner() {
     let page: Created = control.call(browser(Some("https://example.com/"), BlockKind::Browser)).await.unwrap();
     assert_eq!((page.session_id.as_str(), page.window_id.as_str()), (main.session_id.as_str(), ""));
     let v = view(&control, &main.session_id).await;
-    assert_eq!(v.session.parked.iter().map(|p| (p.id.as_str(), p.owner.as_deref())).collect::<Vec<_>>(), [(
-        page.block_id.as_str(),
-        Some(main.block_id.as_str())
-    )]);
+    assert_eq!(
+        v.session.parked.iter().map(|p| (p.id.as_str(), p.owner.as_deref())).collect::<Vec<_>>(),
+        [(page.block_id.as_str(), Some(main.block_id.as_str()))]
+    );
     assert!(v.session.windows.iter().all(|w| !w.layout.contains(&page.block_id)));
     let info = v.blocks.iter().find(|b| b.id == page.block_id).expect("parked blocks are in the view");
     assert_eq!(info.kind, BlockKind::Browser);

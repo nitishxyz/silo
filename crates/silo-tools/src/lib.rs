@@ -517,10 +517,8 @@ impl Tools {
         self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
         let command = vec![shell.to_owned(), "-lc".to_owned(), command.to_owned()];
         let size = Some(silo_proto::model::TermSize::new(COMMAND_COLUMNS, 50));
-        let created: Created = self
-            .control
-            .call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size, kind: BlockKind::Terminal, url: None })
-            .await?;
+        let created: Created =
+            self.control.call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size, kind: BlockKind::Terminal, url: None }).await?;
         Ok(created.block_id)
     }
 
