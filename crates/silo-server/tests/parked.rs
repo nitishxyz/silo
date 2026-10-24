@@ -178,16 +178,23 @@ async fn parked_blocks_spawn_reveal_park_and_close() {
     assert!(v.session.parked.is_empty());
     assert_eq!(v.session.windows[0].floats.last().map(|f| f.id.as_str()), Some(kept.block_id.as_str()));
     assert_eq!(v.session.windows[0].focused, kept.block_id);
+    let owned = |v: &SessionView, id: &str| v.blocks.iter().find(|b| b.id == id).and_then(|b| b.owner_block.clone());
+    assert_eq!(owned(&v, &kept.block_id).as_deref(), Some(agent.block_id.as_str()), "revealed, it keeps its owner");
     control.call_value(Method::TerminalSend { block_id: kept.block_id.clone(), text: "\r".into() }).await.unwrap();
     let ended = until(&control, &kept.block_id, |c| c.lifecycle == Lifecycle::Exited).await;
     assert_eq!(ended.exited, Some(2));
     let view_of: BlockView = control.call(Method::BlockView { block_id: kept.block_id.clone() }).await.unwrap();
     assert_eq!(view_of.block.lifecycle, Lifecycle::Exited);
 
-    // Park and reveal as a split; the only block of a window stays.
+    // Park (it keeps its owner) and reveal as a split; the only block of a
+    // window stays.
     control.call_value(Method::BlockPark { block_id: kept.block_id.clone() }).await.unwrap();
     let v = view(&control, &main.session_id).await;
-    assert_eq!(v.session.parked.iter().map(|p| (p.id.as_str(), p.owner.clone())).collect::<Vec<_>>(), [(kept.block_id.as_str(), None)]);
+    assert_eq!(
+        v.session.parked.iter().map(|p| (p.id.as_str(), p.owner.as_deref())).collect::<Vec<_>>(),
+        [(kept.block_id.as_str(), Some(agent.block_id.as_str()))]
+    );
+    assert_eq!(owned(&v, &kept.block_id).as_deref(), Some(agent.block_id.as_str()));
     control.call_value(Method::BlockReveal { block_id: kept.block_id.clone(), reveal: Reveal::Split }).await.unwrap();
     assert!(view(&control, &main.session_id).await.session.windows[0].layout.contains(&kept.block_id));
     let revealed = control.call_value(Method::BlockReveal { block_id: kept.block_id.clone(), reveal: Reveal::Float }).await.unwrap_err();
@@ -198,11 +205,24 @@ async fn parked_blocks_spawn_reveal_park_and_close() {
         .unwrap();
     assert_eq!(code(&control.call_value(Method::BlockPark { block_id: lone.block_id }).await.unwrap_err()), "conflict");
 
-    // Closing the owner closes its parked blocks, not revealed ones.
+    // A running command revealed, parked and revealed again keeps its owner.
+    let busy: Created = control.call(spawn(&agent.block_id, &["/bin/sh", "-c", "read x"])).await.unwrap();
+    control.call_value(Method::BlockReveal { block_id: busy.block_id.clone(), reveal: Reveal::Split }).await.unwrap();
+    control.call_value(Method::BlockPark { block_id: busy.block_id.clone() }).await.unwrap();
+    let v = view(&control, &main.session_id).await;
+    assert_eq!(v.session.parked.iter().find(|p| p.id == busy.block_id).and_then(|p| p.owner.as_deref()), Some(agent.block_id.as_str()));
+    control.call_value(Method::BlockReveal { block_id: busy.block_id.clone(), reveal: Reveal::Float }).await.unwrap();
+    let v = view(&control, &main.session_id).await;
+    assert!(v.session.windows[0].floats.iter().any(|f| f.id == busy.block_id));
+    assert_eq!(owned(&v, &busy.block_id).as_deref(), Some(agent.block_id.as_str()));
+
+    // Closing the owner closes its parked blocks and its shown running
+    // ones; a shown block that exited stays readable.
     let hidden: Created = control.call(spawn(&agent.block_id, &[])).await.unwrap();
     control.call_value(Method::BlockClose { block_id: agent.block_id.clone(), force: true }).await.unwrap();
     let v = view(&control, &main.session_id).await;
     assert!(v.session.parked.is_empty() && v.blocks.iter().all(|b| b.id != hidden.block_id));
+    assert!(v.blocks.iter().all(|b| b.id != busy.block_id), "the revealed running command closed with its owner");
     assert!(v.blocks.iter().any(|b| b.id == kept.block_id));
 
     control.call_value(Method::ServerShutdown { force: true }).await.unwrap();

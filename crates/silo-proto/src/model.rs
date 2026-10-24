@@ -395,6 +395,12 @@ pub struct BlockInfo {
     /// The owner's short client name (`Silo`, `silo cli`), with the
     /// paired device's name appended for remote owners.
     pub owner_name: Option<String>,
+    /// The block that started this one with `block.spawn` (e.g. an agent
+    /// block running a command), for the block's whole life, shown or
+    /// parked: closing that block closes this one, and apps park rather
+    /// than close a running owned block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_block: Option<BlockId>,
     #[serde(default)]
     pub pid: Option<i32>,
     /// Engine state; `Some` exactly when `kind` is [`BlockKind::Browser`].

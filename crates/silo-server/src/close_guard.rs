@@ -31,7 +31,8 @@ struct Target {
     session_id: SessionId,
     window_id: WindowId,
     session_name: String,
-    /// A parked block's owner: closing the owner ends it.
+    /// The block that started it (`BlockInfo::owner_block`), shown or
+    /// parked: closing the owner ends it while it runs.
     owner: Option<BlockId>,
 }
 
@@ -140,7 +141,13 @@ fn tree(reg: &Registry) -> Vec<Target> {
                 session_name: s.name.clone(),
                 owner,
             };
-            let tiled = s.windows.iter().flat_map(move |w| w.blocks().into_iter().map(move |b| target(b, w.id.clone(), None)));
+            let owner_of = |b: &str| reg.block_info(b).and_then(|i| i.owner_block);
+            let tiled = s.windows.iter().flat_map(move |w| {
+                w.blocks().into_iter().map(move |b| {
+                    let owner = owner_of(&b);
+                    target(b, w.id.clone(), owner)
+                })
+            });
             let parked = s.parked.iter().map(move |p| {
                 let window = p.owner.as_deref().and_then(|o| s.windows.iter().find(|w| w.contains(o))).map_or(&s.active_window, |w| &w.id);
                 target(p.id.clone(), window.clone(), p.owner.clone())

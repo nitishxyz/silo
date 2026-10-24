@@ -938,6 +938,7 @@ mod tests {
             size: silo_proto::model::TermSize { columns: 80, rows: 24, cell_width: 0, cell_height: 0 },
             owner: None,
             owner_name: None,
+            owner_block: None,
             pid: None,
             browser: None,
             agent: None,

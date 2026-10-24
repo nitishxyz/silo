@@ -8,7 +8,10 @@
 //! dialog shows only here.
 
 use gpui::{AnyElement, Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Window, div, prelude::*, px, rgb};
-use silo_proto::control::{BusyBlock, BusyBlocks, Method, RpcError};
+use silo_proto::{
+    control::{BusyBlock, BusyBlocks, Method, RpcError},
+    model::{BlockInfo, BlockKind},
+};
 
 use crate::theme::Continuous as _;
 use crate::{
@@ -77,6 +80,26 @@ impl CloseTarget {
     }
 }
 
+/// What closing a pane does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneClose {
+    /// An agent's command block still running (`owner_block`): hide it
+    /// (`block.park`), no dialog; the command goes on and the agent row's
+    /// ↗ shows it again. The agent's ■ still ends it.
+    Park,
+    /// Close it, asking first if something runs.
+    Close,
+}
+
+/// How closing the pane of `block` goes; `alone`: it is the only block of
+/// its window, which can't be parked, so it closes.
+pub(crate) fn pane_close(block: Option<&BlockInfo>, alone: bool) -> PaneClose {
+    match block {
+        Some(b) if b.owner_block.is_some() && b.kind == BlockKind::Terminal && b.lifecycle.is_running() && !alone => PaneClose::Park,
+        _ => PaneClose::Close,
+    }
+}
+
 /// The dialog's first line: `vim is running in 'api'`, or a count.
 pub(crate) fn headline(busy: &[BusyBlock]) -> String {
     match busy {
@@ -142,6 +165,16 @@ impl Workspace {
 
     /// Close Pane / Close Tab: ask if something runs, else close at once.
     pub(crate) fn close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if let CloseTarget::Pane(block) = &target {
+            let alone = self
+                .view
+                .as_ref()
+                .and_then(|v| v.session.windows.iter().map(crate::floats::window_blocks).find(|blocks| blocks.contains(block)))
+                .is_some_and(|blocks| blocks.len() == 1);
+            if pane_close(self.block_info(block), alone) == PaneClose::Park {
+                return self.call(Method::BlockPark { block_id: block.clone() });
+            }
+        }
         let host = self.active_host;
         if !self.confirm_close() {
             return self.send_close(host, target, true, window, cx);
@@ -481,5 +514,27 @@ mod tests {
         assert!(matches!(CloseTarget::RestartServer.method(true), Method::ServerShutdown { force: true }));
         assert_eq!(tab.consequence(3), "Closing the tab ends them.");
         assert_eq!(session.consequence(1), "Closing \u{201c}work\u{201d} ends every process in it.");
+    }
+
+    #[test]
+    fn an_agents_running_command_parks_instead_of_closing() {
+        use silo_proto::model::Lifecycle;
+        let block = |owner: Option<&str>, kind: &str, lifecycle: Lifecycle| -> BlockInfo {
+            let mut info: BlockInfo = serde_json::from_value(serde_json::json!({
+                "id": "b2", "session_id": "s", "kind": kind, "title": "zsh", "size": {"columns": 80, "rows": 24},
+                "owner_name": null, "owner_block": owner,
+            }))
+            .unwrap();
+            info.lifecycle = lifecycle;
+            info
+        };
+        let running = block(Some("agent"), "terminal", Lifecycle::Running);
+        assert_eq!(pane_close(Some(&running), false), PaneClose::Park);
+        // The only block of its window can't be parked: it closes (with the dialog).
+        assert_eq!(pane_close(Some(&running), true), PaneClose::Close);
+        assert_eq!(pane_close(Some(&block(Some("agent"), "terminal", Lifecycle::Exited)), false), PaneClose::Close);
+        assert_eq!(pane_close(Some(&block(Some("agent"), "browser", Lifecycle::Running)), false), PaneClose::Close);
+        assert_eq!(pane_close(Some(&block(None, "terminal", Lifecycle::Running)), false), PaneClose::Close);
+        assert_eq!(pane_close(None, false), PaneClose::Close);
     }
 }

@@ -165,6 +165,12 @@
               "null"
             ]
           },
+          "owner_block": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "owner_name": {
             "type": [
               "string",
@@ -4419,6 +4425,12 @@
                   "null"
                 ]
               },
+              "owner_block": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "owner_name": {
                 "type": [
                   "string",
@@ -8103,6 +8115,12 @@
                 "minimum": 0,
                 "type": [
                   "integer",
+                  "null"
+                ]
+              },
+              "owner_block": {
+                "type": [
+                  "string",
                   "null"
                 ]
               },

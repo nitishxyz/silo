@@ -101,6 +101,11 @@ impl BrowserBlock {
         Ok(Self::new(info, state))
     }
 
+    /// Mark the block as started by block `owner` (`block.spawn`).
+    pub fn set_owner_block(&mut self, owner: &str) {
+        self.base.owner_block = Some(owner.to_owned());
+    }
+
     pub fn info(&self) -> BlockInfo {
         let title = if self.state.title.is_empty() { self.state.url.clone() } else { self.state.title.clone() };
         BlockInfo { title, browser: Some(self.state.clone()), ..self.base.clone() }

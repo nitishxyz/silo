@@ -35,6 +35,7 @@ fn info(id: &str, columns: u16) -> BlockInfo {
         size: TermSize::new(columns, 10),
         owner: None,
         owner_name: None,
+        owner_block: None,
         pid: None,
         browser: None,
         agent: None,

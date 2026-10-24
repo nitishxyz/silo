@@ -24,6 +24,7 @@ fn spawn(id: &str, script: &str) -> BlockHandle {
         size: TermSize::new(40, 10),
         owner: None,
         owner_name: None,
+        owner_block: None,
         pid: None,
         browser: None,
         agent: None,

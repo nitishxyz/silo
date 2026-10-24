@@ -2036,6 +2036,7 @@ mod tests {
             size: TermSize::new(80, 24),
             owner: None,
             owner_name: None,
+            owner_block: None,
             pid: None,
             browser: None,
             agent: None,

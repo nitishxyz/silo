@@ -790,6 +790,7 @@ impl Registry {
             size,
             owner: None,
             owner_name: None,
+            owner_block: None,
             pid: None,
             browser: None,
             agent: None,
@@ -935,6 +936,7 @@ impl Registry {
             size: size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(PARKED_SIZE),
             owner: None,
             owner_name: None,
+            owner_block: Some(owner.to_owned()),
             pid: None,
             browser: None,
             agent: None,
@@ -957,6 +959,9 @@ impl Registry {
         let session_id = self.sessions[si].id.clone();
         let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url, agent: None };
         let id = self.spawn_block(&session_id, &new, PARKED_SIZE)?;
+        if let Some(Block::Browser(browser)) = self.blocks.get_mut(&id) {
+            browser.set_owner_block(owner);
+        }
         self.sessions[si].parked.push(Parked { id: id.clone(), owner: Some(owner.to_owned()) });
         self.session_changed(si);
         self.sessions_changed();
@@ -970,7 +975,10 @@ impl Registry {
         if self.sessions[si].windows[wi].blocks().len() == 1 {
             return Err(RpcError::new("conflict", "the only block of a window cannot be parked"));
         }
-        self.sessions[si].parked.push(Parked { id: block_id.to_owned(), owner: None });
+        // An owned block (`block.spawn`) keeps its owner when revealed and
+        // parked again.
+        let owner = self.block_info(block_id).and_then(|i| i.owner_block);
+        self.sessions[si].parked.push(Parked { id: block_id.to_owned(), owner });
         self.detach(si, wi, block_id);
         Ok(())
     }
@@ -986,6 +994,7 @@ impl Registry {
             .ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not parked")))?;
         let session = &mut self.sessions[si];
         let index = session.parked.iter().position(|p| p.id == block_id).expect("parked");
+        // The owner stays on the block (`BlockInfo::owner_block`).
         let owner = session.parked.remove(index).owner;
         let wi = owner
             .as_deref()
@@ -1016,10 +1025,21 @@ impl Registry {
         self.locate(block).ok().map(|(si, _)| si).or_else(|| self.sessions.iter().position(|s| s.is_parked(block)))
     }
 
-    /// Close the parked blocks `owner` owns.
+    /// Close the blocks `owner` started (`block.spawn`): every parked one,
+    /// and shown terminals still running their program, so nothing an agent
+    /// ran outlives it, even after the user revealed it. A shown block that
+    /// exited (its output) or a shown browser stays for the user.
     fn close_owned(&mut self, owner: &str) {
-        let owned: Vec<BlockId> =
-            self.sessions.iter().flat_map(|s| &s.parked).filter(|p| p.owner.as_deref() == Some(owner)).map(|p| p.id.clone()).collect();
+        let parked = self.sessions.iter().flat_map(|s| &s.parked).filter(|p| p.owner.as_deref() == Some(owner)).map(|p| p.id.clone());
+        let running = |b: &Block| {
+            b.terminal()
+                .and_then(|h| h.info.lock().ok().map(|i| i.owner_block.as_deref() == Some(owner) && i.lifecycle.is_running()))
+                .unwrap_or(false)
+        };
+        let shown = self.blocks.iter().filter(|(_, b)| running(b)).map(|(id, _)| id.clone());
+        let mut owned: Vec<BlockId> = parked.chain(shown).collect();
+        owned.sort();
+        owned.dedup();
         for id in owned {
             self.kill_block(&id);
             self.remove_block(&id);
@@ -1728,6 +1748,7 @@ mod tests {
             size: TermSize::new(80, 24),
             owner: None,
             owner_name: None,
+            owner_block: None,
             pid: None,
             browser: None,
             agent: None,
