@@ -97,7 +97,7 @@ pub struct Workspace {
     pub(crate) close_confirm: Option<crate::close_confirm::CloseConfirm>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
-    pub(crate) new_tab_menu: crate::new_tab_menu::NewTabMenu,
+    pub(crate) launcher: crate::launcher::Launcher,
     pub(crate) settings: Option<crate::settings::SettingsModal>,
     pub(crate) pairing: crate::settings::Pairing,
     /// Last fullscreen state the titlebar was laid out for.
@@ -267,7 +267,7 @@ impl Workspace {
             close_confirm: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
-            new_tab_menu: crate::new_tab_menu::NewTabMenu::default(),
+            launcher: crate::launcher::Launcher::default(),
             settings: None,
             pairing: crate::settings::Pairing::default(),
             last_fullscreen: std::cell::Cell::new(None),
@@ -1564,7 +1564,7 @@ impl Render for Workspace {
             && self.share.is_none()
             && self.close_confirm.is_none()
             && !self.appearance_menu.open
-            && !self.new_tab_menu.is_open()
+            && !self.launcher.is_open()
         {
             cx.defer_in(window, |this, window, cx| {
                 // Re-check: an overlay may have taken focus meanwhile.
@@ -1577,7 +1577,7 @@ impl Render for Workspace {
                     && this.settings.is_none()
                     && this.close_confirm.is_none()
                     && !this.appearance_menu.open
-                    && !this.new_tab_menu.is_open()
+                    && !this.launcher.is_open()
                 {
                     this.refocus_terminal(window, cx);
                 }
@@ -1616,7 +1616,7 @@ impl Render for Workspace {
         };
         let ghosts = self.render_pane_ghosts(now, window);
         let appearance = self.render_appearance_menu(cx);
-        let new_tab = self.render_new_tab_menu(window, cx);
+        let launcher = self.render_launcher(window, cx);
         let settings = self.render_settings(window, cx);
         let titlebar = self.render_titlebar(window, cx);
         let switcher = self.render_switcher(window, cx);
@@ -1653,7 +1653,7 @@ impl Render for Workspace {
             .children(self.status_bar().map(|status| crate::status::pill(status, self.panes_bottom() + crate::status::PILL_CLEARANCE, cx)))
             .children(ghosts)
             .children(appearance)
-            .children(new_tab)
+            .children(launcher)
             .children(settings)
             .children(switcher)
             .children(offers)

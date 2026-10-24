@@ -181,8 +181,9 @@ impl Workspace {
         if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll) {
             self.close_palette(window, cx);
         }
-        if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll | Command::NewTabChooser) {
-            self.close_new_tab_menu(window, cx);
+        let launcher = matches!(command, Command::NewTabChooser | Command::SplitRightChooser | Command::SplitDownChooser | Command::NewPaneChooser);
+        if !matches!(command, Command::Copy | Command::Paste | Command::SelectAll) && !launcher {
+            self.close_launcher(window, cx);
         }
         let block = self.focused_block(window, cx);
         let server_command = matches!(command, Command::StartServer | Command::StopServer | Command::RestartServer);
@@ -221,7 +222,9 @@ impl Workspace {
             Command::NewTerminalTab => self.new_window(window, cx),
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::NewAgentTab => self.new_agent_tab(window, cx),
-            Command::NewTabChooser => self.toggle_new_tab_menu(window, cx),
+            Command::NewTabChooser | Command::SplitRightChooser | Command::SplitDownChooser | Command::NewPaneChooser => {
+                self.toggle_launcher(command, window, cx);
+            }
             Command::CloseTab => {
                 if let Some(w) = self.active_window() {
                     self.close(crate::close_confirm::CloseTarget::Tab(w.id.clone()), window, cx);
@@ -448,6 +451,9 @@ impl Workspace {
             | Command::SplitRight
             | Command::SplitDown
             | Command::NewPane
+            | Command::SplitRightChooser
+            | Command::SplitDownChooser
+            | Command::NewPaneChooser
             | Command::NewBrowser
             | Command::OpenUrl
             | Command::ClosePane

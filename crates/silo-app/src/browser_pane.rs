@@ -1957,7 +1957,7 @@ impl crate::workspace::Workspace {
     }
 
     /// Create a browser block with `method`, then focus its address bar.
-    fn create_browser(&mut self, method: Method, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn create_browser(&mut self, method: Method, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(control) = self.control() else { return };
         let task = self.rt.spawn(async move { control.call::<silo_proto::control::Created>(method).await });
         cx.spawn_in(window, async move |this, cx| {

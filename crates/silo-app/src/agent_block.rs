@@ -228,7 +228,7 @@ impl crate::workspace::Workspace {
         self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None }, cx);
     }
 
-    fn create_agent(&mut self, method: Method, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn create_agent(&mut self, method: Method, cx: &mut gpui::Context<Self>) {
         let Some(control) = self.control() else { return };
         let task = self.rt.spawn(async move { control.call::<Created>(method).await });
         cx.spawn(async move |this, cx| {

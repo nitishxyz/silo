@@ -275,7 +275,7 @@ impl Workspace {
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
             let comfortable = !compact;
             let menu_open = self.appearance_menu.open;
-            let new_tab_open = self.new_tab_menu.is_open();
+            let new_tab_open = self.launcher.is_open_for_tab();
             // The strip and the empty space after it take tab drops. The
             // space after the last tab means "move to the end".
             let last = view.session.windows.len().saturating_sub(1);
@@ -343,9 +343,8 @@ impl Workspace {
                         .when(new_tab_open, |el| el.bg(hover))
                         .when(!new_tab_open, |el| el.tooltip(crate::tooltip::Tooltip::text("New Tab")))
                         .child(icon("plus", 15.0, self.chrome.icon))
-                        .child(self.new_tab_menu.button_probe())
                         .map(claim_press)
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_new_tab_menu(window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_launcher(crate::commands::Command::NewTabChooser, window, cx))),
                 );
         }
         bar.into_any_element()

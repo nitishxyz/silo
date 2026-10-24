@@ -76,7 +76,7 @@ commands! {
     NewTerminalTab => "New Terminal Tab", "Tabs", [];
     NewBrowserTab => "New Browser Tab", "Tabs", ["cmd-alt-t"];
     NewAgentTab => "New Agent Tab", "Tabs", [];
-    NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"];
+    NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"], "Choose a terminal, browser, agent, address or >command";
     CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
     RenameTab => "Rename Tab…", "Tabs", [];
     NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
@@ -85,6 +85,9 @@ commands! {
     NewPane => "New Pane", "Panes", ["cmd-enter"], "Beside the focused pane, along its longer side";
     SplitRight => "Split Right", "Panes", ["cmd-d"];
     SplitDown => "Split Down", "Panes", ["cmd-shift-d"];
+    NewPaneChooser => "New Pane…", "Panes", ["ctrl-cmd-enter"], "Choose what opens beside the focused pane";
+    SplitRightChooser => "Split Right…", "Panes", ["ctrl-cmd-d"], "Choose what opens on the right";
+    SplitDownChooser => "Split Down…", "Panes", ["ctrl-cmd-shift-d"], "Choose what opens below";
     ClosePane => "Close Pane", "Panes", ["cmd-w"];
     FocusNextPane => "Focus Next Pane", "Panes", ["cmd-]"];
     FocusPreviousPane => "Focus Previous Pane", "Panes", ["cmd-["];
@@ -175,7 +178,15 @@ impl Command {
             Self::CloseTab => Method("window.close"),
             Self::RenameTab => Method("window.rename"),
             Self::NextTab | Self::PreviousTab => Method("window.step"),
-            Self::NewPane | Self::SplitRight | Self::SplitDown | Self::NewBrowser | Self::NewAgent => Method("block.split"),
+            // The launcher's pick is the `kind` (and `url`) param.
+            Self::NewPane
+            | Self::SplitRight
+            | Self::SplitDown
+            | Self::NewPaneChooser
+            | Self::SplitRightChooser
+            | Self::SplitDownChooser
+            | Self::NewBrowser
+            | Self::NewAgent => Method("block.split"),
             Self::OttoSettings => Method("app.settings_open"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
@@ -372,6 +383,11 @@ mod tests {
         assert_eq!(Command::NewTab.hint().as_deref(), Some("⌘T"));
         assert_eq!(Command::NewBrowserTab.hint().as_deref(), Some("⌥⌘T"));
         assert_eq!(Command::NewTabChooser.hint().as_deref(), Some("⌃⌘T"));
+        assert_eq!(Command::SplitRightChooser.hint().as_deref(), Some("⌃⌘D"));
+        assert_eq!(Command::SplitDownChooser.hint().as_deref(), Some("⌃⇧⌘D"));
+        assert_eq!(Command::NewPaneChooser.hint().as_deref(), Some("⌃⌘↩"));
+        assert_eq!(Command::SplitRight.hint().as_deref(), Some("⌘D"), "instant splits keep their keys");
+        assert_eq!(Command::SplitDown.hint().as_deref(), Some("⇧⌘D"));
         assert_eq!(Command::NewTerminalTab.hint(), None);
         assert_eq!(Command::NewAgent.hint().as_deref(), Some("⇧⌘O"));
         assert_eq!(Command::JumpToPreviousPrompt.hint().as_deref(), Some("⌘↑"));

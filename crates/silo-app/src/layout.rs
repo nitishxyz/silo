@@ -187,6 +187,14 @@ impl Workspace {
                     // No focus ring: inactive panes get a translucent wash.
                     self.render_cell(id, active, multiple && !active, zoomed, swap, place.corners(), now, cx)
                 };
+                // A split being chosen in the launcher: its destination's
+                // ghost over the half the new block will take. Drawn over
+                // the pane, not tiled beside it, so nothing resizes (and no
+                // terminal reflows) before a choice is made.
+                let ghost = self.launcher.ghost().filter(|(block, ..)| *block == id.as_str()).map(|(_, axis, kind)| {
+                    let corners = place.split(axis).1.corners();
+                    Self::render_split_ghost(axis, kind, corners)
+                });
                 let cells = self.motion.measured.cells.clone();
                 let id = id.clone();
                 div()
@@ -195,6 +203,7 @@ impl Workspace {
                     .min_w_0()
                     .min_h_0()
                     .child(cell)
+                    .children(ghost)
                     .child(
                         canvas(move |bounds, _, _| _ = cells.borrow_mut().insert(id, bounds), |_, (), _, _| {})
                             .absolute()
