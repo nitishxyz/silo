@@ -538,3 +538,60 @@ fn a_retry_wait_shows_until_the_stream_moves_on() {
     assert!(m.retrying.is_none());
     assert_eq!(m.last_error.as_ref().map(|e| e.1.as_str()), Some("Claude usage limit reached"));
 }
+
+fn items(ids: &[&str]) -> Vec<Item> {
+    ids.iter().map(|id| Item::user_text(*id, *id)).collect()
+}
+
+#[test]
+fn mirror_prepends_older_pages_and_keeps_them_through_a_resync() {
+    let mut newest = view(10);
+    newest.items = items(&["c", "d"]);
+    (newest.has_older, newest.oldest_seq) = (true, Some(7));
+    let mut m = SessionMirror::new(newest.clone());
+    assert!(m.has_older);
+    // A compaction seen live after the loaded items, and a live delta overlay.
+    m.apply_live(10, &Event::CompactionDelta { id: "k".into(), text: "sum".into() });
+    assert_eq!(m.compactions[0].at, 2);
+    m.apply(11, &Event::ItemStarted { item_id: "e".into(), role: serde_json::from_value(json!("assistant")).unwrap() });
+    m.apply_live(11, &Event::TextDelta { item_id: "e".into(), text: "hi".into() });
+
+    let mut page = view(11);
+    page.items = items(&["a", "b", "c"]);
+    (page.has_older, page.oldest_seq) = (true, Some(3));
+    page.part_times = vec![PartTime { item_id: "b".into(), part: 0, started_at: 1, finished_at: Some(2) }];
+    assert_eq!(m.prepend(page), 2);
+    assert_eq!(m.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d", "e"]);
+    assert_eq!(m.item("b").unwrap().id, "b");
+    assert_eq!(m.item("e").unwrap().text(), "hi");
+    assert_eq!(m.compactions[0].at, 4);
+    assert_eq!(m.part_times.len(), 1);
+    assert_eq!(m.oldest_seq, Some(3));
+    // The overlay's durable base gained the page too: dropping the overlay keeps it.
+    m.clear_live();
+    assert_eq!(m.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d", "e"]);
+    assert_eq!(m.item("e").unwrap().text(), "");
+
+    // A resync brings the newest window again; the pages loaded before it stay.
+    let mut fresh = view(12);
+    fresh.items = items(&["d", "e", "f"]);
+    (fresh.has_older, fresh.oldest_seq) = (true, Some(8));
+    let mut resynced = SessionMirror::new(fresh);
+    resynced.keep_older(&m);
+    assert_eq!(resynced.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d", "e", "f"]);
+    assert_eq!((resynced.has_older, resynced.oldest_seq), (true, Some(3)));
+    assert_eq!(resynced.part_times.len(), 1);
+
+    // An older server ignores `before_seq` and sends every item: the missing ones are added, and paging ends.
+    let mut everything = view(12);
+    everything.items = items(&["z", "a", "b", "c", "d", "e", "f"]);
+    assert_eq!(resynced.prepend(everything), 1);
+    assert_eq!(resynced.items[0].id, "z");
+    assert!(!resynced.has_older);
+    // An empty page ends paging too.
+    let mut m = SessionMirror::new(newest);
+    let mut empty = view(10);
+    empty.has_older = true;
+    assert_eq!(m.prepend(empty), 0);
+    assert!(!m.has_older);
+}

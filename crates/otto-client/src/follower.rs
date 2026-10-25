@@ -1,7 +1,7 @@
 use crate::{ApplyResult, ClientError, Connection, Result, SessionMirror};
 use otto_proto::ServerMessage;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 const RETRY_MIN: Duration = Duration::from_millis(250);
 const RETRY_MAX: Duration = Duration::from_secs(5);
@@ -17,6 +17,7 @@ pub struct FollowerState {
 pub struct SessionFollower {
     state: watch::Receiver<FollowerState>,
     replace: mpsc::Sender<Connection>,
+    older: mpsc::Sender<oneshot::Sender<Result<usize>>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for SessionFollower {
@@ -34,8 +35,9 @@ impl SessionFollower {
         connection.session_subscribe(&session_id, Some(mirror.last_seq)).await?;
         let (tx, state) = watch::channel(FollowerState { mirror, connected: true, error: None });
         let (replace, replacements) = mpsc::channel(1);
-        let task = tokio::spawn(run(connection, session_id, events, tx, replacements));
-        Ok(Self { state, replace, task })
+        let (older, pages) = mpsc::channel(1);
+        let task = tokio::spawn(run(connection, session_id, events, tx, replacements, pages));
+        Ok(Self { state, replace, older, task })
     }
     #[must_use]
     pub fn changes(&self) -> watch::Receiver<FollowerState> {
@@ -51,6 +53,16 @@ impl SessionFollower {
     pub async fn reconnect(&self, connection: Connection) -> Result<()> {
         self.replace.send(connection).await.map_err(|_| ClientError::Closed)
     }
+    /// Load one page of older items (`otto_proto::clip::PAGE_ITEMS`) before the
+    /// mirror's oldest and prepend it; the state shows it before this returns.
+    /// Returns how many items were added (0 when none are older).
+    /// # Errors
+    /// The request failed (the follower stays connected), or the follower stopped.
+    pub async fn load_older(&self) -> Result<usize> {
+        let (reply, result) = oneshot::channel();
+        self.older.send(reply).await.map_err(|_| ClientError::Closed)?;
+        result.await.map_err(|_| ClientError::Closed)?
+    }
 }
 async fn run(
     mut connection: Connection,
@@ -58,6 +70,7 @@ async fn run(
     mut events: crate::Events,
     tx: watch::Sender<FollowerState>,
     mut replacements: mpsc::Receiver<Connection>,
+    mut pages: mpsc::Receiver<oneshot::Sender<Result<usize>>>,
 ) {
     let mut state = tx.borrow().clone();
     // Reconnect attempts back off from 250 ms to 5 s, and start over once connected.
@@ -71,6 +84,19 @@ async fn run(
                     Ok(_) => { state.connected = true; state.error = None; retry = RETRY_MIN; tx.send_replace(state.clone()); }
                     Err(e) => { state.connected = false; state.error = Some(e); tx.send_replace(state.clone()); }
                 }
+                continue;
+            }
+            request = pages.recv() => {
+                let Some(reply) = request else { return; };
+                let result = match state.mirror.oldest_seq.filter(|_| state.mirror.has_older) {
+                    None => Ok(0),
+                    Some(before) => connection.session_view_before(&id, before, Some(otto_proto::clip::PAGE_ITEMS)).await.map(|page| {
+                        let added = state.mirror.prepend(page);
+                        tx.send_replace(state.clone());
+                        added
+                    }),
+                };
+                let _ = reply.send(result);
                 continue;
             }
             incoming = events.recv(), if state.connected => incoming,
@@ -124,7 +150,8 @@ async fn run(
             }
             .await;
             match refreshed {
-                Ok(mirror) => {
+                Ok(mut mirror) => {
+                    mirror.keep_older(&state.mirror);
                     state.mirror = mirror;
                     state.error = None;
                 }

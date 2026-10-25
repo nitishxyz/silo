@@ -2,6 +2,8 @@
 mod api_tests;
 #[path = "limits_tests.rs"]
 mod limits_tests;
+#[path = "view_tests.rs"]
+mod view_tests;
 
 use super::*;
 use futures::StreamExt;

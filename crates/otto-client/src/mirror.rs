@@ -81,6 +81,13 @@ pub struct SessionMirror {
     /// Compactions seen live, in order (`compaction.*`). One leaves when its
     /// checkpoint item arrives; a failed one stays.
     pub compactions: Vec<Compacting>,
+    /// Older items are stored than `items` holds: [`SessionMirror::prepend`] a
+    /// `session.view` page before `oldest_seq`. Never set by an older server.
+    pub has_older: bool,
+    /// The item sequence of the oldest stored item loaded (`SessionView::oldest_seq`).
+    pub oldest_seq: Option<i64>,
+    /// The latest `update_todos` call's input when it is older than the loaded items (`SessionView::todos`).
+    pub todos: Option<Value>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
     live: Vec<Event>,
@@ -114,10 +121,61 @@ impl SessionMirror {
             last_error: None,
             retrying: None,
             compactions: Vec::new(),
+            has_older: view.has_older,
+            oldest_seq: view.oldest_seq,
+            todos: view.todos,
             indices,
             durable: None,
             live: Vec::new(),
         }
+    }
+    /// Put a page of older items (`session.view` with `before_seq: oldest_seq`)
+    /// before the loaded ones; items already loaded are skipped. Returns how
+    /// many were added. A page from an older server (every item, no
+    /// `has_older`) adds the ones missing and ends paging.
+    pub fn prepend(&mut self, page: SessionView) -> usize {
+        let older: Vec<Item> = page.items.into_iter().filter(|i| !self.indices.contains_key(&i.id)).collect();
+        let added = older.len();
+        self.has_older = page.has_older && added > 0;
+        self.oldest_seq = page.oldest_seq.or(self.oldest_seq);
+        if added == 0 {
+            return 0;
+        }
+        let mut times = page.part_times;
+        times.append(&mut self.part_times);
+        self.part_times = times;
+        if let Some((items, _)) = &mut self.durable {
+            items.splice(0..0, older.iter().cloned());
+        }
+        self.items.splice(0..0, older);
+        self.indices = self.items.iter().enumerate().map(|(i, item)| (item.id.clone(), i)).collect();
+        for c in &mut self.compactions {
+            c.at += added;
+        }
+        added
+    }
+    /// After a resync replaced this mirror with the newest window, keep the
+    /// older pages `old` had loaded before it (when the windows overlap).
+    pub fn keep_older(&mut self, old: &Self) {
+        let Some(first) = self.items.first() else { return };
+        let Some(at) = old.items.iter().position(|i| i.id == first.id).filter(|at| *at > 0) else { return };
+        let ids: std::collections::HashSet<&str> = old.items[..at].iter().map(|i| i.id.as_str()).collect();
+        let page = SessionView {
+            items: old.items[..at].to_vec(),
+            part_times: old.part_times.iter().filter(|t| ids.contains(t.item_id.as_str())).cloned().collect(),
+            has_older: old.has_older,
+            oldest_seq: old.oldest_seq,
+            todos: None,
+            info: self.info.clone(),
+            pending_approvals: Vec::new(),
+            pending_questions: Vec::new(),
+            queue: Vec::new(),
+            running_tool_calls: Vec::new(),
+            streaming_tool_calls: Vec::new(),
+            seq: self.last_seq,
+            turn_started_at: None,
+        };
+        self.prepend(page);
     }
     #[must_use]
     pub fn item(&self, id: &str) -> Option<&Item> {
