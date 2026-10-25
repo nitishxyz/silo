@@ -360,10 +360,11 @@ enum RemoteCommand {
     },
 }
 
-/// `silo --version`: version and build, read by `silo remote upgrade`.
+/// `silo --version`: version and build, read by `silo remote upgrade`, and
+/// ` dev` after them from a dev-channel build.
 fn version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    VERSION.get_or_init(|| silo_proto::upgrade::version_text(env!("CARGO_PKG_VERSION"), silo_proto::BUILD))
+    VERSION.get_or_init(|| silo_proto::upgrade::channel_version_text(env!("CARGO_PKG_VERSION"), silo_proto::BUILD))
 }
 
 #[derive(Subcommand)]
@@ -1832,7 +1833,8 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Hosts { command: HostsCommand::Rm { name } }) if name == "mini"));
         assert!(Cli::try_parse_from(["silo", "remote", "upgrade", "mini", "--all"]).is_err());
         assert!(Cli::try_parse_from(["silo", "remote", "upgrade", "--all", "--ssh", "me@box"]).is_err());
-        assert_eq!(version(), format!("{} ({})", env!("CARGO_PKG_VERSION"), silo_proto::BUILD));
+        let dev = if silo_proto::CHANNEL == silo_proto::Channel::Dev { " dev" } else { "" };
+        assert_eq!(version(), format!("{} ({}){dev}", env!("CARGO_PKG_VERSION"), silo_proto::BUILD));
         let Some(Command::Server { adopt: true, takeover: false, .. }) = Cli::parse_from(["silo", "server", "--adopt"]).command else { panic!() };
         assert!(Cli::try_parse_from(["silo", "server", "--adopt", "--takeover"]).is_err());
     }

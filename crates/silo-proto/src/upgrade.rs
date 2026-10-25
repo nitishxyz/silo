@@ -201,6 +201,18 @@ pub fn version_text(version: &str, build: &str) -> String {
     format!("{version} ({build})")
 }
 
+/// This build's `silo --version` output (without the `silo ` prefix):
+/// [`version_text`], then ` dev` for a dev-channel build ([`crate::CHANNEL`]).
+/// [`parse_version`] ignores the suffix; the release workflow and
+/// scripts/dev-bundle.sh check it.
+#[must_use]
+pub fn channel_version_text(version: &str, build: &str) -> String {
+    match crate::CHANNEL {
+        crate::Channel::Release => version_text(version, build),
+        crate::Channel::Dev => format!("{} dev", version_text(version, build)),
+    }
+}
+
 /// Version and build from `silo --version` output; builds before the build
 /// was shown have none.
 #[must_use]
@@ -337,6 +349,10 @@ mod tests {
         assert_eq!(compare_versions("1.2", "1.2.0"), None);
         assert_eq!(parse_version("silo 0.1.0 (abc)\n"), Some(("0.1.0".into(), Some("abc".into()))));
         assert_eq!(parse_version("silo 0.1.0"), Some(("0.1.0".into(), None)));
+        assert_eq!(parse_version("silo 0.1.0 (abc) dev\n"), Some(("0.1.0".into(), Some("abc".into()))), "a dev build's");
+        let shown = format!("silo {}", channel_version_text("0.1.0", "abc"));
+        assert_eq!(parse_version(&shown), Some(("0.1.0".into(), Some("abc".into()))));
+        assert_eq!(shown.ends_with(" dev"), crate::CHANNEL == crate::Channel::Dev, "{shown}");
         assert_eq!(parse_version("bash: silo: not found"), None);
         assert_eq!(format!("silo {}", version_text("0.1.0", "abc")), "silo 0.1.0 (abc)");
     }

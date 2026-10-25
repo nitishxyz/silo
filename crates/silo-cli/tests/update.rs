@@ -150,7 +150,7 @@ async fn updates_a_standalone_binary_and_its_server_live() {
     assert!(!out.contains("remote upgrade"), "no paired hosts, no hint: {out}");
 
     // The binary is the release's; the server is too, with the session.
-    assert_eq!(env.stdout(&["--version"]).trim(), format!("silo {next} ({next_build})"));
+    assert_eq!(env.stdout(&["--version"]).trim(), format!("silo {}", silo_proto::upgrade::channel_version_text(&next, &next_build)));
     let (control, _events) = silo_client::Control::connect(&silo_proto::paths::socket(&root.join("h")), "update test").await.unwrap();
     assert_eq!((control.hello().server.version.as_str(), control.hello().build.as_str()), (next.as_str(), next_build.as_str()));
     assert!(env.stdout(&["ls"]).contains("kept"), "the session survived the takeover");
