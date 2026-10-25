@@ -1472,7 +1472,7 @@ fn start_menubar() {
     };
     let home = paths::home();
     let home = home.canonicalize().unwrap_or(home);
-    let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home, silo_proto::BUILD).map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
+    let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home).map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
         return;
     };
     let _ = std::process::Command::new(agent)

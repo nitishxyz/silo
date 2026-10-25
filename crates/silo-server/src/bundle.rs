@@ -1,5 +1,5 @@
 //! Exposing `silo` to shells spawned by a server run from its runtime
-//! directory (`<SILO_HOME>/runtime/<build>/silo`, installed by the app),
+//! directory (`<SILO_HOME>/runtime/silo`, installed by the app),
 //! through the stable `<SILO_HOME>/bin/silo` link that survives upgrades,
 //! and the clipboard tool shims in `<SILO_HOME>/shims`.
 
@@ -12,11 +12,11 @@ use std::{
 /// Tools shimmed to `silo clipboard shim <tool>`.
 pub const SHIMMED: &[&str] = &["pbpaste", "pbcopy", "xclip", "xsel", "wl-paste", "wl-copy"];
 
-/// `exe`'s directory when it is `home`'s runtime directory for `build`.
+/// `exe`'s directory when it is `home`'s runtime directory (the app's copy).
 #[must_use]
-pub fn runtime_dir(exe: &Path, home: &Path, build: &str) -> Option<PathBuf> {
+pub fn runtime_dir(exe: &Path, home: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
-    (exe.file_name()? == "silo" && dir == home.join("runtime").join(build)).then(|| dir.to_owned())
+    (exe.file_name()? == "silo" && dir == home.join("runtime")).then(|| dir.to_owned())
 }
 
 /// The `silo` the shims run: the stable `<home>/bin/silo` for a
@@ -24,7 +24,7 @@ pub fn runtime_dir(exe: &Path, home: &Path, build: &str) -> Option<PathBuf> {
 fn silo_exe(home: &Path) -> Option<PathBuf> {
     let exe = std::env::current_exe().and_then(|e| e.canonicalize()).ok()?;
     let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-    Some(match runtime_dir(&exe, &home, silo_proto::BUILD) {
+    Some(match runtime_dir(&exe, &home) {
         Some(_) => home.join("bin").join("silo"),
         None => exe,
     })
@@ -67,7 +67,7 @@ pub fn path_lead() -> &'static (PathBuf, Vec<PathBuf>) {
         let home = silo_proto::paths::home();
         let home = home.canonicalize().unwrap_or(home);
         let exe = std::env::current_exe().and_then(|e| e.canonicalize()).ok();
-        let bin = exe.and_then(|exe| runtime_dir(&exe, &home, silo_proto::BUILD)).map(|_| home.join("bin"));
+        let bin = exe.and_then(|exe| runtime_dir(&exe, &home)).map(|_| home.join("bin"));
         let lead = std::iter::once(silo_proto::paths::shims(&home)).chain(bin).collect();
         (home, lead)
     })
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn runtime_server_is_recognized() {
         let home = Path::new("/Users/bat/Library/Application Support/silo");
-        assert_eq!(runtime_dir(&home.join("runtime/abc/silo"), home, "abc"), Some(home.join("runtime/abc")));
+        assert_eq!(runtime_dir(&home.join("runtime/silo"), home), Some(home.join("runtime")));
     }
 
     #[test]
@@ -119,14 +119,14 @@ mod tests {
         let home = Path::new("/h");
         for exe in [
             "/h/runtime/old/silo",
-            "/h/runtime/abc/silo-menubar",
+            "/h/runtime/silo-menubar",
             "/h/abc/silo",
             "/Applications/Silo.app/Contents/MacOS/silo-server",
             "/Users/me/dev/term/target/debug/silo",
             "silo",
             "/",
         ] {
-            assert_eq!(runtime_dir(Path::new(exe), home, "abc"), None, "{exe}");
+            assert_eq!(runtime_dir(Path::new(exe), home), None, "{exe}");
         }
     }
 }

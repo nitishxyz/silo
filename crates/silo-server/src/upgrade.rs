@@ -167,7 +167,7 @@ fn target_exe(home: &Path) -> Result<PathBuf, Refusal> {
         .canonicalize()
         .map_err(|_| ("install", format!("the server's executable {} was removed since it started; reinstall silo there", path.display())))?;
     let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-    if crate::bundle::runtime_dir(&target, &home, BUILD).is_some() {
+    if crate::bundle::runtime_dir(&target, &home).is_some() {
         return Err(("managed", "this server comes with Silo.app; update the app on that machine".into()));
     }
     Ok(target)

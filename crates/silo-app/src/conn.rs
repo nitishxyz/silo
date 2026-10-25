@@ -257,10 +257,8 @@ async fn up(svc: &Service) -> anyhow::Result<Vec<String>> {
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let notes = rt.block_on(async { service::up(&svc, &service::System, &client_name()).await.map(|up| up.notes) })?;
-        if svc.manager == Manager::Launchd
-            && let Some(dir) = svc.exe.parent()
-        {
-            runtime::collect(&svc.silo_home, dir);
+        if svc.manager == Manager::Launchd {
+            runtime::collect(&svc.silo_home);
         }
         Ok(notes)
     })
@@ -691,7 +689,7 @@ mod tests {
             std::fs::write(macos.join(name), name).unwrap();
         }
         let exe = managed_exe(&home, &macos.join("silo-server")).unwrap();
-        assert_eq!(exe, home.join("runtime").join(silo_proto::BUILD).join("silo"));
+        assert_eq!(exe, home.join("runtime").join("silo"), "one fixed path for every build");
         let svc = Service::new(Manager::Launchd, exe.clone(), home.clone(), base.clone(), 501, "bat".into()).unwrap();
         let plist = svc.unit_text().unwrap();
         assert!(plist.contains(&format!("<string>{}</string>\n\t\t<string>server</string>", exe.display())));

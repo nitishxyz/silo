@@ -231,7 +231,7 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
 
 - The server crate builds both a library and the `<name>` binary, which is server and CLI in one.
 - **macOS app:**
-  - Bundles it. Under launchd the app copies the server and menu-bar agent to `<SILO_HOME>/runtime/<build>/`
+  - Bundles it. Under launchd the app copies the server and menu-bar agent to `<SILO_HOME>/runtime/`
     (`silo`, `silo-menubar`) and the agent runs them from there, so nothing holds Silo.app open and Finder can
     replace it while the server runs; moving to the new build is a hot upgrade. Once this build's job serves, runtime
     dirs of other builds that no process runs from and nothing touched in 5 minutes are removed (under

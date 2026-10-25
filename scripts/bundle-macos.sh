@@ -35,7 +35,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$out/silo-app" "$app/Contents/MacOS/Silo"
 cp "$out/silo" "$app/Contents/MacOS/silo-server"
 # Menu-bar agent (accessory app, no Dock icon). Under launchd the app runs
-# copies of both out of <SILO_HOME>/runtime/<build> as `silo` and
+# copies of both out of <SILO_HOME>/runtime (one fixed place) as `silo` and
 # `silo-menubar`, so the bundle can be replaced while they run.
 cp "$out/silo-menubar" "$app/Contents/MacOS/silo-menubar"
 # The otto daemon agent blocks connect to (started by the app).

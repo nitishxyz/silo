@@ -1,6 +1,10 @@
-//! The server and menu-bar agent copied out of Silo.app, one directory per
-//! build under `<SILO_HOME>/runtime`, so the launchd job never holds the
-//! bundle open and the app can be replaced while the server runs.
+//! The server and menu-bar agent copied out of Silo.app to one fixed place,
+//! `<SILO_HOME>/runtime/{silo,silo-menubar}`, so the launchd job never holds
+//! the bundle open and the app can be replaced while the server runs. Each
+//! build replaces the files there atomically (a fresh inode: running
+//! processes keep theirs, and macOS never sees a signed binary overwritten in
+//! place). One stable path is one entry in System Settings' privacy lists,
+//! and a permission granted to it stays granted across upgrades.
 
 use std::{
     io,
@@ -12,8 +16,8 @@ use std::{
 /// Files of a runtime directory: (name in `Contents/MacOS`, name here).
 const FILES: [(&str, &str); 2] = [("silo-server", "silo"), ("silo-menubar", "silo-menubar")];
 
-/// Runtime directories touched this recently are never collected (another
-/// app instance may have just installed one).
+/// Legacy per-build runtime directories touched this recently are never
+/// collected (an older app may have just installed one).
 const FRESH: Duration = Duration::from_secs(300);
 
 #[must_use]
@@ -21,9 +25,10 @@ pub fn root(home: &Path) -> PathBuf {
     home.join("runtime")
 }
 
+/// Where the runtime copies live: [`root`] itself, for every build.
 #[must_use]
-pub fn dir(home: &Path, build: &str) -> PathBuf {
-    root(home).join(build)
+pub fn dir(home: &Path) -> PathBuf {
+    root(home)
 }
 
 /// Held across [`install`] and [`collect`] by app instances of any build.
@@ -35,21 +40,16 @@ fn lock(home: &Path) -> io::Result<std::fs::File> {
 }
 
 /// Copy this build's server and agent from the bundle's `Contents/MacOS`
-/// (only read, so a disk image or translocated bundle works) into its
+/// (only read, so a disk image or translocated bundle works) into the
 /// runtime directory, replacing each file atomically unless it is already
 /// the same; returns the runtime `silo`.
 ///
 /// # Errors
 /// A file cannot be read, copied or renamed.
 pub fn install(home: &Path, macos: &Path) -> io::Result<PathBuf> {
-    install_build(home, macos, silo_proto::BUILD)
-}
-
-fn install_build(home: &Path, macos: &Path, build: &str) -> io::Result<PathBuf> {
     let _lock = lock(home)?;
-    let dir = dir(home, build);
+    let dir = dir(home);
     std::fs::create_dir_all(&dir)?;
-    std::fs::File::open(&dir)?.set_modified(SystemTime::now())?;
     for (from, to) in FILES {
         let (src, dst) = (macos.join(from), dir.join(to));
         let modified = std::fs::metadata(&src)?.modified()?;
@@ -78,33 +78,33 @@ fn same(src: &Path, dst: &Path) -> io::Result<bool> {
     Ok(src.len() == dst.len() && src.modified()? == dst.modified()?)
 }
 
-/// Remove the runtime directories other than `keep` that no running
-/// process was started from and nothing touched recently, and copies left
-/// half-done by processes that are gone.
-pub fn collect(home: &Path, keep: &Path) {
+/// Remove the legacy per-build runtime directories (`runtime/<build>/`, from
+/// before the fixed path) that no running process was started from and
+/// nothing touched recently, and copies left half-done by processes that
+/// are gone.
+pub fn collect(home: &Path) {
     let Ok(_lock) = lock(home) else { return };
     let Some(running) = running_exes() else { return };
     let Ok(root) = root(home).canonicalize() else { return };
     let Ok(entries) = std::fs::read_dir(&root) else { return };
-    let keep = keep.canonicalize().unwrap_or_else(|_| keep.to_owned());
     let now = SystemTime::now();
     let fresh = |dir: &Path| std::fs::metadata(dir).and_then(|m| m.modified()).is_ok_and(|t| now.duration_since(t).unwrap_or_default() < FRESH);
     let dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir() && !fresh(p)).collect();
-    for dir in victims(&dirs, &keep, &running) {
+    for dir in victims(&dirs, &running) {
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!("runtime: removed {}", dir.display()),
             Err(error) => tracing::warn!("runtime: remove {}: {error}", dir.display()),
         }
     }
-    for tmp in std::fs::read_dir(&keep).into_iter().flatten().filter_map(Result::ok).map(|e| e.path()) {
+    for tmp in std::fs::read_dir(&root).into_iter().flatten().filter_map(Result::ok).map(|e| e.path()) {
         if temp_pid(&tmp).is_some_and(|pid| !alive(pid)) && std::fs::remove_file(&tmp).is_ok() {
             tracing::info!("runtime: removed {}", tmp.display());
         }
     }
 }
 
-fn victims(dirs: &[PathBuf], keep: &Path, running: &[PathBuf]) -> Vec<PathBuf> {
-    dirs.iter().filter(|dir| *dir != keep && !running.iter().any(|exe| exe.starts_with(dir))).cloned().collect()
+fn victims(dirs: &[PathBuf], running: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter().filter(|dir| !running.iter().any(|exe| exe.starts_with(dir))).cloned().collect()
 }
 
 /// The pid in a temp copy's name `.<file>.<pid>`.
@@ -165,34 +165,38 @@ mod tests {
     }
 
     #[test]
-    fn runtime_dir_per_build() {
+    fn one_runtime_dir_for_every_build() {
         let home = Path::new("/Users/bat/Library/Application Support/silo");
-        assert_eq!(dir(home, "00f805db63eb233a"), home.join("runtime/00f805db63eb233a"));
-        assert_eq!(dir(home, silo_proto::BUILD).parent(), Some(root(home).as_path()));
+        assert_eq!(dir(home), home.join("runtime"));
+        assert_eq!(dir(home), root(home));
     }
 
     #[test]
-    fn install_copies_once_and_refreshes_changes() {
+    fn install_copies_once_and_replaces_changes_with_a_fresh_file() {
         let base = temp("install");
         let (home, macos) = (base.join("home"), base.join("Silo.app/Contents/MacOS"));
         std::fs::create_dir_all(&macos).unwrap();
         std::fs::write(macos.join("silo-server"), "server").unwrap();
         std::fs::write(macos.join("silo-menubar"), "agent").unwrap();
-        let silo = install_build(&home, &macos, "b1").unwrap();
-        assert_eq!(silo, home.join("runtime/b1/silo"));
+        let silo = install(&home, &macos).unwrap();
+        assert_eq!(silo, home.join("runtime/silo"));
         assert_eq!(std::fs::read_to_string(&silo).unwrap(), "server");
-        assert_eq!(std::fs::read_to_string(home.join("runtime/b1/silo-menubar")).unwrap(), "agent");
+        assert_eq!(std::fs::read_to_string(home.join("runtime/silo-menubar")).unwrap(), "agent");
         let inode = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
         let before = inode(&silo);
-        install_build(&home, &macos, "b1").unwrap();
-        assert_eq!(inode(&silo), before);
-        std::fs::write(macos.join("silo-menubar"), "agent2").unwrap();
-        install_build(&home, &macos, "b1").unwrap();
-        assert_eq!(inode(&silo), before);
-        assert_eq!(std::fs::read_to_string(home.join("runtime/b1/silo-menubar")).unwrap(), "agent2");
-        let names: Vec<_> = std::fs::read_dir(home.join("runtime/b1")).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names.len(), 2, "{names:?}");
-        assert!(install_build(&home, &base, "b2").is_err());
+        install(&home, &macos).unwrap();
+        assert_eq!(inode(&silo), before, "the same build leaves the file alone");
+        // Another build: the same path, a new file (a running server keeps the old one).
+        let running = std::fs::File::open(&silo).unwrap();
+        std::fs::write(macos.join("silo-server"), "server2").unwrap();
+        install(&home, &macos).unwrap();
+        assert_eq!(std::fs::read_to_string(&silo).unwrap(), "server2");
+        assert_ne!(inode(&silo), before, "replaced by a rename, not written in place");
+        assert_eq!(std::os::unix::fs::MetadataExt::ino(&running.metadata().unwrap()), before);
+        let mut names: Vec<_> = std::fs::read_dir(home.join("runtime")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["silo", "silo-menubar"]);
+        assert!(install(&home, &base).is_err());
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -207,34 +211,35 @@ mod tests {
             std::fs::set_permissions(macos.join(name), std::fs::Permissions::from_mode(0o555)).unwrap();
         }
         std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let silo = install_build(&home, &macos, "b").unwrap();
+        let silo = install(&home, &macos).unwrap();
         assert_eq!(std::fs::read_to_string(&silo).unwrap(), "silo-server");
         std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(macos.join("silo-menubar"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(macos.join("silo-menubar"), "new").unwrap();
-        install_build(&home, &macos, "b").unwrap();
-        assert_eq!(std::fs::read_to_string(dir(&home, "b").join("silo-menubar")).unwrap(), "new");
+        install(&home, &macos).unwrap();
+        assert_eq!(std::fs::read_to_string(dir(&home).join("silo-menubar")).unwrap(), "new");
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn collect_keeps_the_current_dir() {
+    fn collect_removes_legacy_build_dirs_and_keeps_the_files() {
         let home = temp("collect");
         let old = SystemTime::now() - FRESH - Duration::from_secs(1);
-        for build in ["a", "b", "new", "cur"] {
-            std::fs::create_dir_all(dir(&home, build)).unwrap();
+        let root = root(&home);
+        for build in ["a", "b", "new"] {
+            std::fs::create_dir_all(root.join(build)).unwrap();
             if build != "new" {
-                std::fs::File::open(dir(&home, build)).unwrap().set_modified(old).unwrap();
+                std::fs::File::open(root.join(build)).unwrap().set_modified(old).unwrap();
             }
         }
-        let cur = dir(&home, "cur");
-        let (dead, mine) = (cur.join(".silo.999999999"), cur.join(format!(".silo.{}", std::process::id())));
+        std::fs::write(root.join("silo"), "").unwrap();
+        let (dead, mine) = (root.join(".silo.999999999"), root.join(format!(".silo.{}", std::process::id())));
         std::fs::write(&dead, "").unwrap();
         std::fs::write(&mine, "").unwrap();
-        collect(&home, &cur);
-        let mut left: Vec<_> = std::fs::read_dir(root(&home)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        collect(&home);
+        let mut left: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name()).collect();
         left.sort();
-        assert_eq!(left, ["cur", "new"]);
+        assert_eq!(left, [format!(".silo.{}", std::process::id()).as_str(), "new", "silo"]);
         assert!(!dead.exists() && mine.exists());
         let _ = std::fs::remove_dir_all(home);
     }
@@ -251,12 +256,9 @@ mod tests {
     #[test]
     fn collects_unused_dirs_only() {
         let root = Path::new("/h/runtime");
-        let dirs = ["old", "busy", "cur", "agent"].map(|d| root.join(d));
+        let dirs = ["old", "busy", "agent"].map(|d| root.join(d));
         let running = [PathBuf::from("/h/runtime/busy/silo"), PathBuf::from("/h/runtime/agent/silo-menubar"), PathBuf::from("/usr/bin/login")];
-        assert_eq!(victims(&dirs, &root.join("cur"), &running), [root.join("old")]);
-        assert_eq!(
-            victims(&dirs, &root.join("cur"), &[PathBuf::from("/h/runtime/oldest/silo")]),
-            dirs.iter().filter(|d| !d.ends_with("cur")).cloned().collect::<Vec<_>>()
-        );
+        assert_eq!(victims(&dirs, &running), [root.join("old")]);
+        assert_eq!(victims(&dirs, &[PathBuf::from("/h/runtime/silo")]), dirs.to_vec(), "the fixed copy keeps no legacy dir");
     }
 }
