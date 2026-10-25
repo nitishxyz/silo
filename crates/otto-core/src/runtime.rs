@@ -516,8 +516,15 @@ impl Runtime {
         })
         .await
     }
+    /// Every item, unclipped: otto's own use.
     pub async fn view(&self, id: &str) -> Result<SessionView> {
         let mut view = self.session(id).await?.view().await?;
+        view.info = self.with_plan(view.info);
+        Ok(view)
+    }
+    /// What a client is sent (`session.view`): the items `window` selects, clipped.
+    pub async fn view_window(&self, id: &str, window: ViewWindow) -> Result<SessionView> {
+        let mut view = self.session(id).await?.view_window(window).await?;
         view.info = self.with_plan(view.info);
         Ok(view)
     }
@@ -833,6 +840,114 @@ pub(crate) fn policy_mode(mode: otto_proto::ApprovalMode) -> otto_tools::policy:
         otto_proto::ApprovalMode::AskOnEffects => otto_tools::policy::ApprovalMode::AskOnEffects,
         otto_proto::ApprovalMode::AskAll => otto_tools::policy::ApprovalMode::AskAll,
     }
+}
+/// Which items a client's view holds (`session.view`): the newest stored
+/// before `before_seq` (all when `None`) that fit `budget` serialized bytes
+/// once clipped, at most `limit`. Items stored at one sequence (a fork's) are
+/// never split, and at least one sequence's items are always sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewWindow {
+    pub limit: Option<usize>,
+    pub before_seq: Option<i64>,
+    pub budget: usize,
+}
+impl Default for ViewWindow {
+    fn default() -> Self {
+        Self { limit: None, before_seq: None, budget: otto_proto::clip::VIEW_BUDGET }
+    }
+}
+/// The session actor's side of a view.
+pub(crate) struct ViewState {
+    pub busy: bool,
+    pub waiting: bool,
+    pub approvals: Vec<otto_proto::PendingApproval>,
+    pub questions: Vec<otto_proto::PendingQuestion>,
+    pub queued: Vec<otto_proto::QueuedInput>,
+}
+/// The session's view: every item as stored (`window: None`), or a client's window of them, clipped.
+pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, state: ViewState) -> Result<SessionView> {
+    use otto_proto::clip;
+    let ViewState { busy, waiting, mut approvals, questions, queued } = state;
+    let row = s.session(id)?.ok_or(Error::Closed)?;
+    let mut info = info(s, row)?;
+    info.status = if waiting {
+        SessionStatus::WaitingApproval
+    } else if busy {
+        SessionStatus::Busy
+    } else {
+        info.status
+    };
+    let (mut items, mut has_older, mut oldest_seq) = (Vec::new(), false, None);
+    match window {
+        None => items = crate::legacy::items(s.items(id)?),
+        Some(w) => {
+            let (limit, mut used) = (w.limit.unwrap_or(usize::MAX).max(1), 0);
+            s.items_newest(id, w.before_seq, |seq, item| {
+                let mut item = crate::legacy::items(vec![item]).remove(0);
+                clip::clip_item(&mut item);
+                let size = clip::json_len(&item);
+                let full = items.len() >= limit || used + size > w.budget;
+                if full && !items.is_empty() && oldest_seq != Some(seq) {
+                    has_older = true;
+                    return false;
+                }
+                used += size;
+                oldest_seq = Some(seq);
+                items.push(item);
+                true
+            })?;
+            items.reverse();
+        }
+    }
+    let newest = window.is_none_or(|w| w.before_seq.is_none());
+    if busy && newest {
+        let mut open: Vec<_> = open_items(s, id, info.last_seq)?.into_iter().filter(|o| !items.iter().any(|i| i.id == o.id)).collect();
+        if window.is_some() {
+            open.iter_mut().for_each(|i| {
+                clip::clip_item(i);
+            });
+        }
+        items.extend(open);
+    }
+    let part_times = part_times(s, id, &items)?;
+    let streaming_tool_calls = if busy && newest { open_inputs(s, id, info.last_seq)? } else { Vec::new() };
+    let mut running_tool_calls: Vec<_> = s
+        .tool_calls(id)?
+        .into_iter()
+        .filter(|t| matches!(t.status, otto_store::ToolStatus::Intent | otto_store::ToolStatus::Running))
+        .map(|t| otto_proto::RunningToolCall { call_id: t.call_id, name: t.name, input: t.input, started_at: Some(t.started_at) })
+        .collect();
+    let mut todos = None;
+    if window.is_some() {
+        for value in running_tool_calls.iter_mut().map(|c| &mut c.input).chain(approvals.iter_mut().map(|a| &mut a.input)) {
+            clip::clip_large_value(value);
+        }
+        // The todo list is the latest `update_todos` call's: complete from the newest window.
+        if has_older
+            && let Some(oldest) = oldest_seq
+            && !items.iter().any(|i| i.tool_calls().any(|(_, name, _)| name == "update_todos"))
+        {
+            todos = s.latest_call_before(id, oldest, "update_todos")?.map(|mut input| {
+                clip::clip_large_value(&mut input);
+                input
+            });
+        }
+    }
+    Ok(SessionView {
+        seq: info.last_seq,
+        info,
+        items,
+        part_times,
+        streaming_tool_calls,
+        pending_approvals: approvals,
+        pending_questions: questions,
+        queue: queued,
+        running_tool_calls,
+        turn_started_at: if busy { s.turn_started(id)? } else { None },
+        has_older,
+        oldest_seq,
+        todos,
+    })
 }
 /// When the items' timed parts ran, from the journal (`SessionView.part_times`).
 pub(crate) fn part_times(s: &Store, id: &str, items: &[otto_llm::Item]) -> Result<Vec<otto_proto::PartTime>> {

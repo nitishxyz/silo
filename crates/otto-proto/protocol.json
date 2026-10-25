@@ -199,6 +199,14 @@
       },
       "Item": {
         "properties": {
+          "clipped": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -14800,6 +14808,21 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "before_seq": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "session_id": {
             "type": "string"
           }
@@ -15001,6 +15024,14 @@
           },
           "Item": {
             "properties": {
+              "clipped": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -15885,6 +15916,9 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "has_older": {
+            "type": "boolean"
+          },
           "info": {
             "$ref": "#/$defs/SessionInfo"
           },
@@ -15893,6 +15927,13 @@
               "$ref": "#/$defs/Item"
             },
             "type": "array"
+          },
+          "oldest_seq": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "part_times": {
             "items": {
@@ -15934,6 +15975,7 @@
             },
             "type": "array"
           },
+          "todos": {},
           "turn_started_at": {
             "format": "int64",
             "type": [
@@ -18121,6 +18163,14 @@
       },
       "Item": {
         "properties": {
+          "clipped": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },

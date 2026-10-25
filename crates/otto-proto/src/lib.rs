@@ -5,6 +5,7 @@
 //! Async framing is available through the non-default `io` feature.
 
 pub mod api;
+pub mod clip;
 pub mod control;
 pub mod frame;
 pub mod model;

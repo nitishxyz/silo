@@ -29,9 +29,16 @@ impl Frame {
         serde_json::from_slice(&self.payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    /// Whether it can be written: its length, kind byte included, is at most
+    /// [`MAX_FRAME`]. Writers check this before [`Frame::encode`] or [`write_frame`].
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        self.payload.len() < MAX_FRAME
+    }
+
     /// Encode `len | kind | payload`.
     /// # Panics
-    /// The frame exceeds [`MAX_FRAME`].
+    /// The frame exceeds [`MAX_FRAME`] (check [`Frame::fits`] first).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         assert!(self.payload.len() < MAX_FRAME, "frame exceeds MAX_FRAME");
@@ -88,7 +95,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Opti
 /// I/O failure or a frame over [`MAX_FRAME`].
 #[cfg(feature = "io")]
 pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, frame: &Frame) -> io::Result<()> {
-    if frame.payload.len() >= MAX_FRAME {
+    if !frame.fits() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "frame exceeds MAX_FRAME"));
     }
     writer.write_all(&frame.encode()).await
@@ -134,6 +141,8 @@ mod tests {
         assert!(Frame::decode(&[0; 4]).is_err());
         assert!(Frame::decode(&((MAX_FRAME + 1) as u32).to_le_bytes()).is_err());
         assert!(Frame::new(2, b"!".to_vec()).parse::<serde_json::Value>().is_err());
+        assert!(Frame::new(2, vec![0; MAX_FRAME - 1]).fits());
+        assert!(!Frame::new(2, vec![0; MAX_FRAME]).fits());
     }
 
     #[cfg(feature = "io")]

@@ -374,6 +374,39 @@ impl Store {
         Ok(stmt.query_map([session_id], |r| json_column(r, 0))?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The session's items newest first with their item sequence, those before
+    /// `before_seq` when given, until `visit` returns `false`.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn items_newest(&self, session_id: &str, before_seq: Option<i64>, mut visit: impl FnMut(i64, Item) -> bool) -> Result<()> {
+        let mut stmt = self.connection.prepare("SELECT seq,json FROM items WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC,item_id DESC")?;
+        let mut rows = stmt.query(params![session_id, before_seq.unwrap_or(i64::MAX)])?;
+        while let Some(row) = rows.next()? {
+            if !visit(row.get(0)?, json_column(row, 1)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// The input of the latest call to tool `name` in an item stored before `before_seq`.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn latest_call_before(&self, session_id: &str, before_seq: i64, name: &str) -> Result<Option<serde_json::Value>> {
+        let pattern = format!("%{}%", serde_json::to_string(&serde_json::json!({ "name": name }))?.trim_matches(['{', '}']));
+        let mut stmt = self
+            .connection
+            .prepare("SELECT json FROM items WHERE session_id=?1 AND seq<?2 AND role='assistant' AND json LIKE ?3 ORDER BY seq DESC,item_id DESC")?;
+        let mut rows = stmt.query(params![session_id, before_seq, pattern])?;
+        while let Some(row) = rows.next()? {
+            let item: Item = json_column(row, 0)?;
+            if let Some((_, _, input)) = item.tool_calls().filter(|(_, n, _)| *n == name).last() {
+                return Ok(Some(input.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// # Errors
     /// Returns database or decoding errors.
     pub fn tool_calls(&self, session_id: &str) -> Result<Vec<ToolCall>> {

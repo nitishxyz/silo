@@ -122,7 +122,7 @@ pub fn examples() -> Vec<Method> {
             effort: None,
         },
         M::SessionList { project_id: None, include_archived: false },
-        M::SessionView { session_id: "s1".into() },
+        M::SessionView { session_id: "s1".into(), limit: None, before_seq: None },
         M::SessionSubscribe { session_id: "s1".into(), after_seq: Some(42) },
         M::SessionUnsubscribe { session_id: "s1".into() },
         M::SessionFork { session_id: "s1".into(), at_seq: None },

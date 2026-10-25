@@ -32,7 +32,8 @@ pub(crate) enum Command {
     Update(otto_store::SessionUpdate, bool, oneshot::Sender<Result<bool>>),
     Configure(crate::Configure, oneshot::Sender<Result<SessionInfo>>),
     Shutdown(oneshot::Sender<()>),
-    View(oneshot::Sender<Result<SessionView>>),
+    /// `None`: every item, unclipped (otto's own use); else what a client is sent.
+    View(Option<crate::ViewWindow>, oneshot::Sender<Result<SessionView>>),
     Approval(String, ApprovalDecision, Option<String>, oneshot::Sender<Result<()>>),
     Tools(oneshot::Sender<Result<Vec<ToolInfo>>>),
     SetMode(ApprovalMode, oneshot::Sender<Result<()>>),
@@ -80,9 +81,17 @@ impl SessionHandle {
         self.tx.send(Command::QueueUpdate(input_id.into(), delivery, tx)).await.map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
     }
+    /// Every item, unclipped.
     pub async fn view(&self) -> Result<SessionView> {
+        self.view_with(None).await
+    }
+    /// What a client is sent: the items `window` selects, clipped (`otto_proto::clip`).
+    pub async fn view_window(&self, window: crate::ViewWindow) -> Result<SessionView> {
+        self.view_with(Some(window)).await
+    }
+    async fn view_with(&self, window: Option<crate::ViewWindow>) -> Result<SessionView> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Command::View(tx)).await.map_err(|_| Error::Closed)?;
+        self.tx.send(Command::View(window, tx)).await.map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
     }
     pub async fn answer_approval(&self, id: &str, decision: ApprovalDecision) -> Result<()> {
@@ -407,7 +416,7 @@ async fn actor(
                 Command::Wake=>{if active.is_some(){wake_pending=true;}else{state.wake=true;}}
                 Command::Shutdown(reply)=>{cancel.cancel();if let Some(mut task)=active.take(){loop{tokio::select!{Some(op)=state_rx.recv()=>op(&mut state),_= &mut task=>break,Some(entry)=journal.recv()=>{let result=cx.commit(entry.event,entry.projection,entry.turn,entry.step).await;let _=entry.reply.send(result);}}}}let _=reply.send(());break;}
                 Command::Cancel(user)=>{if user&&subagent&&active.is_some()&&!cancel.is_cancelled(){user_stopped=true;crate::subagents::mark(&cx,true).await;}cancel.cancel();wake_pending=false;state.wake=false;let queued=!state.snapshot().is_empty();state.queue.clear();state.steer.clear();state.native.clear();if queued{let _=cx.commit(Event::QueueChanged{queued:vec![]},Projection::None,turn,0).await;}crate::subagents::cancel_children(&cx).await;}
-                Command::View(reply)=>{let id=cx.row.id.clone();let pending=&state;let approvals=pending.approvals.values().map(|p|p.0.clone()).collect();let questions=pending.questions.values().map(|p|p.0.clone()).collect();let queued=pending.snapshot();let busy=active.is_some();let waiting=!pending.approvals.is_empty()||!pending.questions.is_empty();let result=cx.runtime.db(move|s|{let row=s.session(&id)?.ok_or(Error::Closed)?;let mut info=crate::runtime::info(s,row)?;info.status=if waiting{SessionStatus::WaitingApproval}else if busy{SessionStatus::Busy}else{info.status};let mut items=crate::legacy::items(s.items(&id)?);if busy{let open:Vec<_>=crate::runtime::open_items(s,&id,info.last_seq)?.into_iter().filter(|o|!items.iter().any(|i|i.id==o.id)).collect();items.extend(open);}let part_times=crate::runtime::part_times(s,&id,&items)?;let streaming_tool_calls=if busy{crate::runtime::open_inputs(s,&id,info.last_seq)?}else{Vec::new()};Ok(SessionView{seq:info.last_seq,info,items,part_times,streaming_tool_calls,pending_approvals:approvals,pending_questions:questions,queue:queued,running_tool_calls:s.tool_calls(&id)?.into_iter().filter(|t|matches!(t.status,otto_store::ToolStatus::Intent|otto_store::ToolStatus::Running)).map(|t|RunningToolCall{call_id:t.call_id,name:t.name,input:t.input,started_at:Some(t.started_at)}).collect(),turn_started_at:if busy{s.turn_started(&id)?}else{None}})}).await;let _=reply.send(result);}
+                Command::View(window,reply)=>{let id=cx.row.id.clone();let pending=&state;let approvals=pending.approvals.values().map(|p|p.0.clone()).collect();let questions=pending.questions.values().map(|p|p.0.clone()).collect();let queued=pending.snapshot();let busy=active.is_some();let waiting=!pending.approvals.is_empty()||!pending.questions.is_empty();let result=cx.runtime.db(move|s|crate::runtime::build_view(s,&id,window,crate::runtime::ViewState{busy,waiting,approvals,questions,queued})).await;let _=reply.send(result);}
                 Command::Approval(id,decision,note,reply)=>{if !state.approvals.contains_key(&id){let _=reply.send(Err(Error::Invalid("unknown approval".into())));continue;}else if let Some(note)=note{let item=otto_llm::Item::new(crate::id(),otto_llm::Role::System,vec![otto_llm::Part::System{text:format!("Approval {id} note: {note}")}]);if let Err(error)=cx.commit(Event::ItemDone{item:item.clone()},Projection::PutItem(item),turn,0).await{let _=reply.send(Err(error));continue;}}let pending=state.approvals.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::ApprovalResolved{approval_id:id,decision},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(decision);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown approval".into()))};let _=reply.send(result);}
                 Command::Question(id,answer,reply)=>{let pending=state.questions.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::QuestionResolved{question_id:id,answer:answer.clone()},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(answer);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown question".into()))};let _=reply.send(result);}
                 Command::Compact(reply)=>{*busy.lock().expect("busy mutex")=true;let result=if active.is_some(){Err(Error::Invalid("session busy".into()))}else{{let c=cx.clone();let token=CancellationToken::new();let mut task=tokio::spawn(async move{crate::compaction::compact(&c,&token,turn,"manual").await});loop{tokio::select!{Some(op)=state_rx.recv()=>op(&mut state),result=&mut task=>break result.unwrap_or(Err(Error::Closed)),Some(entry)=journal.recv()=>{let result=cx.commit(entry.event,entry.projection,entry.turn,entry.step).await;let _=entry.reply.send(result);}}}}};let _=reply.send(result);}

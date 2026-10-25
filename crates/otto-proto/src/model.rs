@@ -250,6 +250,17 @@ pub struct SessionView {
     /// (`timing::part_times`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub part_times: Vec<crate::timing::PartTime>,
+    /// Older items are stored than `items` holds: page back with `session.view`
+    /// `before_seq: oldest_seq`. Absent from older servers (they send every item).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_older: bool,
+    /// The item sequence of the oldest stored item in `items`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_seq: Option<i64>,
+    /// With `has_older`: the input of the latest `update_todos` call when it is
+    /// older than `items`, so the session's todo list is complete from the newest window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

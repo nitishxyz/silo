@@ -63,11 +63,16 @@ pub struct Item {
     /// model gets a note naming them, not these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<Mention>,
+    /// Set only on a client's copy that was clipped to fit the wire: the
+    /// item's serialized size in bytes before clipping. Stored items and what
+    /// providers see never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipped: Option<u64>,
 }
 
 impl Item {
     pub fn new(id: impl Into<ItemId>, role: Role, parts: Vec<Part>) -> Self {
-        Self { id: id.into(), role, parts, origin: None, mentions: Vec::new() }
+        Self { id: id.into(), role, parts, origin: None, mentions: Vec::new(), clipped: None }
     }
     pub fn user_text(id: impl Into<ItemId>, text: impl Into<String>) -> Self {
         Self::new(id, Role::User, vec![Part::text(text)])

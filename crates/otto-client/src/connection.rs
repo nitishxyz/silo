@@ -277,8 +277,14 @@ impl Connection {
     pub async fn session_list(&self, project_id: Option<String>, include_archived: bool) -> Result<Vec<SessionInfo>> {
         self.call_typed(Method::SessionList { project_id, include_archived }).await
     }
+    /// The session's newest items that fit one reply (`has_older` when more are stored).
     pub async fn session_view(&self, session_id: &str) -> Result<SessionView> {
-        self.call_typed(Method::SessionView { session_id: session_id.into() }).await
+        self.call_typed(Method::SessionView { session_id: session_id.into(), limit: None, before_seq: None }).await
+    }
+    /// A page of at most `limit` items stored before item sequence `before_seq`
+    /// (a view's `oldest_seq`). An older server ignores both and sends every item.
+    pub async fn session_view_before(&self, session_id: &str, before_seq: i64, limit: Option<u32>) -> Result<SessionView> {
+        self.call_typed(Method::SessionView { session_id: session_id.into(), limit, before_seq: Some(before_seq) }).await
     }
     pub async fn session_subscribe(&self, session_id: &str, after_seq: Option<i64>) -> Result<Subscribed> {
         self.call_typed(Method::SessionSubscribe { session_id: session_id.into(), after_seq }).await

@@ -22,22 +22,57 @@ impl Sink {
     pub fn test_sink(tx: mpsc::Sender<Outgoing>, close: watch::Sender<bool>) -> Self {
         Self { tx, close }
     }
+    /// Queue `message`. One that would not fit a frame never reaches the
+    /// writer: a response becomes a `too_large` error for its request, a
+    /// journal event a malformed-event notice (the client fetches the view
+    /// again), a live overlay is dropped; the connection stays open.
     pub fn send(&self, message: &ServerMessage, shutdown: bool) -> bool {
-        let Ok(frame) = Frame::json(kind::CONTROL, message) else {
+        let Ok(mut frame) = Frame::json(kind::CONTROL, message) else {
             self.close.send_replace(true);
             return false;
         };
+        if !frame.fits() {
+            let Some(replacement) = oversized(message, frame.payload.len()) else { return true };
+            match Frame::json(kind::CONTROL, &replacement) {
+                Ok(small) if small.fits() => frame = small,
+                _ => {
+                    self.close.send_replace(true);
+                    return false;
+                }
+            }
+        }
         if self.tx.try_send(Outgoing { frame, shutdown }).is_err() {
             self.close.send_replace(true);
             return false;
         }
         true
     }
-    pub fn event(&self, id: Option<String>, seq: i64, event: Event) -> bool {
+    /// A journal event, as clients get it: clipped (`otto_proto::clip`).
+    pub fn event(&self, id: Option<String>, seq: i64, mut event: Event) -> bool {
+        otto_proto::clip::clip_event(&mut event);
         self.send(&ServerMessage::Event { seq, session_id: id, event: Box::new(event) }, false)
     }
     pub fn close(&self) {
         self.close.send_replace(true);
+    }
+}
+/// What is sent instead of `message`, `len` bytes, which would not fit a frame.
+fn oversized(message: &ServerMessage, len: usize) -> Option<ServerMessage> {
+    let why = format!("{} is larger than a frame ({})", otto_proto::clip::size_label(len as u64), otto_proto::clip::size_label(MAX_FRAME as u64));
+    tracing::warn!(len, "oversized message not sent: {why}");
+    match message {
+        ServerMessage::Response { id, .. } => Some(ServerMessage::Response {
+            id: *id,
+            result: None,
+            error: Some(RpcError::too_large(format!("The reply ({why})")).with_data(serde_json::json!({"bytes": len, "max": MAX_FRAME}))),
+        }),
+        ServerMessage::Event { seq, session_id, event } => Some(ServerMessage::MalformedEvent {
+            seq: *seq,
+            session_id: session_id.clone(),
+            event: serde_json::to_value(event).ok().and_then(|v| v["event"].as_str().map(str::to_owned)).unwrap_or_default(),
+            error: format!("{}: the event ({why})", RpcError::TOO_LARGE),
+        }),
+        _ => None,
     }
 }
 pub(crate) struct Subscriptions {
@@ -155,6 +190,11 @@ pub(crate) async fn serve(state: Arc<State>, mut stream: UnixStream, mut index: 
     };
     let write = async {
         while let Some(outgoing) = rx.recv().await {
+            // `Sink::send` replaces what would not fit; never end the connection over one frame.
+            if !outgoing.frame.fits() {
+                tracing::warn!(len = outgoing.frame.payload.len(), "oversized frame dropped");
+                continue;
+            }
             let result = write_frame(&mut writer, &outgoing.frame).await;
             if outgoing.shutdown {
                 state.stop.send_replace(true);
@@ -242,14 +282,16 @@ pub(crate) async fn subscribe(state: &State, id: String, after: i64, sink: Sink,
     Ok(subscribed)
 }
 
-fn send_live(sink: &Sink, id: &str, after_seq: i64, event: Event) {
+fn send_live(sink: &Sink, id: &str, after_seq: i64, mut event: Event) {
     if !event.is_live_delta() {
         return;
     }
+    otto_proto::clip::clip_event(&mut event);
     let message = ServerMessage::Live { live: true, id: 0, session_id: id.into(), after_seq, event: Box::new(event) };
     // Ephemeral output may be dropped; reserve queue capacity for durable events.
     if sink.tx.capacity() > OUTBOX / 2
         && let Ok(frame) = Frame::json(kind::CONTROL, &message)
+        && frame.fits()
     {
         let _ = sink.tx.try_send(Outgoing { frame, shutdown: false });
     }
@@ -268,6 +310,48 @@ fn drain_live(sink: &Sink, id: &str, after_seq: i64, deltas: &mut broadcast::Rec
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn huge_events_reach_clients_clipped_and_what_cannot_fit_never_closes() {
+        let (tx, mut outbox) = mpsc::channel(OUTBOX);
+        let (close, closed) = watch::channel(false);
+        let sink = Sink { tx, close };
+        let result = otto_llm::Part::ToolResult {
+            call_id: "c".into(),
+            content: vec![otto_llm::ResultPart::text("r".repeat(20 * 1024 * 1024))],
+            is_error: false,
+        };
+        let item = Item::new("i", otto_llm::Role::Tool, vec![result]);
+        assert!(sink.event(Some("s".into()), 1, Event::ItemDone { item }));
+        let output = serde_json::json!({"content": [{"type": "text", "text": "o".repeat(20 * 1024 * 1024)}]});
+        assert!(sink.event(Some("s".into()), 2, Event::ToolResult { call_id: "c".into(), is_error: false, output, item_id: "i".into() }));
+        // Nothing clips a session's info: it cannot fit, so the client is told to fetch the view again.
+        let mut info: SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": "s", "project_id": "p", "parent_id": null, "agent": "a", "model": "m", "provider": "p", "cwd": "/", "status": "idle",
+            "created_at": 0, "updated_at": 0, "last_seq": 3, "usage": {"usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}, "cost_usd": 0.0},
+            "title": ""
+        }))
+        .unwrap();
+        info.title = "t".repeat(MAX_FRAME);
+        assert!(sink.event(Some("s".into()), 3, Event::SessionChanged { info: info.clone() }));
+        let response = ServerMessage::Response { id: 7, result: Some(serde_json::json!(info)), error: None };
+        assert!(sink.send(&response, false));
+        let mut got = Vec::new();
+        while let Ok(outgoing) = outbox.try_recv() {
+            assert!(outgoing.frame.fits());
+            got.push(outgoing.frame.parse::<ServerMessage>().unwrap());
+        }
+        assert!(
+            matches!(&got[0], ServerMessage::Event { seq: 1, event, .. } if matches!(&**event, Event::ItemDone { item } if item.clipped.is_some()))
+        );
+        assert!(
+            matches!(&got[1], ServerMessage::Event { seq: 2, event, .. } if matches!(&**event, Event::ToolResult { output, .. } if output["clipped"]["bytes"].as_u64() > Some(20 << 20)))
+        );
+        // Clients read it as a malformed event (its data is missing) and fetch the view again.
+        assert!(matches!(&got[2], ServerMessage::MalformedEvent { seq: 3, event, .. } if event == "session.changed"));
+        assert!(matches!(&got[3], ServerMessage::Response { id: 7, error: Some(e), .. } if e.code == RpcError::TOO_LARGE));
+        assert!(!*closed.borrow());
+    }
 
     #[tokio::test]
     async fn lagging_live_stream_and_slow_outbox_preserve_durable_events() {

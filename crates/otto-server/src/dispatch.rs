@@ -101,7 +101,10 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             }
             Ok(json!(sessions.into_iter().map(|info| runtime.with_plan(info)).collect::<Vec<_>>()))
         }
-        Method::SessionView { session_id } => Ok(json!(runtime.view(&session_id).await.map_err(core_error)?)),
+        Method::SessionView { session_id, limit, before_seq } => {
+            let window = otto_core::ViewWindow { limit: limit.map(|l| l as usize), before_seq, ..Default::default() };
+            Ok(json!(runtime.view_window(&session_id, window).await.map_err(core_error)?))
+        }
         Method::SessionSubscribe { session_id, after_seq } => {
             Ok(json!(crate::connection::subscribe(state, session_id, after_seq.unwrap_or(0), sink.clone(), subs).await?))
         }

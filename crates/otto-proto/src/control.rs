@@ -126,8 +126,17 @@ pub enum Method {
         #[serde(default)]
         include_archived: bool,
     },
+    /// The newest items that fit the reply (`clip::VIEW_BUDGET`), at most `limit`;
+    /// with `before_seq`, those stored before that item sequence (a page of older
+    /// items: pass the previous reply's `oldest_seq`). `has_older` says more remain.
     #[serde(rename = "session.view")]
-    SessionView { session_id: SessionId },
+    SessionView {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<i64>,
+    },
     #[serde(rename = "session.subscribe")]
     SessionSubscribe { session_id: SessionId, after_seq: Option<i64> },
     #[serde(rename = "session.unsubscribe")]
@@ -298,7 +307,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("project.list", "List registered projects."),
     ("session.create", "Create a session in a project."),
     ("session.list", "List sessions, optionally including archived sessions."),
-    ("session.view", "Snapshot a session and its durable sequence boundary."),
+    ("session.view", "Snapshot a session and its durable sequence boundary: its newest items that fit, or a page before before_seq."),
     ("session.subscribe", "Replay events after a sequence, then receive live events."),
     ("session.unsubscribe", "Stop receiving this session's events."),
     ("session.fork", "Fork a session at a durable sequence boundary."),
@@ -454,6 +463,8 @@ impl RpcError {
     pub const METHOD_NOT_FOUND: &str = "method_not_found";
     pub const INCOMPATIBLE: &str = "incompatible";
     pub const AUTH_REQUIRED: &str = "auth_required";
+    /// The reply would not fit in a frame (`MAX_FRAME`); the connection stays open.
+    pub const TOO_LARGE: &str = "too_large";
 
     #[must_use]
     pub fn new(code: &str, message: impl Into<String>) -> Self {
@@ -491,6 +502,10 @@ impl RpcError {
     #[must_use]
     pub fn incompatible(message: impl Into<String>) -> Self {
         Self::new(Self::INCOMPATIBLE, message)
+    }
+    #[must_use]
+    pub fn too_large(message: impl Into<String>) -> Self {
+        Self::new(Self::TOO_LARGE, message)
     }
     #[must_use]
     pub fn auth_required(message: impl Into<String>) -> Self {
