@@ -1,11 +1,12 @@
 //! Tools over an ordinary Silo control connection.
 
+pub mod changes;
 mod descriptors;
 pub mod files;
 
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -92,7 +93,8 @@ pub struct Tools {
     subscribed: OnceCell<()>,
     shell: Mutex<Option<String>>,
     run_lock: Mutex<()>,
-    /// `files_show` calls one at a time: two at once would each open a block.
+    /// `files_show` and `changes_show` calls one at a time: two at once
+    /// would each open a block.
     show_lock: Mutex<()>,
 }
 
@@ -188,6 +190,7 @@ impl Tools {
             // `terminal_list` is its old name, still answered for older agents and sessions.
             "block_list" | "terminal_list" => self.list().await?,
             "files_show" => self.show(&input, anchor).await?,
+            "changes_show" => self.changes_show(&input, anchor).await?,
             "terminal_close" => {
                 self.control
                     .call_value(Method::BlockClose { block_id: self.block(&input, anchor)?, force: input["force"].as_bool().unwrap_or(false) })
@@ -331,6 +334,133 @@ impl Tools {
             "block_id": block, "root": root, "path": rel, "created": created,
             "line": files::focus_line(&show), "highlights": marked,
         }))
+    }
+
+    /// `changes_show`: open or focus the agent's own Changes block (one
+    /// linked to `anchor`, else split off it, else a tab in its session) on
+    /// the scope, with the file shown and the lines marked. Input `cwd`,
+    /// `turn_base` and `session_base` come from hosts such as otto.
+    async fn changes_show(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<Value> {
+        if !self.control.peer_supports(silo_proto::compat::feature::CHANGES) {
+            bail!("this Silo server has no Changes blocks (update it)");
+        }
+        let cwd = input["cwd"].as_str().map(PathBuf::from).or_else(|| self.cx.cwd.clone());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut show = changes::parse(input, cwd.as_deref(), home.as_deref())?;
+        // The server's roots are canonical: compare like with like.
+        if let Some(path) = &show.path {
+            show.path = Some(canonical(path).await);
+        }
+        for mark in &mut show.marks {
+            mark.path = canonical(&mark.path).await;
+        }
+        let cwd = match cwd {
+            Some(cwd) => Some(canonical(&cwd).await),
+            None => None,
+        };
+        let (scope, fallback) = changes::block_scope(show.scope, input["turn_base"].as_str(), input["session_base"].as_str());
+        // The folder the block reviews: the file's, else the agent's.
+        let folder = match &show.path {
+            Some(path) if tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir()) => Some(path.clone()),
+            Some(path) => path.parent().map(Path::to_path_buf),
+            None => cwd.clone(),
+        };
+        let _lock = self.show_lock.lock().await;
+        let anchor = input["block_id"].as_str().or(anchor).map(str::to_owned);
+        let agent = match &anchor {
+            Some(anchor) => self.control.call::<BlockView>(Method::BlockView { block_id: anchor.clone() }).await.ok().map(|v| v.block),
+            None => None,
+        };
+        let own = match &agent {
+            Some(agent) => {
+                let session: SessionView = self.control.call(Method::SessionView { session_id: agent.session_id.clone() }).await?;
+                changes::own_block(&session, &agent.id)
+            }
+            None => None,
+        };
+        let created = own.is_none();
+        let block = match own {
+            Some((block, root, window)) => {
+                if let (Some(agent), Some(window_id)) = (&agent, window) {
+                    self.control.call_value(Method::WindowSelect { session_id: agent.session_id.clone(), window_id }).await?;
+                }
+                self.control.call_value(Method::BlockFocus { block_id: block.clone() }).await?;
+                // A file in another repo: review that one.
+                if let Some(folder) = folder.as_ref().filter(|f| !f.starts_with(&root)) {
+                    let reroot = Method::ChangesRoot(silo_proto::control::ChangesRootParams {
+                        block_id: block.clone(),
+                        path: folder.to_string_lossy().into_owned(),
+                    });
+                    self.control.call_value(reroot).await?;
+                }
+                block
+            }
+            None => {
+                let spawn = SpawnSpec { cwd: folder.as_ref().map(|f| f.to_string_lossy().into_owned()), ..Default::default() };
+                let created: Created = match &agent {
+                    Some(agent) => {
+                        let split = Method::BlockSplit {
+                            block_id: agent.id.clone(),
+                            axis: Axis::Horizontal,
+                            spawn: spawn.clone(),
+                            kind: BlockKind::Changes,
+                            url: None,
+                            agent: None,
+                        };
+                        match self.control.call(split).await {
+                            Ok(created) => created,
+                            // A floating or parked agent: a tab in its session.
+                            Err(_) => {
+                                let tab = Method::WindowCreate { session_id: agent.session_id.clone(), spawn, kind: BlockKind::Changes, url: None };
+                                self.control.call(tab).await?
+                            }
+                        }
+                    }
+                    None => {
+                        let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
+                        let session = &self.cx.default_session;
+                        let method = match sessions.iter().find(|s| s.name == *session || s.id == *session) {
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Changes, url: None },
+                            None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Changes, url: None },
+                        };
+                        self.control.call(method).await?
+                    }
+                };
+                created.block_id
+            }
+        };
+        let view: BlockView = self.control.call(Method::BlockView { block_id: block.clone() }).await?;
+        let state = view.block.changes.context("not a Changes block")?;
+        let root = PathBuf::from(&state.root);
+        let rel = show.path.as_ref().and_then(|p| files::relative(&root, p)).filter(|r| !r.is_empty());
+        // The review goes back to this agent.
+        let link = match (&agent, &state.agent) {
+            (Some(agent), None) => agent
+                .agent
+                .as_ref()
+                .and_then(|a| a.session_id.clone())
+                .map(|otto_session| Some(silo_proto::model::AgentLink { otto_session, block_id: Some(agent.id.clone()) })),
+            _ => None,
+        };
+        let params = silo_proto::control::ChangesSetParams {
+            block_id: block.clone(),
+            scope: Some(scope),
+            active: rel.clone(),
+            marks: Some(changes::marks_under(&root, &show.marks)),
+            agent: link,
+            ..Default::default()
+        };
+        let state: silo_proto::model::ChangesState = self.control.call(Method::ChangesSet(params)).await?;
+        let mut result = json!({
+            "block_id": block, "root": state.root, "scope": state.scope, "created": created, "marks": state.marks.len(),
+        });
+        if let Some(rel) = rel {
+            result["path"] = json!(rel);
+        }
+        if fallback {
+            result["note"] = json!("no snapshot of this turn or session yet: showing the work tree against HEAD");
+        }
+        Ok(result)
     }
 
     fn block(&self, input: &Value, anchor: Option<&str>) -> anyhow::Result<String> {
@@ -703,6 +833,18 @@ impl Tools {
 
 /// Join lines a terminal `columns` wide soft-wrapped: a line filling the
 /// width continues on the next.
+/// `path` with symlinks resolved; a path that doesn't exist (a deleted
+/// file) is its folder's, resolved, joined with its name.
+async fn canonical(path: &Path) -> PathBuf {
+    if let Ok(path) = tokio::fs::canonicalize(path).await {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => tokio::fs::canonicalize(parent).await.map_or_else(|_| path.to_path_buf(), |p| p.join(name)),
+        _ => path.to_path_buf(),
+    }
+}
+
 fn unwrap(text: &str, columns: u16) -> String {
     let mut out = String::with_capacity(text.len());
     let mut full = false;

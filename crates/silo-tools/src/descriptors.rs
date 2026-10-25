@@ -75,6 +75,18 @@ struct Fields {
     path: String,
     line: u64,
     highlight: Vec<Highlight>,
+    scope: String,
+    hunks: Vec<HunkMark>,
+}
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct HunkMark {
+    /// The file (absolute, ~/…, or relative to your working directory).
+    path: String,
+    /// A line on the new side, 1-based.
+    line: u64,
+    /// A short note shown beside it.
+    note: Option<String>,
 }
 #[derive(JsonSchema)]
 #[allow(dead_code)]
@@ -230,6 +242,13 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
             "path",
             true,
         ),
+        (
+            "changes_show",
+            "Show the user what you changed, in your own Changes block in Silo (a diff review beside your block, reused on later calls): scope turn (default: this turn's changes), session (everything this session changed), working (the uncommitted work against HEAD) or staged. path opens that file's diff; each of hunks marks a line (new side, 1-based) with an optional short note (check this, the risky part). Calling it again replaces the marks (none given clears them). It returns no diff; the user reviews, comments and sends the review back to you as a message.",
+            "path scope hunks block_id",
+            "",
+            true,
+        ),
         ("notify", "Notify the user on the agent's block, or block_id when outside a block.", "block_id title body", "body", false),
     ];
     let schema = serde_json::to_value(schema_for!(Fields)).expect("schema serializes");
@@ -238,11 +257,11 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         for field in fields.split_whitespace() { properties.insert(field.into(), schema["properties"][field].clone()); }
         if name == "browser_type" { properties.insert("submit".into(), json!({"type":"string"})); }
         if name == "browser_wait_for" { properties.insert("text".into(), json!({"type":"array", "items":{"type":"string"}})); }
-        for (field, choices) in [("place", vec!["split", "tab", "session"]), ("button", vec!["left", "right", "middle"]), ("format", vec!["png", "jpeg"])] {
+        for (field, choices) in [("place", vec!["split", "tab", "session"]), ("button", vec!["left", "right", "middle"]), ("format", vec!["png", "jpeg"]), ("scope", vec!["turn", "session", "working", "staged"])] {
             if let Some(property) = properties.get_mut(field) { property["enum"] = json!(choices); }
         }
         let mut input_schema = json!({"type":"object", "properties": properties, "required": required.split_whitespace().collect::<Vec<_>>(), "additionalProperties": false});
         if let Some(defs) = schema.get("$defs") { input_schema["$defs"] = defs.clone(); }
-        ToolDescriptor { name: name.into(), description: description.into(), input_schema, effects: Effects { read, write: !read, process: !read }, deferred: name.starts_with("browser_") || name == "files_show" }
+        ToolDescriptor { name: name.into(), description: description.into(), input_schema, effects: Effects { read, write: !read, process: !read }, deferred: name.starts_with("browser_") || name == "files_show" || name == "changes_show" }
     }).collect()
 }

@@ -74,7 +74,7 @@ fn highlight(item: &Value) -> anyhow::Result<FileHighlight> {
 
 /// `path` without `.` and `..` components (lexically: symlinks are left
 /// to the server, which checks where they lead).
-fn normalize(path: &Path) -> PathBuf {
+pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
