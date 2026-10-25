@@ -98,6 +98,11 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
+# The browser's hot path (input, frames, the engine's pump) runs every frame;
+# small and rarely edited, so optimizing it costs dev rebuilds almost nothing.
+[profile.dev.package.silo-web]
+opt-level = 2
+
 [profile.dev.package.gpui]
 opt-level = 3
 debug = false
