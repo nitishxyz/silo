@@ -587,6 +587,13 @@ impl Workspace {
         header.into_any_element()
     }
 
+    /// Block `id`'s header label: its name, as the drag pill shows it.
+    pub(crate) fn header_label(&self, id: &str, fill: u32, cx: &mut Context<Self>) -> String {
+        let style = HeaderStyle { active: false, palette: self.card_chrome(fill), control: radius::CONTROL };
+        let info = self.block_info(id).cloned();
+        self.header_parts(id, style, info.as_ref(), cx).label.to_string()
+    }
+
     /// Block `id`'s header parts, from the pane showing it; a block with no
     /// pane here gets its labels.
     fn header_parts(&self, id: &str, style: HeaderStyle, info: Option<&BlockInfo>, cx: &mut Context<Self>) -> HeaderParts {
@@ -654,7 +661,8 @@ impl Workspace {
 
     /// Closed panes sliding out of their old slots towards the outer edge,
     /// over the survivor already laid out at its final size. Visual only:
-    /// no listeners, so input goes to the panes below.
+    /// no listeners (a live pane is covered), so input goes to the panes
+    /// below or nowhere.
     pub(crate) fn render_pane_ghosts(&self, now: Instant, window: &mut Window) -> Vec<AnyElement> {
         let metrics = silo_render::CellMetrics::for_window(window);
         let cursor = silo_render::CursorPresentation { focused: false, phase_visible: true };
@@ -678,7 +686,21 @@ impl Workspace {
                     near(viewport.width - slot.origin.x - slot.size.width),
                     near(viewport.height - slot.origin.y - slot.size.height),
                 );
-                let canvas = silo_render::terminal_canvas(ghost.frame.clone(), metrics, cursor, selection, silo_render::Overlay::default());
+                let body = match &ghost.body {
+                    motion::GhostBody::Frame(frame) => {
+                        let canvas = silo_render::terminal_canvas(frame.clone(), metrics, cursor, selection, silo_render::Overlay::default());
+                        div()
+                            .flex_1()
+                            .p(px(crate::pane::PADDING))
+                            .child(div().relative().size_full().child(div().absolute().top_0().left_0().size_full().child(canvas)))
+                    }
+                    // The pane as it was, under a cover that keeps it from
+                    // the pointer: it is closed.
+                    motion::GhostBody::Pane(pane) => {
+                        div().relative().flex_1().min_h_0().min_w_0().child(pane.element()).child(div().absolute().inset_0().occlude())
+                    }
+                    motion::GhostBody::Card => div().flex_1(),
+                };
                 // Drawn over the panes growing into its place: opaque.
                 let palette = self.card_chrome(ghost.fill).floating();
                 let header = ghost.title.clone().map(|title| {
@@ -692,7 +714,7 @@ impl Workspace {
                         .font_family(theme::ui_font())
                         .text_size(px(11.5))
                         .text_color(rgb(palette.muted))
-                        .child(icon("terminal", 12.0, palette.icon))
+                        .child(icon(ghost.icon, 12.0, palette.icon))
                         .child(title)
                 });
                 Some(
@@ -718,12 +740,7 @@ impl Workspace {
                                 .rounded_clip()
                                 .opacity(1.0 - 0.6 * p)
                                 .children(header)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .p(px(crate::pane::PADDING))
-                                        .child(div().relative().size_full().child(div().absolute().top_0().left_0().size_full().child(canvas))),
-                                ),
+                                .child(body),
                         )
                         .into_any_element(),
                 )

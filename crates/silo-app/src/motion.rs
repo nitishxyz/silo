@@ -17,6 +17,7 @@ use std::{
 };
 
 use gpui::{Bounds, Pixels, point, size};
+use silo_proto::model::{Axis, Layout};
 use silo_render::PreparedFrame;
 
 pub const TAB_ENTER: Duration = Duration::from_millis(190);
@@ -255,11 +256,34 @@ pub struct TabGhost {
     pub started: Instant,
 }
 
-/// A closed pane: its last frame sliding out of its old slot. Visual only.
+/// How a block's pane leaves the tiled layout (closed, floated, parked).
+/// Every kind has one ([`crate::blocks::Kind::exit`]): none snaps away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// Its last painted frame slides out (a terminal: drawing it live would
+    /// resize its pty).
+    Frame,
+    /// The pane itself slides out, still drawing.
+    Pane,
+    /// Its card and header slide out: the pane is shown elsewhere now
+    /// (floated, parked, moved), or there is none here.
+    Card,
+}
+
+/// What a closing pane's ghost shows under its header.
+pub enum GhostBody {
+    Frame(Arc<PreparedFrame>),
+    Pane(crate::blocks::BlockPane),
+    Card,
+}
+
+/// A closed pane sliding out of its old slot. Visual only.
 pub struct PaneGhost {
-    pub frame: Arc<PreparedFrame>,
+    pub body: GhostBody,
     pub slot: Bounds<Pixels>,
     pub edge: Edge,
+    /// The kind's glyph, in the header.
+    pub icon: &'static str,
     /// Header label when pane headers were shown.
     pub title: Option<String>,
     /// The card's fill (its block's backdrop or the theme background).
@@ -298,6 +322,24 @@ impl Zoom {
             (extent, if t < settle { part(t, settle) } else { near_slot(extent) })
         })
     }
+}
+
+/// The panes of a window that stays shown which slide out (in `old`'s
+/// tiled layout, `removed` from it) and in (`added`, along the axis of the
+/// split now holding them). Kind plays no part: every block moves alike.
+pub fn pane_moves(old: &Layout, new: &Layout, diff: &Diff) -> (Vec<String>, Vec<(String, Edge)>) {
+    let old_blocks = old.blocks();
+    let leaving = diff.removed.iter().filter(|id| old_blocks.contains(id)).cloned().collect();
+    let entering = diff
+        .added
+        .iter()
+        .filter_map(|id| match crate::layout::parent_axis(new, id) {
+            Some(Axis::Horizontal) => Some((id.clone(), Edge::Right)),
+            Some(Axis::Vertical) => Some((id.clone(), Edge::Bottom)),
+            None => None,
+        })
+        .collect();
+    (leaving, entering)
 }
 
 /// Window-space bounds from the last paint, for geometry the next frame
@@ -615,6 +657,36 @@ mod tests {
         let (extent, cover) = m.zoom_state(settling + ZOOM_SETTLE).unwrap();
         assert!(extent < 1.0 && cover > 0.99, "turns opaque before it shrinks");
         assert!(m.zoom_state(settling + ZOOM_SETTLE + PANE_ZOOM).is_none());
+    }
+
+    #[test]
+    fn every_kind_slides_in_and_out() {
+        use crate::blocks::Kind;
+        let block = |id: &str| Layout::Block { id: id.into() };
+        let alone = block("base");
+        let start = Instant::now();
+        for kind in Kind::ALL {
+            let id = format!("{kind:?}");
+            let split = Layout::Split { axis: Axis::Horizontal, ratio: 0.5, first: Box::new(block("base")), second: Box::new(block(&id)) };
+            let mut t = Tracker::default();
+            t.sync("s", alone.blocks());
+            // Opened: it slides in from the side it splits off to.
+            let opened = t.sync("s", split.blocks());
+            assert_eq!(pane_moves(&alone, &split, &opened), (vec![], vec![(id.clone(), Edge::Right)]), "{kind:?} opens");
+            // Closed: it slides out, showing what it showed.
+            let closed = t.sync("s", alone.blocks());
+            assert_eq!(pane_moves(&split, &alone, &closed), (vec![id.clone()], vec![]), "{kind:?} closes");
+            let exit = kind.exit(false);
+            assert_eq!(matches!(exit, Exit::Frame | Exit::Pane), kind != Kind::Unsupported, "{kind:?} leaves as {exit:?}");
+            // Floated or parked, its pane is drawn there: never twice.
+            assert_ne!(kind.exit(true), Exit::Pane, "{kind:?}");
+            let mut m = Motion::default();
+            let slot = Bounds::new(point(px(500.), px(0.)), size(px(500.), px(600.)));
+            m.pane_ghosts.push(PaneGhost { body: GhostBody::Card, slot, edge: Edge::Right, icon: kind.icon(), title: None, fill: 0, started: start });
+            m.pane_enter.insert(id, (start, Edge::Right));
+            assert!(m.prune(start + PANE_EXIT / 2), "{kind:?} moves");
+            assert!(!m.prune(start + PANE_ENTER.max(PANE_EXIT)), "{kind:?} settles");
+        }
     }
 
     #[test]

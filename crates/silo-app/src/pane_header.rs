@@ -10,7 +10,7 @@ use gpui::{AnyElement, App, Context, Entity, SharedString, div, prelude::*, px, 
 use serde::{Deserialize, Serialize};
 use silo_proto::model::BlockInfo;
 
-use crate::{blocks::Kind, layout::HEADER_HEIGHT, theme::Continuous as _};
+use crate::{blocks::Kind, theme::Continuous as _};
 
 /// Header buttons.
 pub const BUTTON: f32 = 22.0;
@@ -80,24 +80,12 @@ pub enum HeaderMode {
 }
 
 impl HeaderMode {
-    #[must_use]
-    pub fn height(self) -> f32 {
-        if self == Self::Hidden { 0.0 } else { HEADER_HEIGHT }
-    }
-
     /// Whether the block's actions (and the pane buttons) show: a shrunk
     /// header is its middle alone.
     #[must_use]
     pub fn shows_actions(self) -> bool {
         self == Self::Full
     }
-}
-
-/// A pane's content `slot` grown up over its header: its whole card.
-#[must_use]
-pub fn with_header(slot: gpui::Bounds<gpui::Pixels>, mode: HeaderMode) -> gpui::Bounds<gpui::Pixels> {
-    let header = px(mode.height());
-    gpui::Bounds::new(gpui::point(slot.origin.x, slot.origin.y - header), gpui::size(slot.size.width, slot.size.height + header))
 }
 
 /// A browser's header can't hide (it holds the address); with every other
@@ -320,7 +308,6 @@ mod tests {
         assert_eq!(header_mode(Kind::Files, PaneHeaders::default()), HeaderMode::Full);
         assert_eq!(header_mode(Kind::Terminal, none), HeaderMode::Hidden);
         assert_eq!(header_mode(Kind::Agent, none), HeaderMode::Hidden);
-        assert!((HeaderMode::Middle.height() - HEADER_HEIGHT).abs() < f32::EPSILON, "the same height, shrunk sideways");
     }
 
     #[test]
@@ -334,20 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn header_heights_per_block_in_a_mixed_layout() {
+    fn header_modes_per_block_in_a_mixed_layout() {
         // A terminal (hidden), an agent and a browser side by side.
         let headers = PaneHeaders { terminal: false, agent: true };
-        let heights: Vec<f32> = [Kind::Terminal, Kind::Agent, Kind::Browser].iter().map(|k| header_mode(*k, headers).height()).collect();
-        assert_eq!(heights, [0.0, HEADER_HEIGHT, HEADER_HEIGHT]);
-        // A closing pane's ghost covers its card: content plus its own header.
-        let slot = gpui::Bounds::new(gpui::point(px(10.0), px(100.0)), gpui::size(px(300.0), px(200.0)));
-        let terminal = with_header(slot, header_mode(Kind::Terminal, headers));
-        assert_eq!(terminal, slot, "no header: the content is the card");
-        let agent = with_header(slot, header_mode(Kind::Agent, headers));
-        assert_eq!((agent.origin.y, agent.size.height), (px(100.0 - HEADER_HEIGHT), px(200.0 + HEADER_HEIGHT)));
-        assert_eq!((agent.origin.x, agent.size.width), (slot.origin.x, slot.size.width));
-        let shrunk = with_header(slot, header_mode(Kind::Browser, PaneHeaders::all(false)));
-        assert_eq!(shrunk.size.height, px(200.0 + HEADER_HEIGHT), "a browser's shrunk header keeps its height");
+        let modes: Vec<HeaderMode> = [Kind::Terminal, Kind::Agent, Kind::Browser].iter().map(|k| header_mode(*k, headers)).collect();
+        assert_eq!(modes, [HeaderMode::Hidden, HeaderMode::Full, HeaderMode::Full]);
     }
 
     #[test]

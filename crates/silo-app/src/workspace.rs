@@ -24,7 +24,7 @@ use crate::{
     conn::ConnEvent,
     hosts::{self, AppState, HostState},
     hosts_state::{HostEntry, HostEvent, HostsState},
-    motion::{self, Edge, Motion, PaneGhost, TabGhost},
+    motion::{self, Motion, PaneGhost, TabGhost},
     pane::{Pane, PaneEvent},
     status::{Status, StatusKind},
     switcher::Switcher,
@@ -996,6 +996,11 @@ impl Workspace {
         let scope = view.session.id.clone();
         let windows = self.motion.windows.sync(&scope, view.session.windows.iter().map(|w| w.id.clone()).collect());
         let blocks = self.motion.blocks.sync(&scope, view.session.windows.iter().flat_map(|w| w.layout.blocks()).collect());
+        // Closing panes' slots, before they are forgotten.
+        let slots: std::collections::HashMap<String, Bounds<gpui::Pixels>> = {
+            let cells = self.motion.measured.cells.borrow();
+            blocks.removed.iter().filter_map(|id| Some((id.clone(), *cells.get(id)?))).collect()
+        };
         self.motion.forget_blocks(&blocks.removed);
         if !(windows.added.is_empty() && windows.removed.is_empty() && blocks.added.is_empty() && blocks.removed.is_empty()) {
             tracing::debug!(?windows, ?blocks, reduce_motion = cx.reduce_motion(), "motion");
@@ -1042,32 +1047,24 @@ impl Workspace {
         }
         let viewport = window.viewport_size();
         let body = Bounds::new(point(px(0.), px(TITLEBAR_HEIGHT)), size(viewport.width, viewport.height - px(TITLEBAR_HEIGHT)));
-        let old_blocks = old_active.layout.blocks();
-        for id in blocks.removed.iter().filter(|id| old_blocks.contains(id)) {
-            if let Some(pane) = self.blocks.terminal(id)
-                && let Some((frame, mut slot)) = pane.read(cx).ghost()
-            {
-                // Grow the terminal's slot to the whole card: header and outline.
-                let mode = self.header_mode(id);
-                let title = (mode != crate::pane_header::HeaderMode::Hidden).then(|| crate::layout::header_labels(pane.read(cx).info.as_ref()).0);
-                slot = crate::pane_header::with_header(slot, mode);
-                if self.density() == hosts::Density::Comfortable {
-                    slot = slot.dilate(px(1.0));
-                }
-                // Away from the sibling that takes over the space; geometry
-                // decides when the block was not a direct split child.
-                let edge = crate::layout::sibling_side(&old_active.layout, id).unwrap_or_else(|| motion::exit_edge(slot, body));
-                tracing::debug!(block = %id, ?edge, "pane ghost");
-                let fill = self.card_fill(id, cx);
-                self.motion.pane_ghosts.push(PaneGhost { frame, slot, edge, title, fill, started: now });
-            }
+        let (leaving, entering) = motion::pane_moves(&old_active.layout, &new_active.layout, &blocks);
+        for id in leaving {
+            // The whole card's slot (header and outline), as last laid out.
+            let Some(slot) = slots.get(&id).copied() else { continue };
+            let alive = view.blocks.iter().any(|b| b.id == id);
+            let body_of = self.exit_body(&id, alive, cx);
+            let fill = self.card_fill(&id, cx);
+            let mode = self.header_mode(&id);
+            let title = (mode != crate::pane_header::HeaderMode::Hidden).then(|| self.header_label(&id, fill, cx));
+            // Away from the sibling that takes over the space; geometry
+            // decides when the block was not a direct split child.
+            let edge = crate::layout::sibling_side(&old_active.layout, &id).unwrap_or_else(|| motion::exit_edge(slot, body));
+            tracing::debug!(block = %id, ?edge, alive, "pane ghost");
+            let icon = self.block_icon(&id);
+            self.motion.pane_ghosts.push(PaneGhost { body: body_of, slot, edge, icon, title, fill, started: now });
         }
-        for id in blocks.added {
-            match crate::layout::parent_axis(&new_active.layout, id.as_str()) {
-                Some(Axis::Horizontal) => self.motion.pane_enter.insert(id, (now, Edge::Right)),
-                Some(Axis::Vertical) => self.motion.pane_enter.insert(id, (now, Edge::Bottom)),
-                None => None,
-            };
+        for (id, edge) in entering {
+            self.motion.pane_enter.insert(id, (now, edge));
         }
     }
 

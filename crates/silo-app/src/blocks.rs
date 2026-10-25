@@ -18,6 +18,7 @@ use crate::{
     agent::AgentPane,
     browser_pane::BrowserPane,
     files::FilesPane,
+    motion::{Exit, GhostBody},
     pane::Pane,
     pane_header::{self, HeaderParts, HeaderStyle},
     workspace::Workspace,
@@ -52,6 +53,18 @@ impl Kind {
             Self::Unsupported => "info",
         }
     }
+
+    /// How its pane leaves the tiled layout; `alive`: the block is still in
+    /// the session (floated, parked, moved), so its pane may be drawn there.
+    #[must_use]
+    pub fn exit(self, alive: bool) -> Exit {
+        match self {
+            Self::Terminal => Exit::Frame,
+            Self::Browser | Self::Agent | Self::Files if alive => Exit::Card,
+            Self::Browser | Self::Agent | Self::Files => Exit::Pane,
+            Self::Unsupported => Exit::Card,
+        }
+    }
 }
 
 /// The pane kind of a block the server describes as `info`; a block not
@@ -76,6 +89,14 @@ pub(crate) enum BlockPane {
 }
 
 impl BlockPane {
+    /// The last frame it painted, for a pane that leaves as one ([`Exit::Frame`]).
+    pub(crate) fn last_frame(&self, cx: &App) -> Option<std::sync::Arc<silo_render::PreparedFrame>> {
+        match self {
+            Self::Terminal(p) => p.read(cx).last_frame(),
+            Self::Browser(_) | Self::Agent(_) | Self::Files(_) => None,
+        }
+    }
+
     /// The browser pane, if this is one (handing a browser to the off-screen host).
     pub(crate) fn into_browser(self) -> Option<Entity<BrowserPane>> {
         match self {
@@ -220,6 +241,17 @@ impl Workspace {
     /// The kind of `block`, from the server's view of it.
     pub(crate) fn block_kind(&self, block: &str) -> Kind {
         kind_of(self.block_info(block))
+    }
+
+    /// What block `block`'s ghost shows as it leaves the layout
+    /// ([`Kind::exit`]); `alive`: it is still in the session.
+    pub(crate) fn exit_body(&self, block: &str, alive: bool, cx: &App) -> GhostBody {
+        let pane = self.block_pane(block);
+        match self.block_kind(block).exit(alive) {
+            Exit::Frame => pane.and_then(|p| p.last_frame(cx)).map_or(GhostBody::Card, GhostBody::Frame),
+            Exit::Pane => pane.map_or(GhostBody::Card, GhostBody::Pane),
+            Exit::Card => GhostBody::Card,
+        }
     }
 
     /// The pane showing `block` here, of any kind.

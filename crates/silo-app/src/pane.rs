@@ -970,11 +970,11 @@ impl Pane {
         self.content_bounds
     }
 
-    /// A visual-only copy of the last painted frame and its slot (content
-    /// bounds grown by the padding), for a close animation.
-    pub fn ghost(&self) -> Option<(Arc<PreparedFrame>, Bounds<Pixels>)> {
-        let bounds = self.content_bounds?;
-        Some((self.prepared.clone()?, bounds.dilate(px(PADDING))))
+    /// A visual-only copy of the last painted frame, for the close
+    /// animation (a live terminal would resize its pty).
+    pub fn last_frame(&self) -> Option<Arc<PreparedFrame>> {
+        self.content_bounds?;
+        self.prepared.clone()
     }
 
     /// Render with the (changed) terminal preferences at once, and report
