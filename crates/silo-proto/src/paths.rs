@@ -1,20 +1,60 @@
-//! Well-known local paths shared by the server and clients.
+//! Well-known local paths shared by the server and clients. Every per-user
+//! location follows this build's [`crate::CHANNEL`] (`silo_channel`).
 
 use std::path::PathBuf;
 
-/// Server state directory: `$SILO_HOME`, else
-/// `~/Library/Application Support/silo` on macOS and
-/// `$XDG_STATE_HOME/silo` (default `~/.local/state/silo`) elsewhere.
+pub use silo_channel::Home;
+
+fn env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
+}
+
+const MACOS: bool = cfg!(target_os = "macos");
+
+/// Server state directory: `$SILO_HOME`, else the channel's
+/// `~/Library/Application Support/silo` (dev: `silo-dev`) on macOS and
+/// `$XDG_STATE_HOME/silo` (default `~/.local/state/silo`; dev: `silo-dev`)
+/// elsewhere. A `SILO_HOME` naming the other channel's default home is
+/// refused (warned about once) and this channel's default used instead.
 #[must_use]
 pub fn home() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SILO_HOME").filter(|d| !d.is_empty()) {
-        return dir.into();
+    let home = resolve_home();
+    if let Some(warning) = home.warning("SILO_HOME", crate::CHANNEL) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("silo: {warning}");
+            tracing::warn!("{warning}");
+        });
     }
-    let user_home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    if cfg!(target_os = "macos") {
-        return user_home.join("Library/Application Support/silo");
+    home.path
+}
+
+/// [`home`] and the `SILO_HOME` it refused, if any.
+#[must_use]
+pub fn resolve_home() -> Home {
+    silo_channel::silo_home(crate::CHANNEL, &env, MACOS)
+}
+
+/// This channel's default home (what [`home`] is without `SILO_HOME`).
+#[must_use]
+pub fn default_home() -> PathBuf {
+    silo_channel::default_silo_home(crate::CHANNEL, &env, MACOS)
+}
+
+/// The app's client cache: `<home>/cache` for a custom home (tests, UI
+/// runs), else the channel's `~/Library/Caches/silo` (dev: `silo-dev`;
+/// XDG `$XDG_CACHE_HOME/silo` elsewhere).
+#[must_use]
+pub fn app_cache() -> PathBuf {
+    app_cache_in(&home(), crate::CHANNEL, &env, MACOS)
+}
+
+fn app_cache_in(home: &std::path::Path, channel: crate::Channel, var: silo_channel::Var, macos: bool) -> PathBuf {
+    if silo_channel::same_dir(home, &silo_channel::default_silo_home(channel, var, macos)) {
+        silo_channel::cache_dir(var, macos, channel.silo_dir())
+    } else {
+        home.join("cache")
     }
-    std::env::var_os("XDG_STATE_HOME").map_or_else(|| user_home.join(".local/state"), PathBuf::from).join("silo")
 }
 
 #[must_use]
@@ -101,4 +141,32 @@ pub struct Runtime {
     /// The server's [`crate::BUILD`].
     pub build: String,
     pub started_at: u64,
+    /// The server's [`crate::CHANNEL`]; absent (release) from older builds.
+    #[serde(default)]
+    pub channel: crate::Channel,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsString, path::Path};
+
+    use super::*;
+    use crate::Channel;
+
+    #[test]
+    fn app_cache_per_channel() {
+        let var = |name: &str| (name == "HOME").then(|| OsString::from("/h"));
+        let dev = Path::new("/h/Library/Application Support/silo-dev");
+        assert_eq!(app_cache_in(dev, Channel::Dev, &var, true), Path::new("/h/Library/Caches/silo-dev"));
+        let release = Path::new("/h/Library/Application Support/silo");
+        assert_eq!(app_cache_in(release, Channel::Release, &var, true), Path::new("/h/Library/Caches/silo"));
+        assert_eq!(app_cache_in(Path::new("/tmp/silo-ui"), Channel::Dev, &var, true), Path::new("/tmp/silo-ui/cache"));
+        assert_eq!(app_cache_in(Path::new("/h/.local/state/silo-dev"), Channel::Dev, &var, false), Path::new("/h/.cache/silo-dev"));
+    }
+
+    #[test]
+    fn runtime_without_channel_is_release() {
+        let old = r#"{"pid":1,"socket":"/s","version":"0.1.0","build":"b","started_at":0}"#;
+        assert_eq!(serde_json::from_str::<Runtime>(old).unwrap().channel, Channel::Release);
+    }
 }

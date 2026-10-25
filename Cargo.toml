@@ -12,6 +12,7 @@ license = "MIT"
 silo-vt = { path = "crates/silo-vt" }
 silo-pty = { path = "crates/silo-pty" }
 silo-proto = { path = "crates/silo-proto" }
+silo-channel = { path = "crates/silo-channel" }
 silo-server = { path = "crates/silo-server" }
 silo-client = { path = "crates/silo-client" }
 silo-tools = { path = "crates/silo-tools" }

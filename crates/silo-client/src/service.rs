@@ -11,8 +11,10 @@ use silo_proto::paths;
 
 use crate::Control;
 
-pub const UNIT: &str = "silo.service";
-pub const LABEL: &str = "dev.silo.server";
+/// This channel's systemd unit: `silo.service`, dev `silo-dev.service`.
+pub const UNIT: &str = silo_proto::CHANNEL.systemd_unit();
+/// This channel's launchd job: `dev.silo.server`, dev `dev.silo.server.dev`.
+pub const LABEL: &str = silo_proto::CHANNEL.launchd_label();
 
 const SYSTEMD_TEMPLATE: &str = include_str!("../service/silo.service");
 const LAUNCHD_TEMPLATE: &str = include_str!("../service/dev.silo.server.plist");
@@ -478,9 +480,24 @@ mod tests {
     }
 
     impl Fake {
+        /// The calls, with this channel's job names written as the release
+        /// build's (`dev.silo.server`, `silo.service`) so one table covers both.
         fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
+            self.calls.borrow().iter().map(|c| as_release(c)).collect()
         }
+    }
+
+    fn as_release(text: &str) -> String {
+        text.replace(LABEL, "dev.silo.server").replace(UNIT, "silo.service")
+    }
+
+    #[test]
+    fn job_names_follow_the_channel() {
+        let (label, unit) = match silo_proto::CHANNEL {
+            silo_proto::Channel::Release => ("dev.silo.server", "silo.service"),
+            silo_proto::Channel::Dev => ("dev.silo.server.dev", "silo-dev.service"),
+        };
+        assert_eq!((LABEL, UNIT), (label, unit));
     }
 
     fn temp_home(name: &str) -> PathBuf {
@@ -536,7 +553,7 @@ mod tests {
     #[test]
     fn launchd_plist_pins_exe_home_and_log() {
         let plist = launchd_plist(Path::new("/Apps/S&o/silo"), Path::new("/Users/bat/Library/Application Support/silo"));
-        assert!(plist.contains("<string>dev.silo.server</string>"));
+        assert!(plist.contains(&format!("<string>{LABEL}</string>")));
         assert!(plist.contains("<string>/Apps/S&amp;o/silo</string>\n\t\t<string>server</string>"));
         assert!(plist.contains("<key>SILO_HOME</key>\n\t\t<string>/Users/bat/Library/Application Support/silo</string>"));
         assert!(plist.contains("<string>/Users/bat/Library/Application Support/silo/server.log</string>"));
@@ -547,8 +564,8 @@ mod tests {
     #[test]
     fn unit_paths_derive_from_home() {
         let home = Path::new("/home/bat");
-        assert_eq!(service(Manager::Systemd, home).unit_path(), Some(home.join(".config/systemd/user/silo.service")));
-        assert_eq!(service(Manager::Launchd, home).unit_path(), Some(home.join("Library/LaunchAgents/dev.silo.server.plist")));
+        assert_eq!(service(Manager::Systemd, home).unit_path(), Some(home.join(".config/systemd/user").join(UNIT)));
+        assert_eq!(service(Manager::Launchd, home).unit_path(), Some(home.join("Library/LaunchAgents").join(format!("{LABEL}.plist"))));
     }
 
     #[test]
@@ -703,7 +720,7 @@ mod tests {
                 "/opt/silo/bin/silo server --takeover --daemon --idle-exit 0".to_owned(),
                 "launchctl bootout gui/501/dev.silo.server".to_owned(),
                 "launchctl enable gui/501/dev.silo.server".to_owned(),
-                format!("launchctl bootstrap gui/501 {}", plist.display()),
+                as_release(&format!("launchctl bootstrap gui/501 {}", plist.display())),
                 "launchctl kickstart -k gui/501/dev.silo.server".to_owned(),
                 "launchctl disable gui/501/dev.silo.server".to_owned(),
             ]
@@ -719,7 +736,7 @@ mod tests {
         let svc = service(Manager::Systemd, &home);
         let fake = Fake { failing: vec!["systemctl --user start"], ..Fake::default() };
         let error = svc.apply(&fake, &[Action::Start, Action::Reload]).unwrap_err();
-        assert_eq!(error.to_string(), "systemctl --user start silo.service failed: boom");
+        assert_eq!(as_release(&error.to_string()), "systemctl --user start silo.service failed: boom");
         assert_eq!(fake.calls(), ["systemctl --user start silo.service"]);
         let _ = std::fs::remove_dir_all(home);
     }

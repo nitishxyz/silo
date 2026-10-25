@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+silo-channel.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "silo-channel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Std, serde and schemars only: otto-proto (wasm-safe) depends on it too.
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

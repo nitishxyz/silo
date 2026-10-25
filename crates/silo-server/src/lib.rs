@@ -500,8 +500,14 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         endpoint_addr: None,
         idle_exit_secs: config.idle_exit.map_or(0, |d| d.as_secs().max(1)),
     };
-    let runtime =
-        paths::Runtime { pid: info.pid, socket: socket.clone(), version: info.version.clone(), build: silo_proto::BUILD.to_owned(), started_at };
+    let runtime = paths::Runtime {
+        pid: info.pid,
+        socket: socket.clone(),
+        version: info.version.clone(),
+        build: silo_proto::BUILD.to_owned(),
+        started_at,
+        channel: silo_proto::CHANNEL,
+    };
     // Not fatal: a server that took over must not end its programs here.
     let written = serde_json::to_vec_pretty(&runtime).map_err(std::io::Error::from).and_then(|j| std::fs::write(paths::runtime(&home), j));
     if let Err(error) = written {

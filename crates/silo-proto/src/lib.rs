@@ -31,6 +31,8 @@ pub mod upload;
 mod build_id;
 
 pub use frame::{Frame, read_frame, spawn_reader, write_frame};
+/// This build's channel (`SILO_CHANNEL` at compile time, see `silo_channel`).
+pub use silo_channel::{CURRENT as CHANNEL, Channel};
 
 /// Build id: a hash of every workspace source (see `build.rs`). Hellos
 /// carry it for display and upgrade decisions; peers of any build work

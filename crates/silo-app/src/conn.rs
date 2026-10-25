@@ -605,7 +605,9 @@ mod tests {
 
     impl service::Runner for Fake {
         fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<service::Output> {
-            self.calls.borrow_mut().push(std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" "));
+            // This channel's job written as the release build's, so one table covers both.
+            let call = std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" ");
+            self.calls.borrow_mut().push(call.replace(service::LABEL, "dev.silo.server"));
             let print = program == "launchctl" && args.first() == Some(&"print");
             Ok(service::Output { success: !print || self.print.is_some(), stdout: self.print.unwrap_or_default().to_owned(), stderr: String::new() })
         }

@@ -315,7 +315,14 @@ mod tests {
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
         rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         let listener = tokio::net::UnixListener::bind(paths::socket(home)).unwrap();
-        let runtime = paths::Runtime { pid: 4242, socket: paths::socket(home), version: "0.0.1".into(), build: OTHER.into(), started_at: 0 };
+        let runtime = paths::Runtime {
+            pid: 4242,
+            socket: paths::socket(home),
+            version: "0.0.1".into(),
+            build: OTHER.into(),
+            started_at: 0,
+            channel: silo_proto::CHANNEL,
+        };
         std::fs::write(paths::runtime(home), serde_json::to_vec(&runtime).unwrap()).unwrap();
         let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = connections.clone();
