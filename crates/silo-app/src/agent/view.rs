@@ -3462,4 +3462,79 @@ mod tests {
             assert!(scroll.abs() < 0.5);
         }
     }
+
+    /// The thread's list as the pane builds it (bottom aligned, following the tail).
+    mod thread_layout {
+        use std::{cell::RefCell, rc::Rc};
+
+        use gpui::{
+            Bounds, Context, IntoElement, ListAlignment, ListState, Pixels, Render, TestAppContext, Window, canvas, div, prelude::*, px, size,
+        };
+
+        struct Thread {
+            list: ListState,
+            rows: usize,
+            seen: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+        }
+
+        impl Render for Thread {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let seen = self.seen.clone();
+                seen.borrow_mut().clear();
+                let _ = self.rows;
+                div().size_full().child(
+                    gpui::list(self.list.clone(), move |ix, _, _| {
+                        let seen = seen.clone();
+                        div()
+                            .h(px(40.0))
+                            .w_full()
+                            .child(
+                                canvas(
+                                    |_, _, _| {},
+                                    move |bounds, (), _, _| {
+                                        let mut seen = seen.borrow_mut();
+                                        if seen.len() <= ix {
+                                            seen.resize(ix + 1, Bounds::default());
+                                        }
+                                        seen[ix] = bounds;
+                                    },
+                                )
+                                .size_full(),
+                            )
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+            }
+        }
+
+        /// Row bounds of a `rows`-row thread in a 400 pt tall pane.
+        fn rows(cx: &mut TestAppContext, rows: usize) -> Vec<Bounds<Pixels>> {
+            let list = ListState::new(rows, ListAlignment::Bottom, px(600.0));
+            list.set_follow_mode(gpui::FollowMode::Tail);
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let (_, cx) = cx.add_window_view({
+                let seen = seen.clone();
+                move |_, _| Thread { list, rows, seen }
+            });
+            cx.simulate_resize(size(px(300.0), px(400.0)));
+            cx.run_until_parked();
+            seen.borrow().clone()
+        }
+
+        #[gpui::test]
+        fn a_short_thread_sits_at_the_bottom(cx: &mut TestAppContext) {
+            let seen = rows(cx, 2);
+            let last = seen.last().expect("rows painted");
+            assert!(f32::from(last.bottom()) > 390.0, "the last row ends at the pane's bottom: {seen:?}");
+            assert!(f32::from(seen[0].top()) > 300.0, "not at the top: {seen:?}");
+        }
+
+        #[gpui::test]
+        fn a_long_thread_ends_at_the_bottom(cx: &mut TestAppContext) {
+            let seen = rows(cx, 30);
+            let last = seen.last().expect("rows painted");
+            assert!(f32::from(last.bottom()) > 390.0 && f32::from(last.bottom()) < 401.0, "following the tail: {last:?}");
+        }
+    }
 }

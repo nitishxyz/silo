@@ -475,7 +475,8 @@ impl AgentPane {
             cx.on_focus(&focus, window, |this, window, cx| this.focus_composer(window, cx)),
         ];
         // The rows, then the activity row.
-        let list = ListState::new(1, ListAlignment::Top, px(600.0));
+        // Bottom: a short thread sits just above the composer and grows upward, like a chat.
+        let list = ListState::new(1, ListAlignment::Bottom, px(600.0));
         list.set_follow_mode(gpui::FollowMode::Tail);
         let scroll = scroll::Inner::new(list.clone());
         let mut pane = Self {
