@@ -757,7 +757,7 @@ impl Workspace {
         let Some(control) = self.control() else {
             return;
         };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+        let cwd = self.new_block_folder(window, cx);
         let task = self.rt.spawn(async move {
             control
                 .call::<Created>(Method::SessionCreate {
@@ -1144,21 +1144,61 @@ impl Workspace {
         self.blocks.terminal(&block).cloned()
     }
 
-    /// The folder a block works in, for a new block split off it.
+    /// The folder a new block opened from `block` (split off it, or a tab
+    /// opened while it has focus) starts in: its own, else the session's
+    /// ([`session_folder`]). A page or an empty block has no folder of its
+    /// own, so a new agent there works in the session's project, not `~`.
     pub(crate) fn cwd_of(&self, block: &str, cx: &gpui::App) -> Option<String> {
+        self.own_folder(block, cx).or_else(|| self.session_folder(Some(block), cx))
+    }
+
+    /// The folder for a new block in this session: the focused block's,
+    /// else the session's.
+    pub(crate) fn new_block_folder(&self, window: &Window, cx: &gpui::App) -> Option<String> {
+        match self.focused_block(window, cx) {
+            Some(block) => self.cwd_of(&block, cx),
+            None => self.session_folder(None, cx),
+        }
+    }
+
+    /// The folder block `block` works in, if its kind has one.
+    fn own_folder(&self, block: &str, cx: &gpui::App) -> Option<String> {
         if !self.block_kind(block).has_folder() {
             return None;
         }
         // A terminal's pane hears of a new cwd before the view does.
-        match self.blocks.terminal(block) {
+        let cwd = match self.blocks.terminal(block) {
             Some(p) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
             None => self.block_info(block).and_then(|i| i.cwd.clone()),
+        };
+        cwd.filter(|c| !c.is_empty())
+    }
+
+    /// The session's folder, as [`session_folder`] picks it among its blocks.
+    fn session_folder(&self, from: Option<&str>, cx: &gpui::App) -> Option<String> {
+        let view = self.view.as_ref()?;
+        let active = self.active_window();
+        let windows = active.into_iter().chain(view.session.windows.iter().filter(|w| Some(w.id.as_str()) != active.map(|a| a.id.as_str())));
+        let mut order: Vec<String> = from.map(str::to_owned).into_iter().collect();
+        for w in windows {
+            order.push(w.focused.clone());
+            order.extend(w.layout.blocks());
+            order.extend(w.floats.iter().map(|f| f.id.clone()));
         }
+        order.extend(view.session.parked.iter().map(|p| p.id.clone()));
+        let candidates: Vec<(String, bool)> = order
+            .iter()
+            .filter_map(|b| {
+                let folder = self.own_folder(b, cx).map(|c| (c, true));
+                folder.or_else(|| self.block_info(b).and_then(|i| i.cwd.clone()).map(|c| (c, false)))
+            })
+            .collect();
+        session_folder(&candidates)
     }
 
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+        let cwd = self.new_block_folder(window, cx);
         self.call(Method::WindowCreate {
             session_id: view.session.id.clone(),
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
@@ -1664,8 +1704,30 @@ pub(crate) fn is_root_window<V: 'static + Render>(handle: gpui::AnyWindowHandle,
     handle.downcast::<V>().and_then(|h| h.entity(cx).ok()).is_some_and(|root| root.entity_id() == entity)
 }
 
+/// A session's folder among its blocks' `(cwd, own)`, nearest first (the
+/// block a new one opens from, the focused window's focused block, its
+/// layout, other windows, parked blocks): the first a terminal, agent or
+/// files block works in (`own`), else the first any block was opened in (a
+/// page keeps the folder it opened next to).
+fn session_folder(candidates: &[(String, bool)]) -> Option<String> {
+    let first = |own: bool| candidates.iter().find(|(c, o)| *o == own && !c.is_empty()).map(|(c, _)| c.clone());
+    first(true).or_else(|| first(false))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_block_starts_in_the_sessions_folder() {
+        let c = |cwd: &str, own: bool| (cwd.to_owned(), own);
+        // A page focused: the terminal beside it names the project.
+        assert_eq!(super::session_folder(&[c("/p/page", false), c("/p/proj", true)]).as_deref(), Some("/p/proj"));
+        // The nearest block with a folder wins.
+        assert_eq!(super::session_folder(&[c("/a", true), c("/b", true)]).as_deref(), Some("/a"));
+        // Only pages: the folder they opened in.
+        assert_eq!(super::session_folder(&[c("", true), c("/p", false)]).as_deref(), Some("/p"));
+        assert_eq!(super::session_folder(&[]), None);
+    }
+
     #[test]
     fn cmd_nine_is_the_last_tab() {
         assert_eq!(super::tab_index(8, 3), 2);

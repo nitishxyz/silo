@@ -195,7 +195,7 @@ impl Workspace {
         let Some(control) = self.control() else {
             return self.flash(crate::status::Status::warning(format!("{} is not connected", self.hosts[host].info.name)), cx);
         };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+        let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
         let create = Method::SessionCreate { name, spawn, kind: BlockKind::Terminal, url: None };
         let task = self.rt.spawn(async move { control.call::<Created>(create).await });

@@ -220,7 +220,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn new_agent_tab(&mut self, window: &gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(view) = &self.view else { return };
         let session_id = view.session.id.clone();
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+        let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
         self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None }, cx);
     }

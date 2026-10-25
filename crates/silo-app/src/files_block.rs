@@ -321,7 +321,7 @@ impl Workspace {
     /// New Files Tab: a tab holding a Files block at the focused block's folder.
     pub(crate) fn new_files_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
-        let cwd = self.focused_block(window, cx).and_then(|b| self.cwd_of(&b, cx));
+        let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
         self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None });
     }
