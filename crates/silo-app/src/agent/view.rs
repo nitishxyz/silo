@@ -71,6 +71,12 @@ fn tabular() -> gpui::FontFeatures {
 const AT_END: f32 = 3.0;
 
 /// How far the list is scrolled up from its end, from its last layout (0 when it doesn't scroll).
+/// `text` on one line for a one-line row: every run of whitespace (line
+/// breaks included, which gpui would break on even with `nowrap`) is a space.
+pub(super) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(super) fn gap_to_end(list: &gpui::ListState) -> f32 {
     f32::from(list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y).max(0.0)
 }
@@ -1849,7 +1855,7 @@ impl AgentPane {
         let queue = self.queue_rows();
         if !queue.is_empty() {
             let n = queue.len();
-            let first = queue[0].text.clone();
+            let first = one_line(&queue[0].text);
             bars.push(Bar {
                 key: "queue",
                 icon: icon("clock", 14.0, theme::warning()).into_any_element(),
@@ -1911,7 +1917,7 @@ impl AgentPane {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(rgb(theme::foreground()))
-                    .child(if text.is_empty() { "Attachment".to_owned() } else { text }),
+                    .child(if text.is_empty() { "Attachment".to_owned() } else { one_line(&text) }),
             )
             .map(|el| match id {
                 // Not confirmed by otto yet: nothing to act on.
@@ -3368,6 +3374,16 @@ mod tests {
         assert_eq!(tokens(12_400_000), "12M");
         assert_eq!(grouped(48_213), "48,213");
         assert_eq!(grouped(1_200_000), "1,200,000");
+    }
+
+    #[test]
+    fn a_queued_message_is_one_line() {
+        assert_eq!(
+            super::one_line("also all the animation\nfor blocks\n\n  should be central  "),
+            "also all the animation for blocks should be central"
+        );
+        assert_eq!(super::one_line("one"), "one");
+        assert_eq!(super::one_line(" \n "), "");
     }
 
     #[test]
