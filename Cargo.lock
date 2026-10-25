@@ -5808,6 +5808,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "silo-channel",
  "tokio",
 ]
 

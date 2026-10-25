@@ -4,43 +4,63 @@ use std::path::{Path, PathBuf};
 
 pub use crate::{BINARY, ENV_PREFIX, PROJECT_SHARED_DIR, PROJECT_STATE_DIR};
 
-/// One daemon per Silo server: `$OTTO_SILO_HOME`; else, serving Silo's default
-/// home ([`silo_home`]), macOS Application Support or the XDG state home; else
-/// `<silo home>/otto`.
-#[must_use]
-pub fn home() -> PathBuf {
-    home_in(|name| std::env::var_os(name), cfg!(target_os = "macos"))
-}
-fn home_in(var: impl Fn(&str) -> Option<std::ffi::OsString>, macos: bool) -> PathBuf {
-    if let Some(dir) = var(&format!("{ENV_PREFIX}_HOME")).filter(|d| !d.is_empty()) {
-        return dir.into();
-    }
-    let silo = silo_home_in(&var, macos);
-    if silo != silo_home_in(|name| var(name).filter(|_| name != "SILO_HOME"), macos) {
-        return silo.join("otto");
-    }
-    let user_home = var("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    if macos {
-        return user_home.join("Library/Application Support").join(BINARY);
-    }
-    var("XDG_STATE_HOME").filter(|d| !d.is_empty()).map_or_else(|| user_home.join(".local/state"), PathBuf::from).join(BINARY)
+pub use silo_channel::{CURRENT as CHANNEL, Channel, Home};
+
+use silo_channel::Var;
+
+fn env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
 }
 
-/// The Silo home this process serves, as `silo_proto::paths::home` resolves it:
-/// `$SILO_HOME`, else macOS Application Support or the XDG state home.
+const MACOS: bool = cfg!(target_os = "macos");
+
+/// otto's state directory name for `channel`: `otto-silo`, dev `otto-silo-dev`.
+#[must_use]
+pub fn dir_name(channel: Channel) -> String {
+    format!("{BINARY}{}", channel.suffix())
+}
+
+/// One daemon per Silo server: `$OTTO_SILO_HOME`; else, serving this
+/// channel's default Silo home ([`silo_home`]), macOS Application Support or
+/// the XDG state home `otto-silo` (dev: `otto-silo-dev`); else
+/// `<silo home>/otto`. An `OTTO_SILO_HOME` naming the other channel's default
+/// otto home is refused (warned about once), as Silo refuses its `SILO_HOME`.
+#[must_use]
+pub fn home() -> PathBuf {
+    let home = resolve_home();
+    if let Some(warning) = home.warning(&format!("{ENV_PREFIX}_HOME"), CHANNEL) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!("{BINARY}: {warning}"));
+    }
+    home.path
+}
+
+/// [`home`] and the `OTTO_SILO_HOME` it refused, if any.
+#[must_use]
+pub fn resolve_home() -> Home {
+    resolve_home_with(CHANNEL, &env, MACOS)
+}
+
+/// [`resolve_home`] for a `channel` build, environment `var` and OS rule.
+#[must_use]
+pub fn resolve_home_with(channel: Channel, var: Var, macos: bool) -> Home {
+    let own = silo_channel::state_dir(var, macos, &dir_name(channel));
+    let other = silo_channel::state_dir(var, macos, &dir_name(channel.other()));
+    let given = silo_channel::choose(silo_channel::set(var, &format!("{ENV_PREFIX}_HOME")), own.clone(), &other);
+    if given.refused.is_none() && given.path != own {
+        return given;
+    }
+    let silo = silo_channel::silo_home(channel, var, macos).path;
+    if !silo_channel::same_dir(&silo, &silo_channel::default_silo_home(channel, var, macos)) {
+        return Home { path: silo.join("otto"), refused: given.refused };
+    }
+    given
+}
+
+/// The Silo home this process serves, as `silo_proto::paths::home` resolves it.
 #[must_use]
 pub fn silo_home() -> PathBuf {
-    silo_home_in(|name| std::env::var_os(name), cfg!(target_os = "macos"))
-}
-fn silo_home_in(var: impl Fn(&str) -> Option<std::ffi::OsString>, macos: bool) -> PathBuf {
-    if let Some(dir) = var("SILO_HOME").filter(|d| !d.is_empty()) {
-        return dir.into();
-    }
-    let user_home = var("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    if macos {
-        return user_home.join("Library/Application Support/silo");
-    }
-    var("XDG_STATE_HOME").map_or_else(|| user_home.join(".local/state"), PathBuf::from).join("silo")
+    silo_channel::silo_home(CHANNEL, &env, MACOS).path
 }
 
 /// User-level agents, skills, hooks and `AGENTS.md`, this harness's own (not the TS otto's):
@@ -109,30 +129,64 @@ mod tests {
         move |name| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(*v))
     }
 
+    fn home_in(channel: Channel, env: Vars, macos: bool) -> Home {
+        resolve_home_with(channel, &vars(env), macos)
+    }
+
     #[test]
     fn home_is_one_per_silo_home() {
+        use Channel::{Dev, Release};
         let mac = "/h/Library/Application Support/otto-silo";
-        let table: &[(Vars, bool, &str)] = &[
-            (&[("OTTO_SILO_HOME", "/o"), ("SILO_HOME", "/tmp/silo-dev"), ("HOME", "/h")], true, "/o"),
-            (&[("OTTO_SILO_HOME", ""), ("SILO_HOME", "/tmp/silo-dev"), ("HOME", "/h")], true, "/tmp/silo-dev/otto"),
-            (&[("HOME", "/h")], true, mac),
-            (&[("SILO_HOME", ""), ("HOME", "/h")], true, mac),
-            (&[("SILO_HOME", "/h/Library/Application Support/silo"), ("HOME", "/h")], true, mac),
-            (&[("SILO_HOME", "/tmp/silo-dev"), ("HOME", "/h")], true, "/tmp/silo-dev/otto"),
-            (&[("HOME", "/h")], false, "/h/.local/state/otto-silo"),
-            (&[("XDG_STATE_HOME", "/x"), ("SILO_HOME", "/x/silo"), ("HOME", "/h")], false, "/x/otto-silo"),
-            (&[("XDG_STATE_HOME", "/x"), ("SILO_HOME", "/h/.local/state/silo"), ("HOME", "/h")], false, "/h/.local/state/silo/otto"),
+        let mac_dev = "/h/Library/Application Support/otto-silo-dev";
+        let table: &[(Channel, Vars, bool, &str)] = &[
+            (Dev, &[("OTTO_SILO_HOME", "/o"), ("SILO_HOME", "/tmp/silo-ui"), ("HOME", "/h")], true, "/o"),
+            (Dev, &[("OTTO_SILO_HOME", ""), ("SILO_HOME", "/tmp/silo-ui"), ("HOME", "/h")], true, "/tmp/silo-ui/otto"),
+            (Release, &[("HOME", "/h")], true, mac),
+            (Dev, &[("HOME", "/h")], true, mac_dev),
+            (Release, &[("SILO_HOME", ""), ("HOME", "/h")], true, mac),
+            (Release, &[("SILO_HOME", "/h/Library/Application Support/silo"), ("HOME", "/h")], true, mac),
+            (Dev, &[("SILO_HOME", "/h/Library/Application Support/silo-dev"), ("HOME", "/h")], true, mac_dev),
+            (Release, &[("SILO_HOME", "/tmp/silo-ui"), ("HOME", "/h")], true, "/tmp/silo-ui/otto"),
+            (Dev, &[("SILO_HOME", "/tmp/silo-ui"), ("HOME", "/h")], true, "/tmp/silo-ui/otto"),
+            (Release, &[("HOME", "/h")], false, "/h/.local/state/otto-silo"),
+            (Dev, &[("HOME", "/h")], false, "/h/.local/state/otto-silo-dev"),
+            (Release, &[("XDG_STATE_HOME", "/x"), ("SILO_HOME", "/x/silo"), ("HOME", "/h")], false, "/x/otto-silo"),
+            (Dev, &[("XDG_STATE_HOME", "/x"), ("SILO_HOME", "/x/silo-dev"), ("HOME", "/h")], false, "/x/otto-silo-dev"),
+            (Release, &[("XDG_STATE_HOME", "/x"), ("SILO_HOME", "/h/.local/state/silo"), ("HOME", "/h")], false, "/h/.local/state/silo/otto"),
+            // The other channel's Silo home is refused, so otto takes this channel's default.
+            (Dev, &[("SILO_HOME", "/h/Library/Application Support/silo"), ("HOME", "/h")], true, mac_dev),
+            (Release, &[("SILO_HOME", "/h/.local/state/silo-dev"), ("HOME", "/h")], false, "/h/.local/state/otto-silo"),
         ];
-        for (env, macos, want) in table {
-            assert_eq!(home_in(vars(env), *macos), PathBuf::from(want), "{env:?} macos={macos}");
+        for (channel, env, macos, want) in table {
+            let got = home_in(*channel, env, *macos);
+            assert_eq!(got.path, PathBuf::from(want), "{channel} {env:?} macos={macos}");
+            assert_eq!(got.refused, None, "{channel} {env:?} macos={macos}");
         }
     }
 
     #[test]
-    fn silo_home_matches_silo() {
-        assert_eq!(silo_home_in(vars(&[("SILO_HOME", "/s"), ("HOME", "/h")]), true), PathBuf::from("/s"));
-        assert_eq!(silo_home_in(vars(&[("HOME", "/h")]), true), PathBuf::from("/h/Library/Application Support/silo"));
-        assert_eq!(silo_home_in(vars(&[("XDG_STATE_HOME", "/x"), ("HOME", "/h")]), false), PathBuf::from("/x/silo"));
+    fn the_other_channels_otto_home_is_refused() {
+        let dev = home_in(Channel::Dev, &[("OTTO_SILO_HOME", "/h/Library/Application Support/otto-silo"), ("HOME", "/h")], true);
+        assert_eq!(dev.path, PathBuf::from("/h/Library/Application Support/otto-silo-dev"));
+        assert_eq!(dev.refused, Some(PathBuf::from("/h/Library/Application Support/otto-silo")));
+        assert!(
+            dev.warning("OTTO_SILO_HOME", Channel::Dev)
+                .unwrap()
+                .starts_with("OTTO_SILO_HOME=/h/Library/Application Support/otto-silo is the release build's home")
+        );
+        // Refused, then the custom Silo home rule still applies.
+        let dev = home_in(Channel::Dev, &[("OTTO_SILO_HOME", "/h/.local/state/otto-silo"), ("SILO_HOME", "/tmp/s"), ("HOME", "/h")], false);
+        assert_eq!((dev.path, dev.refused), (PathBuf::from("/tmp/s/otto"), Some(PathBuf::from("/h/.local/state/otto-silo"))));
+        let release = home_in(Channel::Release, &[("OTTO_SILO_HOME", "/x/otto-silo-dev"), ("XDG_STATE_HOME", "/x"), ("HOME", "/h")], false);
+        assert_eq!((release.path, release.refused), (PathBuf::from("/x/otto-silo"), Some(PathBuf::from("/x/otto-silo-dev"))));
+        // Its own default is fine.
+        let own = home_in(Channel::Dev, &[("OTTO_SILO_HOME", "/h/Library/Application Support/otto-silo-dev"), ("HOME", "/h")], true);
+        assert_eq!((own.path, own.refused), (PathBuf::from("/h/Library/Application Support/otto-silo-dev"), None));
+    }
+
+    #[test]
+    fn dir_names() {
+        assert_eq!((dir_name(Channel::Release), dir_name(Channel::Dev)), ("otto-silo".to_owned(), "otto-silo-dev".to_owned()));
     }
 
     #[test]

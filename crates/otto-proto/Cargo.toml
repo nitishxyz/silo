@@ -11,6 +11,8 @@ default = []
 io = ["dep:tokio"]
 
 [dependencies]
+# The build channel and Silo's home rules (std, serde and schemars only).
+silo-channel.workspace = true
 otto-llm = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json.workspace = true
