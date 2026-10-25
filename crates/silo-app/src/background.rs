@@ -210,7 +210,7 @@ impl Workspace {
                 .cursor_pointer()
                 .when(open, |el| el.bg(hover))
                 .when(!open, |el| el.tooltip(Tooltip::text(tip)))
-                .child(icon("eye-off", 15.0, chrome.icon))
+                .child(icon("layers", 15.0, chrome.icon))
                 .child(div().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(chrome.muted)).child(count.to_string()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_background_menu(window, cx)))

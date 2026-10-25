@@ -275,7 +275,6 @@ impl Workspace {
             }
             self.step_tab_reveal(&active_id, active_child, active_entering, !cx.reduce_motion(), window);
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
-            let comfortable = !compact;
             let menu_open = self.appearance_menu.open;
             let new_tab_open = self.launcher.is_open_for_tab();
             // The strip and the empty space after it take tab drops. The
@@ -324,10 +323,8 @@ impl Workspace {
                         .hover(|s| s.bg(hover))
                         .cursor_pointer()
                         .when(menu_open, |el| el.bg(hover))
-                        .when(!menu_open, |el| {
-                            el.tooltip(crate::tooltip::Tooltip::text(if comfortable { "Appearance: Comfortable" } else { "Appearance: Compact" }))
-                        })
-                        .child(icon("eye", 15.0, self.chrome.icon))
+                        .when(!menu_open, |el| el.tooltip(crate::tooltip::Tooltip::text("Settings")))
+                        .child(icon("settings", 15.0, self.chrome.icon))
                         .map(claim_press)
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_appearance_menu(window, cx))),
                 )

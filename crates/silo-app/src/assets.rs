@@ -87,7 +87,8 @@ icons!(
     "arrow-right",
     "eye-off",
     "plug",
-    "sidebar-right"
+    "sidebar-right",
+    "layers"
 );
 
 #[cfg(test)]
