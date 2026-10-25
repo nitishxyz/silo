@@ -29,6 +29,8 @@ struct Metrics {
     size: f32,
     line: f32,
     cell: f32,
+    /// A line number column's width, once per frame (not per row).
+    numbers: f32,
 }
 
 /// A hunk bar's text: git's header (the enclosing function), else where
@@ -255,7 +257,7 @@ impl ChangesPane {
         let font = gpui::font(SharedString::from(family));
         let id = window.text_system().resolve_font(&font);
         let cell = window.text_system().advance(id, px(size), 'm').map_or(size * 0.6, |a| f32::from(a.width));
-        Metrics { size, line: (size * 1.5).round(), cell }
+        Metrics { size, line: (size * 1.5).round(), cell, numbers: 0.0 }
     }
 
     /// The width of a line number column for the shown hunks.
@@ -307,7 +309,9 @@ impl ChangesPane {
         if self.shown.rows.is_empty() {
             return centered(hint("Loading…"));
         }
-        let m = Self::measure(window);
+        let mut m = Self::measure(window);
+        m.numbers = self.number_width(m);
+        let widest = self.widest_line(m);
         let (_, family, _) = theme::summary();
         let list = gpui::list(self.list.clone(), cx.processor(move |this, ix: usize, window, cx| this.render_row(ix, m, window, cx)))
             .size_full()
@@ -328,7 +332,7 @@ impl ChangesPane {
                 if dx.abs() <= dy.abs() && !e.modifiers.shift {
                     return;
                 }
-                let next = sideways(this.scroll_x - dx, this.widest_line(m), this.code_width(m));
+                let next = sideways(this.scroll_x - dx, widest, this.code_width(m));
                 if next != this.scroll_x {
                     this.scroll_x = next;
                     cx.notify();
@@ -347,7 +351,7 @@ impl ChangesPane {
 
     /// The width code shows in (one side's, when split).
     fn code_width(&self, m: Metrics) -> f32 {
-        let numbers = self.number_width(m);
+        let numbers = m.numbers;
         let gutter = m.cell + 6.0 + PAD;
         let width = self.body_width.get();
         if self.state.split { width / 2.0 - numbers - gutter } else { width - numbers * 2.0 - gutter }
@@ -356,7 +360,7 @@ impl ChangesPane {
     fn render_row(&mut self, ix: usize, m: Metrics, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.shown.rows.get(ix).cloned() else { return div().into_any_element() };
         let tints = Tints::now();
-        let numbers = self.number_width(m);
+        let numbers = m.numbers;
         let hunk_of = match &row {
             model::Row::Hunk { file, hunk }
             | model::Row::Line { file, hunk, .. }
@@ -614,7 +618,7 @@ impl ChangesPane {
         tints: Tints,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(loaded) = self.shown.files.get(file).cloned() else { return div().into_any_element() };
+        let Some(loaded) = self.shown.files.get(file) else { return div().into_any_element() };
         let line = &loaded.diff.hunks[hunk].lines[at];
         if matches!(line.kind, LineKind::NoNewline | LineKind::Unknown) {
             return div()
@@ -657,7 +661,7 @@ impl ChangesPane {
                     .min_w_0()
                     .overflow_hidden()
                     .pr(px(PAD))
-                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(&loaded, hunk, at, word, bg))),
+                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(loaded, hunk, at, word, bg))),
             )
             .children(mark)
             .into_any_element()
@@ -676,7 +680,7 @@ impl ChangesPane {
         tints: Tints,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(loaded) = self.shown.files.get(file).cloned() else { return div().into_any_element() };
+        let Some(loaded) = self.shown.files.get(file) else { return div().into_any_element() };
         let Some(at) = at else { return div().h(px(m.line)).w_full().bg(rgb(tints.empty)).into_any_element() };
         let line = &loaded.diff.hunks[hunk].lines[at];
         let path = loaded.diff.path.clone();
@@ -708,7 +712,7 @@ impl ChangesPane {
                     .min_w_0()
                     .overflow_hidden()
                     .pr(px(PAD))
-                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(&loaded, hunk, at, word, bg))),
+                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(loaded, hunk, at, word, bg))),
             )
             .children(mark)
             .into_any_element()
