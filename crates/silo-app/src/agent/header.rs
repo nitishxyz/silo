@@ -1,5 +1,5 @@
 //! The agent's pane header parts: on the chat screen the session title opens
-//! the switcher and History / New Session / Otto settings sit before the pane
+//! the switcher and Review changes / History / New Session / Otto settings sit before the pane
 //! buttons (not on a sub-agent: its strip leads back to the main agent instead).
 
 use gpui::{AnyElement, Context, div, prelude::*, px, rgb};
@@ -26,6 +26,7 @@ impl BlockHeader for AgentPane {
         parts.actions = actions(self.is_subagent())
             .iter()
             .map(|action| match action {
+                Action::Changes => changes(style, cx),
                 Action::History => history(style, cx),
                 Action::NewSession => new_session(style, cx),
                 Action::Settings => settings(style, cx),
@@ -38,6 +39,8 @@ impl BlockHeader for AgentPane {
 /// A header action of the chat screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
+    /// This session's changes in a Changes block.
+    Changes,
     History,
     NewSession,
     Settings,
@@ -45,7 +48,7 @@ pub(crate) enum Action {
 
 /// The chat screen's actions, in order; a sub-agent has none.
 pub(crate) fn actions(subagent: bool) -> &'static [Action] {
-    if subagent { &[] } else { &[Action::History, Action::NewSession, Action::Settings] }
+    if subagent { &[] } else { &[Action::Changes, Action::History, Action::NewSession, Action::Settings] }
 }
 
 /// A plain name; a remote host's agent names its host after it.
@@ -98,6 +101,12 @@ fn session_title(title: &str, host: Option<&str>, style: HeaderStyle, cx: &mut C
         .into_any_element()
 }
 
+fn changes(style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
+    keep_press(button("agent-changes", "git-diff", "Review changes", style.palette.icon, true, style))
+        .on_click(cx.listener(|this, _, _, cx| this.review_session(cx)))
+        .into_any_element()
+}
+
 fn history(style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
     keep_press(button("agent-history", "history", "Sessions  ⌘J", style.palette.icon, true, style))
         .on_click(cx.listener(|this, _, window, cx| this.open_sessions(window, cx)))
@@ -122,8 +131,8 @@ mod tests {
 
     #[test]
     fn the_gear_is_last_and_never_on_a_sub_agent() {
-        assert_eq!(actions(false), [Action::History, Action::NewSession, Action::Settings]);
+        assert_eq!(actions(false), [Action::Changes, Action::History, Action::NewSession, Action::Settings]);
         assert!(actions(true).is_empty());
-        assert!(crate::assets::has_icon("settings"));
+        assert!(crate::assets::has_icon("settings") && crate::assets::has_icon("git-diff"));
     }
 }
