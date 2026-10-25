@@ -142,11 +142,6 @@ impl Workspace {
         self.block_icon(&w.focused)
     }
 
-    /// A block's glyph by kind.
-    pub(crate) fn block_icon(&self, id: &str) -> &'static str {
-        self.block_kind(id).icon()
-    }
-
     /// Block `id`'s icon slot at `size`: the spinner while its page loads or
     /// its agent works, its favicon, else its glyph. `slot` keeps spinners apart.
     pub(crate) fn block_icon_view(&self, id: &str, slot: &str, size: f32, color: u32, cx: &gpui::App) -> AnyElement {
@@ -154,10 +149,10 @@ impl Workspace {
         if self.icon_spins(id) {
             return crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx);
         }
-        let pane = self.blocks.browser(id).map(|p| p.read(cx));
-        match pane.map_or(Icon::Glyph(self.block_icon(id)), crate::browser_pane::BrowserPane::icon) {
+        let pane = self.block_pane(id);
+        match pane.as_ref().map_or(Icon::Glyph(self.block_icon(id)), |p| p.icon(cx)) {
             Icon::Spinner => crate::browser_pane::spinner(&format!("{slot}-{id}"), size, color, cx),
-            Icon::Favicon => match pane.and_then(crate::browser_pane::BrowserPane::favicon_image) {
+            Icon::Favicon => match pane.and_then(|p| p.favicon(cx)) {
                 Some(image) => gpui::img(image).flex_none().size(px(size)).into_any_element(),
                 None => icon("globe", size, color).into_any_element(),
             },

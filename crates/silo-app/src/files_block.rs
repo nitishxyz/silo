@@ -102,12 +102,12 @@ impl Workspace {
                 .filter(|v| &v.session.id == id)
                 .map(|v| v.session.windows.iter().flat_map(crate::floats::window_blocks).collect())
                 .unwrap_or_default(),
-            CloseTarget::StopServer | CloseTarget::RestartServer => self.blocks.files_panes().map(|(id, _)| id.clone()).collect(),
+            CloseTarget::StopServer | CloseTarget::RestartServer => self.blocks.iter().map(|(id, _)| id.clone()).collect(),
         };
         blocks
             .into_iter()
             .filter_map(|b| {
-                let unsaved = self.blocks.files(&b)?.read(cx).unsaved();
+                let unsaved = self.blocks.get(&b)?.unsaved(cx);
                 (!unsaved.is_empty()).then_some((b, unsaved))
             })
             .collect()

@@ -654,14 +654,9 @@ impl Workspace {
         self.motion.reset();
         self.clear_status();
         self.upgrade_connected(cx);
-        for (_, pane) in self.blocks.terminals() {
-            pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
-        }
-        for (_, pane) in self.blocks.browsers() {
-            pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
-        }
-        for (_, pane) in self.blocks.files_panes() {
-            pane.update(cx, |pane, cx| pane.set_control(control.clone(), cx));
+        let panes: Vec<crate::blocks::BlockPane> = self.blocks.iter().map(|(_, p)| p.clone()).collect();
+        for pane in panes {
+            pane.set_control(&control, cx);
         }
         // Agent panes reconnect now rather than at their next retry.
         self.agents_host_up(host, true, cx);
@@ -860,6 +855,55 @@ impl Workspace {
         view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first())
     }
 
+    /// The terminal pane of `block`, created on first sight.
+    fn ensure_terminal(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocks.contains(block) {
+            return;
+        }
+        let control = self.control();
+        let rt = self.rt.clone();
+        let id = block.to_owned();
+        let host = self.active_host;
+        let host_name = Some(&self.hosts[host].info).filter(|h| !h.local).map(|h| h.name.clone());
+        let restored = self.shared.update(cx, |shared, _| shared.take_restored(host, block));
+        let pane = cx.new(|cx| Pane::new(id, host_name, rt, control, restored, window, cx));
+        let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, window, cx| match event {
+            PaneEvent::Activated => {
+                let block = pane.read(cx).block_id.clone();
+                let change = crate::clipboard::change_count();
+                if let Some(text) = crate::clipboard::writes(|w| w.take(&block, change, Instant::now())) {
+                    this.copied(text, pane.read(cx).host.clone(), cx);
+                }
+                this.pane_activated(block);
+                cx.notify();
+            }
+            PaneEvent::NewShell => {
+                let block = pane.read(cx).block_id.clone();
+                this.new_shell(block, cx);
+            }
+            PaneEvent::ClipboardWrite(text) => {
+                let (block, host) = (pane.read(cx).block_id.clone(), pane.read(cx).host.clone());
+                // A remote host writes only while the user sees the block; else on its next focus.
+                let shown = window.is_window_active() && this.active_window().is_some_and(|w| crate::floats::window_blocks(w).contains(&block));
+                let now = Instant::now();
+                if host.is_none() || shown {
+                    if crate::clipboard::writes(|w| w.apply(&block, text, now)) {
+                        this.copied(text.clone(), host, cx);
+                    }
+                } else {
+                    let change = crate::clipboard::change_count();
+                    crate::clipboard::writes(|w| w.defer(&block, text.clone(), change, now));
+                }
+            }
+            PaneEvent::Notice(message) => {
+                this.flash(message.clone(), cx);
+                cx.notify();
+            }
+            PaneEvent::Backdrop => cx.notify(),
+        });
+        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Terminal(pane), subscription);
+    }
+
     fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
         self.ahead_of = None;
         if self.view.as_ref().is_none_or(|old| old.session.id != view.session.id) {
@@ -894,67 +938,17 @@ impl Workspace {
         }
         self.blocks.retain(|id, _| all.iter().any(|a| a == id));
         let active = self.active_window().cloned();
-        let of_kind =
-            |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::blocks::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
-        let browsers = of_kind(crate::blocks::Kind::Browser);
-        let agents = of_kind(crate::blocks::Kind::Agent);
-        let files = of_kind(crate::blocks::Kind::Files);
-        let mut unsupported = of_kind(crate::blocks::Kind::Unsupported);
-        if !self.agents_on(self.active_host) {
-            unsupported.extend(agents.iter().cloned());
-        }
+        // A pane for every block of the active window, by its kind.
+        let agents_here = self.agents_on(self.active_host);
         if let Some(active) = &active {
             for block in crate::floats::window_blocks(active) {
-                if browsers.contains(&block) {
-                    self.ensure_browser(&block, window, cx);
-                } else if agents.contains(&block) && !unsupported.contains(&block) {
-                    self.ensure_agent(&block, window, cx);
-                } else if files.contains(&block) {
-                    self.ensure_files(&block, window, cx);
-                } else if !self.blocks.contains(&block) && !unsupported.contains(&block) {
-                    let control = self.control();
-                    let rt = self.rt.clone();
-                    let id = block.clone();
-                    let host = self.active_host;
-                    let host_name = Some(&self.hosts[host].info).filter(|h| !h.local).map(|h| h.name.clone());
-                    let restored = self.shared.update(cx, |shared, _| shared.take_restored(host, &block));
-                    let pane = cx.new(|cx| Pane::new(id, host_name, rt, control, restored, window, cx));
-                    let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, window, cx| match event {
-                        PaneEvent::Activated => {
-                            let block = pane.read(cx).block_id.clone();
-                            let change = crate::clipboard::change_count();
-                            if let Some(text) = crate::clipboard::writes(|w| w.take(&block, change, Instant::now())) {
-                                this.copied(text, pane.read(cx).host.clone(), cx);
-                            }
-                            this.pane_activated(block);
-                            cx.notify();
-                        }
-                        PaneEvent::NewShell => {
-                            let block = pane.read(cx).block_id.clone();
-                            this.new_shell(block, cx);
-                        }
-                        PaneEvent::ClipboardWrite(text) => {
-                            let (block, host) = (pane.read(cx).block_id.clone(), pane.read(cx).host.clone());
-                            // A remote host writes only while the user sees the block; else on its next focus.
-                            let shown =
-                                window.is_window_active() && this.active_window().is_some_and(|w| crate::floats::window_blocks(w).contains(&block));
-                            let now = Instant::now();
-                            if host.is_none() || shown {
-                                if crate::clipboard::writes(|w| w.apply(&block, text, now)) {
-                                    this.copied(text.clone(), host, cx);
-                                }
-                            } else {
-                                let change = crate::clipboard::change_count();
-                                crate::clipboard::writes(|w| w.defer(&block, text.clone(), change, now));
-                            }
-                        }
-                        PaneEvent::Notice(message) => {
-                            this.flash(message.clone(), cx);
-                            cx.notify();
-                        }
-                        PaneEvent::Backdrop => cx.notify(),
-                    });
-                    self.blocks.insert(block, crate::blocks::BlockPane::Terminal(pane), subscription);
+                match self.block_kind(&block) {
+                    crate::blocks::Kind::Terminal => self.ensure_terminal(&block, window, cx),
+                    crate::blocks::Kind::Browser => self.ensure_browser(&block, window, cx),
+                    crate::blocks::Kind::Agent if agents_here => self.ensure_agent(&block, window, cx),
+                    crate::blocks::Kind::Files => self.ensure_files(&block, window, cx),
+                    // No pane: its card says why (`render_cell`).
+                    crate::blocks::Kind::Agent | crate::blocks::Kind::Unsupported => {}
                 }
             }
         }
@@ -1289,11 +1283,7 @@ impl Workspace {
         if !adaptive {
             return None;
         }
-        match (self.blocks.terminal(id), self.blocks.browser(id)) {
-            (Some(pane), _) => pane.read(cx).backdrop(),
-            (None, Some(pane)) => pane.read(cx).backdrop(),
-            (None, None) => None,
-        }
+        self.block_pane(id)?.backdrop(cx)
     }
 
     /// The fill of block `id`'s card: its backdrop, else the theme's.
@@ -1500,13 +1490,7 @@ impl Workspace {
         if let Some(name) = &w.name {
             return name.clone();
         }
-        if let Some(pane) = self.blocks.browser(&w.focused) {
-            return pane.read(cx).title();
-        }
-        self.blocks.terminal(&w.focused).map_or_else(
-            || self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == w.focused)).map_or_else(|| "shell".into(), crate::pane::block_title),
-            |p| p.read(cx).title(),
-        )
+        self.block_label(&w.focused, cx)
     }
 }
 

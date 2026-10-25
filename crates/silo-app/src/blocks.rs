@@ -16,7 +16,7 @@ use silo_proto::model::{BlockInfo, BlockKind};
 
 use crate::{
     agent::AgentPane,
-    browser_pane::BrowserPane,
+    browser_pane::{BrowserPane, Icon},
     files::FilesPane,
     motion::{Exit, GhostBody},
     pane::Pane,
@@ -80,6 +80,16 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
     }
 }
 
+/// The card a pane is drawn in this frame ([`BlockPane::set_card`]).
+pub(crate) struct Card {
+    pub palette: crate::adaptive::Chrome,
+    pub corners: crate::radius::CardCorners,
+    /// A page's bottom corners inside the card (0 when flush).
+    pub page_corners: (f32, f32),
+    /// How a terminal paints its cells on the card's material.
+    pub translucency: Option<silo_render::Translucency>,
+}
+
 #[derive(Clone)]
 pub(crate) enum BlockPane {
     Terminal(Entity<Pane>),
@@ -89,6 +99,88 @@ pub(crate) enum BlockPane {
 }
 
 impl BlockPane {
+    /// The title the pane knows better than the server (a terminal's
+    /// program, a page's title); `None`: the server's.
+    pub(crate) fn title(&self, cx: &App) -> Option<String> {
+        match self {
+            Self::Terminal(p) => Some(p.read(cx).title()),
+            Self::Browser(p) => Some(p.read(cx).title()),
+            Self::Agent(_) | Self::Files(_) => None,
+        }
+    }
+
+    /// What fills its icon slot (header, tab): a page's spinner or favicon,
+    /// else the kind's glyph.
+    pub(crate) fn icon(&self, cx: &App) -> Icon {
+        match self {
+            Self::Browser(p) => p.read(cx).icon(),
+            Self::Terminal(_) => Icon::Glyph(Kind::Terminal.icon()),
+            Self::Agent(_) => Icon::Glyph(Kind::Agent.icon()),
+            Self::Files(_) => Icon::Glyph(Kind::Files.icon()),
+        }
+    }
+
+    /// The image behind [`Icon::Favicon`].
+    pub(crate) fn favicon(&self, cx: &App) -> Option<std::sync::Arc<gpui::Image>> {
+        match self {
+            Self::Browser(p) => p.read(cx).favicon_image(),
+            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) => None,
+        }
+    }
+
+    /// The colour its program or page paints behind itself, if it reports one.
+    pub(crate) fn backdrop(&self, cx: &App) -> Option<u32> {
+        match self {
+            Self::Terminal(p) => p.read(cx).backdrop(),
+            Self::Browser(p) => p.read(cx).backdrop(),
+            Self::Agent(_) | Self::Files(_) => None,
+        }
+    }
+
+    /// How dim it is while another pane is active (a page dims less).
+    pub(crate) fn inactive_dim(&self) -> f32 {
+        match self {
+            Self::Browser(_) => crate::theme::INACTIVE_DIM_PAGE,
+            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) => crate::theme::INACTIVE_DIM,
+        }
+    }
+
+    /// The card it is drawn in this frame. A terminal paints its cells for
+    /// the card's material and corner; a page clips to the card and tints
+    /// its own controls with the card's palette.
+    pub(crate) fn set_card(&self, card: &Card, cx: &mut App) {
+        match self {
+            Self::Terminal(p) => p.update(cx, |p, cx| {
+                p.set_translucency(card.translucency, cx);
+                p.set_card_corner(card.corners.bottom_right, cx);
+            }),
+            Self::Browser(p) => p.update(cx, |p, cx| {
+                p.set_palette(card.palette, cx);
+                p.set_corners(card.page_corners, cx);
+            }),
+            Self::Agent(_) | Self::Files(_) => {}
+        }
+    }
+
+    /// The host's connection is back. Agents reach otto on their own
+    /// ([`Workspace::agents_host_up`]).
+    pub(crate) fn set_control(&self, control: &silo_client::Control, cx: &mut App) {
+        match self {
+            Self::Terminal(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
+            Self::Browser(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
+            Self::Files(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
+            Self::Agent(_) => {}
+        }
+    }
+
+    /// What a close would lose: its unsaved files (the close guard asks first).
+    pub(crate) fn unsaved(&self, cx: &App) -> Vec<String> {
+        match self {
+            Self::Files(p) => p.read(cx).unsaved(),
+            Self::Terminal(_) | Self::Browser(_) | Self::Agent(_) => Vec::new(),
+        }
+    }
+
     /// The last frame it painted, for a pane that leaves as one ([`Exit::Frame`]).
     pub(crate) fn last_frame(&self, cx: &App) -> Option<std::sync::Arc<silo_render::PreparedFrame>> {
         match self {
@@ -241,6 +333,20 @@ impl Workspace {
     /// The kind of `block`, from the server's view of it.
     pub(crate) fn block_kind(&self, block: &str) -> Kind {
         kind_of(self.block_info(block))
+    }
+
+    /// A block's glyph by kind.
+    pub(crate) fn block_icon(&self, block: &str) -> &'static str {
+        self.block_kind(block).icon()
+    }
+
+    /// A block's title wherever it is named (lists, tabs, the background
+    /// menu): its pane's when it knows better, else the server's.
+    pub(crate) fn block_label(&self, block: &str, cx: &App) -> String {
+        if let Some(title) = self.block_pane(block).and_then(|p| p.title(cx)) {
+            return title;
+        }
+        self.block_info(block).map_or_else(|| "shell".into(), crate::pane::block_title)
     }
 
     /// What block `block`'s ghost shows as it leaves the layout

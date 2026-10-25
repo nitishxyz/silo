@@ -160,10 +160,6 @@ impl crate::workspace::Workspace {
         self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Agent(pane), sub);
     }
 
-    pub(crate) fn agent_focused(&self, window: &gpui::Window, cx: &gpui::App) -> Option<String> {
-        self.blocks.agents().find(|(_, p)| p.read(cx).focus.contains_focused(window, cx)).map(|(id, _)| id.clone())
-    }
-
     /// Jump to `block` (named by a tool call, picked in ⌘P's Blocks or the
     /// background menu), in whichever session holds it; a parked block (a
     /// command, a hidden terminal) floats into the shown tab first.
@@ -261,7 +257,7 @@ impl crate::workspace::Workspace {
     /// Otto Settings: in the agent pane in front, else in a new agent tab on
     /// the active host, if it runs agents.
     pub(crate) fn open_otto_settings(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let front = self.agent_focused(window, cx).or_else(|| self.focused_block(window, cx));
+        let front = self.focused_block(window, cx);
         let pane = front.and_then(|b| self.blocks.agent(&b)).cloned();
         let host = &self.hosts[self.active_host].info.name;
         match settings_route(pane.is_some(), self.agents(self.active_host), host) {

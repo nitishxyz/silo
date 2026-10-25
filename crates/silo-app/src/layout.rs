@@ -316,7 +316,6 @@ impl Workspace {
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
         let comfortable = floating || self.density() == Density::Comfortable;
         let frosted = self.frosted();
-        let browser = self.blocks.browser(id).is_some();
         let mode = self.header_mode(id);
         // Corners just inside the 1px outline, for overlays (wash, drop
         // outline, docks) and the page that fill the card's rounded clip.
@@ -345,25 +344,16 @@ impl Workspace {
             Some((_, cover)) => self.card_chrome(fill_color).toward_floating(cover),
             None => self.card_chrome(fill_color),
         };
-        if let Some(pane) = self.blocks.browser(id) {
-            let page = if comfortable { (fill.bottom_left, fill.bottom_right) } else { (0.0, 0.0) };
-            pane.update(cx, |pane, cx| {
-                pane.set_palette(palette, cx);
-                pane.set_corners(page, cx);
-            });
-        }
-        if let Some(pane) = self.blocks.terminal(id) {
+        if let Some(pane) = self.block_pane(id) {
+            let page_corners = if comfortable { (fill.bottom_left, fill.bottom_right) } else { (0.0, 0.0) };
             let translucency = self.translucency(id, fill_color, palette, cx);
-            pane.update(cx, |pane, cx| {
-                pane.set_translucency(translucency, cx);
-                pane.set_card_corner(corners.bottom_right, cx);
-            });
+            pane.set_card(&crate::blocks::Card { palette, corners, page_corners, translucency }, cx);
         }
         // Header and terminal are one surface; an inactive pane is dimmed
         // as a whole so no band appears between them. Solid: a wash of the
         // card's colour (no listeners: clicks and hovers reach below).
         // Frosted: the content fades instead, so no second veil appears.
-        let dim = if browser { theme::INACTIVE_DIM_PAGE } else { theme::INACTIVE_DIM };
+        let dim = self.block_pane(id).map_or(theme::INACTIVE_DIM, |p| p.inactive_dim());
         let fade = (dimmed && frosted).then_some(1.0 - dim);
         let wash = (dimmed && !frosted).then(|| {
             div().absolute().top_0().left_0().size_full().bg(rgb(fill_color).opacity(dim)).when(comfortable, |el| el.continuous_corners(fill))
