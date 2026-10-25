@@ -298,6 +298,9 @@ pub struct AgentPane {
     home: Option<String>,
     /// A folder this pane moved to that the server hasn't echoed yet.
     moving: Option<String>,
+    /// Whether the session's folder is in a git work tree, for the folder
+    /// last asked about (the header's Review changes shows only then).
+    git_repo: std::cell::RefCell<Option<(String, bool)>>,
     rt: tokio::runtime::Handle,
     epoch: Instant,
     conn: Conn,
@@ -494,6 +497,7 @@ impl AgentPane {
             host,
             home: None,
             moving: None,
+            git_repo: std::cell::RefCell::new(None),
             rt,
             width: std::rc::Rc::default(),
             bounds: std::rc::Rc::default(),
@@ -1165,6 +1169,26 @@ impl AgentPane {
     }
 
     // ---- actions ----
+
+    /// Whether Review changes has anything to show here: the session's
+    /// folder is in a git work tree. A remote host's folder can't be looked
+    /// at from here, so it's offered there (the block says when it's not).
+    pub(super) fn reviewable(&self) -> bool {
+        if self.host.is_some() {
+            return true;
+        }
+        let cwd = self.mirror().map(|m| m.info.cwd.clone()).filter(|c| !c.is_empty()).or_else(|| self.cwd.clone());
+        let Some(cwd) = cwd else { return false };
+        let mut known = self.git_repo.borrow_mut();
+        match &*known {
+            Some((dir, repo)) if *dir == cwd => *repo,
+            _ => {
+                let repo = in_work_tree(std::path::Path::new(&cwd));
+                *known = Some((cwd, repo));
+                repo
+            }
+        }
+    }
 
     fn mirror(&self) -> Option<&otto_client::SessionMirror> {
         self.state.as_ref().map(|s| &s.mirror)
@@ -2349,5 +2373,29 @@ mod tests {
         );
         // The switcher opens on its first session (the project row is above it); other lists on their first row.
         assert_eq!((first_choice(Overlay::Sessions), first_choice(Overlay::Projects), first_choice(Overlay::Models)), (1, 0, 0));
+    }
+}
+
+/// Whether `dir` is in a git work tree: it or a parent holds `.git` (a
+/// folder, or a worktree's or submodule's file).
+fn in_work_tree(dir: &std::path::Path) -> bool {
+    dir.ancestors().any(|d| d.join(".git").exists())
+}
+
+#[cfg(test)]
+mod work_tree_tests {
+    #[test]
+    fn review_changes_shows_in_git_work_trees_only() {
+        let root = std::env::temp_dir().join(format!("silo-worktree-{}", std::process::id()));
+        let (repo, plain) = (root.join("repo"), root.join("plain"));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(super::in_work_tree(&repo.join("src/deep")), "a folder inside a repo");
+        assert!(!super::in_work_tree(&plain), "not a repo");
+        // A worktree or submodule has a .git file.
+        std::fs::write(plain.join(".git"), "gitdir: ../repo/.git").unwrap();
+        assert!(super::in_work_tree(&plain));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

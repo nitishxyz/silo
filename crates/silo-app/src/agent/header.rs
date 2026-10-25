@@ -23,8 +23,10 @@ impl BlockHeader for AgentPane {
             return named(title, host.as_deref(), style);
         }
         let mut parts = HeaderParts::new(session_title(&title, host.as_deref(), style, cx), title);
+        let reviewable = self.reviewable();
         parts.actions = actions(self.is_subagent())
             .iter()
+            .filter(|a| reviewable || **a != Action::Changes)
             .map(|action| match action {
                 Action::Changes => changes(style, cx),
                 Action::History => history(style, cx),
