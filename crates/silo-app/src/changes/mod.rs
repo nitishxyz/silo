@@ -132,6 +132,8 @@ pub struct ChangesPane {
     pub(crate) expanded: HashSet<(String, String, usize)>,
     /// The hunk j/k or a click went to: what s / u / r / c act on.
     pub(crate) current: Option<(String, String)>,
+    /// The hunk (file, hunk) under the mouse: its bar shows its actions.
+    pub(crate) hovered: Option<(usize, usize)>,
     pub(crate) selection: Option<LineSel>,
     pub(crate) composing: Option<Composing>,
     pub(crate) picker: Option<Picker>,
@@ -192,6 +194,7 @@ impl ChangesPane {
             list: ListState::new(0, ListAlignment::Top, px(600.0)),
             expanded: HashSet::new(),
             current: None,
+            hovered: None,
             selection: None,
             composing: None,
             picker: None,

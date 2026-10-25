@@ -315,7 +315,14 @@ impl ChangesPane {
         let Some(row) = self.shown.rows.get(ix).cloned() else { return div().into_any_element() };
         let tints = Tints::now();
         let numbers = self.number_width(m);
-        match row {
+        let hunk_of = match &row {
+            model::Row::Hunk { file, hunk }
+            | model::Row::Line { file, hunk, .. }
+            | model::Row::Pair { file, hunk, .. }
+            | model::Row::Fold { file, hunk, .. } => Some((*file, *hunk)),
+            _ => None,
+        };
+        let el = match row {
             model::Row::File { file } => self.render_file_header(file, cx),
             model::Row::Gap { lines, .. } => div()
                 .h(px(m.line))
@@ -364,7 +371,20 @@ impl ChangesPane {
                 .italic()
                 .child(text)
                 .into_any_element(),
-        }
+        };
+        // Hovering any of a hunk's rows shows its bar's actions.
+        div()
+            .id(("changes-row", ix))
+            .w_full()
+            .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                let next = if *over { hunk_of } else { this.hovered.filter(|h| Some(*h) != hunk_of) };
+                if this.hovered != next {
+                    this.hovered = next;
+                    cx.notify();
+                }
+            }))
+            .child(el)
+            .into_any_element()
     }
 
     fn render_file_header(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -414,8 +434,8 @@ impl ChangesPane {
         let Some(h) = loaded.diff.hunks.get(hunk) else { return div().into_any_element() };
         let (path, id) = (loaded.diff.path.clone(), h.id.clone());
         let current = self.current.as_ref().is_some_and(|(p, i)| *p == path && *i == id);
+        let shown = current || self.hovered == Some((file, hunk));
         let mode = self.mode();
-        let group: SharedString = format!("changes-hunk-{path}-{id}").into();
         let action = |label: &'static str, key: &'static str, act: HunkAction| {
             let (path, id) = (path.clone(), id.clone());
             div()
@@ -435,15 +455,11 @@ impl ChangesPane {
                     this.hunk_action(act, cx);
                 }))
         };
-        let mut actions = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(4.0))
-            .font_family(theme::ui_font())
-            .text_size(px(11.5))
-            .opacity(if current { 1.0 } else { 0.0 })
-            .group_hover(group.clone(), |s| s.opacity(1.0));
+        let mut actions = div().flex().flex_none().items_center().gap(px(4.0)).font_family(theme::ui_font()).text_size(px(11.5)).opacity(if shown {
+            1.0
+        } else {
+            0.0
+        });
         match mode {
             model::ListMode::Working | model::ListMode::Unstaged => {
                 actions = actions.child(action("Stage", "s", HunkAction::Stage)).child(action("Revert", "r", HunkAction::Revert));
@@ -473,7 +489,6 @@ impl ChangesPane {
         let (gpath, gid) = (path.clone(), id.clone());
         div()
             .id(SharedString::from(format!("changes-hunk-{path}-{id}")))
-            .group(group)
             .w_full()
             .h(px(m.line + 4.0))
             .mt(px(4.0))
