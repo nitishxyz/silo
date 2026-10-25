@@ -99,6 +99,27 @@ the hunks so far), a 10 s timeout per git command.
 **`compat`:** `feature::CHANGES = "changes"` in `compat::FEATURES`. An older server answers `method_not_found`;
 the app's launcher hides Changes there.
 
+**Built** (differences from the above):
+- `ChangesStatus` has `repo: bool` (false outside a git work tree: nothing else filled); `branch`/`head` are
+  `Option`s (detached, unborn). `ChangesState.marks: Vec<ChangeMark { path, line, note? }>` holds `changes_show`'s
+  marks (§4; at most 50, `changes.set { marks }` replaces them). `FileStatus`, `LineKind` and `ChangesScope` have an
+  `Unknown` (`serde(other)`) for newer peers. `changes.set`'s `agent: null` unlinks.
+- Root: the nearest folder up from the cwd with a `.git` (read from the file system, not `git rev-parse`, as the
+  block is made under the registry lock); the cwd is the split block's, else the focused block's (`window.create`),
+  else `~` — the app passes the session's folder as `spawn.cwd` when it wants that. A split off an agent block
+  links it (`agent: { otto_session, block_id }`).
+- Hunk ids are a hash of the section and lines (not the `@@` numbers), so a hunk keeps its id when lines above it
+  change; they depend on `context`, so writes use the block's `context`. Staging a hunk of an untracked file stages
+  the file. Unstage before the first commit is `git rm --cached`.
+- Revert in the `staged` scope is `bad_request`. In a `Tree`/`Range` scope without `head` (a turn against the work
+  tree) revert goes back to the scope's base (the turn's tree, or the merge base), not just the index.
+- Errors: a failing git command is code `git` with its output (hooks' too); a command over its timeout is `timeout`.
+  `changes.commit` reads the message from stdin (`-F -`) and has 5 min, for hooks.
+- Watcher: its own recursive watch on the root (`.gitignore`d paths dropped, the root's `.gitignore` and
+  `info/exclude` only) plus the git dir's `index`, `HEAD`, `refs/`, `packed-refs` and merge heads.
+- `changes_show` takes `turn_base` / `session_base` (tree ids) in its input from the host (otto); without them
+  `turn`/`session` fall back to `working` and the result says so (`note`).
+
 ## 3. App
 
 **Layout** (same shell as Files):
