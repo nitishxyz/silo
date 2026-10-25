@@ -530,6 +530,20 @@ wrap_jsdialog_handler! {
     }
 }
 
+// Keys the page leaves unhandled stop here. Without it CEF offers each to
+// `[[NSApp mainMenu] performKeyEquivalent:]`, where a bare `f` matches
+// AppKit's fn-F "Enter Full Screen" (typing toggled full screen); the app has
+// already run its own shortcuts.
+wrap_keyboard_handler! {
+    struct PageKeys {}
+
+    impl KeyboardHandler {
+        fn on_key_event(&self, _browser: Option<&mut Browser>, _event: Option<&KeyEvent>, _os_event: *mut u8) -> c_int {
+            1
+        }
+    }
+}
+
 wrap_client! {
     pub(crate) struct PageClient {
         view: RenderHandler,
@@ -568,6 +582,10 @@ wrap_client! {
 
         fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
             Some(self.dialogs.clone())
+        }
+
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(PageKeys::new())
         }
     }
 }

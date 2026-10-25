@@ -17,6 +17,16 @@ pub struct KeyInput<'a> {
 
 /// Events to send for one transition: RAWKEYDOWN (+ CHAR when it types) on down, KEYUP on up.
 pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
+    if let Some((edge, key)) = line_delete(input) {
+        // Select to the line's edge, then delete the selection.
+        let plain = Modifiers::default();
+        let delete = |down| key_events(&KeyInput { key, key_char: None, modifiers: plain, down, repeat: input.repeat });
+        if !input.down {
+            return delete(false);
+        }
+        let select = |down| key_events(&KeyInput { key: edge, key_char: None, modifiers: Modifiers { shift: true, ..plain }, down, repeat: false });
+        return [select(true), select(false), delete(true)].concat();
+    }
     let line_edge = line_edge(input);
     let input = &KeyInput {
         key: line_edge.unwrap_or(input.key),
@@ -48,6 +58,21 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
         events.push(KeyEvent { type_: KeyEventType::CHAR, ..base });
     }
     events
+}
+
+/// ⌘⌫ / ⌘⌦: delete to the line's start / end (AppKit's
+/// `deleteToBeginningOfLine:`, which windowless key events don't carry, as
+/// [`line_edge`]): the line edge to select to and the key that deletes.
+fn line_delete(input: &KeyInput) -> Option<(&'static str, &'static str)> {
+    let m = input.modifiers;
+    if !m.command || m.control || m.alt || m.shift {
+        return None;
+    }
+    match input.key {
+        "backspace" => Some(("home", "backspace")),
+        "delete" => Some(("end", "delete")),
+        _ => None,
+    }
 }
 
 /// ⌘← / ⌘→ (⇧ to select) as Home / End: Chromium on macOS moves the caret to the line
@@ -285,6 +310,24 @@ mod tests {
         assert_ne!(end[0].modifiers & select.flags(), 0);
         let word = Modifiers { alt: true, ..command };
         assert_eq!(key_events(&input("left", None, word, true))[0].windows_key_code, 0x25);
+    }
+
+    #[test]
+    fn command_delete_selects_to_the_line_edge_then_deletes() {
+        let command = Modifiers { command: true, ..Default::default() };
+        let down = key_events(&input("backspace", None, command, true));
+        let kinds: Vec<_> = down.iter().map(|e| (e.type_, e.windows_key_code)).collect();
+        assert_eq!(
+            kinds,
+            [(KeyEventType::RAWKEYDOWN, 0x24), (KeyEventType::KEYUP, 0x24), (KeyEventType::RAWKEYDOWN, 0x08), (KeyEventType::CHAR, 0x08)]
+        );
+        let shift = Modifiers { shift: true, ..Default::default() }.flags();
+        assert_ne!(down[0].modifiers & shift, 0, "Home extends the selection");
+        assert_eq!(down[2].modifiers & command.flags(), 0, "the delete is plain");
+        let up = key_events(&input("backspace", None, command, false));
+        assert_eq!((up.len(), up[0].type_, up[0].windows_key_code), (1, KeyEventType::KEYUP, 0x08));
+        assert_eq!(key_events(&input("delete", None, command, true))[0].windows_key_code, 0x23, "⌘⌦ selects to End");
+        assert_eq!(key_events(&input("backspace", None, Modifiers::default(), true))[0].windows_key_code, 0x08);
     }
 
     #[test]
