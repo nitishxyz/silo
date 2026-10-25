@@ -531,7 +531,13 @@ pub fn replaced(staged: &Path) -> Option<&Path> {
     staged.parent().filter(|d| d.file_name().and_then(OsStr::to_str).is_some_and(|n| n.starts_with(STAGE_PREFIX)))
 }
 
+/// How long [`relaunch`] waits for this process to exit before ending it.
+pub const RELAUNCH_WAIT_SECS: u32 = 10;
+
 /// Open `app` once this process has exited (it inherits the environment).
+/// A quit that hangs (a page or a thread that will not let go) is ended
+/// after [`RELAUNCH_WAIT_SECS`]: SIGTERM, then SIGKILL two seconds later,
+/// so an update never leaves the user without the app.
 ///
 /// # Errors
 /// The waiter cannot be started.
@@ -539,10 +545,11 @@ pub fn relaunch(app: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     std::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#)
+        .arg(RELAUNCH_SCRIPT)
         .arg("silo-relaunch")
         .arg(std::process::id().to_string())
         .arg(app)
+        .arg((RELAUNCH_WAIT_SECS * 5).to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -550,6 +557,18 @@ pub fn relaunch(app: &Path) -> std::io::Result<()> {
         .spawn()
         .map(drop)
 }
+
+/// `$1` the pid to wait for, `$2` the app to open, `$3` 0.2 s ticks to wait.
+const RELAUNCH_SCRIPT: &str = r#"n=0
+while kill -0 "$1" 2>/dev/null && [ "$n" -lt "$3" ]; do sleep 0.2; n=$((n + 1)); done
+if kill -0 "$1" 2>/dev/null; then
+  kill -TERM "$1" 2>/dev/null
+  n=0
+  while kill -0 "$1" 2>/dev/null && [ "$n" -lt 10 ]; do sleep 0.2; n=$((n + 1)); done
+  kill -KILL "$1" 2>/dev/null
+  sleep 0.5
+fi
+exec /usr/bin/open "$2""#;
 
 /// Remove staging directories (and the apps they replaced) next to `app`
 /// left by processes that are gone, and their [`PrivateDir`]s, detaching
@@ -746,6 +765,32 @@ pub async fn prepare_binary(feed: &Feed, version: &str, exe: &Path) -> Result<Pa
 mod tests {
     use super::*;
 
+    /// The relaunch waiter ends a process whose quit hangs (it ignores
+    /// SIGTERM here) once its wait is over, then goes on to `open`.
+    #[test]
+    fn relaunch_ends_a_quit_that_hangs() {
+        let mut stuck = std::process::Command::new("/bin/sh").arg("-c").arg("trap '' TERM; while :; do sleep 0.1; done").spawn().unwrap();
+        let pid = stuck.id().to_string();
+        let started = std::time::Instant::now();
+        // Two ticks of waiting; `open` of a missing path does nothing.
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(RELAUNCH_SCRIPT)
+            .args(["silo-relaunch", &pid, "/nonexistent/silo-relaunch-test.app", "2"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let _ = status;
+        let waited = started.elapsed();
+        let gone = stuck.try_wait().unwrap();
+        if gone.is_none() {
+            let _ = stuck.kill();
+        }
+        assert!(gone.is_some(), "the stuck process is gone");
+        assert!(waited < std::time::Duration::from_secs(6), "ended within the wait plus the grace ({waited:?})");
+        assert!(waited >= std::time::Duration::from_millis(400), "it waited first ({waited:?})");
+    }
     /// A test's directory, removed when the test ends, failed or not.
     struct Temp(PathBuf);
 

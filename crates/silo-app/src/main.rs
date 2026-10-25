@@ -72,6 +72,44 @@ use crate::{
     workspace::Workspace,
 };
 
+/// Home a development build uses when `SILO_HOME` is unset, so opening it
+/// by hand can never take over the installed Silo's server and sessions.
+const DEV_HOME: &str = "/tmp/silo-dev";
+
+/// The home to force for executable `exe` (`SiloDev` is the dev bundle's,
+/// `scripts/dev-bundle.sh`) when `SILO_HOME` is `set` or not.
+fn dev_home(exe: Option<&std::ffi::OsStr>, set: bool) -> Option<&'static str> {
+    (!set && exe.is_some_and(|name| name == "SiloDev")).then_some(DEV_HOME)
+}
+
+/// A dev bundle opened without `SILO_HOME` gets [`DEV_HOME`]. Runs before
+/// any other thread starts, so setting the environment is sound; the
+/// server, menu-bar agent and otto it starts inherit it.
+fn dev_home_guard() {
+    let exe = std::env::current_exe().ok();
+    let set = std::env::var_os("SILO_HOME").is_some_and(|h| !h.is_empty());
+    if let Some(home) = dev_home(exe.as_deref().and_then(std::path::Path::file_name), set) {
+        // SAFETY: called first thing in `main`, before any thread exists.
+        unsafe { std::env::set_var("SILO_HOME", home) };
+    }
+}
+
+#[cfg(test)]
+mod dev_home_tests {
+    use std::ffi::OsStr;
+
+    use super::{DEV_HOME, dev_home};
+
+    #[test]
+    fn only_the_dev_bundle_without_a_home_is_moved() {
+        assert_eq!(dev_home(Some(OsStr::new("SiloDev")), false), Some(DEV_HOME));
+        assert_eq!(dev_home(Some(OsStr::new("SiloDev")), true), None, "an explicit SILO_HOME wins");
+        assert_eq!(dev_home(Some(OsStr::new("Silo")), false), None, "the installed app keeps its home");
+        assert_eq!(dev_home(Some(OsStr::new("silo-app")), false), None);
+        assert_eq!(dev_home(None, false), None);
+    }
+}
+
 fn main() {
     // CEF subprocesses (`<App> Helper*.app` are copies of this binary).
     if std::env::args().any(|arg| arg.starts_with("--type=")) {
@@ -79,6 +117,7 @@ fn main() {
     }
     // The app's calls are the user's own: they need no approval.
     silo_client::set_role(silo_proto::control::ClientRole::App);
+    dev_home_guard();
     // Closes that would end running programs are asked about here.
     silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     silo_client::advertise(silo_proto::compat::feature::BROWSER_ACTIONS);
