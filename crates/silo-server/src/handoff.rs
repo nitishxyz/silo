@@ -50,6 +50,16 @@
 //! server cannot read the outcome and exits, and the successor then fails
 //! before `READY`; programs are hung up, never run by two servers.
 //!
+//! Channels: a successor never takes over a server of the other
+//! [`silo_proto::Channel`] (a dev build and a release build never share a
+//! server). It checks `runtime.json` before sending [`MAGIC`], and the
+//! old server's `Transfer::channel` (absent from older builds: release)
+//! before `READY`; refusing there is a failure before `READY`, so the old
+//! server re-adopts everything and keeps serving. The old server cannot
+//! tell the successor's channel (the [`MAGIC`] line is fixed across builds),
+//! so the check is the successor's: a successor from before channels is not
+//! refused by a dev server.
+//!
 //! Remote access is not transferred: the old server closes its iroh
 //! endpoint (and every remote connection) before `COMMIT`, and the
 //! successor binds its own with the same identity from `<home>/state/iroh`.
@@ -95,6 +105,9 @@ pub struct Transfer {
     pub blocks: Vec<Record>,
     /// Browser and agent blocks: no process, so their info is all there is.
     pub browsers: Vec<BlockInfo>,
+    /// The old server's channel; absent (release) from older builds.
+    #[serde(default)]
+    pub channel: silo_proto::Channel,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -346,7 +359,9 @@ pub(crate) async fn give(
     server.registry.lock().unwrap().parked.extend(parked);
     let result = match failed {
         Some(error) => Err(error),
-        None => transfer(sock, Transfer { server_id, sessions, blocks: Vec::new(), browsers }, &slots, own, fault).await,
+        None => {
+            transfer(sock, Transfer { server_id, sessions, blocks: Vec::new(), browsers, channel: silo_proto::CHANNEL }, &slots, own, fault).await
+        }
     };
     if result.is_err() {
         readopt(&server.registry, slots);
@@ -464,8 +479,11 @@ pub struct Taken {
 /// its blocks; with `fail_before_ready` it fails right there (a test hook).
 ///
 /// # Errors
-/// No server is running, it refuses, or the transfer fails.
+/// No server is running, it refuses, it is of the other channel
+/// ([`silo_proto::OtherChannel`]), or the transfer fails.
 pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready: bool) -> anyhow::Result<Taken> {
+    // Before anything is released: the server's runtime.json.
+    silo_proto::paths::check_runtime_channel(home)?;
     let socket = silo_proto::paths::socket(home);
     let (sock, transfer, checkpoints, fds, [lock, listener]) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let mut sock = UnixStream::connect(&socket).map_err(|e| match e.kind() {
@@ -481,6 +499,10 @@ pub async fn take(home: &Path, notes: &UnboundedSender<Note>, fail_before_ready:
     })
     .await?
     .map_err(|e| if e.get_ref().is_some_and(|e| e.is::<NotUpgradable>()) { anyhow::Error::from(NotUpgradable) } else { e.into() })?;
+    // Before READY: dropping everything gives the old server its blocks back.
+    if transfer.channel != silo_proto::CHANNEL {
+        return Err(silo_proto::OtherChannel { server: transfer.channel }.into());
+    }
     let persist = persist::Persist::attach(home, transfer.server_id.clone())?;
     if fail_before_ready {
         anyhow::bail!("upgrade aborted before READY (test hook)");

@@ -162,9 +162,11 @@ pub async fn stop(home: &Path, server: &IncompatibleServer) -> anyhow::Result<()
 /// the old server keeps serving.
 ///
 /// # Errors
-/// The successor could not take over, or the old server could not be
-/// stopped.
+/// The successor could not take over, the old server could not be
+/// stopped, or it is of the other channel ([`silo_proto::OtherChannel`]:
+/// neither taken over nor stopped).
 pub async fn upgrade(home: &Path, server_exe: &Path, server: &IncompatibleServer) -> anyhow::Result<Upgraded> {
+    paths::check_runtime_channel(home)?;
     match take_over(home, server_exe, server).await {
         Ok(()) => Ok(Upgraded::Live),
         Err(error) if error.is::<NotUpgradable>() => {
@@ -306,6 +308,15 @@ mod tests {
     /// servers do, answers `session.list` with two sessions and
     /// `server.shutdown` by exiting (releasing its lock).
     async fn other_server(home: &Path) -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        fake_server(home, OTHER, silo_proto::CHANNEL).await
+    }
+
+    /// A server of `build` and `channel`, otherwise as [`other_server`].
+    async fn fake_server(
+        home: &Path,
+        build: &'static str,
+        channel: silo_proto::Channel,
+    ) -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
         use silo_proto::{
             Frame,
             control::{ClientHello, Request, RpcError, ServerHello, ServerInfo, ServerMessage},
@@ -315,14 +326,7 @@ mod tests {
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
         rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         let listener = tokio::net::UnixListener::bind(paths::socket(home)).unwrap();
-        let runtime = paths::Runtime {
-            pid: 4242,
-            socket: paths::socket(home),
-            version: "0.0.1".into(),
-            build: OTHER.into(),
-            started_at: 0,
-            channel: silo_proto::CHANNEL,
-        };
+        let runtime = paths::Runtime { pid: 4242, socket: paths::socket(home), version: "0.0.1".into(), build: build.into(), started_at: 0, channel };
         std::fs::write(paths::runtime(home), serde_json::to_vec(&runtime).unwrap()).unwrap();
         let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = connections.clone();
@@ -333,9 +337,9 @@ mod tests {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let (mut r, mut w) = stream.into_split();
                 let hello: ClientHello = read_frame(&mut r).await.unwrap().unwrap().parse().unwrap();
-                if hello.build != OTHER {
+                if hello.build != build {
                     // A server from before protocol numbers rejected other builds.
-                    let error = RpcError::new("different_build", format!("different build: server {OTHER}, client {}", hello.build));
+                    let error = RpcError::new("different_build", format!("different build: server {build}, client {}", hello.build));
                     let reply = ServerMessage::Response { id: 0, result: None, error: Some(error) };
                     write_frame(&mut w, &Frame::json(kind::CONTROL, &reply).unwrap()).await.unwrap();
                     continue;
@@ -351,14 +355,16 @@ mod tests {
                     endpoint_addr: None,
                     idle_exit_secs: 0,
                 };
+                let ours = build == silo_proto::BUILD;
                 let hello = ServerHello {
-                    protocol: 0,
-                    vt: String::new(),
+                    protocol: if ours { silo_proto::PROTOCOL } else { 0 },
+                    vt: if ours { silo_proto::VT.into() } else { String::new() },
                     features: Vec::new(),
-                    build: OTHER.into(),
+                    build: build.into(),
                     client_id: 1,
                     server: info,
                     granted: None,
+                    channel,
                 };
                 write_frame(&mut w, &Frame::json(kind::CONTROL_HELLO, &hello).unwrap()).await.unwrap();
                 while let Ok(Some(frame)) = read_frame(&mut r).await {
@@ -423,7 +429,13 @@ mod tests {
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::server_lock(home)).unwrap();
         rustix::fs::flock(lock.as_fd(), rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         std::thread::spawn(move || drop((child.wait(), lock)));
-        let runtime = serde_json::json!({"pid": pid, "socket": paths::socket(home), "version": "0.1.0", "ghostty_rev": "x", "started_at": 0});
+        let mut runtime = serde_json::json!({"pid": pid, "socket": paths::socket(home), "version": "0.1.0", "ghostty_rev": "x", "started_at": 0});
+        // Without a channel it is a release server, which a dev build never
+        // upgrades or stops (`the_other_channels_server_is_left_alone`):
+        // pretend it was a dev one when this build is.
+        if silo_proto::CHANNEL == silo_proto::Channel::Dev {
+            runtime["channel"] = "dev".into();
+        }
         std::fs::write(paths::runtime(home), runtime.to_string()).unwrap();
         let listener = tokio::net::UnixListener::bind(paths::socket(home)).unwrap();
         let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -486,6 +498,40 @@ mod tests {
         stop(&home, &found).await.unwrap();
         task.await.unwrap();
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    struct NothingRuns;
+
+    impl crate::service::Runner for NothingRuns {
+        fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<crate::service::Output> {
+            panic!("ran {program} {args:?} against another channel's server");
+        }
+    }
+
+    /// A server of the other channel (a release server for this dev build,
+    /// or the reverse) is never taken over, adopted, upgraded or stopped:
+    /// `up` and `upgrade` refuse before doing anything, whether it answers
+    /// the hello (this build) or rejects it (another build: its
+    /// `runtime.json` names the channel).
+    #[tokio::test]
+    async fn the_other_channels_server_is_left_alone() {
+        use crate::service::{Manager, Server, Service};
+        let other = silo_proto::CHANNEL.other();
+        let refused = Some(silo_proto::OtherChannel { server: other });
+        for (name, build) in [("same", silo_proto::BUILD), ("other", OTHER)] {
+            let home = std::env::temp_dir().join(format!("silo-mismatch-channel-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            let (_, task) = fake_server(&home, build, other).await;
+            assert_eq!(crate::service::probe_server(&home, "test").await.0, Server::OtherChannel(other), "{name} build");
+            let svc = Service::new(Manager::None, "/nonexistent/silo".into(), home.clone(), home.clone(), 501, "bat".into()).unwrap();
+            let error = crate::service::up(&svc, &NothingRuns, "test").await.err().expect("refused");
+            assert_eq!(error.downcast_ref::<silo_proto::OtherChannel>().copied(), refused, "{name} build: {error:#}");
+            let error = upgrade(&home, Path::new("/nonexistent/silo"), &inspect(&home).await).await.expect_err("refused");
+            assert_eq!(error.downcast_ref::<silo_proto::OtherChannel>().copied(), refused, "{name} build: {error:#}");
+            assert!(server_lock_held(&home), "{name} build: still serving");
+            task.abort();
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 
     #[tokio::test]

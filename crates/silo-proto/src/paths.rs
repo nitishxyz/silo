@@ -132,6 +132,29 @@ pub fn clear_quit(home: &std::path::Path, keep: Option<u32>) {
     }
 }
 
+/// The channel `runtime.json` in `home` records: `None` without a readable
+/// file, [`crate::Channel::Release`] from a server that predates channels.
+#[must_use]
+pub fn runtime_channel(home: &std::path::Path) -> Option<crate::Channel> {
+    #[derive(serde::Deserialize)]
+    struct Channel {
+        #[serde(default)]
+        channel: crate::Channel,
+    }
+    serde_json::from_slice::<Channel>(&std::fs::read(runtime(home)).ok()?).ok().map(|c| c.channel)
+}
+
+/// `Err` when `runtime.json` in `home` names the other channel's server.
+///
+/// # Errors
+/// [`crate::OtherChannel`].
+pub fn check_runtime_channel(home: &std::path::Path) -> Result<(), crate::OtherChannel> {
+    match runtime_channel(home) {
+        Some(server) if server != crate::CHANNEL => Err(crate::OtherChannel { server }),
+        _ => Ok(()),
+    }
+}
+
 /// Contents of `runtime.json`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Runtime {
@@ -162,6 +185,26 @@ mod tests {
         assert_eq!(app_cache_in(release, Channel::Release, &var, true), Path::new("/h/Library/Caches/silo"));
         assert_eq!(app_cache_in(Path::new("/tmp/silo-ui"), Channel::Dev, &var, true), Path::new("/tmp/silo-ui/cache"));
         assert_eq!(app_cache_in(Path::new("/h/.local/state/silo-dev"), Channel::Dev, &var, false), Path::new("/h/.cache/silo-dev"));
+    }
+
+    #[test]
+    fn runtime_channel_reads_any_runtime_json() {
+        let home = std::env::temp_dir().join(format!("silo-proto-runtime-channel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(runtime_channel(&home), None);
+        assert_eq!(check_runtime_channel(&home), Ok(()));
+        // A server from before channels: release.
+        std::fs::write(runtime(&home), r#"{"pid":1,"socket":"/s","version":"0.1.0","started_at":0}"#).unwrap();
+        assert_eq!(runtime_channel(&home), Some(Channel::Release));
+        std::fs::write(runtime(&home), format!(r#"{{"pid":1,"channel":"{}"}}"#, crate::CHANNEL.other())).unwrap();
+        assert_eq!(runtime_channel(&home), Some(crate::CHANNEL.other()));
+        let refused = check_runtime_channel(&home).unwrap_err();
+        assert_eq!(refused.server, crate::CHANNEL.other());
+        assert!(refused.to_string().contains(&format!("a {} build never takes over", crate::CHANNEL)), "{refused}");
+        std::fs::write(runtime(&home), format!(r#"{{"channel":"{}"}}"#, crate::CHANNEL)).unwrap();
+        assert_eq!(check_runtime_channel(&home), Ok(()));
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

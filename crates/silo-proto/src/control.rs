@@ -119,6 +119,11 @@ pub struct ServerHello {
     /// token) may do; `None` for the owner and paired devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted: Option<Granted>,
+    /// The server's [`crate::CHANNEL`]; absent (release) from older
+    /// builds. A build never takes over or adopts a server of the other
+    /// channel.
+    #[serde(default)]
+    pub channel: crate::Channel,
 }
 
 impl ServerHello {
@@ -133,6 +138,7 @@ impl ServerHello {
             client_id,
             server,
             granted: None,
+            channel: crate::CHANNEL,
         }
     }
 }
@@ -1537,6 +1543,26 @@ pub struct AppResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_hello_carries_the_channel_and_old_peers_are_release() {
+        let info = ServerInfo {
+            version: "0.1.0".into(),
+            pid: 1,
+            server_id: "s".into(),
+            started_at: 0,
+            endpoint_id: String::new(),
+            hostname: String::new(),
+            remote_error: None,
+            endpoint_addr: None,
+            idle_exit_secs: 0,
+        };
+        let mut json = serde_json::to_value(ServerHello::ours(1, info)).unwrap();
+        assert_eq!(json["channel"], crate::CHANNEL.name());
+        json.as_object_mut().unwrap().remove("channel");
+        let old: ServerHello = serde_json::from_value(json).unwrap();
+        assert_eq!(old.channel, crate::Channel::Release, "a server from before channels is a release build");
+    }
 
     #[test]
     fn request_and_messages_round_trip() {

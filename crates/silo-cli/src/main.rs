@@ -682,6 +682,12 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             });
             if takeover {
                 if let Err(error) = takeover_reporting(config, status).await {
+                    if adopt && error.downcast_ref::<silo_proto::OtherChannel>().is_some() {
+                        // Exit 0: the service manager must not retry adopting it.
+                        tracing::error!("adopt: {error:#}");
+                        eprintln!("silo: {error}");
+                        return Ok(0);
+                    }
                     if error.downcast_ref::<silo_server::handoff::NotUpgradable>().is_some() {
                         // A clean exit so the service manager does not retry
                         // (the unit and plist do not restart exit 0).
@@ -1311,6 +1317,10 @@ async fn show_status() -> anyhow::Result<i32> {
         }
         (service::Server::Unresponsive, None) => {
             println!("running:        yes (not responding)");
+            println!("managed by:     {managed}");
+        }
+        (service::Server::OtherChannel(channel), None) => {
+            println!("running:        yes (a {channel} build; this {} build leaves it alone)", silo_proto::CHANNEL);
             println!("managed by:     {managed}");
         }
         _ => println!("running:        no"),

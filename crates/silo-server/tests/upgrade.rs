@@ -184,6 +184,20 @@ async fn takeover_keeps_programs_streams_and_layout() {
 /// counter block in session `s1`, reads READY, then dies without COMMIT.
 /// Returns the program's pid and the thread.
 async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<()>) {
+    fake_old(home, silo_proto::CHANNEL, |sock| {
+        silo_server::handoff::expect(sock, silo_server::handoff::READY).unwrap();
+        // Dies here: every descriptor of the old server closes, no COMMIT.
+    })
+    .await
+}
+
+/// An old server of `channel` with one running block: it answers the
+/// successor's MAGIC with everything, then runs `then` on the stream.
+async fn fake_old(
+    home: &Path,
+    channel: silo_proto::Channel,
+    then: impl FnOnce(&mut std::os::unix::net::UnixStream) + Send + 'static,
+) -> (i32, std::thread::JoinHandle<()>) {
     use silo_server::{
         block, handoff,
         registry::{Session, Window},
@@ -238,15 +252,14 @@ async fn fake_old_without_commit(home: &Path) -> (i32, std::thread::JoinHandle<(
         parked: Vec::new(),
     };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
-    let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new() };
+    let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new(), channel };
     let checkpoint = silo_server::persist::encode(released.checkpoint).unwrap();
     let thread = std::thread::spawn(move || {
         let (mut sock, _) = listener.accept().unwrap();
         handoff::expect(&mut sock, handoff::MAGIC).unwrap();
         let fds = handoff::ServerFds { lock: lock.as_fd(), listener: listener.as_fd() };
         handoff::send(&mut sock, &transfer, &[checkpoint], &[pty.master], fds).unwrap();
-        handoff::expect(&mut sock, handoff::READY).unwrap();
-        // Dies here: every descriptor of the old server closes, no COMMIT.
+        then(&mut sock);
     });
     (pid, thread)
 }
@@ -271,6 +284,51 @@ async fn lost_commit_after_ready_keeps_programs() {
     control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     drop((stream, control));
     tokio::time::timeout(TIMEOUT, new).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A successor never takes over a server of the other channel (a dev build
+/// the installed Silo's, or the reverse): it refuses on the old server's
+/// transfer, before READY, writing nothing, so the old server would
+/// re-adopt its blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn takeover_refuses_the_other_channels_transfer() {
+    let home = temp_home("channel-transfer");
+    let (_, old) = fake_old(&home, silo_proto::CHANNEL.other(), |sock| {
+        let mut rest = Vec::new();
+        std::io::Read::read_to_end(sock, &mut rest).unwrap();
+        assert!(rest.is_empty(), "the successor wrote {rest:?}: it may have committed");
+    })
+    .await;
+    let error = silo_server::takeover(config(&home), false).await.expect_err("another channel's server");
+    let refused = error.downcast_ref::<silo_proto::OtherChannel>().unwrap_or_else(|| panic!("{error:#}"));
+    assert_eq!(refused.server, silo_proto::CHANNEL.other());
+    tokio::task::spawn_blocking(move || old.join().unwrap()).await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The successor reads the running server's channel from `runtime.json`
+/// first: refused there, nothing is released and every program streams on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn takeover_refuses_the_other_channels_runtime() {
+    let home = temp_home("channel-runtime");
+    let old = start(&home).await;
+    let control = connect(&home).await;
+    let (created, before, mut stream, mut tail) = populate(&control).await;
+    let mut runtime: serde_json::Value = serde_json::from_slice(&std::fs::read(paths::runtime(&home)).unwrap()).unwrap();
+    assert_eq!(runtime["channel"], silo_proto::CHANNEL.name(), "the server records its channel");
+    runtime["channel"] = silo_proto::CHANNEL.other().name().into();
+    std::fs::write(paths::runtime(&home), serde_json::to_vec(&runtime).unwrap()).unwrap();
+
+    let error = silo_server::takeover(config(&home), false).await.expect_err("another channel's server");
+    assert_eq!(error.downcast_ref::<silo_proto::OtherChannel>().map(|r| r.server), Some(silo_proto::CHANNEL.other()), "{error:#}");
+    let seen = tail.numbers().len();
+    assert!(pump(&mut stream, &mut tail, |t| t.numbers().len() > seen + 20).await, "never released");
+    assert_same(&before, &view(&control, &created.session_id).await);
+
+    control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    drop((stream, control));
+    tokio::time::timeout(TIMEOUT, old).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }
 

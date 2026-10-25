@@ -2416,6 +2416,13 @@
     },
     "ServerHello": {
       "$defs": {
+        "Channel": {
+          "enum": [
+            "release",
+            "dev"
+          ],
+          "type": "string"
+        },
         "Granted": {
           "properties": {
             "expires_at": {
@@ -2576,6 +2583,10 @@
       "properties": {
         "build": {
           "type": "string"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel",
+          "default": "release"
         },
         "client_id": {
           "format": "uint64",

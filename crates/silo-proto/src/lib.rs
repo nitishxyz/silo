@@ -55,6 +55,27 @@ pub const INSTALL_URL: &str = "https://nitishxyz.github.io/silo/install.sh";
 /// on the upgrade request: it predates live upgrade and keeps serving.
 pub const EXIT_NOT_UPGRADABLE: i32 = 3;
 
+/// A server of the other [`Channel`] holds the state directory: this build
+/// never takes it over, adopts it, replaces it or uses it (a dev build and
+/// the installed Silo never share a server).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OtherChannel {
+    /// The running server's channel.
+    pub server: Channel,
+}
+
+impl std::fmt::Display for OtherChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (server, ours) = (self.server, CHANNEL);
+        write!(
+            f,
+            "the running server is a {server} build and this is a {ours} build: a {ours} build never takes over, adopts or uses a {server} server; quit that one or give this build its own SILO_HOME"
+        )
+    }
+}
+
+impl std::error::Error for OtherChannel {}
+
 /// Upper bound for any single frame.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 

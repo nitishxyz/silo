@@ -83,6 +83,9 @@ pub enum Server {
     Other,
     /// Holds the state directory but does not answer (starting, hung).
     Unresponsive,
+    /// Of the other channel (a release server for a dev build, or the
+    /// reverse): never taken over, adopted or stopped by this build.
+    OtherChannel(silo_proto::Channel),
 }
 
 /// What the service manager and the socket report.
@@ -171,7 +174,7 @@ pub fn plan_up(state: &State) -> Vec<Action> {
         }
         Manager::None => match state.server {
             Server::Absent => actions.push(Action::Spawn),
-            Server::Current | Server::Unresponsive => {}
+            Server::Current | Server::Unresponsive | Server::OtherChannel(_) => {}
             Server::Idle | Server::Other => actions.push(Action::Takeover),
         },
     }
@@ -355,10 +358,14 @@ fn launchd_pid(print: &str) -> Option<u32> {
 /// taken over to this build.
 pub async fn probe_server(home: &Path, client_name: &str) -> (Server, Option<Control>) {
     match Control::connect(&paths::socket(home), client_name).await {
+        Ok((control, _)) if control.hello().channel != silo_proto::CHANNEL => (Server::OtherChannel(control.hello().channel), None),
         Ok((control, _)) if control.hello().build != silo_proto::BUILD => (Server::Other, None),
         Ok((control, _)) if control.hello().server.idle_exit_secs == 0 => (Server::Current, Some(control)),
         Ok((control, _)) => (Server::Idle, Some(control)),
-        Err(error) if crate::mismatch::incompatible_server(home, &error).await.is_some() => (Server::Other, None),
+        Err(error) if crate::mismatch::incompatible_server(home, &error).await.is_some() => match paths::check_runtime_channel(home) {
+            Err(other) => (Server::OtherChannel(other.server), None),
+            Ok(()) => (Server::Other, None),
+        },
         Err(_) if crate::mismatch::server_lock_held(home) => (Server::Unresponsive, None),
         Err(_) => (Server::Absent, None),
     }
@@ -389,7 +396,8 @@ pub struct Up {
 /// successor serving before the job adopts it).
 ///
 /// # Errors
-/// An action fails, the server does not come up, or [`NotUpgraded`].
+/// An action fails, the server does not come up, [`NotUpgraded`], or
+/// [`silo_proto::OtherChannel`] (nothing is done to that server).
 pub async fn up(svc: &Service, runner: &dyn Runner, client_name: &str) -> anyhow::Result<Up> {
     let home = &svc.silo_home;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -397,6 +405,7 @@ pub async fn up(svc: &Service, runner: &dyn Runner, client_name: &str) -> anyhow
         match probe_server(home, client_name).await {
             (Server::Unresponsive, _) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(100)).await,
             (Server::Unresponsive, _) => bail!("the server is running but not responding"),
+            (Server::OtherChannel(server), _) => return Err(silo_proto::OtherChannel { server }.into()),
             probed => break probed,
         }
     };

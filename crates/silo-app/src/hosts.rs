@@ -126,10 +126,20 @@ impl Transport {
     pub async fn connect(&self, client_name: &str) -> anyhow::Result<(Control, Events)> {
         match self {
             Self::Local { home, .. } => {
+                // A server of the other channel (a dev build and the
+                // installed Silo sharing a custom SILO_HOME) is never used.
                 let (control, events) = match Control::connect(&silo_proto::paths::socket(home), client_name).await {
+                    Ok((control, _)) if control.hello().channel != silo_proto::CHANNEL => {
+                        return Err(silo_proto::OtherChannel { server: control.hello().channel }.into());
+                    }
                     Ok(connected) => connected,
                     Err(error) => match silo_client::mismatch::incompatible_server(home, &error).await {
-                        Some(server) => return Err(server.into()),
+                        Some(server) => {
+                            return Err(match silo_proto::paths::check_runtime_channel(home) {
+                                Err(other) => other.into(),
+                                Ok(()) => server.into(),
+                            });
+                        }
                         None => return Err(error),
                     },
                 };

@@ -398,6 +398,7 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
     let remote = transport.is_remote();
     let mut attempt = 0u32;
     let mut incompatible_remote = false;
+    let mut other_channel = false;
     let mut incompatible: Option<IncompatibleServer> = None;
     let mut ensured = Ensure::now();
     loop {
@@ -430,6 +431,7 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
             Ok((control, mut events)) => {
                 attempt = 0;
                 incompatible_remote = false;
+                other_channel = false;
                 incompatible = None;
                 let pid = control.hello().server.pid;
                 tracing::info!(pid, "connected to silo server");
@@ -536,6 +538,17 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                     continue;
                 }
                 incompatible = None;
+                if let Some(other) = error.downcast_ref::<silo_proto::OtherChannel>() {
+                    // Polled slowly; nothing is spawned or taken over.
+                    if !std::mem::replace(&mut other_channel, true) {
+                        tracing::warn!("{other}");
+                        if tx.send(ConnEvent::Disconnected(other.to_string())).is_err() {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(INCOMPATIBLE_POLL).await;
+                    continue;
+                }
                 tracing::debug!("connect failed: {error:#}");
                 let delay = match classify(&error) {
                     Failure::Upgrading => UPGRADING_RETRY,
