@@ -147,13 +147,25 @@ impl crate::workspace::Workspace {
                 AgentPaneEvent::Project { cwd } => {
                     this.call(Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
                 }
-                AgentPaneEvent::Status(status) => this.call(report(block, *status)),
+                AgentPaneEvent::Status(status) => {
+                    this.call(report(block, *status));
+                    // A finished turn may have changed files: Changes blocks reviewing it list its turns again.
+                    if matches!(status, AgentStatus::Done | AgentStatus::Error)
+                        && let Some(session) = pane.read(cx).session().map(str::to_owned)
+                    {
+                        this.agent_turn_ended(&session, cx);
+                    }
+                }
                 AgentPaneEvent::Reveal(target) => this.reveal_agent_target(target.clone(), window, cx),
                 AgentPaneEvent::Stop(target) => this.call(Method::BlockClose { block_id: target.clone(), force: true }),
                 AgentPaneEvent::OpenSession { session_id, title } => {
                     this.open_agent_session(block, session_id.clone(), title.clone(), window, cx);
                 }
                 AgentPaneEvent::Header => {}
+                AgentPaneEvent::Review { scope, session } => {
+                    let ask = crate::changes_block::ReviewAsk { scope: scope.clone(), session: session.clone() };
+                    this.review_changes(block, ask, window, cx);
+                }
             }
             cx.notify();
         });

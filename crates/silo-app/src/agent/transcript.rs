@@ -165,6 +165,12 @@ pub enum Row {
     /// Older messages are stored than are loaded (`SessionMirror::has_older`): the
     /// "Load earlier messages" row that opens the transcript.
     Earlier,
+    /// What a finished turn changed, under its reply: counts, paths and Review (docs/CHANGES_BLOCK.md §3).
+    Changes {
+        key: String,
+        turn: i64,
+        changes: otto_proto::TurnChanges,
+    },
 }
 
 /// The key of [`Row::Earlier`].
@@ -326,7 +332,7 @@ impl Row {
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Row::User { key, .. } | Row::Text { key, .. } | Row::Report { key, .. } => key,
+            Row::User { key, .. } | Row::Text { key, .. } | Row::Report { key, .. } | Row::Changes { key, .. } => key,
             Row::Group(g) => &g.key,
             Row::Compaction(c) => &c.key,
             Row::Earlier => EARLIER,
@@ -646,6 +652,8 @@ pub struct Input<'a> {
     pub now: u64,
     /// Older items are stored than `items` holds: the transcript opens with [`Row::Earlier`].
     pub older: bool,
+    /// Finished turns that changed files (`SessionMirror::turns`): a [`Row::Changes`] under each one's reply.
+    pub turns: &'a [otto_proto::TurnSummary],
 }
 
 struct Ctx<'a> {
@@ -841,6 +849,10 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                     }
                 }
                 messages += 1;
+                if let Some(t) = input.turns.iter().find(|t| t.item_id.as_deref() == Some(item.id.as_str()) && t.changes.file_count() > 0) {
+                    flush(&mut rows, &mut lines, false, false);
+                    rows.push(Row::Changes { key: format!("{}#changes", item.id), turn: t.turn, changes: t.changes.clone() });
+                }
             }
             Role::System if item.parts.iter().any(|p| matches!(p, Part::Compaction { .. })) => {
                 flush(&mut rows, &mut lines, false, false);
@@ -1881,6 +1893,7 @@ mod tests {
             times,
             now,
             older: false,
+            turns: &[],
         })
     }
 
@@ -1919,6 +1932,7 @@ mod tests {
             times: &times,
             now: 0,
             older: false,
+            turns: &[],
         })
     }
 
@@ -2600,6 +2614,7 @@ mod tests {
             times: &times,
             now: 0,
             older: false,
+            turns: &[],
         });
         let g = group_of(&rows[1]);
         assert_eq!((g.lines[1].title.as_str(), g.lines[1].kind), ("rate limited", Kind::Error));
@@ -2625,6 +2640,7 @@ mod tests {
             times: &times,
             now: 0,
             older: false,
+            turns: &[],
         };
         let rows = build(&input);
         let g = group_of(&rows[1]);
@@ -2661,6 +2677,7 @@ mod tests {
             times: &times,
             now: 1_000,
             older: false,
+            turns: &[],
         };
         let rows = build(&input(TurnStatus::Running));
         let g = group_of(&rows[1]);
@@ -3054,6 +3071,7 @@ mod tests {
             times: &times,
             now: 0,
             older: m.has_older,
+            turns: &m.turns,
         };
         build(&input)
     }
@@ -3084,6 +3102,32 @@ mod tests {
         more.push(Row::Text { key: "a5#t0".into(), text: "x".into(), streaming: false });
         assert!(!list_change(&last, &more).prepended);
         assert!(!list_change(&more, &last).prepended);
+    }
+
+    #[test]
+    fn a_turn_that_changed_files_gets_its_card_under_the_reply() {
+        let changes = otto_proto::TurnChanges {
+            base_tree: Some("b".into()),
+            end_tree: Some("e".into()),
+            files: vec!["a.rs".into()],
+            more: 0,
+            added: 3,
+            removed: 1,
+        };
+        let mut view = page(&[exchange(1), exchange(2)].concat(), false, 1);
+        view.turns = vec![otto_proto::TurnSummary { turn: 1, item_id: Some("a1".into()), changes: changes.clone() }];
+        let mut m = otto_client::SessionMirror::new(view);
+        assert_eq!(mirror_rows(&m).iter().map(Row::key).collect::<Vec<_>>(), ["u1", "a1#t0", "a1#changes", "u2", "a2#t0"]);
+        // A live turn's changes land under its last reply; a turn with nothing changed gets no card.
+        let applied = m.apply(
+            51,
+            &otto_proto::Event::TurnFinished { turn: 2, status: TurnStatus::Done, usage: otto_llm::Usage::default(), changes: Some(changes.clone()) },
+        );
+        assert_eq!(applied, otto_client::ApplyResult::Applied);
+        let rows = mirror_rows(&m);
+        assert_eq!(rows.last(), Some(&Row::Changes { key: "a2#changes".into(), turn: 2, changes }));
+        m.turns[0].changes.files.clear();
+        assert!(!mirror_rows(&m).iter().any(|r| r.key() == "a1#changes"), "no files: no card");
     }
 
     #[test]

@@ -321,12 +321,7 @@ impl Blocks {
     kind!(browser, browsers, Browser, BrowserPane);
     kind!(agent, agents, Agent, AgentPane);
     kind!(files, files_panes, Files, FilesPane);
-    pub(crate) fn changes(&self, block: &str) -> Option<&Entity<ChangesPane>> {
-        match self.map.get(block) {
-            Some((BlockPane::Changes(p), _)) => Some(p),
-            _ => None,
-        }
-    }
+    kind!(changes, changes_panes, Changes, ChangesPane);
 
     pub(crate) fn get(&self, block: &str) -> Option<&BlockPane> {
         self.map.get(block).map(|(pane, _)| pane)

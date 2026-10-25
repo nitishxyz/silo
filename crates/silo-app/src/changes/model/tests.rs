@@ -249,6 +249,23 @@ fn commit_messages_come_from_the_first_fence() {
 }
 
 #[test]
+fn the_turn_card_reads_as_designed() {
+    assert_eq!(card_title(5, 142, 37), "5 files changed  +142 \u{2212}37");
+    assert_eq!(card_title(1, 1, 0), "1 file changed  +1 \u{2212}0");
+    let paths: Vec<String> =
+        ["crates/silo-app/src/agent/view.rs", "crates/silo-tools/src/lib.rs", "docs/BLOCKS.md", "a.rs", "b.rs"].map(String::from).to_vec();
+    assert_eq!(card_paths(&paths, 5), "agent/view.rs \u{b7} silo-tools/lib.rs \u{b7} docs/BLOCKS.md \u{b7} +2");
+    assert_eq!(card_paths(&paths[..2], 2), "agent/view.rs \u{b7} silo-tools/lib.rs");
+    assert_eq!(
+        card_paths(&paths[..3], 60),
+        "agent/view.rs \u{b7} silo-tools/lib.rs \u{b7} docs/BLOCKS.md \u{b7} +57",
+        "the count covers paths not listed"
+    );
+    assert_eq!(short_path("README.md"), "README.md");
+    assert_eq!(short_path("src/main.rs"), "main.rs");
+}
+
+#[test]
 fn the_scope_picker_lists_scopes_turns_and_the_session() {
     let t = |turn, base: &str, end: &str| TurnRef { turn, base_tree: base.into(), end_tree: end.into(), files: 2 };
     let turns = [t(3, "b3", "e3"), t(4, "b4", "e4")];

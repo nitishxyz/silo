@@ -16,6 +16,8 @@ pub const FOLD_MIN: usize = 4;
 const WORDS_MAX: usize = 400;
 /// Lines of code quoted under a comment's place in a review.
 const QUOTE_MAX: usize = 6;
+/// Paths a turn card names before "+N".
+pub const CARD_PATHS: usize = 3;
 
 // ---------------------------------------------------------------- rows
 
@@ -617,6 +619,40 @@ pub fn commit_message_from(reply: &str) -> String {
         }
     }
     reply.trim().to_owned()
+}
+
+// ---------------------------------------------------------------- turn card
+
+/// The card's first line: `5 files changed  +142 −37`.
+#[must_use]
+pub fn card_title(files: usize, added: u32, removed: u32) -> String {
+    let n = if files == 1 { "1 file changed".to_owned() } else { format!("{files} files changed") };
+    format!("{n}  {}", totals(added, removed))
+}
+
+/// A path as the card names it: its file with the nearest folder that says
+/// something (`src` skipped): `crates/silo-tools/src/lib.rs` is
+/// `silo-tools/lib.rs`.
+#[must_use]
+pub fn short_path(path: &str) -> String {
+    let mut parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let Some(name) = parts.pop() else { return path.to_owned() };
+    match parts.into_iter().rev().find(|p| *p != "src") {
+        Some(dir) => format!("{dir}/{name}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The card's second line: the first paths, then `+N` for the rest of `total`.
+#[must_use]
+pub fn card_paths(paths: &[String], total: usize) -> String {
+    let shown: Vec<String> = paths.iter().take(CARD_PATHS).map(|p| short_path(p)).collect();
+    let rest = total.max(paths.len()).saturating_sub(shown.len());
+    let mut out = shown.join(" \u{b7} ");
+    if rest > 0 {
+        out.push_str(&format!(" \u{b7} +{rest}"));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- scope picker

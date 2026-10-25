@@ -271,6 +271,11 @@ impl ChangesPane {
         }
     }
 
+    /// The otto session reviews go back to.
+    pub fn linked_session(&self) -> Option<&str> {
+        self.state.agent.as_ref().map(|a| a.otto_session.as_str())
+    }
+
     /// The linked agent's turns, for the scope picker.
     pub fn set_turns(&mut self, session: &str, turns: Vec<TurnRef>, cx: &mut Context<Self>) {
         if self.turns_of.as_deref() == Some(session) {

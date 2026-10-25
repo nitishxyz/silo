@@ -925,7 +925,7 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Compaction(_) | Row::Report { .. } | Row::Earlier) => 12.0,
+            Some(Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. }) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
@@ -984,6 +984,9 @@ impl AgentPane {
             (Some(Row::Earlier), _) => 8.0,
             (Some(Row::User { .. }), _) => 20.0,
             (Some(Row::Compaction(_) | Row::Report { .. }), _) | (Some(_), Row::Compaction(_) | Row::Report { .. } | Row::Earlier) => 12.0,
+            (_, Row::Changes { .. }) => 8.0,
+            (Some(Row::Changes { .. }), Row::User { .. }) => 20.0,
+            (Some(Row::Changes { .. }), _) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Group(_)), Row::User { .. }) => 28.0,
             (Some(Row::Text { .. }), _) => 4.0,
@@ -997,6 +1000,7 @@ impl AgentPane {
             Row::Compaction(c) => self.render_compaction(ix, c, now, cx),
             Row::Report { key, child, title, status, note } => Self::render_report(key, child, title, *status, note.as_deref(), cx),
             Row::Earlier => self.render_earlier(cx),
+            Row::Changes { key, turn, changes } => self.render_changes(key, *turn, changes, cx),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
         let content = match enter {
@@ -1059,6 +1063,77 @@ impl AgentPane {
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
             .when_some(note.map(str::to_owned), |el, note| el.tooltip(Tooltip::text(note)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_session_block(child.clone(), cx)))
+            .into_any_element()
+    }
+
+    /// A turn's changes (docs/CHANGES_BLOCK.md §3): `5 files changed  +142 −37  ·  Review ›` over the first paths;
+    /// Review opens the agent's Changes block on the turn.
+    fn render_changes(&self, key: &str, turn: i64, changes: &otto_proto::TurnChanges, cx: &mut Context<Self>) -> AnyElement {
+        use crate::changes::model;
+        let muted = theme::muted();
+        #[allow(clippy::cast_possible_truncation)]
+        let (added, removed) = (changes.added.min(u64::from(u32::MAX)) as u32, changes.removed.min(u64::from(u32::MAX)) as u32);
+        let count = changes.file_count();
+        let title = if count == 1 { "1 file changed".to_owned() } else { format!("{count} files changed") };
+        let paths = model::card_paths(&changes.files, count);
+        let all = format!("{}\n{}", model::card_title(count, added, removed), changes.files.join("\n"));
+        let scope = crate::changes_block::turn_scope(turn, changes);
+        let review = div()
+            .id(gpui::ElementId::Name(format!("review-{key}").into()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .px(px(8.0))
+            .h(px(22.0))
+            .continuous(6.0)
+            .text_color(rgb(theme::accent()))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover_fill()))
+            .child("Review")
+            .child(icon("chevron-right", 11.0, theme::accent()))
+            .tooltip(Tooltip::text(format!("Review {} in a Changes block", model::turn_label(turn))))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(session) = this.session_id.clone() {
+                    cx.emit(AgentPaneEvent::Review { scope: scope.clone(), session });
+                }
+            }));
+        div()
+            .id(gpui::ElementId::Name(format!("changes-{key}").into()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .continuous(10.0)
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_size(px(13.0))
+            .child(div().w(px(16.0)).flex_none().flex().justify_center().child(icon("git-diff", 14.0, muted)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .whitespace_nowrap()
+                            .child(title)
+                            .child(div().text_size(px(12.0)).text_color(rgb(theme::success())).child(format!("+{added}")))
+                            .child(div().text_size(px(12.0)).text_color(rgb(theme::danger())).child(format!("\u{2212}{removed}"))),
+                    )
+                    .child(
+                        div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.0)).text_color(rgb(muted)).child(paths),
+                    ),
+            )
+            .child(review)
+            .tooltip(Tooltip::text(all))
             .into_any_element()
     }
 
@@ -2706,6 +2781,7 @@ impl AgentPane {
         for (i, (id, glyph, label, note)) in [
             ("agent-menu-new", "new-session", "New session", "/new"),
             ("agent-menu-sessions", "history", "Sessions", "⌘J"),
+            ("agent-menu-review", "git-diff", "Review changes", "This session"),
             ("agent-menu-providers", "plug", "Providers", "/providers"),
         ]
         .into_iter()

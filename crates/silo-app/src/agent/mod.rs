@@ -90,6 +90,11 @@ pub enum AgentPaneEvent {
     },
     /// [`AgentPane::header_title`] changed: redraw the pane header.
     Header,
+    /// Review changes in a Changes block linked to `session` (a turn card's Review, the menu's Review changes).
+    Review {
+        scope: silo_proto::model::ChangesScope,
+        session: String,
+    },
 }
 
 /// Entry motion of rows and lines (`docs/AGENT_BLOCK.md` §6).
@@ -177,7 +182,7 @@ fn slash_matches(query: &str) -> Vec<&'static SlashCommand> {
 }
 
 /// The ⋮ menu's rows, in order.
-const MENU_ROWS: usize = 5;
+const MENU_ROWS: usize = 6;
 
 /// The effort menu's rows; `None` is the default (the agent's, else the model's).
 const EFFORTS: [Option<Effort>; 5] = [None, Some(Effort::Low), Some(Effort::Medium), Some(Effort::High), Some(Effort::Max)];
@@ -641,6 +646,11 @@ impl AgentPane {
     /// The pane header's title on the chat screen (`New session` before the
     /// first prompt); `None` on sign-in and Providers (no session controls).
     /// The header's parts: `header.rs`.
+    /// The otto session shown.
+    pub fn session(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     pub fn header_title(&self) -> Option<String> {
         self.composer_visible().then(|| {
             self.mirror()
@@ -1027,6 +1037,7 @@ impl AgentPane {
             times: &self.times,
             now,
             older: m.has_older,
+            turns: &m.turns,
         });
         let mut todos = transcript::todos(&m.items, &m.tools, &self.times, m.todos.as_ref());
         for todo in &mut todos {
@@ -1138,7 +1149,7 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } | Row::Earlier => {}
+                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. } => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
@@ -1643,6 +1654,16 @@ impl AgentPane {
         self.editor.update(cx, |e, cx| e.set_content(text, chips, cx));
     }
 
+    /// Review changes: the whole session's, from its first snapshotted turn to its last.
+    fn review_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_id.clone() else {
+            self.notice = Some("Nothing to review yet: no session".into());
+            return cx.notify();
+        };
+        let scope = crate::changes_block::session_scope(self.mirror().map(|m| m.turns.as_slice()).unwrap_or_default());
+        cx.emit(AgentPaneEvent::Review { scope, session });
+    }
+
     fn stop(&mut self, cx: &mut Context<Self>) {
         self.sent_at = None;
         let Some(id) = self.session_id.clone() else { return };
@@ -1968,6 +1989,10 @@ impl AgentPane {
                 1 => self.set_mode(ApprovalMode::AskOnEffects, cx),
                 2 => self.new_session(window, cx),
                 3 => self.open_overlay(Overlay::Sessions, window, cx),
+                4 => {
+                    self.close_overlay(window, cx);
+                    self.review_session(cx);
+                }
                 _ => self.open_otto_settings(settings::Entry::Providers, window, cx),
             },
             Some(Overlay::Slash) => {

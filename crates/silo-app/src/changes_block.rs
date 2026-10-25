@@ -10,8 +10,10 @@ use std::time::Duration;
 use gpui::{AnyElement, AppContext as _, Context, FocusHandle, KeyDownEvent, Window, div, prelude::*, px};
 use otto_proto::{Delivery, InputPart, SessionStatus};
 use silo_proto::{
+    changes::ChangesSetParams,
+    compat::feature,
     control::{Created, FilesSetParams, Method, SpawnSpec},
-    model::{AgentLink, Axis, BlockKind},
+    model::{AgentLink, Axis, BlockKind, ChangesScope},
 };
 
 use crate::{
@@ -29,6 +31,35 @@ const ASK_POLL: Duration = Duration::from_millis(1500);
 pub(crate) struct RevertConfirm {
     ask: RevertAsk,
     focus: FocusHandle,
+}
+
+/// What an agent asked to review: a turn (its trees), or the whole session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewAsk {
+    pub scope: ChangesScope,
+    pub session: String,
+}
+
+/// The scope a turn's Review opens: its snapshots, labelled "Turn N"; a turn
+/// without them (not a git repo, snapshots off) shows the work tree.
+#[must_use]
+pub(crate) fn turn_scope(turn: i64, changes: &otto_proto::TurnChanges) -> ChangesScope {
+    match (&changes.base_tree, &changes.end_tree) {
+        (Some(base), Some(end)) => ChangesScope::Tree { base: base.clone(), head: Some(end.clone()), label: model::turn_label(turn) },
+        _ => ChangesScope::Working,
+    }
+}
+
+/// The session's scope: from its first snapshotted turn's start to its last one's end.
+#[must_use]
+pub(crate) fn session_scope(turns: &[otto_proto::TurnSummary]) -> ChangesScope {
+    model::picker_rows(&turn_refs(turns), false)
+        .into_iter()
+        .find_map(|p| match p {
+            model::Pick::Session { base, head } => Some(ChangesScope::Tree { base, head: Some(head), label: model::SESSION_LABEL.to_owned() }),
+            _ => None,
+        })
+        .unwrap_or(ChangesScope::Working)
 }
 
 /// The turns the scope picker lists: those with both snapshots.
@@ -108,6 +139,48 @@ impl Workspace {
             (None, Some(block)) => self.new_changes(block, cx),
             (None, None) => self.new_changes_tab(window, cx),
         }
+    }
+
+    /// An agent's Review: its Changes block (linked to its session, or
+    /// showing it) on `ask`'s scope, else a new one split off `agent_block`.
+    pub(crate) fn review_changes(&mut self, agent_block: String, ask: ReviewAsk, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.host_supports(feature::CHANGES) {
+            let status = crate::status::Status::warning(self.not_supported());
+            return self.flash(status, cx);
+        }
+        let link = AgentLink { otto_session: ask.session.clone(), block_id: Some(agent_block.clone()) };
+        let existing = self.view.as_ref().and_then(|v| {
+            v.blocks
+                .iter()
+                .filter(|b| b.kind == BlockKind::Changes)
+                .find(|b| b.changes.as_ref().and_then(|c| c.agent.as_ref()).is_some_and(|a| a.otto_session == ask.session))
+                .map(|b| b.id.clone())
+        });
+        let params = move |block_id: String| ChangesSetParams {
+            block_id,
+            scope: Some(ask.scope.clone()),
+            active: Some(String::new()),
+            agent: Some(Some(link.clone())),
+            ..ChangesSetParams::default()
+        };
+        if let Some(block) = existing {
+            self.call(Method::ChangesSet(params.clone()(block.clone())));
+            return self.reveal_agent_target(block, window, cx);
+        }
+        let Some(control) = self.control() else { return };
+        let split = changes_split(agent_block.clone(), self.auto_axis(&agent_block), self.cwd_of(&agent_block, cx));
+        let task = self.rt.spawn(async move {
+            let created: Created = control.call(split).await?;
+            control.call_value(Method::ChangesSet(params(created.block_id))).await?;
+            anyhow::Ok(())
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(error)) | Err(error) = task.await.map_err(anyhow::Error::from) {
+                tracing::warn!("review changes: {error:#}");
+                let _ = this.update(cx, |this, cx| this.flash(this.failed(&error, "Couldn't open the changes"), cx));
+            }
+        })
+        .detach();
     }
 
     /// The agent block this session holds that a review without a link goes to:
@@ -195,6 +268,15 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| done(this, result, cx));
         })
         .detach();
+    }
+
+    /// An agent's status changed: Changes blocks linked to its session list its turns again.
+    pub(crate) fn agent_turn_ended(&mut self, session: &str, cx: &mut Context<Self>) {
+        let linked: Vec<String> =
+            self.blocks.changes_panes().filter(|(_, p)| p.read(cx).linked_session() == Some(session)).map(|(id, _)| id.clone()).collect();
+        for block in linked {
+            self.load_turns(block, session.to_owned(), cx);
+        }
     }
 
     /// The linked agent's turns, for `block`'s scope picker.
@@ -327,8 +409,17 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_lists_snapshotted_turns() {
+    fn a_turns_review_compares_its_snapshots() {
+        let t = turn(4, Some(("b4", "e4")));
+        assert_eq!(turn_scope(4, &t.changes), ChangesScope::Tree { base: "b4".into(), head: Some("e4".into()), label: "Turn 4".into() });
+        assert_eq!(turn_scope(5, &turn(5, None).changes), ChangesScope::Working, "no snapshot: the work tree");
+    }
+
+    #[test]
+    fn the_session_spans_its_snapshotted_turns() {
         let turns = [turn(2, Some(("b2", "e2"))), turn(3, None), turn(5, Some(("b5", "e5")))];
+        assert_eq!(session_scope(&turns), ChangesScope::Tree { base: "b2".into(), head: Some("e5".into()), label: "This session".into() });
+        assert_eq!(session_scope(&turns[1..2]), ChangesScope::Working);
         let refs = turn_refs(&turns);
         assert_eq!(refs.iter().map(|t| (t.turn, t.files)).collect::<Vec<_>>(), [(2, 3), (5, 3)]);
     }
