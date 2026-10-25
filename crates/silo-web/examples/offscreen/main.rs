@@ -2,6 +2,7 @@
 //! the IOSurface centre pixel after input, navigation and tunnel-PAC loads. Re-execs itself inside a dev
 //! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen`
 
+mod arrows;
 mod bundle;
 mod nav;
 mod server;
@@ -169,6 +170,7 @@ fn run() -> Result<()> {
         wait_for(&runtime, &browser, BLUE, (640, 400), "after key press")?;
         browser.resize(ViewSize { width: 200, height: 100, scale: 1.0 });
         wait_for(&runtime, &browser, BLUE, (200, 100), "after resize to 200x100@1x")?;
+        arrows::run(&runtime, &browser)?;
         nav::run(&runtime, &browser)?;
         pump_for(&runtime, Duration::from_secs(2));
         probe.check("after navigation")

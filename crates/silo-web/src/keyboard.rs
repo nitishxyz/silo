@@ -35,8 +35,8 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEvent> {
         windows_key_code: code,
         native_key_code: mac_key_code(code),
         modifiers,
-        character: typed.unwrap_or(0),
-        unmodified_character: unmodified(input.key).or(typed).unwrap_or(0),
+        character: typed.or(function_char(input.key)).unwrap_or(0),
+        unmodified_character: unmodified(input.key).or(typed).or(function_char(input.key)).unwrap_or(0),
         ..Default::default()
     };
     if !input.down {
@@ -77,6 +77,30 @@ fn typed_char(input: &KeyInput) -> Option<u16> {
     let mut units = text.encode_utf16();
     let unit = units.next()?;
     units.next().is_none().then_some(unit)
+}
+
+/// AppKit's `NS*FunctionKey` character for a key that types nothing (what
+/// `-[NSEvent characters]` holds). CEF builds a native event from it on macOS:
+/// with no character, an arrow's release reached the page as a second press,
+/// so one arrow moved twice.
+fn function_char(key: &str) -> Option<u16> {
+    let c = match key {
+        "up" => 0xF700,
+        "down" => 0xF701,
+        "left" => 0xF702,
+        "right" => 0xF703,
+        "insert" => 0xF727,
+        "delete" => 0xF728,
+        "home" => 0xF729,
+        "end" => 0xF72B,
+        "pageup" => 0xF72C,
+        "pagedown" => 0xF72D,
+        _ => {
+            let n = key.strip_prefix('f')?.parse::<u16>().ok()?;
+            return (1..=24).contains(&n).then_some(0xF703 + n);
+        }
+    };
+    Some(c)
 }
 
 fn single(text: &str) -> Option<char> {
@@ -280,6 +304,10 @@ mod tests {
         assert_eq!((f5[0].windows_key_code, f5[0].native_key_code), (0x74, 0x60));
         let left = key_events(&input("left", None, Modifiers::default(), true));
         assert_eq!((left.len(), left[0].native_key_code), (1, 0x7B));
+        // AppKit's function-key character, on press and release alike.
+        let right_up = key_events(&input("right", None, Modifiers::default(), false));
+        assert_eq!((left[0].character, right_up[0].character, right_up[0].unmodified_character), (0xF702, 0xF703, 0xF703));
+        assert_eq!(key_events(&input("f5", None, Modifiers::default(), true))[0].character, 0xF708);
         let e_acute = key_events(&input("é", Some("é"), Modifiers::default(), true));
         assert_eq!((e_acute[0].windows_key_code, e_acute[1].character), (0, 0xE9));
         assert!(key_events(&input("unknownkey", None, Modifiers::default(), true)).is_empty());
