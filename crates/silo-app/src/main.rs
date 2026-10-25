@@ -84,18 +84,40 @@ use crate::{
 const DEV_HOME: &str = "/tmp/silo-dev";
 
 /// The home to force for executable `exe` (`SiloDev` is the dev bundle's,
-/// `scripts/dev-bundle.sh`) when `SILO_HOME` is `set` or not.
-fn dev_home(exe: Option<&std::ffi::OsStr>, set: bool) -> Option<&'static str> {
-    (!set && exe.is_some_and(|name| name == "SiloDev")).then_some(DEV_HOME)
+/// `scripts/dev-bundle.sh`) given `SILO_HOME` (`set`): unset, or the installed
+/// app's own home (`installed`), which every Silo terminal exports, so a dev
+/// build opened from one took over the installed server, its sessions and
+/// its otto. Any other `SILO_HOME` is kept.
+fn dev_home(exe: Option<&std::ffi::OsStr>, set: Option<&std::path::Path>, installed: &std::path::Path) -> Option<&'static str> {
+    let ours = set.is_none_or(|home| same_dir(home, installed));
+    (ours && exe.is_some_and(|name| name == "SiloDev")).then_some(DEV_HOME)
 }
 
-/// A dev bundle opened without `SILO_HOME` gets [`DEV_HOME`]. Runs before
-/// any other thread starts, so setting the environment is sound; the
-/// server, menu-bar agent and otto it starts inherit it.
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
+}
+
+/// A dev bundle gets [`DEV_HOME`] unless `SILO_HOME` names another home than
+/// the installed app's. Runs before any other thread starts, so setting the
+/// environment is sound; the server, menu-bar agent and otto it starts
+/// inherit it (otto's home follows Silo's).
 fn dev_home_guard() {
     let exe = std::env::current_exe().ok();
-    let set = std::env::var_os("SILO_HOME").is_some_and(|h| !h.is_empty());
-    if let Some(home) = dev_home(exe.as_deref().and_then(std::path::Path::file_name), set) {
+    let set = std::env::var_os("SILO_HOME").filter(|h| !h.is_empty()).map(std::path::PathBuf::from);
+    let installed = {
+        // SAFETY: as below; read the default with SILO_HOME cleared.
+        let saved = std::env::var_os("SILO_HOME");
+        unsafe { std::env::remove_var("SILO_HOME") };
+        let home = silo_proto::paths::home();
+        if let Some(saved) = saved {
+            unsafe { std::env::set_var("SILO_HOME", saved) };
+        }
+        home
+    };
+    if let Some(home) = dev_home(exe.as_deref().and_then(std::path::Path::file_name), set.as_deref(), &installed) {
+        if set.is_some() {
+            eprintln!("silo: SiloDev ignores SILO_HOME {} (the installed Silo's) and uses {home}", installed.display());
+        }
         // SAFETY: called first thing in `main`, before any thread exists.
         unsafe { std::env::set_var("SILO_HOME", home) };
     }
@@ -105,15 +127,22 @@ fn dev_home_guard() {
 mod dev_home_tests {
     use std::ffi::OsStr;
 
+    use std::path::Path;
+
     use super::{DEV_HOME, dev_home};
 
     #[test]
-    fn only_the_dev_bundle_without_a_home_is_moved() {
-        assert_eq!(dev_home(Some(OsStr::new("SiloDev")), false), Some(DEV_HOME));
-        assert_eq!(dev_home(Some(OsStr::new("SiloDev")), true), None, "an explicit SILO_HOME wins");
-        assert_eq!(dev_home(Some(OsStr::new("Silo")), false), None, "the installed app keeps its home");
-        assert_eq!(dev_home(Some(OsStr::new("silo-app")), false), None);
-        assert_eq!(dev_home(None, false), None);
+    fn the_dev_bundle_never_uses_the_installed_home() {
+        let installed = Path::new("/h/Library/Application Support/silo");
+        let dev = Some(OsStr::new("SiloDev"));
+        assert_eq!(dev_home(dev, None, installed), Some(DEV_HOME));
+        // A Silo terminal exports the installed home: opening SiloDev from one took over production.
+        assert_eq!(dev_home(dev, Some(installed), installed), Some(DEV_HOME));
+        assert_eq!(dev_home(dev, Some(Path::new("/tmp/silo-ui")), installed), None, "another SILO_HOME is kept");
+        assert_eq!(dev_home(Some(OsStr::new("Silo")), None, installed), None, "the installed app keeps its home");
+        assert_eq!(dev_home(Some(OsStr::new("Silo")), Some(installed), installed), None);
+        assert_eq!(dev_home(Some(OsStr::new("silo-app")), None, installed), None);
+        assert_eq!(dev_home(None, None, installed), None);
     }
 }
 
