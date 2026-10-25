@@ -10,13 +10,60 @@ use std::{
 
 /// Edits kept per session; the oldest go first.
 const KEPT: usize = 64;
-/// A file before and after one edit (`None`: absent).
+/// A file before and after one edit (`None`: absent), `mark` its place among all sessions' edits.
 struct Change {
     path: PathBuf,
     before: Option<String>,
     after: Option<String>,
+    mark: u64,
 }
 static CHANGES: LazyLock<Mutex<HashMap<String, Vec<Change>>>> = LazyLock::new(Default::default);
+/// The last edit's mark (any session's); edits after a [`mark`] have greater ones.
+static MARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where the edit records are now: [`edited_since`] this mark lists the edits made after it.
+#[must_use]
+pub fn mark() -> u64 {
+    MARK.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A file `session`'s edits changed since a [`mark`], with the lines added and removed between its content
+/// before the first of them and after the last. Edits taken back by `undo_edit` don't count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edited {
+    pub path: PathBuf,
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// The files `session` (its id) changed with the edit tools after `mark`, in the order first edited; a file
+/// back as it was is left out. Only the last 64 edits per session are kept, so a long turn may miss some.
+#[must_use]
+pub fn edited_since(session: &str, mark: u64) -> Vec<Edited> {
+    let all = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut files: Vec<(&Path, Option<&str>, Option<&str>)> = Vec::new();
+    for change in all.get(session).into_iter().flatten().filter(|c| c.mark > mark) {
+        match files.iter_mut().find(|f| f.0 == change.path) {
+            Some(file) => file.2 = change.after.as_deref(),
+            None => files.push((&change.path, change.before.as_deref(), change.after.as_deref())),
+        }
+    }
+    files
+        .into_iter()
+        .filter(|(_, before, after)| before != after)
+        .map(|(path, before, after)| {
+            let (mut added, mut removed) = (0, 0);
+            for change in similar::TextDiff::from_lines(before.unwrap_or_default(), after.unwrap_or_default()).iter_all_changes() {
+                match change.tag() {
+                    similar::ChangeTag::Insert => added += 1,
+                    similar::ChangeTag::Delete => removed += 1,
+                    similar::ChangeTag::Equal => {}
+                }
+            }
+            Edited { path: path.to_path_buf(), added, removed }
+        })
+        .collect()
+}
 
 fn session(cx: &ToolCx) -> String {
     cx.sessions.first().cloned().unwrap_or_default()
@@ -26,7 +73,8 @@ fn session(cx: &ToolCx) -> String {
 pub(crate) fn record(cx: &ToolCx, path: &Path, before: Option<&str>, after: Option<&str>) {
     let mut all = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
     let changes = all.entry(session(cx)).or_default();
-    changes.push(Change { path: path.into(), before: before.map(Into::into), after: after.map(Into::into) });
+    let mark = MARK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    changes.push(Change { path: path.into(), before: before.map(Into::into), after: after.map(Into::into), mark });
     if changes.len() > KEPT {
         changes.remove(0);
     }
