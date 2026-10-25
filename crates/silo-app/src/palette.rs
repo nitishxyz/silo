@@ -713,7 +713,7 @@ impl Workspace {
         self.cancel_preview(window, cx);
         if let Some(palette) = self.palette.take() {
             drop(palette);
-            self.refocus_terminal(window, cx);
+            self.refocus_block(window, cx);
             cx.notify();
         }
     }

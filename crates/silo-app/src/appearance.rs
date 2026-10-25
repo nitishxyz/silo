@@ -53,7 +53,7 @@ impl Workspace {
             focus.focus(window, cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
         } else {
-            self.refocus_terminal(window, cx);
+            self.refocus_block(window, cx);
         }
         cx.notify();
     }
@@ -87,7 +87,7 @@ impl Workspace {
                     if ev.keystroke.key == "escape" {
                         cx.stop_propagation();
                         this.close_appearance_menu(cx);
-                        this.refocus_terminal(window, cx);
+                        this.refocus_block(window, cx);
                     }
                 }))
                 .absolute()
@@ -128,7 +128,7 @@ impl Workspace {
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.appearance_menu.open = false;
                     this.appearance_menu.closed_at = Some(Instant::now());
-                    this.refocus_terminal(window, cx);
+                    this.refocus_block(window, cx);
                     cx.notify();
                 }))
                 .into_any_element(),

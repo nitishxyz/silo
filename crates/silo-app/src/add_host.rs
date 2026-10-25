@@ -169,7 +169,7 @@ impl Workspace {
 
     pub(crate) fn close_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_host = None;
-        self.refocus_terminal(window, cx);
+        self.refocus_block(window, cx);
         cx.notify();
     }
 

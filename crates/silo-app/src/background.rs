@@ -87,7 +87,7 @@ impl Workspace {
             focus.focus(window, cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
         } else {
-            self.refocus_terminal(window, cx);
+            self.refocus_block(window, cx);
         }
         cx.notify();
     }
@@ -118,7 +118,7 @@ impl Workspace {
             "backspace" | "delete" => self.background_close(selected, window, cx),
             "escape" => {
                 self.close_background_menu(cx);
-                self.refocus_terminal(window, cx);
+                self.refocus_block(window, cx);
             }
             _ => return,
         }
@@ -204,7 +204,7 @@ impl Workspace {
                 )
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.close_background_menu(cx);
-                    this.refocus_terminal(window, cx);
+                    this.refocus_block(window, cx);
                 }))
                 .into_any_element(),
         )

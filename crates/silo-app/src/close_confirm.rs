@@ -325,7 +325,7 @@ impl Workspace {
     fn refocus_after_close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.settings {
             Some(modal) => modal.panel.update(cx, |panel, cx| panel.focus_search(window, cx)),
-            None => self.refocus_terminal(window, cx),
+            None => self.refocus_block(window, cx),
         }
     }
 

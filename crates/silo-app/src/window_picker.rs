@@ -118,7 +118,7 @@ impl Workspace {
 
     pub(crate) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker.take().is_some() {
-            self.refocus_terminal(window, cx);
+            self.refocus_block(window, cx);
             cx.notify();
         }
     }

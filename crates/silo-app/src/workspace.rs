@@ -1062,8 +1062,8 @@ impl Workspace {
         }
     }
 
-    /// Return keyboard focus to the terminal after closing an overlay.
-    pub(crate) fn refocus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Return keyboard focus to the focused block (any kind) after closing an overlay.
+    pub(crate) fn refocus_block(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_window().map(|w| w.focused.clone()).filter(|b| self.has_pane(b)) {
             Some(block) => self.focus_block(&block, window, cx),
             // No terminal (server stopped, no session): keep key bindings
@@ -1144,10 +1144,15 @@ impl Workspace {
         self.blocks.terminal(&block).cloned()
     }
 
+    /// The folder a block works in, for a new block split off it.
     pub(crate) fn cwd_of(&self, block: &str, cx: &gpui::App) -> Option<String> {
+        if !self.block_kind(block).has_folder() {
+            return None;
+        }
+        // A terminal's pane hears of a new cwd before the view does.
         match self.blocks.terminal(block) {
             Some(p) => p.read(cx).info.as_ref().and_then(|i| i.cwd.clone()),
-            None => self.block_info(block).filter(|i| matches!(i.kind, BlockKind::Agent | BlockKind::Files)).and_then(|i| i.cwd.clone()),
+            None => self.block_info(block).and_then(|i| i.cwd.clone()),
         }
     }
 
@@ -1537,7 +1542,7 @@ impl Render for Workspace {
                     && !this.background_shown()
                     && !this.launcher.is_open()
                 {
-                    this.refocus_terminal(window, cx);
+                    this.refocus_block(window, cx);
                 }
             });
         }

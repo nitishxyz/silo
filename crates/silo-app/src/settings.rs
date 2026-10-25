@@ -271,7 +271,7 @@ impl Workspace {
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.take().is_some() {
-            self.refocus_terminal(window, cx);
+            self.refocus_block(window, cx);
             cx.notify();
         }
     }

@@ -331,7 +331,8 @@ impl Workspace {
             None => match self.block_kind(id) {
                 crate::blocks::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
                 crate::blocks::Kind::Agent => unsupported(self.agent_unsupported().into()),
-                _ => div().size_full().into_any_element(),
+                // Its pane comes with the view that shows it.
+                crate::blocks::Kind::Terminal | crate::blocks::Kind::Browser | crate::blocks::Kind::Files => div().size_full().into_any_element(),
             },
         };
         let fill_color = self.card_fill(id, cx);

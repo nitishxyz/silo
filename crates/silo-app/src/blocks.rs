@@ -54,6 +54,15 @@ impl Kind {
         }
     }
 
+    /// Whether it works in a folder, which a block split off it starts in.
+    #[must_use]
+    pub fn has_folder(self) -> bool {
+        match self {
+            Self::Terminal | Self::Agent | Self::Files => true,
+            Self::Browser | Self::Unsupported => false,
+        }
+    }
+
     /// How its pane leaves the tiled layout; `alive`: the block is still in
     /// the session (floated, parked, moved), so its pane may be drawn there.
     #[must_use]
@@ -445,6 +454,12 @@ mod tests {
         assert_eq!(kind_of(Some(&info("b", BlockKind::Terminal))), Kind::Terminal);
         assert_eq!(kind_of(Some(&info("b", BlockKind::Unknown))), Kind::Unsupported);
         assert_eq!(kind_of(None), Kind::Terminal);
+    }
+
+    #[test]
+    fn splits_start_in_the_folder_of_a_kind_that_has_one() {
+        let with: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.has_folder()).collect();
+        assert_eq!(with, [Kind::Terminal, Kind::Agent, Kind::Files]);
     }
 
     #[test]
