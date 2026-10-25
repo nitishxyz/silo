@@ -10,7 +10,14 @@
 #   scripts/bundle-macos.sh            # release build
 #   PROFILE=debug scripts/bundle-macos.sh
 #   SILO_APP_FEATURES="" scripts/bundle-macos.sh   # precompiled Metal shaders (needs Xcode Metal toolchain)
+#
+# Always a release-channel build (SILO_CHANNEL=release, crates/silo-channel):
+# Silo.app uses the installed app's homes (~/Library/Application Support/silo
+# and otto-silo), launchd job and bundle id. For a development app use
+# scripts/dev-bundle.sh (SiloDev.app, dev channel: …/silo-dev, otto-silo-dev).
 set -euo pipefail
+
+export SILO_CHANNEL=release
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -29,6 +36,9 @@ cargo build "${cargo_flags[@]}" -p silo-web --bin silo-web-helper
 cargo build "${cargo_flags[@]}" -p silo-app "${app_flags[@]}"
 
 out="$root/target/$profile"
+case "$("$out/silo" --version)" in
+  *" dev") echo "bundle-macos: $out/silo is a dev-channel build" >&2; exit 1 ;;
+esac
 app="$root/target/Silo.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

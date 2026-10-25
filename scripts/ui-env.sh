@@ -1,6 +1,8 @@
 # Helpers for driving silo-app in UI smoke tests: `source scripts/ui-env.sh`.
 # Needs Accessibility + Screen Recording permission for the calling terminal
-# (`ui_perms` reports both). Always runs against a throwaway SILO_HOME.
+# (`ui_perms` reports both). Always runs against a throwaway SILO_HOME (a
+# custom home; the dev bundle is a dev-channel build, so without one it would
+# use ~/Library/Application Support/silo-dev, docs/PLAN.md §5 Channels).
 #
 #   app_start      reuse a running, windowed app; start one otherwise
 #   app_restart    always start a fresh app

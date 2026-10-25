@@ -36,6 +36,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  # As release.yml builds: the channel is part of every crate's build
+  # (silo-channel), so a cache warmed without it would not match.
+  SILO_CHANNEL: release
 
 jobs:
   warm:

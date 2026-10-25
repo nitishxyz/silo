@@ -63,6 +63,11 @@ concurrency:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  # Release-channel builds (crates/silo-channel): the installed app's homes
+  # (~/Library/Application Support/silo, otto-silo), launchd job and bundle
+  # id. Without it every binary would be a dev build. bundle-macos.sh sets
+  # it too; "Package silo" checks the binary.
+  SILO_CHANNEL: release
 
 jobs:
   build:
@@ -157,6 +162,10 @@ jobs:
           set -eu
           bin=target/release/silo
           "$bin" --version
+          # A dev-channel binary says so after its build id.
+          case "$("$bin" --version)" in
+            *" dev") echo "$bin is a dev-channel build (SILO_CHANNEL unset?)" >&2; exit 1 ;;
+          esac
           # silo-proto's build script output holds SILO_BUILD_ID. The cache
           # can keep stale silo-proto build dirs with other ids, so keep the
           # one id this binary embeds.

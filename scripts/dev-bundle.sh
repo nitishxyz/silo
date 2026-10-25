@@ -3,6 +3,11 @@
 #   <target>/debug/SiloDev.app  (exe = silo-app, helpers = copies of it,
 #   framework = symlink into CEF_PATH, silo/silo-menubar/otto-silo next to the exe).
 # Usage: scripts/dev-bundle.sh   (prints the bundle's executable path)
+#
+# The binaries must be dev-channel builds (plain `cargo build`, SILO_CHANNEL
+# unset; crates/silo-channel): SiloDev then uses its own homes
+# (~/Library/Application Support/silo-dev and otto-silo-dev), never the
+# installed Silo's, whatever SILO_HOME it inherits.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,6 +16,12 @@ target="${CARGO_TARGET_DIR:-$root/target}"
 out="$target/debug"
 cef="${CEF_PATH:-$("$root/scripts/fetch-cef.sh" --print)}"
 app="$out/SiloDev.app"
+if [[ -x "$out/silo" ]]; then
+  case "$("$out/silo" --version)" in
+    *" dev") ;;
+    *) echo "dev-bundle: $out/silo is not a dev-channel build (built with SILO_CHANNEL=release, or before channels); rebuild it with plain cargo build" >&2; exit 1 ;;
+  esac
+fi
 framework="Chromium Embedded Framework.framework"
 
 plist() { # exe id [helper]
