@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::agent::*;
+pub use crate::changes::*;
 pub use crate::files::*;
 
 use crate::{
@@ -237,6 +238,22 @@ pub enum Method {
     FilesWrite(FilesWriteParams),
     #[serde(rename = "files.create")]
     FilesCreate(FilesCreateParams),
+    #[serde(rename = "changes.status")]
+    ChangesStatus(ChangesStatusParams),
+    #[serde(rename = "changes.diff")]
+    ChangesDiff(ChangesDiffParams),
+    #[serde(rename = "changes.set")]
+    ChangesSet(ChangesSetParams),
+    #[serde(rename = "changes.stage")]
+    ChangesStage(ChangesHunksParams),
+    #[serde(rename = "changes.unstage")]
+    ChangesUnstage(ChangesHunksParams),
+    #[serde(rename = "changes.revert")]
+    ChangesRevert(ChangesHunksParams),
+    #[serde(rename = "changes.commit")]
+    ChangesCommit(ChangesCommitParams),
+    #[serde(rename = "changes.root")]
+    ChangesRoot(ChangesRootParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -814,6 +831,14 @@ pub const METHODS: &[(&str, &str)] = &[
     ("files.root", "Show another directory in a files block."),
     ("files.write", "Save a text file of a files block atomically, refusing when it changed on disk since the edit's base."),
     ("files.create", "Create a new file in a files block."),
+    ("changes.status", "The changed files of a changes block's scope, with the branch and line counts."),
+    ("changes.diff", "One file's diff hunks in a changes block's scope."),
+    ("changes.set", "Change a changes block's scope, tabs, layout, review comments, agent or marks."),
+    ("changes.stage", "Stage a file, or some of its hunks, in a changes block's repo."),
+    ("changes.unstage", "Unstage a file, or some of its hunks, in a changes block's repo."),
+    ("changes.revert", "Discard a file's work tree changes, or some hunks of them (untracked files go to the Trash)."),
+    ("changes.commit", "Commit the staged changes of a changes block's repo, running its hooks."),
+    ("changes.root", "Review the git repo holding another folder in a changes block."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),
@@ -1011,7 +1036,11 @@ impl RpcError {
     pub const CONFIRM: &str = "confirm";
     /// `files.write`: the file changed on disk since the edit's base;
     /// `data` is the file now (`mtime`, `size`). Write again with `force`.
+    /// `changes.stage`/`unstage`/`revert`: a hunk named is no longer in
+    /// the file, or no longer applies; review it again.
     pub const CONFLICT: &str = "conflict";
+    /// `changes.*`: a git command failed; the message is its output.
+    pub const GIT: &str = "git";
     /// `files.create`: the path is taken.
     pub const EXISTS: &str = "exists";
     /// The file or its folder can't be written (permissions).
@@ -1094,6 +1123,7 @@ pub const EVENTS: &[&str] = &[
     "block.command_finished",
     "session.watchers",
     "files.changed",
+    "changes.changed",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1172,6 +1202,10 @@ pub enum Event {
         #[serde(default)]
         truncated: bool,
     },
+    /// A changes block's repo changed (work tree, index or `HEAD`),
+    /// debounced: re-read its status and the open file.
+    #[serde(rename = "changes.changed")]
+    ChangesChanged { block_id: BlockId },
 }
 
 /// Who made a call: a client's label and, for a process in one of this

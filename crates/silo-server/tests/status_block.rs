@@ -40,6 +40,7 @@ fn info(id: &str, columns: u16) -> BlockInfo {
         browser: None,
         agent: None,
         files: None,
+        changes: None,
     }
 }
 

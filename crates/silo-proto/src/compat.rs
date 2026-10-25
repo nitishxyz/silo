@@ -53,6 +53,10 @@ pub mod feature {
     /// against a base), `files.create`, and `files.read`'s `sha256`. Older
     /// servers answer `method_not_found`, so the app keeps them read-only.
     pub const FILES_WRITE: &str = "files_write";
+    /// Changes blocks (`kind: changes`), the `changes.*` methods and
+    /// `changes.changed` (docs/CHANGES_BLOCK.md). Older servers answer
+    /// `method_not_found`; the app hides Changes there.
+    pub const CHANGES: &str = "changes";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].

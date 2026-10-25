@@ -238,6 +238,10 @@ pub fn need(method: &Method) -> Need {
         | M::FilesReadImage(_)
         | M::FilesFind(_) => rights(Block(BLOCK), View),
         M::FilesSet(_) | M::FilesRoot(_) | M::FilesWrite(_) | M::FilesCreate(_) => rights(Block(BLOCK), Interact),
+        M::ChangesStatus(_) | M::ChangesDiff(_) => rights(Block(BLOCK), View),
+        M::ChangesSet(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) | M::ChangesCommit(_) | M::ChangesRoot(_) => {
+            rights(Block(BLOCK), Interact)
+        }
         M::BlockReport(_)
         | M::BlockNotify(_)
         | M::BrowserClick(_)

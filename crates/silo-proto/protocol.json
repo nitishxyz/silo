@@ -31,6 +31,23 @@
   },
   "events": {
     "$defs": {
+      "AgentLink": {
+        "properties": {
+          "block_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "otto_session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "otto_session"
+        ],
+        "type": "object"
+      },
       "AgentState": {
         "properties": {
           "session_id": {
@@ -131,6 +148,16 @@
             ],
             "default": null
           },
+          "changes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ChangesState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "cwd": {
             "default": null,
             "type": [
@@ -229,6 +256,10 @@
           },
           {
             "const": "files",
+            "type": "string"
+          },
+          {
+            "const": "changes",
             "type": "string"
           },
           {
@@ -462,6 +493,194 @@
         "required": [
           "client_id",
           "label"
+        ],
+        "type": "object"
+      },
+      "ChangeMark": {
+        "properties": {
+          "line": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line"
+        ],
+        "type": "object"
+      },
+      "ChangesScope": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "working",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "staged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unstaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base": {
+                "type": "string"
+              },
+              "head": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "tree",
+                "type": "string"
+              },
+              "label": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "base"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base": {
+                "type": "string"
+              },
+              "head": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "base"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChangesState": {
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "comments": {
+            "items": {
+              "$ref": "#/$defs/ReviewComment"
+            },
+            "type": "array"
+          },
+          "context": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "list": {
+            "default": true,
+            "type": "boolean"
+          },
+          "marks": {
+            "items": {
+              "$ref": "#/$defs/ChangeMark"
+            },
+            "type": "array"
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/ChangesScope",
+            "default": {
+              "kind": "working"
+            }
+          },
+          "split": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
         ],
         "type": "object"
       },
@@ -961,6 +1180,49 @@
         ],
         "type": "string"
       },
+      "ReviewComment": {
+        "properties": {
+          "created_at": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "end_line": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "line": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "side": {
+            "$ref": "#/$defs/Side",
+            "default": "new"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "line",
+          "text"
+        ],
+        "type": "object"
+      },
       "Rights": {
         "oneOf": [
           {
@@ -1183,6 +1445,13 @@
           "blocks"
         ],
         "type": "object"
+      },
+      "Side": {
+        "enum": [
+          "old",
+          "new"
+        ],
+        "type": "string"
       },
       "StatusKind": {
         "enum": [
@@ -1884,6 +2153,30 @@
           },
           "event": {
             "const": "files.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_id"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "changes.changed",
             "type": "string"
           }
         },
@@ -4125,6 +4418,10 @@
                 "type": "string"
               },
               {
+                "const": "changes",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -4283,6 +4580,10 @@
               },
               {
                 "const": "files",
+                "type": "string"
+              },
+              {
+                "const": "changes",
                 "type": "string"
               },
               {
@@ -4490,6 +4791,23 @@
       },
       "result": {
         "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
           "AgentState": {
             "properties": {
               "session_id": {
@@ -4529,6 +4847,16 @@
                   }
                 ],
                 "default": null
+              },
+              "changes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ChangesState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "cwd": {
                 "default": null,
@@ -4628,6 +4956,10 @@
               },
               {
                 "const": "files",
+                "type": "string"
+              },
+              {
+                "const": "changes",
                 "type": "string"
               },
               {
@@ -4744,6 +5076,194 @@
             "required": [
               "process",
               "since"
+            ],
+            "type": "object"
+          },
+          "ChangeMark": {
+            "properties": {
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ChangesScope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "working",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "staged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unstaged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tree",
+                    "type": "string"
+                  },
+                  "label": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "range",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ChangesState": {
+            "properties": {
+              "active": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "comments": {
+                "items": {
+                  "$ref": "#/$defs/ReviewComment"
+                },
+                "type": "array"
+              },
+              "context": {
+                "default": 3,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "list": {
+                "default": true,
+                "type": "boolean"
+              },
+              "marks": {
+                "items": {
+                  "$ref": "#/$defs/ChangeMark"
+                },
+                "type": "array"
+              },
+              "open": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/ChangesScope",
+                "default": {
+                  "kind": "working"
+                }
+              },
+              "split": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "root"
             ],
             "type": "object"
           },
@@ -4943,6 +5463,56 @@
               "indeterminate",
               "pause",
               "unknown"
+            ],
+            "type": "string"
+          },
+          "ReviewComment": {
+            "properties": {
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "end_line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/Side",
+                "default": "new"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          "Side": {
+            "enum": [
+              "old",
+              "new"
             ],
             "type": "string"
           },
@@ -6641,6 +7211,1705 @@
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Empty",
+        "type": "object"
+      }
+    },
+    "changes.commit": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "amend": {
+            "default": false,
+            "type": "boolean"
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "message"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "sha": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha",
+          "summary"
+        ],
+        "title": "ChangesCommitted",
+        "type": "object"
+      }
+    },
+    "changes.diff": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "context": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "DiffLine": {
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LineKind"
+              },
+              "new": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "old": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "Hunk": {
+            "properties": {
+              "header": {
+                "default": "",
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "lines": {
+                "items": {
+                  "$ref": "#/$defs/DiffLine"
+                },
+                "type": "array"
+              },
+              "new_lines": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "new_start": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "old_lines": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "old_start": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "old_start",
+              "old_lines",
+              "new_start",
+              "new_lines",
+              "lines"
+            ],
+            "type": "object"
+          },
+          "LineKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "context",
+                  "added",
+                  "removed",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "no_newline",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "binary": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hunks": {
+            "items": {
+              "$ref": "#/$defs/Hunk"
+            },
+            "type": "array"
+          },
+          "old_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/FileStatus"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "status",
+          "hunks"
+        ],
+        "title": "FileDiff",
+        "type": "object"
+      }
+    },
+    "changes.revert": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "hunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
+    "changes.root": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
+          "ChangeMark": {
+            "properties": {
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ChangesScope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "working",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "staged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unstaged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tree",
+                    "type": "string"
+                  },
+                  "label": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "range",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ReviewComment": {
+            "properties": {
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "end_line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/Side",
+                "default": "new"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          "Side": {
+            "enum": [
+              "old",
+              "new"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "comments": {
+            "items": {
+              "$ref": "#/$defs/ReviewComment"
+            },
+            "type": "array"
+          },
+          "context": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "list": {
+            "default": true,
+            "type": "boolean"
+          },
+          "marks": {
+            "items": {
+              "$ref": "#/$defs/ChangeMark"
+            },
+            "type": "array"
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/ChangesScope",
+            "default": {
+              "kind": "working"
+            }
+          },
+          "split": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "ChangesState",
+        "type": "object"
+      }
+    },
+    "changes.set": {
+      "params": {
+        "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
+          "ChangeMark": {
+            "properties": {
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ChangesScope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "working",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "staged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unstaged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tree",
+                    "type": "string"
+                  },
+                  "label": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "range",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ReviewComment": {
+            "properties": {
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "end_line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/Side",
+                "default": "new"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          "Side": {
+            "enum": [
+              "old",
+              "new"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "comments": {
+            "items": {
+              "$ref": "#/$defs/ReviewComment"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "context": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "list": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "marks": {
+            "items": {
+              "$ref": "#/$defs/ChangeMark"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ChangesScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "split": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
+          "ChangeMark": {
+            "properties": {
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ChangesScope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "working",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "staged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unstaged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tree",
+                    "type": "string"
+                  },
+                  "label": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "range",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ReviewComment": {
+            "properties": {
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "end_line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/Side",
+                "default": "new"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          "Side": {
+            "enum": [
+              "old",
+              "new"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "comments": {
+            "items": {
+              "$ref": "#/$defs/ReviewComment"
+            },
+            "type": "array"
+          },
+          "context": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "list": {
+            "default": true,
+            "type": "boolean"
+          },
+          "marks": {
+            "items": {
+              "$ref": "#/$defs/ChangeMark"
+            },
+            "type": "array"
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/ChangesScope",
+            "default": {
+              "kind": "working"
+            }
+          },
+          "split": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "ChangesState",
+        "type": "object"
+      }
+    },
+    "changes.stage": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "hunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
+    "changes.status": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
+    "changes.unstage": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "hunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
         "type": "object"
       }
     },
@@ -8668,6 +10937,10 @@
                 "type": "string"
               },
               {
+                "const": "changes",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -8985,6 +11258,23 @@
       },
       "result": {
         "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
           "AgentState": {
             "properties": {
               "session_id": {
@@ -9031,6 +11321,16 @@
                   }
                 ],
                 "default": null
+              },
+              "changes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ChangesState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "cwd": {
                 "default": null,
@@ -9130,6 +11430,10 @@
               },
               {
                 "const": "files",
+                "type": "string"
+              },
+              {
+                "const": "changes",
                 "type": "string"
               },
               {
@@ -9246,6 +11550,194 @@
             "required": [
               "process",
               "since"
+            ],
+            "type": "object"
+          },
+          "ChangeMark": {
+            "properties": {
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ChangesScope": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "working",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "staged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unstaged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tree",
+                    "type": "string"
+                  },
+                  "label": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "base": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "range",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "base"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ChangesState": {
+            "properties": {
+              "active": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "comments": {
+                "items": {
+                  "$ref": "#/$defs/ReviewComment"
+                },
+                "type": "array"
+              },
+              "context": {
+                "default": 3,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "list": {
+                "default": true,
+                "type": "boolean"
+              },
+              "marks": {
+                "items": {
+                  "$ref": "#/$defs/ChangeMark"
+                },
+                "type": "array"
+              },
+              "open": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/ChangesScope",
+                "default": {
+                  "kind": "working"
+                }
+              },
+              "split": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "root"
             ],
             "type": "object"
           },
@@ -9569,6 +12061,49 @@
             ],
             "type": "string"
           },
+          "ReviewComment": {
+            "properties": {
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "end_line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/Side",
+                "default": "new"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
           "Rights": {
             "oneOf": [
               {
@@ -9633,6 +12168,13 @@
               "created_at"
             ],
             "type": "object"
+          },
+          "Side": {
+            "enum": [
+              "old",
+              "new"
+            ],
+            "type": "string"
           },
           "StatusKind": {
             "enum": [
@@ -10290,6 +12832,10 @@
               },
               {
                 "const": "files",
+                "type": "string"
+              },
+              {
+                "const": "changes",
                 "type": "string"
               },
               {

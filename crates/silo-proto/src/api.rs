@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::access::{Rights, Scope};
 use crate::agent::*;
+use crate::changes::*;
 use crate::control::{
     ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
     GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted, Reveal,
@@ -13,7 +14,9 @@ use crate::control::{
 };
 use crate::data::{ClipKind, ClipboardLocation};
 use crate::files::*;
-use crate::model::{Axis, BlockKind, FilesState, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize};
+use crate::model::{
+    Axis, BlockKind, ChangeMark, ChangesScope, ChangesState, FilesState, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize,
+};
 
 /// The description of method `name`; `None` for an unknown method.
 #[must_use]
@@ -117,6 +120,10 @@ fn result_schema(method: &Method) -> Schema {
         M::FilesFind(_) => schema_for!(FileFound),
         M::FilesSet(_) | M::FilesRoot(_) => schema_for!(FilesState),
         M::FilesWrite(_) | M::FilesCreate(_) => schema_for!(FileWritten),
+        M::ChangesStatus(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) => schema_for!(ChangesStatus),
+        M::ChangesDiff(_) => schema_for!(FileDiff),
+        M::ChangesSet(_) | M::ChangesRoot(_) => schema_for!(ChangesState),
+        M::ChangesCommit(_) => schema_for!(ChangesCommitted),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -279,6 +286,21 @@ pub fn examples() -> Vec<Method> {
             force: false,
         }),
         M::FilesCreate(FilesCreateParams { block_id: b(), path: "src/new.rs".into(), text: String::new() }),
+        M::ChangesStatus(ChangesStatusParams { block_id: b() }),
+        M::ChangesDiff(ChangesDiffParams { block_id: b(), path: "src/main.rs".into(), context: Some(3) }),
+        M::ChangesSet(ChangesSetParams {
+            block_id: b(),
+            scope: Some(ChangesScope::Range { base: "main".into(), head: None }),
+            active: Some("src/main.rs".into()),
+            split: Some(true),
+            marks: Some(vec![ChangeMark { path: "src/main.rs".into(), line: 12, note: Some("check this".into()) }]),
+            ..ChangesSetParams::default()
+        }),
+        M::ChangesStage(ChangesHunksParams { block_id: b(), path: "src/main.rs".into(), hunks: Some(vec!["3f9a1c0d5e7b2a46".into()]) }),
+        M::ChangesUnstage(ChangesHunksParams { block_id: b(), path: "src/main.rs".into(), hunks: None }),
+        M::ChangesRevert(ChangesHunksParams { block_id: b(), path: "src/main.rs".into(), hunks: Some(vec!["3f9a1c0d5e7b2a46".into()]) }),
+        M::ChangesCommit(ChangesCommitParams { block_id: b(), message: "Fix the lockfile".into(), amend: false }),
+        M::ChangesRoot(ChangesRootParams { block_id: b(), path: "~/src/silo".into() }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

@@ -30,6 +30,7 @@ impl Block {
             BlockKind::Browser => Ok(Self::Browser(Box::new(BrowserBlock::restore(info)?))),
             BlockKind::Agent => Ok(Self::Agent(Box::new(AgentBlock::restore(info)?))),
             BlockKind::Files => Ok(Self::Files(Box::new(FilesBlock::restore(info)?))),
+            BlockKind::Changes => anyhow::bail!("changes blocks are not supported yet"),
             BlockKind::Terminal | BlockKind::Unknown => anyhow::bail!("block {} has a process", info.id),
         }
     }

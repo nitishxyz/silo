@@ -19,6 +19,7 @@ fn block(id: &str, kind: BlockKind) -> BlockInfo {
         browser: None,
         agent: None,
         files: None,
+        changes: None,
     }
 }
 

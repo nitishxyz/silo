@@ -2041,6 +2041,7 @@ mod tests {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         }
     }
 

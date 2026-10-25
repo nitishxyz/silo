@@ -30,6 +30,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
         browser: None,
         agent: None,
         files: None,
+        changes: None,
     }
 }
 

@@ -85,7 +85,7 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
         Some(BlockKind::Browser) => Kind::Browser,
         Some(BlockKind::Agent) => Kind::Agent,
         Some(BlockKind::Files) => Kind::Files,
-        Some(BlockKind::Unknown) => Kind::Unsupported,
+        Some(BlockKind::Changes | BlockKind::Unknown) => Kind::Unsupported,
     }
 }
 
@@ -425,6 +425,7 @@ mod tests {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         }
     }
 

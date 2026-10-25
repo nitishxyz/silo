@@ -243,6 +243,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::AppRequest { .. } => Some(feature::APP_REQUESTS),
         Event::BlockStatus { .. } | Event::BlockAttention { .. } | Event::CommandFinished { .. } => Some(feature::STATUS),
         Event::FilesChanged { .. } => Some(feature::FILES),
+        Event::ChangesChanged { .. } => Some(feature::CHANGES),
         Event::SessionsChanged { .. }
         | Event::SessionChanged { .. }
         | Event::SessionClosed { .. }
@@ -503,7 +504,10 @@ impl Registry {
             Event::BlockAttention { block_id, session_id, .. } | Event::CommandFinished { block_id, session_id, .. } => {
                 Visibility::Block { block: block_id.clone(), session: Some(session_id.clone()) }
             }
-            Event::BlockBell { block_id } | Event::BrowserCommand { block_id, .. } | Event::FilesChanged { block_id, .. } => block(block_id),
+            Event::BlockBell { block_id }
+            | Event::BrowserCommand { block_id, .. }
+            | Event::FilesChanged { block_id, .. }
+            | Event::ChangesChanged { block_id } => block(block_id),
             Event::BlockStatus { status } => block(&status.block_id),
             Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
             // Sent with `emit_clients` to their recipients only.
@@ -807,6 +811,7 @@ impl Registry {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         };
         if new.kind == BlockKind::Files {
             let root = crate::files::paths::new_root(None, spawn.cwd.as_deref().unwrap_or("~"))?;
@@ -967,6 +972,7 @@ impl Registry {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         };
         let mut config = spawn_config(&id, command, cwd.as_deref());
         config.env.extend(env.into_iter().map(|(k, v)| (k.into(), v.into())));
@@ -1907,6 +1913,7 @@ mod tests {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         };
         let config = spawn_config("b", &["/bin/sh".into(), "-c".into(), script.into()], None);
         let mut handle = block::spawn(info, &config, notes.clone()).unwrap();

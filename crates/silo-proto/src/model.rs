@@ -370,6 +370,9 @@ pub enum BlockKind {
     /// A read-only view of a directory on the server (feature `files`);
     /// no process.
     Files,
+    /// A review of code changes in a git repo on the server (feature
+    /// `changes`, docs/CHANGES_BLOCK.md); no process.
+    Changes,
     /// A block kind of a newer server: shown as unsupported.
     #[serde(other)]
     Unknown,
@@ -438,6 +441,179 @@ pub struct BlockInfo {
     /// (boxed: most blocks have none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Box<FilesState>>,
+    /// View state; `Some` exactly when `kind` is [`BlockKind::Changes`]
+    /// (boxed: most blocks have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Box<ChangesState>>,
+}
+
+/// Server-held state of a changes block (docs/CHANGES_BLOCK.md §1). Paths
+/// are relative to `root`, `/`-separated, without `.` or `..` components.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesState {
+    /// The repo's top level (absolute, canonical); the block never reads
+    /// outside it. Not a git repo: the folder it was opened in
+    /// (`changes.status` answers `repo: false`).
+    pub root: String,
+    /// What is compared.
+    #[serde(default)]
+    pub scope: ChangesScope,
+    /// Open file tabs, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open: Vec<String>,
+    /// The file shown; `None`: the summary of every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// The file list is shown.
+    #[serde(default = "shown")]
+    pub list: bool,
+    /// Side by side; false: unified.
+    #[serde(default)]
+    pub split: bool,
+    /// Context lines around each hunk.
+    #[serde(default = "ChangesState::default_context")]
+    pub context: u32,
+    /// Review comments not sent yet (docs/CHANGES_BLOCK.md §5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<ReviewComment>,
+    /// The agent the review goes back to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentLink>,
+    /// Lines an agent marked with `changes_show`, with notes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<ChangeMark>,
+}
+
+impl ChangesState {
+    /// Most open tabs.
+    pub const OPEN_MAX: usize = 100;
+    /// Most review comments.
+    pub const COMMENTS_MAX: usize = 500;
+    /// Longest comment, in characters.
+    pub const COMMENT_MAX: usize = 10_000;
+    /// Most context lines.
+    pub const CONTEXT_MAX: u32 = 10_000;
+
+    #[must_use]
+    pub const fn default_context() -> u32 {
+        3
+    }
+
+    /// A fresh state on `root`: the working tree, no tabs, the list shown.
+    #[must_use]
+    pub fn new(root: String) -> Self {
+        Self {
+            root,
+            scope: ChangesScope::default(),
+            open: Vec::new(),
+            active: None,
+            list: true,
+            split: false,
+            context: Self::default_context(),
+            comments: Vec::new(),
+            agent: None,
+            marks: Vec::new(),
+        }
+    }
+}
+
+/// What a changes block compares.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangesScope {
+    /// Work tree and index against `HEAD`, untracked files included.
+    #[default]
+    Working,
+    /// The index against `HEAD`.
+    Staged,
+    /// The work tree against the index, untracked files included.
+    Unstaged,
+    /// Between two tree ids (otto's turn snapshots); `head` `None`: the
+    /// work tree now (untracked files included). Read-only with a `head`.
+    Tree {
+        base: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+        /// "Turn 4", "This session".
+        #[serde(default)]
+        label: String,
+    },
+    /// Between revisions (`base` "main", `head` "otto"); `head` `None`:
+    /// the work tree (untracked files included). Read-only with a `head`.
+    Range {
+        base: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+    },
+    /// A scope of a newer peer.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ChangesScope {
+    /// Stage, unstage and revert are refused (`bad_request`).
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        match self {
+            Self::Tree { head, .. } | Self::Range { head, .. } => head.is_some(),
+            Self::Unknown => true,
+            Self::Working | Self::Staged | Self::Unstaged => false,
+        }
+    }
+}
+
+/// A side of a diff.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Old,
+    #[default]
+    New,
+}
+
+/// A review comment on line `line` (to `end_line`) of `path`'s `side`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewComment {
+    pub id: String,
+    pub path: String,
+    #[serde(default)]
+    pub side: Side,
+    /// 1-based.
+    pub line: u32,
+    /// The range's last line (inclusive), when more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    pub text: String,
+    /// Unix ms.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// The agent a changes block's review goes back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentLink {
+    /// The otto session.
+    pub otto_session: String,
+    /// The agent block that shows the session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<BlockId>,
+}
+
+/// A line (new side, 1-based) of a file marked by an agent's
+/// `changes_show`, with an optional short note.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeMark {
+    pub path: String,
+    pub line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ChangeMark {
+    /// Most marks per block.
+    pub const MAX: usize = 50;
+    /// Longest note, in characters.
+    pub const NOTE_MAX: usize = 300;
 }
 
 /// Server-held state of a files block (docs/FILES_BLOCK.md §1). Paths are

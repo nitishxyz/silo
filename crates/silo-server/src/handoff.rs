@@ -690,6 +690,7 @@ mod tests {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         };
         let config = silo_pty::SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], ..Default::default() };
         let handle = block::spawn(info.clone(), &config, notes.clone()).unwrap();

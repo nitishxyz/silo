@@ -10,6 +10,7 @@
 pub mod access;
 pub mod agent;
 pub mod api;
+pub mod changes;
 pub mod compat;
 pub mod control;
 pub mod data;

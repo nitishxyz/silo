@@ -30,6 +30,7 @@ fn info(id: &str) -> BlockInfo {
         browser: None,
         agent: None,
         files: None,
+        changes: None,
     }
 }
 

@@ -603,6 +603,7 @@ impl Workspace {
             }
             // No files view yet (docs/FILES_BLOCK.md §6 step 3).
             ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
+            ConnEvent::Event(Event::ChangesChanged { .. }) => {}
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some(pane) = self.blocks.browser(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));

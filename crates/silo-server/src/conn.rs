@@ -796,6 +796,14 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::FilesRoot(_)
         | Method::FilesWrite(_)
         | Method::FilesCreate(_) => crate::files::handle(server, method).await,
+        Method::ChangesStatus(_)
+        | Method::ChangesDiff(_)
+        | Method::ChangesSet(_)
+        | Method::ChangesStage(_)
+        | Method::ChangesUnstage(_)
+        | Method::ChangesRevert(_)
+        | Method::ChangesCommit(_)
+        | Method::ChangesRoot(_) => Err(RpcError::method_not_found(&api::method_name(&method))),
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }
         | Method::WindowStep { .. }

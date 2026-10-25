@@ -1124,6 +1124,7 @@ mod tests {
             browser: None,
             agent: None,
             files: None,
+            changes: None,
         };
         assert_eq!(header_labels(Some(&info("-zsh", Some(format!("{home}/dev"))))), ("zsh".into(), Some("~/dev".into())));
         assert_eq!(header_labels(Some(&info("", None))), ("shell".into(), None));
