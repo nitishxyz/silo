@@ -46,6 +46,12 @@ pub(super) fn hunk_title(h: &silo_proto::changes::Hunk) -> SharedString {
     }
 }
 
+/// The sideways scroll `x`, kept between the start and where the longest
+/// line (`widest`) ends at the right of a `view` wide code column.
+pub(super) fn sideways(x: f32, widest: f32, view: f32) -> f32 {
+    x.clamp(0.0, (widest - view + 24.0).max(0.0))
+}
+
 fn alpha(c: u32, a: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
     h.a = a;
@@ -308,7 +314,43 @@ impl ChangesPane {
             .font_family(SharedString::from(family))
             .text_size(px(m.size))
             .line_height(px(m.line));
-        div().size_full().pb(px(8.0)).child(list).into_any_element()
+        let width = self.body_width.clone();
+        div()
+            .size_full()
+            .pb(px(8.0))
+            .child(list)
+            .child(gpui::canvas(move |bounds, _, _| width.set(f32::from(bounds.size.width)), |_, _, _, _| {}).absolute().size_full())
+            .on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
+                let d = e.delta.pixel_delta(px(m.line));
+                let (dx, dy) = (f32::from(d.x), f32::from(d.y));
+                // ⇧ turns a mouse wheel sideways.
+                let dx = if e.modifiers.shift && dx == 0.0 { dy } else { dx };
+                if dx.abs() <= dy.abs() && !e.modifiers.shift {
+                    return;
+                }
+                let next = sideways(this.scroll_x - dx, this.widest_line(m), this.code_width(m));
+                if next != this.scroll_x {
+                    this.scroll_x = next;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// The longest shown line's width (px).
+    fn widest_line(&self, m: Metrics) -> f32 {
+        let chars = self.shown.files.iter().flat_map(|l| &l.diff.hunks).flat_map(|h| &h.lines).map(|l| l.text.chars().count()).max().unwrap_or(0);
+        #[allow(clippy::cast_precision_loss)]
+        let chars = chars as f32;
+        chars * m.cell
+    }
+
+    /// The width code shows in (one side's, when split).
+    fn code_width(&self, m: Metrics) -> f32 {
+        let numbers = self.number_width(m);
+        let gutter = m.cell + 6.0 + PAD;
+        let width = self.body_width.get();
+        if self.state.split { width / 2.0 - numbers - gutter } else { width - numbers * 2.0 - gutter }
     }
 
     fn render_row(&mut self, ix: usize, m: Metrics, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -609,7 +651,14 @@ impl ChangesPane {
             .child(self.number(("changes-old", ix), &path, Side::Old, line.old.filter(|_| line.kind != LineKind::Added), numbers, cx))
             .child(self.number(("changes-new", ix), &path, Side::New, line.new.filter(|_| line.kind != LineKind::Removed), numbers, cx))
             .child(div().flex_none().w(px(m.cell + 6.0)).text_color(rgb(theme::muted())).child(sign))
-            .child(div().flex_1().min_w_0().overflow_hidden().pr(px(PAD)).child(Self::styled(&loaded, hunk, at, word, bg)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .pr(px(PAD))
+                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(&loaded, hunk, at, word, bg))),
+            )
             .children(mark)
             .into_any_element()
     }
@@ -653,7 +702,14 @@ impl ChangesPane {
             .when(picked, |el| el.bg(alpha(theme::selection(), 0.55)))
             .child(self.number((id, ix), &path, side, n, numbers, cx))
             .child(div().flex_none().w(px(m.cell + 6.0)).text_color(rgb(theme::muted())).child(sign))
-            .child(div().flex_1().min_w_0().overflow_hidden().pr(px(PAD)).child(Self::styled(&loaded, hunk, at, word, bg)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .pr(px(PAD))
+                    .child(div().ml(px(-self.scroll_x)).child(Self::styled(&loaded, hunk, at, word, bg))),
+            )
             .children(mark)
             .into_any_element()
     }

@@ -249,3 +249,12 @@ fn a_hunk_bar_without_a_header_names_its_lines() {
     assert_eq!(super::view::hunk_title(&hunk("", (0, 0), (1, 57))), "Lines 1\u{2013}57", "a new file");
     assert_eq!(super::view::hunk_title(&hunk("", (4, 1), (0, 0))), "Line 4", "a deleted line");
 }
+
+#[test]
+fn sideways_scroll_stops_at_the_longest_line() {
+    use super::view::sideways;
+    assert_eq!(sideways(-30.0, 900.0, 400.0), 0.0);
+    assert_eq!(sideways(200.0, 900.0, 400.0), 200.0);
+    assert_eq!(sideways(2000.0, 900.0, 400.0), 524.0, "the end of the longest line, with a little room");
+    assert_eq!(sideways(50.0, 300.0, 400.0), 0.0, "nothing to scroll when every line fits");
+}

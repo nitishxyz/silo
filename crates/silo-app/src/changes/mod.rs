@@ -134,6 +134,11 @@ pub struct ChangesPane {
     pub(crate) current: Option<(String, String)>,
     /// The hunk (file, hunk) under the mouse: its bar shows its actions.
     pub(crate) hovered: Option<(usize, usize)>,
+    /// How far the code is scrolled sideways (px); the line numbers stay.
+    pub(crate) scroll_x: f32,
+    /// The diff's width as last laid out, to stop the sideways scroll at the
+    /// longest line's end.
+    pub(crate) body_width: std::rc::Rc<std::cell::Cell<f32>>,
     pub(crate) selection: Option<LineSel>,
     pub(crate) composing: Option<Composing>,
     pub(crate) picker: Option<Picker>,
@@ -195,6 +200,8 @@ impl ChangesPane {
             expanded: HashSet::new(),
             current: None,
             hovered: None,
+            scroll_x: 0.0,
+            body_width: std::rc::Rc::default(),
             selection: None,
             composing: None,
             picker: None,
