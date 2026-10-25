@@ -946,8 +946,9 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
 ## 8. `otto-server` and protocol
 
 - Same framing and conventions as silo (§2.1). Control frames are JSON-RPC style; events carry a per-session `seq`
-  plus a global `seq` for the session index. Clients do `session.view` (snapshot) and then events from `seq`;
-  overflow closes the connection.
+  plus a global `seq` for the session index. Clients do `session.view` (snapshot of the newest items that fit;
+  older pages on demand, below) and then events from `seq`; overflow closes the connection, an oversized reply
+  does not.
 - Listen: a unix socket under `<state>/server.sock` (§3.1), with the peer uid as owner. Remote: only through silo
   tunnels (§9).
 - Methods (sketch): `server.info`, `api.list/describe`, `project.open/list`, `session.create/list/view/fork/rename/
@@ -977,6 +978,34 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `compaction` resets `used` to 0 until the next step, a model change sets `window`. `usage` (the session's
   totals) stays cumulative.
 - `api.describe` and `protocol.json` pinning work as in silo; `otto-proto` builds for wasm32.
+- **Bounded views and frames** (additive, `otto_proto::clip`). A frame is at most `MAX_FRAME` (16 MiB), and a
+  session's items can be far larger (screenshots, page dumps), so:
+  - `session.view {session_id, limit?, before_seq?}` returns the newest items that fit `VIEW_BUDGET` (8 MiB of
+    serialized items, clipped as below), at most `limit`; with `before_seq` (an item sequence: the previous
+    reply's `oldest_seq`) the newest stored before it, as a page. Items stored at one sequence (a fork's) are never
+    split. The reply adds `has_older` (more are stored) and `oldest_seq`; with `has_older`, `todos` carries the
+    latest `update_todos` call's input when that call is older than `items`, so the todo list is complete from the
+    newest window. `running_tool_calls`, the pending approvals and questions, the queue, `info` (title, usage,
+    context) and `part_times` (for the items sent) are complete as before. A view with no params, an older
+    client's, gets the same newest window. otto's own `Runtime::view` still reads every item, unclipped.
+  - An item over `ITEM_BUDGET` (256 KB serialized) reaches clients clipped: long text keeps its head (¾) and
+    tail with `[… 2.1 MB clipped …]` between them, provider-opaque data is dropped, a tool result's images and
+    documents become a text part `[image/png, 2.1 MB: not sent to this client]` (elsewhere, a media part keeps
+    its mime and name with empty data), and `Item.clipped` holds its size before. The same applies to journal
+    events as sent (`item.done`; `tool.result` outputs, whose images keep `type`/`mime` with empty
+    `data_base64` and gain `bytes`, the output gaining `clipped: {bytes}`; large `tool.call`/`approval.requested`
+    inputs and `tool.progress` output), on replay and live. The stored item and what the model sees are untouched.
+  - Nothing over a frame reaches the writer: a response becomes the error `too_large` (`data: {bytes, max}`) for
+    that request, a journal event a malformed-event notice (clients fetch `session.view` again), a live overlay
+    is dropped. The connection stays open.
+  - Clients: `SessionMirror` has `has_older`, `oldest_seq`, `todos`; `prepend(page)` puts an older page before the
+    loaded items (skipping ones it has, shifting live compactions); a resync keeps pages loaded before
+    (`keep_older`). `SessionFollower::load_older()` fetches one page (`PAGE_ITEMS`, 200) and prepends it. The agent
+    pane opens with a "Load earlier messages" row while `has_older`, keeps the rows on screen where they were,
+    and notes a clipped result under its output (`Output clipped (2.1 MB)`).
+  - Compatibility: an older server ignores `limit`/`before_seq` and sends every item without `has_older`, so a
+    new client never pages (a page it is sent anyway only adds the items it lacks). An older client ignores the
+    new fields; it sees the newest window as the whole session and clipped items as they are.
 
 ---
 
