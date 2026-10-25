@@ -90,7 +90,8 @@ impl AppLauncher {
 }
 
 const SETTINGS_URL: &str = "silo://settings";
-const BUNDLE_ID: &str = "xyz.nitish.silo";
+/// This channel's app (`xyz.nitish.silo`, dev `xyz.nitish.silo.dev`).
+const BUNDLE_ID: &str = silo_proto::CHANNEL.bundle_id();
 
 fn activate_running(name: &str) -> bool {
     let script = format!(

@@ -77,14 +77,6 @@ pub struct Config {
     pub switches: Vec<String>,
 }
 
-impl Config {
-    /// `~/Library/Application Support/Silo/web`.
-    pub fn default_root() -> Result<PathBuf> {
-        let home = std::env::var_os("HOME").context("HOME unset")?;
-        Ok(PathBuf::from(home).join("Library/Application Support/Silo/web"))
-    }
-}
-
 /// The CEF engine. One per process, main thread only.
 pub struct Runtime {
     profiles_dir: PathBuf,

@@ -79,70 +79,101 @@ use crate::{
     workspace::Workspace,
 };
 
-/// Home a development build uses when `SILO_HOME` is unset, so opening it
-/// by hand can never take over the installed Silo's server and sessions.
-const DEV_HOME: &str = "/tmp/silo-dev";
-
-/// The home to force for executable `exe` (`SiloDev` is the dev bundle's,
-/// `scripts/dev-bundle.sh`) given `SILO_HOME` (`set`): unset, or the installed
-/// app's own home (`installed`), which every Silo terminal exports, so a dev
-/// build opened from one took over the installed server, its sessions and
-/// its otto. Any other `SILO_HOME` is kept.
-fn dev_home(exe: Option<&std::ffi::OsStr>, set: Option<&std::path::Path>, installed: &std::path::Path) -> Option<&'static str> {
-    let ours = set.is_none_or(|home| same_dir(home, installed));
-    (ours && exe.is_some_and(|name| name == "SiloDev")).then_some(DEV_HOME)
+/// The overrides this build refuses, each with this channel's home to use
+/// instead and the warning: a `SILO_HOME` (`silo`) or `OTTO_SILO_HOME`
+/// (`otto`) naming the other channel's default home. Every Silo terminal
+/// exports the installed app's `SILO_HOME`, so a dev build opened from one
+/// would otherwise serve the installed Silo's home: its server (taken over),
+/// sessions, otto and sign-ins.
+fn refused_homes(
+    channel: silo_proto::Channel,
+    silo: &silo_proto::paths::Home,
+    otto: &otto_proto::paths::Home,
+) -> Vec<(String, std::path::PathBuf, String)> {
+    let otto_var = format!("{}_HOME", otto_proto::ENV_PREFIX);
+    [("SILO_HOME".to_owned(), silo), (otto_var, otto)]
+        .into_iter()
+        .filter_map(|(var, home)| Some((var.clone(), home.path.clone(), home.warning(&var, channel)?)))
+        .collect()
 }
 
-fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
-    a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
-}
-
-/// A dev bundle gets [`DEV_HOME`] unless `SILO_HOME` names another home than
-/// the installed app's. Runs before any other thread starts, so setting the
-/// environment is sound; the server, menu-bar agent and otto it starts
-/// inherit it (otto's home follows Silo's).
-fn dev_home_guard() {
-    let exe = std::env::current_exe().ok();
-    let set = std::env::var_os("SILO_HOME").filter(|h| !h.is_empty()).map(std::path::PathBuf::from);
-    let installed = {
-        // SAFETY: as below; read the default with SILO_HOME cleared.
-        let saved = std::env::var_os("SILO_HOME");
-        unsafe { std::env::remove_var("SILO_HOME") };
-        let home = silo_proto::paths::home();
-        if let Some(saved) = saved {
-            unsafe { std::env::set_var("SILO_HOME", saved) };
-        }
-        home
-    };
-    if let Some(home) = dev_home(exe.as_deref().and_then(std::path::Path::file_name), set.as_deref(), &installed) {
-        if set.is_some() {
-            eprintln!("silo: SiloDev ignores SILO_HOME {} (the installed Silo's) and uses {home}", installed.display());
-        }
-        // SAFETY: called first thing in `main`, before any thread exists.
-        unsafe { std::env::set_var("SILO_HOME", home) };
-    }
+/// Replace refused overrides ([`refused_homes`]) with this channel's homes,
+/// so this process and the server, menu-bar agent and otto it starts agree;
+/// the warnings, to log once logging runs. The channel is the build's
+/// (`SILO_CHANNEL` at compile time), never guessed from the executable.
+/// Runs before any other thread starts, so setting the environment is sound.
+fn channel_guard() -> Vec<String> {
+    let refused = refused_homes(silo_proto::CHANNEL, &silo_proto::paths::resolve_home(), &otto_proto::paths::resolve_home());
+    refused
+        .into_iter()
+        .map(|(var, home, warning)| {
+            // SAFETY: called first thing in `main`, before any thread exists.
+            unsafe { std::env::set_var(var, home) };
+            warning
+        })
+        .collect()
 }
 
 #[cfg(test)]
-mod dev_home_tests {
-    use std::ffi::OsStr;
+mod channel_guard_tests {
+    use std::{ffi::OsString, path::PathBuf};
 
-    use std::path::Path;
+    use silo_proto::Channel;
 
-    use super::{DEV_HOME, dev_home};
+    use super::refused_homes;
+
+    type Vars = &'static [(&'static str, &'static str)];
+
+    /// What a build of `channel` replaces given `env` on macOS.
+    fn fixes(channel: Channel, env: Vars) -> Vec<(String, PathBuf)> {
+        let var = |name: &str| env.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(*v));
+        let (silo, otto) = (silo_proto::paths::resolve_home_with(channel, &var, true), otto_proto::paths::resolve_home_with(channel, &var, true));
+        refused_homes(channel, &silo, &otto).into_iter().map(|(var, home, _)| (var, home)).collect()
+    }
 
     #[test]
-    fn the_dev_bundle_never_uses_the_installed_home() {
-        let installed = Path::new("/h/Library/Application Support/silo");
-        let dev = Some(OsStr::new("SiloDev"));
-        assert_eq!(dev_home(dev, None, installed), Some(DEV_HOME));
-        // A Silo terminal exports the installed home: opening SiloDev from one took over production.
-        assert_eq!(dev_home(dev, Some(installed), installed), Some(DEV_HOME));
-        assert_eq!(dev_home(dev, Some(Path::new("/tmp/silo-ui")), installed), None, "another SILO_HOME is kept");
-        assert_eq!(dev_home(Some(OsStr::new("Silo")), None, installed), None, "the installed app keeps its home");
-        assert_eq!(dev_home(Some(OsStr::new("Silo")), Some(installed), installed), None);
-        assert_eq!(dev_home(Some(OsStr::new("silo-app")), None, installed), None);
-        assert_eq!(dev_home(None, None, installed), None);
+    fn the_other_channels_homes_are_replaced() {
+        const RELEASE: &str = "/h/Library/Application Support/silo";
+        let release = RELEASE;
+        let dev = PathBuf::from("/h/Library/Application Support/silo-dev");
+        // A dev build opened from an installed Silo's terminal (tonight's takeover).
+        assert_eq!(fixes(Channel::Dev, &[("HOME", "/h"), ("SILO_HOME", RELEASE)]), [("SILO_HOME".to_owned(), dev.clone())]);
+        assert_eq!(
+            fixes(Channel::Dev, &[("HOME", "/h"), ("SILO_HOME", RELEASE), ("OTTO_SILO_HOME", "/h/Library/Application Support/otto-silo")]),
+            [("SILO_HOME".to_owned(), dev), ("OTTO_SILO_HOME".to_owned(), PathBuf::from("/h/Library/Application Support/otto-silo-dev"))]
+        );
+        // The reverse: the installed app opened from a dev build's terminal.
+        assert_eq!(
+            fixes(Channel::Release, &[("HOME", "/h"), ("SILO_HOME", "/h/Library/Application Support/silo-dev")]),
+            [("SILO_HOME".to_owned(), PathBuf::from(release))]
+        );
+    }
+
+    #[test]
+    fn other_homes_are_kept() {
+        for channel in [Channel::Dev, Channel::Release] {
+            assert_eq!(fixes(channel, &[("HOME", "/h")]), [], "{channel}: no override");
+            assert_eq!(fixes(channel, &[("HOME", "/h"), ("SILO_HOME", "/tmp/silo-ui")]), [], "{channel}: a custom home (ui-env.sh)");
+            assert_eq!(fixes(channel, &[("HOME", "/h"), ("OTTO_SILO_HOME", "/tmp/o")]), [], "{channel}: a custom otto home");
+        }
+        assert_eq!(fixes(Channel::Dev, &[("HOME", "/h"), ("SILO_HOME", "/h/Library/Application Support/silo-dev")]), [], "its own home");
+    }
+
+    #[test]
+    fn the_warning_names_both_homes() {
+        let var = |name: &str| match name {
+            "HOME" => Some(OsString::from("/h")),
+            "SILO_HOME" => Some(OsString::from("/h/Library/Application Support/silo")),
+            _ => None,
+        };
+        let (silo, otto) =
+            (silo_proto::paths::resolve_home_with(Channel::Dev, &var, true), otto_proto::paths::resolve_home_with(Channel::Dev, &var, true));
+        let refused = refused_homes(Channel::Dev, &silo, &otto);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(
+            refused[0].2,
+            "SILO_HOME=/h/Library/Application Support/silo is the release build's home; this dev build never uses it and uses /h/Library/Application Support/silo-dev instead"
+        );
     }
 }
 
@@ -153,7 +184,7 @@ fn main() {
     }
     // The app's calls are the user's own: they need no approval.
     silo_client::set_role(silo_proto::control::ClientRole::App);
-    dev_home_guard();
+    let refused = channel_guard();
     // Closes that would end running programs are asked about here.
     silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     silo_client::advertise(silo_proto::compat::feature::BROWSER_ACTIONS);
@@ -169,6 +200,9 @@ fn main() {
     }
     if let Err(error) = &log {
         tracing::warn!("app log {}: {error}", home.join("app.log").display());
+    }
+    for warning in refused {
+        tracing::warn!("{warning}");
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("silo-net").enable_all().build().expect("tokio runtime");

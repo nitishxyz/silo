@@ -219,7 +219,9 @@ fn with_origin<T>(server_exe: &Path, f: impl FnOnce(&Origin) -> T) -> T {
     let silo_home = std::env::var_os("SILO_HOME");
     f(&Origin {
         silo_home: silo_home.as_deref(),
-        release: !cfg!(debug_assertions),
+        // A release-channel build (SILO_CHANNEL=release): a dev build never
+        // runs the launchd job or the updater, whatever its bundle says.
+        release: !cfg!(debug_assertions) && silo_proto::CHANNEL == silo_proto::Channel::Release,
         app_exe: &app_exe,
         server_exe,
         bundle_id: silo_client::update::plist_string(&plist, "CFBundleIdentifier"),

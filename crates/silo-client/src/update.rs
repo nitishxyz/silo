@@ -37,8 +37,9 @@ use std::{
 
 use silo_proto::{release, upgrade};
 
-/// Silo.app's bundle identifier.
-pub const APP_ID: &str = "xyz.nitish.silo";
+/// Silo.app's bundle identifier: the release channel's, the only one the
+/// updater installs or replaces (a dev bundle is `xyz.nitish.silo.dev`).
+pub const APP_ID: &str = silo_proto::Channel::Release.bundle_id();
 /// Posted (a Darwin notification) once [`install`] replaced Silo.app: a
 /// running app restarts into the new version.
 #[cfg(target_os = "macos")]

@@ -32,7 +32,13 @@ pub fn home() -> PathBuf {
 /// [`home`] and the `SILO_HOME` it refused, if any.
 #[must_use]
 pub fn resolve_home() -> Home {
-    silo_channel::silo_home(crate::CHANNEL, &env, MACOS)
+    resolve_home_with(crate::CHANNEL, &env, MACOS)
+}
+
+/// [`resolve_home`] for a `channel` build, environment `var` and OS rule.
+#[must_use]
+pub fn resolve_home_with(channel: crate::Channel, var: silo_channel::Var, macos: bool) -> Home {
+    silo_channel::silo_home(channel, var, macos)
 }
 
 /// This channel's default home (what [`home`] is without `SILO_HOME`).

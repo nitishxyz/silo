@@ -4,7 +4,6 @@
 
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
@@ -27,18 +26,12 @@ pub struct CachedTree {
     pub view: SessionView,
 }
 
-/// Cache root: `$SILO_HOME/cache` when `SILO_HOME` is set (tests, dev
-/// instances), else `~/Library/Caches/silo`.
+/// Cache root: `$SILO_HOME/cache` for a custom home (tests, UI runs),
+/// else the channel's `~/Library/Caches/silo` (dev: `silo-dev`); see
+/// `silo_proto::paths::app_cache`.
 #[must_use]
 pub fn root() -> PathBuf {
-    root_for(std::env::var_os("SILO_HOME"), std::env::var_os("HOME"))
-}
-
-fn root_for(silo_home: Option<OsString>, home: Option<OsString>) -> PathBuf {
-    if let Some(dir) = silo_home.filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir).join("cache");
-    }
-    home.map_or_else(|| PathBuf::from("/tmp"), PathBuf::from).join("Library/Caches/silo")
+    silo_proto::paths::app_cache()
 }
 
 /// Blocks of `old` that `new`, a later view of the same session, no longer
@@ -203,13 +196,6 @@ mod tests {
             status: Vec::new(),
             watchers: Vec::new(),
         }
-    }
-
-    #[test]
-    fn root_follows_silo_home() {
-        assert_eq!(root_for(Some("/tmp/x".into()), Some("/Users/u".into())), PathBuf::from("/tmp/x/cache"));
-        assert_eq!(root_for(Some("".into()), Some("/Users/u".into())), PathBuf::from("/Users/u/Library/Caches/silo"));
-        assert_eq!(root_for(None, Some("/Users/u".into())), PathBuf::from("/Users/u/Library/Caches/silo"));
     }
 
     #[test]
