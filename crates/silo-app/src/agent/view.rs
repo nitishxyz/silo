@@ -919,7 +919,7 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Compaction(_) | Row::Report { .. }) => 12.0,
+            Some(Row::Compaction(_) | Row::Report { .. } | Row::Earlier) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
@@ -975,8 +975,9 @@ impl AgentPane {
         // Gap above the row; a paragraph already ends with 8 of its own.
         let top = match (ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row) {
             (None, _) => 16.0,
+            (Some(Row::Earlier), _) => 8.0,
             (Some(Row::User { .. }), _) => 20.0,
-            (Some(Row::Compaction(_) | Row::Report { .. }), _) | (Some(_), Row::Compaction(_) | Row::Report { .. }) => 12.0,
+            (Some(Row::Compaction(_) | Row::Report { .. }), _) | (Some(_), Row::Compaction(_) | Row::Report { .. } | Row::Earlier) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Group(_)), Row::User { .. }) => 28.0,
             (Some(Row::Text { .. }), _) => 4.0,
@@ -989,6 +990,7 @@ impl AgentPane {
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
             Row::Compaction(c) => self.render_compaction(ix, c, now, cx),
             Row::Report { key, child, title, status, note } => Self::render_report(key, child, title, *status, note.as_deref(), cx),
+            Row::Earlier => self.render_earlier(cx),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
         let content = match enter {
@@ -999,6 +1001,31 @@ impl AgentPane {
             div().w_full().flex().justify_center().px(px(20.0)).pt(px(top)).child(div().w_full().max_w(px(COLUMN)).child(content)).into_any_element();
         keep_moving(window);
         row
+    }
+
+    /// "Load earlier messages": loads one older page (`load_earlier`); while it loads, "Loading earlier messages…".
+    fn render_earlier(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = theme::muted();
+        let (label, glyph) = match (self.loading_earlier, self.earlier_error.as_deref()) {
+            (true, _) => ("Loading earlier messages…".to_owned(), "clock"),
+            (false, Some(error)) => (format!("Couldn't load earlier messages: {error}. Try again"), "rotate-ccw"),
+            (false, None) => ("Load earlier messages".to_owned(), "history"),
+        };
+        div()
+            .id("load-earlier")
+            .h(px(LINE_H))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .text_size(px(12.5))
+            .text_color(rgb(muted))
+            .cursor_pointer()
+            .hover(|s| s.text_color(rgb(theme::foreground())))
+            .child(icon(glyph, 13.0, muted))
+            .child(label)
+            .on_click(cx.listener(|this, _, _, cx| this.load_earlier(cx)))
+            .into_any_element()
     }
 
     /// `bot  Sub-agent finished · title` (or `asks` / `needs approval`), quiet; a click opens the child, its error or reply is the tooltip.
@@ -1485,7 +1512,7 @@ impl AgentPane {
             }
         }
         let detail = (openness > 0.0)
-            .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, &self.scroll)))
+            .then(|| line.detail.as_ref().map(|d| render_detail(&key, d, line.clipped, &self.scroll)))
             .flatten()
             // The gap is the wrapper's padding: a margin on the box collapsed out of the (block) line, so the next row
             // overlapped the box once it was fully open. The box reports its height (a live window's budget).
@@ -2749,7 +2776,22 @@ fn nowrap_lines<'a>(lines: impl Iterator<Item = (&'a str, Option<u32>)>) -> gpui
     }))
 }
 
-fn render_detail(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
+fn render_detail(key: &str, detail: &Detail, clipped: Option<u64>, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
+    let muted = theme::muted();
+    let body = render_detail_body(key, detail, scroll);
+    match clipped {
+        // otto sent the result clipped (its head and tail): say so under it.
+        Some(bytes) => div()
+            .flex()
+            .flex_col()
+            .child(body)
+            .child(div().ml(px(24.0)).pt(px(4.0)).text_size(px(11.5)).text_color(rgb(muted)).child(transcript::clipped_note(bytes)))
+            .into_any_element(),
+        None => body,
+    }
+}
+
+fn render_detail_body(key: &str, detail: &Detail, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
     let muted = theme::muted();
     let id = format!("detail-{key}");
     let base = div()

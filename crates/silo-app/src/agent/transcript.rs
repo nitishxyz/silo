@@ -120,6 +120,8 @@ pub struct Line {
     pub preview: bool,
     /// The title's `{left}` counts down to this time (pane ms): `in 12s`, then `now`.
     pub until: Option<u64>,
+    /// otto sent this result clipped (it was this many bytes): its detail says so.
+    pub clipped: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,7 +162,13 @@ pub enum Row {
         /// Its error, else the start of its reply (the tooltip).
         note: Option<String>,
     },
+    /// Older messages are stored than are loaded (`SessionMirror::has_older`): the
+    /// "Load earlier messages" row that opens the transcript.
+    Earlier,
 }
+
+/// The key of [`Row::Earlier`].
+pub const EARLIER: &str = "earlier";
 
 /// A compaction of the history, live or stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +329,7 @@ impl Row {
             Row::User { key, .. } | Row::Text { key, .. } | Row::Report { key, .. } => key,
             Row::Group(g) => &g.key,
             Row::Compaction(c) => &c.key,
+            Row::Earlier => EARLIER,
         }
     }
 }
@@ -356,14 +365,29 @@ pub struct ListChange {
     pub remeasure: std::ops::Range<usize>,
     /// The old range replaced, and how many rows replace it.
     pub splice: Option<(std::ops::Range<usize>, usize)>,
+    /// Rows came in before the old ones (an earlier page), which all stay, in
+    /// order, after them: the view keeps showing what it showed.
+    pub prepended: bool,
 }
 
 #[must_use]
 pub fn list_change(old: &[Row], new: &[Row]) -> ListChange {
     let same = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    // An earlier page: the old rows after the load row (which may leave) end the new list, keys unchanged.
+    let kept = old[same..].iter().skip_while(|r| matches!(r, Row::Earlier)).count();
+    let from = old.len() - kept;
+    if kept > 0 && new.len() > same + kept && old[from..].iter().zip(&new[new.len() - kept..]).all(|(a, b)| a.key() == b.key()) {
+        let changed: Vec<usize> = old[from..].iter().zip(&new[new.len() - kept..]).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+        let inserted = new.len() - same - kept;
+        let remeasure = match (changed.first(), changed.last()) {
+            (Some(first), Some(last)) => from + first..from + last + 1,
+            _ => same..same,
+        };
+        return ListChange { remeasure, splice: Some((same..from, inserted)), prepended: true };
+    }
     let at = same + old[same..].iter().zip(&new[same..]).take_while(|(a, b)| a.key() == b.key()).count();
     let splice = (at < old.len() || at < new.len()).then(|| (at..old.len(), new.len() - at));
-    ListChange { remeasure: same..at, splice }
+    ListChange { remeasure: same..at, splice, prepended: false }
 }
 
 /// Keys showing for the first time: new rows and new lines of live groups.
@@ -580,6 +604,31 @@ fn results(items: &[Item]) -> HashMap<&str, (String, bool)> {
     map
 }
 
+/// Tool results otto clipped for this client (`Item::clipped`): the result item's size before, by call id.
+fn clipped_results(items: &[Item]) -> HashMap<&str, u64> {
+    let mut map = HashMap::new();
+    for item in items {
+        let Some(bytes) = item.clipped else { continue };
+        for part in &item.parts {
+            if let Part::ToolResult { call_id, .. } = part {
+                map.insert(call_id.as_str(), bytes);
+            }
+        }
+    }
+    map
+}
+
+/// A tool result's size before otto clipped it: the live result's (`clipped.bytes` of its output), else its item's.
+fn clipped(live: Option<&ToolState>, stored: Option<u64>) -> Option<u64> {
+    live.and_then(|t| t.output.as_ref()).and_then(|o| o["clipped"]["bytes"].as_u64()).or(stored)
+}
+
+/// The note under a clipped tool result's output.
+#[must_use]
+pub fn clipped_note(bytes: u64) -> String {
+    format!("Output clipped ({})", otto_proto::clip::size_label(bytes))
+}
+
 pub struct Input<'a> {
     pub items: &'a [Item],
     pub tools: &'a HashMap<String, ToolState>,
@@ -595,6 +644,8 @@ pub struct Input<'a> {
     pub home: Option<&'a str>,
     pub times: &'a Times,
     pub now: u64,
+    /// Older items are stored than `items` holds: the transcript opens with [`Row::Earlier`].
+    pub older: bool,
 }
 
 struct Ctx<'a> {
@@ -718,6 +769,10 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     // Messages since the last checkpoint: what the next one summarises.
     let mut messages = 0;
     let mut rows = Vec::new();
+    if input.older {
+        rows.push(Row::Earlier);
+    }
+    let clips = clipped_results(input.items);
     let mut lines = Vec::new();
     // The item of the last text: a reply streams only while its item ends the transcript (a turn otto started
     // with a notice, a sub-agent's or a job's, must not stream the finished reply before it again).
@@ -768,7 +823,10 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
                             lines.extend(reasoning(&format!("{}#{pi}", item.id), body, live, &cx));
                         }
                         Part::ToolCall { call_id, name, input: args, .. } => {
-                            lines.push(tool(call_id, name, args, input.tools.get(call_id), results.get(call_id.as_str()), &cx));
+                            let live = input.tools.get(call_id);
+                            let mut line = tool(call_id, name, args, live, results.get(call_id.as_str()), &cx);
+                            line.clipped = clipped(live, clips.get(call_id.as_str()).copied());
+                            lines.push(line);
                         }
                         // Threshold compaction: the provider's checkpoint opens the reply.
                         Part::Compaction { summary, .. } => {
@@ -804,11 +862,13 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
         rows.push(Row::Compaction(Compaction::live(c)));
     }
     for (id, t) in pending {
-        lines.push(match streaming(t) {
+        let mut line = match streaming(t) {
             // Shown as it will run, from what of its input arrived: the same row, filling in.
             Some((name, input)) => tool(id, name, &input, Some(t), None, &cx),
             None => tool(id, &t.name, &t.input, Some(t), None, &cx),
-        });
+        };
+        line.clipped = clipped(Some(t), None);
+        lines.push(line);
     }
     if let Some(error) = input.error.map(str::trim).filter(|e| !e.is_empty()) {
         lines.push(Line {
@@ -851,6 +911,7 @@ impl Line {
             clock: false,
             preview: false,
             until: None,
+            clipped: None,
         }
     }
     /// The title as shown at `now` (pane ms): a countdown filled in.
@@ -1464,10 +1525,11 @@ fn parse_todos(input: &Value) -> Vec<Todo> {
         .collect()
 }
 
-/// The session's todo list: the latest `update_todos` call's input.
+/// The session's todo list: the latest `update_todos` call's input. `older`: the latest call's
+/// input before the loaded items, when otto sent only the newest (`SessionMirror::todos`).
 #[must_use]
-pub fn todos(items: &[Item], tools: &HashMap<String, ToolState>, times: &Times) -> Vec<Todo> {
-    let mut latest = None;
+pub fn todos(items: &[Item], tools: &HashMap<String, ToolState>, times: &Times, older: Option<&Value>) -> Vec<Todo> {
+    let mut latest = older;
     for item in items {
         for (_, name, input) in item.tool_calls() {
             if name == "update_todos" {
@@ -1807,7 +1869,19 @@ mod tests {
     }
 
     fn build_rows(items: &[Item], tools: &HashMap<String, ToolState>, turn: Option<TurnStatus>, times: &Times, now: u64) -> Vec<Row> {
-        build(&Input { items, tools, turn, error: None, retrying: None, compactions: &[], cwd: Some("/work/app"), home: None, times, now })
+        build(&Input {
+            items,
+            tools,
+            turn,
+            error: None,
+            retrying: None,
+            compactions: &[],
+            cwd: Some("/work/app"),
+            home: None,
+            times,
+            now,
+            older: false,
+        })
     }
 
     fn group_of(row: &Row) -> &Group {
@@ -1833,7 +1907,19 @@ mod tests {
 
     fn with_compactions(items: &[Item], compactions: &[Compacting], turn: Option<TurnStatus>) -> Vec<Row> {
         let times = Times::default();
-        build(&Input { items, tools: &HashMap::new(), turn, error: None, retrying: None, compactions, cwd: None, home: None, times: &times, now: 0 })
+        build(&Input {
+            items,
+            tools: &HashMap::new(),
+            turn,
+            error: None,
+            retrying: None,
+            compactions,
+            cwd: None,
+            home: None,
+            times: &times,
+            now: 0,
+            older: false,
+        })
     }
 
     fn card(row: &Row) -> &Compaction {
@@ -2095,13 +2181,13 @@ mod tests {
         assert_eq!(g1.lines[..2], g0.lines[..], "earlier lines are unchanged");
         assert_eq!(arrivals(&before, &after, |k| entered.contains_key(k)), ["c2"], "only the new line enters");
         // The group is remeasured in place, never spliced (which drops the scroll anchor).
-        assert_eq!(list_change(&before, &after), ListChange { remeasure: 1..2, splice: None });
-        assert_eq!(list_change(&after, &after), ListChange { remeasure: 2..2, splice: None });
+        assert_eq!(list_change(&before, &after), ListChange { remeasure: 1..2, splice: None, prepended: false });
+        assert_eq!(list_change(&after, &after), ListChange { remeasure: 2..2, splice: None, prepended: false });
 
         // Text after the group: the group folds in place, the text is new.
         items.push(assistant("c", vec![Part::text("Done.")]));
         let done = build_rows(&items, &tools, Some(TurnStatus::Running), &times, 1_300);
-        assert_eq!(list_change(&after, &done), ListChange { remeasure: 1..2, splice: Some((2..2, 1)) });
+        assert_eq!(list_change(&after, &done), ListChange { remeasure: 1..2, splice: Some((2..2, 1)), prepended: false });
         assert_eq!(arrivals(&after, &done, |k| entered.contains_key(k)), ["c#t0"]);
     }
 
@@ -2513,6 +2599,7 @@ mod tests {
             home: None,
             times: &times,
             now: 0,
+            older: false,
         });
         let g = group_of(&rows[1]);
         assert_eq!((g.lines[1].title.as_str(), g.lines[1].kind), ("rate limited", Kind::Error));
@@ -2537,6 +2624,7 @@ mod tests {
             home: None,
             times: &times,
             now: 0,
+            older: false,
         };
         let rows = build(&input);
         let g = group_of(&rows[1]);
@@ -2572,6 +2660,7 @@ mod tests {
             home: None,
             times: &times,
             now: 1_000,
+            older: false,
         };
         let rows = build(&input(TurnStatus::Running));
         let g = group_of(&rows[1]);
@@ -2761,7 +2850,7 @@ mod tests {
                 )],
             ),
         ];
-        let todos = todos(&items, &HashMap::new(), &Times::default());
+        let todos = todos(&items, &HashMap::new(), &Times::default(), None);
         assert_eq!(todos.len(), 4);
         assert_eq!(progress(&todos), (1, 3));
         assert_eq!(current(&todos).map(|t| t.step.as_str()), Some("Fix"));
@@ -2938,5 +3027,97 @@ mod tests {
             vec![Part::text("[attachment att_3f2a9c1b: logo.png, image/png, 180 KB — copy_attachment can save it into the project]")],
         )];
         assert_eq!(attachment_names(&items), HashMap::from([("att_3f2a9c1b".to_owned(), "logo.png".to_owned())]));
+    }
+
+    fn page(items: &[Item], has_older: bool, oldest_seq: i64) -> otto_proto::SessionView {
+        let mut view: otto_proto::SessionView = serde_json::from_value(json!({"info":{"id":"s","project_id":"p","agent":"a","provider":"p","model":"m","title":"t","cwd":"/","status":"idle","created_at":0,"updated_at":0,"last_seq":50,"usage":{"usage":{"input":0,"output":0},"cost_usd":0.0}},"items":[],"pending_approvals":[],"pending_questions":[],"queue":[],"running_tool_calls":[],"seq":50})).unwrap();
+        view.items = items.to_vec();
+        (view.has_older, view.oldest_seq) = (has_older, Some(oldest_seq));
+        view
+    }
+
+    fn exchange(n: usize) -> Vec<Item> {
+        vec![user(&format!("u{n}"), &format!("question {n}")), assistant(&format!("a{n}"), vec![Part::text(format!("answer {n}"))])]
+    }
+
+    fn mirror_rows(m: &otto_client::SessionMirror) -> Vec<Row> {
+        let times = Times::default();
+        let input = Input {
+            items: &m.items,
+            tools: &m.tools,
+            turn: None,
+            error: None,
+            retrying: None,
+            compactions: &m.compactions,
+            cwd: None,
+            home: None,
+            times: &times,
+            now: 0,
+            older: m.has_older,
+        };
+        build(&input)
+    }
+
+    #[test]
+    fn earlier_pages_load_above_the_transcript_and_keep_its_rows_in_place() {
+        let mut m = otto_client::SessionMirror::new(page(&[exchange(3), exchange(4)].concat(), true, 30));
+        let first = mirror_rows(&m);
+        assert_eq!(first[0], Row::Earlier);
+        assert_eq!(first.iter().map(Row::key).collect::<Vec<_>>(), [EARLIER, "u3", "a3#t0", "u4", "a4#t0"]);
+
+        // A page that leaves more: the load row stays first, the page goes in under it, the old rows are untouched.
+        assert_eq!(m.prepend(page(&exchange(2), true, 20)), 2);
+        let second = mirror_rows(&m);
+        assert_eq!(second.iter().map(Row::key).collect::<Vec<_>>(), [EARLIER, "u2", "a2#t0", "u3", "a3#t0", "u4", "a4#t0"]);
+        let change = list_change(&first, &second);
+        assert_eq!(change, ListChange { remeasure: 1..1, splice: Some((1..1, 2)), prepended: true });
+
+        // The last page: the load row goes, and its place is part of the splice.
+        assert_eq!(m.prepend(page(&exchange(1), false, 10)), 2);
+        let last = mirror_rows(&m);
+        assert!(!last.contains(&Row::Earlier));
+        assert_eq!(last.len(), 8);
+        assert_eq!(list_change(&second, &last), ListChange { remeasure: 0..0, splice: Some((0..1, 2)), prepended: true });
+
+        // Rows that only grow at the end are no prepend.
+        let mut more = last.clone();
+        more.push(Row::Text { key: "a5#t0".into(), text: "x".into(), streaming: false });
+        assert!(!list_change(&last, &more).prepended);
+        assert!(!list_change(&more, &last).prepended);
+    }
+
+    #[test]
+    fn clipped_results_say_so_and_older_todos_fill_in() {
+        let mut clipped = tool_item("t", vec![result("c", "head\n\n[… 1.8 MB clipped …]\n\ntail", false)]);
+        clipped.clipped = Some(2_202_009);
+        let items = vec![user("u", "shoot"), assistant("a", vec![call("c", "browser_screenshot", json!({}))]), clipped];
+        let rows = build_rows(&items, &HashMap::new(), Some(TurnStatus::Done), &Times::default(), 0);
+        let line = &group_of(&rows[1]).lines[0];
+        assert_eq!(line.clipped, Some(2_202_009));
+        assert!(matches!(&line.detail, Some(Detail::Mono(t)) if t.ends_with("tail")));
+        assert_eq!(clipped_note(2_202_009), "Output clipped (2.1 MB)");
+        // Seen live: the result's output carries it.
+        let mut tools = HashMap::new();
+        let output = json!({"content": [{"type": "text", "text": "x"}], "clipped": {"bytes": 3_000_000}});
+        tools.insert("c".to_owned(), ToolState { name: "shell".into(), status: ToolStatus::Done, output: Some(output), ..ToolState::default() });
+        let live = build_rows(&items[..2], &tools, Some(TurnStatus::Done), &Times::default(), 0);
+        assert_eq!(group_of(&live[1]).lines[0].clipped, Some(3_000_000));
+        // Not clipped: no note.
+        let plain = build_rows(
+            &[items[0].clone(), items[1].clone(), tool_item("t", vec![result("c", "x", false)])],
+            &HashMap::new(),
+            None,
+            &Times::default(),
+            0,
+        );
+        assert_eq!(group_of(&plain[1]).lines[0].clipped, None);
+
+        // The todo list from before the loaded items, until a newer call replaces it.
+        let older = json!({"todos": [{"step": "Old plan", "status": "in_progress"}]});
+        let shown = todos(&items, &HashMap::new(), &Times::default(), Some(&older));
+        assert_eq!(shown.iter().map(|t| t.step.as_str()).collect::<Vec<_>>(), ["Old plan"]);
+        let newer = assistant("n", vec![call("n1", "update_todos", json!({"todos": [{"step": "New plan", "status": "pending"}]}))]);
+        let shown = todos(&[newer], &HashMap::new(), &Times::default(), Some(&older));
+        assert_eq!(shown.iter().map(|t| t.step.as_str()).collect::<Vec<_>>(), ["New plan"]);
     }
 }

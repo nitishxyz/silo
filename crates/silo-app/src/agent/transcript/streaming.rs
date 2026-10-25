@@ -66,6 +66,7 @@ impl Session {
             home: None,
             times,
             now: 0,
+            older: false,
         })
     }
 

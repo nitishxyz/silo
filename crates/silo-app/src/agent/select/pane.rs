@@ -160,7 +160,7 @@ impl Source for Rows<'_> {
             },
             // A compaction's summary while it's open (the view parses it only then).
             Row::Compaction(c) => self.parsed.get(&c.key).map(|doc| block_leaves(&c.key, doc.blocks())).unwrap_or_default(),
-            Row::Group(_) | Row::Report { .. } => Vec::new(),
+            Row::Group(_) | Row::Report { .. } | Row::Earlier => Vec::new(),
         }
     }
 }

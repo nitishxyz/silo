@@ -303,6 +303,10 @@ pub struct AgentPane {
     sessions: Vec<SessionInfo>,
     follower: Option<std::sync::Arc<SessionFollower>>,
     pump: Option<Task<()>>,
+    /// An earlier page is loading (`load_earlier`).
+    loading_earlier: bool,
+    /// Loading the earlier page failed: the row says so and tries again on a click.
+    earlier_error: Option<String>,
     generation: u64,
     state: Option<FollowerState>,
     /// Loading the shown session failed.
@@ -498,6 +502,8 @@ impl AgentPane {
             sessions: Vec::new(),
             follower: None,
             pump: None,
+            loading_earlier: false,
+            earlier_error: None,
             generation: 0,
             state: None,
             error: None,
@@ -846,6 +852,8 @@ impl AgentPane {
         let generation = self.generation;
         self.follower = None;
         self.pump = None;
+        self.loading_earlier = false;
+        self.earlier_error = None;
         self.state = None;
         self.error = None;
         self.notice = None;
@@ -948,6 +956,29 @@ impl AgentPane {
         }));
     }
 
+    /// "Load earlier messages": one older page, prepended (`SessionFollower::load_older`); the list keeps
+    /// showing what it showed (`sync_rows`).
+    fn load_earlier(&mut self, cx: &mut Context<Self>) {
+        let Some(follower) = self.follower.clone().filter(|_| !self.loading_earlier) else { return };
+        self.loading_earlier = true;
+        self.earlier_error = None;
+        cx.notify();
+        let generation = self.generation;
+        let task = self.rt.spawn(async move { follower.load_older().await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| describe(&e)));
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.loading_earlier = false;
+                this.earlier_error = result.err();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn set_status(&mut self, status: AgentStatus, cx: &mut Context<Self>) {
         if self.status != Some(status) {
             self.status = Some(status);
@@ -994,8 +1025,9 @@ impl AgentPane {
             home: self.home.as_deref(),
             times: &self.times,
             now,
+            older: m.has_older,
         });
-        let mut todos = transcript::todos(&m.items, &m.tools, &self.times);
+        let mut todos = transcript::todos(&m.items, &m.tools, &self.times, m.todos.as_ref());
         for todo in &mut todos {
             todo.step = transcript::display(&todo.step, cwd.as_deref(), self.home.as_deref());
         }
@@ -1045,8 +1077,23 @@ impl AgentPane {
         if !change.remeasure.is_empty() {
             self.list.remeasure_items(change.remeasure);
         }
+        // An earlier page came in above: the row at the top stays at the top (the load row's place goes to the
+        // first row that was below it).
+        let anchor = (change.prepended && matches!(old.first(), Some(Row::Earlier)))
+            .then(|| {
+                let top = self.list.logical_scroll_top();
+                let from = change.splice.as_ref().map_or(0, |(range, _)| range.end);
+                let (ix, offset) = if top.item_ix >= from { (top.item_ix, top.offset_in_item) } else { (from, gpui::px(0.0)) };
+                old.get(ix).map(|r| (r.key().to_owned(), offset))
+            })
+            .flatten();
         if let Some((range, count)) = change.splice {
             self.list.splice(range, count);
+        }
+        if let Some((key, offset)) = anchor
+            && let Some(item_ix) = self.rows.iter().position(|r| r.key() == key)
+        {
+            self.list.scroll_to(gpui::ListOffset { item_ix, offset_in_item: offset });
         }
         // New below only when the user is away from the bottom (not merely between the list's follow updates).
         if changed && !self.tail().at_end && self.primed {
@@ -1090,7 +1137,7 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } => {}
+                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } | Row::Earlier => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
@@ -2123,6 +2170,7 @@ const FOLLOW_RETRY: Duration = Duration::from_secs(2);
 /// Whether `error` is otto being out of reach for now (worth retrying), not
 /// a refusal such as a deleted session.
 pub(crate) fn unreachable(error: &ClientError) -> bool {
+    // `too_large` is an answer: otto is there, the reply wasn't sent.
     matches!(error, ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout)
 }
 
@@ -2137,6 +2185,11 @@ pub(crate) fn describe(error: &ClientError) -> String {
         ClientError::Incompatible { .. } => "This otto is incompatible".to_owned(),
         // otto's hint names its CLI; in the app the way is the Providers view.
         ClientError::Rpc(e) if e.message.starts_with("Auth:") => "Its provider isn't connected. Connect it with /providers.".to_owned(),
+        // otto answered, but what was asked for doesn't fit in one message: not a lost connection.
+        ClientError::Rpc(e) if e.code == otto_proto::RpcError::TOO_LARGE => match e.data.as_ref().and_then(|d| d["bytes"].as_u64()) {
+            Some(bytes) => format!("Too large for otto to send ({})", otto_proto::clip::size_label(bytes)),
+            None => "Too large for otto to send".to_owned(),
+        },
         ClientError::Rpc(e) => e.message.clone(),
         other => other.to_string(),
     }
@@ -2189,6 +2242,12 @@ mod tests {
         let gone = ClientError::Rpc(otto_proto::control::RpcError { code: "not_found".into(), message: "session not found".into(), data: None });
         assert!(!unreachable(&gone), "a deleted session is not retried");
         assert!(!unreachable(&ClientError::Incompatible { expected: 1, got: None }));
+        // A reply too large to send is otto's answer: said plainly, never "Can't reach otto".
+        let large = otto_proto::RpcError::too_large("The reply (25.0 MB is larger than a frame (16.0 MB))")
+            .with_data(serde_json::json!({"bytes": 25 * 1024 * 1024, "max": otto_proto::MAX_FRAME}));
+        assert!(!unreachable(&ClientError::Rpc(large.clone())));
+        assert_eq!(describe(&ClientError::Rpc(large)), "Too large for otto to send (25.0 MB)");
+        assert_eq!(describe(&ClientError::Rpc(otto_proto::RpcError::too_large("x"))), "Too large for otto to send");
     }
 
     #[test]
