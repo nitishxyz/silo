@@ -1,15 +1,18 @@
-//! One handle for a block's pane, whatever its kind.
+//! The block core: what every block kind shares (see `docs/BLOCKS.md`).
 //!
-//! The workspace keeps a map per kind (`panes`, `browsers`, `agents`,
-//! `files`); everything that treats blocks alike (focus, focus navigation,
-//! block info, rendering, the header) goes through [`BlockPane`] instead of
-//! asking each map in turn. Its `match`es are exhaustive, so a new kind is
-//! one variant here and the compiler names every place it must be handled.
+//! [`Kind`] is the client's kind of a block (from its server info), with
+//! what is fixed per kind (its glyph). [`BlockPane`] is one handle for a
+//! block's pane, whatever its kind; [`Blocks`] is the workspace's one list
+//! of them. Everything that treats blocks alike (focus, focus navigation,
+//! block info, rendering, the header, close motion) goes through these
+//! instead of asking for one kind. Their `match`es are exhaustive (no `_`
+//! arms), so a new kind is one variant here and the compiler names every
+//! place it must be handled.
 
 use std::collections::HashMap;
 
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Subscription, Window};
-use silo_proto::model::BlockInfo;
+use silo_proto::model::{BlockInfo, BlockKind};
 
 use crate::{
     agent::AgentPane,
@@ -19,6 +22,50 @@ use crate::{
     pane_header::{self, HeaderParts, HeaderStyle},
     workspace::Workspace,
 };
+
+/// Which pane a block gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Terminal,
+    Browser,
+    /// An otto session; a "Not supported" card on remote hosts.
+    Agent,
+    /// A folder's files.
+    Files,
+    /// A newer server's block kind: no pane, a "Not supported" card.
+    Unsupported,
+}
+
+impl Kind {
+    /// Every kind, for tests that must cover each one.
+    #[cfg(test)]
+    pub const ALL: [Self; 5] = [Self::Terminal, Self::Browser, Self::Agent, Self::Files, Self::Unsupported];
+
+    /// The kind's glyph: lists, tabs, headers and the drag pill.
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Browser => "globe",
+            Self::Agent => crate::agent_block::ICON,
+            Self::Files => crate::files_block::ICON,
+            Self::Unsupported => "info",
+        }
+    }
+}
+
+/// The pane kind of a block the server describes as `info`; a block not
+/// (yet) in the view is a terminal.
+#[must_use]
+pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
+    match info.map(|i| i.kind) {
+        None | Some(BlockKind::Terminal) => Kind::Terminal,
+        Some(BlockKind::Browser) => Kind::Browser,
+        Some(BlockKind::Agent) => Kind::Agent,
+        Some(BlockKind::Files) => Kind::Files,
+        Some(BlockKind::Unknown) => Kind::Unsupported,
+    }
+}
 
 #[derive(Clone)]
 pub(crate) enum BlockPane {
@@ -170,6 +217,11 @@ impl Blocks {
 }
 
 impl Workspace {
+    /// The kind of `block`, from the server's view of it.
+    pub(crate) fn block_kind(&self, block: &str) -> Kind {
+        kind_of(self.block_info(block))
+    }
+
     /// The pane showing `block` here, of any kind.
     pub(crate) fn block_pane(&self, block: &str) -> Option<BlockPane> {
         self.blocks.get(block).cloned()
@@ -200,5 +252,70 @@ impl Workspace {
             return Some(cell);
         }
         self.block_pane(block)?.content_bounds(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use silo_proto::model::{Lifecycle, TermSize};
+
+    use super::*;
+
+    fn info(id: &str, kind: BlockKind) -> BlockInfo {
+        BlockInfo {
+            id: id.into(),
+            session_id: "s".into(),
+            kind,
+            title: String::new(),
+            cwd: None,
+            exited: None,
+            lifecycle: Lifecycle::Running,
+            size: TermSize::new(80, 24),
+            owner: None,
+            owner_name: None,
+            owner_block: None,
+            pid: None,
+            browser: None,
+            agent: None,
+            files: None,
+        }
+    }
+
+    /// Position of `kind` in [`Kind::ALL`]; exhaustive, so a new kind
+    /// can't be left out of it.
+    fn index(kind: Kind) -> usize {
+        match kind {
+            Kind::Terminal => 0,
+            Kind::Browser => 1,
+            Kind::Agent => 2,
+            Kind::Files => 3,
+            Kind::Unsupported => 4,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_kind_once() {
+        let at: Vec<usize> = Kind::ALL.iter().map(|k| index(*k)).collect();
+        assert_eq!(at, (0..Kind::ALL.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn pane_kind_follows_block_kind() {
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Browser))), Kind::Browser);
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Agent))), Kind::Agent);
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Files))), Kind::Files);
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Terminal))), Kind::Terminal);
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Unknown))), Kind::Unsupported);
+        assert_eq!(kind_of(None), Kind::Terminal);
+    }
+
+    #[test]
+    fn every_kind_has_its_own_glyph() {
+        let glyphs: Vec<&str> = Kind::ALL.iter().map(|k| k.icon()).collect();
+        assert_eq!(glyphs, ["terminal", "globe", crate::agent_block::ICON, crate::files_block::ICON, "info"]);
+        let mut unique = glyphs.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), glyphs.len(), "two kinds share a glyph");
     }
 }

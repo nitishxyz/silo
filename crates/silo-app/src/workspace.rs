@@ -895,11 +895,11 @@ impl Workspace {
         self.blocks.retain(|id, _| all.iter().any(|a| a == id));
         let active = self.active_window().cloned();
         let of_kind =
-            |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::browser_pane::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
-        let browsers = of_kind(crate::browser_pane::Kind::Browser);
-        let agents = of_kind(crate::browser_pane::Kind::Agent);
-        let files = of_kind(crate::browser_pane::Kind::Files);
-        let mut unsupported = of_kind(crate::browser_pane::Kind::Unsupported);
+            |kind| -> Vec<String> { view.blocks.iter().filter(|b| crate::blocks::kind_of(Some(b)) == kind).map(|b| b.id.clone()).collect() };
+        let browsers = of_kind(crate::blocks::Kind::Browser);
+        let agents = of_kind(crate::blocks::Kind::Agent);
+        let files = of_kind(crate::blocks::Kind::Files);
+        let mut unsupported = of_kind(crate::blocks::Kind::Unsupported);
         if !self.agents_on(self.active_host) {
             unsupported.extend(agents.iter().cloned());
         }
@@ -1263,7 +1263,7 @@ impl Workspace {
 
     /// How much of block `id`'s header shows: its type's setting.
     pub(crate) fn header_mode(&self, id: &str) -> crate::pane_header::HeaderMode {
-        crate::pane_header::header_mode(crate::browser_pane::kind_of(self.block_info(id)), self.pane_headers())
+        crate::pane_header::header_mode(self.block_kind(id), self.pane_headers())
     }
 
     pub(crate) fn set_density(&mut self, density: hosts::Density, cx: &mut Context<Self>) {

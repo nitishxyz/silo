@@ -13,29 +13,7 @@ use silo_proto::{
 /// Engine changes are reported at most this often.
 pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Which pane a block gets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Terminal,
-    Browser,
-    /// An otto session; a "Not supported" card on remote hosts.
-    Agent,
-    /// A folder's files.
-    Files,
-    /// A newer server's block kind: no pane, a "Not supported" card.
-    Unsupported,
-}
-
-#[must_use]
-pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
-    match info.map(|i| i.kind) {
-        Some(BlockKind::Browser) => Kind::Browser,
-        Some(BlockKind::Agent) => Kind::Agent,
-        Some(BlockKind::Files) => Kind::Files,
-        Some(BlockKind::Unknown) => Kind::Unsupported,
-        _ => Kind::Terminal,
-    }
-}
+use crate::blocks::Kind;
 
 /// What fills a block's icon slot (pane header, tab).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +27,9 @@ pub enum Icon {
 #[must_use]
 pub fn icon_for(kind: Kind, loading: bool, favicon: bool) -> Icon {
     match kind {
-        Kind::Terminal => Icon::Glyph("terminal"),
         Kind::Browser if loading => Icon::Spinner,
         Kind::Browser if favicon => Icon::Favicon,
-        Kind::Browser => Icon::Glyph("globe"),
-        Kind::Agent => Icon::Glyph(crate::agent_block::ICON),
-        Kind::Files => Icon::Glyph(crate::files_block::ICON),
-        Kind::Unsupported => Icon::Glyph("info"),
+        kind => Icon::Glyph(kind.icon()),
     }
 }
 
@@ -2008,8 +1982,6 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
 
 #[cfg(test)]
 mod tests {
-    use silo_proto::model::{Lifecycle, TermSize};
-
     use super::*;
 
     #[test]
@@ -2018,34 +1990,6 @@ mod tests {
         assert!(!close_on_escape(&mut open, "a") && open, "other keys leave it open");
         assert!(close_on_escape(&mut open, "escape") && !open, "Esc closes it and stops there");
         assert!(!close_on_escape(&mut open, "escape"), "closed: Esc goes on (the address cancels, the page gets it)");
-    }
-
-    fn info(kind: BlockKind) -> BlockInfo {
-        BlockInfo {
-            id: "b".into(),
-            session_id: "s".into(),
-            kind,
-            title: String::new(),
-            cwd: None,
-            exited: None,
-            lifecycle: Lifecycle::Running,
-            size: TermSize::new(80, 24),
-            owner: None,
-            owner_name: None,
-            owner_block: None,
-            pid: None,
-            browser: (kind == BlockKind::Browser).then(|| BrowserState::new("about:blank".into())),
-            agent: (kind == BlockKind::Agent).then(Default::default),
-            files: None,
-        }
-    }
-
-    #[test]
-    fn pane_kind_follows_block_kind() {
-        assert_eq!(kind_of(Some(&info(BlockKind::Browser))), Kind::Browser);
-        assert_eq!(kind_of(Some(&info(BlockKind::Agent))), Kind::Agent);
-        assert_eq!(kind_of(Some(&info(BlockKind::Terminal))), Kind::Terminal);
-        assert_eq!(kind_of(None), Kind::Terminal);
     }
 
     #[test]

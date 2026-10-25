@@ -329,9 +329,9 @@ impl Workspace {
             .and_then(|(started, edge)| motion::progress(*started, motion::PANE_ENTER, now).map(|p| edge.offset(1.0 - p)));
         let inner: AnyElement = match self.block_pane(id) {
             Some(pane) => pane.element(),
-            None => match crate::browser_pane::kind_of(self.block_info(id)) {
-                crate::browser_pane::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
-                crate::browser_pane::Kind::Agent => unsupported(self.agent_unsupported().into()),
+            None => match self.block_kind(id) {
+                crate::blocks::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
+                crate::blocks::Kind::Agent => unsupported(self.agent_unsupported().into()),
                 _ => div().size_full().into_any_element(),
             },
         };

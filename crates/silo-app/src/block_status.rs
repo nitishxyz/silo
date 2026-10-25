@@ -78,8 +78,8 @@ pub fn mark(status: &BlockStatus) -> Option<Mark> {
 }
 
 /// Whether a block's icon slot shows the spinner instead of its glyph: an agent at work.
-pub fn spins(kind: crate::browser_pane::Kind, mark: Option<Mark>) -> bool {
-    kind == crate::browser_pane::Kind::Agent && matches!(mark, Some(Mark::Working(_)))
+pub fn spins(kind: crate::blocks::Kind, mark: Option<Mark>) -> bool {
+    kind == crate::blocks::Kind::Agent && matches!(mark, Some(Mark::Working(_)))
 }
 
 /// A tab's mark: the strongest across its blocks, less the one whose icon slot already spins.
@@ -150,8 +150,7 @@ fn theme_muted(bg: u32) -> u32 {
 impl crate::workspace::Workspace {
     /// Block `id`'s icon slot spins ([`spins`]).
     pub(crate) fn icon_spins(&self, id: &str) -> bool {
-        let block = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == id));
-        spins(crate::browser_pane::kind_of(block), self.block_status(id).and_then(mark))
+        spins(self.block_kind(id), self.block_status(id).and_then(mark))
     }
 
     /// The pane header's status: "needs you" with the kind's icon, a
@@ -302,7 +301,7 @@ mod tests {
 
     #[test]
     fn states_are_found() {
-        use crate::browser_pane::Kind;
+        use crate::blocks::Kind;
         // A working agent spins in its icon slot; needs you, done and error don't, nor other kinds.
         assert!(spins(Kind::Agent, Some(Mark::Working(None))) && spins(Kind::Agent, Some(Mark::Working(Some(30)))));
         assert!(!spins(Kind::Agent, Some(Mark::Blocked(None))) && !spins(Kind::Agent, Some(Mark::Done)) && !spins(Kind::Agent, None));

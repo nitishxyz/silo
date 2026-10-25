@@ -10,7 +10,7 @@ use gpui::{AnyElement, App, Context, Entity, SharedString, div, prelude::*, px, 
 use serde::{Deserialize, Serialize};
 use silo_proto::model::BlockInfo;
 
-use crate::{browser_pane::Kind, layout::HEADER_HEIGHT, theme::Continuous as _};
+use crate::{blocks::Kind, layout::HEADER_HEIGHT, theme::Continuous as _};
 
 /// Header buttons.
 pub const BUTTON: f32 = 22.0;
