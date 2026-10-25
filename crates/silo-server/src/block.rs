@@ -424,6 +424,12 @@ pub enum Note {
         root: std::path::PathBuf,
         paths: Vec<std::path::PathBuf>,
     },
+    /// A changes block's repo changed, seen by its watcher on canonical
+    /// `root`.
+    ChangesChanged {
+        block_id: BlockId,
+        root: std::path::PathBuf,
+    },
 }
 
 pub struct BlockHandle {

@@ -74,7 +74,8 @@ mod double_option {
 }
 
 /// `changes.stage`, `changes.unstage` and `changes.revert`: a whole file,
-/// or only the hunks named (ids from `changes.diff` in the block's scope).
+/// or only the hunks named (ids from `changes.diff` in the block's scope,
+/// with the block's `context`: ids depend on the context lines).
 /// A hunk the file no longer has is refused with
 /// [`crate::control::RpcError::CONFLICT`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

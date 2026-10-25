@@ -49,7 +49,9 @@ impl Watch {
         let filter = shown.clone();
         let worker_root = root.clone();
         std::thread::Builder::new().name("silo-files-watch".into()).spawn(move || work(&worker_root, &wanted, filter, changes))?;
-        std::thread::Builder::new().name("silo-files-debounce".into()).spawn(move || debounce(&changed, &block_id, &root, &notes))?;
+        std::thread::Builder::new().name("silo-files-debounce".into()).spawn(move || {
+            debounce(&changed, DEBOUNCE, |paths| notes.send(Note::FilesChanged { block_id: block_id.clone(), root: root.clone(), paths }).is_ok());
+        })?;
         Ok(Self { shown, folders })
     }
 
@@ -111,12 +113,13 @@ fn work(root: &Path, wanted: &Receiver<HashSet<PathBuf>>, shown: Arc<Mutex<HashS
     }
 }
 
-/// Gather changes for [`DEBOUNCE`] after the first, then send them; ends
-/// when the watcher is gone.
-fn debounce(rx: &Receiver<Vec<PathBuf>>, block_id: &str, root: &Path, notes: &UnboundedSender<Note>) {
+/// Gather changes for `window` after the first, then `send` them (false:
+/// nobody listens); ends when the watcher is gone. Changes blocks use it
+/// too.
+pub fn debounce(rx: &Receiver<Vec<PathBuf>>, window: Duration, send: impl Fn(Vec<PathBuf>) -> bool) {
     while let Ok(first) = rx.recv() {
         let mut paths: BTreeSet<PathBuf> = first.into_iter().collect();
-        let deadline = Instant::now() + DEBOUNCE;
+        let deadline = Instant::now() + window;
         let mut open = true;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -132,8 +135,7 @@ fn debounce(rx: &Receiver<Vec<PathBuf>>, block_id: &str, root: &Path, notes: &Un
                 }
             }
         }
-        let note = Note::FilesChanged { block_id: block_id.to_owned(), root: root.to_owned(), paths: paths.into_iter().collect() };
-        if notes.send(note).is_err() || !open {
+        if !send(paths.into_iter().collect()) || !open {
             return;
         }
     }

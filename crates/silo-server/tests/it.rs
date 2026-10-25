@@ -1,6 +1,7 @@
 //! The integration tests, one module per file, in one binary.
 
 mod browser;
+mod changes;
 mod close_guard;
 mod compat;
 mod dock;

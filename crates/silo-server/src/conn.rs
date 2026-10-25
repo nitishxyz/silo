@@ -803,7 +803,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::ChangesUnstage(_)
         | Method::ChangesRevert(_)
         | Method::ChangesCommit(_)
-        | Method::ChangesRoot(_) => Err(RpcError::method_not_found(&api::method_name(&method))),
+        | Method::ChangesRoot(_) => crate::changes::handle(server, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }
         | Method::WindowStep { .. }

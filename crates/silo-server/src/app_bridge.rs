@@ -187,6 +187,7 @@ pub fn browser_target(reg: &Registry, block_id: &str) -> Result<ClientId, RpcErr
         Some(crate::browser::Block::Terminal(_)) => return Err(RpcError::bad_request(format!("block {block_id} is a terminal"))),
         Some(crate::browser::Block::Agent(_)) => return Err(RpcError::bad_request(format!("block {block_id} is an agent"))),
         Some(crate::browser::Block::Files(_)) => return Err(RpcError::bad_request(format!("block {block_id} is a files block"))),
+        Some(crate::browser::Block::Changes(_)) => return Err(RpcError::bad_request(format!("block {block_id} is a changes block"))),
         None => return Err(RpcError::not_found(format!("block {block_id}"))),
     };
     let Some(owner) = block.info().owner else {

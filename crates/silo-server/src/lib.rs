@@ -10,6 +10,7 @@ pub mod auth;
 pub mod block;
 pub mod browser;
 pub mod bundle;
+pub mod changes;
 pub mod close_guard;
 pub mod conn;
 pub mod drops;

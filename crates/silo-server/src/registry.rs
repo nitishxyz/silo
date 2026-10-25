@@ -12,14 +12,15 @@ use silo_proto::{
     access::{Rights, Scope},
     compat::feature,
     control::{
-        BrowserCommand, Capture, ClientRole, Created, DataTicket, Dock, Event, FilesSetParams, OwnMode, Reveal, RpcError, ServerMessage, SpawnSpec,
+        BrowserCommand, Capture, ChangesSetParams, ClientRole, Created, DataTicket, Dock, Event, FilesSetParams, OwnMode, Reveal, RpcError,
+        ServerMessage, SpawnSpec,
     },
     data::ticket_hex,
     kind,
     model::{
-        AgentState, AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ClientId, FilesState, Float, FloatRect, Layout,
-        Lifecycle, Parked, SessionId, SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo, browser_url,
-        short_client_name,
+        AgentLink, AgentState, AttentionCounts, Axis, BlockId, BlockInfo, BlockKind, BlockStatus, BrowserState, ChangesState, ClientId, FilesState,
+        Float, FloatRect, Layout, Lifecycle, Parked, SessionId, SessionInfo, SessionSummary, SessionView, TermSize, Watcher, WindowId, WindowInfo,
+        browser_url, short_client_name,
     },
     text::{MAX_TITLE, untrusted},
 };
@@ -31,6 +32,7 @@ use crate::{
     agent::AgentBlock,
     block::{self, BlockHandle, BlockMsg, Note, Sink, now_ms},
     browser::{Block, BrowserBlock, Report},
+    changes::ChangesBlock,
     files::FilesBlock,
 };
 
@@ -364,8 +366,10 @@ impl Registry {
         let mut reg = Self { sessions, blocks, ..Self::new(notes) };
         let notes = reg.notes.clone();
         for block in reg.blocks.values_mut() {
-            if let Block::Files(files) = block {
-                files.watch(notes.clone());
+            match block {
+                Block::Files(files) => files.watch(notes.clone()),
+                Block::Changes(changes) => changes.watch(notes.clone()),
+                _ => {}
             }
         }
         let done: Vec<BlockId> = reg.blocks.iter().filter(|(_, b)| exited_cleanly(b)).map(|(id, _)| id.clone()).collect();
@@ -460,7 +464,7 @@ impl Registry {
                         disowned.push(block_id.clone());
                     }
                 }
-                Block::Agent(_) | Block::Files(_) => {}
+                Block::Agent(_) | Block::Files(_) | Block::Changes(_) => {}
             }
         }
         for block_id in disowned {
@@ -728,6 +732,7 @@ impl Registry {
             Some(Block::Browser(_)) => Err(RpcError::bad_request(format!("block {id} is a browser"))),
             Some(Block::Agent(_)) => Err(RpcError::bad_request(format!("block {id} is an agent"))),
             Some(Block::Files(_)) => Err(RpcError::bad_request(format!("block {id} is a files block"))),
+            Some(Block::Changes(_)) => Err(RpcError::bad_request(format!("block {id} is a changes block"))),
             None => Err(RpcError::not_found(format!("block {id}"))),
         }
     }
@@ -820,6 +825,14 @@ impl Registry {
             self.blocks.insert(id.clone(), Block::Files(Box::new(files)));
             return Ok(id);
         }
+        if new.kind == BlockKind::Changes {
+            let dir = crate::files::paths::new_root(None, spawn.cwd.as_deref().unwrap_or("~"))?;
+            let root = crate::changes::find_root(&dir);
+            let mut changes = ChangesBlock::new(info, ChangesState::new(root.to_string_lossy().into_owned()));
+            changes.watch(self.notes.clone());
+            self.blocks.insert(id.clone(), Block::Changes(Box::new(changes)));
+            return Ok(id);
+        }
         if new.kind == BlockKind::Agent {
             if new.agent.is_some_and(|a| a.session_id.as_deref() == Some("")) {
                 return Err(RpcError::bad_request("empty agent session_id"));
@@ -884,9 +897,9 @@ impl Registry {
         let session = self.session(session_id)?;
         let sid = session.id.clone();
         let fallback = session.windows.iter().find(|w| w.id == session.active_window).map(|w| self.window_size(w)).unwrap_or(TermSize::new(80, 24));
-        // A files block opens in the folder of the block in focus.
+        // A files or changes block opens in the folder of the block in focus.
         let mut spawn = new.spawn.clone();
-        if new.kind == BlockKind::Files && spawn.cwd.is_none() {
+        if matches!(new.kind, BlockKind::Files | BlockKind::Changes) && spawn.cwd.is_none() {
             let focused = session.windows.iter().find(|w| w.id == session.active_window).map(|w| w.focused.clone());
             spawn.cwd = focused.and_then(|b| self.block_info(&b)).and_then(|i| i.cwd);
         }
@@ -933,6 +946,14 @@ impl Registry {
             spawn.cwd = self.block_info(block_id).and_then(|i| i.cwd);
         }
         let new = self.spawn_block(&sid, &New { spawn: &spawn, ..*new }, fallback)?;
+        // A review split off an agent goes back to it.
+        let agent = match self.blocks.get(block_id) {
+            Some(Block::Agent(agent)) => agent.info().agent.and_then(|a| a.session_id),
+            _ => None,
+        };
+        if let (Some(otto_session), Some(Block::Changes(changes))) = (agent, self.blocks.get_mut(&new)) {
+            changes.link(AgentLink { otto_session, block_id: Some(block_id.to_owned()) });
+        }
         let window = &mut self.sessions[si].windows[wi];
         window.layout.split(block_id, new.clone(), axis);
         window.focus(&new);
@@ -1445,6 +1466,11 @@ impl Registry {
                     self.emit(Event::FilesChanged { block_id, paths, truncated });
                 }
             }
+            Note::ChangesChanged { block_id, root } => {
+                if matches!(self.blocks.get(&block_id), Some(Block::Changes(c)) if c.root() == root) {
+                    self.emit(Event::ChangesChanged { block_id });
+                }
+            }
             Note::Exited(id) if self.keep_ended(&id) => {
                 // Nobody sees a parked block: it closes when its program
                 // ends, after its exit went out.
@@ -1488,7 +1514,7 @@ impl Registry {
                 }
                 (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, label.clone(), mode),
                 (Some(Block::Browser(browser)), None) => browser.disown(client_id),
-                (Some(Block::Agent(_) | Block::Files(_)), _) => false,
+                (Some(Block::Agent(_) | Block::Files(_) | Block::Changes(_)), _) => false,
                 (None, _) => return Err(RpcError::not_found(format!("block {id}"))),
             };
             if changed {
@@ -1563,6 +1589,40 @@ impl Registry {
         let state = files.state().clone();
         if changed {
             self.block_changed(&block_id);
+        }
+        Ok(state)
+    }
+
+    /// A changes block; `bad_request` for another kind.
+    fn changes(&mut self, id: &str) -> Result<&mut ChangesBlock, RpcError> {
+        match self.blocks.get_mut(id) {
+            Some(Block::Changes(changes)) => Ok(changes),
+            Some(_) => Err(RpcError::bad_request(format!("block {id} is not a changes block"))),
+            None => Err(RpcError::not_found(format!("block {id}"))),
+        }
+    }
+
+    /// `changes.set`: the block's new view state.
+    pub fn changes_set(&mut self, params: ChangesSetParams) -> Result<ChangesState, RpcError> {
+        let block_id = params.block_id.clone();
+        let changes = self.changes(&block_id)?;
+        let changed = changes.set(params)?;
+        let state = changes.state().clone();
+        if changed {
+            self.block_changed(&block_id);
+        }
+        Ok(state)
+    }
+
+    /// `changes.root`: review the repo at canonical `root`, afresh.
+    pub fn changes_root(&mut self, block_id: &str, root: &std::path::Path) -> Result<ChangesState, RpcError> {
+        let notes = self.notes.clone();
+        let changes = self.changes(block_id)?;
+        changes.reroot(root, notes);
+        let state = changes.state().clone();
+        self.block_changed(block_id);
+        if let Ok((si, _)) = self.locate(block_id) {
+            self.session_changed(si);
         }
         Ok(state)
     }

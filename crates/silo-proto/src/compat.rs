@@ -73,6 +73,7 @@ pub const FEATURES: &[&str] = &[
     feature::FILES,
     feature::DOCK_SIDES,
     feature::FILES_WRITE,
+    feature::CHANGES,
 ];
 
 /// Features this build's server supports that a client advertises only
