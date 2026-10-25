@@ -1,5 +1,5 @@
 //! ⌘P finder: a list of sources (commands, settings, sessions, machines,
-//! tabs and panes, recent pages, an address) that each turn the query into
+//! tabs, every block of the session, recent pages, an address) that each turn the query into
 //! scored entries, ranked and grouped under section labels. The palette
 //! (`palette.rs`) shows and runs them.
 
@@ -15,7 +15,9 @@ use crate::{
     workspace::Workspace,
 };
 
-pub const PLACEHOLDER: &str = "Search commands, settings, sessions…";
+pub const PLACEHOLDER: &str = "Search commands, settings, sessions, blocks…";
+/// The query Browse Blocks opens on: the Blocks scope.
+pub const BLOCKS_QUERY: &str = "#";
 /// Finder picks remembered for the empty query and the recency boost.
 pub const RECENT_CAP: usize = 20;
 /// Entries per group when searching everything.
@@ -35,7 +37,9 @@ pub enum Group {
     Settings,
     Sessions,
     Machines,
-    Panes,
+    Tabs,
+    /// Every block of the session: tiled, floating and background.
+    Blocks,
     Pages,
 }
 
@@ -49,7 +53,8 @@ impl Group {
             Self::Settings => "Settings",
             Self::Sessions => "Sessions",
             Self::Machines => "Machines",
-            Self::Panes => "Panes",
+            Self::Tabs => "Tabs",
+            Self::Blocks => "Blocks",
             Self::Pages => "Pages",
         }
     }
@@ -65,8 +70,8 @@ pub enum Scope {
     Settings,
     /// `@`: sessions and machines.
     Sessions,
-    /// `#`: tabs and panes.
-    Panes,
+    /// `#`: blocks (Browse Blocks).
+    Blocks,
 }
 
 impl Scope {
@@ -77,7 +82,7 @@ impl Scope {
             Self::Commands => group == Group::Commands,
             Self::Settings => group == Group::Settings,
             Self::Sessions => matches!(group, Group::Sessions | Group::Machines),
-            Self::Panes => group == Group::Panes,
+            Self::Blocks => group == Group::Blocks,
         }
     }
 }
@@ -90,7 +95,7 @@ pub fn parse(query: &str) -> (Scope, &str) {
         Some('>') => Scope::Commands,
         Some(':') => Scope::Settings,
         Some('@') => Scope::Sessions,
-        Some('#') => Scope::Panes,
+        Some('#') => Scope::Blocks,
         _ => return (Scope::All, query.trim()),
     };
     (scope, query[1..].trim())
@@ -134,12 +139,23 @@ pub fn score(query: &str, text: &str, keywords: &str) -> Option<Match> {
 pub enum Target {
     Command(Command),
     Setting(SettingId),
-    Session { host: usize, id: String },
+    Session {
+        host: usize,
+        id: String,
+    },
     Host(usize),
     RenameHost(usize),
     Upgrade(usize),
-    Tab { index: usize },
-    Pane { index: usize, block: String },
+    Tab {
+        index: usize,
+    },
+    /// A block shown in tab `index` (tiled or floating).
+    Block {
+        index: usize,
+        block: String,
+    },
+    /// A background (parked) block: floated into the shown tab.
+    Background(String),
     Page(String),
     OpenUrl(String),
 }
@@ -151,6 +167,8 @@ pub struct Item {
     pub group: Group,
     /// Unhighlighted words before the matched text ("Switch to ").
     pub lead: &'static str,
+    /// A glyph before it (a block's kind).
+    pub icon: Option<&'static str>,
     /// The matched text.
     pub text: String,
     /// Matched too, never shown.
@@ -176,6 +194,7 @@ impl Item {
             target,
             group,
             lead: "",
+            icon: None,
             text: text.into(),
             keywords: String::new(),
             detail: None,
@@ -187,12 +206,17 @@ impl Item {
     }
 }
 
-/// Sort by tier, then recency (`recent` newest first), then score; then
+/// Sort by tier, then recency (`recent` newest first), then blocks last,
+/// then score; then
 /// group, groups ordered by their best entry, at most `per_group` each.
 #[must_use]
 pub fn rank(mut items: Vec<Item>, recent: &[String], per_group: Option<usize>) -> Vec<Item> {
     let boost = |key: &str| recent.iter().position(|k| k == key).map_or(0, |i| RECENT_CAP.saturating_sub(i));
-    items.sort_by_cached_key(|i| (std::cmp::Reverse(i.found.tier), std::cmp::Reverse(boost(&i.key)), std::cmp::Reverse(i.found.score)));
+    // Blocks go after commands and the rest as good: a block's name is
+    // often a word a command starts with too.
+    items.sort_by_cached_key(|i| {
+        (std::cmp::Reverse(i.found.tier), std::cmp::Reverse(boost(&i.key)), i.group == Group::Blocks, std::cmp::Reverse(i.found.score))
+    });
     let mut order: Vec<Group> = Vec::new();
     for item in &items {
         if !order.contains(&item.group) {
@@ -405,8 +429,11 @@ impl Workspace {
             add.detail = Command::AddHost.subtitle().map(str::to_owned);
             out.push(add);
         }
-        if scope.includes(Group::Panes) {
-            out.extend(self.pane_items(cx));
+        if scope.includes(Group::Tabs) {
+            out.extend(self.tab_items(cx));
+        }
+        if scope.includes(Group::Blocks) {
+            out.extend(block_items(self.block_rows(cx)));
         }
         if scope.includes(Group::Pages) {
             out.extend(self.page_items(cx));
@@ -414,29 +441,45 @@ impl Workspace {
         out
     }
 
-    /// Tabs with more than one pane, and every pane, of the shown session.
-    fn pane_items(&self, cx: &gpui::App) -> Vec<Item> {
+    /// Tabs with more than one block, of the shown session.
+    fn tab_items(&self, cx: &gpui::App) -> Vec<Item> {
         let Some(view) = &self.view else { return Vec::new() };
         let mut out = Vec::new();
         for (index, w) in view.session.windows.iter().enumerate() {
-            let tab = self.window_title(w, cx);
-            let blocks = crate::floats::window_blocks(w);
-            if blocks.len() > 1 {
-                let mut item = Item::new(Target::Tab { index }, Group::Panes, tab.clone(), format!("tab:{}", w.id));
+            if crate::floats::window_blocks(w).len() > 1 {
+                let mut item = Item::new(Target::Tab { index }, Group::Tabs, self.window_title(w, cx), format!("tab:{}", w.id));
+                item.icon = Some(self.tab_icon(w));
                 item.detail = Some(format!("Tab {}", index + 1));
-                out.push(item);
-            }
-            for block in blocks {
-                let mut item =
-                    Item::new(Target::Pane { index, block: block.clone() }, Group::Panes, self.block_label(&block, cx), format!("pane:{block}"));
-                item.detail = Some(if tab == item.text { format!("Tab {}", index + 1) } else { format!("Tab {} · {tab}", index + 1) });
                 out.push(item);
             }
         }
         out
     }
 
-    fn block_label(&self, block: &str, cx: &gpui::App) -> String {
+    /// Every block of the shown session: each tab's tiled and floating
+    /// ones in order, then the background ones.
+    pub(crate) fn block_rows(&self, cx: &gpui::App) -> Vec<BlockRow> {
+        let Some(view) = &self.view else { return Vec::new() };
+        let mut out = Vec::new();
+        for (index, w) in view.session.windows.iter().enumerate() {
+            let tab = self.window_title(w, cx);
+            for block in crate::floats::window_blocks(w) {
+                let float = crate::floats::is_float(w, &block);
+                out.push(BlockRow {
+                    title: self.block_label(&block, cx),
+                    icon: self.block_icon(&block),
+                    place: Place::Tab { index, name: tab.clone(), float },
+                    block,
+                });
+            }
+        }
+        for row in self.background_rows(cx) {
+            out.push(BlockRow { block: row.id, title: row.title, icon: row.icon, place: Place::Background { state: row.state, by: row.by } });
+        }
+        out
+    }
+
+    pub(crate) fn block_label(&self, block: &str, cx: &gpui::App) -> String {
         if let Some(pane) = self.blocks.browser(block) {
             return pane.read(cx).title();
         }
@@ -464,6 +507,53 @@ impl Workspace {
             })
             .collect()
     }
+}
+
+/// One block of the session, as the finder lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockRow {
+    pub block: String,
+    pub title: String,
+    pub icon: &'static str,
+    pub place: Place,
+}
+
+/// Where a block is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// In tab `index` (named `name`), tiled or floating.
+    Tab { index: usize, name: String, float: bool },
+    /// Parked: in no tab; its state and who started it.
+    Background { state: String, by: Option<String> },
+}
+
+/// The Blocks entries: the kind's glyph and title, the tab (or
+/// "background", its state and who started it) after it.
+#[must_use]
+pub fn block_items(rows: Vec<BlockRow>) -> Vec<Item> {
+    rows.into_iter()
+        .map(|row| {
+            let (target, detail) = match row.place {
+                Place::Tab { index, name, float } => {
+                    let mut detail = if name == row.title { format!("Tab {}", index + 1) } else { format!("Tab {} · {name}", index + 1) };
+                    if float {
+                        detail.push_str(" · floating");
+                    }
+                    (Target::Block { index, block: row.block.clone() }, detail)
+                }
+                Place::Background { state, by } => {
+                    let by = by.map(|by| format!(" · started by {by}")).unwrap_or_default();
+                    (Target::Background(row.block.clone()), format!("background · {state}{by}"))
+                }
+            };
+            // The same key wherever the block is, so a pick stays recent
+            // as it moves between the background and a tab.
+            let mut item = Item::new(target, Group::Blocks, row.title, format!("pane:{}", row.block));
+            item.icon = Some(row.icon);
+            item.detail = Some(detail);
+            item
+        })
+        .collect()
 }
 
 /// A host's identity in the recent picks: its EndpointId ("local" for this
@@ -538,9 +628,10 @@ mod tests {
         assert_eq!(parse(">split"), (Scope::Commands, "split"));
         assert_eq!(parse(": font"), (Scope::Settings, "font"));
         assert_eq!(parse("@work"), (Scope::Sessions, "work"));
-        assert_eq!(parse("#btop"), (Scope::Panes, "btop"));
-        assert_eq!(parse("#"), (Scope::Panes, ""));
-        assert!(Scope::Sessions.includes(Group::Machines) && !Scope::Sessions.includes(Group::Panes));
+        assert_eq!(parse("#btop"), (Scope::Blocks, "btop"));
+        assert_eq!(parse(BLOCKS_QUERY), (Scope::Blocks, ""));
+        assert!(Scope::Sessions.includes(Group::Machines) && !Scope::Sessions.includes(Group::Blocks));
+        assert!(Scope::Blocks.includes(Group::Blocks) && !Scope::Blocks.includes(Group::Tabs) && !Scope::Blocks.includes(Group::Commands));
         assert!(Scope::All.includes(Group::Pages) && !Scope::Commands.includes(Group::Settings));
     }
 
@@ -566,8 +657,8 @@ mod tests {
     fn groups_follow_their_best_entry_and_are_capped() {
         let items = vec![
             item("alpha one", Group::Commands, "1"),
-            item("beta", Group::Panes, "2"),
-            item("alpha", Group::Panes, "3"),
+            item("beta", Group::Blocks, "2"),
+            item("alpha", Group::Blocks, "3"),
             item("alpha two", Group::Commands, "4"),
             item("alpha three", Group::Commands, "5"),
         ];
@@ -580,7 +671,7 @@ mod tests {
             .collect();
         let ranked = rank(ranked, &[], Some(2));
         let shown: Vec<(&str, Group)> = ranked.iter().map(|i| (i.text.as_str(), i.group)).collect();
-        assert_eq!(shown, [("alpha", Group::Panes), ("alpha one", Group::Commands), ("alpha two", Group::Commands)]);
+        assert_eq!(shown, [("alpha", Group::Blocks), ("alpha one", Group::Commands), ("alpha two", Group::Commands)]);
         let groups: Vec<Group> = ranked.iter().map(|i| i.group).collect();
         assert_eq!([0, 1, 2].map(|s| row_index(&groups, s)), [1, 3, 4], "a label row before each group");
     }
@@ -670,6 +761,91 @@ mod tests {
         assert_eq!(targets("rename studio"), [Target::RenameHost(2)]);
         assert_eq!(targets("mini"), [Target::RenameHost(1)]);
         assert!(targets("zzz").is_empty());
+    }
+
+    fn blocks() -> Vec<BlockRow> {
+        let tab = |index, name: &str, float| Place::Tab { index, name: name.into(), float };
+        vec![
+            BlockRow { block: "b1".into(), title: "api".into(), icon: "terminal", place: tab(0, "api", false) },
+            BlockRow { block: "b2".into(), title: "GitHub".into(), icon: "globe", place: tab(0, "api", true) },
+            BlockRow { block: "b3".into(), title: "otto".into(), icon: "agent", place: tab(1, "review", false) },
+            BlockRow {
+                block: "b4".into(),
+                title: "sonic".into(),
+                icon: "terminal",
+                place: Place::Background { state: "running cargo".into(), by: Some("otto".into()) },
+            },
+            BlockRow {
+                block: "b5".into(),
+                title: "logs".into(),
+                icon: "terminal",
+                place: Place::Background { state: "exited · code 1".into(), by: None },
+            },
+        ]
+    }
+
+    #[test]
+    fn blocks_show_their_kind_tab_or_background() {
+        let items = block_items(blocks());
+        let shown: Vec<(&str, Option<&str>, &str)> = items.iter().map(|i| (i.text.as_str(), i.icon, i.detail.as_deref().unwrap_or(""))).collect();
+        assert_eq!(
+            shown,
+            [
+                ("api", Some("terminal"), "Tab 1"),
+                ("GitHub", Some("globe"), "Tab 1 · api · floating"),
+                ("otto", Some("agent"), "Tab 2 · review"),
+                ("sonic", Some("terminal"), "background · running cargo · started by otto"),
+                ("logs", Some("terminal"), "background · exited · code 1"),
+            ]
+        );
+        assert!(items.iter().all(|i| i.group == Group::Blocks));
+        assert_eq!(items[2].target, Target::Block { index: 1, block: "b3".into() });
+        assert_eq!(items[3].target, Target::Background("b4".into()));
+        assert_eq!(items[3].key, "pane:b4", "one key for a block wherever it is");
+    }
+
+    #[test]
+    fn blocks_match_by_title_and_rank_like_everything_else() {
+        let targets = |query: &str, recent: &[String]| -> Vec<String> {
+            let items: Vec<Item> = block_items(blocks())
+                .into_iter()
+                .filter_map(|mut i| {
+                    i.found = score(query, &i.text, &i.keywords)?;
+                    Some(i)
+                })
+                .collect();
+            rank(items, recent, None).into_iter().map(|i| i.text).collect()
+        };
+        assert_eq!(targets("sonic", &[]), ["sonic"], "a background block is found");
+        assert_eq!(targets("o", &[]), ["otto", "sonic", "logs"], "a prefix first, then the rest in session order");
+        assert_eq!(targets("gh", &[]), ["GitHub"]);
+        assert!(targets("zzz", &[]).is_empty());
+        // A recent pick goes ahead of equally good matches.
+        assert_eq!(targets("o", &["pane:b5".to_owned()]), ["otto", "logs", "sonic"]);
+    }
+
+    #[test]
+    fn blocks_keep_their_own_section_next_to_commands() {
+        let mut command = item("Split Right", Group::Commands, "c");
+        command.found = score("s", &command.text, "").unwrap();
+        let mut found: Vec<Item> = block_items(blocks())
+            .into_iter()
+            .filter_map(|mut i| {
+                i.found = score("s", &i.text, "")?;
+                Some(i)
+            })
+            .collect();
+        found.push(command);
+        let ranked = rank(found, &[], Some(PER_GROUP));
+        let shown: Vec<(&str, Group)> = ranked.iter().map(|i| (i.text.as_str(), i.group)).collect();
+        // Blocks are one section of their own: never mixed into Commands.
+        assert_eq!(shown, [("Split Right", Group::Commands), ("sonic", Group::Blocks), ("logs", Group::Blocks)]);
+        // A block named exactly as typed still leads.
+        let mut command = item("Split Right", Group::Commands, "c");
+        command.found = score("sonic", &command.text, "").unwrap_or_default();
+        let mut sonic = block_items(blocks()).remove(3);
+        sonic.found = score("sonic", &sonic.text, "").unwrap();
+        assert_eq!(rank(vec![command, sonic], &[], None)[0].text, "sonic");
     }
 
     #[test]

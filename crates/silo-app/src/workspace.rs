@@ -96,6 +96,8 @@ pub struct Workspace {
     pub(crate) unsaved: Option<crate::files_block::UnsavedConfirm>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
+    /// The titlebar's background-blocks menu.
+    pub(crate) background: crate::background::BackgroundMenu,
     pub(crate) launcher: crate::launcher::Launcher,
     pub(crate) settings: Option<crate::settings::SettingsModal>,
     pub(crate) pairing: crate::settings::Pairing,
@@ -267,6 +269,7 @@ impl Workspace {
             unsaved: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
+            background: crate::background::BackgroundMenu::new(window, cx),
             launcher: crate::launcher::Launcher::default(),
             settings: None,
             pairing: crate::settings::Pairing::default(),
@@ -1518,6 +1521,7 @@ impl Render for Workspace {
         }
         self.step_chrome(now, window, cx);
         self.apply_material(window);
+        self.settle_background_menu();
         // A click on bare chrome (titlebar, gaps, menus) focuses the
         // workspace itself; hand focus back to the terminal so typing
         // keeps working. Focus lost with its pane (switching to a host
@@ -1534,6 +1538,7 @@ impl Render for Workspace {
             && self.close_confirm.is_none()
             && self.unsaved.is_none()
             && !self.appearance_menu.open
+            && !self.background_shown()
             && !self.launcher.is_open()
         {
             cx.defer_in(window, |this, window, cx| {
@@ -1548,6 +1553,7 @@ impl Render for Workspace {
                     && this.close_confirm.is_none()
                     && this.unsaved.is_none()
                     && !this.appearance_menu.open
+                    && !this.background_shown()
                     && !this.launcher.is_open()
                 {
                     this.refocus_terminal(window, cx);
@@ -1587,6 +1593,7 @@ impl Render for Workspace {
         };
         let ghosts = self.render_pane_ghosts(now, window);
         let appearance = self.render_appearance_menu(cx);
+        let background = self.render_background_menu(cx);
         let launcher = self.render_launcher(window, cx);
         let settings = self.render_settings(window, cx);
         let titlebar = self.render_titlebar(window, cx);
@@ -1625,6 +1632,7 @@ impl Render for Workspace {
             .children(self.status_bar().map(|status| crate::status::pill(status, self.panes_bottom() + crate::status::PILL_CLEARANCE, cx)))
             .children(ghosts)
             .children(appearance)
+            .children(background)
             .children(launcher)
             .children(settings)
             .children(switcher)

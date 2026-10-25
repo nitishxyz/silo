@@ -21,7 +21,8 @@ Otto is the one native harness: it loads the same tools in-process and records t
 attachable and closable by the user; placement is a parameter. One addition (`docs/OTTO.md` §6.2): a block can be
 *parked*, in its session but in no layout, owned by the block that started it (the agent block). Otto runs each
 `shell` command in a parked command block, and a hidden terminal is a parked shell. The user reveals one from the
-switcher or the agent block; closing the owner closes its parked blocks.
+titlebar's background button, ⌘P's Blocks (Browse Blocks…, ⇧⌘B) or the agent block; closing the owner closes its
+parked blocks.
 
 ## 2. Layers
 

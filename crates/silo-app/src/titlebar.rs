@@ -1,6 +1,7 @@
 //! Titlebar: one inline row with the traffic-light gap, the session pill,
 //! compact window tabs and, at the far right, the Update pill (while an
-//! update downloads, installs or is ready), the appearance toggle and the "+" button, all on the
+//! update downloads, installs or is ready), the background-blocks button (while the session has
+//! any, `background.rs`), the appearance toggle and the "+" button, all on the
 //! terminal's own background. Tabs are small
 //! pills: inactive ones filled only on hover, the current one a subtle step
 //! brighter.
@@ -309,6 +310,7 @@ impl Workspace {
                 .child(drop_zone)
                 .children(self.render_watchers())
                 .children(self.render_update_pill(cx))
+                .children(self.render_background_button(cx))
                 .child(
                     div()
                         .id("appearance")

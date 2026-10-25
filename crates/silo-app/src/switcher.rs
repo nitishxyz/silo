@@ -1,12 +1,7 @@
 //! Session switcher popover (opened from the titlebar pill): filter or
-//! create, sessions grouped by host, the current session's parked blocks
-//! (revealed on choice), new session, add remote host.
-
-use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
-use silo_proto::{
-    control::{Method, Reveal},
-    model::Lifecycle,
-};
+//! create, sessions grouped by host, new session, add remote host. Only
+//! sessions: a session's background blocks are behind the titlebar's
+//! background button (`background.rs`) and in ⌘P's Blocks.
 
 use crate::theme::Continuous as _;
 use crate::{
@@ -17,6 +12,7 @@ use crate::{
     titlebar::TRAFFIC_LIGHTS,
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
+use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
 
 pub struct Switcher {
     pub field: Entity<TextField>,
@@ -30,7 +26,6 @@ pub struct Switcher {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Session { host: usize, id: String },
-    Parked(String),
     Create(String),
     Connect(usize),
     NewSession,
@@ -92,44 +87,8 @@ impl Workspace {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let filter = self.switcher.as_ref().map(|s| s.filter.trim().to_lowercase()).unwrap_or_default();
-        let renaming = self.switcher.as_ref().is_some_and(|s| s.renaming.is_some());
-        let mut rows = Vec::new();
-        if renaming {
-            return rows;
-        }
-        let mut exact = false;
-        for (index, host) in self.hosts.iter().enumerate() {
-            if host.removed {
-                continue;
-            }
-            rows.push(Row::Header { host: index });
-            if host.state == HostState::NotPaired {
-                rows.push(Row::Item(Item::Connect(index)));
-            }
-            for s in &host.sessions {
-                if s.name.to_lowercase() == filter {
-                    exact = true;
-                }
-                if filter.is_empty() || s.name.to_lowercase().contains(&filter) {
-                    rows.push(Row::Item(Item::Session { host: index, id: s.id.clone() }));
-                }
-                // The current session's parked blocks, under it.
-                if let Some(view) = self.view.as_ref().filter(|v| filter.is_empty() && index == self.active_host && v.session.id == s.id) {
-                    rows.extend(view.session.parked.iter().map(|p| Row::Item(Item::Parked(p.id.clone()))));
-                }
-            }
-        }
-        let text = self.switcher.as_ref().map(|s| s.filter.trim().to_owned()).unwrap_or_default();
-        if !text.is_empty() && !exact {
-            rows.push(Row::Divider);
-            rows.push(Row::Item(Item::Create(text)));
-        }
-        rows.push(Row::Divider);
-        rows.push(Row::Item(Item::NewSession));
-        rows.push(Row::Divider);
-        rows.push(Row::Item(Item::AddHost));
-        rows
+        let Some(switcher) = self.switcher.as_ref() else { return rows(&self.hosts, "", false) };
+        rows(&self.hosts, &switcher.filter, switcher.renaming.is_some())
     }
 
     fn items(&self) -> Vec<Item> {
@@ -205,7 +164,6 @@ impl Workspace {
         self.close_switcher(window, cx);
         match item {
             Item::Session { host, id } => self.open_session(host, id, window, cx),
-            Item::Parked(block_id) => self.call(Method::BlockReveal { block_id, reveal: Reveal::Float }),
             Item::Create(name) => self.create_session(Some(name), window, cx),
             Item::NewSession => self.create_session(None, window, cx),
             Item::AddHost => self.open_add_host(None, None, window, cx),
@@ -328,17 +286,6 @@ impl Workspace {
                 let hint = number.map(|n| format!("⌘{}", n + 1));
                 (None, name, hint, checked)
             }
-            Item::Parked(id) => {
-                let info = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| &b.id == id));
-                let busy = self.view.as_ref().and_then(|v| v.status.iter().find(|s| &s.block_id == id)).and_then(|s| s.busy.as_ref());
-                let hint = match info.map(|i| (i.lifecycle, i.exited)) {
-                    Some((Lifecycle::Running, _)) if busy.is_some() => "running".to_owned(),
-                    Some((Lifecycle::Running, _)) => "idle".to_owned(),
-                    Some((_, Some(code))) => format!("exit {code}"),
-                    _ => "exited".to_owned(),
-                };
-                (Some("terminal"), info.map(crate::pane::block_title).unwrap_or_default(), Some(hint), false)
-            }
             Item::Create(name) => (Some("plus"), format!("Create “{name}”"), Some("↩".into()), false),
             Item::Connect(_) => (Some("globe"), "Pair again…".into(), None, false),
             Item::NewSession => (Some("new-session"), "New Session".into(), crate::commands::Command::NewSession.hint(), false),
@@ -351,7 +298,6 @@ impl Workspace {
         let tip = counts.map(crate::block_status::counts_text).filter(|t| !t.is_empty());
         let badges = counts.map(|c| crate::block_status::count_badges(c, theme::overlay())).unwrap_or_default();
         let is_session = matches!(item, Item::Session { .. });
-        let parked = matches!(item, Item::Parked(_));
         let rename_id = if let Item::Session { id, .. } = &item { Some(id.clone()) } else { None };
         let muted = matches!(item, Item::Connect(_));
         div()
@@ -364,7 +310,6 @@ impl Workspace {
             .h(px(26.0))
             .mx(px(4.0))
             .px(px(8.0))
-            .when(parked, |el| el.pl(px(22.0)))
             .continuous(crate::radius::MENU_ROW)
             .when(selected, |el| el.bg(theme::row_fill()))
             .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
@@ -443,6 +388,93 @@ pub(crate) fn state_color(state: &HostState) -> u32 {
     }
 }
 
+/// The switcher's rows for `filter`: each host's sessions, then create,
+/// new session and add host. Sessions only; no blocks.
+fn rows(hosts: &[crate::hosts_state::HostEntry], filter: &str, renaming: bool) -> Vec<Row> {
+    let mut rows = Vec::new();
+    if renaming {
+        return rows;
+    }
+    let text = filter.trim().to_owned();
+    let filter = text.to_lowercase();
+    let mut exact = false;
+    for (index, host) in hosts.iter().enumerate() {
+        if host.removed {
+            continue;
+        }
+        rows.push(Row::Header { host: index });
+        if host.state == HostState::NotPaired {
+            rows.push(Row::Item(Item::Connect(index)));
+        }
+        for s in &host.sessions {
+            if s.name.to_lowercase() == filter {
+                exact = true;
+            }
+            if filter.is_empty() || s.name.to_lowercase().contains(&filter) {
+                rows.push(Row::Item(Item::Session { host: index, id: s.id.clone() }));
+            }
+        }
+    }
+    if !text.is_empty() && !exact {
+        rows.push(Row::Divider);
+        rows.push(Row::Item(Item::Create(text)));
+    }
+    rows.push(Row::Divider);
+    rows.push(Row::Item(Item::NewSession));
+    rows.push(Row::Divider);
+    rows.push(Row::Item(Item::AddHost));
+    rows
+}
+
 fn switcher_selected(ws: &Workspace) -> usize {
     ws.switcher.as_ref().map_or(0, |s| s.selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    use silo_proto::model::SessionSummary;
+
+    use super::*;
+    use crate::{hosts::HostInfo, hosts_state::HostEntry};
+
+    fn host(sessions: &[(&str, &str)]) -> HostEntry {
+        HostEntry {
+            info: HostInfo::local(std::env::temp_dir(), Err("test".into())),
+            state: HostState::Connected,
+            control: None,
+            sessions: sessions
+                .iter()
+                .map(|(id, name)| SessionSummary {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    windows: 1,
+                    blocks: 2,
+                    attached_clients: 1,
+                    created_at: 0,
+                    attention: Default::default(),
+                })
+                .collect(),
+            paused: Arc::new(AtomicBool::new(false)),
+            incompatible: None,
+            removed: false,
+        }
+    }
+
+    fn items(rows: Vec<Row>) -> Vec<Item> {
+        rows.into_iter().filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_switcher_lists_sessions_not_blocks() {
+        let hosts = [host(&[("s1", "trade"), ("s2", "work")])];
+        let session = |id: &str| Item::Session { host: 0, id: id.into() };
+        // Unfiltered: the sessions, one after the other (a session's
+        // background blocks are in the titlebar's background menu).
+        assert_eq!(items(rows(&hosts, "", false)), [session("s1"), session("s2"), Item::NewSession, Item::AddHost]);
+        assert_eq!(items(rows(&hosts, "tra", false)), [session("s1"), Item::Create("tra".into()), Item::NewSession, Item::AddHost]);
+        assert_eq!(items(rows(&hosts, "trade", false)), [session("s1"), Item::NewSession, Item::AddHost], "an exact name creates nothing");
+        assert!(rows(&hosts, "x", true).is_empty(), "renaming lists nothing");
+    }
 }

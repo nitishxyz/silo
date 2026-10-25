@@ -104,6 +104,7 @@ commands! {
     ZoomPane => "Zoom Pane", "Panes", ["cmd-shift-enter"], "Toggle";
     FloatPane => "Float Pane", "Panes", [], "Lift it above the layout";
     DockPane => "Dock Pane", "Panes", [], "Put it back in the layout";
+    BrowseBlocks => "Browse Blocks…", "Panes", ["cmd-shift-b"], "Every block of this session, background ones too";
     // Browser
     NewBrowser => "New Browser", "Browser", [];
     OpenUrl => "Open URL…", "Browser", [];
@@ -221,7 +222,8 @@ impl Command {
             Self::ReloadTerminalSettings => Method("app.settings_reload"),
             Self::OpenTerminalSettingsFile => Method("app.settings_open_file"),
             Self::CheckForUpdates => Method("app.update_check"),
-            Self::CommandPalette => Method("app.palette"),
+            // The palette, on its Blocks.
+            Self::CommandPalette | Self::BrowseBlocks => Method("app.palette"),
             Self::HideSilo => Method("app.hide"),
             Self::HideOthers => Method("app.hide_others"),
             Self::ShowAll => Method("app.show_all"),
@@ -400,6 +402,18 @@ mod tests {
         assert_eq!(Command::JumpToNextPrompt.hint().as_deref(), Some("⌘↓"));
         assert_eq!(Command::SelectCommandOutput.hint().as_deref(), Some("⇧⌘A"));
         assert_eq!(Command::CopyCommandOutput.hint().as_deref(), Some("⌥⌘C"));
+        assert_eq!(Command::BrowseBlocks.hint().as_deref(), Some("⇧⌘B"));
+    }
+
+    #[test]
+    fn browse_blocks_has_a_free_plain_chord() {
+        assert_eq!(Command::BrowseBlocks.keys(), ["cmd-shift-b"]);
+        // macOS keeps these for itself (Look Up, Dock hiding, emoji).
+        for taken in ["ctrl-cmd-d", "cmd-alt-d", "ctrl-cmd-space"] {
+            assert!(!Command::BrowseBlocks.keys().contains(&taken));
+        }
+        let others = Command::ALL.iter().filter(|c| **c != Command::BrowseBlocks);
+        assert!(others.flat_map(|c| c.keys()).all(|k| *k != "cmd-shift-b"), "no other command has ⇧⌘B");
     }
 
     #[test]

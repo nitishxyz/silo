@@ -399,6 +399,7 @@ impl Workspace {
                 self.updater.update(cx, |updater, cx| updater.check(Some(me), cx));
             }
             Command::CommandPalette => self.toggle_palette(window, cx),
+            Command::BrowseBlocks => self.open_palette_with(finder::BLOCKS_QUERY.to_owned(), window, cx),
             Command::HideSilo => cx.hide(),
             Command::HideOthers => cx.hide_other_apps(),
             Command::ShowAll => cx.unhide_other_apps(),
@@ -449,7 +450,7 @@ impl Workspace {
             Command::CheckForUpdates => self.updater.read(cx).enabled(),
             Command::NewSession => connected,
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
-            Command::OttoSettings => self.view.is_some(),
+            Command::OttoSettings | Command::BrowseBlocks => self.view.is_some(),
             Command::NewFiles | Command::NewFilesTab => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES),
             Command::RenameSession
             | Command::CloseSession
@@ -971,7 +972,7 @@ impl Workspace {
                 self.close_palette(window, cx);
                 self.select_window(index);
             }
-            Target::Pane { index, block } => {
+            Target::Block { index, block } => {
                 self.close_palette(window, cx);
                 let active = self.active_window().map(|w| w.id.clone());
                 let target = self.view.as_ref().and_then(|v| v.session.windows.get(index)).map(|w| w.id.clone());
@@ -982,6 +983,10 @@ impl Workspace {
                     self.call(Method::BlockFocus { block_id: block });
                     self.select_window(index);
                 }
+            }
+            Target::Background(block) => {
+                self.close_palette(window, cx);
+                self.reveal_agent_target(block, window, cx);
             }
             Target::Page(url) | Target::OpenUrl(url) => {
                 self.close_palette(window, cx);
@@ -1036,6 +1041,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
+                        .children(item.icon.map(|glyph| crate::assets::icon(glyph, 13.0, theme::muted())))
                         .child(div().flex().child(item.lead).child(styled(item.text.clone(), &item.found.ranges))),
                     item.check,
                 )
@@ -1172,6 +1178,7 @@ impl Workspace {
             Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back"),
             Step::Choice(_, Some(_)) => Some("↩ keep · esc restore"),
             Step::Choice(_, None) => Some("↩ apply · esc back"),
+            Step::Search if finder::parse(&palette.query).0 == finder::Scope::Blocks => Some("↩ go to · esc close"),
             _ => None,
         };
         let input_step = matches!(palette.step, Step::Input(_) | Step::Number(_));

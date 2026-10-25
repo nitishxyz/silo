@@ -174,7 +174,10 @@ impl Workspace {
 
     /// [`Self::close`] with unsaved files answered for.
     pub(crate) fn close_checked(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if let CloseTarget::Pane(block) = &target {
+        // A background block is closed, not parked again.
+        if let CloseTarget::Pane(block) = &target
+            && !self.view.as_ref().is_some_and(|v| v.session.parked.iter().any(|p| &p.id == block))
+        {
             let alone = self
                 .view
                 .as_ref()

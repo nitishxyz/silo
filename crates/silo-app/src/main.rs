@@ -10,6 +10,7 @@ mod app_requests;
 mod appearance;
 mod approvals;
 mod assets;
+mod background;
 mod blink;
 mod block_status;
 mod blocks;
@@ -68,7 +69,7 @@ mod workspace;
 use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, point, prelude::*, px, size};
 
 use crate::{
-    commands::act::{CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll},
+    commands::act::{BrowseBlocks, CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll},
     workspace::Workspace,
 };
 
@@ -213,6 +214,7 @@ fn main() {
                     MenuItem::action("New Session", NewSession),
                     MenuItem::action("New Window…", NewWindow),
                     MenuItem::action("Command Palette", CommandPalette),
+                    MenuItem::action("Browse Blocks…", BrowseBlocks),
                 ],
                 disabled: false,
             },

@@ -164,9 +164,10 @@ impl crate::workspace::Workspace {
         self.blocks.agents().find(|(_, p)| p.read(cx).focus.contains_focused(window, cx)).map(|(id, _)| id.clone())
     }
 
-    /// Jump to `block` named by a tool call, in whichever session holds it;
-    /// a parked block (a command, a hidden terminal) floats in first.
-    fn reveal_agent_target(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+    /// Jump to `block` (named by a tool call, picked in ⌘P's Blocks or the
+    /// background menu), in whichever session holds it; a parked block (a
+    /// command, a hidden terminal) floats into the shown tab first.
+    pub(crate) fn reveal_agent_target(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let host = self.active_host;
         let parked = self.view.as_ref().is_some_and(|v| v.session.parked.iter().any(|p| p.id == block));
         if !parked && let Some(view) = self.view.as_ref().filter(|v| v.blocks.iter().any(|b| b.id == block)) {
