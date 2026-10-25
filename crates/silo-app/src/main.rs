@@ -12,6 +12,7 @@ mod approvals;
 mod assets;
 mod background;
 mod blink;
+mod block_list;
 mod block_status;
 mod blocks;
 mod browser_actions;

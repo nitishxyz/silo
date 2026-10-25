@@ -2,16 +2,16 @@
 //! parked blocks (a command an agent started, a hidden terminal), which
 //! are in no tab. Each row shows the block's kind, title, state and who
 //! started it; Show floats it into the shown tab, × closes it (asking
-//! first when a program runs). ⌘P's Blocks lists them too (`finder.rs`).
+//! first when a program runs). Its rows are `block_list.rs`'s, as in ⌘P.
 
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Subscription, Window, div, prelude::*, px, rgb};
-use silo_proto::model::{Busy, Lifecycle};
 
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
+    block_list::BlockRow,
     close_confirm::CloseTarget,
     theme,
     titlebar::PILL_HEIGHT,
@@ -43,68 +43,12 @@ impl BackgroundMenu {
     }
 }
 
-/// One background block, as the menu and ⌘P show it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BackgroundRow {
-    pub id: String,
-    pub icon: &'static str,
-    pub title: String,
-    /// See [`state_text`].
-    pub state: String,
-    /// The block that started it (an agent), by its title.
-    pub by: Option<String>,
-    /// The running command line, when the shell reported one.
-    pub command: Option<String>,
-    /// A program runs: closing asks first.
-    pub busy: bool,
-}
-
-/// A block's state in a word or three: `running cargo`, `idle`,
-/// `exited · code 1`, `exited`, `restored`.
-#[must_use]
-pub(crate) fn state_text(lifecycle: Lifecycle, exited: Option<i32>, busy: Option<&Busy>) -> String {
-    match (lifecycle, exited, busy) {
-        (Lifecycle::Running, _, Some(busy)) => format!("running {}", busy.process),
-        (Lifecycle::Running, _, None) => "idle".into(),
-        (Lifecycle::Exited, Some(code), _) => format!("exited · code {code}"),
-        (Lifecycle::Exited, None, _) => "exited".into(),
-        (Lifecycle::Restored, ..) => "restored".into(),
-        (Lifecycle::Unknown, ..) => "stopped".into(),
-    }
-}
-
 /// The `n`th row's selection after the list changed to `count` rows.
 fn clamp(selected: usize, count: usize) -> usize {
     selected.min(count.saturating_sub(1))
 }
 
 impl Workspace {
-    /// The shown session's background blocks, oldest first.
-    pub(crate) fn background_rows(&self, cx: &gpui::App) -> Vec<BackgroundRow> {
-        let Some(view) = &self.view else { return Vec::new() };
-        view.session
-            .parked
-            .iter()
-            .map(|parked| {
-                let info = self.block_info(&parked.id);
-                let busy = self.block_status(&parked.id).and_then(|s| s.busy.as_ref());
-                let state = info.map_or_else(|| "starting".to_owned(), |i| state_text(i.lifecycle, i.exited, busy));
-                let owner = parked.owner.as_ref().or_else(|| info.and_then(|i| i.owner_block.as_ref()));
-                // Only a block still in the session has a name to show.
-                let by = owner.filter(|o| self.block_info(o).is_some()).map(|o| self.block_label(o, cx));
-                BackgroundRow {
-                    id: parked.id.clone(),
-                    icon: self.block_icon(&parked.id),
-                    title: self.block_label(&parked.id, cx),
-                    state,
-                    by,
-                    command: busy.and_then(|b| b.command.clone()),
-                    busy: busy.is_some(),
-                }
-            })
-            .collect()
-    }
-
     fn has_background(&self) -> bool {
         self.view.as_ref().is_some_and(|v| !v.session.parked.is_empty())
     }
@@ -152,7 +96,7 @@ impl Workspace {
     fn background_show(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.background_rows(cx).into_iter().nth(index) else { return };
         self.background.open = false;
-        self.reveal_agent_target(row.id, window, cx);
+        self.pick_block(row.target(), window, cx);
         cx.notify();
     }
 
@@ -160,7 +104,7 @@ impl Workspace {
     /// menu stays open on the rest.
     fn background_close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.background_rows(cx).into_iter().nth(index) else { return };
-        self.close(CloseTarget::Pane(row.id), window, cx);
+        self.close(CloseTarget::Pane(row.block), window, cx);
         cx.notify();
     }
 
@@ -266,8 +210,8 @@ impl Workspace {
         )
     }
 
-    fn background_row(&self, row: BackgroundRow, index: usize, selected: bool, cx: &mut Context<Self>) -> AnyElement {
-        let by = row.by.map(|by| format!(" · started by {by}")).unwrap_or_default();
+    fn background_row(&self, row: BlockRow, index: usize, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+        let status = row.status();
         let tip = row.command.clone();
         let close_tip = if row.busy { "Close (asks first: a program is running)" } else { "Close" };
         let button = |id: &'static str| {
@@ -294,7 +238,7 @@ impl Workspace {
             .when(selected, |el| el.bg(theme::row_fill()))
             .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
             .cursor_pointer()
-            .child(div().w(px(14.0)).flex_none().flex().justify_center().child(icon(row.icon, 13.0, theme::muted())))
+            .child(div().w(px(14.0)).flex_none().flex().justify_center().child(icon(row.icon(), 13.0, theme::muted())))
             .child(
                 div()
                     .flex()
@@ -304,7 +248,7 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(div().text_ellipsis().child(row.title))
-                    .child(div().text_ellipsis().text_size(px(11.0)).text_color(rgb(theme::muted())).child(format!("{}{by}", row.state))),
+                    .child(div().text_ellipsis().text_size(px(11.0)).text_color(rgb(theme::muted())).child(status)),
             )
             .when_some(tip, |el, tip| el.tooltip(Tooltip::text(tip)))
             .child(
@@ -343,23 +287,6 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn busy(process: &str) -> Busy {
-        Busy { process: process.into(), command: Some(format!("{process} build")), since: 0 }
-    }
-
-    #[test]
-    fn rows_say_what_runs_or_how_it_ended() {
-        assert_eq!(state_text(Lifecycle::Running, None, Some(&busy("cargo"))), "running cargo");
-        assert_eq!(state_text(Lifecycle::Running, None, None), "idle", "a shell at its prompt");
-        assert_eq!(state_text(Lifecycle::Exited, Some(0), None), "exited · code 0");
-        assert_eq!(state_text(Lifecycle::Exited, Some(101), None), "exited · code 101");
-        assert_eq!(state_text(Lifecycle::Exited, None, None), "exited", "killed by a signal");
-        // An exited block's stale busy record never reads as running.
-        assert_eq!(state_text(Lifecycle::Exited, Some(1), Some(&busy("sleep"))), "exited · code 1");
-        assert_eq!(state_text(Lifecycle::Restored, None, None), "restored");
-        assert_eq!(state_text(Lifecycle::Unknown, None, None), "stopped");
-    }
 
     #[test]
     fn the_selection_stays_on_the_list_as_it_shrinks() {

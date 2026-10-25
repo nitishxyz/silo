@@ -8,6 +8,7 @@ use std::{ops::Range, path::Path};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    block_list::BlockRow,
     commands::{Command, fuzzy},
     hosts::HostState,
     settings_panel::SettingsSnapshot,
@@ -456,29 +457,6 @@ impl Workspace {
         out
     }
 
-    /// Every block of the shown session: each tab's tiled and floating
-    /// ones in order, then the background ones.
-    pub(crate) fn block_rows(&self, cx: &gpui::App) -> Vec<BlockRow> {
-        let Some(view) = &self.view else { return Vec::new() };
-        let mut out = Vec::new();
-        for (index, w) in view.session.windows.iter().enumerate() {
-            let tab = self.window_title(w, cx);
-            for block in crate::floats::window_blocks(w) {
-                let float = crate::floats::is_float(w, &block);
-                out.push(BlockRow {
-                    title: self.block_label(&block, cx),
-                    icon: self.block_icon(&block),
-                    place: Place::Tab { index, name: tab.clone(), float },
-                    block,
-                });
-            }
-        }
-        for row in self.background_rows(cx) {
-            out.push(BlockRow { block: row.id, title: row.title, icon: row.icon, place: Place::Background { state: row.state, by: row.by } });
-        }
-        out
-    }
-
     /// Recent pages of the shown host.
     fn page_items(&self, cx: &gpui::App) -> Vec<Item> {
         let Some(host) = self.hosts.get(self.active_host) else { return Vec::new() };
@@ -499,48 +477,17 @@ impl Workspace {
     }
 }
 
-/// One block of the session, as the finder lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockRow {
-    pub block: String,
-    pub title: String,
-    pub icon: &'static str,
-    pub place: Place,
-}
-
-/// Where a block is.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Place {
-    /// In tab `index` (named `name`), tiled or floating.
-    Tab { index: usize, name: String, float: bool },
-    /// Parked: in no tab; its state and who started it.
-    Background { state: String, by: Option<String> },
-}
-
-/// The Blocks entries: the kind's glyph and title, the tab (or
-/// "background", its state and who started it) after it.
+/// The Blocks entries ([`crate::block_list`]): the kind's glyph and title,
+/// where it is after it.
 #[must_use]
-pub fn block_items(rows: Vec<BlockRow>) -> Vec<Item> {
+pub(crate) fn block_items(rows: Vec<BlockRow>) -> Vec<Item> {
     rows.into_iter()
         .map(|row| {
-            let (target, detail) = match row.place {
-                Place::Tab { index, name, float } => {
-                    let mut detail = if name == row.title { format!("Tab {}", index + 1) } else { format!("Tab {} · {name}", index + 1) };
-                    if float {
-                        detail.push_str(" · floating");
-                    }
-                    (Target::Block { index, block: row.block.clone() }, detail)
-                }
-                Place::Background { state, by } => {
-                    let by = by.map(|by| format!(" · started by {by}")).unwrap_or_default();
-                    (Target::Background(row.block.clone()), format!("background · {state}{by}"))
-                }
-            };
             // The same key wherever the block is, so a pick stays recent
             // as it moves between the background and a tab.
-            let mut item = Item::new(target, Group::Blocks, row.title, format!("pane:{}", row.block));
-            item.icon = Some(row.icon);
-            item.detail = Some(detail);
+            let mut item = Item::new(row.target(), Group::Blocks, row.title.clone(), format!("pane:{}", row.block));
+            item.icon = Some(row.icon());
+            item.detail = Some(row.detail());
             item
         })
         .collect()
@@ -754,23 +701,24 @@ mod tests {
     }
 
     fn blocks() -> Vec<BlockRow> {
+        use crate::{block_list::Place, blocks::Kind};
         let tab = |index, name: &str, float| Place::Tab { index, name: name.into(), float };
+        let row = |block: &str, title: &str, kind: Kind, state: &str, by: Option<&str>, place: Place| BlockRow {
+            block: block.into(),
+            kind,
+            title: title.into(),
+            state: state.into(),
+            by: by.map(Into::into),
+            command: None,
+            busy: false,
+            place,
+        };
         vec![
-            BlockRow { block: "b1".into(), title: "api".into(), icon: "terminal", place: tab(0, "api", false) },
-            BlockRow { block: "b2".into(), title: "GitHub".into(), icon: "globe", place: tab(0, "api", true) },
-            BlockRow { block: "b3".into(), title: "otto".into(), icon: "agent", place: tab(1, "review", false) },
-            BlockRow {
-                block: "b4".into(),
-                title: "sonic".into(),
-                icon: "terminal",
-                place: Place::Background { state: "running cargo".into(), by: Some("otto".into()) },
-            },
-            BlockRow {
-                block: "b5".into(),
-                title: "logs".into(),
-                icon: "terminal",
-                place: Place::Background { state: "exited · code 1".into(), by: None },
-            },
+            row("b1", "api", Kind::Terminal, "idle", None, tab(0, "api", false)),
+            row("b2", "GitHub", Kind::Browser, "idle", None, tab(0, "api", true)),
+            row("b3", "otto", Kind::Agent, "idle", None, tab(1, "review", false)),
+            row("b4", "sonic", Kind::Terminal, "running cargo", Some("otto"), Place::Background),
+            row("b5", "logs", Kind::Terminal, "exited · code 1", None, Place::Background),
         ]
     }
 
@@ -783,7 +731,7 @@ mod tests {
             [
                 ("api", Some("terminal"), "Tab 1"),
                 ("GitHub", Some("globe"), "Tab 1 · api · floating"),
-                ("otto", Some("agent"), "Tab 2 · review"),
+                ("otto", Some(crate::agent_block::ICON), "Tab 2 · review"),
                 ("sonic", Some("terminal"), "background · running cargo · started by otto"),
                 ("logs", Some("terminal"), "background · exited · code 1"),
             ]

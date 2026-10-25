@@ -972,21 +972,9 @@ impl Workspace {
                 self.close_palette(window, cx);
                 self.select_window(index);
             }
-            Target::Block { index, block } => {
+            target @ (Target::Block { .. } | Target::Background(_)) => {
                 self.close_palette(window, cx);
-                let active = self.active_window().map(|w| w.id.clone());
-                let target = self.view.as_ref().and_then(|v| v.session.windows.get(index)).map(|w| w.id.clone());
-                if target.is_some() && target == active {
-                    self.focus_block(&block, window, cx);
-                } else {
-                    // The server's focus is followed once the tab shows.
-                    self.call(Method::BlockFocus { block_id: block });
-                    self.select_window(index);
-                }
-            }
-            Target::Background(block) => {
-                self.close_palette(window, cx);
-                self.reveal_agent_target(block, window, cx);
+                self.pick_block(target, window, cx);
             }
             Target::Page(url) | Target::OpenUrl(url) => {
                 self.close_palette(window, cx);
