@@ -336,6 +336,8 @@ fn turn_trees_and_changes_survive_the_migration() {
     store.set_turn_trees("old", 1, None, Some("end")).unwrap();
     assert_eq!(store.turn_trees("old", 1).unwrap(), (Some("base".into()), Some("end".into())));
     assert!(store.set_turn_trees("old", 2, Some("x"), None).is_err());
+    assert_eq!(store.session_base_tree("old").unwrap().as_deref(), Some("base"), "the session's first snapshot");
+    assert_eq!(store.session_base_tree("none").unwrap(), None);
 
     let mut store = Store::open_in_memory().unwrap();
     let id = new_session(&mut store).id;

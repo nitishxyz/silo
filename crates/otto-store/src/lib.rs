@@ -461,6 +461,18 @@ impl Store {
             .unwrap_or_default())
     }
 
+    /// The session's first snapshot: the oldest turn's `base_tree` that was taken.
+    /// # Errors
+    /// Returns database errors.
+    pub fn session_base_tree(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row("SELECT base_tree FROM turns WHERE session_id=?1 AND base_tree IS NOT NULL ORDER BY turn LIMIT 1", params![session_id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
     /// The session's finished turns that changed files, oldest first: the turn, the last assistant item stored
     /// in it (the reply a client shows the changes under) and the `changes` its `turn.finished` event carries.
     /// # Errors

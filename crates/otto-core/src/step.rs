@@ -92,6 +92,32 @@ async fn turn_changes(cx: &Context, turn: i64, start: &crate::snapshot::Start) -
     }
     changes
 }
+/// `changes_show` reviews "this turn" or "this session" from otto's snapshots:
+/// the turn's and the session's first `base_tree` go in its input as
+/// `turn_base` / `session_base` (added after the input is checked, so the
+/// model can't set them). Without a snapshot they are left out and the tool falls back to
+/// the work tree against HEAD.
+async fn with_snapshots(cx: &Context, name: &str, mut value: serde_json::Value, turn: i64) -> serde_json::Value {
+    if name != "changes_show" {
+        return value;
+    }
+    let Some(input) = value.as_object_mut() else { return value };
+    input.remove("turn_base");
+    input.remove("session_base");
+    let id = cx.row.id.clone();
+    let trees = cx.runtime.db(move |s| Ok((s.turn_trees(&id, turn)?.0, s.session_base_tree(&id)?))).await;
+    match trees {
+        Ok((turn_base, session_base)) => {
+            for (key, tree) in [("turn_base", turn_base), ("session_base", session_base)] {
+                if let Some(tree) = tree {
+                    input.insert(key.into(), serde_json::Value::String(tree));
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "reading snapshots for changes_show"),
+    }
+    value
+}
 /// A retry wait as the `model.retrying` event.
 fn retrying(notice: &RetryNotice) -> Event {
     let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
@@ -841,6 +867,7 @@ async fn execute(
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         tcx.progress = Some(progress_tx);
         let value = prepared.ok_or_else(|| Error::Invalid("missing prepared tool input".into()))?.input;
+        let value = with_snapshots(&cx, &name, value, turn).await;
         let execution = tool.call(value, tcx.clone());
         tokio::pin!(execution);
         loop {
