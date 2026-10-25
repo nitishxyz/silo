@@ -1173,7 +1173,33 @@ impl AgentPane {
                     }
                 }))
         } else if status.signed_in {
+            // Reconnect: the same sign-in again (another account, or a fresh
+            // token); the new credential replaces the old one, no disconnect.
+            let (p2, p3) = (provider.clone(), provider.clone());
+            let by_key = status.mode == AuthMode::ApiKey || !status.modes.contains(&AuthMode::Subscription);
             div()
+                .flex()
+                .gap(px(6.0))
+                .when(!status.modes.is_empty(), |el| {
+                    el.child(self.button(
+                        format!("signin-reauth-{i}"),
+                        Kind::Quiet,
+                        if by_key { "Change key" } else { "Reconnect" },
+                        ROW_BUTTON,
+                        state(if by_key { Act::Key } else { Act::Subscribe }),
+                        cx,
+                        move |this, _, cx| {
+                            this.signin.error = None;
+                            this.signin.confirm = None;
+                            if by_key {
+                                this.key_field.update(cx, |e, cx| e.clear(cx));
+                                this.open_dialog(p2.clone(), Step::ApiKey, cx);
+                            } else {
+                                this.sign_in(p2.clone(), None, cx);
+                            }
+                        },
+                    ))
+                })
                 .child(self.button(
                     format!("signin-logout-{i}"),
                     Kind::Quiet,
@@ -1182,7 +1208,7 @@ impl AgentPane {
                     state(Act::Disconnect),
                     cx,
                     move |this, _, cx| {
-                        this.signin.arm(&p);
+                        this.signin.arm(&p3);
                         cx.notify();
                     },
                 ))
