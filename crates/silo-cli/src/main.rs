@@ -1402,9 +1402,11 @@ async fn otto_socket(silo_home: &std::path::Path, home: &std::path::Path) -> any
 
 /// Make the daemon in otto `home`, if any, this server's (at server start and
 /// before each `otto` service call): one serving another or an unknown
-/// (pre-`silo_home`) Silo home is stopped even when busy; an older one serving
-/// this home only once none of its sessions is busy. Stopped turns resume when
-/// otto starts again. Whether a daemon to keep runs.
+/// (pre-`silo_home`) Silo home is stopped, and so is an older one serving this
+/// home, even when busy, so an upgrade moves otto along with the server.
+/// otto's recovery ends the turns it stopped as interrupted (sub-agents report
+/// that to their parents); a new prompt continues them. Whether a daemon to
+/// keep runs.
 async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyhow::Result<bool> {
     use otto_client::{ClientError, Connection};
     let otto = match Connection::connect(home).await {
@@ -1418,11 +1420,12 @@ async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyh
         return Ok(true);
     }
     if ours {
-        let sessions = otto.session_list(None, false).await?;
-        if sessions.iter().any(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)) {
-            return Ok(true);
-        }
-        tracing::info!(old = %version, "restarting an older otto daemon");
+        let sessions = otto
+            .session_list(None, false)
+            .await
+            .map(|s| s.iter().filter(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)).count())
+            .unwrap_or(0);
+        tracing::info!(old = %version, busy = sessions, "restarting an older otto daemon");
     } else {
         let serves = if serves.is_empty() { "an unknown Silo" } else { serves.as_str() };
         tracing::warn!(%version, %serves, home = %home.display(), "replacing an otto daemon that serves another Silo");
@@ -1651,15 +1654,16 @@ mod tests {
     }
 
     /// This server's otto home holds its own daemon: a current one serving
-    /// this Silo is kept; one serving another or an unknown Silo is stopped
-    /// even when busy; an older one of this Silo only when idle.
+    /// this Silo is kept; one serving another or an unknown Silo, or an older
+    /// one of this Silo, is stopped even when busy (an upgrade moves otto too).
     #[tokio::test]
     async fn otto_claim_replaces_a_daemon_of_another_silo() {
         let current = env!("CARGO_PKG_VERSION");
         assert_eq!(claim("ours", current, "/here/silo", false, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("ours-busy", current, "/here/silo", true, true).await, (Some(true), false, String::new()));
         assert_eq!(claim("other", current, "/elsewhere/silo", true, true).await, (Some(false), true, String::new()));
         assert_eq!(claim("pre", current, "", true, true).await, (Some(false), true, String::new()));
-        assert_eq!(claim("old-busy", "0.0.1", "/here/silo", true, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("old-busy", "0.0.1", "/here/silo", true, true).await, (Some(false), true, String::new()));
         assert_eq!(claim("old-idle", "0.0.1", "/here/silo", false, true).await, (Some(false), true, String::new()));
     }
 
