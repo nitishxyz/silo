@@ -96,6 +96,8 @@ pub(crate) struct Defaults {
     pub agent: Option<String>,
     pub approval: ApprovalMode,
     pub native_compaction: bool,
+    /// Snapshot the work tree at each turn's start and end for review (otto's default: on).
+    pub turn_snapshots: bool,
     /// An [`ENGINES`] key.
     pub search: &'static str,
 }
@@ -112,6 +114,7 @@ impl Defaults {
             agent: text("agent"),
             approval: config.get("approval_mode").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
             native_compaction: config.get("native_compaction").and_then(Value::as_bool).unwrap_or(false),
+            turn_snapshots: config.get("turn_snapshots").and_then(Value::as_bool).unwrap_or(true),
             search,
         }
     }
@@ -151,6 +154,7 @@ pub(crate) enum Change {
     Agent(String),
     Approval(ApprovalMode),
     Compaction(bool),
+    Snapshots(bool),
     Search(&'static str),
 }
 
@@ -164,6 +168,7 @@ impl Change {
             Self::Agent(name) => vec![("agent", Value::from(name.as_str()))],
             Self::Approval(mode) => vec![("approval_mode", json(mode))],
             Self::Compaction(on) => vec![("native_compaction", Value::Bool(*on))],
+            Self::Snapshots(on) => vec![("turn_snapshots", Value::Bool(*on))],
             Self::Search(engine) => vec![("search_engine", Value::from(*engine))],
         }
     }
@@ -176,6 +181,7 @@ impl Change {
             Self::Agent(name) => d.agent = Some(name),
             Self::Approval(mode) => d.approval = mode,
             Self::Compaction(on) => d.native_compaction = on,
+            Self::Snapshots(on) => d.turn_snapshots = on,
             Self::Search(engine) => d.search = engine,
         }
     }
@@ -599,6 +605,12 @@ impl DefaultsView {
                 let _ = entity.update(cx, |this, cx| this.change(Change::Compaction(on), cx));
             })
             .into_any_element();
+        let entity = cx.entity().downgrade();
+        let snapshots = Toggle::new("otto-turn-snapshots", "Snapshot each turn for review", d.turn_snapshots)
+            .on_toggle(move |on, _, cx| {
+                let _ = entity.update(cx, |this, cx| this.change(Change::Snapshots(on), cx));
+            })
+            .into_any_element();
         let card = AgentsSettings::card(vec![
             Self::row("Model", None, self.menu_trigger(Menu::Model, d.model_label(), cx)),
             Self::row("Effort", Some("An agent's own effort wins"), self.menu_trigger(Menu::Effort, d.effort_label().to_owned(), cx)),
@@ -609,6 +621,11 @@ impl DefaultsView {
                 self.segmented("otto-default-mode", MODES.iter().map(|(_, l)| *l).collect(), d.mode_index(), |i| Change::Approval(MODES[i].0), cx),
             ),
             Self::row("Native compaction", Some("Let the provider compact long sessions when it can"), compaction),
+            Self::row(
+                "Snapshot each turn for review",
+                Some("In a git repo, keep the work tree at each turn's start and end so its changes can be reviewed"),
+                snapshots,
+            ),
         ]);
         vec![AgentsSettings::titled("Defaults", None, card), AgentsSettings::note("Applies to new sessions.")]
     }
@@ -671,6 +688,8 @@ mod tests {
         let unset = Defaults::of(&json!({}));
         assert_eq!((unset.model_label(), unset.effort_label(), unset.agent_label()), ("Automatic".to_owned(), "Default", "build"));
         assert_eq!((unset.mode_index(), unset.search_index(), unset.native_compaction), (0, 0, false));
+        assert!(unset.turn_snapshots, "otto snapshots unless told not to");
+        assert!(!Defaults::of(&json!({"turn_snapshots": false})).turn_snapshots);
         let set = Defaults::of(&json!({
             "provider": "anthropic", "model": "claude-x", "effort": "high", "agent": "plan",
             "approval_mode": "ask_all", "native_compaction": true, "search_engine": "google",
@@ -693,6 +712,7 @@ mod tests {
             Change::Agent("plan".into()),
             Change::Approval(ApprovalMode::AskOnEffects),
             Change::Compaction(true),
+            Change::Snapshots(false),
             Change::Search("bing"),
             Change::Effort(None),
             Change::Model(None),
