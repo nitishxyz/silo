@@ -11,7 +11,7 @@ mod editor;
 pub(crate) mod model;
 #[cfg(test)]
 mod tests;
-mod text;
+pub(crate) mod text;
 mod view;
 
 use std::{

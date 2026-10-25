@@ -17,6 +17,7 @@ use silo_proto::model::{BlockInfo, BlockKind};
 use crate::{
     agent::AgentPane,
     browser_pane::{BrowserPane, Icon},
+    changes::ChangesPane,
     files::FilesPane,
     motion::{Exit, GhostBody},
     pane::Pane,
@@ -33,6 +34,8 @@ pub enum Kind {
     Agent,
     /// A folder's files.
     Files,
+    /// A repo's changes, for review.
+    Changes,
     /// A newer server's block kind: no pane, a "Not supported" card.
     Unsupported,
 }
@@ -40,7 +43,7 @@ pub enum Kind {
 impl Kind {
     /// Every kind, for tests that must cover each one.
     #[cfg(test)]
-    pub const ALL: [Self; 5] = [Self::Terminal, Self::Browser, Self::Agent, Self::Files, Self::Unsupported];
+    pub const ALL: [Self; 6] = [Self::Terminal, Self::Browser, Self::Agent, Self::Files, Self::Changes, Self::Unsupported];
 
     /// The kind's glyph: lists, tabs, headers and the drag pill.
     #[must_use]
@@ -50,6 +53,7 @@ impl Kind {
             Self::Browser => "globe",
             Self::Agent => crate::agent_block::ICON,
             Self::Files => crate::files_block::ICON,
+            Self::Changes => crate::changes_block::ICON,
             Self::Unsupported => "info",
         }
     }
@@ -58,7 +62,7 @@ impl Kind {
     #[must_use]
     pub fn has_folder(self) -> bool {
         match self {
-            Self::Terminal | Self::Agent | Self::Files => true,
+            Self::Terminal | Self::Agent | Self::Files | Self::Changes => true,
             Self::Browser | Self::Unsupported => false,
         }
     }
@@ -69,8 +73,8 @@ impl Kind {
     pub fn exit(self, alive: bool) -> Exit {
         match self {
             Self::Terminal => Exit::Frame,
-            Self::Browser | Self::Agent | Self::Files if alive => Exit::Card,
-            Self::Browser | Self::Agent | Self::Files => Exit::Pane,
+            Self::Browser | Self::Agent | Self::Files | Self::Changes if alive => Exit::Card,
+            Self::Browser | Self::Agent | Self::Files | Self::Changes => Exit::Pane,
             Self::Unsupported => Exit::Card,
         }
     }
@@ -85,7 +89,8 @@ pub fn kind_of(info: Option<&BlockInfo>) -> Kind {
         Some(BlockKind::Browser) => Kind::Browser,
         Some(BlockKind::Agent) => Kind::Agent,
         Some(BlockKind::Files) => Kind::Files,
-        Some(BlockKind::Changes | BlockKind::Unknown) => Kind::Unsupported,
+        Some(BlockKind::Changes) => Kind::Changes,
+        Some(BlockKind::Unknown) => Kind::Unsupported,
     }
 }
 
@@ -105,6 +110,7 @@ pub(crate) enum BlockPane {
     Browser(Entity<BrowserPane>),
     Agent(Entity<AgentPane>),
     Files(Entity<FilesPane>),
+    Changes(Entity<ChangesPane>),
 }
 
 impl BlockPane {
@@ -114,7 +120,7 @@ impl BlockPane {
         match self {
             Self::Terminal(p) => Some(p.read(cx).title()),
             Self::Browser(p) => Some(p.read(cx).title()),
-            Self::Agent(_) | Self::Files(_) => None,
+            Self::Agent(_) | Self::Files(_) | Self::Changes(_) => None,
         }
     }
 
@@ -126,6 +132,7 @@ impl BlockPane {
             Self::Terminal(_) => Icon::Glyph(Kind::Terminal.icon()),
             Self::Agent(_) => Icon::Glyph(Kind::Agent.icon()),
             Self::Files(_) => Icon::Glyph(Kind::Files.icon()),
+            Self::Changes(_) => Icon::Glyph(Kind::Changes.icon()),
         }
     }
 
@@ -133,7 +140,7 @@ impl BlockPane {
     pub(crate) fn favicon(&self, cx: &App) -> Option<std::sync::Arc<gpui::Image>> {
         match self {
             Self::Browser(p) => p.read(cx).favicon_image(),
-            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) => None,
+            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) | Self::Changes(_) => None,
         }
     }
 
@@ -142,7 +149,7 @@ impl BlockPane {
         match self {
             Self::Terminal(p) => p.read(cx).backdrop(),
             Self::Browser(p) => p.read(cx).backdrop(),
-            Self::Agent(_) | Self::Files(_) => None,
+            Self::Agent(_) | Self::Files(_) | Self::Changes(_) => None,
         }
     }
 
@@ -150,7 +157,7 @@ impl BlockPane {
     pub(crate) fn inactive_dim(&self) -> f32 {
         match self {
             Self::Browser(_) => crate::theme::INACTIVE_DIM_PAGE,
-            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) => crate::theme::INACTIVE_DIM,
+            Self::Terminal(_) | Self::Agent(_) | Self::Files(_) | Self::Changes(_) => crate::theme::INACTIVE_DIM,
         }
     }
 
@@ -167,7 +174,7 @@ impl BlockPane {
                 p.set_palette(card.palette, cx);
                 p.set_corners(card.page_corners, cx);
             }),
-            Self::Agent(_) | Self::Files(_) => {}
+            Self::Agent(_) | Self::Files(_) | Self::Changes(_) => {}
         }
     }
 
@@ -178,6 +185,7 @@ impl BlockPane {
             Self::Terminal(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
             Self::Browser(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
             Self::Files(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
+            Self::Changes(p) => p.update(cx, |p, cx| p.set_control(control.clone(), cx)),
             Self::Agent(_) => {}
         }
     }
@@ -186,7 +194,7 @@ impl BlockPane {
     pub(crate) fn unsaved(&self, cx: &App) -> Vec<String> {
         match self {
             Self::Files(p) => p.read(cx).unsaved(),
-            Self::Terminal(_) | Self::Browser(_) | Self::Agent(_) => Vec::new(),
+            Self::Terminal(_) | Self::Browser(_) | Self::Agent(_) | Self::Changes(_) => Vec::new(),
         }
     }
 
@@ -194,7 +202,7 @@ impl BlockPane {
     pub(crate) fn last_frame(&self, cx: &App) -> Option<std::sync::Arc<silo_render::PreparedFrame>> {
         match self {
             Self::Terminal(p) => p.read(cx).last_frame(),
-            Self::Browser(_) | Self::Agent(_) | Self::Files(_) => None,
+            Self::Browser(_) | Self::Agent(_) | Self::Files(_) | Self::Changes(_) => None,
         }
     }
 
@@ -213,6 +221,7 @@ impl BlockPane {
             Self::Browser(p) => p.read(cx).focus.clone().focus(window, cx),
             Self::Agent(p) => p.update(cx, |p, cx| p.focus_composer(window, cx)),
             Self::Files(p) => p.read(cx).focus.clone().focus(window, cx),
+            Self::Changes(p) => p.read(cx).focus.clone().focus(window, cx),
         }
     }
 
@@ -229,6 +238,7 @@ impl BlockPane {
                 let p = p.read(cx);
                 p.focus.contains_focused(window, cx) || p.tree_focus.is_focused(window)
             }
+            Self::Changes(p) => p.read(cx).focus.contains_focused(window, cx),
         }
     }
 
@@ -242,6 +252,7 @@ impl BlockPane {
                 p.update(cx, |p, cx| p.show(session, info.cwd, cx));
             }
             Self::Files(p) => p.update(cx, |p, cx| p.set_info(info, cx)),
+            Self::Changes(p) => p.update(cx, |p, cx| p.set_info(info, cx)),
         }
     }
 
@@ -253,6 +264,7 @@ impl BlockPane {
             Self::Browser(p) => p.read(cx).bounds(),
             Self::Agent(p) => p.read(cx).bounds(),
             Self::Files(p) => p.read(cx).bounds(),
+            Self::Changes(p) => p.read(cx).bounds(),
         }
     }
 
@@ -262,6 +274,7 @@ impl BlockPane {
             Self::Browser(p) => p.clone().into_any_element(),
             Self::Agent(p) => p.clone().into_any_element(),
             Self::Files(p) => p.clone().into_any_element(),
+            Self::Changes(p) => p.clone().into_any_element(),
         }
     }
 
@@ -271,6 +284,7 @@ impl BlockPane {
             Self::Browser(p) => pane_header::parts(p, style, info, cx),
             Self::Agent(p) => pane_header::parts(p, style, info, cx),
             Self::Files(p) => pane_header::parts(p, style, info, cx),
+            Self::Changes(p) => pane_header::parts(p, style, info, cx),
         }
     }
 }
@@ -307,6 +321,12 @@ impl Blocks {
     kind!(browser, browsers, Browser, BrowserPane);
     kind!(agent, agents, Agent, AgentPane);
     kind!(files, files_panes, Files, FilesPane);
+    pub(crate) fn changes(&self, block: &str) -> Option<&Entity<ChangesPane>> {
+        match self.map.get(block) {
+            Some((BlockPane::Changes(p), _)) => Some(p),
+            _ => None,
+        }
+    }
 
     pub(crate) fn get(&self, block: &str) -> Option<&BlockPane> {
         self.map.get(block).map(|(pane, _)| pane)
@@ -437,7 +457,8 @@ mod tests {
             Kind::Browser => 1,
             Kind::Agent => 2,
             Kind::Files => 3,
-            Kind::Unsupported => 4,
+            Kind::Changes => 4,
+            Kind::Unsupported => 5,
         }
     }
 
@@ -452,6 +473,7 @@ mod tests {
         assert_eq!(kind_of(Some(&info("b", BlockKind::Browser))), Kind::Browser);
         assert_eq!(kind_of(Some(&info("b", BlockKind::Agent))), Kind::Agent);
         assert_eq!(kind_of(Some(&info("b", BlockKind::Files))), Kind::Files);
+        assert_eq!(kind_of(Some(&info("b", BlockKind::Changes))), Kind::Changes);
         assert_eq!(kind_of(Some(&info("b", BlockKind::Terminal))), Kind::Terminal);
         assert_eq!(kind_of(Some(&info("b", BlockKind::Unknown))), Kind::Unsupported);
         assert_eq!(kind_of(None), Kind::Terminal);
@@ -460,13 +482,13 @@ mod tests {
     #[test]
     fn splits_start_in_the_folder_of_a_kind_that_has_one() {
         let with: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.has_folder()).collect();
-        assert_eq!(with, [Kind::Terminal, Kind::Agent, Kind::Files]);
+        assert_eq!(with, [Kind::Terminal, Kind::Agent, Kind::Files, Kind::Changes]);
     }
 
     #[test]
     fn every_kind_has_its_own_glyph() {
         let glyphs: Vec<&str> = Kind::ALL.iter().map(|k| k.icon()).collect();
-        assert_eq!(glyphs, ["terminal", "globe", crate::agent_block::ICON, crate::files_block::ICON, "info"]);
+        assert_eq!(glyphs, ["terminal", "globe", crate::agent_block::ICON, crate::files_block::ICON, crate::changes_block::ICON, "info"]);
         let mut unique = glyphs.clone();
         unique.sort_unstable();
         unique.dedup();

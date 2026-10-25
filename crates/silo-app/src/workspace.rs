@@ -94,6 +94,8 @@ pub struct Workspace {
     pub(crate) close_confirm: Option<crate::close_confirm::CloseConfirm>,
     /// Save / Don't Save / Cancel before a close loses Files edits.
     pub(crate) unsaved: Option<crate::files_block::UnsavedConfirm>,
+    /// Asking before a Changes block discards changes.
+    pub(crate) revert: Option<crate::changes_block::RevertConfirm>,
     pub(crate) motion: Motion,
     pub(crate) appearance_menu: crate::appearance::AppearanceMenu,
     /// The titlebar's background-blocks menu.
@@ -267,6 +269,7 @@ impl Workspace {
             picker: None,
             close_confirm: None,
             unsaved: None,
+            revert: None,
             motion: Motion::default(),
             appearance_menu: crate::appearance::AppearanceMenu::new(window, cx),
             background: crate::background::BackgroundMenu::new(window, cx),
@@ -603,7 +606,7 @@ impl Workspace {
             }
             // No files view yet (docs/FILES_BLOCK.md §6 step 3).
             ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
-            ConnEvent::Event(Event::ChangesChanged { .. }) => {}
+            ConnEvent::Event(Event::ChangesChanged { block_id }) => self.changes_changed(block_id, cx),
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some(pane) = self.blocks.browser(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
@@ -948,8 +951,11 @@ impl Workspace {
                     crate::blocks::Kind::Browser => self.ensure_browser(&block, window, cx),
                     crate::blocks::Kind::Agent if agents_here => self.ensure_agent(&block, window, cx),
                     crate::blocks::Kind::Files => self.ensure_files(&block, window, cx),
+                    crate::blocks::Kind::Changes if self.host_supports(silo_proto::compat::feature::CHANGES) => {
+                        self.ensure_changes(&block, window, cx)
+                    }
                     // No pane: its card says why (`render_cell`).
-                    crate::blocks::Kind::Agent | crate::blocks::Kind::Unsupported => {}
+                    crate::blocks::Kind::Agent | crate::blocks::Kind::Changes | crate::blocks::Kind::Unsupported => {}
                 }
             }
         }
@@ -1633,6 +1639,7 @@ impl Render for Workspace {
         let picker = self.render_picker(window, cx);
         let close_confirm = self.render_close_confirm(cx);
         let unsaved = self.render_unsaved(cx);
+        let revert = self.render_revert(cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1671,6 +1678,7 @@ impl Render for Workspace {
             .children(picker)
             .children(close_confirm)
             .children(unsaved)
+            .children(revert)
     }
 }
 

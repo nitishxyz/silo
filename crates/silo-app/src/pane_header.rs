@@ -94,9 +94,9 @@ impl HeaderMode {
 pub fn header_mode(kind: Kind, headers: PaneHeaders) -> HeaderMode {
     let shown = |on: bool| if on { HeaderMode::Full } else { HeaderMode::Hidden };
     match kind {
-        // Browsers and Files hold their address or tabs there.
-        Kind::Browser | Kind::Files if headers.none() => HeaderMode::Middle,
-        Kind::Browser | Kind::Files => HeaderMode::Full,
+        // Browsers, Files and Changes hold their address or tabs there.
+        Kind::Browser | Kind::Files | Kind::Changes if headers.none() => HeaderMode::Middle,
+        Kind::Browser | Kind::Files | Kind::Changes => HeaderMode::Full,
         Kind::Agent => shown(headers.get(HeaderBlock::Agent)),
         Kind::Terminal | Kind::Unsupported => shown(headers.get(HeaderBlock::Terminal)),
     }
@@ -306,6 +306,7 @@ mod tests {
         assert_eq!(header_mode(Kind::Browser, none), HeaderMode::Middle);
         assert_eq!(header_mode(Kind::Files, none), HeaderMode::Middle, "a Files block keeps its tabs");
         assert_eq!(header_mode(Kind::Files, PaneHeaders::default()), HeaderMode::Full);
+        assert_eq!(header_mode(Kind::Changes, none), HeaderMode::Middle, "a Changes block keeps its scope and tabs");
         assert_eq!(header_mode(Kind::Terminal, none), HeaderMode::Hidden);
         assert_eq!(header_mode(Kind::Agent, none), HeaderMode::Hidden);
     }

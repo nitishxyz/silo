@@ -20,6 +20,8 @@ mod browser_home;
 mod browser_host;
 mod browser_pane;
 mod cache;
+mod changes;
+mod changes_block;
 mod cli_link;
 mod clipboard;
 mod close_confirm;

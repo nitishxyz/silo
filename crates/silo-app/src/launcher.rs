@@ -33,10 +33,11 @@ pub enum Kind {
     Browser,
     Agent,
     Files,
+    Changes,
 }
 
 /// The kinds listed, in order (their digits are 1, 2, 3…).
-pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent, Kind::Files];
+pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent, Kind::Files, Kind::Changes];
 
 /// Recent pages listed under the kinds.
 const RECENTS: usize = 3;
@@ -48,6 +49,7 @@ impl Kind {
             Self::Browser => "Browser",
             Self::Agent => "Agent",
             Self::Files => "Files",
+            Self::Changes => "Changes",
         }
     }
 
@@ -57,6 +59,7 @@ impl Kind {
             Self::Browser => "globe",
             Self::Agent => crate::agent_block::ICON,
             Self::Files => crate::files_block::ICON,
+            Self::Changes => crate::changes_block::ICON,
         }
     }
 
@@ -66,6 +69,7 @@ impl Kind {
             Self::Browser => BlockKind::Browser,
             Self::Agent => BlockKind::Agent,
             Self::Files => BlockKind::Files,
+            Self::Changes => BlockKind::Changes,
         }
     }
 
@@ -76,6 +80,7 @@ impl Kind {
             Self::Browser => Command::NewBrowserTab,
             Self::Agent => Command::NewAgentTab,
             Self::Files => Command::NewFilesTab,
+            Self::Changes => Command::NewChangesTab,
         }
     }
 
@@ -86,6 +91,7 @@ impl Kind {
             Self::Browser => Command::NewBrowser,
             Self::Agent => Command::NewAgent,
             Self::Files => Command::NewFiles,
+            Self::Changes => Command::NewChanges,
         }
     }
 }
@@ -186,6 +192,7 @@ pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> 
         Row::Kind(Kind::Browser, _) => (BlockKind::Browser, SpawnSpec::default(), None),
         Row::Kind(Kind::Agent, _) => (BlockKind::Agent, spawn, None),
         Row::Kind(Kind::Files, _) => (BlockKind::Files, spawn, None),
+        Row::Kind(Kind::Changes, _) => (BlockKind::Changes, spawn, None),
         Row::Path(path) => (BlockKind::Files, SpawnSpec { cwd: Some(path.clone()), ..SpawnSpec::default() }, None),
         Row::Open { url, .. } => (BlockKind::Browser, SpawnSpec::default(), Some(url.clone())),
     };

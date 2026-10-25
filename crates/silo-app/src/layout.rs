@@ -330,9 +330,13 @@ impl Workspace {
             Some(pane) => pane.element(),
             None => match self.block_kind(id) {
                 crate::blocks::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
+                // A server that lists the kind but can't answer for it yet.
+                crate::blocks::Kind::Changes if !self.host_supports(silo_proto::compat::feature::CHANGES) => unsupported(UNSUPPORTED.into()),
                 crate::blocks::Kind::Agent => unsupported(self.agent_unsupported().into()),
                 // Its pane comes with the view that shows it.
-                crate::blocks::Kind::Terminal | crate::blocks::Kind::Browser | crate::blocks::Kind::Files => div().size_full().into_any_element(),
+                crate::blocks::Kind::Terminal | crate::blocks::Kind::Browser | crate::blocks::Kind::Files | crate::blocks::Kind::Changes => {
+                    div().size_full().into_any_element()
+                }
             },
         };
         let fill_color = self.card_fill(id, cx);

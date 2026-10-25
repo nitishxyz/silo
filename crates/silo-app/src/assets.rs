@@ -88,7 +88,9 @@ icons!(
     "eye-off",
     "plug",
     "sidebar-right",
-    "layers"
+    "layers",
+    "git-diff",
+    "message-square"
 );
 
 #[cfg(test)]

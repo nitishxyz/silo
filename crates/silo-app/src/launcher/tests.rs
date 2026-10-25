@@ -94,7 +94,8 @@ fn files_is_a_kind_and_a_path_opens_it() {
 
 #[test]
 fn rows_follow_the_intent() {
-    assert_eq!(kinds("age"), vec![Kind::Agent]);
+    assert_eq!(kinds("agen"), vec![Kind::Agent]);
+    assert_eq!(kinds("chan"), vec![Kind::Changes]);
     assert_eq!(kinds("term"), vec![Kind::Terminal]);
     assert_eq!(kinds("  BRO "), vec![Kind::Browser], "trimmed, any case");
     #[allow(clippy::single_range_in_vec_init, reason = "one highlighted run")]

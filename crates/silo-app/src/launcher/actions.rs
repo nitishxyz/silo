@@ -61,7 +61,7 @@ impl Workspace {
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.launcher_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
         let recents = self.launcher_recents(cx);
-        let rows = rows("", &recents);
+        let rows = self.launcher_rows("", &recents);
         let selected = preselect("", &rows, same);
         self.launcher.dialog = Some(Dialog { field, rows, selected, target, same, recents, note: None, _sub: sub });
         // Deferred: a mouse-down that opened us may still focus its target.
@@ -70,12 +70,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A kind the host has no blocks of isn't offered (Changes on an older server).
+    fn launcher_hidden(&self) -> Option<Kind> {
+        (!self.host_supports(silo_proto::compat::feature::CHANGES)).then_some(Kind::Changes)
+    }
+
+    fn launcher_rows(&self, text: &str, recents: &[crate::browser_home::RecentPage]) -> Vec<Row> {
+        let hidden = self.launcher_hidden();
+        rows(text, recents).into_iter().filter(|r| hidden.is_none_or(|h| r.kind() != h)).collect()
+    }
+
     fn launcher_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let hidden = self.launcher_hidden();
         let Some(dialog) = self.launcher.dialog.as_mut() else { return };
         let count = dialog.rows.len();
         match event {
             FieldEvent::Changed(text) => {
-                dialog.rows = rows(text, &dialog.recents);
+                dialog.rows = rows(text, &dialog.recents).into_iter().filter(|r| hidden.is_none_or(|h| r.kind() != h)).collect();
                 dialog.selected = preselect(text, &dialog.rows, dialog.same);
                 dialog.note = intent_note(text);
             }
@@ -167,7 +178,7 @@ impl Workspace {
                     Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), cx),
                     Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
                     Row::Kind(Kind::Agent, _) => self.create_agent(method, cx),
-                    Row::Kind(Kind::Files, _) | Row::Open { .. } => self.call(method),
+                    Row::Kind(Kind::Files | Kind::Changes, _) | Row::Open { .. } => self.call(method),
                     Row::Path(_) => self.open_files_path(method, cx),
                     Row::Run(command) => self.launch_command(method, command, cx),
                 }

@@ -227,6 +227,7 @@ impl Workspace {
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::NewAgentTab => self.new_agent_tab(window, cx),
             Command::NewFilesTab => self.new_files_tab(window, cx),
+            Command::NewChangesTab => self.new_changes_tab(window, cx),
             Command::NewTabChooser | Command::NewPaneChooser => {
                 self.toggle_launcher(command, window, cx);
             }
@@ -292,6 +293,12 @@ impl Workspace {
                     self.new_files(block, cx);
                 }
             }
+            Command::NewChanges => {
+                if let Some(block) = block {
+                    self.new_changes(block, cx);
+                }
+            }
+            Command::ReviewChanges => self.review_changes_command(block, window, cx),
             Command::AddHost => {
                 self.close_palette(window, cx);
                 self.open_add_host(None, None, window, cx);
@@ -452,6 +459,9 @@ impl Workspace {
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::OttoSettings | Command::BrowseBlocks => self.view.is_some(),
             Command::NewFiles | Command::NewFilesTab => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES),
+            Command::NewChanges | Command::NewChangesTab | Command::ReviewChanges => {
+                connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::CHANGES)
+            }
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
