@@ -436,6 +436,49 @@ impl Store {
             .optional()?)
     }
 
+    /// Records the work tree snapshots of a turn (`git write-tree` ids): `base` at its start, `end` before it
+    /// finished. `None` leaves a recorded id as it is.
+    /// # Errors
+    /// Returns database errors or `NotFound` when the turn has no row.
+    pub fn set_turn_trees(&mut self, session_id: &str, turn: i64, base: Option<&str>, end: Option<&str>) -> Result<()> {
+        let count = self.connection.execute(
+            "UPDATE turns SET base_tree=coalesce(?3,base_tree),end_tree=coalesce(?4,end_tree) WHERE session_id=?1 AND turn=?2",
+            params![session_id, turn, base, end],
+        )?;
+        require_row(count, &format!("{session_id} turn {turn}"))
+    }
+
+    /// A turn's snapshots: `(base_tree, end_tree)`, each `None` when not taken.
+    /// # Errors
+    /// Returns database errors.
+    pub fn turn_trees(&self, session_id: &str, turn: i64) -> Result<(Option<String>, Option<String>)> {
+        Ok(self
+            .connection
+            .query_row("SELECT base_tree,end_tree FROM turns WHERE session_id=?1 AND turn=?2", params![session_id, turn], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// The session's finished turns that changed files, oldest first: the turn, the last assistant item stored
+    /// in it (the reply a client shows the changes under) and the `changes` its `turn.finished` event carries.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn turn_changes(&self, session_id: &str) -> Result<Vec<(i64, Option<String>, Value)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT f.turn,(SELECT i.item_id FROM items i JOIN events e ON e.session_id=i.session_id AND e.seq=i.seq WHERE i.session_id=f.session_id AND e.turn=f.turn AND i.role='assistant' ORDER BY i.seq DESC LIMIT 1),json_extract(f.payload,'$.changes') FROM events f WHERE f.session_id=?1 AND f.kind='turn.finished' AND json_type(f.payload,'$.changes')='object' ORDER BY f.seq",
+        )?;
+        Ok(stmt
+            .query_map([session_id], |r| {
+                let text: String = r.get(2)?;
+                let changes = serde_json::from_str(&text)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+                Ok((r.get(0)?, r.get(1)?, changes))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The usage recorded for the session's last step, if it ran one.
     /// # Errors
     /// Returns database errors, including integer overflow.
@@ -700,7 +743,7 @@ fn append_tx(tx: &Transaction<'_>, id: &str, event: &EventRecord, projection: &P
         }
         Projection::TurnStatus(status) => {
             let finished = if *status == TurnStatus::Running { None } else { Some(at) };
-            tx.execute("INSERT INTO turns VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,turn) DO UPDATE SET status=excluded.status,finished_at=excluded.finished_at",params![id,event.turn,enum_name(status)?,at,finished])?;
+            tx.execute("INSERT INTO turns(session_id,turn,status,started_at,finished_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,turn) DO UPDATE SET status=excluded.status,finished_at=excluded.finished_at",params![id,event.turn,enum_name(status)?,at,finished])?;
         }
     }
     Ok(seq)

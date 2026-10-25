@@ -77,7 +77,7 @@ fn projects_sessions_and_settings() {
     assert!(store.update_session("missing", SessionUpdate::default()).is_err());
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(), "wal");
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
     drop(store);
     assert!(Store::open(&path).unwrap().session(&first.id).unwrap().is_some());
 }
@@ -315,4 +315,43 @@ fn recent_projects_order_by_latest_session() {
     let recent = store.recent_projects().unwrap();
     assert_eq!(recent[0].0.id, busy.project_id);
     assert_eq!(recent[0].1, store.session(&busy.id).unwrap().unwrap().updated_at);
+}
+
+#[test]
+fn turn_trees_and_changes_survive_the_migration() {
+    // A version 2 database with a turn: migration 3 adds the snapshot columns, empty.
+    let file = tempfile::NamedTempFile::new().unwrap();
+    {
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE turns (session_id TEXT NOT NULL, turn INTEGER NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, PRIMARY KEY(session_id,turn));
+             INSERT INTO turns VALUES('old',1,'done',1,2);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+    }
+    let mut store = Store::open(file.path()).unwrap();
+    assert_eq!(store.turn_trees("old", 1).unwrap(), (None, None));
+    store.set_turn_trees("old", 1, Some("base"), None).unwrap();
+    store.set_turn_trees("old", 1, None, Some("end")).unwrap();
+    assert_eq!(store.turn_trees("old", 1).unwrap(), (Some("base".into()), Some("end".into())));
+    assert!(store.set_turn_trees("old", 2, Some("x"), None).is_err());
+
+    let mut store = Store::open_in_memory().unwrap();
+    let id = new_session(&mut store).id;
+    store.append(&id, event("turn.started"), Projection::TurnStatus(TurnStatus::Running)).unwrap();
+    store.set_turn_trees(&id, 1, Some("aaa"), None).unwrap();
+    let mut reply = Item::user_text("reply", "done");
+    reply.role = serde_json::from_value(json!("assistant")).unwrap();
+    store.append(&id, event("item.done"), Projection::PutItem(Item::user_text("prompt", "go"))).unwrap();
+    store.append(&id, event("item.done"), Projection::PutItem(reply)).unwrap();
+    let changes = json!({"base_tree":"aaa","end_tree":"bbb","files":["a.rs"],"added":1,"removed":0});
+    let finished = EventRecord { turn: 1, step: 0, kind: "turn.finished".into(), payload: json!({"turn":1,"status":"done","changes":changes}) };
+    store.append(&id, finished, Projection::TurnStatus(TurnStatus::Done)).unwrap();
+    assert_eq!(store.turn_trees(&id, 1).unwrap(), (Some("aaa".into()), None));
+    assert_eq!(store.turn_changes(&id).unwrap(), [(1, Some("reply".into()), changes)]);
+    // A turn without changes is not listed.
+    let plain = EventRecord { turn: 2, step: 0, kind: "turn.finished".into(), payload: json!({"turn":2,"status":"done"}) };
+    store.append(&id, plain, Projection::TurnStatus(TurnStatus::Done)).unwrap();
+    assert_eq!(store.turn_changes(&id).unwrap().len(), 1);
 }

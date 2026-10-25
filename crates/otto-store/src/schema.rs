@@ -56,4 +56,11 @@ CREATE UNIQUE INDEX outbox_version ON outbox(session_id,from_session,version);
 CREATE INDEX sessions_parent ON sessions(parent_id);
 "#,
     ),
+    (
+        3,
+        r#"
+ALTER TABLE turns ADD COLUMN base_tree TEXT;
+ALTER TABLE turns ADD COLUMN end_tree TEXT;
+"#,
+    ),
 ];
