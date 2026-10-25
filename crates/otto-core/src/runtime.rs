@@ -28,7 +28,7 @@ pub struct RuntimeConfig {
     pub user_config_dir: PathBuf,
 }
 /// Reloadable defaults, applied only to sessions created after set_config.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionDefaults {
     pub agent: Option<String>,
     pub provider: Option<String>,
@@ -42,6 +42,23 @@ pub struct SessionDefaults {
     pub search_engine: otto_tools::builtin::web_search::Engine,
     /// Reasoning effort for sessions whose agent sets none.
     pub effort: Option<otto_llm::Effort>,
+    /// Snapshot a git work tree at each turn's start and end for review (`turn_snapshots` in config, on by
+    /// default; read at each turn, so a change applies to every session's next turn).
+    pub turn_snapshots: bool,
+}
+impl Default for SessionDefaults {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            provider: None,
+            model: None,
+            approval_mode: None,
+            native_compaction: false,
+            search_engine: Default::default(),
+            effort: None,
+            turn_snapshots: true,
+        }
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct CreateSession {

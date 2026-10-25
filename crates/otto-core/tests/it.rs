@@ -5,4 +5,5 @@ mod harness;
 mod model_errors;
 mod plan_usage;
 mod runtime;
+mod snapshots;
 mod update;

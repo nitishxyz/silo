@@ -524,3 +524,14 @@ async fn a_detached_shell_call_returns_and_its_job_reports_later() {
     assert!(client.jobs(&session.id).await.unwrap()[0].completed);
     server.shutdown().await.unwrap();
 }
+
+#[test]
+fn turn_snapshots_is_on_unless_set_off() {
+    use crate::dispatch::defaults;
+    assert!(defaults(&json!({})).unwrap().turn_snapshots);
+    assert!(defaults(&json!({"turn_snapshots": null})).unwrap().turn_snapshots);
+    assert!(!defaults(&json!({"turn_snapshots": false})).unwrap().turn_snapshots);
+    assert!(defaults(&json!({"turn_snapshots": true})).unwrap().turn_snapshots);
+    let error = defaults(&json!({"turn_snapshots": "no"})).unwrap_err();
+    assert_eq!(error.code, RpcError::BAD_REQUEST);
+}

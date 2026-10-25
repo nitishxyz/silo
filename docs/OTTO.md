@@ -868,6 +868,15 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   to sign in.
 - Output-limit continuation: when the model hits `max_output` in the middle of text, continue automatically
   (bounded).
+- **Turn snapshots** (`otto-core/src/snapshot.rs`, docs/CHANGES_BLOCK.md §4): when the session's cwd is in a git
+  work tree and `turn_snapshots` in config.json is on (the default; `false` turns it off, read at each turn), the
+  work tree is written to a tree object after `turn.started` and before `turn.finished`: the index (the
+  worktree's own) is copied to a temp file, then `GIT_INDEX_FILE=<copy> git add -A` and `git write-tree`, with
+  `GIT_OPTIONAL_LOCKS=0` and 10 s per command, so the user's index is never touched. The ids go in `turns.base_tree`
+  and `end_tree` (migration 3); untracked files over 50 MB skip the snapshot; a failure is logged and never fails
+  the turn. The trees are reachable from nothing, so `git gc` may prune them after its grace period. Outside git
+  (or without git) the turn's files come from the edit tools' records (`undo_edit::edited_since`), so `shell`
+  changes aren't seen there.
 
 ### 7.3 Context management
 
@@ -978,6 +987,13 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   `compaction` resets `used` to 0 until the next step, a model change sets `window`. `usage` (the session's
   totals) stays cumulative.
 - `api.describe` and `protocol.json` pinning work as in silo; `otto-proto` builds for wasm32.
+- Turn changes (additive): `turn.finished.changes: TurnChanges {base_tree?, end_tree?, files (≤ 50 paths), more
+  (files beyond them, omitted when 0), added, removed}`, from `git diff --numstat -z <base> <end>` between the
+  turn's snapshots (§7.2), else the edit records' paths and line counts with no trees; absent when nothing
+  changed, no snapshot was taken or `turn_snapshots` is off. `session.view` adds `turns: [TurnSummary {turn,
+  item_id?, changes}]` for the turns among its items that changed files (`item_id` is the turn's last assistant
+  item, the reply the changes show under; read back from the journaled `turn.finished`), and `SessionMirror.turns`
+  keeps them, adding each live `turn.finished` with `changes`. Older peers skip both.
 - **Bounded views and frames** (additive, `otto_proto::clip`). A frame is at most `MAX_FRAME` (16 MiB), and a
   session's items can be far larger (screenshots, page dumps), so:
   - `session.view {session_id, limit?, before_seq?}` returns the newest items that fit `VIEW_BUDGET` (8 MiB of

@@ -32,3 +32,7 @@ otto-silo-tools.workspace = true
 [[test]]
 name = "it"
 path = "tests/it.rs"
+
+[[test]]
+name = "snapshots_no_git"
+path = "tests/snapshots_no_git.rs"

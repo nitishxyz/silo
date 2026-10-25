@@ -293,6 +293,11 @@ pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcE
             None | Some(Value::Null) => None,
             Some(effort) => Some(serde_json::from_value(effort.clone()).map_err(|e| RpcError::bad_request(format!("effort: {e}")))?),
         },
+        turn_snapshots: match value.get("turn_snapshots") {
+            None | Some(Value::Null) => true,
+            Some(Value::Bool(on)) => *on,
+            _ => return Err(RpcError::bad_request("turn_snapshots must be a boolean or null")),
+        },
     })
 }
 async fn save_json(path: &std::path::Path, value: &Value) -> Result<(), RpcError> {

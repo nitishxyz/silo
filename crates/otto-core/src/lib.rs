@@ -14,6 +14,7 @@ mod recovery;
 mod runtime;
 mod session;
 pub mod skills;
+mod snapshot;
 mod spills;
 mod step;
 mod subagents;

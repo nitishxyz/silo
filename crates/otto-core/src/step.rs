@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel: CancellationToken) -> Result<()> {
     cx.emit(Event::TurnStarted { turn }, Projection::TurnStatus(otto_store::TurnStatus::Running), turn, 0).await?;
+    let snapshot = turn_snapshot(&cx, turn).await;
     let mut result = run_inner(cx.clone(), input, turn, &cancel).await;
     if !cancel.is_cancelled() {
         let error = result.as_ref().err().map(ToString::to_string);
@@ -65,8 +66,31 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
             Ok(total)
         })
         .await?;
-    cx.emit(Event::TurnFinished { turn, status, usage, changes: None }, Projection::TurnStatus(stored), turn, 0).await?;
+    let changes = turn_changes(&cx, turn, &snapshot).await;
+    cx.emit(Event::TurnFinished { turn, status, usage, changes }, Projection::TurnStatus(stored), turn, 0).await?;
     result
+}
+/// The work tree as the turn starts (`snapshot`), its tree id kept as the turn's `base_tree`.
+async fn turn_snapshot(cx: &Context, turn: i64) -> crate::snapshot::Start {
+    let start = crate::snapshot::start(std::path::Path::new(&cx.row.cwd), cx.runtime.defaults().turn_snapshots).await;
+    if let crate::snapshot::Start::Git { base: Some(base) } = &start {
+        let (id, base) = (cx.row.id.clone(), base.clone());
+        if let Err(error) = cx.runtime.db(move |s| Ok(s.set_turn_trees(&id, turn, Some(&base), None)?)).await {
+            tracing::warn!(%error, "recording a turn's base tree");
+        }
+    }
+    start
+}
+/// The work tree as the turn ends, its tree id kept as the turn's `end_tree`, and what the turn changed.
+async fn turn_changes(cx: &Context, turn: i64, start: &crate::snapshot::Start) -> Option<otto_proto::TurnChanges> {
+    let (end, changes) = crate::snapshot::finish(std::path::Path::new(&cx.row.cwd), &cx.row.id, start).await;
+    if let Some(end) = end {
+        let id = cx.row.id.clone();
+        if let Err(error) = cx.runtime.db(move |s| Ok(s.set_turn_trees(&id, turn, None, Some(&end))?)).await {
+            tracing::warn!(%error, "recording a turn's end tree");
+        }
+    }
+    changes
 }
 /// A retry wait as the `model.retrying` event.
 fn retrying(notice: &RetryNotice) -> Event {
