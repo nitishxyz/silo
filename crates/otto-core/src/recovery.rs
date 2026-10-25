@@ -112,7 +112,11 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
         if matches!(session.status.as_str(), "busy" | "waiting_approval") {
             store.append_with_session(
                 &session.id,
-                record(&Event::TurnFinished { turn: 0, status: otto_proto::TurnStatus::Interrupted, usage: Default::default() }, 0, 0)?,
+                record(
+                    &Event::TurnFinished { turn: 0, status: otto_proto::TurnStatus::Interrupted, usage: Default::default(), changes: None },
+                    0,
+                    0,
+                )?,
                 Projection::None,
                 SessionUpdate { status: Some("idle".into()), ..Default::default() },
             )?;

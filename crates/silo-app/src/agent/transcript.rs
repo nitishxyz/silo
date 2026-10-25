@@ -2314,7 +2314,7 @@ mod tests {
         // A group arriving after the text settles it: only the newest row reveals.
         m.apply(5, &Event::ToolCall { call_id: "c".into(), name: "read".into(), input: json!({"path": "a.rs"}) });
         assert_eq!(revealing(&rows(&m)), None);
-        m.apply(6, &Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: otto_llm::Usage::default() });
+        m.apply(6, &Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: otto_llm::Usage::default(), changes: None });
         let ended = rows(&m);
         assert!(matches!(&ended[3], Row::Text { key, streaming: false, .. } if key == "a#t1"));
     }

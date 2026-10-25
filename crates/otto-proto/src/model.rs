@@ -181,6 +181,54 @@ pub enum TurnStatus {
     Error,
 }
 
+/// What a turn changed in its session's folder (additive, on `turn.finished` and `SessionView.turns`).
+/// In a git work tree `base_tree` and `end_tree` are the `git write-tree` snapshots taken at the turn's start and
+/// end (reachable from nothing, so `git gc` may prune them after its grace period), and the counts come from
+/// `git diff --numstat` between them. Outside git both are absent and `files` holds the paths otto's edit tools
+/// wrote in the turn, with counts of their line changes (a `shell` command's changes aren't seen there).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnChanges {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_tree: Option<String>,
+    /// Changed paths, relative to the repo's top level (else the session's folder), at most
+    /// [`TurnChanges::MAX_FILES`]; `more` counts the rest.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Changed files beyond `files`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more: u32,
+    /// Lines added and removed in every changed file (binary files count none).
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default)]
+    pub removed: u64,
+}
+impl TurnChanges {
+    /// Paths listed in `files`.
+    pub const MAX_FILES: usize = 50;
+    /// Every changed file: `files` and `more`.
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.files.len() + self.more as usize
+    }
+}
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A finished turn that changed files, in `SessionView.turns` (additive).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnSummary {
+    pub turn: i64,
+    /// The turn's last assistant item, the reply its changes show under; absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    pub changes: TurnChanges,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PendingApproval {
     pub approval_id: String,
@@ -261,6 +309,10 @@ pub struct SessionView {
     /// older than `items`, so the session's todo list is complete from the newest window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Value>,
+    /// The finished turns among `items` that changed files (a turn is listed when its reply, `item_id`, is
+    /// in `items`), oldest first, so a reopened thread shows their changes. Absent from older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<TurnSummary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

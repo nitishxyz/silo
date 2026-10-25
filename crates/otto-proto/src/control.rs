@@ -639,7 +639,15 @@ pub enum Event {
     #[serde(rename = "turn.started")]
     TurnStarted { turn: i64 },
     #[serde(rename = "turn.finished")]
-    TurnFinished { turn: i64, status: TurnStatus, usage: Usage },
+    /// `changes` (additive): what the turn changed in the session's folder, absent when nothing changed or
+    /// nothing could tell (no snapshot, `turn_snapshots` off).
+    TurnFinished {
+        turn: i64,
+        status: TurnStatus,
+        usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changes: Option<TurnChanges>,
+    },
     #[serde(rename = "item.started")]
     ItemStarted { item_id: String, role: Role },
     #[serde(rename = "item.done")]

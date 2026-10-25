@@ -65,7 +65,7 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
             Ok(total)
         })
         .await?;
-    cx.emit(Event::TurnFinished { turn, status, usage }, Projection::TurnStatus(stored), turn, 0).await?;
+    cx.emit(Event::TurnFinished { turn, status, usage, changes: None }, Projection::TurnStatus(stored), turn, 0).await?;
     result
 }
 /// A retry wait as the `model.retrying` event.

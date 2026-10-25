@@ -88,6 +88,9 @@ pub struct SessionMirror {
     pub oldest_seq: Option<i64>,
     /// The latest `update_todos` call's input when it is older than the loaded items (`SessionView::todos`).
     pub todos: Option<Value>,
+    /// The loaded turns that changed files (`SessionView::turns`, then each `turn.finished` with `changes`,
+    /// under the last assistant item loaded), oldest first.
+    pub turns: Vec<TurnSummary>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
     live: Vec<Event>,
@@ -124,6 +127,7 @@ impl SessionMirror {
             has_older: view.has_older,
             oldest_seq: view.oldest_seq,
             todos: view.todos,
+            turns: view.turns,
             indices,
             durable: None,
             live: Vec::new(),
@@ -144,6 +148,9 @@ impl SessionMirror {
         let mut times = page.part_times;
         times.append(&mut self.part_times);
         self.part_times = times;
+        let mut turns: Vec<TurnSummary> = page.turns.into_iter().filter(|t| !self.turns.iter().any(|s| s.turn == t.turn)).collect();
+        turns.append(&mut self.turns);
+        self.turns = turns;
         if let Some((items, _)) = &mut self.durable {
             items.splice(0..0, older.iter().cloned());
         }
@@ -166,6 +173,7 @@ impl SessionMirror {
             has_older: old.has_older,
             oldest_seq: old.oldest_seq,
             todos: None,
+            turns: old.turns.iter().filter(|t| t.item_id.as_deref().is_some_and(|id| ids.contains(id))).cloned().collect(),
             info: self.info.clone(),
             pending_approvals: Vec::new(),
             pending_questions: Vec::new(),
@@ -262,7 +270,12 @@ impl SessionMirror {
                 self.info.status = SessionStatus::Busy;
                 self.last_error = None;
             }
-            Event::TurnFinished { turn, status, .. } => {
+            Event::TurnFinished { turn, status, changes, .. } => {
+                if let Some(changes) = changes {
+                    let item_id = self.items.iter().rev().find(|i| i.role == Role::Assistant).map(|i| i.id.clone());
+                    self.turns.retain(|t| t.turn != *turn);
+                    self.turns.push(TurnSummary { turn: *turn, item_id, changes: changes.clone() });
+                }
                 // A compaction still running when its turn ended never reported its end: the turn stopped it.
                 for c in self.compactions.iter_mut().filter(|c| c.status == CompactionStatus::Running) {
                     c.status = CompactionStatus::Failed { message: "Stopped".into(), cancelled: true };

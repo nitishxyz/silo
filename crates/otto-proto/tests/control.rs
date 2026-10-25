@@ -177,3 +177,53 @@ fn model_retrying_is_additive_on_the_wire() {
         matches!(serde_json::from_value::<ServerMessage>(wire).unwrap(), ServerMessage::Event { event, .. } if matches!(*event, Event::ModelRetrying { attempt: 2, .. }))
     );
 }
+
+/// `turn.finished.changes` and `SessionView.turns` are additive: an older server's event and view read as none,
+/// a turn without changes keeps the old shape, and an older client ignores the new field.
+#[test]
+fn turn_changes_are_additive() {
+    use otto_proto::{SessionView, TurnChanges, TurnStatus};
+    let old = json!({"event": "turn.finished", "data": {"turn": 2, "status": "done", "usage": {"input": 1, "output": 2}}});
+    let event: Event = serde_json::from_value(old.clone()).unwrap();
+    assert!(matches!(event, Event::TurnFinished { turn: 2, status: TurnStatus::Done, changes: None, .. }));
+    assert_eq!(serde_json::to_value(&event).unwrap()["data"].get("changes"), None);
+    let changes = TurnChanges {
+        base_tree: Some("4b825dc".into()),
+        end_tree: Some("9f1e2aa".into()),
+        files: vec!["src/a.rs".into(), "b.txt".into()],
+        more: 0,
+        added: 12,
+        removed: 3,
+    };
+    let event = Event::TurnFinished { turn: 3, status: TurnStatus::Done, usage: Default::default(), changes: Some(changes.clone()) };
+    let wire = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        wire["data"]["changes"],
+        json!({"base_tree": "4b825dc", "end_tree": "9f1e2aa", "files": ["src/a.rs", "b.txt"], "added": 12, "removed": 3})
+    );
+    assert!(matches!(serde_json::from_value::<Event>(wire.clone()).unwrap(), Event::TurnFinished { changes: Some(c), .. } if c == changes));
+    // Outside git: no trees.
+    let fallback: TurnChanges = serde_json::from_value(json!({"files": ["notes.md"], "added": 0, "removed": 0})).unwrap();
+    assert_eq!((fallback.base_tree.as_deref(), fallback.file_count()), (None, 1));
+    // An older client's TurnFinished has no `changes`: serde skips the unknown field.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "event", content = "data")]
+    #[allow(dead_code)]
+    enum Old {
+        #[serde(rename = "turn.finished")]
+        TurnFinished { turn: i64, status: TurnStatus, usage: otto_proto::Usage },
+    }
+    assert!(serde_json::from_value::<Old>(wire).is_ok());
+    // A view from an older server has no `turns`.
+    let mut view = serde_json::to_value(sample_view()).unwrap();
+    view.as_object_mut().unwrap().remove("turns");
+    assert!(serde_json::from_value::<SessionView>(view).unwrap().turns.is_empty());
+}
+fn sample_view() -> otto_proto::SessionView {
+    serde_json::from_value(json!({
+        "info": {"id": "s", "project_id": "p", "parent_id": null, "agent": "build", "model": "m", "provider": "x", "title": "t", "cwd": "/",
+                 "status": "idle", "created_at": 0, "updated_at": 0, "last_seq": 0, "usage": {"usage": {"input": 0, "output": 0}, "cost_usd": 0.0}},
+        "items": [], "pending_approvals": [], "pending_questions": [], "queue": [], "running_tool_calls": [], "seq": 0
+    }))
+    .unwrap()
+}

@@ -17,7 +17,7 @@ pub use frame::Frame;
 #[cfg(feature = "io")]
 pub use frame::{read_frame, spawn_reader, write_frame};
 pub use model::*;
-pub use otto_llm::{Effort, Item, Mention, MentionKind, ModelInfo, Part, StreamEvent, Usage};
+pub use otto_llm::{Effort, Item, Mention, MentionKind, ModelInfo, Part, Role, StreamEvent, Usage};
 pub use timing::PartTime;
 
 /// Bump for incompatible wire changes; additive changes update `protocol.json`.

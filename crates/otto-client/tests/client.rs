@@ -150,7 +150,7 @@ async fn follower_resyncs_gap_and_replacement() {
         hello(&mut server).await;
         let r = request(&mut server).await;
         assert!(matches!(r.method, Method::SessionSubscribe { after_seq: Some(3), .. }));
-        event(&mut server, 4, Event::TurnFinished { turn: 2, status: TurnStatus::Done, usage: Usage::default() }).await;
+        event(&mut server, 4, Event::TurnFinished { turn: 2, status: TurnStatus::Done, usage: Usage::default(), changes: None }).await;
         response(&mut server, r.id, json!({"session_id":"s","seq":4})).await;
     });
     follower.reconnect(Connection::connect_stream(client).await.unwrap()).await.unwrap();
@@ -192,7 +192,7 @@ async fn connection_reconnects_through_its_dialer() {
                 } else {
                     let r = request(&mut server).await;
                     assert!(matches!(r.method, Method::SessionSubscribe { after_seq: Some(1), .. }), "resumes from last_seq");
-                    event(&mut server, 2, Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage::default() }).await;
+                    event(&mut server, 2, Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage::default(), changes: None }).await;
                     response(&mut server, r.id, json!({"session_id":"s","seq":2})).await;
                     while read_frame(&mut server).await.is_ok_and(|f| f.is_some()) {}
                 }
@@ -269,7 +269,7 @@ fn approvals_questions_tools_and_usage() {
             cost_usd: Some(0.1),
             context: otto_proto::ContextUse { used: 4, window: 1000 },
         },
-        Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage { input: 4, output: 2, ..Usage::default() } },
+        Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage { input: 4, output: 2, ..Usage::default() }, changes: None },
     ];
     for (i, e) in script.iter().enumerate() {
         m.apply(i as i64 + 1, e);
@@ -319,7 +319,7 @@ fn compactions_stream_live_and_give_way_to_their_checkpoint() {
     assert_eq!(m.compactions[0].status, CompactionStatus::Failed { message: "empty compaction summary".into(), cancelled: false });
     // One the turn's end cut off reads as stopped; one that began before the view shows from its next delta.
     m.apply(9, &Event::CompactionStarted { id: "e".into(), trigger: "auto".into() });
-    m.apply(10, &Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: Usage::default() });
+    m.apply(10, &Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: Usage::default(), changes: None });
     assert!(matches!(m.compactions[1].status, CompactionStatus::Failed { cancelled: true, .. }));
     m.apply_live(10, &Event::CompactionDelta { id: "f".into(), text: "late".into() });
     assert_eq!((m.compactions[2].trigger.as_str(), m.compactions[2].summary.as_str()), ("", "late"));
@@ -594,4 +594,20 @@ fn mirror_prepends_older_pages_and_keeps_them_through_a_resync() {
     empty.has_older = true;
     assert_eq!(m.prepend(empty), 0);
     assert!(!m.has_older);
+}
+#[test]
+fn mirror_keeps_the_turns_that_changed_files() {
+    let changes = TurnChanges { files: vec!["a.rs".into()], added: 2, ..Default::default() };
+    let mut v = view(0);
+    v.turns = vec![TurnSummary { turn: 1, item_id: Some("old".into()), changes: changes.clone() }];
+    let mut m = SessionMirror::new(v);
+    let mut reply = Item::user_text("r2", "done");
+    reply.role = Role::Assistant;
+    m.apply(1, &Event::ItemDone { item: Item::user_text("u2", "go") });
+    m.apply(2, &Event::ItemDone { item: reply });
+    m.apply(3, &Event::TurnFinished { turn: 2, status: TurnStatus::Done, usage: Usage::default(), changes: Some(changes.clone()) });
+    m.apply(4, &Event::TurnFinished { turn: 3, status: TurnStatus::Done, usage: Usage::default(), changes: None });
+    let turns: Vec<_> = m.turns.iter().map(|t| (t.turn, t.item_id.as_deref())).collect();
+    assert_eq!(turns, [(1, Some("old")), (2, Some("r2"))]);
+    assert_eq!(m.turns[1].changes, changes);
 }

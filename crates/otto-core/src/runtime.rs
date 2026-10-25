@@ -910,6 +910,12 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         items.extend(open);
     }
     let part_times = part_times(s, id, &items)?;
+    let turns = s
+        .turn_changes(id)?
+        .into_iter()
+        .filter(|(_, item, _)| item.as_ref().is_some_and(|item| items.iter().any(|i| i.id == *item)))
+        .filter_map(|(turn, item_id, changes)| Some(otto_proto::TurnSummary { turn, item_id, changes: serde_json::from_value(changes).ok()? }))
+        .collect();
     let streaming_tool_calls = if busy && newest { open_inputs(s, id, info.last_seq)? } else { Vec::new() };
     let mut running_tool_calls: Vec<_> = s
         .tool_calls(id)?
@@ -947,6 +953,7 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         has_older,
         oldest_seq,
         todos,
+        turns,
     })
 }
 /// When the items' timed parts ran, from the journal (`SessionView.part_times`).

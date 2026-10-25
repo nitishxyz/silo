@@ -262,7 +262,7 @@ fn a_finished_turn_shows_no_streaming_call_as_running() {
     let mut s = Session::new(json!([]));
     s.start("c", "write");
     s.delta("c", r#"{"path":"a.rs","content":"x"#);
-    s.event(Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: otto_llm::Usage::default() });
+    s.event(Event::TurnFinished { turn: 1, status: TurnStatus::Cancelled, usage: otto_llm::Usage::default(), changes: None });
     let (_, line) = s.line("c").unwrap();
     assert_eq!((line.status, line.preview), (Status::Stopped, false));
 }
