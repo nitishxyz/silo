@@ -31,6 +31,21 @@ struct Metrics {
     cell: f32,
 }
 
+/// A hunk bar's text: git's header (the enclosing function), else where
+/// the hunk is, so a new file's bar isn't blank.
+pub(super) fn hunk_title(h: &silo_proto::changes::Hunk) -> SharedString {
+    let header = h.header.trim();
+    if !header.is_empty() {
+        return header.to_owned().into();
+    }
+    let (start, lines) = if h.new_lines > 0 { (h.new_start, h.new_lines) } else { (h.old_start, h.old_lines) };
+    match lines {
+        0 => "Empty".into(),
+        1 => format!("Line {start}").into(),
+        n => format!("Lines {start}\u{2013}{}", start + n - 1).into(),
+    }
+}
+
 fn alpha(c: u32, a: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
     h.a = a;
@@ -459,6 +474,7 @@ impl ChangesPane {
         div()
             .id(SharedString::from(format!("changes-hunk-{path}-{id}")))
             .group(group)
+            .w_full()
             .h(px(m.line + 4.0))
             .mt(px(4.0))
             .flex()
@@ -477,7 +493,7 @@ impl ChangesPane {
                     .text_ellipsis()
                     .text_size(px(m.size - 1.0))
                     .text_color(rgb(theme::muted()))
-                    .child(h.header.clone()),
+                    .child(hunk_title(h)),
             )
             .child(actions)
             .on_click(cx.listener(move |this, _, _, cx| {

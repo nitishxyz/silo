@@ -233,3 +233,19 @@ fn comments_build_the_review_sent_to_the_linked_agent(cx: &mut TestAppContext) {
         assert_eq!(pane.state.comments.len(), 1);
     });
 }
+
+#[test]
+fn a_hunk_bar_without_a_header_names_its_lines() {
+    let hunk = |header: &str, (old_start, old_lines), (new_start, new_lines)| silo_proto::changes::Hunk {
+        id: "h".into(),
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        header: header.into(),
+        lines: Vec::new(),
+    };
+    assert_eq!(super::view::hunk_title(&hunk(" fn queue_row ", (805, 7), (812, 9))), "fn queue_row");
+    assert_eq!(super::view::hunk_title(&hunk("", (0, 0), (1, 57))), "Lines 1\u{2013}57", "a new file");
+    assert_eq!(super::view::hunk_title(&hunk("", (4, 1), (0, 0))), "Line 4", "a deleted line");
+}
