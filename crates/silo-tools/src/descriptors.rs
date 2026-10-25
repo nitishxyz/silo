@@ -97,7 +97,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
     let entries = [
         (
             "terminal_open",
-            "Open a shell block for long-lived or stateful work: dev servers, watchers, REPLs, ssh, anything the user may take over; read it with terminal_read/terminal_wait. visible:false parks it next to your block, out of every layout (the user can reveal it; it closes with your block). Drive claude, codex, opencode or otto: open with command, send text with submit:true, wait for done/blocked, then read. On blocked, answer with send. The same pattern works on remote hosts.",
+            "Open a shell block for long-lived or stateful work: dev servers, watchers, REPLs, ssh, anything the user may take over; read it with terminal_read/terminal_wait. place: split (default, next to your block), tab (a new tab in your session, or in session) or session (a new session). visible:false parks it next to your block, out of every layout (the user can reveal it; it closes with your block). Drive claude, codex, opencode or otto: open with command, send text with submit:true, wait for done/blocked, then read. On blocked, answer with send. The same pattern works on remote hosts.",
             "block_id command cwd place session exec visible",
             "",
             false,
@@ -140,7 +140,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ("terminal_close", "Close a block; force is required for a busy program.", "block_id force", "", false),
         (
             "browser_open",
-            "Open an ordinary browser block (default: a split next to your own block). visible:false parks it next to your block, out of every layout: a background browser the Silo app runs off screen, with the same state, history and actions as a shown one (the user can reveal it; it closes with your block). Take browser_snapshot for element refs before acting.",
+            "Open an ordinary browser block (default: a split next to your own block). place:tab opens a new tab in your session (session names another one). visible:false parks it next to your block, out of every layout: a background browser the Silo app runs off screen, with the same state, history and actions as a shown one (the user can reveal it; it closes with your block). Take browser_snapshot for element refs before acting.",
             "block_id url place session visible",
             "url",
             false,

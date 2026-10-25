@@ -337,6 +337,15 @@ impl Tools {
         input["block_id"].as_str().or(anchor).map(str::to_owned).context("block_id is required outside a block")
     }
 
+    /// The session `anchor` (the agent's block) is in, if it still exists.
+    async fn anchor_session(&self, anchor: Option<&str>) -> anyhow::Result<Option<String>> {
+        let Some(anchor) = anchor else { return Ok(None) };
+        match self.control.call::<BlockView>(Method::BlockView { block_id: anchor.to_owned() }).await {
+            Ok(view) => Ok(Some(view.block.session_id)),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn open(&self, input: &Value, browser: bool, anchor: Option<&str>) -> anyhow::Result<Created> {
         let kind = if browser { BlockKind::Browser } else { BlockKind::Terminal };
         let url = input["url"].as_str().map(str::to_owned);
@@ -392,15 +401,28 @@ impl Tools {
                 url,
                 agent: None,
             },
-            "tab" => {
-                let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
-                let session = input["session"].as_str().unwrap_or(&self.cx.default_session);
-                if let Some(s) = sessions.iter().find(|s| s.name == session || s.id == session) {
-                    Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url }
-                } else {
-                    Method::SessionCreate { name: Some(session.into()), spawn, kind, url }
+            "tab" => match input["session"].as_str() {
+                // A named session: it, or a new one of that name.
+                Some(session) => {
+                    let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
+                    match sessions.iter().find(|s| s.name == session || s.id == session) {
+                        Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url },
+                        None => Method::SessionCreate { name: Some(session.into()), spawn, kind, url },
+                    }
                 }
-            }
+                // Else the session the agent works in (its block's), then the default one.
+                None => match self.anchor_session(anchor.as_deref()).await? {
+                    Some(session_id) => Method::WindowCreate { session_id, spawn, kind, url },
+                    None => {
+                        let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
+                        let session = &self.cx.default_session;
+                        match sessions.iter().find(|s| s.name == *session || s.id == *session) {
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url },
+                            None => Method::SessionCreate { name: Some(session.clone()), spawn, kind, url },
+                        }
+                    }
+                },
+            },
             "session" => Method::SessionCreate { name: input["session"].as_str().map(str::to_owned), spawn, kind, url },
             _ => bail!("place must be split, tab or session"),
         };

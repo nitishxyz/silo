@@ -86,6 +86,35 @@ async fn command_blocks_and_hidden_terminals() {
     tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_tab_opens_in_the_agents_own_session() {
+    use silo_proto::{
+        control::{Created, SpawnSpec},
+        model::{BlockKind, SessionView},
+    };
+    let home = tempfile::Builder::new().prefix("silo-tools-tab-").tempdir_in("/tmp").unwrap();
+    let config = silo_server::Config { home: home.path().into(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
+    let server = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
+    while !silo_client::server_running(home.path()).await {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (control, events) = Control::connect(&paths::socket(home.path()), "tools-test").await.unwrap();
+    let create = |name: &str| Method::SessionCreate { name: Some(name.into()), spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None };
+    // The default session exists too: the tab must not land there.
+    let _agents: Created = control.call(create("agents")).await.unwrap();
+    let exo: Created = control.call(create("exo")).await.unwrap();
+    let tools = Tools::new(control.clone(), events, Context { agent_block: Some(exo.block_id.clone()), ..Default::default() });
+    let opened = call(&tools, "terminal_open", json!({"place": "tab"})).await;
+    assert_eq!(opened["session_id"], exo.session_id.as_str(), "the agent's own session: {opened}");
+    let view: SessionView = control.call(Method::SessionView { session_id: exo.session_id.clone() }).await.unwrap();
+    assert_eq!(view.session.windows.len(), 2, "a new tab there");
+    // Naming a session still goes there.
+    let named = call(&tools, "terminal_open", json!({"place": "tab", "session": "agents"})).await;
+    assert_ne!(named["session_id"], exo.session_id.as_str());
+    control.call_value(Method::ServerShutdown { force: true }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
+}
+
 async fn scenario(report_status: bool) {
     let home = tempfile::Builder::new().prefix("silo-tools-").tempdir_in("/tmp").unwrap();
     let config = silo_server::Config { home: home.path().into(), idle_exit: None, relay: RelayConfig::Disabled, mdns: false, ..Default::default() };
