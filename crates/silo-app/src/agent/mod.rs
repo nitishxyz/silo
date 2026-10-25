@@ -898,12 +898,22 @@ impl AgentPane {
             let follower = match task.await {
                 Ok(Ok(follower)) => follower,
                 Ok(Err(error)) => {
+                    // otto was out of reach (its server restarting, a takeover): try again until it answers.
+                    let again = unreachable(&error);
                     let _ = this.update(cx, |this, cx| {
                         if this.generation == generation {
                             this.error = Some(describe(&error));
                             cx.notify();
                         }
                     });
+                    if again {
+                        cx.background_executor().timer(FOLLOW_RETRY).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.generation == generation && this.error.is_some() {
+                                this.follow(cx);
+                            }
+                        });
+                    }
                     return;
                 }
                 Err(_) => return,
@@ -2107,11 +2117,23 @@ fn project_names<'a>(roots: impl Iterator<Item = &'a str> + Clone) -> Vec<(Strin
         .collect()
 }
 
+/// How soon a session that couldn't reach otto tries again.
+const FOLLOW_RETRY: Duration = Duration::from_secs(2);
+
+/// Whether `error` is otto being out of reach for now (worth retrying), not
+/// a refusal such as a deleted session.
+pub(crate) fn unreachable(error: &ClientError) -> bool {
+    matches!(error, ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout)
+}
+
+/// The text [`describe`] gives an [`unreachable`] error.
+pub(crate) const UNREACHABLE: &str = "Can't reach otto";
+
 /// A short, user-facing reason.
 pub(crate) fn describe(error: &ClientError) -> String {
     match error {
         ClientError::Io { kind: std::io::ErrorKind::NotFound, .. } => "otto is not available".to_owned(),
-        ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout => "Can't reach otto".to_owned(),
+        ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout => UNREACHABLE.to_owned(),
         ClientError::Incompatible { .. } => "This otto is incompatible".to_owned(),
         // otto's hint names its CLI; in the app the way is the Providers view.
         ClientError::Rpc(e) if e.message.starts_with("Auth:") => "Its provider isn't connected. Connect it with /providers.".to_owned(),
@@ -2150,6 +2172,24 @@ impl Render for AgentPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn otto_out_of_reach_is_retried_and_refusals_are_not() {
+        let io = |kind| ClientError::Io { kind, message: "x".into() };
+        for error in [
+            io(std::io::ErrorKind::ConnectionRefused),
+            io(std::io::ErrorKind::NotFound),
+            io(std::io::ErrorKind::Other),
+            ClientError::Closed,
+            ClientError::Timeout,
+        ] {
+            assert!(unreachable(&error), "{error:?} is retried");
+        }
+        assert_eq!(describe(&ClientError::Closed), UNREACHABLE);
+        let gone = ClientError::Rpc(otto_proto::control::RpcError { code: "not_found".into(), message: "session not found".into(), data: None });
+        assert!(!unreachable(&gone), "a deleted session is not retried");
+        assert!(!unreachable(&ClientError::Incompatible { expected: 1, got: None }));
+    }
 
     #[test]
     fn slash_menu_filters_commands() {

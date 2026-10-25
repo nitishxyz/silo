@@ -788,6 +788,15 @@ impl AgentPane {
             return (4, centered(self.render_signin(window, cx)));
         }
         if let Some(error) = &self.error {
+            // Out of reach for now: it retries on its own (`follow`); Retry does it at once.
+            if error == super::UNREACHABLE || error == "otto is not available" {
+                let retry = chip("agent-error-retry", "Retry")
+                    .mt(px(12.0))
+                    .bg(theme::control_fill())
+                    .active(|s| s.scale(0.96))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.follow(cx)));
+                return (5, centered(empty_state("Reconnecting to otto…", Some(format!("{error}. Trying again."))).child(retry).into_any_element()));
+            }
             // Sending from here starts a new session; the old one can't be reached.
             let reason =
                 if error.contains("not found") { "It may have been deleted. Ask anything to start a new one.".to_owned() } else { error.clone() };
