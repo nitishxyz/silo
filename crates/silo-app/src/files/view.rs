@@ -7,6 +7,8 @@ use gpui::{
 };
 use silo_proto::model::BlockInfo;
 
+use std::rc::Rc;
+
 use super::{Content, Drag, FilesPane, model};
 use crate::{
     commands::act,
@@ -70,95 +72,36 @@ impl FilesPane {
     /// The open files as tabs: name (and folder for twins), a dot when
     /// changed on disk, × to close; middle-click closes too.
     fn tabs(&self, style: HeaderStyle, cx: &mut Context<Self>) -> AnyElement {
-        let palette = style.palette;
         let labels = model::tab_labels(&self.state.open);
-        let active = self.state.active.clone();
-        let tabs = self.state.open.iter().zip(labels).enumerate().map(|(i, (path, (name, dir)))| {
-            let shown = active.as_deref() == Some(path.as_str());
-            let changed = self.changed.contains(path);
-            let dirty = self.dirty(path);
-            let group: SharedString = format!("files-tab-{i}").into();
-            let (open, close, middle) = (path.clone(), path.clone(), path.clone());
-            let ink = if shown && style.active { palette.ink } else { palette.secondary };
-            let close_button = div()
-                .id(("files-tab-close", i))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(16.0))
-                .continuous(4.0)
-                .hover(|s| s.bg(palette.hover()))
-                .relative()
-                .when(!shown && !dirty, |el| el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.close(&close, cx);
-                }))
-                // Unsaved: a dot in the ×'s place, the × on hover.
-                .when(dirty, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .group_hover(group.clone(), |s| s.opacity(0.0))
-                            .child(div().size(px(7.0)).rounded_full().bg(rgb(ink))),
-                    )
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(dirty, |el| el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
-                        .child(crate::assets::icon("close", 10.0, palette.icon)),
-                );
-            let dot = changed.then(|| div().flex_none().size(px(6.0)).rounded_full().bg(rgb(palette.accent)));
-            keep_press(
-                div()
-                    .id(("files-tab", i))
-                    .group(group)
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.0))
-                    .h(px(BUTTON))
-                    .pl(px(8.0))
-                    .pr(px(3.0))
-                    .continuous(style.control)
-                    .when(shown, |el| el.bg(palette.selected()))
-                    .when(!shown, |el| el.hover(|s| s.bg(palette.hover())))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(&open, true, cx)))
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.close(&middle, cx);
-                        }),
-                    )
-                    .child(div().text_color(rgb(ink)).child(name))
-                    .children(dir.map(|d| div().text_color(rgb(palette.muted)).child(d)))
-                    .children(dot)
-                    .child(close_button),
-            )
-            .tooltip(crate::tooltip::Tooltip::text(SharedString::from(path.clone())))
-        });
-        div()
-            .id("files-tabs")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .flex_1()
-            .min_w_0()
-            .overflow_x_scroll()
-            .whitespace_nowrap()
-            .children(tabs)
-            .into_any_element()
+        let active = self.state.active.as_deref();
+        let tabs = self
+            .state
+            .open
+            .iter()
+            .zip(labels)
+            .map(|(path, (name, dir))| crate::header_tabs::Tab {
+                name,
+                dir,
+                tooltip: path.clone(),
+                shown: active == Some(path.as_str()),
+                dirty: self.dirty(path),
+                dot: self.changed.contains(path),
+            })
+            .collect();
+        let paths = Rc::new(self.state.open.clone());
+        let (pane, closing) = (cx.entity().downgrade(), cx.entity().downgrade());
+        let (open, close) = (paths.clone(), paths);
+        crate::header_tabs::strip(
+            crate::header_tabs::Ids { strip: "files-tabs", tab: "files-tab", close: "files-tab-close" },
+            tabs,
+            style,
+            move |i, _, cx| {
+                let _ = pane.update(cx, |this, cx| this.open(&open[i], true, cx));
+            },
+            move |i, _, cx| {
+                let _ = closing.update(cx, |this, cx| this.close(&close[i], cx));
+            },
+        )
     }
 
     /// Rendered | Source, for a markdown tab.

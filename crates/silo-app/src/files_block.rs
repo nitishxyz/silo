@@ -4,7 +4,7 @@
 //! close loses unsaved edits (a tab, the pane, its tab or its session):
 //! Save / Don't Save / Cancel.
 
-use gpui::{AnyElement, AppContext as _, Context, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, AppContext as _, Context, FocusHandle, KeyDownEvent, Window, div, prelude::*, px};
 use silo_proto::{
     control::{Created, FilesSetParams, Method, SpawnSpec},
     model::{Axis, BlockKind},
@@ -13,8 +13,7 @@ use silo_proto::{
 use crate::{
     close_confirm::CloseTarget,
     files::{FilesPane, FilesPaneEvent, model},
-    theme::{self, Continuous as _},
-    workspace::{TITLEBAR_HEIGHT, Workspace},
+    workspace::Workspace,
 };
 
 /// What goes on once unsaved edits are saved or let go.
@@ -200,24 +199,7 @@ impl Workspace {
         let dialog = self.unsaved.as_ref()?;
         let saving = dialog.saving;
         let button = |id: &'static str, label: &'static str, primary: bool, danger: bool| {
-            div()
-                .id(id)
-                .h(px(28.0))
-                .px(px(14.0))
-                .flex()
-                .items_center()
-                .continuous(8.0)
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .when(saving, |el| el.opacity(0.5))
-                .when(!saving, |el| el.cursor_pointer())
-                .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
-                .when(!primary, |el| {
-                    el.bg(theme::control_fill())
-                        .text_color(rgb(if danger { theme::danger() } else { theme::foreground() }))
-                        .hover(|s| s.bg(theme::row_fill()))
-                })
-                .child(label)
+            crate::confirm_card::button(id, label, primary, danger).when(saving, |el| el.opacity(0.5)).when(!saving, |el| el.cursor_pointer())
         };
         let paths: Vec<&String> = dialog.files.iter().flat_map(|(_, p)| p).collect();
         let list = (paths.len() > 1).then(|| {
@@ -228,8 +210,7 @@ impl Workspace {
                     .map(|p| div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.5)).child((*p).clone())),
             )
         });
-        let card = div()
-            .id("unsaved-confirm")
+        let card = crate::confirm_card::card("unsaved-confirm")
             .track_focus(&dialog.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let k = &event.keystroke;
@@ -241,26 +222,9 @@ impl Workspace {
                 }
                 cx.stop_propagation();
             }))
-            .occlude()
-            .w(px(400.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .p(px(18.0))
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
-            .font_family(theme::ui_font())
-            .text_size(px(13.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.0)).child(question(&dialog.files)))
+            .child(crate::confirm_card::headline(question(&dialog.files)))
             .children(list)
-            .child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(if saving {
-                "Saving…"
-            } else {
-                "Your changes are lost if you don't save them."
-            }))
+            .child(crate::confirm_card::detail(if saving { "Saving…" } else { "Your changes are lost if you don't save them." }))
             .child(
                 div()
                     .flex()
@@ -285,22 +249,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, window, cx| this.unsaved_save(window, cx))),
                     ),
             );
-        Some(
-            div()
-                .id("unsaved-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .occlude()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(TITLEBAR_HEIGHT + 60.0))
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.dismiss_unsaved(window, cx)))
-                .child(card)
-                .into_any_element(),
-        )
+        Some(crate::confirm_card::backdrop("unsaved-backdrop", card, cx.listener(|this, _, window, cx| this.dismiss_unsaved(window, cx))))
     }
 
     /// The view's Files panes are going (another session or host shown):

@@ -7,20 +7,13 @@
 //! dialog opens from its list. The check is this app's request, so the
 //! dialog shows only here.
 
-use gpui::{AnyElement, Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px, rgb};
 use silo_proto::{
     control::{BusyBlock, BusyBlocks, Method, RpcError},
     model::{BlockInfo, BlockKind},
 };
 
-use crate::theme::Continuous as _;
-use crate::{
-    commands::Command,
-    status::Status,
-    theme,
-    tooltip::Tooltip,
-    workspace::{TITLEBAR_HEIGHT, Workspace},
-};
+use crate::{commands::Command, status::Status, theme, tooltip::Tooltip, workspace::Workspace};
 
 /// Rows listed before "and N more".
 const MAX_ROWS: usize = 8;
@@ -350,22 +343,8 @@ impl Workspace {
     pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.close_confirm.as_ref()?;
         let busy = &dialog.busy;
-        let button = |id: &'static str, label: &'static str, primary: bool| {
-            div()
-                .id(id)
-                .h(px(28.0))
-                .px(px(14.0))
-                .flex()
-                .items_center()
-                .continuous(8.0)
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .when(primary, |el| el.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
-                .when(!primary, |el| el.bg(theme::control_fill()).text_color(rgb(theme::danger())).hover(|s| s.bg(theme::row_fill())))
-                .child(label)
-        };
-        let mut headline = div().id("close-confirm-headline").font_weight(FontWeight::SEMIBOLD).text_size(px(14.0)).child(headline(busy));
+        let button = |id: &'static str, label: &'static str, primary: bool| crate::confirm_card::button(id, label, primary, true).cursor_pointer();
+        let mut headline = crate::confirm_card::headline(headline(busy)).id("close-confirm-headline");
         if let [one] = busy.as_slice()
             && let Some(command) = one.busy.command.clone()
         {
@@ -394,8 +373,7 @@ impl Workspace {
             }
             list.when(more > 0, |el| el.child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(format!("and {more} more"))))
         });
-        let card = div()
-            .id("close-confirm")
+        let card = crate::confirm_card::card("close-confirm")
             .track_focus(&dialog.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let k = &event.keystroke;
@@ -406,22 +384,9 @@ impl Workspace {
                 }
                 cx.stop_propagation();
             }))
-            .occlude()
-            .w(px(400.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .p(px(18.0))
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
-            .font_family(theme::ui_font())
-            .text_size(px(13.0))
             .child(headline)
             .children(list)
-            .child(div().text_size(px(12.5)).text_color(rgb(theme::muted())).child(dialog.target.consequence(busy.len())))
+            .child(crate::confirm_card::detail(dialog.target.consequence(busy.len())))
             .child(
                 div()
                     .flex()
@@ -440,22 +405,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, window, cx| this.dismiss_close_confirm(window, cx))),
                     ),
             );
-        Some(
-            div()
-                .id("close-confirm-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .occlude()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(TITLEBAR_HEIGHT + 60.0))
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| this.dismiss_close_confirm(window, cx)))
-                .child(card)
-                .into_any_element(),
-        )
+        Some(crate::confirm_card::backdrop("close-confirm-backdrop", card, cx.listener(|this, _, window, cx| this.dismiss_close_confirm(window, cx))))
     }
 }
 

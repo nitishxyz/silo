@@ -28,6 +28,9 @@ pub struct ChangesDiffParams {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ChangesSetParams {
     pub block_id: BlockId,
+    /// What is compared: `{"kind":"working"}`, `staged`, `unstaged`,
+    /// `{"kind":"tree","base":…,"head"?:…,"label"?:…}` or
+    /// `{"kind":"range","base":…,"head"?:…}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ChangesScope>,
     /// Open tabs, in order (replaces the list).
@@ -37,10 +40,13 @@ pub struct ChangesSetParams {
     /// (appended).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// The file list is shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<bool>,
+    /// Side by side; false: unified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<bool>,
+    /// Context lines around each hunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<u32>,
     /// Unsent review comments (replaces the list).
@@ -82,6 +88,7 @@ mod double_option {
 pub struct ChangesHunksParams {
     pub block_id: BlockId,
     pub path: String,
+    /// Hunk ids from `changes.diff`; omitted: the whole file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hunks: Option<Vec<String>>,
 }
