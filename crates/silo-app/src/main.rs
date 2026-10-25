@@ -50,6 +50,7 @@ mod pane_header;
 mod qr;
 mod radius;
 mod remote;
+mod search;
 mod settings;
 mod settings_panel;
 mod settings_table;

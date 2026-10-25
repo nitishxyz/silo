@@ -881,8 +881,8 @@ impl Workspace {
                 self.close_palette(window, cx);
             }
             Input::OpenUrl(block) => {
-                let Some(url) = silo_proto::model::browser_url(&text) else {
-                    return fail(self, "Enter an address.".into(), cx);
+                let Some(url) = crate::search::page_for(&text, self.state.search_engine) else {
+                    return fail(self, "Enter an address or a search.".into(), cx);
                 };
                 self.split_browser(block, Some(url));
                 self.close_palette(window, cx);

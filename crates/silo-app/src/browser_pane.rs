@@ -888,6 +888,15 @@ impl BrowserPane {
         });
     }
 
+    /// What the address bar typed: an address, else a search on the
+    /// engine in Settings › Browser.
+    fn go_to(&self, input: &str, cx: &gpui::App) {
+        let engine = crate::hosts_state::HostsState::global(cx).read(cx).app_state().search_engine;
+        if let Some(url) = crate::search::page_for(input, engine) {
+            self.send(Method::BrowserNavigate { block_id: self.block_id.clone(), url });
+        }
+    }
+
     pub fn navigate(&self, input: &str) {
         if let Some(url) = silo_proto::model::browser_url(input) {
             self.send(Method::BrowserNavigate { block_id: self.block_id.clone(), url });
@@ -1020,7 +1029,7 @@ impl BrowserPane {
                     }
                     return;
                 }
-                self.navigate(&text);
+                self.go_to(&text, cx);
                 self.focus.focus(window, cx);
             }
             FieldEvent::Cancel => {

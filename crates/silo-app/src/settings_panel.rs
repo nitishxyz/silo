@@ -282,6 +282,8 @@ pub struct SettingsSnapshot {
     pub check_updates: bool,
     /// Ask before a close that would end running programs.
     pub confirm_close: bool,
+    /// What the address bar searches with.
+    pub search_engine: crate::search::SearchEngine,
     pub notify: crate::hosts::NotifyPrefs,
     /// macOS refused Silo's notifications.
     pub notify_denied: bool,
@@ -311,6 +313,7 @@ impl Default for SettingsSnapshot {
             updates: true,
             check_updates: true,
             confirm_close: true,
+            search_engine: crate::search::SearchEngine::default(),
             notify: crate::hosts::NotifyPrefs::default(),
             notify_denied: false,
             ui_font: UiFontSettings::default(),
@@ -337,6 +340,7 @@ pub enum ServerAction {
 pub enum SettingsEvent {
     Close,
     SetDensity(Density),
+    SetSearchEngine(crate::search::SearchEngine),
     /// Show a block type's headers.
     SetPaneHeaders(crate::pane_header::HeaderBlock, bool),
     /// Card padding and chrome take on the running app's background.
@@ -501,7 +505,7 @@ impl Section {
         let own = match self {
             Self::Appearance => "general preferences layout theme colors",
             Self::Terminal => "preview settings file json configuration config edit open reload finder",
-            Self::Browser => "browser web pages swipe back forward zoom pinch",
+            Self::Browser => "browser web pages swipe back forward zoom pinch search engine address bar",
             Self::Keyboard => "shortcuts keys commands bindings",
             Self::Notifications => "alerts banners dock badge needs you done error",
             Self::Hosts => "remote local address add remove iroh notifications notify",
@@ -986,6 +990,14 @@ impl SettingsPanel {
                 let _ = panel.update(cx, |_, cx| cx.emit(SettingsEvent::SetMaterial(material)));
             })
             .into_any_element()
+    }
+
+    fn search_engine_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        const ENGINES: [(crate::search::SearchEngine, &str); 4] = {
+            use crate::search::SearchEngine as E;
+            [(E::Google, E::Google.label()), (E::DuckDuckGo, E::DuckDuckGo.label()), (E::Bing, E::Bing.label()), (E::Kagi, E::Kagi.label())]
+        };
+        Self::segmented("settings-search-engine", &ENGINES, self.snapshot.search_engine, 84.0, SettingsEvent::SetSearchEngine, cx)
     }
 
     fn density_control(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1698,6 +1710,15 @@ impl SettingsPanel {
             }
             Section::Terminal => out.extend(self.terminal_page(narrow, cx)),
             Section::Browser => {
+                out.push(self.group(
+                    Some("Address bar"),
+                    vec![Self::row(
+                        SettingId::SearchEngine.label(),
+                        Some("What the address bar searches with when you don't type an address".into()),
+                        Some(self.search_engine_control(cx)),
+                        narrow,
+                    )],
+                ));
                 out.push(self.group(
                     Some("Gestures"),
                     vec![Self::row(

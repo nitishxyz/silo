@@ -29,6 +29,7 @@ pub enum SettingId {
     Scrollback,
     RestoreDefaults,
     ConfirmClose,
+    SearchEngine,
     CheckUpdates,
     Notifications,
     NotifyOnlyHidden,
@@ -165,6 +166,15 @@ pub const SETTINGS: &[Setting] = &[
         Some("Closing"),
         Toggle,
         "confirm close closing quit running programs processes busy ask warn"
+    ),
+    setting!(
+        SettingId::SearchEngine,
+        "Search engine",
+        "Search engine",
+        Browser,
+        Some("Address bar"),
+        Choice,
+        "search engine address bar url google duckduckgo bing kagi default"
     ),
     setting!(
         SettingId::RestoreDefaults,
@@ -390,6 +400,7 @@ impl SettingId {
         let automatic = |family: &str| if family.is_empty() { "Automatic".to_owned() } else { family.to_owned() };
         Some(match self {
             Self::PaneDensity => label_of(&DENSITIES, &s.density),
+            Self::SearchEngine => s.search_engine.label().to_owned(),
             Self::WindowMaterial => label_of(&MATERIALS, &s.material),
             Self::Theme => t.themes.iter().find(|c| c.id == t.theme).map_or_else(|| t.theme.clone(), |c| c.name.clone()),
             Self::InterfaceFont => automatic(&s.ui_font.family),
@@ -408,6 +419,10 @@ impl SettingId {
         let t = &s.terminal;
         match self {
             Self::PaneDensity => DENSITIES.iter().map(|(d, l)| simple(l, SettingsEvent::SetDensity(*d), *d == s.density)).collect(),
+            Self::SearchEngine => crate::search::SearchEngine::ALL
+                .iter()
+                .map(|e| simple(e.label(), SettingsEvent::SetSearchEngine(*e), *e == s.search_engine))
+                .collect(),
             Self::WindowMaterial => MATERIALS
                 .iter()
                 .map(|(m, l)| {

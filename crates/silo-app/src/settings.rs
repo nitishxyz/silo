@@ -139,6 +139,7 @@ impl Workspace {
             updates: self.updater.read(cx).enabled(),
             check_updates: self.check_updates(),
             confirm_close: self.confirm_close(),
+            search_engine: self.state.search_engine,
             notify: self.notify_prefs(),
             notify_denied: crate::notifications::denied(),
             ui_font,
@@ -431,6 +432,12 @@ impl Workspace {
             }
             SettingsEvent::SetConfirmClose(on) => {
                 self.set_confirm_close(*on, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetSearchEngine(engine) => {
+                let engine = *engine;
+                tracing::debug!(?engine, "search engine");
+                self.shared.update(cx, |shared, cx| shared.update_state(|s| s.search_engine = engine, cx));
                 Outcome::default()
             }
             SettingsEvent::SetNotify(field, on) => {
