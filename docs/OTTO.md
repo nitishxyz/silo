@@ -176,7 +176,7 @@ names differ from the final ones, so nothing clashes with the TS `otto` already 
 | Thing | Now | Later |
 |---|---|---|
 | Binary | `otto-silo` | `otto` |
-| State dir | `~/Library/Application Support/otto-silo`, `$XDG_STATE_HOME/otto-silo`; override `OTTO_SILO_HOME` | `otto` |
+| State dir | `~/Library/Application Support/otto-silo`, `$XDG_STATE_HOME/otto-silo` (dev builds: `otto-silo-dev`, `docs/PLAN.md` §5 Channels); override `OTTO_SILO_HOME` | `otto` |
 | User config | `$XDG_CONFIG_HOME/otto-silo`, else `~/.config/otto-silo` (agents, skills, commands, hooks, `mcp.json`, `rules.json`, `AGENTS.md`); override `OTTO_SILO_CONFIG_DIR`. Its own, not shared with the TS otto's `~/.config/otto` | `otto` |
 | Project dir | `.otto/` read-only for agents, skills and commands (shared with the TS otto); otto-silo state in `.otto-silo/` | `.otto/` |
 | Socket | `<state>/server.sock` | – |
@@ -1057,11 +1057,13 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   refresh) run `<exe> otto …` when embedded. Clients reach a remote daemon with `Connection::connect_dial(Dial)`,
   which reconnects through the same dialer; a follower retries with a 250 ms to 5 s backoff.
 - **One otto daemon per Silo server** (decided 2026-10-24): each has its own socket, locks, db, sign-ins and
-  sessions, so a dev app (`SILO_HOME=/tmp/silo-otto`) never drives or shares the installed app's daemon.
+  sessions, so a dev app never drives or shares the installed app's daemon.
   - The otto home is `otto_proto::paths::home()`, used by `otto-silo`, `silo otto`, `silo server` and the app alike:
     `$OTTO_SILO_HOME`; else, when the effective Silo home (`$SILO_HOME`, else Silo's default) is Silo's default,
-    the default otto home (Application Support / XDG state `otto-silo`, unchanged); else `<silo home>/otto`. So
-    `SILO_HOME=/tmp/silo-otto otto-silo auth login …` signs the dev daemon in. The config dir
+    the channel's default otto home (Application Support / XDG state `otto-silo`, dev builds `otto-silo-dev`);
+    else `<silo home>/otto`. An `OTTO_SILO_HOME` naming the other channel's default is refused, like `SILO_HOME`
+    (`docs/PLAN.md` §5 Channels). So a dev `otto-silo auth login …` signs the dev daemon in, and
+    `SILO_HOME=/tmp/silo-ui otto-silo auth login …` that home's. The config dir
     (`OTTO_SILO_CONFIG_DIR`, `~/.config/otto-silo`) stays shared.
   - The daemon records the Silo home its silo tools drive (`paths::silo_home()`) as `silo_home` in `hello`,
     `server.info` and `runtime.json`. `otto_claim` runs in the background at every `silo server` start (incl.

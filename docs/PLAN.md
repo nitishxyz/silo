@@ -242,6 +242,38 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
     `~/.local/bin/silo` to it when that dir exists. Shells of a runtime-dir server get `<SILO_HOME>/bin` on `PATH`.
     Anything else (`SILO_HOME`, dev and debug builds, a bundle in a cargo target dir) starts a plain server; Stop
     disables the agent until the next launch.
+- **Channels (release and dev builds):** whether a build is the installed Silo or a development build is fixed
+  when it is compiled, never guessed at run time: `SILO_CHANNEL=release` makes a release build
+  (`scripts/bundle-macos.sh` and `.github/workflows/release.yml` set it); unset or `dev` is a dev build (`cargo
+  build`, `cargo test`, `scripts/dev-bundle.sh`); any other value fails the build. `crates/silo-channel` holds
+  `Channel`/`CURRENT` and the home rules, re-exported as `silo_proto::CHANNEL` and by `otto-proto`; every per-user
+  name follows it, so a dev build and the installed Silo never share state, a server, otto or sign-ins:
+
+  | | release | dev |
+  |---|---|---|
+  | Silo home (`silo_proto::paths::home`) | `~/Library/Application Support/silo`, XDG state `silo` | `…/silo-dev`, XDG state `silo-dev` |
+  | otto home (`otto_proto::paths::home`) | `…/otto-silo` | `…/otto-silo-dev` |
+  | App cache (`paths::app_cache`) | `~/Library/Caches/silo` | `~/Library/Caches/silo-dev` |
+  | launchd job / systemd unit | `dev.silo.server` / `silo.service` | `dev.silo.server.dev` / `silo-dev.service` |
+  | Bundle id (app, helpers) | `xyz.nitish.silo`, `xyz.nitish.silo.helper*` | `xyz.nitish.silo.dev`, `xyz.nitish.silo.dev.helper*` |
+
+  Everything else lives in a home: socket, `runtime.json`, locks, logs (`server.log`, `app.log`, `web/cef.log`), the
+  browser profiles (`<home>/web`), shell integration, shims, `runtime/` copies, `bin/silo`, the menu-bar lock,
+  paired devices (`state/`), and otto's db and sign-ins (`<otto home>/auth/auth.json`; nothing goes to the
+  keychain, and Chromium runs with a mock keychain). The otto config dir (`~/.config/otto-silo`: agents, skills,
+  hooks, `mcp.json`) is user-written configuration and stays shared.
+  - `SILO_HOME` / `OTTO_SILO_HOME` still override (tests, `scripts/ui-env.sh`), except that a build given the other
+    channel's default home (a Silo terminal exports the installed app's `SILO_HOME`) refuses it, warns and uses its
+    own; the app also rewrites the variable for the server, menu-bar agent and otto it starts.
+  - The server's channel is in the hello (`ServerHello.channel`), `runtime.json` and the live upgrade's `Transfer`
+    (absent = release: every older build is one). A successor refuses another channel's server on `runtime.json`
+    before `SILO-UPGRADE 1` and on the `Transfer` before `READY` (the old server re-adopts); `silo up`, the app and
+    "Upgrade" refuse it before acting (`silo_proto::OtherChannel`); the app does not use it. The old server cannot
+    tell a successor's channel (the upgrade line is frozen), so a pre-channel release successor is not refused by a
+    dev server.
+  - `silo --version` ends in ` dev` for a dev build; the release workflow and `dev-bundle.sh` check it.
+  - Dev state from before channels is in `/tmp/silo-dev` (the old SiloDev home); it is not migrated. A dev build
+    starts with no sessions and no sign-ins.
 - **Server modes:**
   - Personal: auto-exits about 10 s after the last session and client, unless started explicitly.
   - Shared and login modes come later.
