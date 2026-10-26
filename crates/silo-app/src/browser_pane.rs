@@ -1505,6 +1505,7 @@ impl crate::pane_header::BlockHeader for BrowserPane {
             .child(self.address_box(cx))
             .into_any_element();
         let mut parts = crate::pane_header::HeaderParts::new(middle, self.title());
+        parts.fill = true;
         #[allow(clippy::cast_possible_truncation)]
         let progress = (self.loading() && self.progress < 1.0).then_some(self.progress as f32);
         parts.progress = progress;

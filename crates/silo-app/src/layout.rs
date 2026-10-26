@@ -512,8 +512,31 @@ impl Workspace {
                 let color = if active { accent } else { icon_color };
                 el.child(self.block_icon_view(id, "header", 12.0, color, cx))
             })
-            .child(div().flex().flex_row().items_center().flex_1().min_w_0().h_full().child(parts.middle))
-            .children(status)
+            // The status mark follows the title (it sat by the pane buttons,
+            // alone at the far right while they're hidden); a middle that
+            // fills the width (`fill`: a page's address bar) puts it at the end.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .flex_shrink(1.0)
+                            .when(parts.fill, |el| el.flex_1())
+                            .min_w_0()
+                            .h_full()
+                            .child(parts.middle),
+                    )
+                    .children(status),
+            )
             // Actions show on the active pane, and on any pane while the
             // pointer is over it; they keep their space so nothing shifts.
             // In a pane too narrow for every button the row shrinks and,

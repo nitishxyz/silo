@@ -121,8 +121,11 @@ impl HeaderStyle {
 
 /// What a block type puts in its header.
 pub struct HeaderParts {
-    /// Stretches between the icon and the actions.
+    /// Between the icon and the actions; as wide as its contents, the
+    /// status mark right after it, unless `fill`.
     pub middle: AnyElement,
+    /// The middle takes all the width (a page's address bar).
+    pub fill: bool,
     /// Just before the pane buttons, shown with them.
     pub actions: Vec<AnyElement>,
     /// Replaces the status progress line (0.0–1.0).
@@ -136,7 +139,7 @@ pub struct HeaderParts {
 impl HeaderParts {
     #[must_use]
     pub fn new(middle: AnyElement, label: impl Into<SharedString>) -> Self {
-        Self { middle, actions: Vec::new(), progress: None, rule: false, label: label.into() }
+        Self { middle, fill: false, actions: Vec::new(), progress: None, rule: false, label: label.into() }
     }
 }
 
