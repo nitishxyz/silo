@@ -765,6 +765,7 @@ impl AgentPane {
         let retry = |cx: &mut Context<Self>| {
             chip("agent-retry", "Try again").mt(px(12.0)).text_color(rgb(theme::accent())).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.conn = Conn::Connecting;
+                this.load_tries = 0;
                 this.load(cx);
                 cx.notify();
             }))

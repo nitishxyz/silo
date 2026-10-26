@@ -292,6 +292,11 @@ async fn probe_refusal(id: &str) -> Option<TunnelErrCode> {
     silo_client::tunnel::refusal(&error)
 }
 
+/// A local load's tries before "Can't reach otto", [`LOCAL_RETRY`] apart:
+/// this Mac's server and its otto come up a moment after the app.
+const LOCAL_TRIES: u32 = 8;
+const LOCAL_RETRY: std::time::Duration = std::time::Duration::from_millis(750);
+
 pub struct AgentPane {
     pub block_id: String,
     pub focus: FocusHandle,
@@ -300,8 +305,11 @@ pub struct AgentPane {
     /// The otto daemon this block's host runs, and the host's name (`None`: this Mac).
     target: client::Otto,
     host: Option<String>,
-    /// The host's silo connection is up (always on this Mac).
+    /// The host's silo connection is up (this Mac's too: its server can
+    /// start after the app, after an update or a cold start).
     host_up: bool,
+    /// Failed local loads in a row (see [`LOCAL_TRIES`]).
+    load_tries: u32,
     /// The daemon user's home (`hello.home`), for shortening paths.
     home: Option<String>,
     /// A folder this pane moved to that the server hasn't echoed yet.
@@ -514,7 +522,8 @@ impl AgentPane {
             session_id,
             cwd,
             target,
-            host_up: host_up || host.is_none(),
+            host_up,
+            load_tries: 0,
             host,
             home: None,
             moving: None,
@@ -620,7 +629,7 @@ impl AgentPane {
     /// The host's connection came back (reconnect now, not at the next
     /// retry) or went (the reconnect strip shows).
     pub fn set_host_up(&mut self, up: bool, cx: &mut Context<Self>) {
-        if self.host.is_none() || self.host_up == up {
+        if self.host_up == up {
             return;
         }
         self.host_up = up;
@@ -832,6 +841,7 @@ impl AgentPane {
                     // Moved again meanwhile: the newer load wins.
                     _ if this.cwd != asked => {}
                     Ok((catalog, project, sessions, home)) => {
+                        this.load_tries = 0;
                         let first = !matches!(this.conn, Conn::Ready);
                         this.conn = Conn::Ready;
                         this.home = Some(home).filter(|h| !h.is_empty());
@@ -848,6 +858,20 @@ impl AgentPane {
                     }
                     // The host went down meanwhile: the strip says so, and it loads again once back.
                     Err(_) if !this.host_up => {}
+                    // This Mac's otto starts with its server (after an update or a
+                    // cold start, a moment after the app): ask again before failing.
+                    Err(_) if this.host.is_none() && this.load_tries < LOCAL_TRIES => {
+                        this.load_tries += 1;
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(LOCAL_RETRY).await;
+                            let _ = this.update(cx, |this, cx| {
+                                if !matches!(this.conn, Conn::Ready) {
+                                    this.load(cx);
+                                }
+                            });
+                        })
+                        .detach();
+                    }
                     Err((error, refused)) => {
                         this.conn = if this.host.is_some() { Conn::Unreachable(Failure::of(refused)) } else { Conn::Failed(error) };
                     }
