@@ -25,6 +25,11 @@ data-encoding.workspace = true
 # Files blocks: `.gitignore`-aware walks and folder watches.
 ignore = "0.4"
 notify = "8"
+# Search (docs/FINDER.md §2): fff's file picker, frecency (LMDB) and grep.
+# Its plain Rust build: `ripgrep` globs, not `zlob` (which needs Zig).
+fff-search = { version = "0.11", default-features = false, features = ["ripgrep"] }
+# The type of fff's git statuses (the same libgit2 build fff uses).
+git2 = { version = "0.21", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { workspace = true, features = ["NSData", "NSError", "NSFileManager", "NSURL"] }

@@ -24,6 +24,7 @@ pub mod persist;
 pub mod prompts;
 pub mod registry;
 pub mod remote;
+pub mod search;
 pub mod shell;
 pub mod status;
 pub mod sysclip;
@@ -88,6 +89,8 @@ pub struct Config {
     /// Unix-socket services reachable over `silo/tunnel/1` by name (`"otto"`
     /// also adds the `otto` hello feature). Empty by default.
     pub services: std::collections::HashMap<String, ServiceFn>,
+    /// Search pickers kept and their idle time (docs/FINDER.md §2).
+    pub search: search::Limits,
 }
 
 /// See [`Config::agent_closed`].
@@ -114,6 +117,7 @@ impl Default for Config {
             ready_fault: None,
             agent_closed: None,
             services: std::collections::HashMap::new(),
+            search: search::Limits::default(),
         }
     }
 }
@@ -152,6 +156,8 @@ pub struct Server {
     data_writers: tokio::sync::watch::Sender<usize>,
     /// See [`Config::services`].
     pub services: std::collections::HashMap<String, ServiceFn>,
+    /// `search.*` and `files.find`: fff pickers, frecency, query history.
+    pub search: search::Search,
 }
 
 /// Counts a data stream's writer task while it runs, so a server handing
@@ -539,6 +545,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         grant_sweep_ahead: config.grant_sweep_ahead.clone(),
         data_writers: tokio::sync::watch::channel(0).0,
         services: config.services.clone(),
+        search: search::Search::new(paths::search(&home), config.search),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
@@ -553,6 +560,15 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
             if !sweep_server.upgrading.load(Ordering::SeqCst) {
                 sweep_server.settle_grants();
             }
+        }
+    }));
+    let search = server.search.clone();
+    let _search_sweep = AbortOnDrop(tokio::spawn(async move {
+        let every = (search.limits().idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(60));
+        loop {
+            tokio::time::sleep(every).await;
+            let search = search.clone();
+            let _ = tokio::task::spawn_blocking(move || search.sweep()).await;
         }
     }));
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");

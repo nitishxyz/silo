@@ -1,4 +1,8 @@
-//! `files.find`: a `.gitignore`-aware walk of the root, fuzzy-scored.
+//! `files.find`: in a git repo, the root's fff picker (the one `search.files`
+//! uses, docs/FINDER.md §2); elsewhere, or when fff refuses the folder, a
+//! `.gitignore`-aware walk of the root, fuzzy-scored. fff skips hidden files
+//! outside repos (and reads no `.gitignore` there), so the walk keeps
+//! finding them.
 
 use std::{
     path::Path,
@@ -8,6 +12,7 @@ use std::{
 use silo_proto::{control::RpcError, files::FileFound};
 
 use super::paths::{canonical_root, relative};
+use crate::search::Search;
 
 /// Directories never walked.
 const SKIP: &[&str] = &[".git", "target", "node_modules"];
@@ -17,9 +22,46 @@ const WALK_MAX: usize = 200_000;
 const WALK_TIME: Duration = Duration::from_secs(2);
 
 /// Files under `root` matching `query`, best first.
-pub fn find(root: &Path, query: &str, limit: Option<u32>) -> Result<FileFound, RpcError> {
+pub fn find(search: &Search, root: &Path, query: &str, limit: Option<u32>) -> Result<FileFound, RpcError> {
     let root = canonical_root(root)?;
     let limit = limit.unwrap_or(FileFound::DEFAULT_LIMIT).clamp(1, FileFound::MAX_LIMIT) as usize;
+    if in_repo(&root) {
+        match picked(search, &root, query, limit) {
+            Ok(found) => return Ok(found),
+            Err(error) => tracing::debug!(root = %root.display(), "files.find: walking instead of fff: {}", error.message),
+        }
+    }
+    walk(&root, query, limit)
+}
+
+/// Whether `root` is in a git work tree (as fff finds it: then it walks
+/// hidden files and reads `.gitignore`).
+fn in_repo(root: &Path) -> bool {
+    git2::Repository::discover(root).is_ok_and(|repo| repo.workdir().is_some())
+}
+
+/// [`find`] through the root's fff picker, waiting up to [`WALK_TIME`] for
+/// its scan (`truncated` when it is still running).
+fn picked(search: &Search, root: &Path, query: &str, limit: usize) -> Result<FileFound, RpcError> {
+    let picker = search.picker(root)?;
+    let truncated = !picker.wait_for_scan(WALK_TIME);
+    let guard = picker.read().map_err(|e| RpcError::internal(format!("search: {e}")))?;
+    let picker = guard.as_ref().ok_or_else(|| RpcError::internal("search: no picker"))?;
+    let query = fff_search::QueryParser::new(fff_search::FileSearchConfig).parse(query);
+    let options = fff_search::FuzzySearchOptions {
+        max_threads: 0,
+        project_path: Some(root),
+        pagination: fff_search::PaginationArgs { offset: 0, limit },
+        ..Default::default()
+    };
+    let found = picker.fuzzy_search(&query, None, options);
+    let paths = found.items.iter().map(|item| item.relative_path(picker)).filter(|path| !path.split('/').any(|part| SKIP.contains(&part))).collect();
+    Ok(FileFound { paths, truncated })
+}
+
+/// [`find`] by walking `root`.
+fn walk(root: &Path, query: &str, limit: usize) -> Result<FileFound, RpcError> {
+    let root = root.to_owned();
     let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
     let walk = ignore::WalkBuilder::new(&root)
         .hidden(false)

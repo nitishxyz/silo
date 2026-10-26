@@ -554,7 +554,9 @@ fn daemonize(report: bool) -> Option<std::fs::File> {
 }
 
 fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
+    // fff (search) logs every query at info and every folder outside a
+    // repo as a warning.
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info,fff_search=error".into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).try_init();
 }
 

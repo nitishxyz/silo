@@ -109,6 +109,13 @@ pub fn drops(home: &std::path::Path) -> PathBuf {
     home.join("drops")
 }
 
+/// Search state (docs/FINDER.md §2): fff's frecency and query history
+/// (LMDB), in the channel's home so dev and release builds keep their own.
+#[must_use]
+pub fn search(home: &std::path::Path) -> PathBuf {
+    home.join("search")
+}
+
 /// Written by "Quit Silo" with the pid of the server it stops, so clients
 /// can tell that shutdown from a crash or a restart.
 #[must_use]

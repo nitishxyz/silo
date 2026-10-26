@@ -237,7 +237,8 @@ pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> 
         }
         Method::FilesFind(p) => {
             let root = root_of(server, &p.block_id)?;
-            reply(&blocking(move || find::find(&root, &p.query, p.limit)).await?)
+            let search = server.search.clone();
+            reply(&blocking(move || find::find(&search, &root, &p.query, p.limit)).await?)
         }
         Method::FilesWrite(p) => {
             let root = root_of(server, &p.block_id)?;

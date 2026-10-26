@@ -178,6 +178,46 @@ async fn scoped_tokens_see_and_do_only_what_they_cover() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `search.*` roots: the folders of the blocks a principal can view, or
+/// under them (docs/FINDER.md §2).
+#[tokio::test(flavor = "multi_thread")]
+async fn search_roots_follow_the_blocks_a_principal_sees() {
+    let home = temp_home("search");
+    let dir = home.parent().unwrap().join(format!("silo-access-search-dirs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mine_dir, other_dir) = (dir.join("mine"), dir.join("other"));
+    for d in [&mine_dir, &other_dir] {
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/file.txt"), "x\n").unwrap();
+    }
+    let (mine_dir, other_dir) = (mine_dir.canonicalize().unwrap(), other_dir.canonicalize().unwrap());
+    let task = start(&home).await;
+    let owner = connect(&home, None).await.unwrap();
+    let new = |cwd: &Path| Method::SessionCreate {
+        name: None,
+        spawn: SpawnSpec { cwd: Some(cwd.display().to_string()), ..shell() },
+        kind: BlockKind::Terminal,
+        url: None,
+    };
+    let mine: Created = owner.call(new(&mine_dir)).await.unwrap();
+    let _other: Created = owner.call(new(&other_dir)).await.unwrap();
+    let view = token(&owner, Scope::Session { session_id: mine.session_id.clone() }, Rights::View, None, GrantKind::Token).await;
+    let viewer = connect(&home, Some(&view.secret)).await.unwrap();
+    let search = |root: &Path| {
+        Method::SearchFiles(silo_proto::search::SearchFilesParams { root: root.display().to_string(), query: String::new(), limit: None })
+    };
+    viewer.call_value(search(&mine_dir)).await.unwrap();
+    viewer.call_value(search(&mine_dir.join("sub"))).await.unwrap();
+    assert_eq!(code(viewer.call_value(search(&other_dir)).await), RpcError::FORBIDDEN, "another session's folder");
+    let opened = Method::SearchOpened(silo_proto::search::SearchOpenedParams { root: other_dir.display().to_string(), path: "sub/file.txt".into() });
+    assert_eq!(code(viewer.call_value(opened).await), RpcError::FORBIDDEN);
+    owner.call_value(search(&other_dir)).await.unwrap();
+    drop(viewer);
+    shutdown(owner, task).await;
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_and_expired_grants_close_control_and_data_connections() {
     let home = temp_home("revoke");

@@ -12,6 +12,7 @@ mod line_mode;
 mod parked;
 mod persist;
 mod remote;
+mod search;
 mod share;
 mod status_api;
 mod status_block;
