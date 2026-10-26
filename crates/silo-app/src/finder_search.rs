@@ -58,6 +58,7 @@ pub fn grep_hits(root: String, query: String, found: SearchGrep) -> Hits<GrepHit
             line: u32::try_from(i.line).unwrap_or(u32::MAX),
             text: i.text,
             ranges: i.ranges.into_iter().map(|[a, b]| a as usize..b as usize).collect(),
+            git: i.git.map(finder::status_letter),
         })
         .collect();
     Hits { root, query, items, total: usize::try_from(found.total).unwrap_or(usize::MAX), indexing: found.indexing }
@@ -165,7 +166,7 @@ mod tests {
         assert_eq!((hits.total, hits.indexing, hits.query.as_str()), (7, true, "rs:3"));
         assert_eq!(hits.items[0].path, "src/main.rs", "the server's order is kept");
         let grep = SearchGrep {
-            items: vec![SearchGrepItem { path: "a.rs".into(), line: 4, col: 5, text: "fn main() {}".into(), ranges: vec![[3, 7]] }],
+            items: vec![SearchGrepItem { path: "a.rs".into(), line: 4, col: 5, text: "fn main() {}".into(), ranges: vec![[3, 7]], git: None }],
             total: 1,
             indexing: false,
             truncated: false,

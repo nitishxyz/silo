@@ -224,6 +224,7 @@ pub fn grep(search: &Search, root: &Path, p: &SearchGrepParams) -> Result<Search
                 col: u32::try_from(col).unwrap_or(u32::MAX).saturating_add(1),
                 text: text.to_owned(),
                 ranges,
+                git: git_status(file.git_status),
             })
         })
         .collect();

@@ -490,6 +490,8 @@ pub struct GrepHit {
     pub text: String,
     /// Byte ranges of the match in `text`.
     pub ranges: Vec<Range<usize>>,
+    /// The file's git status letter.
+    pub git: Option<char>,
 }
 
 /// A server search's answer for `query` under `root`.
@@ -546,6 +548,7 @@ pub fn grep_items(hits: &Hits<GrepHit>) -> Vec<Item> {
             item.icon = Some("search");
             item.detail = Some(format!("{}:{}", hit.path, hit.line));
             item.found = Match { tier: 0, score: 0, ranges };
+            item.right = hit.git.map(|g| Right::Value(g.to_string()));
             item
         })
         .collect()
@@ -1251,8 +1254,13 @@ mod tests {
 
     #[test]
     fn grep_rows_show_the_line_with_its_match() {
-        let found =
-            vec![GrepHit { path: "src/main.rs".into(), line: 7, text: "    let total = 1;".into(), ranges: std::iter::once(8..13).collect() }];
+        let found = vec![GrepHit {
+            path: "src/main.rs".into(),
+            line: 7,
+            text: "    let total = 1;".into(),
+            ranges: std::iter::once(8..13).collect(),
+            git: Some('M'),
+        }];
         let rows = grep_items(&hits("total", found));
         assert_eq!(rows[0].target, Target::File { root: "/work/app".into(), path: "src/main.rs".into(), line: Some(7) });
         assert_eq!(rows[0].text, "let total = 1;");
@@ -1260,7 +1268,7 @@ mod tests {
         assert_eq!(rows[0].detail.as_deref(), Some("src/main.rs:7"));
         assert_eq!(rows[0].group, Group::Grep);
         // A range past the text (or inside a character) is dropped, never panics.
-        let odd = vec![GrepHit { path: "a".into(), line: 1, text: "é".into(), ranges: vec![1..2, 5..9] }];
+        let odd = vec![GrepHit { path: "a".into(), line: 1, text: "é".into(), ranges: vec![1..2, 5..9], git: None }];
         assert!(grep_items(&hits("x", odd))[0].found.ranges.is_empty());
     }
 

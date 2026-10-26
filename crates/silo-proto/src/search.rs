@@ -109,6 +109,9 @@ pub struct SearchGrepItem {
     /// The matches in `text`: byte offsets `[start, end)`.
     #[serde(default)]
     pub ranges: Vec<[u32; 2]>,
+    /// The file's git status, as [`SearchFileItem::git`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::changes::FileStatus>,
 }
 
 /// `search.grep`'s result: files in fff's order (frecency first), lines in

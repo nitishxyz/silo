@@ -10915,12 +10915,36 @@
       },
       "result": {
         "$defs": {
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
           "SearchGrepItem": {
             "properties": {
               "col": {
                 "format": "uint32",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "git": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FileStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "line": {
                 "format": "uint64",
