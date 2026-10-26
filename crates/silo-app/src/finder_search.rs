@@ -71,15 +71,24 @@ pub fn top_for(line: u32) -> u64 {
 }
 
 impl Workspace {
-    /// Open `path` (relative to `root`) found by ⌘P: in the session's Files
-    /// block whose root holds it (the deepest), else in a new Files tab at
-    /// `root`; at `line` when given. The server hears of the open, for
+    /// Open `path` (relative to `root`) found by ⌘P, at `line` when given.
+    /// `how` ↩: the session's Files block whose root holds it (the deepest),
+    /// else a new Files tab at `root`; ⌘↩: a Files block split beside the
+    /// focused pane; ⌥⌘↩: a new Files tab. The server hears of the open, for
     /// frecency.
-    pub(crate) fn open_found_file(&mut self, root: String, path: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_found_file(
+        &mut self,
+        root: String,
+        path: String,
+        line: Option<u32>,
+        how: finder::OpenIn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(control) = self.control() else { return };
         let Some(view) = &self.view else { return };
         let full = std::path::Path::new(&root).join(&path);
-        let reuse = finder::files_block_for(&view.blocks, &full);
+        let reuse = finder::files_block_for(&view.blocks, &full).filter(|_| how == finder::OpenIn::Place);
         let session_id = view.session.id.clone();
         let opened = (root.clone(), path.clone());
         let set = move |block_id: String, rel: String| FilesSetParams {
@@ -93,7 +102,16 @@ impl Workspace {
             self.reveal_agent_target(block, window, cx);
         } else {
             let spawn = SpawnSpec { cwd: Some(root.clone()), command: Vec::new(), size: None };
-            let method = Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None };
+            let beside = (how == finder::OpenIn::Beside)
+                .then(|| self.focused_block(window, cx).or_else(|| self.active_window().map(|w| w.focused.clone())))
+                .flatten();
+            let method = match beside {
+                Some(block) => {
+                    let axis = self.auto_axis(&block);
+                    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Files, url: None, agent: None }
+                }
+                None => Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None },
+            };
             let control = control.clone();
             let task = self.rt.spawn(async move {
                 let created: Created = control.call(method).await?;
@@ -119,11 +137,14 @@ impl Workspace {
         self.call(Method::SearchOpened(SearchOpenedParams { root, path }));
     }
 
-    /// Show otto session `session` found by ⌘P: the block showing it, else
-    /// a new agent block beside the focused one, showing it.
-    pub(crate) fn open_found_agent(&mut self, session: String, title: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show otto session `session` found by ⌘P: ↩ the block showing it,
+    /// else (and ⌘↩, ⌥⌘↩ always) a new agent block beside the focused one.
+    /// A new tab can't carry an agent's session yet (`window.create` has no
+    /// `agent`), so ⌥⌘↩ splits too.
+    pub(crate) fn open_found_agent(&mut self, session: String, title: String, how: finder::OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
-        if let Some(shown) = view.blocks.iter().find(|b| b.agent.as_ref().and_then(|a| a.session_id.as_deref()) == Some(session.as_str())) {
+        let shown = view.blocks.iter().find(|b| b.agent.as_ref().and_then(|a| a.session_id.as_deref()) == Some(session.as_str()));
+        if let Some(shown) = shown.filter(|_| how == finder::OpenIn::Place) {
             let block = shown.id.clone();
             return self.reveal_agent_target(block, window, cx);
         }

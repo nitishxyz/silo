@@ -33,6 +33,8 @@ pub struct TextField {
     blink_task: Option<Task<()>>,
     /// The colours of the surface behind the field; the theme's if unset.
     palette: Option<crate::adaptive::Chrome>,
+    /// The modifiers held on the last ↩ (`FieldEvent::Submit`): ⌘P's ⌘↩ / ⌥⌘↩.
+    pub submit_mods: gpui::Modifiers,
 }
 
 /// One edit of the field's text.
@@ -79,6 +81,7 @@ impl TextField {
             caret: false,
             blink_task: None,
             palette: None,
+            submit_mods: gpui::Modifiers::default(),
         }
     }
 
@@ -176,7 +179,10 @@ impl TextField {
             self.all = false;
         }
         match k.key.as_str() {
-            "enter" => cx.emit(FieldEvent::Submit),
+            "enter" => {
+                self.submit_mods = m;
+                cx.emit(FieldEvent::Submit);
+            }
             "escape" => cx.emit(FieldEvent::Cancel),
             "up" => cx.emit(FieldEvent::Up),
             "down" => cx.emit(FieldEvent::Down),

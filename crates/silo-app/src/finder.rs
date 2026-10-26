@@ -379,6 +379,37 @@ pub fn score(query: &str, text: &str, keywords: &str) -> Option<Match> {
     q.split_whitespace().all(|w| keywords.split_whitespace().any(|k| k.starts_with(w))).then(|| Match { tier: 0, score: -100, ranges: Vec::new() })
 }
 
+/// Where ⌘P opens what it found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenIn {
+    /// ↩: a block already showing it (or that can: the folder's Files block),
+    /// else a new tab.
+    Place,
+    /// ⌘↩: a split beside the focused pane.
+    Beside,
+    /// ⌥⌘↩: always a new tab.
+    NewTab,
+}
+
+impl OpenIn {
+    #[must_use]
+    pub fn from_mods(m: gpui::Modifiers) -> Self {
+        match (m.platform, m.alt) {
+            (true, true) => Self::NewTab,
+            (true, false) => Self::Beside,
+            _ => Self::Place,
+        }
+    }
+}
+
+impl Target {
+    /// It opens in a block, so ⌘↩ / ⌥⌘↩ mean something.
+    #[must_use]
+    pub fn opens_a_block(&self) -> bool {
+        matches!(self, Self::File { .. } | Self::Agent { .. } | Self::Page(_) | Self::OpenUrl(_))
+    }
+}
+
 /// Where a pick goes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -1605,6 +1636,19 @@ mod tests {
         let mut sonic = block_items(blocks()).remove(3);
         sonic.found = score("sonic", &sonic.text, "").unwrap();
         assert_eq!(rank(vec![command, sonic], &[], None)[0].text, "sonic");
+    }
+
+    #[test]
+    fn return_opens_in_place_cmd_beside_and_option_cmd_in_a_new_tab() {
+        let m = |platform, alt, shift| gpui::Modifiers { platform, alt, shift, ..Default::default() };
+        assert_eq!(OpenIn::from_mods(m(false, false, false)), OpenIn::Place);
+        assert_eq!(OpenIn::from_mods(m(false, false, true)), OpenIn::Place, "⇧ alone changes nothing");
+        assert_eq!(OpenIn::from_mods(m(true, false, false)), OpenIn::Beside);
+        assert_eq!(OpenIn::from_mods(m(true, true, false)), OpenIn::NewTab);
+        assert_eq!(OpenIn::from_mods(m(false, true, false)), OpenIn::Place);
+        let file = Target::File { root: "/w".into(), path: "a.rs".into(), line: None };
+        assert!(file.opens_a_block() && Target::Page("https://x.dev".into()).opens_a_block());
+        assert!(!Target::Command(Command::NewPane).opens_a_block() && !Target::Tab { index: 0 }.opens_a_block());
     }
 
     #[test]

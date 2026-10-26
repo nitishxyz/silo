@@ -164,6 +164,15 @@ impl Workspace {
             }
             return;
         }
+        // ⌘↩ is New Pane's binding, which gpui runs before the field sees the
+        // key: with ⌘P open it opens the pick beside the focused pane.
+        if command == Command::NewPane && self.palette.as_ref().is_some_and(|p| matches!(p.step, Step::Search)) {
+            let selected = self.palette.as_ref().map_or(0, |p| p.selected);
+            if let Some(entry) = self.entries(cx).get(selected).cloned() {
+                self.activate_entry(entry, finder::OpenIn::Beside, window, cx);
+            }
+            return;
+        }
         if command.feature().is_some_and(|f| !self.host_supports(f)) {
             return self.flash(Status::warning(self.not_supported()), cx);
         }
@@ -903,8 +912,9 @@ impl Workspace {
                     },
                     _ => {
                         let selected = palette.selected;
+                        let how = finder::OpenIn::from_mods(palette.field.read(cx).submit_mods);
                         if let Some(entry) = self.entries(cx).get(selected).cloned() {
-                            self.activate_entry(entry, window, cx);
+                            self.activate_entry(entry, how, window, cx);
                         }
                     }
                 }
@@ -923,7 +933,7 @@ impl Workspace {
         match self.entries(cx).get(palette.selected) {
             Some(Entry::Item(item)) if matches!(item.target, Target::Setting(id) if id.setting().kind == Kind::Choice) => {
                 let item = item.clone();
-                self.pick(item, window, cx);
+                self.pick(item, finder::OpenIn::Place, window, cx);
                 true
             }
             Some(Entry::Item(finder::Item { target: Target::Category(scope), .. })) => {
@@ -1157,7 +1167,7 @@ impl Workspace {
         }
     }
 
-    fn pick(&mut self, item: finder::Item, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick(&mut self, item: finder::Item, how: finder::OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         // Only what the empty query can list again is remembered.
         if !matches!(item.target, Target::OpenUrl(_) | Target::Category(_) | Target::File { .. } | Target::Agent { .. } | Target::Change { .. }) {
             self.remember_pick(&item.key);
@@ -1213,16 +1223,19 @@ impl Workspace {
             }
             Target::Page(url) | Target::OpenUrl(url) => {
                 self.close_palette(window, cx);
-                self.open_page_tab(url);
+                match how {
+                    finder::OpenIn::Beside => self.open_page_beside(url, window, cx),
+                    finder::OpenIn::Place | finder::OpenIn::NewTab => self.open_page_tab(url),
+                }
             }
             Target::Category(scope) => self.set_chip(Some(scope), String::new(), window, cx),
             Target::File { root, path, line } => {
                 self.close_palette(window, cx);
-                self.open_found_file(root, path, line, window, cx);
+                self.open_found_file(root, path, line, how, window, cx);
             }
             Target::Agent { session, title } => {
                 self.close_palette(window, cx);
-                self.open_found_agent(session, title, window, cx);
+                self.open_found_agent(session, title, how, window, cx);
             }
             Target::Change { block, path } => {
                 self.close_palette(window, cx);
@@ -1234,6 +1247,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A browser on `url` split beside the focused pane (⌘↩), else a new tab.
+    fn open_page_beside(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(block) = self.focused_block(window, cx).or_else(|| self.active_window().map(|w| w.focused.clone())) else {
+            return self.open_page_tab(url);
+        };
+        let spawn = silo_proto::control::SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
+        let axis = self.auto_axis(&block);
+        self.call(Method::BlockSplit { block_id: block, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None });
+    }
+
     /// A new tab holding a browser on `url`.
     pub(crate) fn open_page_tab(&mut self, url: String) {
         let Some(view) = &self.view else { return };
@@ -1241,9 +1264,9 @@ impl Workspace {
         self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url) });
     }
 
-    fn activate_entry(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+    fn activate_entry(&mut self, entry: Entry, how: finder::OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         match entry {
-            Entry::Item(item) => self.pick(item, window, cx),
+            Entry::Item(item) => self.pick(item, how, window, cx),
             Entry::Choice { choice, .. } => {
                 if let Some(Step::Choice(id, _)) = self.palette.as_ref().map(|p| p.step.clone()) {
                     self.apply_setting(id, &choice.event, window, cx);
@@ -1384,7 +1407,9 @@ impl Workspace {
                     cx.notify();
                 }
             }))
-            .on_click(cx.listener(move |this, _, window, cx| this.activate_entry(entry.clone(), window, cx)))
+            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
+                this.activate_entry(entry.clone(), finder::OpenIn::from_mods(e.modifiers()), window, cx);
+            }))
             .into_any_element()
     }
 
@@ -1455,6 +1480,7 @@ impl Workspace {
             Step::RemoveHost => Some("Remove which host?".into()),
             Step::Choice(id, _) | Step::Number(id) => Some(id.setting().title.to_owned()),
         };
+        let opens_block = matches!(self.entries(cx).get(palette.selected), Some(Entry::Item(item)) if item.target.opens_a_block());
         let footer: Option<gpui::SharedString> = match &palette.step {
             Step::Input(Input::HostName(..)) => Some("↩ rename · esc cancel".into()),
             Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back".into()),
@@ -1467,6 +1493,7 @@ impl Workspace {
             Step::Search if matches!(finder::mode(palette.chip, &palette.query), finder::Mode::Categories(_)) => {
                 Some("↹ or ↩ search in · ↑↓ move · esc close".into())
             }
+            Step::Search if opens_block => Some("↩ open · ⌘↩ beside · ⌥⌘↩ new tab".into()),
             _ => None,
         };
         let input_step = matches!(palette.step, Step::Input(_) | Step::Number(_));
