@@ -1018,6 +1018,13 @@ impl Workspace {
                                 false
                             }
                         };
+                        // Fewer rows than before: the selection stays on one.
+                        let count = this.entries(cx).len();
+                        if let Some(palette) = this.palette.as_mut()
+                            && palette.selected >= count
+                        {
+                            palette.selected = 0;
+                        }
                         cx.notify();
                         indexing
                     })
