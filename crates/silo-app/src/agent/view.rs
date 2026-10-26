@@ -994,7 +994,7 @@ impl AgentPane {
             (Some(Row::Group(_)), Row::Group(_)) => 4.0,
         };
         let content = match &row {
-            Row::User { text, files, mentions, .. } => self.render_user(text, files, mentions, cx),
+            Row::User { key, text, files, mentions } => self.render_user(key, text, files, mentions, cx),
             Row::Group(g) => self.render_group(g, now, window, cx),
             Row::Text { key, text, streaming } => self.render_text(ix, key, text, *streaming, now, cx),
             Row::Compaction(c) => self.render_compaction(ix, c, now, cx),
@@ -1631,11 +1631,15 @@ impl AgentPane {
             .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), theme::foreground(), &self.scroll))
             .collect();
         self.parsed.insert(key.to_owned(), doc);
-        let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. } | Row::Report { .. }));
+        // A turn's reply: its last text (its changes card may follow).
+        let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. } | Row::Report { .. } | Row::Changes { .. }));
         let actions = answer.then(|| {
             let copy = text.to_owned();
             let question = self.rows[..ix].iter().rev().find_map(|r| if let Row::User { key, .. } = r { Some(key.clone()) } else { None });
             let group = SharedString::from(format!("answer-{key}"));
+            // The text row's item (`item#tN`): a branch keeps the history through it.
+            let item = key.split_once('#').map_or(key, |(item, _)| item);
+            let branch = self.branch_button(item, key, cx);
             div()
                 .flex()
                 .gap(px(2.0))
@@ -1653,6 +1657,7 @@ impl AgentPane {
                         .tooltip(Tooltip::text("Retry"))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(&q, cx)))
                 }))
+                .children(branch)
         });
         let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
         let (Some(mut r), Some(s)) = (reveal, shown) else { return body.into_any_element() };
@@ -1741,6 +1746,7 @@ impl AgentPane {
                     .flex()
                     .flex_col()
                     .children(strip)
+                    .children(self.render_branched(cx))
                     .children(notice)
                     .children(self.render_card(cx))
                     .children(self.render_bars(cx))
@@ -2549,17 +2555,21 @@ impl AgentPane {
         let current = self.session_id.clone();
         // The shown session is named as in the pane header (its first prompt until otto titles it).
         let shown = self.header_title();
-        let choices: Vec<(String, String, String, SessionStatus, i64)> = self
-            .session_choices(cx)
-            .into_iter()
-            .map(|s| {
-                let title = match &shown {
-                    Some(t) if current.as_deref() == Some(s.id.as_str()) => t.clone(),
-                    _ => super::session_label(s),
-                };
-                (s.id.clone(), title, s.model.clone(), s.status, s.updated_at)
-            })
-            .collect();
+        let choices: Vec<(String, String, String, SessionStatus, i64, Option<String>)> =
+            self.session_choices(cx)
+                .into_iter()
+                .map(|s| {
+                    let title = match &shown {
+                        Some(t) if current.as_deref() == Some(s.id.as_str()) => t.clone(),
+                        _ => super::session_label(s),
+                    };
+                    // A fork: the title of the session it came from.
+                    let from = s.forked_from.as_ref().map(|o| {
+                        self.sessions.iter().find(|p| p.id == o.session_id).map_or_else(|| "another session".to_owned(), super::session_label)
+                    });
+                    (s.id.clone(), title, s.model.clone(), s.status, s.updated_at, from)
+                })
+                .collect();
         let count = choices.len();
         // The block's project on top: opens the recent projects.
         let project = self.project.as_ref().map_or_else(|| "Project".to_owned(), |p| super::project_name(&p.root));
@@ -2575,7 +2585,7 @@ impl AgentPane {
             .pick_row(project_row, 0, self.selected == 0, cx)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Projects, window, cx)));
         let mut list = div().id("agent-sessions").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
-        for (i, (id, title, model, status, updated)) in choices.into_iter().enumerate() {
+        for (i, (id, title, model, status, updated, from)) in choices.into_iter().enumerate() {
             let i = i + 1;
             let checked = current.as_deref() == Some(id.as_str());
             let state = match status {
@@ -2590,11 +2600,27 @@ impl AgentPane {
                 .collect::<Vec<_>>()
                 .join(" · ");
             let lead = session_dot(status).map(|c| div().size(px(7.0)).rounded_full().bg(rgb(c)).into_any_element());
+            let glyph = from.map(|from| {
+                div()
+                    .id(gpui::ElementId::Name(format!("session-fork-{id}").into()))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(icon("git-branch", 12.0, theme::muted()))
+                    .tooltip(Tooltip::text(format!("Branched from {from}")))
+            });
+            let title = div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .min_w_0()
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().when(checked, |el| el.font_weight(FontWeight::MEDIUM)).child(title))
+                .children(glyph);
             let row = rows::row(
                 gpui::ElementId::Name(format!("session-{id}").into()),
                 i == self.selected,
                 lead,
-                div().when(checked, |el| el.font_weight(FontWeight::MEDIUM)).child(title),
+                title,
                 Some(div().child(subtitle).into_any_element()),
                 checked.then(rows::check),
             );

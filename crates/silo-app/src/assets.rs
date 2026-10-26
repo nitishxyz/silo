@@ -90,6 +90,7 @@ icons!(
     "sidebar-right",
     "layers",
     "git-diff",
+    "git-branch",
     "message-square"
 );
 

@@ -600,6 +600,21 @@ pickers say `Applies from the next step` while a turn runs), shown at once and c
 refusal drops the pick and shows otto's reason in the notice slot. Before the first prompt they go into the create
 options.
 
+A fork (`SessionInfo.forked_from`) is listed like any session, a `git-branch` glyph after its title ("Branched from
+<title>"); it is never a sub-agent (no strip under its source, no back-link), though `parent_id` names its source.
+
+## 5a. Branching
+
+Hovering a user message (left of the bubble) or a turn's reply (after Copy and Retry) shows `git-branch` Branch.
+It forks the session (`session.fork {at_seq}`) at that message and shows the fork in the same block (as a switcher
+pick), titled `<title> (branch)` (`(branch 2)`, … past titles taken; a branch of a branch numbers its original's),
+with `Branched from <title> · Back to original ×` above the composer. The fork holds the history through the
+message: a user message is its last item (the composer stays as it was, ready to continue); a reply keeps the tool
+results right after it. `at_seq` is the latest stored sequence of the kept items (`SessionMirror.item_seqs`).
+While a turn runs Branch is disabled ("Stop the turn to branch"): the running turn's items aren't stored yet and a
+fork mid-turn would copy a half-finished step. Not on a sub-agent's block; an otto without `item_seqs` says
+"Update otto to branch".
+
 ## 6. Motion
 
 See §4e. Rows and lines enter with opacity 0→1 and y +6→0 over 320 ms; everything else as listed there.

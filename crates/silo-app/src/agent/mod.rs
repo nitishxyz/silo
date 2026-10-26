@@ -7,6 +7,7 @@
 //! ⌘J (with focus in the pane) opens the session switcher.
 
 mod attach;
+mod branch;
 pub(crate) mod client;
 pub(crate) mod editor;
 mod header;
@@ -323,6 +324,10 @@ pub struct AgentPane {
     notice: Option<String>,
     /// The session `/compact` is summarizing; sending waits until it's done.
     compacting: Option<String>,
+    /// A Branch click is forking the shown session.
+    branching: bool,
+    /// The branch this pane opened, and the original it leads back to (`branch.rs`).
+    branched: Option<branch::Branched>,
     /// The composer's text was just put back after a failed send (its change keeps the notice).
     restored: bool,
     rows: Vec<Row>,
@@ -519,6 +524,8 @@ impl AgentPane {
             error: None,
             notice: None,
             compacting: None,
+            branching: false,
+            branched: None,
             restored: false,
             rows: Vec::new(),
             built: Vec::new(),

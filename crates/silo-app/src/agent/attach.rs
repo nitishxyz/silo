@@ -131,8 +131,16 @@ pub(super) fn chip(thumb: Option<Arc<gpui::Image>>, mime: &str, name: String) ->
 }
 
 impl AgentPane {
-    /// The user's message: its files' chips, then the bubble (its mentions as chips inline).
-    pub(super) fn render_user(&mut self, text: &str, files: &[FileChip], mentions: &[super::mention::Chip], cx: &mut Context<Self>) -> AnyElement {
+    /// The user's message: its files' chips, then the bubble (its mentions as chips inline), its hover
+    /// actions (Branch) to the bubble's left.
+    pub(super) fn render_user(
+        &mut self,
+        key: &str,
+        text: &str,
+        files: &[FileChip],
+        mentions: &[super::mention::Chip],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let chips: Vec<Div> = files
             .iter()
             .map(|f| {
@@ -155,13 +163,33 @@ impl AgentPane {
                     el.child(super::select::register(super::select::USER, 0, None, &layout, text_el))
                 })
         });
+        let group = gpui::SharedString::from(format!("user-{key}"));
+        let actions = self
+            .branch_button(key, key, cx)
+            .map(|b| div().flex_none().opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)).child(b).into_any_element());
+        // Beside the bubble, else (files only) beside the chips: the row keeps its height.
+        let (chip_actions, bubble_actions) = if bubble.is_some() { (None, actions) } else { (actions, None) };
         div()
+            .group(group)
             .flex()
             .flex_col()
             .items_end()
             .gap(px(6.0))
-            .when(!chips.is_empty(), |el| el.child(div().max_w(relative(0.8)).flex().flex_wrap().justify_end().gap(px(6.0)).children(chips)))
-            .children(bubble)
+            .when(!chips.is_empty(), |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .items_end()
+                        .gap(px(4.0))
+                        .children(chip_actions)
+                        .child(div().max_w(relative(0.8)).flex().flex_wrap().justify_end().gap(px(6.0)).children(chips)),
+                )
+            })
+            .when_some(bubble, |el, bubble| {
+                el.child(div().w_full().flex().justify_end().items_end().gap(px(4.0)).children(bubble_actions).child(bubble))
+            })
             .into_any_element()
     }
 
