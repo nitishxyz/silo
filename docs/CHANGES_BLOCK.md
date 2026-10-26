@@ -25,7 +25,7 @@ ChangesState {
   scope: ChangesScope,          // what is compared
   open: Vec<String>,            // open file tabs (repo-relative), in order
   active: Option<String>,       // the file shown; none: the summary
-  list: bool,                   // the file list shown (default true)
+  list: bool,                   // the file list shown (a new block: hidden)
   split: bool,                  // side-by-side; false: unified (default)
   context: u32,                 // context lines (default 3)
   comments: Vec<ReviewComment>, // unsent review comments (§5)

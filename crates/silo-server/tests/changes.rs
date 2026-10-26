@@ -193,7 +193,7 @@ async fn status_of_every_scope() {
     let block = info(&control, &created).await;
     assert_eq!((block.kind, block.title.as_str()), (BlockKind::Changes, "repo"));
     let state = block.changes.as_deref().unwrap().clone();
-    assert_eq!(state, ChangesState::new(repo.display().to_string()), "working tree, list shown, 3 lines of context");
+    assert_eq!(state, ChangesState::new(repo.display().to_string()), "working tree, list hidden, 3 lines of context");
 
     use FileStatus::*;
     let working = status(&control, &id).await.unwrap();

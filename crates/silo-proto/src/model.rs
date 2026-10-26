@@ -499,7 +499,8 @@ impl ChangesState {
         3
     }
 
-    /// A fresh state on `root`: the working tree, no tabs, the list shown.
+    /// A fresh state on `root`: the working tree, no tabs, the file list
+    /// hidden (the diff gets the width; the toolbar shows it).
     #[must_use]
     pub fn new(root: String) -> Self {
         Self {
@@ -507,7 +508,7 @@ impl ChangesState {
             scope: ChangesScope::default(),
             open: Vec::new(),
             active: None,
-            list: true,
+            list: false,
             split: false,
             context: Self::default_context(),
             comments: Vec::new(),
