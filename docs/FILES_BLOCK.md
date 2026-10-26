@@ -123,7 +123,7 @@ dialog).
   tab was last shown, × to close (shown on the active tab, and on hover), middle-click to close. The tab strip
   scrolls sideways when it overflows. With no tab open, the header shows the root's name and path.
 - For a markdown tab: a Rendered | Source switch.
-- A search button: find a file (⌘P).
+- A search button: find a file (⇧⌘P; ⌘P is the app palette, its @files chip searches the same folder).
 - The tree toggle (a sidebar icon), last before the pane buttons (split, zoom, close).
 - With every pane header hidden, a Files block keeps a shrunk header (its tabs only), as a browser does.
 
@@ -176,7 +176,7 @@ Markdown edits in Source; Rendered stays read-only and shows the edited text. Im
 
 | Key | Action |
 |---|---|
-| ⌘P | Find a file: the palette's scoring (`finder::score`) over `files.find`'s paths, a match in the file name first. Open tabs first while nothing is typed |
+| ⇧⌘P | Find a file: the palette's scoring (`finder::score`) over `files.find`'s paths, a match in the file name first. Open tabs first while nothing is typed |
 | ⌘W | Close the tab (or the open finder / find / go-to bar); with no tab open, close the block |
 | ⌃Tab / ⌃⇧Tab | Next / previous tab |
 | ⌘⇧E | Toggle the tree |

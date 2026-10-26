@@ -1,5 +1,5 @@
 //! Drawing the Files block: its header (tabs, the Rendered/Source switch,
-//! find and the tree toggle), the viewer, the tree and the ⌘P finder.
+//! find and the tree toggle), the viewer, the tree and the ⇧⌘P finder.
 
 use gpui::{
     AnyElement, ClickEvent, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Render, SharedString, StyledImage as _,
@@ -45,7 +45,7 @@ impl BlockHeader for FilesPane {
             actions.push(self.source_switch(style, cx));
         }
         actions.push(
-            keep_press(button("files-find", "search", "Find a File  ⌘P", style.palette.icon, true, style))
+            keep_press(button("files-find", "search", "Find a File  ⇧⌘P", style.palette.icon, true, style))
                 .on_click(cx.listener(|this, _, window, cx| this.open_finder(window, cx)))
                 .into_any_element(),
         );
@@ -142,7 +142,7 @@ impl FilesPane {
 
     fn render_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(path) = self.state.active.clone() else {
-            let hint = if self.state.tree { "Pick a file in the tree, or press ⌘P to find one" } else { "Press ⌘P to find a file" };
+            let hint = if self.state.tree { "Pick a file in the tree, or press ⇧⌘P to find one" } else { "Press ⇧⌘P to find a file" };
             return centered(div().flex().flex_col().items_center().gap(px(4.0)).child("No file open").child(hint_text(hint)));
         };
         let mut content = self.contents.remove(&path);
@@ -485,6 +485,11 @@ impl FilesPane {
                 self.toggle_tree(cx);
                 true
             }
+            // ⇧⌘P: this folder's file finder (⌘P stays the app's palette).
+            "p" if m.platform && m.shift && !m.control && !m.alt => {
+                self.open_finder(window, cx);
+                true
+            }
             "f" if m.platform && !m.shift && !m.control && !m.alt => {
                 self.open_find(window, cx);
                 true
@@ -572,7 +577,6 @@ impl Render for FilesPane {
             .text_size(px(13.0))
             .text_color(rgb(theme::foreground()))
             .when(dragging_tree, |el| el.cursor_col_resize())
-            .on_action(cx.listener(|this, _: &act::CommandPalette, window, cx| this.open_finder(window, cx)))
             .on_action(cx.listener(|this, _: &act::ClosePane, window, cx| {
                 if this.finder.is_some() || this.find.is_some() || this.goto.is_some() {
                     return this.close_bars(window, cx);

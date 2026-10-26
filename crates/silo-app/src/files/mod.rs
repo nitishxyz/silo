@@ -100,7 +100,7 @@ pub(crate) struct Find {
     _sub: Subscription,
 }
 
-/// The ⌘P finder.
+/// The ⇧⌘P finder (⌘P stays the palette).
 pub(crate) struct Finder {
     pub field: Entity<TextField>,
     pub found: Vec<model::Found>,

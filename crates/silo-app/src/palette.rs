@@ -1430,6 +1430,8 @@ impl Workspace {
     /// hover that removes it; as tall as the text line.
     fn finder_chip(chip: finder::Scope, cx: &mut Context<Self>) -> AnyElement {
         let group: gpui::SharedString = "finder-chip".into();
+        // A pill: even padding round icon and label; the × takes room only
+        // on hover (a hidden one left a gap at the right).
         div()
             .id("finder-chip")
             .group(group.clone())
@@ -1438,10 +1440,10 @@ impl Workspace {
             .flex_row()
             .items_center()
             .gap(px(5.0))
-            .h(px(22.0))
-            .pl(px(7.0))
-            .pr(px(4.0))
-            .continuous(6.0)
+            .h(px(24.0))
+            .px(px(10.0))
+            .mr(px(2.0))
+            .rounded_full()
             .bg(theme::control_fill())
             .text_size(px(13.0))
             .text_color(rgb(theme::foreground()))
@@ -1450,12 +1452,13 @@ impl Workspace {
             .child(
                 div()
                     .id("finder-chip-clear")
-                    .flex()
+                    .hidden()
+                    .group_hover(group, |s| s.flex())
                     .items_center()
                     .justify_center()
                     .size(px(14.0))
-                    .opacity(0.0)
-                    .group_hover(group, |s| s.opacity(1.0))
+                    .mr(px(-4.0))
+                    .rounded_full()
                     .cursor_pointer()
                     .child(crate::assets::icon("close", 10.0, theme::muted()))
                     .on_click(cx.listener(|this, _, window, cx| {

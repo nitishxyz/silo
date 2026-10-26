@@ -1,6 +1,6 @@
 //! The Files block's logic, free of gpui: tabs, the tree's rows, which
 //! reads a change calls for, positions and selection in a text, find in
-//! file, go to line, the ⌘P finder's ranking and what a file is shown as.
+//! file, go to line, the ⇧⌘P finder's ranking and what a file is shown as.
 
 use std::{
     collections::{HashMap, HashSet},
