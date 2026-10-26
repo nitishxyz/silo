@@ -1,7 +1,9 @@
 //! ⌘P finder: a list of sources (commands, settings, sessions, machines,
-//! tabs, every block of the session, recent pages, an address) that each turn the query into
-//! scored entries, ranked and grouped under section labels. The palette
-//! (`palette.rs`) shows and runs them.
+//! tabs, every block of the session, recent pages, an address, files and
+//! their text, agent sessions, changed files) that each turn the query into
+//! scored entries, ranked and grouped under section labels. A category chip
+//! (docs/FINDER.md §1) narrows it to one source. The palette (`palette.rs`)
+//! shows and runs them.
 
 use std::{ops::Range, path::Path};
 
@@ -17,8 +19,15 @@ use crate::{
 };
 
 pub const PLACEHOLDER: &str = "Search commands, settings, sessions, blocks…";
-/// The query Browse Blocks opens on: the Blocks scope.
+/// The query Browse Blocks opens on: it turns into the Blocks chip.
 pub const BLOCKS_QUERY: &str = "#";
+/// Files shown without a chip, once the query has [`FILES_MIN`] characters.
+pub const FILES_TOP: usize = 5;
+pub const FILES_MIN: usize = 2;
+/// Files asked for under the Files chip.
+pub const FILES_LIMIT: usize = 50;
+/// Matches asked for under the Grep chip.
+pub const GREP_LIMIT: usize = 100;
 /// Finder picks remembered for the empty query and the recency boost.
 pub const RECENT_CAP: usize = 20;
 /// Entries per group when searching everything.
@@ -32,6 +41,8 @@ const COMMON: [Command; 6] =
 /// A section of the results, in display order for an empty query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// The `@` list.
+    Categories,
     Open,
     Recent,
     Commands,
@@ -42,12 +53,17 @@ pub enum Group {
     /// Every block of the session: tiled, floating and background.
     Blocks,
     Pages,
+    Files,
+    Grep,
+    Agents,
+    Changes,
 }
 
 impl Group {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Categories => "Search in",
             Self::Open => "Open",
             Self::Recent => "Recent",
             Self::Commands => "Commands",
@@ -57,49 +73,277 @@ impl Group {
             Self::Tabs => "Tabs",
             Self::Blocks => "Blocks",
             Self::Pages => "Pages",
+            Self::Files => "Files",
+            Self::Grep => "Matches",
+            Self::Agents => "Agents",
+            Self::Changes => "Changes",
         }
     }
 }
 
-/// What a query searches: everything, or one kind after a prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a query searches: everything, or one category (a chip).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
     All,
+    Files,
+    Grep,
+    /// `#`; Browse Blocks.
+    Blocks,
+    /// Workspaces (sessions) and machines.
+    Spaces,
+    Tabs,
+    Agents,
     /// `>`
     Commands,
     /// `:`
     Settings,
-    /// `@`: sessions and machines.
-    Sessions,
-    /// `#`: blocks (Browse Blocks).
-    Blocks,
+    Pages,
+    Changes,
 }
+
+/// The categories of the `@` list, in order.
+pub const CATEGORIES: [Scope; 10] = [
+    Scope::Files,
+    Scope::Grep,
+    Scope::Blocks,
+    Scope::Spaces,
+    Scope::Tabs,
+    Scope::Agents,
+    Scope::Commands,
+    Scope::Settings,
+    Scope::Pages,
+    Scope::Changes,
+];
+
+/// The server feature file and content search need.
+pub const SEARCH_FEATURE: &str = "search";
 
 impl Scope {
     #[must_use]
     pub fn includes(self, group: Group) -> bool {
         match self {
-            Self::All => true,
+            Self::All => !matches!(group, Group::Categories | Group::Grep | Group::Agents | Group::Changes),
+            Self::Files => group == Group::Files,
+            Self::Grep => group == Group::Grep,
             Self::Commands => group == Group::Commands,
             Self::Settings => group == Group::Settings,
-            Self::Sessions => matches!(group, Group::Sessions | Group::Machines),
+            Self::Spaces => matches!(group, Group::Sessions | Group::Machines),
+            Self::Tabs => group == Group::Tabs,
             Self::Blocks => group == Group::Blocks,
+            Self::Agents => group == Group::Agents,
+            Self::Pages => group == Group::Pages,
+            Self::Changes => group == Group::Changes,
         }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Files => "Files",
+            Self::Grep => "Grep",
+            Self::Blocks => "Blocks",
+            Self::Spaces => "Spaces",
+            Self::Tabs => "Tabs",
+            Self::Agents => "Agents",
+            Self::Commands => "Commands",
+            Self::Settings => "Settings",
+            Self::Pages => "Pages",
+            Self::Changes => "Changes",
+        }
+    }
+
+    /// The chip's and the `@` row's glyph (`assets/icons`).
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::All => "settings-search",
+            Self::Files => "file-text",
+            Self::Grep => "search",
+            Self::Blocks => "layers",
+            Self::Spaces => "laptop",
+            Self::Tabs => "split-right",
+            Self::Agents => "agent",
+            Self::Commands => "terminal",
+            Self::Settings => "settings",
+            Self::Pages => "globe",
+            Self::Changes => "git-diff",
+        }
+    }
+
+    /// The `@` row's one-line hint.
+    #[must_use]
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::All => "",
+            Self::Files => "Files in this workspace's folder",
+            Self::Grep => "Text inside files",
+            Self::Blocks => "Every block: tiled, floating, parked",
+            Self::Spaces => "Workspaces on this Mac and other machines",
+            Self::Tabs => "Tabs of this workspace",
+            Self::Agents => "Agent sessions of this project",
+            Self::Commands => "Run a command",
+            Self::Settings => "Change a setting",
+            Self::Pages => "Recent browser pages",
+            Self::Changes => "Changed files of this repo",
+        }
+    }
+
+    /// The field's placeholder under the chip.
+    #[must_use]
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::All => PLACEHOLDER,
+            Self::Files => "Search files (globs, !exclude, path:line)…",
+            Self::Grep => "Search text in files…",
+            Self::Blocks => "Search blocks…",
+            Self::Spaces => "Search workspaces and machines…",
+            Self::Tabs => "Search tabs…",
+            Self::Agents => "Search agent sessions…",
+            Self::Commands => "Search commands…",
+            Self::Settings => "Search settings…",
+            Self::Pages => "Search recent pages…",
+            Self::Changes => "Search changed files…",
+        }
+    }
+
+    /// The old one-character prefix that types this chip.
+    #[must_use]
+    pub fn prefix(self) -> Option<char> {
+        match self {
+            Self::Commands => Some('>'),
+            Self::Settings => Some(':'),
+            Self::Blocks => Some('#'),
+            _ => None,
+        }
+    }
+
+    /// The server feature the category needs.
+    #[must_use]
+    pub fn feature(self) -> Option<&'static str> {
+        match self {
+            Self::Files | Self::Grep => Some(SEARCH_FEATURE),
+            Self::Changes => Some(silo_proto::compat::feature::CHANGES),
+            _ => None,
+        }
+    }
+
+    /// What ⌫ on an empty field puts back for this chip.
+    #[must_use]
+    pub fn typed(self) -> String {
+        format!("@{}", self.label().to_lowercase())
     }
 }
 
-/// The scope a query's prefix picks and the rest of the query.
+/// What the field shows: the `@` list (filtered by the text after `@`), or
+/// results of a scope for the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode<'a> {
+    Categories(&'a str),
+    Search(Scope, &'a str),
+}
+
+/// The field's mode for `text` typed after `chip`.
 #[must_use]
-pub fn parse(query: &str) -> (Scope, &str) {
-    let query = query.trim_start();
-    let scope = match query.chars().next() {
-        Some('>') => Scope::Commands,
-        Some(':') => Scope::Settings,
-        Some('@') => Scope::Sessions,
-        Some('#') => Scope::Blocks,
-        _ => return (Scope::All, query.trim()),
+pub fn mode(chip: Option<Scope>, text: &str) -> Mode<'_> {
+    match chip {
+        Some(scope) => Mode::Search(scope, text.trim()),
+        None => match text.trim_start().strip_prefix('@') {
+            Some(filter) => Mode::Categories(filter.trim()),
+            None => Mode::Search(Scope::All, text.trim()),
+        },
+    }
+}
+
+/// What Esc does in the finder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Escape {
+    /// The chip goes; the text stays.
+    Unchip,
+    Close,
+}
+
+/// Esc with `chip`: the chip first, then the finder.
+#[must_use]
+pub fn escape(chip: Option<Scope>) -> Escape {
+    if chip.is_some() { Escape::Unchip } else { Escape::Close }
+}
+
+/// ⌫ with `chip` on field `text`: on an empty field the chip goes and the
+/// text it came from (`@files`) comes back, to be selected; otherwise
+/// `None` (an ordinary ⌫).
+#[must_use]
+pub fn backspace(chip: Option<Scope>, text: &str) -> Option<String> {
+    chip.filter(|_| text.is_empty()).map(Scope::typed)
+}
+
+/// An old prefix typed with no chip: the chip it turns into and the text
+/// after it. `@` stays text (the category list).
+#[must_use]
+pub fn promote(chip: Option<Scope>, text: &str) -> Option<(Scope, String)> {
+    if chip.is_some() {
+        return None;
+    }
+    let t = text.trim_start();
+    let first = t.chars().next()?;
+    let scope = CATEGORIES.into_iter().find(|s| s.prefix() == Some(first))?;
+    Some((scope, t[first.len_utf8()..].trim_start().to_owned()))
+}
+
+/// The `@` list for `filter`, among the categories `available`: prefix
+/// matches of the label first, then fuzzy ones, else in list order.
+#[must_use]
+pub fn categories(filter: &str, available: impl Fn(Scope) -> bool) -> Vec<(Scope, Match)> {
+    let mut out: Vec<(Scope, Match)> =
+        CATEGORIES.into_iter().filter(|s| available(*s)).filter_map(|s| Some((s, score(filter, s.label(), s.hint())?))).collect();
+    out.sort_by_key(|(_, m)| (std::cmp::Reverse(m.tier), std::cmp::Reverse(m.score)));
+    out
+}
+
+/// Whether `scope` is offered: its feature is supported.
+#[must_use]
+pub fn offered(scope: Scope, supports: impl Fn(&str) -> bool) -> bool {
+    scope.feature().is_none_or(supports)
+}
+
+/// A server search a query needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Files { query: String, limit: usize },
+    Grep { query: String, limit: usize },
+}
+
+/// The server search for `text` under `scope` (`search`: the server has
+/// feature `search`): the Files chip always (an empty query lists the
+/// frecent files), Grep for some text, no chip the top files at
+/// [`FILES_MIN`] characters.
+#[must_use]
+pub fn request(scope: Scope, text: &str, search: bool) -> Option<Request> {
+    let query = text.trim().to_owned();
+    if !search {
+        return None;
+    }
+    match scope {
+        Scope::Files => Some(Request::Files { query, limit: FILES_LIMIT }),
+        Scope::Grep if !query.is_empty() => Some(Request::Grep { query, limit: GREP_LIMIT }),
+        Scope::All if query.chars().count() >= FILES_MIN && address(&query).is_none() => Some(Request::Files { query, limit: FILES_TOP }),
+        _ => None,
+    }
+}
+
+/// The line a Files query asks for: `path:42` or `path:42:7`.
+#[must_use]
+pub fn query_line(query: &str) -> Option<u32> {
+    let mut parts = query.trim().rsplit(':');
+    let last = parts.next()?;
+    let before = parts.next()?;
+    let line = match (last.parse::<u32>(), before.parse::<u32>()) {
+        // `path:line:col`, unless the path is a number itself.
+        (Ok(_), Ok(line)) if parts.next().is_some() => line,
+        (Ok(line), _) => line,
+        _ => return None,
     };
-    (scope, query[1..].trim())
+    (line > 0).then_some(line)
 }
 
 /// How well an entry matches: `tier` 3 exact, 2 prefix, 1 a word's
@@ -159,6 +403,24 @@ pub enum Target {
     Background(String),
     Page(String),
     OpenUrl(String),
+    /// An `@` row: the chip it sets.
+    Category(Scope),
+    /// A file under `root` (root-relative `path`), at `line` (1-based).
+    File {
+        root: String,
+        path: String,
+        line: Option<u32>,
+    },
+    /// An otto session of the workspace's project.
+    Agent {
+        session: String,
+        title: String,
+    },
+    /// A changed file, in Changes block `block` (`None`: no Changes block yet).
+    Change {
+        block: Option<String>,
+        path: String,
+    },
 }
 
 /// One result row.
@@ -205,6 +467,259 @@ impl Item {
             key,
         }
     }
+}
+
+// ---- server search results ----
+
+/// A file `search.files` found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileHit {
+    /// Root-relative, `/`-separated.
+    pub path: String,
+    pub name: String,
+    /// Its git status letter (M, A, ?, …).
+    pub git: Option<char>,
+}
+
+/// A line `search.grep` found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrepHit {
+    pub path: String,
+    /// 1-based.
+    pub line: u32,
+    pub text: String,
+    /// Byte ranges of the match in `text`.
+    pub ranges: Vec<Range<usize>>,
+}
+
+/// A server search's answer for `query` under `root`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hits<T> {
+    pub root: String,
+    pub query: String,
+    pub items: Vec<T>,
+    pub total: usize,
+    /// The server is still scanning the folder: more may come.
+    pub indexing: bool,
+}
+
+/// The Files rows: the name (its matched letters highlighted), the folder
+/// dimmed after it, the git letter at the right; `query`'s `:line` opens there.
+#[must_use]
+pub fn file_items(hits: &Hits<FileHit>) -> Vec<Item> {
+    let line = query_line(&hits.query);
+    let words = hits.query.split(':').next().unwrap_or_default();
+    hits.items
+        .iter()
+        .map(|hit| {
+            let target = Target::File { root: hits.root.clone(), path: hit.path.clone(), line };
+            let mut item = Item::new(target, Group::Files, hit.name.clone(), format!("file:{}/{}", hits.root, hit.path));
+            item.icon = Some("file-text");
+            let folder = hit.path.rsplit_once('/').map(|(dir, _)| dir.to_owned());
+            item.detail = folder.filter(|d| !d.is_empty());
+            item.right = hit.git.map(|g| Right::Value(g.to_string()));
+            item.found = Match { tier: 0, score: 0, ranges: fuzzy(&words.to_lowercase(), &hit.name).map(|(_, r)| r).unwrap_or_default() };
+            item
+        })
+        .collect()
+}
+
+/// The Grep rows: the line, its match highlighted (leading blanks cut), with
+/// `path:line` dimmed after it.
+#[must_use]
+pub fn grep_items(hits: &Hits<GrepHit>) -> Vec<Item> {
+    hits.items
+        .iter()
+        .map(|hit| {
+            let target = Target::File { root: hits.root.clone(), path: hit.path.clone(), line: Some(hit.line) };
+            let cut = hit.text.len() - hit.text.trim_start().len();
+            let text = hit.text.trim().to_owned();
+            let ranges = hit
+                .ranges
+                .iter()
+                .filter_map(|r| {
+                    let r = r.start.saturating_sub(cut).min(text.len())..r.end.saturating_sub(cut).min(text.len());
+                    (r.start < r.end && text.is_char_boundary(r.start) && text.is_char_boundary(r.end)).then_some(r)
+                })
+                .collect();
+            let mut item = Item::new(target, Group::Grep, text, String::new());
+            item.icon = Some("search");
+            item.detail = Some(format!("{}:{}", hit.path, hit.line));
+            item.found = Match { tier: 0, score: 0, ranges };
+            item
+        })
+        .collect()
+}
+
+/// An otto session as the Agents rows show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRow {
+    pub id: String,
+    pub title: String,
+    /// `agent · model`.
+    pub detail: String,
+    /// Shown in a block of this workspace now.
+    pub open: bool,
+}
+
+/// The Agents rows, newest first as given.
+#[must_use]
+pub fn agent_items(rows: &[AgentRow]) -> Vec<Item> {
+    rows.iter()
+        .map(|row| {
+            let title = if row.title.trim().is_empty() { "Untitled session".to_owned() } else { row.title.clone() };
+            let target = Target::Agent { session: row.id.clone(), title: row.title.clone() };
+            let mut item = Item::new(target, Group::Agents, title, format!("agent:{}", row.id));
+            item.icon = Some(crate::agent_block::ICON);
+            item.detail = Some(row.detail.clone());
+            item.right = row.open.then(|| Right::Value("open".into()));
+            item
+        })
+        .collect()
+}
+
+/// A changed file of the workspace's repo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRow {
+    pub path: String,
+    /// M, A, D, R, ?, …
+    pub status: char,
+    pub added: u32,
+    pub removed: u32,
+}
+
+/// What the Changes chip lists: the changed files read through Changes
+/// block `block`, or none (no Changes block: one row opens one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changes {
+    pub block: Option<String>,
+    pub files: Vec<ChangeRow>,
+}
+
+/// The Changes rows: the file name, its folder dimmed, the status letter
+/// and line counts at the right; without a Changes block, New Changes Tab.
+#[must_use]
+pub fn change_items(changes: &Changes) -> Vec<Item> {
+    let Some(block) = &changes.block else {
+        let command = Command::NewChangesTab;
+        let mut item = Item::new(Target::Command(command), Group::Changes, command.title(), command_key(command));
+        item.icon = Some("git-diff");
+        item.detail = Some("Lists the repo's changed files".into());
+        return vec![item];
+    };
+    changes
+        .files
+        .iter()
+        .map(|file| {
+            let (folder, name) = file.path.rsplit_once('/').map_or((None, file.path.as_str()), |(d, n)| (Some(d.to_owned()), n));
+            let target = Target::Change { block: Some(block.clone()), path: file.path.clone() };
+            let mut item = Item::new(target, Group::Changes, name, String::new());
+            item.icon = Some("git-diff");
+            item.keywords.clone_from(&file.path);
+            item.detail = folder;
+            let counts = if file.added + file.removed > 0 { format!("+{} \u{2212}{}  ", file.added, file.removed) } else { String::new() };
+            item.right = Some(Right::Value(format!("{counts}{}", file.status)));
+            item
+        })
+        .collect()
+}
+
+/// The Agents rows of `sessions` (sub-agents left out), newest first;
+/// those in `open` are shown in a block now.
+#[must_use]
+pub fn agent_rows(mut sessions: Vec<otto_proto::SessionInfo>, open: &[String]) -> Vec<AgentRow> {
+    sessions.retain(|s| !s.is_subagent());
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    sessions
+        .into_iter()
+        .map(|s| AgentRow { open: open.contains(&s.id), detail: format!("{} \u{b7} {}", s.agent, s.model), id: s.id, title: s.title })
+        .collect()
+}
+
+/// The Files block of the session to show file `full` (absolute) in: one
+/// whose root holds it, the deepest root first; its id and `full` relative
+/// to that root.
+#[must_use]
+pub fn files_block_for(blocks: &[silo_proto::model::BlockInfo], full: &Path) -> Option<(String, String)> {
+    blocks
+        .iter()
+        .filter(|b| b.kind == silo_proto::model::BlockKind::Files)
+        .filter_map(|b| Some((b.id.as_str(), Path::new(&b.files.as_ref()?.root))))
+        .filter(|(_, root)| full.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())
+        .map(|(id, root)| {
+            let rest = full.strip_prefix(root).unwrap_or(full);
+            (id.to_owned(), rest.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
+        })
+}
+
+/// The Changes block the Changes chip reads: the one whose root holds
+/// `folder` (the deepest), else the first.
+#[must_use]
+pub fn changes_block(blocks: &[silo_proto::model::BlockInfo], folder: Option<&str>) -> Option<String> {
+    let roots: Vec<(&str, &str)> = blocks
+        .iter()
+        .filter(|b| b.kind == silo_proto::model::BlockKind::Changes)
+        .map(|b| (b.id.as_str(), b.changes.as_ref().map_or("", |c| c.root.as_str())))
+        .collect();
+    let holds = |root: &str| folder.is_some_and(|f| !root.is_empty() && Path::new(f).starts_with(root));
+    roots.iter().filter(|(_, root)| holds(root)).max_by_key(|(_, root)| root.len()).or(roots.first()).map(|(id, _)| (*id).to_owned())
+}
+
+/// The Changes rows' files of a `changes.status`.
+#[must_use]
+pub fn change_rows(status: &silo_proto::changes::ChangesStatus) -> Vec<ChangeRow> {
+    status.files.iter().map(|f| ChangeRow { path: f.path.clone(), status: status_letter(f.status), added: f.added, removed: f.removed }).collect()
+}
+
+/// A changed file's status letter.
+#[must_use]
+pub fn status_letter(status: silo_proto::changes::FileStatus) -> char {
+    use silo_proto::changes::FileStatus as S;
+    match status {
+        S::Added => 'A',
+        S::Modified | S::TypeChanged => 'M',
+        S::Deleted => 'D',
+        S::Renamed => 'R',
+        S::Copied => 'C',
+        S::Untracked => '?',
+        S::Conflicted => 'U',
+        S::Unknown => '\u{b7}',
+    }
+}
+
+/// The `@` rows for `filter`.
+#[must_use]
+pub fn category_items(filter: &str, available: impl Fn(Scope) -> bool) -> Vec<Item> {
+    categories(filter, available)
+        .into_iter()
+        .map(|(scope, found)| {
+            let mut item = Item::new(Target::Category(scope), Group::Categories, scope.label(), String::new());
+            item.icon = Some(scope.icon());
+            item.detail = Some(scope.hint().to_owned());
+            item.right = Some(Right::Value(scope.typed()));
+            item.found = found;
+            item
+        })
+        .collect()
+}
+
+/// Put the Files group (already in the server's order) among `ranked`
+/// results: ahead of the first group whose best entry is no better than
+/// the best file's match is, so a file named as typed leads.
+#[must_use]
+pub fn with_files(ranked: Vec<Item>, files: Vec<Item>, query: &str) -> Vec<Item> {
+    if files.is_empty() {
+        return ranked;
+    }
+    let words = query.split(':').next().unwrap_or_default();
+    let best = files.iter().filter_map(|f| score(words, &f.text, "")).map(|m| m.tier).max().unwrap_or(0);
+    // The first entry of each group is its best (`rank`).
+    let at = ranked.iter().enumerate().find(|(i, item)| (*i == 0 || ranked[i - 1].group != item.group) && item.found.tier < best).map(|(i, _)| i);
+    let mut ranked = ranked;
+    let at = at.unwrap_or(ranked.len());
+    ranked.splice(at..at, files);
+    ranked
 }
 
 /// Sort by tier, then recency (`recent` newest first), then blocks last,
@@ -319,11 +834,46 @@ impl<T: Clone + PartialEq> Preview<T> {
 
 // ---- sources ----
 
+/// What the server answered so far for the open finder.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Live<'a> {
+    pub files: Option<&'a Hits<FileHit>>,
+    pub grep: Option<&'a Hits<GrepHit>>,
+    pub agents: Option<&'a [AgentRow]>,
+    pub changes: Option<&'a Changes>,
+}
+
 impl Workspace {
-    /// The finder's entries for `query`.
-    pub(crate) fn finder_items(&self, query: &str, snapshot: &SettingsSnapshot, recent: &[String], cx: &gpui::App) -> Vec<Item> {
-        let (scope, q) = parse(query);
+    /// The finder's entries for `text` typed after `chip`; `live` holds
+    /// what the server answered so far.
+    pub(crate) fn finder_items(
+        &self,
+        chip: Option<Scope>,
+        text: &str,
+        snapshot: &SettingsSnapshot,
+        recent: &[String],
+        live: &Live<'_>,
+        cx: &gpui::App,
+    ) -> Vec<Item> {
+        let (scope, q) = match mode(chip, text) {
+            Mode::Categories(filter) => {
+                let agents = self.agent_target(self.active_host).is_some();
+                return category_items(filter, |s| offered(s, |f| self.host_supports(f)) && (s != Scope::Agents || agents));
+            }
+            Mode::Search(scope, q) => (scope, q),
+        };
+        match scope {
+            Scope::Files => return live.files.map(file_items).unwrap_or_default(),
+            Scope::Grep => return live.grep.map(grep_items).unwrap_or_default(),
+            _ => {}
+        }
         let mut all = self.finder_sources(scope, snapshot, cx);
+        if scope == Scope::Agents {
+            all.extend(live.agents.map(agent_items).unwrap_or_default());
+        }
+        if scope == Scope::Changes {
+            all.extend(live.changes.map(change_items).unwrap_or_default());
+        }
         if q.is_empty() {
             if scope != Scope::All {
                 return all;
@@ -357,7 +907,11 @@ impl Workspace {
             open.found.tier = 4;
             found.push(open);
         }
-        rank(found, recent, (scope == Scope::All).then_some(PER_GROUP))
+        let ranked = rank(found, recent, (scope == Scope::All).then_some(PER_GROUP));
+        match live.files.filter(|_| scope == Scope::All && q.chars().count() >= FILES_MIN) {
+            Some(files) => with_files(ranked, file_items(files).into_iter().take(FILES_TOP).collect(), q),
+            None => ranked,
+        }
     }
 
     fn finder_sources(&self, scope: Scope, snapshot: &SettingsSnapshot, cx: &gpui::App) -> Vec<Item> {
@@ -431,7 +985,7 @@ impl Workspace {
             out.push(add);
         }
         if scope.includes(Group::Tabs) {
-            out.extend(self.tab_items(cx));
+            out.extend(self.tab_items(scope == Scope::Tabs, cx));
         }
         if scope.includes(Group::Blocks) {
             out.extend(block_items(self.block_rows(cx)));
@@ -442,12 +996,13 @@ impl Workspace {
         out
     }
 
-    /// Tabs with more than one block, of the shown session.
-    fn tab_items(&self, cx: &gpui::App) -> Vec<Item> {
+    /// Tabs of the shown session: with more than one block, or `every` one
+    /// (the Tabs chip; a single block's tab is under Blocks too).
+    fn tab_items(&self, every: bool, cx: &gpui::App) -> Vec<Item> {
         let Some(view) = &self.view else { return Vec::new() };
         let mut out = Vec::new();
         for (index, w) in view.session.windows.iter().enumerate() {
-            if crate::floats::window_blocks(w).len() > 1 {
+            if every || crate::floats::window_blocks(w).len() > 1 {
                 let mut item = Item::new(Target::Tab { index }, Group::Tabs, self.window_title(w, cx), format!("tab:{}", w.id));
                 item.icon = Some(self.tab_icon(w));
                 item.detail = Some(format!("Tab {}", index + 1));
@@ -560,16 +1115,274 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_pick_a_scope() {
-        assert_eq!(parse("  theme "), (Scope::All, "theme"));
-        assert_eq!(parse(">split"), (Scope::Commands, "split"));
-        assert_eq!(parse(": font"), (Scope::Settings, "font"));
-        assert_eq!(parse("@work"), (Scope::Sessions, "work"));
-        assert_eq!(parse("#btop"), (Scope::Blocks, "btop"));
-        assert_eq!(parse(BLOCKS_QUERY), (Scope::Blocks, ""));
-        assert!(Scope::Sessions.includes(Group::Machines) && !Scope::Sessions.includes(Group::Blocks));
+    fn old_prefixes_become_chips() {
+        assert_eq!(promote(None, ">split"), Some((Scope::Commands, "split".into())));
+        assert_eq!(promote(None, ": font"), Some((Scope::Settings, "font".into())));
+        assert_eq!(promote(None, "#btop"), Some((Scope::Blocks, "btop".into())));
+        assert_eq!(promote(None, BLOCKS_QUERY), Some((Scope::Blocks, String::new())), "Browse Blocks opens with the Blocks chip");
+        assert_eq!(promote(None, "  >"), Some((Scope::Commands, String::new())));
+        assert_eq!(promote(None, "@files"), None, "@ is the category list");
+        assert_eq!(promote(None, "theme"), None);
+        assert_eq!(promote(Some(Scope::Files), ">x"), None, "after a chip a prefix is text");
+        for scope in CATEGORIES {
+            if let Some(c) = scope.prefix() {
+                assert_eq!(promote(None, &c.to_string()).map(|p| p.0), Some(scope));
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_and_escape_take_the_chip_off_first() {
+        assert_eq!(backspace(Some(Scope::Files), ""), Some("@files".into()), "the chip's text comes back");
+        assert_eq!(backspace(Some(Scope::Files), "ma"), None, "an ordinary ⌫");
+        assert_eq!(backspace(None, ""), None);
+        // What comes back lists that category again, first.
+        let typed = backspace(Some(Scope::Grep), "").unwrap();
+        let Mode::Categories(filter) = mode(None, &typed) else { panic!("{typed}") };
+        assert_eq!(categories(filter, |_| true)[0].0, Scope::Grep);
+        assert_eq!(escape(Some(Scope::Blocks)), Escape::Unchip);
+        assert_eq!(escape(None), Escape::Close);
+    }
+
+    #[test]
+    fn the_field_lists_categories_after_at_and_searches_a_chip() {
+        assert_eq!(mode(None, "  theme "), Mode::Search(Scope::All, "theme"));
+        assert_eq!(mode(None, "@"), Mode::Categories(""));
+        assert_eq!(mode(None, "@fi"), Mode::Categories("fi"));
+        assert_eq!(mode(Some(Scope::Files), " main.rs "), Mode::Search(Scope::Files, "main.rs"));
+        assert_eq!(mode(Some(Scope::Grep), "@x"), Mode::Search(Scope::Grep, "@x"), "a chip's text is never the @ list");
+        assert_eq!(Scope::Files.typed(), "@files", "what ⌫ puts back");
+        assert_eq!(Scope::Spaces.typed(), "@spaces");
+        assert!(Scope::Spaces.includes(Group::Machines) && Scope::Spaces.includes(Group::Sessions) && !Scope::Spaces.includes(Group::Blocks));
         assert!(Scope::Blocks.includes(Group::Blocks) && !Scope::Blocks.includes(Group::Tabs) && !Scope::Blocks.includes(Group::Commands));
-        assert!(Scope::All.includes(Group::Pages) && !Scope::Commands.includes(Group::Settings));
+        assert!(Scope::All.includes(Group::Pages) && Scope::All.includes(Group::Files) && !Scope::Commands.includes(Group::Settings));
+        assert!(!Scope::All.includes(Group::Grep) && !Scope::All.includes(Group::Agents) && !Scope::All.includes(Group::Changes));
+    }
+
+    #[test]
+    fn the_category_list_filters_as_typed() {
+        let all = |_: Scope| true;
+        let labels = |filter: &str, available: &dyn Fn(Scope) -> bool| -> Vec<&str> {
+            categories(filter, available).into_iter().map(|(s, _)| s.label()).collect()
+        };
+        assert_eq!(labels("", &all), CATEGORIES.map(Scope::label), "every category, in order");
+        assert_eq!(labels("fi", &all)[0], "Files");
+        assert_eq!(labels("g", &all)[0], "Grep");
+        assert_eq!(labels("ag", &all)[0], "Agents");
+        assert_eq!(labels("cha", &all)[0], "Changes");
+        assert_eq!(labels("text", &all)[0], "Grep", "hints match too, after labels");
+        assert_eq!(labels("sp", &all)[0], "Spaces");
+        assert!(labels("zzz", &all).is_empty());
+        // Rows: icon, label, hint; the pick is the chip.
+        let rows = category_items("fil", all);
+        assert_eq!(rows[0].target, Target::Category(Scope::Files));
+        assert_eq!((rows[0].icon, rows[0].text.as_str(), rows[0].group), (Some("file-text"), "Files", Group::Categories));
+        assert_eq!(rows[0].detail.as_deref(), Some(Scope::Files.hint()));
+        let icons: Vec<&str> = CATEGORIES.map(Scope::icon).to_vec();
+        assert_eq!(icons, ["file-text", "search", "layers", "laptop", "split-right", "agent", "terminal", "settings", "globe", "git-diff"]);
+        for scope in CATEGORIES {
+            assert!(!scope.hint().is_empty() && scope.placeholder() != PLACEHOLDER, "{scope:?}");
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/");
+            assert!(Path::new(&format!("{path}{}.svg", scope.icon())).exists(), "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn files_grep_and_changes_are_hidden_without_their_feature() {
+        let old = |f: &str| f != SEARCH_FEATURE && f != silo_proto::compat::feature::CHANGES;
+        let shown: Vec<Scope> = categories("", |s| offered(s, old)).into_iter().map(|(s, _)| s).collect();
+        assert!(!shown.contains(&Scope::Files) && !shown.contains(&Scope::Grep) && !shown.contains(&Scope::Changes));
+        assert_eq!(shown.len(), CATEGORIES.len() - 3);
+        assert!(categories("fi", |s| offered(s, old)).iter().all(|(s, _)| *s != Scope::Files));
+        assert!(offered(Scope::Files, |_| true) && offered(Scope::Blocks, |_| false));
+        // No server search: no files without a chip either.
+        assert_eq!(request(Scope::All, "main", false), None);
+        assert_eq!(request(Scope::Files, "main", false), None);
+    }
+
+    #[test]
+    fn the_query_sent_per_chip() {
+        let files = |q: &str, limit| Some(Request::Files { query: q.into(), limit });
+        assert_eq!(request(Scope::Files, " main.rs ", true), files("main.rs", FILES_LIMIT));
+        assert_eq!(request(Scope::Files, "", true), files("", FILES_LIMIT), "frecent files for an empty query");
+        assert_eq!(request(Scope::Files, "src/main.rs:42", true), files("src/main.rs:42", FILES_LIMIT));
+        assert_eq!(request(Scope::Grep, "fn main", true), Some(Request::Grep { query: "fn main".into(), limit: GREP_LIMIT }));
+        assert_eq!(request(Scope::Grep, "  ", true), None);
+        // No chip: the top files at two characters, not for an address.
+        assert_eq!(request(Scope::All, "m", true), None);
+        assert_eq!(request(Scope::All, "ma", true), files("ma", FILES_TOP));
+        assert_eq!(request(Scope::All, "github.com", true), None);
+        for scope in [Scope::Blocks, Scope::Spaces, Scope::Tabs, Scope::Agents, Scope::Commands, Scope::Settings, Scope::Pages, Scope::Changes] {
+            assert_eq!(request(scope, "main", true), None, "{scope:?} searches here");
+        }
+    }
+
+    #[test]
+    fn a_files_query_can_name_a_line() {
+        assert_eq!(query_line("src/main.rs:42"), Some(42));
+        assert_eq!(query_line("main.rs:42:7"), Some(42));
+        assert_eq!(query_line("main.rs"), None);
+        assert_eq!(query_line("main.rs:"), None);
+        assert_eq!(query_line("main.rs:0"), None);
+        assert_eq!(query_line("a:b"), None);
+    }
+
+    fn hits<T>(query: &str, items: Vec<T>) -> Hits<T> {
+        Hits { root: "/work/app".into(), query: query.into(), total: items.len(), items, indexing: false }
+    }
+
+    #[test]
+    fn file_rows_show_the_folder_and_git_status_and_open_at_a_line() {
+        let found = vec![
+            FileHit { path: "src/main.rs".into(), name: "main.rs".into(), git: Some('M') },
+            FileHit { path: "Cargo.toml".into(), name: "Cargo.toml".into(), git: None },
+        ];
+        let rows = file_items(&hits("main:12", found.clone()));
+        assert_eq!(rows[0].target, Target::File { root: "/work/app".into(), path: "src/main.rs".into(), line: Some(12) });
+        assert_eq!(
+            (rows[0].text.as_str(), rows[0].detail.as_deref(), rows[0].right.clone()),
+            ("main.rs", Some("src"), Some(Right::Value("M".into())))
+        );
+        assert_eq!(rows[0].found.ranges.first(), Some(&(0..4)), "the matched letters of the name");
+        assert_eq!((rows[1].detail.as_deref(), rows[1].right.clone()), (None, None));
+        assert!(rows.iter().all(|r| r.group == Group::Files && r.icon == Some("file-text")));
+        assert_eq!(file_items(&hits("main", found))[0].target, Target::File { root: "/work/app".into(), path: "src/main.rs".into(), line: None });
+    }
+
+    #[test]
+    fn grep_rows_show_the_line_with_its_match() {
+        let found =
+            vec![GrepHit { path: "src/main.rs".into(), line: 7, text: "    let total = 1;".into(), ranges: std::iter::once(8..13).collect() }];
+        let rows = grep_items(&hits("total", found));
+        assert_eq!(rows[0].target, Target::File { root: "/work/app".into(), path: "src/main.rs".into(), line: Some(7) });
+        assert_eq!(rows[0].text, "let total = 1;");
+        assert_eq!(&rows[0].text[rows[0].found.ranges[0].clone()], "total", "ranges follow the cut indent");
+        assert_eq!(rows[0].detail.as_deref(), Some("src/main.rs:7"));
+        assert_eq!(rows[0].group, Group::Grep);
+        // A range past the text (or inside a character) is dropped, never panics.
+        let odd = vec![GrepHit { path: "a".into(), line: 1, text: "é".into(), ranges: vec![1..2, 5..9] }];
+        assert!(grep_items(&hits("x", odd))[0].found.ranges.is_empty());
+    }
+
+    #[test]
+    fn the_files_group_goes_by_its_best_match() {
+        let found = |text: &str, group, query: &str| {
+            let mut i = item(text, group, text);
+            i.found = score(query, text, "").unwrap();
+            i
+        };
+        let files = |names: &[&str]| -> Vec<Item> {
+            file_items(&hits("", names.iter().map(|n| FileHit { path: (*n).into(), name: (*n).into(), git: None }).collect()))
+        };
+        let groups = |items: &[Item]| items.iter().map(|i| i.group).collect::<Vec<_>>();
+        // A file named as typed leads a fuzzy command.
+        let ranked = vec![found("Split Right", Group::Commands, "sr")];
+        assert_eq!(groups(&with_files(ranked, files(&["sr"]), "sr")), [Group::Files, Group::Commands]);
+        // An equally good command stays first.
+        let ranked = vec![found("Split Right", Group::Commands, "split")];
+        assert_eq!(groups(&with_files(ranked, files(&["split.rs"]), "split")), [Group::Commands, Group::Files]);
+        assert_eq!(with_files(Vec::new(), files(&["a.rs"]), "a").len(), 1);
+        assert!(with_files(Vec::new(), Vec::new(), "a").is_empty());
+    }
+
+    #[test]
+    fn agent_rows_open_their_session() {
+        let rows = [
+            AgentRow { id: "s1".into(), title: "Fix login".into(), detail: "general · opus".into(), open: true },
+            AgentRow { id: "s2".into(), title: " ".into(), detail: "general · opus".into(), open: false },
+        ];
+        let items = agent_items(&rows);
+        assert_eq!(items[0].target, Target::Agent { session: "s1".into(), title: "Fix login".into() });
+        assert_eq!((items[0].text.as_str(), items[0].right.clone()), ("Fix login", Some(Right::Value("open".into()))));
+        assert_eq!((items[1].text.as_str(), items[1].right.clone()), ("Untitled session", None));
+        assert!(items.iter().all(|i| i.group == Group::Agents && i.icon == Some(crate::agent_block::ICON)));
+    }
+
+    fn session(id: &str, parent: Option<&str>, updated_at: i64) -> otto_proto::SessionInfo {
+        otto_proto::SessionInfo {
+            id: id.into(),
+            project_id: "proj".into(),
+            parent_id: parent.map(Into::into),
+            forked_from: None,
+            agent: "general".into(),
+            approval_mode: otto_proto::ApprovalMode::default(),
+            provider: "test".into(),
+            model: "m1".into(),
+            effort: None,
+            title: format!("task {id}"),
+            cwd: String::new(),
+            status: otto_proto::SessionStatus::Idle,
+            created_at: 0,
+            updated_at,
+            last_seq: 0,
+            usage: otto_proto::UsageTotals::default(),
+            context: otto_proto::ContextUse::default(),
+            report_held: false,
+            plan: None,
+        }
+    }
+
+    #[test]
+    fn agents_list_top_level_sessions_newest_first() {
+        let mut fork = session("f", Some("a"), 3);
+        fork.forked_from = Some(otto_proto::ForkOrigin { session_id: "a".into(), at_seq: 1 });
+        let rows = agent_rows(vec![session("a", None, 1), session("sub", Some("a"), 9), session("b", None, 2), fork], &["b".to_owned()]);
+        let shown: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.open)).collect();
+        assert_eq!(shown, [("f", false), ("b", true), ("a", false)], "no sub-agents; a fork is listed");
+        assert_eq!(rows[0].detail, "general · m1");
+    }
+
+    fn block(id: &str, kind: silo_proto::model::BlockKind, root: &str) -> silo_proto::model::BlockInfo {
+        use silo_proto::model::{BlockKind, ChangesState, FilesState};
+        let mut info: silo_proto::model::BlockInfo = serde_json::from_value(serde_json::json!({
+            "id": id, "session_id": "s", "kind": kind, "title": "", "size": {"columns": 80, "rows": 24}
+        }))
+        .unwrap();
+        match kind {
+            BlockKind::Files => info.files = Some(Box::new(FilesState::new(root.into()))),
+            BlockKind::Changes => info.changes = Some(Box::new(ChangesState::new(root.into()))),
+            _ => {}
+        }
+        info
+    }
+
+    #[test]
+    fn a_found_file_opens_in_the_files_block_holding_it() {
+        use silo_proto::model::BlockKind;
+        let blocks = [block("t", BlockKind::Terminal, ""), block("f1", BlockKind::Files, "/work"), block("f2", BlockKind::Files, "/work/app")];
+        let pick = |p: &str| files_block_for(&blocks, Path::new(p));
+        assert_eq!(pick("/work/app/src/main.rs"), Some(("f2".into(), "src/main.rs".into())), "the deepest root");
+        assert_eq!(pick("/work/other/a.rs"), Some(("f1".into(), "other/a.rs".into())));
+        assert_eq!(pick("/etc/hosts"), None, "none holds it: a new Files tab");
+    }
+
+    #[test]
+    fn changes_rows_come_from_the_workspace_repo() {
+        use silo_proto::model::BlockKind;
+        let blocks = [block("c1", BlockKind::Changes, "/other"), block("c2", BlockKind::Changes, "/work/app")];
+        assert_eq!(changes_block(&blocks, Some("/work/app/src")).as_deref(), Some("c2"));
+        assert_eq!(changes_block(&blocks, Some("/elsewhere")).as_deref(), Some("c1"), "else the first");
+        assert_eq!(changes_block(&blocks[..0], Some("/work/app")), None);
+        let changes = Changes {
+            block: Some("c2".into()),
+            files: vec![
+                ChangeRow { path: "src/main.rs".into(), status: 'M', added: 3, removed: 1 },
+                ChangeRow { path: "NEW.md".into(), status: '?', added: 0, removed: 0 },
+            ],
+        };
+        let items = change_items(&changes);
+        assert_eq!(items[0].target, Target::Change { block: Some("c2".into()), path: "src/main.rs".into() });
+        assert_eq!((items[0].text.as_str(), items[0].detail.as_deref()), ("main.rs", Some("src")));
+        assert_eq!(items[0].right, Some(Right::Value("+3 \u{2212}1  M".into())));
+        assert_eq!(items[1].right, Some(Right::Value("?".into())));
+        // The path is matched too: `src` finds main.rs.
+        assert!(score("src", &items[0].text, &items[0].keywords).is_some());
+        // No Changes block: one row opens one.
+        let none = change_items(&Changes { block: None, files: Vec::new() });
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].target, Target::Command(Command::NewChangesTab));
+        assert_eq!(status_letter(silo_proto::changes::FileStatus::Untracked), '?');
+        assert_eq!(status_letter(silo_proto::changes::FileStatus::Added), 'A');
     }
 
     #[test]

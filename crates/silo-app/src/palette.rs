@@ -16,6 +16,10 @@ use crate::{status::Status, theme::Continuous as _};
 
 /// Quiet time after the last resize step before ratios go to the server.
 const RATIO_FLUSH: std::time::Duration = std::time::Duration::from_millis(120);
+/// Typing pause before ⌘P asks the server for files or text.
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
+/// How often a search is asked again while the server is still indexing.
+const SEARCH_REPOLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A split ratio applied locally, not yet sent; `shape` is its window's
 /// layout when set, so the path only applies to that same tree.
@@ -45,8 +49,20 @@ use crate::{
 /// The ⌘P finder (see `finder.rs`) and its sub-steps.
 pub struct Palette {
     field: Entity<TextField>,
-    /// The search query, restored when an input step goes back.
+    /// The search query (the text after the chip), restored when an input
+    /// step goes back.
     query: String,
+    /// The category chip at the field's left; `None` searches everything.
+    chip: Option<finder::Scope>,
+    /// The workspace's folder when the finder opened: Files and Grep search it.
+    root: Option<String>,
+    /// What the server answered so far (`finder::Live`).
+    files: Option<finder::Hits<finder::FileHit>>,
+    grep: Option<finder::Hits<finder::GrepHit>>,
+    agents: Option<Vec<finder::AgentRow>>,
+    changes: Option<finder::Changes>,
+    /// The pending (debounced) file or text search; replacing it cancels it.
+    search: Option<gpui::Task<()>>,
     /// A choice list's filter.
     filter: String,
     selected: usize,
@@ -667,9 +683,17 @@ impl Workspace {
         if self.palette.is_none() {
             let field = cx.new(|cx| TextField::new(finder::PLACEHOLDER, cx));
             let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.palette_event(event, window, cx));
+            let root = self.new_block_folder(window, cx);
             self.palette = Some(Palette {
                 field,
                 query: String::new(),
+                chip: None,
+                root,
+                files: None,
+                grep: None,
+                agents: None,
+                changes: None,
+                search: None,
                 filter: String::new(),
                 selected: 0,
                 step: Step::Search,
@@ -694,8 +718,20 @@ impl Workspace {
         palette.error = None;
         palette.note = None;
         palette.filter.clear();
+        // Opened on a query (Browse Blocks' `#`): it becomes the query, its
+        // prefix the chip, below.
+        if matches!(step, Step::Search) && !text.is_empty() {
+            palette.chip = None;
+            palette.query.clone_from(&text);
+        }
+        if matches!(step, Step::Search)
+            && let Some((chip, rest)) = finder::promote(palette.chip, &palette.query)
+        {
+            palette.chip = Some(chip);
+            palette.query = rest;
+        }
         let placeholder = match &step {
-            Step::Search => finder::PLACEHOLDER.to_owned(),
+            Step::Search => palette.chip.map_or(finder::PLACEHOLDER, finder::Scope::placeholder).to_owned(),
             Step::Input(input) => input.placeholder(),
             Step::Confirm(_) => "↩ confirm · esc back".into(),
             Step::RemoveHost => "Choose a host to remove".into(),
@@ -716,6 +752,9 @@ impl Workspace {
         let focus = field.read(cx).focus.clone();
         focus.focus(window, cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
+        if matches!(step, Step::Search) {
+            self.finder_query_changed(cx);
+        }
         cx.notify();
     }
 
@@ -749,7 +788,15 @@ impl Workspace {
     fn entries(&self, cx: &gpui::App) -> Vec<Entry> {
         let Some(palette) = &self.palette else { return Vec::new() };
         match &palette.step {
-            Step::Search => self.finder_items(&palette.query, &palette.snapshot, &palette.recent, cx).into_iter().map(Entry::Item).collect(),
+            Step::Search => {
+                let live = finder::Live {
+                    files: palette.files.as_ref(),
+                    grep: palette.grep.as_ref(),
+                    agents: palette.agents.as_deref(),
+                    changes: palette.changes.as_ref(),
+                };
+                self.finder_items(palette.chip, &palette.query, &palette.snapshot, &palette.recent, &live, cx).into_iter().map(Entry::Item).collect()
+            }
             Step::Choice(id, _) => id
                 .choices(&palette.snapshot)
                 .into_iter()
@@ -805,9 +852,16 @@ impl Workspace {
                 palette.error = None;
                 palette.note = None;
                 match palette.step {
+                    Step::Search if palette.chip.is_none() && finder::promote(None, text).is_some() => {
+                        if let Some((chip, rest)) = finder::promote(None, text) {
+                            self.set_chip(Some(chip), rest, window, cx);
+                        }
+                        return;
+                    }
                     Step::Search if palette.query != *text => {
                         palette.query = text.clone();
                         self.select_entry(0, window, cx);
+                        self.finder_query_changed(cx);
                     }
                     Step::Choice(..) if palette.filter != *text => {
                         palette.filter = text.clone();
@@ -824,6 +878,11 @@ impl Workspace {
             FieldEvent::Up | FieldEvent::Down => {}
             FieldEvent::Cancel => {
                 match &palette.step {
+                    // A chip goes first, then the finder.
+                    Step::Search if finder::escape(palette.chip) == finder::Escape::Unchip => {
+                        let text = palette.query.clone();
+                        self.set_chip(None, text, window, cx);
+                    }
                     // A host rename is its own errand, from ⌘P or Settings.
                     Step::Search | Step::Input(Input::HostName(..)) => self.close_palette(window, cx),
                     _ => self.open_palette_step(Step::Search, String::new(), window, cx),
@@ -855,7 +914,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Tab on a choice setting opens its values.
+    /// Tab on a choice setting opens its values; on an `@` row it sets that chip.
     fn palette_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(palette) = &self.palette else { return false };
         if !matches!(palette.step, Step::Search) {
@@ -867,8 +926,166 @@ impl Workspace {
                 self.pick(item, window, cx);
                 true
             }
+            Some(Entry::Item(finder::Item { target: Target::Category(scope), .. })) => {
+                let scope = *scope;
+                self.set_chip(Some(scope), String::new(), window, cx);
+                true
+            }
             _ => false,
         }
+    }
+
+    /// ⌫ on an empty field with a chip: the chip goes and its `@name`
+    /// comes back as text, selected (⌫ again clears it).
+    fn palette_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(palette) = &self.palette else { return false };
+        if !matches!(palette.step, Step::Search) {
+            return false;
+        }
+        let Some(typed) = finder::backspace(palette.chip, &palette.field.read(cx).text) else { return false };
+        self.set_chip(None, typed, window, cx);
+        if let Some(field) = self.palette.as_ref().map(|p| p.field.clone()) {
+            field.update(cx, |f, cx| f.select_all(cx));
+        }
+        true
+    }
+
+    /// Set the finder's chip (`None` removes it) with `text` after it.
+    pub(crate) fn set_chip(&mut self, chip: Option<finder::Scope>, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_mut() else { return };
+        palette.chip = chip;
+        palette.query.clone_from(&text);
+        palette.error = None;
+        palette.note = None;
+        let field = palette.field.clone();
+        field.update(cx, |f, cx| {
+            f.set_placeholder(chip.map_or(finder::PLACEHOLDER, finder::Scope::placeholder), cx);
+            f.replace_text(text, cx);
+        });
+        self.select_entry(0, window, cx);
+        self.finder_query_changed(cx);
+        cx.notify();
+    }
+
+    /// The finder's chip or text changed: ask the server for what it needs
+    /// (files and text after a short pause; agent sessions and changed
+    /// files once per chip).
+    fn finder_query_changed(&mut self, cx: &mut Context<Self>) {
+        let search = self.host_supports(finder::SEARCH_FEATURE);
+        let (control, rt) = (self.control(), self.rt.clone());
+        let Some(palette) = self.palette.as_mut() else { return };
+        let finder::Mode::Search(scope, q) = finder::mode(palette.chip, &palette.query) else {
+            palette.search = None;
+            return;
+        };
+        let request = finder::request(scope, q, search);
+        match scope {
+            finder::Scope::Agents if palette.agents.is_none() => self.load_finder_agents(cx),
+            finder::Scope::Changes if palette.changes.is_none() => self.load_finder_changes(cx),
+            _ => {}
+        }
+        let Some(palette) = self.palette.as_mut() else { return };
+        match &request {
+            Some(finder::Request::Files { .. }) => palette.grep = None,
+            Some(finder::Request::Grep { .. }) => palette.files = None,
+            None => (palette.files, palette.grep) = (None, None),
+        }
+        let (Some(request), Some(root)) = (request, palette.root.clone()) else {
+            palette.search = None;
+            return;
+        };
+        palette.search = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            loop {
+                let call = crate::finder_search::run(control.clone(), root.clone(), request.clone());
+                let reply = rt.spawn(call).await.map_err(anyhow::Error::from).and_then(|r| r);
+                let indexing = this
+                    .update(cx, |this, cx| {
+                        let Some(palette) = this.palette.as_mut() else { return false };
+                        let indexing = match reply {
+                            Ok(crate::finder_search::Reply::Files(hits)) => {
+                                let indexing = hits.indexing;
+                                palette.files = Some(hits);
+                                indexing
+                            }
+                            Ok(crate::finder_search::Reply::Grep(hits)) => {
+                                let indexing = hits.indexing;
+                                palette.grep = Some(hits);
+                                indexing
+                            }
+                            Err(error) => {
+                                tracing::debug!("finder search: {error:#}");
+                                false
+                            }
+                        };
+                        cx.notify();
+                        indexing
+                    })
+                    .unwrap_or(false);
+                if !indexing {
+                    return;
+                }
+                // Still scanning: ask again, the list fills in.
+                cx.background_executor().timer(SEARCH_REPOLL).await;
+            }
+        }));
+    }
+
+    /// The otto sessions of the workspace's project, for the Agents chip.
+    fn load_finder_agents(&mut self, cx: &mut Context<Self>) {
+        let target = self.agent_target(self.active_host);
+        let Some(palette) = self.palette.as_mut() else { return };
+        palette.agents = Some(Vec::new());
+        let Some(target) = target else { return };
+        let cwd = palette.root.clone();
+        let open: Vec<String> =
+            self.view.as_ref().map(|v| v.blocks.iter().filter_map(|b| b.agent.as_ref()?.session_id.clone()).collect()).unwrap_or_default();
+        let task = self.rt.spawn(async move {
+            let c = crate::agent::client::connection(&target).await?;
+            let project = crate::agent::client::project(&c, cwd.as_deref()).await?;
+            c.session_list(Some(project.id), false).await
+        });
+        cx.spawn(async move |this, cx| {
+            let sessions = match task.await {
+                Ok(Ok(sessions)) => sessions,
+                Ok(Err(error)) => return tracing::debug!("finder agents: {error}"),
+                Err(error) => return tracing::debug!("finder agents: {error}"),
+            };
+            let rows = finder::agent_rows(sessions, &open);
+            let _ = this.update(cx, |this, cx| {
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.agents = Some(rows);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The changed files of the workspace's repo, for the Changes chip,
+    /// read through a Changes block of the session (the one whose root holds
+    /// the workspace's folder, else the first).
+    fn load_finder_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_mut() else { return };
+        let block = self.view.as_ref().and_then(|v| finder::changes_block(&v.blocks, palette.root.as_deref()));
+        palette.changes = Some(finder::Changes { block: block.clone(), files: Vec::new() });
+        let (Some(block), Some(control)) = (block, self.control()) else { return };
+        let method = Method::ChangesStatus(silo_proto::changes::ChangesStatusParams { block_id: block.clone() });
+        let task = self.rt.spawn(async move { control.call::<silo_proto::changes::ChangesStatus>(method).await });
+        cx.spawn(async move |this, cx| {
+            let status = match task.await.map_err(anyhow::Error::from).and_then(|r| r) {
+                Ok(status) => status,
+                Err(error) => return tracing::debug!("finder changes: {error:#}"),
+            };
+            let files = finder::change_rows(&status);
+            let _ = this.update(cx, |this, cx| {
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.changes = Some(finder::Changes { block: Some(block), files });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn submit_input(&mut self, input: Input, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -934,7 +1151,8 @@ impl Workspace {
     }
 
     fn pick(&mut self, item: finder::Item, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(item.target, Target::OpenUrl(_)) {
+        // Only what the empty query can list again is remembered.
+        if !matches!(item.target, Target::OpenUrl(_) | Target::Category(_) | Target::File { .. } | Target::Agent { .. } | Target::Change { .. }) {
             self.remember_pick(&item.key);
         }
         match item.target {
@@ -989,6 +1207,21 @@ impl Workspace {
             Target::Page(url) | Target::OpenUrl(url) => {
                 self.close_palette(window, cx);
                 self.open_page_tab(url);
+            }
+            Target::Category(scope) => self.set_chip(Some(scope), String::new(), window, cx),
+            Target::File { root, path, line } => {
+                self.close_palette(window, cx);
+                self.open_found_file(root, path, line, window, cx);
+            }
+            Target::Agent { session, title } => {
+                self.close_palette(window, cx);
+                self.open_found_agent(session, title, window, cx);
+            }
+            Target::Change { block, path } => {
+                self.close_palette(window, cx);
+                if let Some(block) = block {
+                    self.open_found_change(block, path, window, cx);
+                }
             }
         }
         cx.notify();
@@ -1161,6 +1394,50 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The category chip at the field's left: its icon and label, a × on
+    /// hover that removes it; as tall as the text line.
+    fn finder_chip(chip: finder::Scope, cx: &mut Context<Self>) -> AnyElement {
+        let group: gpui::SharedString = "finder-chip".into();
+        div()
+            .id("finder-chip")
+            .group(group.clone())
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .h(px(22.0))
+            .pl(px(7.0))
+            .pr(px(4.0))
+            .continuous(6.0)
+            .bg(theme::control_fill())
+            .text_size(px(13.0))
+            .text_color(rgb(theme::foreground()))
+            .child(crate::assets::icon(chip.icon(), 13.0, theme::muted()))
+            .child(chip.label())
+            .child(
+                div()
+                    .id("finder-chip-clear")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(14.0))
+                    .opacity(0.0)
+                    .group_hover(group, |s| s.opacity(1.0))
+                    .cursor_pointer()
+                    .child(crate::assets::icon("close", 10.0, theme::muted()))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        let text = this.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
+                        this.set_chip(None, text, window, cx);
+                        if let Some(focus) = this.palette.as_ref().map(|p| p.field.read(cx).focus.clone()) {
+                            focus.focus(window, cx);
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = self.palette.as_ref()?;
         let entries = self.entries(cx);
@@ -1171,12 +1448,18 @@ impl Workspace {
             Step::RemoveHost => Some("Remove which host?".into()),
             Step::Choice(id, _) | Step::Number(id) => Some(id.setting().title.to_owned()),
         };
-        let footer = match &palette.step {
-            Step::Input(Input::HostName(..)) => Some("↩ rename · esc cancel"),
-            Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back"),
-            Step::Choice(_, Some(_)) => Some("↩ keep · esc restore"),
-            Step::Choice(_, None) => Some("↩ apply · esc back"),
-            Step::Search if finder::parse(&palette.query).0 == finder::Scope::Blocks => Some("↩ go to · esc close"),
+        let footer: Option<gpui::SharedString> = match &palette.step {
+            Step::Input(Input::HostName(..)) => Some("↩ rename · esc cancel".into()),
+            Step::Input(_) | Step::Number(_) => Some("↩ apply · esc back".into()),
+            Step::Choice(_, Some(_)) => Some("↩ keep · esc restore".into()),
+            Step::Choice(_, None) => Some("↩ apply · esc back".into()),
+            Step::Search if palette.chip == Some(finder::Scope::Blocks) => Some("↩ go to · esc close".into()),
+            Step::Search if palette.files.as_ref().is_some_and(|h| h.indexing) || palette.grep.as_ref().is_some_and(|h| h.indexing) => {
+                Some("Indexing…".into())
+            }
+            Step::Search if matches!(finder::mode(palette.chip, &palette.query), finder::Mode::Categories(_)) => {
+                Some("↹ or ↩ search in · ↑↓ move · esc close".into())
+            }
             _ => None,
         };
         let input_step = matches!(palette.step, Step::Input(_) | Step::Number(_));
@@ -1219,6 +1502,9 @@ impl Workspace {
                 if k.key == "tab" && !k.modifiers.shift && this.palette_tab(window, cx) {
                     cx.stop_propagation();
                 }
+                if k.key == "backspace" && !k.modifiers.platform && !k.modifiers.alt && !k.modifiers.control && this.palette_backspace(window, cx) {
+                    cx.stop_propagation();
+                }
             }))
             .children(header.map(|h| div().px(px(16.0)).pt(px(10.0)).text_size(px(11.5)).text_color(rgb(theme::muted())).child(h)))
             .child(
@@ -1236,6 +1522,7 @@ impl Workspace {
                         16.0,
                         theme::muted(),
                     ))
+                    .children(palette.chip.filter(|_| matches!(palette.step, Step::Search)).map(|chip| Self::finder_chip(chip, cx)))
                     .child(palette.field.clone()),
             )
             .children(palette.error.clone().map(|e| div().px(px(16.0)).py(px(6.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)))

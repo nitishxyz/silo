@@ -33,6 +33,7 @@ mod controls;
 mod files;
 mod files_block;
 mod finder;
+mod finder_search;
 mod floats;
 mod fonts;
 mod gesture;
