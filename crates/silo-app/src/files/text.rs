@@ -38,6 +38,14 @@ impl Default for Metrics {
     }
 }
 
+/// The list's offset `oy` as its rows are drawn: a fast swipe's elastic
+/// overscroll moves the handle's offset past either end while the list keeps
+/// its rows in place, so the gutter (drawn from the offset) slid off them.
+#[must_use]
+pub fn settled(oy: f32, content: f32, height: f32) -> f32 {
+    oy.clamp(-(content - height).max(0.0), 0.0)
+}
+
 /// The gutter's width for `lines` lines.
 #[must_use]
 pub fn gutter_width(lines: usize, cell: f32) -> f32 {
@@ -249,8 +257,9 @@ impl FilesPane {
         // The gutter, the highlights' tint and their notes are drawn from the
         // scroll offset (the list moves its rows itself): what shows of them.
         let offset = handle.0.borrow().base_handle.offset();
-        let (ox, oy) = (f32::from(offset.x), f32::from(offset.y));
         let height = self.text_bounds.get().map_or(800.0, |b| f32::from(b.size.height));
+        #[allow(clippy::cast_precision_loss)]
+        let (ox, oy) = (f32::from(offset.x), settled(f32::from(offset.y), lines as f32 * m.line, height));
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let first = (-oy / m.line).floor().max(0.0) as usize;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -487,6 +496,10 @@ mod tests {
         assert_eq!(line_at(9000.0, 100.0, 0.0, 20.0, 100), 99, "below: the last");
         assert!(edge_speed(90.0, 100.0, 500.0) < 0.0 && edge_speed(600.0, 100.0, 500.0) > 0.0);
         assert!(edge_speed(300.0, 100.0, 500.0) == 0.0);
+        assert_eq!(settled(40.0, 2000.0, 500.0), 0.0, "overscroll at the top: the rows stay at the top");
+        assert_eq!(settled(-1800.0, 2000.0, 500.0), -1500.0, "and at the bottom");
+        assert_eq!(settled(-300.0, 2000.0, 500.0), -300.0);
+        assert_eq!(settled(25.0, 300.0, 500.0), 0.0, "a short file doesn't scroll");
         assert!((gutter_width(5, 8.0) - (3.0 * 8.0 + 22.0)).abs() < 0.01, "room for three digits at least");
         assert!((gutter_width(12_345, 8.0) - (5.0 * 8.0 + 22.0)).abs() < 0.01);
     }
