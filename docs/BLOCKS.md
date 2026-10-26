@@ -47,7 +47,10 @@ folder's tree and tabs) and a few small answers to the core.
 - Focus and focus navigation, the server's focus followed, refocus after an
   overlay (`refocus_block`).
 - Card chrome: corners, outline, inactive wash or fade, Frosted veils,
-  adaptive backdrop (when it reports one).
+  adaptive backdrop (when it reports one). The card clips its content to
+  its rounded shape (`rounded_clip`, inside its outline), so a pane may fill
+  its whole area with a square background; it never has to round its own
+  corners to stay inside the card.
 - Drag, drop and docking, floats, zoom and park: all by block id.
 - Close: Close Pane, ⌘W, the header's ×, the busy-program dialog, and the
   unsaved-changes guard when `unsaved` lists anything.

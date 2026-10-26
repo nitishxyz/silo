@@ -74,8 +74,9 @@ pub fn ui_font_state() -> UiFont {
 pub const CORNER_SMOOTHING: f32 = 4.0;
 
 /// Continuous corners. Smoothing is per element (not inherited); content
-/// masks are rectangular unless the parent uses `rounded_clip`, so otherwise
-/// a child whose fill reaches a parent's corner must repeat its curve too.
+/// masks are rectangular unless an ancestor uses `rounded_clip` (a pane card
+/// does), so otherwise a child whose fill reaches a parent's corner must
+/// repeat its curve too.
 pub trait Continuous: gpui::Styled + Sized {
     /// Continuous corners at `radius` on every corner.
     #[must_use]
