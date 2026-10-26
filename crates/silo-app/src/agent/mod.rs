@@ -2038,19 +2038,7 @@ impl AgentPane {
 
     /// Sessions matching the filter, newest first.
     fn session_choices(&self, cx: &gpui::App) -> Vec<&SessionInfo> {
-        let query = self.filter.read(cx).text.clone();
-        let mut list: Vec<(i32, &SessionInfo)> = self
-            .sessions
-            .iter()
-            .filter(|s| s.parent_id.is_none())
-            .filter_map(|s| crate::commands::fuzzy(&query, &session_label(s)).map(|(score, _)| (score, s)))
-            .collect();
-        if query.trim().is_empty() {
-            list.sort_by_key(|(_, s)| std::cmp::Reverse(s.updated_at));
-        } else {
-            list.sort_by_key(|(score, s)| (std::cmp::Reverse(*score), std::cmp::Reverse(s.updated_at)));
-        }
-        list.into_iter().map(|(_, s)| s).collect()
+        switcher_sessions(&self.sessions, &self.filter.read(cx).text)
     }
 
     /// Recent projects matching the filter (most recent first), the current one included.
@@ -2188,6 +2176,22 @@ pub(super) fn input_text(input: &[InputPart]) -> String {
 
 fn session_label(s: &SessionInfo) -> String {
     if s.title.trim().is_empty() { "Untitled".to_owned() } else { s.title.clone() }
+}
+
+/// The switcher's sessions matching `query`, newest first (best match first while filtering): top-level
+/// sessions, forks among them; sub-agents open from their parent instead.
+fn switcher_sessions<'a>(sessions: &'a [SessionInfo], query: &str) -> Vec<&'a SessionInfo> {
+    let mut list: Vec<(i32, &SessionInfo)> = sessions
+        .iter()
+        .filter(|s| !s.is_subagent())
+        .filter_map(|s| crate::commands::fuzzy(query, &session_label(s)).map(|(score, _)| (score, s)))
+        .collect();
+    if query.trim().is_empty() {
+        list.sort_by_key(|(_, s)| std::cmp::Reverse(s.updated_at));
+    } else {
+        list.sort_by_key(|(score, s)| (std::cmp::Reverse(*score), std::cmp::Reverse(s.updated_at)));
+    }
+    list.into_iter().map(|(_, s)| s).collect()
 }
 
 /// The row an overlay opens on: the switcher skips its project row.

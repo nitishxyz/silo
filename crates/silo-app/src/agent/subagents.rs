@@ -97,12 +97,23 @@ fn out(s: &SessionInfo) -> bool {
     s.report_held || matches!(s.status, SessionStatus::Busy | SessionStatus::WaitingApproval)
 }
 
+/// `s` is a sub-agent of `parent`. A fork names its source as `parent_id` too, but is a session of its own
+/// (`forked_from`): never a child.
+pub(super) fn child_of(s: &SessionInfo, parent: &str) -> bool {
+    s.is_subagent() && s.parent_id.as_deref() == Some(parent)
+}
+
+/// The parent of `s` when it is a sub-agent (a fork has none).
+pub(super) fn parent_of(s: &SessionInfo) -> Option<&str> {
+    s.parent_id.as_deref().filter(|_| s.is_subagent())
+}
+
 impl Subs {
     /// Note the children of `parent` in a fresh session list; `true` when one
     /// just returned (its report went to the parent).
     pub(super) fn track(&mut self, sessions: &[SessionInfo], parent: &str, now: Instant) -> bool {
         let mut returned = false;
-        for s in sessions.iter().filter(|s| s.parent_id.as_deref() == Some(parent)) {
+        for s in sessions.iter().filter(|s| child_of(s, parent)) {
             if out(s) {
                 self.running.insert(s.id.clone());
                 self.returned.remove(&s.id);
@@ -144,7 +155,7 @@ impl Subs {
     pub(super) fn rows(&self, sessions: &[SessionInfo], parent: &str, now: Instant) -> Vec<SubRow> {
         let mut rows: Vec<(&SessionInfo, SubState, Option<Instant>)> = sessions
             .iter()
-            .filter(|s| s.parent_id.as_deref() == Some(parent))
+            .filter(|s| child_of(s, parent))
             .filter_map(|s| {
                 let back = self.returned.get(&s.id).filter(|b| b.leaving.is_none_or(|at| now.duration_since(at) < LEAVE));
                 let (state, leaving) = match s.status {
@@ -170,11 +181,11 @@ impl AgentPane {
         self.subs.rows(&self.sessions, id, Instant::now())
     }
 
-    /// The shown session's parent, when it is a sub-agent.
+    /// The shown session's parent, when it is a sub-agent (not a fork).
     fn parent_session(&self) -> Option<&str> {
-        self.mirror().and_then(|m| m.info.parent_id.as_deref()).or_else(|| {
+        self.mirror().and_then(|m| parent_of(&m.info)).or_else(|| {
             let id = self.session_id.as_deref()?;
-            self.sessions.iter().find(|s| s.id == id).and_then(|s| s.parent_id.as_deref())
+            self.sessions.iter().find(|s| s.id == id).and_then(parent_of)
         })
     }
 
@@ -307,9 +318,8 @@ impl AgentPane {
 
     fn sessions_changed(&mut self, cx: &mut Context<Self>) {
         let shown = self.session_id.as_deref();
-        let relevant = self.subagent_calls > 0
-            || self.parent_session().is_some()
-            || shown.is_some_and(|id| self.sessions.iter().any(|s| s.parent_id.as_deref() == Some(id)));
+        let relevant =
+            self.subagent_calls > 0 || self.parent_session().is_some() || shown.is_some_and(|id| self.sessions.iter().any(|s| child_of(s, id)));
         if !relevant || self.subs.refreshing {
             return;
         }
@@ -568,6 +578,29 @@ mod tests {
             report_held: false,
             plan: None,
         }
+    }
+
+    #[test]
+    fn a_fork_is_never_a_sub_agent() {
+        let now = Instant::now();
+        let mut fork = session("f", Some("p"), SessionStatus::Busy, 2);
+        fork.forked_from = Some(otto_proto::ForkOrigin { session_id: "p".into(), at_seq: 7 });
+        let list = vec![session("p", None, SessionStatus::Idle, 0), session("a", Some("p"), SessionStatus::Busy, 1), fork.clone()];
+        // Not a child of its source: the sub-agent strip and its tracking skip it.
+        assert!(child_of(&list[1], "p") && !child_of(&fork, "p"));
+        let mut subs = Subs::default();
+        subs.track(&list, "p", now);
+        assert_eq!(subs.rows(&list, "p", now).into_iter().map(|r| r.id).collect::<Vec<_>>(), ["a"]);
+        // No parent to lead back to (the header keeps History / New Session).
+        assert_eq!(parent_of(&list[1]), Some("p"));
+        assert_eq!(parent_of(&fork), None);
+        // Listed in the switcher with the top-level sessions; the sub-agent isn't.
+        let listed: Vec<&str> = super::super::switcher_sessions(&list, "").into_iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(listed, ["f", "p"]);
+        // From an older otto (no `forked_from`) a fork still reads as a sub-agent.
+        let mut old = fork;
+        old.forked_from = None;
+        assert!(child_of(&old, "p"));
     }
 
     #[test]
