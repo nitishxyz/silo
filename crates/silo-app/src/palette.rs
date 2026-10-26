@@ -952,11 +952,10 @@ impl Workspace {
         if !matches!(palette.step, Step::Search) {
             return false;
         }
-        let Some(typed) = finder::backspace(palette.chip, &palette.field.read(cx).text) else { return false };
-        self.set_chip(None, typed, window, cx);
-        if let Some(field) = self.palette.as_ref().map(|p| p.field.clone()) {
-            field.update(cx, |f, cx| f.select_all(cx));
+        if !finder::backspace(palette.chip, &palette.field.read(cx).text) {
+            return false;
         }
+        self.set_chip(None, String::new(), window, cx);
         true
     }
 
@@ -1428,13 +1427,11 @@ impl Workspace {
 
     /// The category chip at the field's left: its icon and label, a × on
     /// hover that removes it; as tall as the text line.
-    fn finder_chip(chip: finder::Scope, cx: &mut Context<Self>) -> AnyElement {
-        let group: gpui::SharedString = "finder-chip".into();
-        // A pill: even padding round icon and label; the × takes room only
-        // on hover (a hidden one left a gap at the right).
+    fn finder_chip(chip: finder::Scope) -> AnyElement {
+        // A pill: even padding round icon and label; ⌫ on an empty field
+        // (or Esc) removes it.
         div()
             .id("finder-chip")
-            .group(group.clone())
             .flex_none()
             .flex()
             .flex_row()
@@ -1449,27 +1446,6 @@ impl Workspace {
             .text_color(rgb(theme::foreground()))
             .child(crate::assets::icon(chip.icon(), 13.0, theme::muted()))
             .child(chip.label())
-            .child(
-                div()
-                    .id("finder-chip-clear")
-                    .hidden()
-                    .group_hover(group, |s| s.flex())
-                    .items_center()
-                    .justify_center()
-                    .size(px(14.0))
-                    .mr(px(-4.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .child(crate::assets::icon("close", 10.0, theme::muted()))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        let text = this.palette.as_ref().map(|p| p.query.clone()).unwrap_or_default();
-                        this.set_chip(None, text, window, cx);
-                        if let Some(focus) = this.palette.as_ref().map(|p| p.field.read(cx).focus.clone()) {
-                            focus.focus(window, cx);
-                        }
-                    })),
-            )
             .into_any_element()
     }
 
@@ -1559,7 +1535,7 @@ impl Workspace {
                         16.0,
                         theme::muted(),
                     ))
-                    .children(palette.chip.filter(|_| matches!(palette.step, Step::Search)).map(|chip| Self::finder_chip(chip, cx)))
+                    .children(palette.chip.filter(|_| matches!(palette.step, Step::Search)).map(Self::finder_chip))
                     .child(palette.field.clone()),
             )
             .children(palette.error.clone().map(|e| div().px(px(16.0)).py(px(6.0)).text_size(px(12.0)).text_color(rgb(theme::danger())).child(e)))

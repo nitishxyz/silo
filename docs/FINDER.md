@@ -12,7 +12,7 @@ unchanged (it attaches files there).
 
 Typing `@` at the start of the field lists the categories, filtered as you type (`@fi` → Files). Tab or ↩ turns
 the pick into a chip at the field's left; the rest of the text searches only that category. ⌫ on an empty field
-removes the chip (the text `@files` comes back, selected). Esc with a chip clears the chip first, then closes.
+removes the chip and leaves the field empty. Esc with a chip clears the chip first, then closes.
 The old prefixes become their chip as soon as they're typed (`>` → Commands, `:` → Settings, `#` → Blocks,
 `@` stays the category list). Browse Blocks (⇧⌘B) opens with the Blocks chip.
 
@@ -29,7 +29,7 @@ The old prefixes become their chip as soon as they're typed (`>` → Commands, `
 | Pages | `globe` | recent browser pages | open |
 | Changes | `git-diff` | changed files of the workspace's repo | open in the Changes block |
 
-The chip: the icon, the label, and a × on hover; same height and radius as the field's text, theme
+The chip: a pill with the icon and the label (⌫ or Esc removes it), theme
 `control_fill`. Each category row in the `@` list shows its icon, label and a one-line hint. Result rows keep
 today's rows; Files and Grep rows show the path dimmed after the name, a git status letter (M/A/?) on the right,
 and Grep rows the line with the match highlighted.

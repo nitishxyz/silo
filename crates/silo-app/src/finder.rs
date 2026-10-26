@@ -228,7 +228,7 @@ impl Scope {
         }
     }
 
-    /// What ⌫ on an empty field puts back for this chip.
+    /// How the chip is typed (`@files`), shown on its row in the `@` list.
     #[must_use]
     pub fn typed(self) -> String {
         format!("@{}", self.label().to_lowercase())
@@ -269,12 +269,12 @@ pub fn escape(chip: Option<Scope>) -> Escape {
     if chip.is_some() { Escape::Unchip } else { Escape::Close }
 }
 
-/// ⌫ with `chip` on field `text`: on an empty field the chip goes and the
-/// text it came from (`@files`) comes back, to be selected; otherwise
-/// `None` (an ordinary ⌫).
+/// ⌫ with `chip` on field `text`: on an empty field the chip goes, leaving
+/// the field empty (everything is searched again); otherwise `false` (an
+/// ordinary ⌫).
 #[must_use]
-pub fn backspace(chip: Option<Scope>, text: &str) -> Option<String> {
-    chip.filter(|_| text.is_empty()).map(Scope::typed)
+pub fn backspace(chip: Option<Scope>, text: &str) -> bool {
+    chip.is_some() && text.is_empty()
 }
 
 /// An old prefix typed with no chip: the chip it turns into and the text
@@ -1167,13 +1167,9 @@ mod tests {
 
     #[test]
     fn backspace_and_escape_take_the_chip_off_first() {
-        assert_eq!(backspace(Some(Scope::Files), ""), Some("@files".into()), "the chip's text comes back");
-        assert_eq!(backspace(Some(Scope::Files), "ma"), None, "an ordinary ⌫");
-        assert_eq!(backspace(None, ""), None);
-        // What comes back lists that category again, first.
-        let typed = backspace(Some(Scope::Grep), "").unwrap();
-        let Mode::Categories(filter) = mode(None, &typed) else { panic!("{typed}") };
-        assert_eq!(categories(filter, |_| true)[0].0, Scope::Grep);
+        assert!(backspace(Some(Scope::Files), ""), "the chip goes, and no text comes back");
+        assert!(!backspace(Some(Scope::Files), "ma"), "an ordinary ⌫");
+        assert!(!backspace(None, ""));
         assert_eq!(escape(Some(Scope::Blocks)), Escape::Unchip);
         assert_eq!(escape(None), Escape::Close);
     }
@@ -1185,7 +1181,7 @@ mod tests {
         assert_eq!(mode(None, "@fi"), Mode::Categories("fi"));
         assert_eq!(mode(Some(Scope::Files), " main.rs "), Mode::Search(Scope::Files, "main.rs"));
         assert_eq!(mode(Some(Scope::Grep), "@x"), Mode::Search(Scope::Grep, "@x"), "a chip's text is never the @ list");
-        assert_eq!(Scope::Files.typed(), "@files", "what ⌫ puts back");
+        assert_eq!(Scope::Files.typed(), "@files", "how it is typed");
         assert_eq!(Scope::Spaces.typed(), "@spaces");
         assert!(Scope::Spaces.includes(Group::Machines) && Scope::Spaces.includes(Group::Sessions) && !Scope::Spaces.includes(Group::Blocks));
         assert!(Scope::Blocks.includes(Group::Blocks) && !Scope::Blocks.includes(Group::Tabs) && !Scope::Blocks.includes(Group::Commands));
