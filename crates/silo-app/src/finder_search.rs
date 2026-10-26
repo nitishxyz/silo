@@ -5,7 +5,7 @@
 use gpui::{Context, Window};
 use silo_proto::{
     changes::ChangesSetParams,
-    control::{Created, FilesSetParams, Method, SpawnSpec},
+    control::{Created, FilesSetParams, Method, SearchFiles, SearchFilesParams, SearchGrep, SearchGrepParams, SearchOpenedParams, SpawnSpec},
     model::{AgentState, BlockKind},
 };
 
@@ -26,31 +26,41 @@ pub enum Reply {
 
 /// Run `request` under `root` on the host's server.
 pub async fn run(control: Option<silo_client::Control>, root: String, request: Request) -> anyhow::Result<Reply> {
-    let _ = control;
-    Ok(fake(&root, &request))
+    let control = control.ok_or_else(|| anyhow::anyhow!("not connected"))?;
+    let limit = |n: usize| Some(u32::try_from(n).unwrap_or(u32::MAX));
+    Ok(match request {
+        Request::Files { query, limit: n } => {
+            let method = Method::SearchFiles(SearchFilesParams { root: root.clone(), query: query.clone(), limit: limit(n) });
+            Reply::Files(file_hits(root, query, control.call::<SearchFiles>(method).await?))
+        }
+        Request::Grep { query, limit: n } => {
+            let method = Method::SearchGrep(SearchGrepParams { root: root.clone(), query: query.clone(), mode: None, limit: limit(n) });
+            Reply::Grep(grep_hits(root, query, control.call::<SearchGrep>(method).await?))
+        }
+    })
 }
 
-/// A stand-in until the server answers `search.files` / `search.grep`.
-fn fake(root: &str, request: &Request) -> Reply {
-    let files = [("Cargo.toml", None), ("src/main.rs", Some('M')), ("src/finder.rs", None), ("README.md", Some('?'))];
-    match request {
-        Request::Files { query, limit } => {
-            let q = query.split(':').next().unwrap_or_default();
-            let items: Vec<FileHit> = files
-                .iter()
-                .filter(|(p, _)| crate::commands::fuzzy(&q.to_lowercase(), p).is_some())
-                .map(|(p, g)| FileHit { path: (*p).into(), name: p.rsplit('/').next().unwrap_or(p).into(), git: *g })
-                .take(*limit)
-                .collect();
-            Reply::Files(Hits { root: root.into(), query: query.clone(), total: items.len(), items, indexing: false })
-        }
-        Request::Grep { query, .. } => {
-            let text = format!("    let {query} = 1;");
-            let start = 8;
-            let items = vec![GrepHit { path: "src/main.rs".into(), line: 12, text, ranges: std::iter::once(start..start + query.len()).collect() }];
-            Reply::Grep(Hits { root: root.into(), query: query.clone(), total: 1, items, indexing: false })
-        }
-    }
+/// `search.files`' answer as the finder shows it.
+#[must_use]
+pub fn file_hits(root: String, query: String, found: SearchFiles) -> Hits<FileHit> {
+    let items = found.items.into_iter().map(|i| FileHit { git: i.git.map(finder::status_letter), path: i.path, name: i.name }).collect();
+    Hits { root, query, items, total: usize::try_from(found.total).unwrap_or(usize::MAX), indexing: found.indexing }
+}
+
+/// `search.grep`'s answer as the finder shows it.
+#[must_use]
+pub fn grep_hits(root: String, query: String, found: SearchGrep) -> Hits<GrepHit> {
+    let items = found
+        .items
+        .into_iter()
+        .map(|i| GrepHit {
+            path: i.path,
+            line: u32::try_from(i.line).unwrap_or(u32::MAX),
+            text: i.text,
+            ranges: i.ranges.into_iter().map(|[a, b]| a as usize..b as usize).collect(),
+        })
+        .collect();
+    Hits { root, query, items, total: usize::try_from(found.total).unwrap_or(usize::MAX), indexing: found.indexing }
 }
 
 /// The top line (0-based) that shows 1-based `line` with some lines above.
@@ -105,7 +115,7 @@ impl Workspace {
         if !self.host_supports(finder::SEARCH_FEATURE) {
             return;
         }
-        tracing::debug!(root, path, "search.opened");
+        self.call(Method::SearchOpened(SearchOpenedParams { root, path }));
     }
 
     /// Show otto session `session` found by ⌘P: the block showing it, else
@@ -127,5 +137,48 @@ impl Workspace {
     pub(crate) fn open_found_change(&mut self, block: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.call(Method::ChangesSet(ChangesSetParams { block_id: block.clone(), active: Some(path), ..ChangesSetParams::default() }));
         self.reveal_agent_target(block, window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use silo_proto::{
+        changes::FileStatus,
+        control::{SearchFileItem, SearchGrepItem},
+    };
+
+    use super::*;
+
+    #[test]
+    fn server_answers_become_rows() {
+        let files = SearchFiles {
+            items: vec![
+                SearchFileItem { path: "src/main.rs".into(), name: "main.rs".into(), git: Some(FileStatus::Modified), score: 9 },
+                SearchFileItem { path: "new.rs".into(), name: "new.rs".into(), git: Some(FileStatus::Untracked), score: 3 },
+                SearchFileItem { path: "lib.rs".into(), name: "lib.rs".into(), git: None, score: 1 },
+            ],
+            total: 7,
+            indexing: true,
+        };
+        let hits = file_hits("/w".into(), "rs:3".into(), files);
+        assert_eq!(hits.items.iter().map(|h| h.git).collect::<Vec<_>>(), [Some('M'), Some('?'), None]);
+        assert_eq!((hits.total, hits.indexing, hits.query.as_str()), (7, true, "rs:3"));
+        assert_eq!(hits.items[0].path, "src/main.rs", "the server's order is kept");
+        let grep = SearchGrep {
+            items: vec![SearchGrepItem { path: "a.rs".into(), line: 4, col: 5, text: "fn main() {}".into(), ranges: vec![[3, 7]] }],
+            total: 1,
+            indexing: false,
+            truncated: false,
+        };
+        let hits = grep_hits("/w".into(), "main".into(), grep);
+        assert_eq!(hits.items[0].line, 4);
+        assert_eq!(&hits.items[0].text[hits.items[0].ranges[0].clone()], "main");
+    }
+
+    #[test]
+    fn a_line_opens_with_some_lines_above() {
+        assert_eq!(top_for(1), 0);
+        assert_eq!(top_for(6), 0);
+        assert_eq!(top_for(42), 36);
     }
 }

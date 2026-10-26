@@ -116,7 +116,7 @@ pub const CATEGORIES: [Scope; 10] = [
 ];
 
 /// The server feature file and content search need.
-pub const SEARCH_FEATURE: &str = "search";
+pub const SEARCH_FEATURE: &str = silo_proto::compat::feature::SEARCH;
 
 impl Scope {
     #[must_use]
