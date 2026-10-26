@@ -40,7 +40,9 @@ folder's tree and tabs) and a few small answers to the core.
 - Opening and closing animations: it slides in when it joins the layout (a
   split, a dock) and out when it leaves it (closed, floated, parked), drawn
   live under an inert cover, or as its card when its pane is shown elsewhere.
-  Zoom grows and shrinks it like any pane.
+  Zoom grows and shrinks it like any pane. A float that closes, parks or
+  moves to another tab recedes where it was (shrinks a little and fades,
+  `motion::float_exit`, `floats::floats_leaving`); one docked slides in.
 - The header frame: icon slot (spinner, favicon or glyph), status mark,
   split, zoom and close buttons, click to focus, drag to swap or dock, the
   float's move handle, the progress line.
@@ -77,7 +79,8 @@ folder's tree and tabs) and a few small answers to the core.
       (`every_kind_lists_alike_in_a_tab_or_the_background`) cover it once it
       is in `Kind::ALL`.
 - [ ] By hand: open it as a split (slides in), close it (slides out), float
-      it and dock it back, zoom it, park and show it, find it in ⌘P and ⇧⌘B.
+      it, close the float (recedes) and dock one back, zoom it, park and
+      show it, find it in ⌘P and ⇧⌘B.
 
 ## Kept per kind, on purpose
 

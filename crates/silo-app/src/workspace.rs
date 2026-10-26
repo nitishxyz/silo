@@ -1037,6 +1037,23 @@ impl Workspace {
                 self.motion.start_zoom(block, new.zoomed, settle, now);
             }
         }
+        // A float leaving the window it stays in (closed, parked, moved to
+        // another tab) recedes where it was drawn, zoomed or not.
+        if let (Some(old), Some(new)) = (self.active_window().cloned(), new_active)
+            && old.id == new.id
+        {
+            for id in crate::floats::floats_leaving(&old, new) {
+                let Some(slot) = self.motion.measured.floats.borrow_mut().remove(&id) else { continue };
+                let alive = view.blocks.iter().any(|b| b.id == id);
+                let body = self.exit_body(&id, alive, cx);
+                let fill = self.card_fill(&id, cx);
+                let title = (self.header_mode(&id) != crate::pane_header::HeaderMode::Hidden).then(|| self.header_label(&id, fill, cx));
+                tracing::debug!(block = %id, alive, "float ghost");
+                let icon = self.block_icon(&id);
+                self.motion.pane_ghosts.push(PaneGhost { body, slot, edge: motion::Edge::Bottom, float: true, icon, title, fill, started: now });
+            }
+            self.motion.measured.floats.borrow_mut().retain(|id, _| crate::floats::is_float(new, id));
+        }
         // Pane motion only inside a window that stays active and unzoomed;
         // tab motion covers whole windows coming and going.
         let old_active = self.active_window().filter(|w| !w.zoomed).cloned();
@@ -1062,7 +1079,7 @@ impl Workspace {
             let edge = crate::layout::sibling_side(&old_active.layout, &id).unwrap_or_else(|| motion::exit_edge(slot, body));
             tracing::debug!(block = %id, ?edge, alive, "pane ghost");
             let icon = self.block_icon(&id);
-            self.motion.pane_ghosts.push(PaneGhost { body: body_of, slot, edge, icon, title, fill, started: now });
+            self.motion.pane_ghosts.push(PaneGhost { body: body_of, slot, edge, float: false, icon, title, fill, started: now });
         }
         for (id, edge) in entering {
             self.motion.pane_enter.insert(id, (now, edge));

@@ -693,17 +693,25 @@ impl Workspace {
             .iter()
             .filter_map(|ghost| {
                 let p = motion::progress(ghost.started, motion::PANE_EXIT, now)?;
-                let (dx, dy) = ghost.edge.offset(p);
+                // A float recedes in place; a tiled pane slides out through its edge.
+                let (dx, dy) = if ghost.float { (0.0, 0.0) } else { ghost.edge.offset(p) };
+                let (scale, alpha) = if ghost.float { motion::float_exit(p) } else { (1.0, 1.0 - 0.6 * p) };
+                // Floats are always cards, with the float's corners.
+                let comfortable = ghost.float || comfortable;
                 // The slot is the whole card: keep the corners it had.
                 let near = |gap: gpui::Pixels| f32::from(gap) <= OUTER + 0.5;
                 let slot = ghost.slot;
-                let corners = CardCorners::for_card(
-                    corner,
-                    OUTER,
-                    near(slot.origin.x),
-                    near(viewport.width - slot.origin.x - slot.size.width),
-                    near(viewport.height - slot.origin.y - slot.size.height),
-                );
+                let corners = if ghost.float {
+                    CardCorners::uniform(radius::CARD)
+                } else {
+                    CardCorners::for_card(
+                        corner,
+                        OUTER,
+                        near(slot.origin.x),
+                        near(viewport.width - slot.origin.x - slot.size.width),
+                        near(viewport.height - slot.origin.y - slot.size.height),
+                    )
+                };
                 let body = match &ghost.body {
                     motion::GhostBody::Frame(frame) => {
                         let canvas = silo_render::terminal_canvas(frame.clone(), metrics, cursor, selection, silo_render::Overlay::default());
@@ -742,7 +750,9 @@ impl Workspace {
                         .top(ghost.slot.origin.y)
                         .w(ghost.slot.size.width)
                         .h(ghost.slot.size.height)
-                        .overflow_hidden()
+                        // A float's shadow shows around it (nothing to slide out of).
+                        .when(!ghost.float, |el| el.overflow_hidden())
+                        .when(ghost.float, |el| el.scale(scale).opacity(alpha).continuous(radius::CARD).shadow_lg())
                         .child(
                             div()
                                 .absolute()
@@ -756,7 +766,7 @@ impl Workspace {
                                     el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(ghost.fill)))
                                 })
                                 .rounded_clip()
-                                .opacity(1.0 - 0.6 * p)
+                                .when(!ghost.float, |el| el.opacity(alpha))
                                 .children(header)
                                 .child(body),
                         )

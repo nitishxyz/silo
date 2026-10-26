@@ -282,6 +282,9 @@ pub struct PaneGhost {
     pub body: GhostBody,
     pub slot: Bounds<Pixels>,
     pub edge: Edge,
+    /// It floated: it shrinks a little and fades where it was
+    /// ([`float_exit`]) instead of sliding out through `edge`.
+    pub float: bool,
     /// The kind's glyph, in the header.
     pub icon: &'static str,
     /// Header label when pane headers were shown.
@@ -342,6 +345,16 @@ pub fn pane_moves(old: &Layout, new: &Layout, diff: &Diff) -> (Vec<String>, Vec<
     (leaving, entering)
 }
 
+/// How small a closing float gets as it fades out.
+pub const FLOAT_EXIT_SCALE: f32 = 0.94;
+
+/// A closing float's scale and opacity `p` (eased, 0 … 1) through its exit:
+/// it recedes in place, as a window closes, rather than sliding to an edge.
+pub fn float_exit(p: f32) -> (f32, f32) {
+    let p = p.clamp(0.0, 1.0);
+    (1.0 - (1.0 - FLOAT_EXIT_SCALE) * p, 1.0 - p)
+}
+
 /// Window-space bounds from the last paint, for geometry the next frame
 /// animates between.
 #[derive(Clone, Default)]
@@ -350,6 +363,8 @@ pub struct Measured {
     pub area: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Each tiled pane's slot.
     pub cells: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Each float's card, as drawn.
+    pub floats: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
 }
 
 /// `from` moved `t` of the way towards `to`.
@@ -387,6 +402,7 @@ impl Motion {
         self.pane_ghosts.clear();
         self.zoom = None;
         self.measured.cells.borrow_mut().clear();
+        self.measured.floats.borrow_mut().clear();
     }
 
     /// Drop finished animations; true while anything still moves.
@@ -682,11 +698,29 @@ mod tests {
             assert_ne!(kind.exit(true), Exit::Pane, "{kind:?}");
             let mut m = Motion::default();
             let slot = Bounds::new(point(px(500.), px(0.)), size(px(500.), px(600.)));
-            m.pane_ghosts.push(PaneGhost { body: GhostBody::Card, slot, edge: Edge::Right, icon: kind.icon(), title: None, fill: 0, started: start });
+            m.pane_ghosts.push(PaneGhost {
+                body: GhostBody::Card,
+                slot,
+                edge: Edge::Right,
+                float: false,
+                icon: kind.icon(),
+                title: None,
+                fill: 0,
+                started: start,
+            });
             m.pane_enter.insert(id, (start, Edge::Right));
             assert!(m.prune(start + PANE_EXIT / 2), "{kind:?} moves");
             assert!(!m.prune(start + PANE_ENTER.max(PANE_EXIT)), "{kind:?} settles");
         }
+    }
+
+    #[test]
+    fn a_closing_float_recedes_and_fades_in_place() {
+        assert_eq!(float_exit(0.0), (1.0, 1.0), "starts as it was");
+        let (scale, alpha) = float_exit(0.5);
+        assert!(scale < 1.0 && scale > FLOAT_EXIT_SCALE && (alpha - 0.5).abs() < 1e-6);
+        assert_eq!(float_exit(1.0), (FLOAT_EXIT_SCALE, 0.0), "gone, slightly smaller");
+        assert_eq!(float_exit(2.0), float_exit(1.0));
     }
 
     #[test]

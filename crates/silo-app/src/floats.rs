@@ -99,6 +99,9 @@ impl Workspace {
                 let active = focused.as_deref() == Some(id.as_str());
                 let raise = top.as_deref() != Some(id.as_str());
                 let card = self.render_cell(&id, active, !active, false, None, CardCorners::uniform(radius::CARD), now, cx);
+                // Where it's drawn, for its exit when it closes.
+                let (floats, measured) = (self.motion.measured.floats.clone(), id.clone());
+                let measure = gpui::canvas(move |b, _, _| _ = floats.borrow_mut().insert(measured, b), |_, (), _, _| {}).absolute().inset_0();
                 div()
                     .id(gpui::ElementId::Name(format!("float-{id}").into()))
                     .absolute()
@@ -116,6 +119,7 @@ impl Workspace {
                         }
                     }))
                     .child(card)
+                    .child(measure)
                     .children(mover)
                     .child(resizer)
                     .into_any_element()
@@ -292,6 +296,14 @@ pub(crate) fn is_float(w: &WindowInfo, block: &str) -> bool {
     w.floats.iter().any(|f| f.id == block)
 }
 
+/// Floats of `old` gone from `new` (the same window, a moment later):
+/// closed, parked, or moved to another window. One docked into `new`'s
+/// layout isn't leaving: it slides into its slot there.
+pub(crate) fn floats_leaving(old: &WindowInfo, new: &WindowInfo) -> Vec<String> {
+    let tiled = new.layout.blocks();
+    old.floats.iter().map(|f| f.id.clone()).filter(|id| !is_float(new, id) && !tiled.contains(id)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{bounds, point, size};
@@ -315,5 +327,29 @@ mod tests {
         assert!(near(resized.x, 0.2) && near(resized.y, 0.2) && near(resized.w, 0.4) && near(resized.h, 0.4), "{resized:?}");
         let resized = dragged_rect(rect, Grab::Resize, point(px(5000.0), px(0.0)), grip, body);
         assert!(near(resized.x, 0.2) && near(resized.w, 0.8) && near(resized.h, FloatRect::MIN), "{resized:?}");
+    }
+
+    #[test]
+    fn closed_and_parked_floats_leave_docked_ones_do_not() {
+        let float = |id: &str| silo_proto::model::Float { id: id.into(), rect: FloatRect { x: 0.1, y: 0.1, w: 0.5, h: 0.5 } };
+        let window = |layout: silo_proto::model::Layout, floats: Vec<silo_proto::model::Float>| WindowInfo {
+            id: "w".into(),
+            name: None,
+            layout,
+            focused: "base".into(),
+            zoomed: false,
+            floats,
+        };
+        let base = || silo_proto::model::Layout::Block { id: "base".into() };
+        let old = window(base(), vec![float("a"), float("b"), float("c")]);
+        let docked = silo_proto::model::Layout::Split {
+            axis: silo_proto::model::Axis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(base()),
+            second: Box::new(silo_proto::model::Layout::Block { id: "c".into() }),
+        };
+        // `a` closed or parked, `b` still floats, `c` docked beside the base.
+        assert_eq!(floats_leaving(&old, &window(docked, vec![float("b")])), ["a"]);
+        assert!(floats_leaving(&old, &old).is_empty(), "nothing changed");
     }
 }
