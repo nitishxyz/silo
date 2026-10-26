@@ -225,3 +225,63 @@ async fn fork_replay_and_follower_match_view_without_gaps() {
     assert_eq!(json!(mirror.items), json!(view.items));
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_fork_at_an_item_is_a_top_level_session_and_a_sub_agent_is_not() {
+    let f = Fixture::new(vec![text("one"), text("two")]).await;
+    let server = Server::start(f.config()).await.unwrap();
+    let client = f.connect().await;
+    let session = f.session(&client).await;
+    assert!(session.forked_from.is_none() && !session.is_subagent());
+    let follower = SessionFollower::new(client.clone(), &session.id).await.unwrap();
+    prompt(&client, &session.id).await;
+    finished(&follower).await;
+    prompt(&client, &session.id).await;
+    let mut changes = follower.changes();
+    let mirror = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mirror = changes.borrow_and_update().mirror.clone();
+            if mirror.items.iter().filter(|i| i.role == otto_proto::Role::Assistant).count() == 2
+                && mirror.info.status == otto_proto::SessionStatus::Idle
+            {
+                return mirror;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // Seen live, every stored item has the sequence a fresh view gives it.
+    let view = client.session_view(&session.id).await.unwrap();
+    assert_eq!(view.item_seqs.len(), view.items.len());
+    assert_eq!(mirror.item_seqs, view.item_seqs.clone().into_iter().collect());
+    // At the first reply: the first exchange only.
+    let first_reply = view.items.iter().find(|i| i.role == otto_proto::Role::Assistant).unwrap();
+    let at = view.item_seqs[&first_reply.id];
+    let fork = client.session_fork(&session.id, Some(at)).await.unwrap();
+    assert_eq!(fork.parent_id.as_deref(), Some(session.id.as_str()));
+    assert_eq!(fork.forked_from, Some(otto_proto::ForkOrigin { session_id: session.id.clone(), at_seq: at }));
+    assert!(!fork.is_subagent());
+    let forked = client.session_view(&fork.id).await.unwrap();
+    assert_eq!(forked.items.iter().map(|i| i.text()).collect::<Vec<_>>(), ["hello", "one"]);
+    client.session_rename(&fork.id, "Mine (branch)").await.unwrap();
+    let listed = client.session_list(Some(session.project_id.clone()), false).await.unwrap();
+    let row = listed.iter().find(|s| s.id == fork.id).unwrap();
+    assert_eq!(row.title, "Mine (branch)");
+    assert_eq!(row.forked_from.as_ref().map(|o| o.session_id.as_str()), Some(session.id.as_str()));
+    // A sub-agent has a parent and no fork origin.
+    let child = client
+        .session_create(SessionCreateOptions { project_id: Some(session.project_id.clone()), parent: Some(session.id.clone()), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(child.forked_from.is_none() && child.is_subagent());
+    let raw = client.call(Method::SessionView { session_id: child.id.clone(), limit: None, before_seq: None }).await.unwrap();
+    assert!(raw["info"].get("forked_from").is_none(), "absent unless forked");
+    // An older peer's info (no `forked_from`) and view (no `item_seqs`) still read.
+    let mut old = serde_json::to_value(&forked).unwrap();
+    old["info"].as_object_mut().unwrap().remove("forked_from");
+    old.as_object_mut().unwrap().remove("item_seqs");
+    let old: otto_proto::SessionView = serde_json::from_value(old).unwrap();
+    assert!(old.info.forked_from.is_none() && old.item_seqs.is_empty());
+    server.shutdown().await.unwrap();
+}

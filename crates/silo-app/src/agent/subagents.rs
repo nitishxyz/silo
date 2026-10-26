@@ -551,6 +551,7 @@ mod tests {
             id: id.into(),
             project_id: "proj".into(),
             parent_id: parent.map(Into::into),
+            forked_from: None,
             agent: "general".into(),
             approval_mode: otto_proto::ApprovalMode::default(),
             provider: "test".into(),

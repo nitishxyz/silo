@@ -1022,6 +1022,12 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   - Compatibility: an older server ignores `limit`/`before_seq` and sends every item without `has_older`, so a
     new client never pages (a page it is sent anyway only adds the items it lacks). An older client ignores the
     new fields; it sees the newest window as the whole session and clipped items as they are.
+- **Forks and item sequences** (additive). `SessionInfo.forked_from {session_id, at_seq}` is set on a fork
+  (`session.fork`: `parent_id` names the source and the row's meta has `forked_at_seq`); a sub-agent has none.
+  `SessionInfo::is_subagent()` is `parent_id` without `forked_from`, so clients list a fork as a top-level session
+  (from an older server, without the field, a fork still reads as a sub-agent). `SessionView.item_seqs` maps each
+  stored item sent to the sequence it was last written at; `SessionMirror.item_seqs` keeps it, adding each
+  `item.done`'s sequence, so a client can fork at an item (`session.fork {at_seq}`). Older peers skip both.
 
 ---
 

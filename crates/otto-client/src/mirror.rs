@@ -91,6 +91,9 @@ pub struct SessionMirror {
     /// The loaded turns that changed files (`SessionView::turns`, then each `turn.finished` with `changes`,
     /// under the last assistant item loaded), oldest first.
     pub turns: Vec<TurnSummary>,
+    /// The sequence each stored item was last written at (`SessionView::item_seqs`, then each `item.done`):
+    /// what `session.fork` takes to keep the history through it. Empty from an older server's view.
+    pub item_seqs: HashMap<String, i64>,
     indices: HashMap<String, usize>,
     durable: Option<(Vec<Item>, HashMap<String, ToolState>)>,
     live: Vec<Event>,
@@ -128,6 +131,7 @@ impl SessionMirror {
             oldest_seq: view.oldest_seq,
             todos: view.todos,
             turns: view.turns,
+            item_seqs: view.item_seqs.into_iter().collect(),
             indices,
             durable: None,
             live: Vec::new(),
@@ -139,6 +143,9 @@ impl SessionMirror {
     /// `has_older`) adds the ones missing and ends paging.
     pub fn prepend(&mut self, page: SessionView) -> usize {
         let older: Vec<Item> = page.items.into_iter().filter(|i| !self.indices.contains_key(&i.id)).collect();
+        for (id, seq) in page.item_seqs {
+            self.item_seqs.entry(id).or_insert(seq);
+        }
         let added = older.len();
         self.has_older = page.has_older && added > 0;
         self.oldest_seq = page.oldest_seq.or(self.oldest_seq);
@@ -174,6 +181,7 @@ impl SessionMirror {
             oldest_seq: old.oldest_seq,
             todos: None,
             turns: old.turns.iter().filter(|t| t.item_id.as_deref().is_some_and(|id| ids.contains(id))).cloned().collect(),
+            item_seqs: old.item_seqs.iter().filter(|(id, _)| ids.contains(id.as_str())).map(|(id, seq)| (id.clone(), *seq)).collect(),
             info: self.info.clone(),
             pending_approvals: Vec::new(),
             pending_questions: Vec::new(),
@@ -239,6 +247,10 @@ impl SessionMirror {
         }
         Self::reconcile(&mut self.live, event);
         self.project(event);
+        // Its journal sequence is the stored item's version.
+        if let Event::ItemDone { item } = event {
+            self.item_seqs.insert(item.id.clone(), seq);
+        }
         self.info.last_seq = seq;
         if !self.live.is_empty() {
             self.durable = Some((self.items.clone(), self.tools.clone()));

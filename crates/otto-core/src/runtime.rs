@@ -825,6 +825,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
     Ok(SessionInfo {
         id: row.id,
         project_id: row.project_id,
+        forked_from: fork_origin(row.parent_id.as_deref(), &row.meta),
         parent_id: row.parent_id,
         approval_mode: approval_mode(&row.meta),
         agent: row.agent,
@@ -846,6 +847,11 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         last_seq: row.last_seq,
         usage: UsageTotals { usage: usage.usage, cost_usd: usage.cost_usd },
     })
+}
+/// A fork's source and sequence (`SessionInfo::forked_from`): a session with a parent whose meta has
+/// `forked_at_seq` (`Store::fork_session`); a sub-agent has none.
+pub(crate) fn fork_origin(parent: Option<&str>, meta: &serde_json::Value) -> Option<otto_proto::ForkOrigin> {
+    Some(otto_proto::ForkOrigin { session_id: parent?.to_owned(), at_seq: meta.get("forked_at_seq")?.as_i64()? })
 }
 /// The session's approval mode; a value otto no longer has (`plan`) reads as the default, `auto`.
 pub(crate) fn approval_mode(meta: &serde_json::Value) -> otto_proto::ApprovalMode {
@@ -895,8 +901,17 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         info.status
     };
     let (mut items, mut has_older, mut oldest_seq) = (Vec::new(), false, None);
+    let mut item_seqs = std::collections::BTreeMap::new();
     match window {
-        None => items = crate::legacy::items(s.items(id)?),
+        None => {
+            s.items_newest(id, None, |seq, item| {
+                item_seqs.insert(item.id.clone(), seq);
+                items.push(item);
+                true
+            })?;
+            items.reverse();
+            items = crate::legacy::items(items);
+        }
         Some(w) => {
             let (limit, mut used) = (w.limit.unwrap_or(usize::MAX).max(1), 0);
             s.items_newest(id, w.before_seq, |seq, item| {
@@ -910,6 +925,7 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
                 }
                 used += size;
                 oldest_seq = Some(seq);
+                item_seqs.insert(item.id.clone(), seq);
                 items.push(item);
                 true
             })?;
@@ -971,6 +987,7 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         oldest_seq,
         todos,
         turns,
+        item_seqs,
     })
 }
 /// When the items' timed parts ran, from the journal (`SessionView.part_times`).

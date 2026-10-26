@@ -271,6 +271,13 @@ impl Connection {
         let SessionUpdate { provider, model, agent, effort, reset_effort } = update;
         self.call_typed(Method::SessionUpdate { session_id: session_id.into(), provider, model, agent, effort, reset_effort }).await
     }
+    /// A new session with the history through `at_seq` (all of it when `None`); its `forked_from` names this one.
+    pub async fn session_fork(&self, session_id: &str, at_seq: Option<i64>) -> Result<SessionInfo> {
+        self.call_typed(Method::SessionFork { session_id: session_id.into(), at_seq }).await
+    }
+    pub async fn session_rename(&self, session_id: &str, title: &str) -> Result<Empty> {
+        self.call_typed(Method::SessionRename { session_id: session_id.into(), title: title.into() }).await
+    }
     pub async fn project_list(&self) -> Result<Vec<ProjectInfo>> {
         self.call_typed(Method::ProjectList {}).await
     }

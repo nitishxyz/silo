@@ -53,11 +53,24 @@ pub enum ApprovalMode {
     AskAll,
 }
 
+/// Where a fork (`session.fork`) came from: its source session and the
+/// sequence its history was copied up to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkOrigin {
+    pub session_id: SessionId,
+    pub at_seq: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionInfo {
     pub id: SessionId,
     pub project_id: ProjectId,
+    /// A sub-agent's parent, or a fork's source (then `forked_from` is set too).
     pub parent_id: Option<SessionId>,
+    /// Set on a fork (`session.fork`): a top-level session of its own, not a
+    /// sub-agent, though `parent_id` names its source. Absent from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkOrigin>,
     pub agent: String,
     #[serde(default)]
     pub approval_mode: ApprovalMode,
@@ -83,6 +96,15 @@ pub struct SessionInfo {
     /// in `session.view`, `session.list` and `session.update` results only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<otto_llm::PlanUsage>,
+}
+
+impl SessionInfo {
+    /// A sub-agent: it has a parent and is not a fork. (A fork from an older
+    /// server, without `forked_from`, reads as one.)
+    #[must_use]
+    pub fn is_subagent(&self) -> bool {
+        self.parent_id.is_some() && self.forked_from.is_none()
+    }
 }
 
 /// A session's background shell command (`job.list`): started with
@@ -313,6 +335,11 @@ pub struct SessionView {
     /// in `items`), oldest first, so a reopened thread shows their changes. Absent from older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<TurnSummary>,
+    /// The sequence each stored item in `items` was last written at (its latest version), by item id:
+    /// `session.fork` at an item's sequence keeps the history through it. Items still being written
+    /// have none. Absent from older servers.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub item_seqs: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

@@ -105,6 +105,22 @@
         ],
         "type": "string"
       },
+      "ForkOrigin": {
+        "properties": {
+          "at_seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "at_seq"
+        ],
+        "type": "object"
+      },
       "InputPart": {
         "oneOf": [
           {
@@ -823,6 +839,16 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forked_from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ForkOrigin"
               },
               {
                 "type": "null"
@@ -10857,6 +10883,22 @@
             ],
             "type": "string"
           },
+          "ForkOrigin": {
+            "properties": {
+              "at_seq": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "at_seq"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -10989,6 +11031,16 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forked_from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ForkOrigin"
               },
               {
                 "type": "null"
@@ -11353,6 +11405,22 @@
             ],
             "type": "string"
           },
+          "ForkOrigin": {
+            "properties": {
+              "at_seq": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "at_seq"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -11485,6 +11553,16 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forked_from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ForkOrigin"
               },
               {
                 "type": "null"
@@ -12094,6 +12172,22 @@
             ],
             "type": "string"
           },
+          "ForkOrigin": {
+            "properties": {
+              "at_seq": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "at_seq"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -12162,6 +12256,16 @@
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "forked_from": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ForkOrigin"
                   },
                   {
                     "type": "null"
@@ -14420,6 +14524,22 @@
             ],
             "type": "string"
           },
+          "ForkOrigin": {
+            "properties": {
+              "at_seq": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "at_seq"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -14552,6 +14672,16 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forked_from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ForkOrigin"
               },
               {
                 "type": "null"
@@ -14980,6 +15110,22 @@
               "max"
             ],
             "type": "string"
+          },
+          "ForkOrigin": {
+            "properties": {
+              "at_seq": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "at_seq"
+            ],
+            "type": "object"
           },
           "InputPart": {
             "oneOf": [
@@ -15816,6 +15962,16 @@
                   }
                 ]
               },
+              "forked_from": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ForkOrigin"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -16035,6 +16191,13 @@
           },
           "info": {
             "$ref": "#/$defs/SessionInfo"
+          },
+          "item_seqs": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
           },
           "items": {
             "items": {
@@ -18199,6 +18362,22 @@
           }
         ]
       },
+      "ForkOrigin": {
+        "properties": {
+          "at_seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "at_seq"
+        ],
+        "type": "object"
+      },
       "InputPart": {
         "oneOf": [
           {
@@ -18933,6 +19112,16 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forked_from": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ForkOrigin"
               },
               {
                 "type": "null"
