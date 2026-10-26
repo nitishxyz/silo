@@ -1077,28 +1077,26 @@ impl AgentPane {
         let paths = model::card_paths(&changes.files, count);
         let all = format!("{}\n{}", model::card_title(count, added, removed), changes.files.join("\n"));
         let scope = crate::changes_block::turn_scope(turn, changes);
+        // The whole card opens the review (lit while hovered); `Review ›` is its cue.
         let review = div()
-            .id(gpui::ElementId::Name(format!("review-{key}").into()))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(2.0))
             .px(px(8.0))
             .h(px(22.0))
-            .continuous(6.0)
             .text_color(rgb(theme::accent()))
+            .child("Review")
+            .child(icon("chevron-right", 11.0, theme::accent()));
+        div()
+            .id(gpui::ElementId::Name(format!("changes-{key}").into()))
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover_fill()))
-            .child("Review")
-            .child(icon("chevron-right", 11.0, theme::accent()))
-            .tooltip(Tooltip::text(format!("Review {} in a Changes block", model::turn_label(turn))))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if let Some(session) = this.session_id.clone() {
                     cx.emit(AgentPaneEvent::Review { scope: scope.clone(), session });
                 }
-            }));
-        div()
-            .id(gpui::ElementId::Name(format!("changes-{key}").into()))
+            }))
             .flex()
             .flex_row()
             .items_center()
@@ -1132,7 +1130,7 @@ impl AgentPane {
                     ),
             )
             .child(review)
-            .tooltip(Tooltip::text(all))
+            .tooltip(Tooltip::text(format!("Review {} in a Changes block\n{all}", model::turn_label(turn))))
             .into_any_element()
     }
 
