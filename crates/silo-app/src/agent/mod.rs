@@ -1206,6 +1206,10 @@ impl AgentPane {
                 Row::Text { key, streaming: true, .. } => {
                     self.reveals.entry(key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
+                // A compaction's summary streams in its box the same way.
+                Row::Compaction(c) if c.running() => {
+                    self.reveals.entry(c.key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
+                }
                 Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. } => {}
             }
         }

@@ -353,12 +353,13 @@ pub fn thought(g: &Group) -> bool {
     g.lines.iter().all(|l| l.kind == Kind::Reasoning)
 }
 
-/// The one text row that may still reveal (sweep in, its height gliding): the last row, while it's text. A row
-/// after it settles it at once; the newer row has the motion.
+/// The one row that may still reveal (sweep in, its height gliding): the last row, while it's text or a
+/// compaction streaming its summary. A row after it settles it at once; the newer row has the motion.
 #[must_use]
 pub fn revealing(rows: &[Row]) -> Option<&str> {
     match rows.last() {
         Some(Row::Text { key, .. }) => Some(key),
+        Some(Row::Compaction(c)) if c.running() => Some(&c.key),
         _ => None,
     }
 }
@@ -1999,6 +2000,7 @@ mod tests {
         let c = card(&rows[2]);
         assert_eq!((c.title(), c.summary.as_str()), ("Compacting context (auto)".into(), "## Goal\nShi"));
         assert!(indicator_is_group(&rows));
+        assert_eq!(revealing(&rows), Some("k#compaction"), "its summary sweeps in like a reply");
         let manual = [compacting("k", "manual", "", CompactionStatus::Running, 3)];
         assert_eq!(card(&with_compactions(&items, &manual, None)[2]).title(), "Compacting context (/compact)");
         // Stored, it keeps its row: the same key, now folded.
@@ -2008,6 +2010,7 @@ mod tests {
         assert_eq!(rows.iter().map(Row::key).collect::<Vec<_>>(), ["u", "g:c1", "k#compaction"]);
         assert_eq!(card(&rows[2]).status, CompactionStatus::Done);
         assert!(!indicator_is_group(&rows));
+        assert_eq!(revealing(&rows), None, "folded, nothing reveals");
     }
 
     #[test]

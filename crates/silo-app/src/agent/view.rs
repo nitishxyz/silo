@@ -26,8 +26,6 @@ use crate::{
 
 /// Most height of a compaction's summary while it streams (it follows its newest lines).
 const COMPACTION_H: f32 = 160.0;
-/// The most lines of it drawn while it streams.
-const STREAMED_LINES: usize = 80;
 /// Width of the reading column.
 const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
@@ -1198,8 +1196,11 @@ impl AgentPane {
             .when(can_open, |el| el.child(chevron(openness, 12.0, muted)))
             .when(indicator, |el| el.children(self.queued_note()).child(div().flex_1()).child(self.stop_button(cx)));
         let mut column = div().text_size(px(13.0)).flex().flex_col().child(header);
-        // Streaming: a bounded box pinned to its newest lines (scrolled up in it, it stays put).
-        if running && !c.summary.trim().is_empty() {
+        // Streaming: a bounded box pinned to its newest lines (scrolled up in it, it stays put). The summary is
+        // markdown revealed like a reply: complete lines sweep in and the box's content glides open line by
+        // line (the box grows with it, then follows it), rather than jumping with each delta.
+        let streaming = running && !c.summary.trim().is_empty();
+        if streaming {
             let id = format!("cmp-stream-{key}");
             let handle = self.scroll.handle(&id);
             let pin = self.live_pins.entry(id.clone()).or_default();
@@ -1209,18 +1210,19 @@ impl AgentPane {
             let base = div()
                 .id(gpui::ElementId::Name(id.clone().into()))
                 .ml(px(24.0))
-                .px(px(10.0))
-                .py(px(8.0))
+                .px(px(12.0))
+                .pt(px(10.0))
+                .pb(px(2.0))
                 .continuous(8.0)
                 .bg(rgb(ink(0.04)))
-                .text_size(px(12.0))
-                .line_height(px(17.0))
-                .text_color(rgb(muted))
                 .max_h(px(COMPACTION_H));
-            // Its newest lines only: laid out every frame while it streams.
-            let lines: Vec<&str> = c.summary.lines().collect();
-            let tail = lines[lines.len().saturating_sub(STREAMED_LINES)..].join("\n");
-            column = column.child(div().py(px(4.0)).child(self.scroll.scroller(&id, base, false).child(tail)));
+            let (els, reveal) = self.reveal_blocks(&key, &c.summary, true, muted, now, cx);
+            let body = div().flex().flex_col().children(els);
+            let content = match reveal {
+                Some((r, s)) => self.revealed(&key, body, r, &s, now, cx.reduce_motion()),
+                None => body.into_any_element(),
+            };
+            column = column.child(div().py(px(4.0)).child(self.scroll.scroller(&id, base, false).child(div().flex_none().child(content))));
         } else {
             self.live_pins.remove(&format!("cmp-stream-{key}"));
         }
@@ -1243,7 +1245,7 @@ impl AgentPane {
             column = column.child(
                 div().py(px(DETAIL_GAP)).when(openness < 1.0, |el| el.max_h(px(DETAIL_H * openness)).overflow_hidden().opacity(openness)).child(body),
             );
-        } else {
+        } else if !streaming {
             self.parsed.remove(&key);
         }
         column.into_any_element()
@@ -1615,13 +1617,23 @@ impl AgentPane {
         div().relative().top(px(shift)).opacity(alpha * dim).child(row).children(stream).children(detail).into_any_element()
     }
 
-    fn render_text(&mut self, ix: usize, key: &str, text: &str, streaming: bool, now: Instant, cx: &mut Context<Self>) -> AnyElement {
-        // Parsed once per frame at most; completed blocks are kept as they are.
+    /// A markdown text's blocks, parsed once per frame at most (completed blocks are kept as they are). While
+    /// it streams with a reveal (`self.reveals`), lines show once complete and sweep in; blocks fully shown
+    /// draw as usual. Returns the reveal and its frame, for [`Self::revealed`].
+    #[allow(clippy::too_many_arguments)]
+    fn reveal_blocks(
+        &mut self,
+        key: &str,
+        text: &str,
+        streaming: bool,
+        fg: u32,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Option<(reveal::Reveal, reveal::Shown)>) {
         let mut doc = self.parsed.remove(key).unwrap_or_default();
         doc.update(text, streaming);
         let blocks = doc.blocks();
         let reduce = cx.reduce_motion();
-        // Streaming: lines show once complete and sweep in (`reveal`); blocks fully shown draw as usual.
         let mut reveal = self.reveals.remove(key);
         let shown = reveal.as_mut().map(|r| r.frame(key, blocks, text, streaming, self.width.get(), now, reduce));
         let fx = reveal.as_ref().zip(shown.as_ref()).map(|(r, s)| Fx { lines: &s.lines, wraps: &r.wraps });
@@ -1629,9 +1641,58 @@ impl AgentPane {
         let els: Vec<AnyElement> = blocks
             .iter()
             .enumerate()
-            .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), theme::foreground(), &self.scroll))
+            .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), fg, &self.scroll))
             .collect();
         self.parsed.insert(key.to_owned(), doc);
+        (els, reveal.zip(shown))
+    }
+
+    /// `body` revealing: its height glides to the end of the lines the reveal gave space (`Shown::height`: line
+    /// by line with the sweeps; what holds it follows, so it grows smoothly). The reveal is kept until it's done.
+    fn revealed(&mut self, key: &str, body: impl IntoElement, mut r: reveal::Reveal, s: &reveal::Shown, now: Instant, reduce: bool) -> AnyElement {
+        if r.quiet(now) {
+            r.height = motion::Glide::new(reveal::GLIDE);
+        }
+        r.height.target(s.height, now, reduce);
+        let h = r.height.value(now, reduce);
+        r.drawn = h;
+        let moving = r.height.moving(now, reduce);
+        r.idle = if s.done && !moving { r.idle + 1 } else { 0 };
+        if moving || s.moving || r.idle > 0 {
+            MOVING.set(true);
+        }
+        let (measured, origin) = (r.measured.clone(), r.origin.clone());
+        // Done (twice, so the last measure is in): drawn as usual from the next frame, at the same height.
+        if r.idle < 2 {
+            self.reveals.insert(key.to_owned(), r);
+        }
+        // It's given `h`; it draws up to `SLACK` past that (a line fades in once its slot is nearly open, so
+        // nothing is uncovered by a moving edge), and the transparent line being written stays clipped.
+        div()
+            .h(px(h))
+            .relative()
+            .child(
+                div().absolute().top_0().left_0().right_0().h(px(h + reveal::SLACK)).overflow_hidden().child(
+                    div().relative().child(body).child(
+                        gpui::canvas(
+                            move |b, _, _| {
+                                measured.set(f32::from(b.size.height));
+                                origin.set(f32::from(b.origin.y));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_text(&mut self, ix: usize, key: &str, text: &str, streaming: bool, now: Instant, cx: &mut Context<Self>) -> AnyElement {
+        let (els, reveal) = self.reveal_blocks(key, text, streaming, theme::foreground(), now, cx);
         // A turn's reply: its last text (its changes card may follow).
         let answer = !streaming && matches!(self.rows.get(ix + 1), None | Some(Row::User { .. } | Row::Report { .. } | Row::Changes { .. }));
         let actions = answer.then(|| {
@@ -1661,48 +1722,11 @@ impl AgentPane {
                 .children(branch)
         });
         let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
-        let (Some(mut r), Some(s)) = (reveal, shown) else { return body.into_any_element() };
-        // The height glides to the end of the lines the reveal gave space (`Shown::height`: line by line with
-        // the sweeps; the list follows it at the bottom, so the transcript scrolls smoothly).
-        if r.quiet(now) {
-            r.height = motion::Glide::new(reveal::GLIDE);
+        // The list follows the glide at the bottom, so the transcript scrolls smoothly.
+        match reveal {
+            Some((r, s)) => self.revealed(key, body, r, &s, now, cx.reduce_motion()),
+            None => body.into_any_element(),
         }
-        r.height.target(s.height, now, reduce);
-        let h = r.height.value(now, reduce);
-        r.drawn = h;
-        let moving = r.height.moving(now, reduce);
-        r.idle = if s.done && !moving { r.idle + 1 } else { 0 };
-        if moving || s.moving || r.idle > 0 {
-            MOVING.set(true);
-        }
-        let (measured, origin) = (r.measured.clone(), r.origin.clone());
-        // Done (twice, so the last measure is in): drawn as usual from the next frame, at the same height.
-        if r.idle < 2 {
-            self.reveals.insert(key.to_owned(), r);
-        }
-        // The list gives it `h`; it draws up to `SLACK` past that (a line fades in once its slot is nearly open,
-        // so nothing is uncovered by a moving edge), and the transparent line being written stays clipped.
-        div()
-            .h(px(h))
-            .relative()
-            .child(
-                div().absolute().top_0().left_0().right_0().h(px(h + reveal::SLACK)).overflow_hidden().child(
-                    div().relative().child(body).child(
-                        gpui::canvas(
-                            move |b, _, _| {
-                                measured.set(f32::from(b.size.height));
-                                origin.set(f32::from(b.origin.y));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    ),
-                ),
-            )
-            .into_any_element()
     }
 
     // ---- bottom: notice, card, tray, composer, footer ----
