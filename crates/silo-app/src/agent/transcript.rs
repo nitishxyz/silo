@@ -1354,6 +1354,13 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
     if !quiet && line.detail.is_none() && !text.trim().is_empty() {
         line.detail = Some(if status == Status::Error { Detail::Text(tail(text)) } else { Detail::Mono(tail(text)) });
     }
+    // A command's `›` opens on the whole command (the title clips it at 80
+    // characters and its first line), then what it printed.
+    if matches!(name, "shell" | "terminal_run")
+        && let Some(command) = str_at(input, "command").map(str::trim).filter(|c| !c.is_empty())
+    {
+        line.detail = Some(with_command(command, line.detail.take()));
+    }
     // No absolute paths on screen: the project's read relative, the rest of home as `~`.
     let show = |s: &str| display(s, cx.cwd, cx.home);
     line.title = show(&line.title);
@@ -1364,6 +1371,22 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         Detail::Diff(t) => Detail::Diff(show(&t)),
     });
     line
+}
+
+/// `$ command` (each further line of it indented under the `$`), a blank
+/// line, then the output's text (an error's too), as one monospace block.
+fn with_command(command: &str, output: Option<Detail>) -> Detail {
+    let mut shown = String::from("$ ");
+    for (i, l) in command.lines().enumerate() {
+        if i > 0 {
+            shown.push_str("\n  ");
+        }
+        shown.push_str(l);
+    }
+    match output {
+        Some(Detail::Mono(t) | Detail::Text(t) | Detail::Diff(t)) if !t.trim().is_empty() => Detail::Mono(format!("{shown}\n\n{t}")),
+        _ => Detail::Mono(shown),
+    }
 }
 
 /// Silo tools: kind, running and done verbs, and the input field naming the subject.
@@ -2420,6 +2443,14 @@ mod tests {
     }
 
     #[test]
+    fn a_command_shows_whole_under_its_line() {
+        let long = format!("cargo test -p silo-app && {}", "x".repeat(90));
+        assert_eq!(with_command(&long, None), Detail::Mono(format!("$ {long}")), "no clipping");
+        assert_eq!(with_command("cd a\nmake", Some(Detail::Mono("ok".into()))), Detail::Mono("$ cd a\n  make\n\nok".into()));
+        assert_eq!(with_command("ls", Some(Detail::Mono("  ".into()))), Detail::Mono("$ ls".into()), "blank output adds nothing");
+    }
+
+    #[test]
     fn shell_lines_report_exit_and_duration() {
         let mut times = Times::default();
         span(&mut times, "c", 0, Some(1_234));
@@ -2433,10 +2464,10 @@ mod tests {
         };
         let line = tool("c", "shell", &json!({"command": "pnpm install"}), Some(&live), None, &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref(), line.status), ("Failed to run pnpm install", Some("exit 1"), Status::Error));
-        assert_eq!(line.detail, Some(Detail::Text("boom".into())));
+        assert_eq!(line.detail, Some(Detail::Mono("$ pnpm install\n\nboom".into())), "the command, then what it printed");
         let line = tool("c", "shell", &json!({"command": "ls"}), None, Some(&("out".into(), false)), &cx);
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Ran ls", Some("1.2s")));
-        assert_eq!(line.detail, Some(Detail::Mono("out".into())));
+        assert_eq!(line.detail, Some(Detail::Mono("$ ls\n\nout".into())));
         let line = tool("p", "shell", &json!({"command": "rm -rf build"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.status), ("Running rm -rf build", Status::Pending));
     }
@@ -2493,7 +2524,7 @@ mod tests {
         let line = tool("w", "shell", &json!({"command": "sudo true"}), None, Some(&(waiting.into(), false)), &cx);
         assert_eq!(
             (line.title.as_str(), line.desc.as_deref(), line.status, line.reveal.as_deref(), line.detail),
-            ("Needs you", Some("sudo true"), Status::Input, Some("b5"), Some(Detail::Mono("Password:".into())))
+            ("Needs you", Some("sudo true"), Status::Input, Some("b5"), Some(Detail::Mono("$ sudo true\n\nPassword:".into())))
         );
         // Background: running until its report, then done with the exit code.
         let started = ("Started job-b4 in block b8; its result arrives as a message when it exits.".to_owned(), false);
@@ -2502,12 +2533,12 @@ mod tests {
             (line.title.as_str(), line.desc.as_deref(), line.status, line.stop.as_deref()),
             ("Running cargo test", Some("background"), Status::Running, Some("b8"))
         );
-        assert!(line.detail.is_none());
+        assert_eq!(line.detail, Some(Detail::Mono("$ cargo test".into())), "a background command shows what it runs");
         let started = ("Started job-a1 in block b9; its result arrives as a message when it exits.".to_owned(), false);
         let line = tool("d", "shell", &json!({"command": "cargo test", "background": true}), None, Some(&started), &cx);
         assert_eq!(
             (line.title.as_str(), line.desc.as_deref(), line.status, line.stop, line.detail),
-            ("Failed to run cargo test", Some("exit 101"), Status::Error, None, Some(Detail::Mono("FAILED".into())))
+            ("Failed to run cargo test", Some("exit 101"), Status::Error, None, Some(Detail::Mono("$ cargo test\n\nFAILED".into())))
         );
         assert_eq!(reports("Background shell job-1 (`x`) was stopped (closed).\n")["job-1"].0, JobEnd::Stopped);
         assert_eq!(reports("Background shell job-2 (`x`) in block b exited with code 0.\nok")["job-2"], (JobEnd::Exit(0), "ok".into()));

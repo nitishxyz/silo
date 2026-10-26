@@ -201,7 +201,11 @@ fn every_tool_shows_from_its_start_and_keeps_its_row_through_call_and_result() {
     assert_eq!(s.line("c").unwrap().1.title, "Running cargo te", "the subject fills in as it arrives");
     s.delta("c", r#"st -p app"}"#);
     let (_, streamed) = s.line("c").unwrap();
-    assert_eq!((streamed.title.as_str(), streamed.detail.as_ref()), ("Running cargo test -p app", None));
+    assert_eq!(
+        (streamed.title.as_str(), streamed.detail.as_ref()),
+        ("Running cargo test -p app", Some(&Detail::Mono("$ cargo test -p app".into()))),
+        "the whole command under ›"
+    );
     s.call("c", "shell", &json!({"command": "cargo test -p app"}));
     let (called_group, called) = s.line("c").unwrap();
     assert_eq!((called_group, called.title.as_str()), (group.clone(), "Running cargo test -p app"));
