@@ -2938,6 +2938,10 @@
               {
                 "const": "blocks",
                 "type": "string"
+              },
+              {
+                "const": "folder",
+                "type": "string"
               }
             ]
           }
@@ -10746,6 +10750,258 @@
     "ping": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "search.files": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "SearchFileItem": {
+            "properties": {
+              "git": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FileStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "score": {
+                "default": 0,
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "indexing": {
+            "default": false,
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/SearchFileItem"
+            },
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SearchFiles",
+        "type": "object"
+      }
+    },
+    "search.grep": {
+      "params": {
+        "$defs": {
+          "SearchGrepMode": {
+            "oneOf": [
+              {
+                "const": "plain",
+                "type": "string"
+              },
+              {
+                "const": "regex",
+                "type": "string"
+              },
+              {
+                "const": "fuzzy",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SearchGrepMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "query"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "SearchGrepItem": {
+            "properties": {
+              "col": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "ranges": {
+                "default": [],
+                "items": {
+                  "items": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line",
+              "col",
+              "text"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "indexing": {
+            "default": false,
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/SearchGrepItem"
+            },
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SearchGrep",
+        "type": "object"
+      }
+    },
+    "search.opened": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "path"
+        ],
         "type": "object"
       },
       "result": {

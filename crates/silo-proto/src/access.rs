@@ -179,6 +179,10 @@ pub enum Target {
     BlockSession(&'static str),
     /// A list of block ids, checked on each block.
     Blocks(&'static str),
+    /// A folder (absolute path): it must be the folder of a block the
+    /// caller holds the rights on (or of a session holding it), or under
+    /// it.
+    Folder(&'static str),
 }
 
 impl Target {
@@ -190,6 +194,7 @@ impl Target {
             Self::Session(p) | Self::Window(p) | Self::BlockSession(p) => (TargetKind::Session, Some(p)),
             Self::Block(p) => (TargetKind::Block, Some(p)),
             Self::Blocks(p) => (TargetKind::Blocks, Some(p)),
+            Self::Folder(p) => (TargetKind::Folder, Some(p)),
         }
     }
 }
@@ -222,7 +227,7 @@ const fn approved(rights: Rights) -> Need {
 pub fn need(method: &Method) -> Need {
     use Method as M;
     use Rights::{Control, Interact, Owner, View};
-    use Target::{Block, BlockSession, Blocks, Server, Session, Window};
+    use Target::{Block, BlockSession, Blocks, Folder, Server, Session, Window};
     const BLOCK: &str = "block_id";
     const SESSION: &str = "session_id";
     const WINDOW: &str = "window_id";
@@ -239,6 +244,7 @@ pub fn need(method: &Method) -> Need {
         | M::FilesFind(_) => rights(Block(BLOCK), View),
         M::FilesSet(_) | M::FilesRoot(_) | M::FilesWrite(_) | M::FilesCreate(_) => rights(Block(BLOCK), Interact),
         M::ChangesStatus(_) | M::ChangesDiff(_) => rights(Block(BLOCK), View),
+        M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => rights(Folder("root"), View),
         M::ChangesSet(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) | M::ChangesCommit(_) | M::ChangesRoot(_) => {
             rights(Block(BLOCK), Interact)
         }
@@ -372,6 +378,9 @@ pub enum TargetKind {
     Block,
     /// Each block of a list.
     Blocks,
+    /// A folder: one of the blocks' folders the caller holds the rights
+    /// on, or under it.
+    Folder,
     #[serde(other)]
     Unknown,
 }

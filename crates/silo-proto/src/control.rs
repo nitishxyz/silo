@@ -9,6 +9,7 @@ use serde_json::Value;
 pub use crate::agent::*;
 pub use crate::changes::*;
 pub use crate::files::*;
+pub use crate::search::*;
 
 use crate::{
     access::{Grant, Granted, Rights, Scope},
@@ -260,6 +261,12 @@ pub enum Method {
     ChangesCommit(ChangesCommitParams),
     #[serde(rename = "changes.root")]
     ChangesRoot(ChangesRootParams),
+    #[serde(rename = "search.files")]
+    SearchFiles(SearchFilesParams),
+    #[serde(rename = "search.grep")]
+    SearchGrep(SearchGrepParams),
+    #[serde(rename = "search.opened")]
+    SearchOpened(SearchOpenedParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -845,6 +852,9 @@ pub const METHODS: &[(&str, &str)] = &[
     ("changes.revert", "Discard a file's work tree changes, or some hunks of them (untracked files go to the Trash)."),
     ("changes.commit", "Commit the staged changes of a changes block's repo, running its hooks."),
     ("changes.root", "Review the git repo holding another folder in a changes block."),
+    ("search.files", "Fuzzy-find files under a folder (fff query syntax: globs, !excludes, git:modified), frecency-ranked."),
+    ("search.grep", "Search the text of the files under a folder (plain, regex or fuzzy), within a time budget."),
+    ("search.opened", "Record that a file under a folder was opened, so it ranks higher in later searches."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),

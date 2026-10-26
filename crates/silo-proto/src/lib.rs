@@ -23,6 +23,7 @@ pub mod model;
 pub mod offer;
 pub mod paths;
 pub mod release;
+pub mod search;
 pub mod text;
 pub mod upgrade;
 pub mod upload;

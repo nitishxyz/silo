@@ -804,6 +804,10 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::ChangesRevert(_)
         | Method::ChangesCommit(_)
         | Method::ChangesRoot(_) => crate::changes::handle(server, method).await,
+        // Not served yet: no `search` feature is advertised.
+        Method::SearchFiles(_) | Method::SearchGrep(_) | Method::SearchOpened(_) => {
+            Err(RpcError::method_not_found(&silo_proto::api::method_name(&method)))
+        }
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }
         | Method::WindowStep { .. }

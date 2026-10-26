@@ -17,6 +17,7 @@ use crate::files::*;
 use crate::model::{
     Axis, BlockKind, ChangeMark, ChangesScope, ChangesState, FilesState, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize,
 };
+use crate::search::*;
 
 /// The description of method `name`; `None` for an unknown method.
 #[must_use]
@@ -124,6 +125,9 @@ fn result_schema(method: &Method) -> Schema {
         M::ChangesDiff(_) => schema_for!(FileDiff),
         M::ChangesSet(_) | M::ChangesRoot(_) => schema_for!(ChangesState),
         M::ChangesCommit(_) => schema_for!(ChangesCommitted),
+        M::SearchFiles(_) => schema_for!(SearchFiles),
+        M::SearchGrep(_) => schema_for!(SearchGrep),
+        M::SearchOpened(_) => schema_for!(Empty),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -301,6 +305,9 @@ pub fn examples() -> Vec<Method> {
         M::ChangesRevert(ChangesHunksParams { block_id: b(), path: "src/main.rs".into(), hunks: Some(vec!["3f9a1c0d5e7b2a46".into()]) }),
         M::ChangesCommit(ChangesCommitParams { block_id: b(), message: "Fix the lockfile".into(), amend: false }),
         M::ChangesRoot(ChangesRootParams { block_id: b(), path: "~/src/silo".into() }),
+        M::SearchFiles(SearchFilesParams { root: "~/src/silo".into(), query: "main.rs !test".into(), limit: Some(20) }),
+        M::SearchGrep(SearchGrepParams { root: "~/src/silo".into(), query: "fn main".into(), mode: Some(SearchGrepMode::Plain), limit: None }),
+        M::SearchOpened(SearchOpenedParams { root: "~/src/silo".into(), path: "src/main.rs".into() }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },

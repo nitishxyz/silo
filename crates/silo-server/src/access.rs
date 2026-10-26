@@ -149,6 +149,9 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
     let mut targets: Vec<(Option<String>, Option<String>)> = Vec::new(); // (block, session)
     match on {
         Target::Server => {}
+        // Which folders a principal may view needs the file system (links
+        // resolved), so the method checks it: see `crate::search::allowed`.
+        Target::Folder(_) => return Ok(Gate { approval }),
         Target::Session(p) => {
             let id = id(p)?;
             match reg.session_id(&id) {

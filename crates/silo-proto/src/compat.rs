@@ -57,6 +57,10 @@ pub mod feature {
     /// `changes.changed` (docs/CHANGES_BLOCK.md). Older servers answer
     /// `method_not_found`; the app hides Changes there.
     pub const CHANGES: &str = "changes";
+    /// `search.files`, `search.grep` and `search.opened` (docs/FINDER.md
+    /// §2). Older servers answer `method_not_found`; the app hides its
+    /// Files and Grep categories there.
+    pub const SEARCH: &str = "search";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
