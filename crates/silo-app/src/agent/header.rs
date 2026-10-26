@@ -1,5 +1,5 @@
 //! The agent's pane header parts: on the chat screen the session title opens
-//! the switcher and Review changes / History / New Session / Otto settings sit before the pane
+//! the switcher (a double-click renames it in place, `rename.rs`) and Review changes / History / New Session / Otto settings sit before the pane
 //! buttons (not on a sub-agent: its strip leads back to the main agent instead).
 
 use gpui::{AnyElement, Context, div, prelude::*, px, rgb};
@@ -22,7 +22,11 @@ impl BlockHeader for AgentPane {
         if self.is_subagent() {
             return named(title, host.as_deref(), style);
         }
-        let mut parts = HeaderParts::new(session_title(&title, host.as_deref(), style, cx), title);
+        let middle = match self.header_rename(style, cx) {
+            Some(field) => field,
+            None => session_title(&title, host.as_deref(), style, cx),
+        };
+        let mut parts = HeaderParts::new(middle, title);
         let reviewable = self.reviewable();
         parts.actions = actions(self.is_subagent())
             .iter()
@@ -70,7 +74,7 @@ fn named(name: String, host: Option<&str>, style: HeaderStyle) -> HeaderParts {
     HeaderParts::new(middle.into_any_element(), name)
 }
 
-/// The session's title; opens the switcher. Its hover fill reaches past the
+/// The session's title; opens the switcher, a double-click renames it in place. Its hover fill reaches past the
 /// text, which keeps its place.
 fn session_title(title: &str, host: Option<&str>, style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
     let palette = style.palette;
@@ -89,7 +93,14 @@ fn session_title(title: &str, host: Option<&str>, style: HeaderStyle, cx: &mut C
         .hover(move |s| s.bg(palette.hover()))
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(style.ink())).child(title.to_owned()))
         .child(crate::assets::icon("chevron-down", 11.0, palette.icon))
-        .on_click(cx.listener(|this, _, window, cx| this.open_sessions(window, cx)));
+        .tooltip(crate::tooltip::Tooltip::text("Sessions · double-click to rename"))
+        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+            if event.click_count() >= 2 {
+                this.rename_shown(window, cx);
+            } else {
+                this.open_sessions(window, cx);
+            }
+        }));
     div()
         .flex()
         .flex_row()

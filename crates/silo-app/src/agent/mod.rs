@@ -18,6 +18,7 @@ pub(crate) mod mention;
 mod partial_json;
 mod pill_input;
 mod plan;
+mod rename;
 mod reveal;
 mod ring;
 mod rows;
@@ -132,6 +133,7 @@ enum SlashAct {
     Settings,
     Clear,
     Compact,
+    Rename,
 }
 
 struct SlashCommand {
@@ -141,9 +143,10 @@ struct SlashCommand {
     act: SlashAct,
 }
 
-const SLASH: [SlashCommand; 11] = [
+const SLASH: [SlashCommand; 12] = [
     SlashCommand { name: "new", about: "Start a new session", icon: "new-session", act: SlashAct::New },
     SlashCommand { name: "sessions", about: "Switch to another session", icon: "history", act: SlashAct::Sessions },
+    SlashCommand { name: "rename", about: "Rename this session (/rename <title>)", icon: "pencil", act: SlashAct::Rename },
     SlashCommand { name: "compact", about: "Summarize the conversation to free context", icon: "unzoom", act: SlashAct::Compact },
     SlashCommand { name: "model", about: "Choose the model", icon: "bot", act: SlashAct::Model },
     SlashCommand { name: "effort", about: "Choose the reasoning effort", icon: "brain", act: SlashAct::Effort },
@@ -176,6 +179,10 @@ fn slash_matches(query: &str) -> Vec<&'static SlashCommand> {
     if query.is_empty() {
         return SLASH.iter().collect();
     }
+    // `/rename <title>`: the title is its argument.
+    if query.strip_prefix("rename").is_some_and(|rest| rest.starts_with(char::is_whitespace)) {
+        return SLASH.iter().filter(|c| c.act == SlashAct::Rename).collect();
+    }
     let mut hits: Vec<(i32, usize, &SlashCommand)> =
         SLASH.iter().enumerate().filter_map(|(i, c)| crate::commands::fuzzy(query, c.name).map(|(score, _)| (score, i, c))).collect();
     hits.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
@@ -183,7 +190,7 @@ fn slash_matches(query: &str) -> Vec<&'static SlashCommand> {
 }
 
 /// The ⋮ menu's rows, in order.
-const MENU_ROWS: usize = 6;
+const MENU_ROWS: usize = 7;
 
 /// The effort menu's rows; `None` is the default (the agent's, else the model's).
 const EFFORTS: [Option<Effort>; 5] = [None, Some(Effort::Low), Some(Effort::Medium), Some(Effort::High), Some(Effort::Max)];
@@ -360,6 +367,11 @@ pub struct AgentPane {
     code_field: Entity<pill_input::PillInput>,
     /// A local or custom provider's address (the connect dialog).
     url_field: Entity<pill_input::PillInput>,
+    /// The title field of a rename (`rename.rs`), and the rename it serves.
+    rename_field: Entity<TextField>,
+    renaming: Option<rename::Renaming>,
+    /// A title saved and not yet confirmed by otto's `session.changed` (shown meanwhile).
+    retitled: Option<(String, String)>,
     choice: Choice,
     update: Update,
     overlay: Option<Overlay>,
@@ -470,6 +482,8 @@ impl AgentPane {
         let key_field = cx.new(|cx| pill_input::PillInput::new("Paste an API key", "key", cx).masked(cx));
         let code_field = cx.new(|cx| pill_input::PillInput::new("Paste the code", "key", cx));
         let url_field = cx.new(|cx| pill_input::PillInput::new("Server address", "globe", cx));
+        let rename_field = cx.new(|cx| TextField::new("Session title", cx));
+        let rename_focus = rename_field.read(cx).focus.clone();
         let subscriptions = vec![
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, _, event: &EditorEvent, window, cx| this.editor_event(event, window, cx)),
@@ -477,6 +491,8 @@ impl AgentPane {
             cx.subscribe(&code_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe(&url_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe_in(&filter, window, |this, _, event: &FieldEvent, window, cx| this.filter_event(event, window, cx)),
+            cx.subscribe_in(&rename_field, window, |this, _, event: &FieldEvent, window, cx| this.rename_event(event, window, cx)),
+            cx.on_blur(&rename_focus, window, |this, _, cx| this.rename_blurred(cx)),
             cx.observe_global::<client::AuthChanged>(Self::reload_catalog),
             cx.observe_global::<client::OttoChanged>(|this, cx| {
                 if cx.global::<client::OttoChanged>().concerns(&this.target) {
@@ -542,6 +558,9 @@ impl AgentPane {
             key_field,
             code_field,
             url_field,
+            rename_field,
+            renaming: None,
+            retitled: None,
             choice: Choice::default(),
             update: Update::default(),
             overlay: None,
@@ -664,8 +683,10 @@ impl AgentPane {
 
     pub fn header_title(&self) -> Option<String> {
         self.composer_visible().then(|| {
-            self.mirror()
-                .map(|m| m.info.title.clone())
+            // A rename otto hasn't confirmed yet.
+            let retitled = self.retitled.as_ref().filter(|(id, _)| self.session_id.as_ref() == Some(id)).map(|(_, t)| t.clone());
+            retitled
+                .or_else(|| self.mirror().map(|m| m.info.title.clone()))
                 .filter(|t| !t.trim().is_empty())
                 .or_else(|| (!self.title.is_empty()).then(|| self.title.clone()))
                 // Until otto names it: the first prompt.
@@ -1086,6 +1107,7 @@ impl AgentPane {
             }
             cx.emit(AgentPaneEvent::Session { session_id: m.info.id.clone(), title: self.title.clone() });
         }
+        self.retitled.take_if(|(id, title)| *id == m.info.id && *title == m.info.title);
         self.state = Some(state);
         self.primed = true;
         cx.notify();
@@ -1210,6 +1232,10 @@ impl AgentPane {
     fn editor_event(&mut self, event: &EditorEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             EditorEvent::Submit => {
+                // `/rename <title>` renames at once; a bare `/rename` edits the header's title.
+                if rename::slash_rename(self.editor.read(cx).text()).is_some() {
+                    return self.run_slash(SlashAct::Rename, window, cx);
+                }
                 if matches!(self.overlay, Some(Overlay::Slash | Overlay::Mention | Overlay::Agents | Overlay::Effort | Overlay::Menu))
                     && self.overlay_count(cx) > 0
                 {
@@ -1373,6 +1399,7 @@ impl AgentPane {
     }
 
     fn run_slash(&mut self, act: SlashAct, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.editor.read(cx).text().to_owned();
         self.editor.update(cx, |e, cx| e.set_text("", cx));
         self.set_overlay(None, cx);
         match act {
@@ -1389,6 +1416,15 @@ impl AgentPane {
             SlashAct::Providers => self.open_otto_settings(settings::Entry::Providers, window, cx),
             SlashAct::Settings => self.open_otto_settings(settings::Entry::Slash, window, cx),
             SlashAct::Compact => self.compact(cx),
+            // `/rename <title>` renames at once; a bare `/rename` edits the header's title.
+            SlashAct::Rename => match (rename::slash_rename(&typed).filter(|t| !t.is_empty()), self.session_id.clone()) {
+                (Some(title), Some(id)) => {
+                    if let Some(title) = rename::rename_to(title, &self.header_title().unwrap_or_default()) {
+                        self.rename(id, title, cx);
+                    }
+                }
+                _ => self.rename_shown(window, cx),
+            },
         }
         cx.notify();
     }
@@ -1460,6 +1496,9 @@ impl AgentPane {
             self.overlay_anim.set(false, now, reduce);
         }
         self.overlay = overlay;
+        if overlay != Some(Overlay::Sessions) {
+            self.switcher_closed();
+        }
         let nav = matches!(overlay, Some(Overlay::Slash | Overlay::Mention | Overlay::Agents | Overlay::Effort | Overlay::Menu));
         self.editor.update(cx, |e, _| e.nav = nav);
         cx.notify();
@@ -2022,6 +2061,10 @@ impl AgentPane {
                 3 => self.open_overlay(Overlay::Sessions, window, cx),
                 4 => {
                     self.close_overlay(window, cx);
+                    self.rename_shown(window, cx);
+                }
+                5 => {
+                    self.close_overlay(window, cx);
                     self.review_session(cx);
                 }
                 _ => self.open_otto_settings(settings::Entry::Providers, window, cx),
@@ -2329,6 +2372,8 @@ mod tests {
         assert_eq!((act("settings"), act("providers")), (Some(SlashAct::Settings), Some(SlashAct::Providers)), "both open the otto settings");
         assert_eq!(names("comp")[0], "compact");
         assert_eq!(act("compact"), Some(SlashAct::Compact));
+        assert_eq!((names("ren")[0], act("rename")), ("rename", Some(SlashAct::Rename)));
+        assert_eq!(names("rename Fix the login"), ["rename"], "its title doesn't filter it away");
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
         }

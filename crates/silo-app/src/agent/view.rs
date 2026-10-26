@@ -2616,14 +2616,49 @@ impl AgentPane {
                 .min_w_0()
                 .child(div().min_w_0().overflow_hidden().text_ellipsis().when(checked, |el| el.font_weight(FontWeight::MEDIUM)).child(title))
                 .children(glyph);
+            // Renamed here (its pencil): the title field in place of the title.
+            let editing = self.renaming.as_ref().is_some_and(|r| r.in_switcher && r.session == id);
+            let title = if editing {
+                div()
+                    .id(gpui::ElementId::Name(format!("session-rename-{id}").into()))
+                    .flex()
+                    .items_center()
+                    .min_w_0()
+                    .h(px(22.0))
+                    .px(px(5.0))
+                    .ml(px(-6.0))
+                    .continuous(6.0)
+                    .border_1()
+                    .border_color(rgb(ink(0.35)))
+                    .child(self.rename_field.clone())
+                    // A click in the field stays there (it doesn't pick the row).
+                    .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+                    .into_any_element()
+            } else {
+                title.into_any_element()
+            };
+            let group = SharedString::from(format!("session-row-{id}"));
+            let rename_id = id.clone();
+            let pencil = (!editing).then(|| {
+                icon_button(gpui::ElementId::Name(format!("session-pencil-{id}").into()), "pencil", 12.0, 22.0, theme::muted())
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .tooltip(Tooltip::text("Rename"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.start_rename(rename_id.clone(), true, window, cx);
+                    }))
+            });
+            let trailing = div().flex().items_center().gap(px(2.0)).children(pencil).children(checked.then(rows::check)).into_any_element();
             let row = rows::row(
                 gpui::ElementId::Name(format!("session-{id}").into()),
                 i == self.selected,
                 lead,
                 title,
                 Some(div().child(subtitle).into_any_element()),
-                checked.then(rows::check),
-            );
+                Some(trailing),
+            )
+            .group(group);
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.pick_session(id.clone(), window, cx))),
@@ -2807,6 +2842,7 @@ impl AgentPane {
         for (i, (id, glyph, label, note)) in [
             ("agent-menu-new", "new-session", "New session", "/new"),
             ("agent-menu-sessions", "history", "Sessions", "⌘J"),
+            ("agent-menu-rename", "pencil", "Rename…", "/rename"),
             ("agent-menu-review", "git-diff", "Review changes", "This session"),
             ("agent-menu-providers", "plug", "Providers", "/providers"),
         ]

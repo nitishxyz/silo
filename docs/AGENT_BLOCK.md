@@ -162,7 +162,7 @@ See §8 for status.
 
 - Multi-line, grows to ~8 lines then scrolls. ⏎ sends, ⇧⏎ newline. While a turn runs, ⏎ steers
   (`Delivery::Steer`, see §4f); queued inputs appear as chips in the tray. Stop lives on the activity row (§4f).
-- `⋮` menu: approval mode (auto / ask), new session.
+- `⋮` menu: approval mode (auto / ask), new session, sessions, Rename… (§5b), review changes, providers.
 - Footer: agent (`BUILD`, …) picker; provider glyph / model id (subscription marker) → searchable model picker
   from `model.list` limited to signed-in providers; on the right, before the buttons, the context's used count (`48k`),
   muted, amber above 80%, red above 95%; its tooltip gives the window, exact counts, the session totals and cost
@@ -270,7 +270,7 @@ Units are points.
 
 - **No global chord overrides.** ⌘N stays New Window everywhere. Agent actions live in the composer as slash
   commands: typing `/` at the start opens a filtered menu above the composer (↑/↓, ⏎/Tab pick, esc close):
-  `/new` (new session), `/sessions` (switcher; ⌘J also), `/model`, `/effort`, `/agent`, `/mode auto|ask`,
+  `/new` (new session), `/sessions` (switcher; ⌘J also), `/rename [title]` (§5b), `/model`, `/effort`, `/agent`, `/mode auto|ask`,
   `/providers`, `/clear`. Menus show no ⌘N hint.
 - **Every state change animates** (silo `motion.rs`, `SILO_MOTION_SLOWDOWN`, reduce-motion → none), ~200–320 ms
   ease-out `cubic-bezier(0.25,1,0.5,1)`:
@@ -614,6 +614,15 @@ results right after it. `at_seq` is the latest stored sequence of the kept items
 While a turn runs Branch is disabled ("Stop the turn to branch"): the running turn's items aren't stored yet and a
 fork mid-turn would copy a half-finished step. Not on a sub-agent's block; an otto without `item_seqs` says
 "Update otto to branch".
+
+## 5b. Renaming
+
+The session's title is edited in place: double-click the header's title (a single click still opens the switcher),
+the `⋮` menu's `Rename…`, a bare `/rename`, or a switcher row's `pencil` (on hover; the row's title becomes the field).
+The field starts with the whole title selected; ⏎ saves (`session.rename`), esc or a click elsewhere cancels, and an
+empty or unchanged title saves nothing. `/rename <title>` renames at once. The new title shows at once (header,
+switcher row) and otto's `session.changed` confirms it live in every pane; a refusal puts the old one back and says
+why in the notice slot.
 
 ## 6. Motion
 
