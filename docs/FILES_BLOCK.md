@@ -298,3 +298,32 @@ upload made is removed. Terminal uploads are unchanged (a staging folder; `to_di
 `DOWNLOAD_END`) or `REJECT`. Items resolve under the root; symlinks inside folders are skipped. The client
 (`silo_client::download`) checks every name is one component, takes `name 2.ext` for taken names and removes what it
 wrote when it fails or is dropped (cancel).
+
+### The browser (app)
+
+The header's **Browse | Edit** switch (hosts with `files_ops`) sets `FilesState.view`; existing blocks stay in Edit.
+**Browse Files** (palette) opens a Files pane beside the focused block, at its folder, in Browse. Code:
+`silo-app/src/files/browse.rs` (rows, sort, selection, history, path bar; no gpui), `browser.rs` (state and
+operations), `browser_view.rs` (drawing, menu, Quick Look, keys).
+
+- A toolbar (back, forward, enclosing folder, the path bar, hidden items, `+` for New Folder / New File, search) over
+  Finder's list: Name (icon by kind), Date Modified, Size (folders `—`), Kind; a search adds a Folder column. Click a
+  header to sort, again to reverse; a toggle keeps folders on top. Columns drop out as the pane narrows. Folders open in
+  place with their triangle, listed lazily. The list is a `uniform_list` and its rows are cached until a listing,
+  the sort, the expanded folders or the hits change, with fixed column widths, so nothing is measured per frame.
+- Keys: ↑ ↓ (⇧ extends), ← → close and open a folder in place, typing jumps to a name, Space Quick Look (text and
+  images via `files.read`/`files.read_image`), ↩ rename in place, ⌘↓ / ⌘O / double-click open (a folder is shown, a
+  file opens in Edit), ⌘↑ enclosing folder, ⌘[ ⌘] back and forward, ⌘A, ⌘C / ⌘V copy and paste items (files copied in
+  Finder upload), ⌥⌘C Copy Path, ⌘D Duplicate, ⌘⌫ Move to Trash (no confirmation: the Trash keeps it), ⇧⌘N New Folder,
+  ⌘F search (Esc clears), ⇧⌘. hidden files. Browsing, ⌘D ⌘[ ⌘] ⇧⌘N ⌘↑ ⌘↓ act on the list instead of the app's split,
+  focus and new-session commands. Right-click: the same actions, plus Reveal in Finder (this Mac's host) and Open in
+  Terminal (a terminal block beside it at that folder).
+- **Drag in:** files from Finder dropped on a folder row (the list's or the tree's), the list's background or the
+  tree's background upload into that folder (`UploadHello.to_dir`), with progress and Cancel in the block.
+- **Within the block:** rows drag (the selection when the row is in it) onto a folder row, a path-bar crumb or the
+  list's background: a move, ⌥ a copy (`files.move` / `files.copy`). The preview names the item or counts them.
+- **Drag out:** the same drag value carries `external_drag_payload` for this Mac's host: when the pointer leaves the
+  window gpui hands the real paths to the platform (`ExternalDragPayload::Files`), so Finder, the Desktop or another app
+  takes them; where the platform can't, it stays an in-app drag. Remote hosts: in-app only for now. Their seam is
+  `FilesPane::drag_out_items` (name, folder or not, size, path) and `drag_out_fetch` (downloads one item into a local
+  folder with the download stream), for the promised-file payload being added to our gpui fork (see `DragOutItem`).
