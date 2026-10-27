@@ -136,21 +136,30 @@ fn check(id: PermissionId) -> PermissionStatus {
     }
 }
 
-/// A file only Full Disk Access may read: the user's TCC database.
-fn tcc_db() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/com.apple.TCC/TCC.db"))
+/// Places only Full Disk Access may read: the user's and the system's TCC
+/// databases (the user's is missing on some Macs) and Safari's data.
+fn protected_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        paths.push(home.join("Library/Application Support/com.apple.TCC/TCC.db"));
+    }
+    paths.push(PathBuf::from("/Library/Application Support/com.apple.TCC/TCC.db"));
+    if let Some(home) = &home {
+        paths.push(home.join("Library/Safari"));
+    }
+    paths
 }
 
 fn full_disk_access() -> PermissionStatus {
     if !cfg!(target_os = "macos") {
         return PermissionStatus::Unknown;
     }
-    let Some(path) = tcc_db() else { return PermissionStatus::Unknown };
-    fda_status(std::fs::File::open(path).map(drop))
+    let read = |path: PathBuf| if path.is_dir() { std::fs::read_dir(path).map(drop) } else { std::fs::File::open(path).map(drop) };
+    protected_paths().into_iter().map(read).map(fda_status).find(|s| *s != PermissionStatus::Unknown).unwrap_or_default()
 }
 
-/// Full Disk Access from opening a TCC-protected file: opened is granted,
+/// Full Disk Access from reading a TCC-protected file: read is granted,
 /// refused (`EPERM`, `EACCES`) denied, anything else (missing) unknown.
 #[must_use]
 pub fn fda_status(opened: std::io::Result<()>) -> PermissionStatus {
@@ -256,6 +265,9 @@ mod tests {
         assert_eq!(fda_status(Err(Error::from_raw_os_error(libc::EACCES))), PermissionStatus::Denied);
         assert_eq!(fda_status(Err(Error::from(ErrorKind::NotFound))), PermissionStatus::Unknown);
         assert_eq!(fda_status(Err(Error::other("odd"))), PermissionStatus::Unknown);
+        let paths = protected_paths();
+        assert!(paths.iter().all(|p| p.is_absolute()), "{paths:?}");
+        assert!(paths.iter().any(|p| p.ends_with("Library/Application Support/com.apple.TCC/TCC.db")));
     }
 
     #[test]
