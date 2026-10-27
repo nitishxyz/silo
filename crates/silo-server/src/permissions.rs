@@ -10,15 +10,12 @@
 //! cached in this one before the user changed it. The child calls the
 //! native checks ([`probe`]) and prints a [`ProbeReport`].
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
 use serde_json::Value;
 use silo_proto::{
     control::{Method, RpcError},
-    permissions::{AUTOMATION_URL, PermissionId, PermissionStatus, Permissions, ProbeReport, parse_probe},
+    permissions::{AUTOMATION_URL, PermissionId, PermissionStatus, Permissions, ProbeReport, parse_probe, server_bundle},
 };
 
 use crate::Server;
@@ -82,17 +79,6 @@ async fn status() -> Result<Permissions, RpcError> {
         bundle_name: silo_proto::CHANNEL.server_name().into(),
         automation_url: AUTOMATION_URL.into(),
     })
-}
-
-/// The app bundle `exe` runs from (`…/Silo Server.app/Contents/MacOS/silo`
-/// → `…/Silo Server.app`), if it is one.
-#[must_use]
-pub fn server_bundle(exe: &Path) -> Option<PathBuf> {
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    let bundle = contents.parent()?;
-    let ok = macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && bundle.extension().is_some_and(|e| e == "app");
-    ok.then(|| bundle.to_owned())
 }
 
 /// The args of a probe child: [`PROBE_ARGS`], then `--request <id>`.
@@ -255,17 +241,6 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_bundle_is_three_levels_up_from_its_executable() {
-        let exe = Path::new("/h/Library/Application Support/silo/runtime/Silo Server.app/Contents/MacOS/silo");
-        assert_eq!(server_bundle(exe), Some(PathBuf::from("/h/Library/Application Support/silo/runtime/Silo Server.app")));
-        let helper = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
-        assert_eq!(server_bundle(helper), Some(PathBuf::from("/Applications/Silo.app/Contents/Helpers/Silo Server.app")));
-        assert_eq!(server_bundle(Path::new("/usr/local/bin/silo")), None);
-        assert_eq!(server_bundle(Path::new("/x/Silo Server/Contents/MacOS/silo")), None, "not an .app");
-        assert_eq!(server_bundle(Path::new("silo")), None);
-    }
 
     #[test]
     fn probe_children_get_the_probe_words() {

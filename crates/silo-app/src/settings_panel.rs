@@ -13,6 +13,7 @@ pub use crate::hosts::Density;
 pub use crate::terminal_prefs::ColorSlot;
 use crate::theme::Continuous as _;
 pub use silo_proto::model::CursorShape;
+use silo_proto::permissions::{PermissionId, PermissionStatus, Permissions};
 
 type TriggerBounds = std::rc::Rc<std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>)>>>;
 
@@ -292,6 +293,11 @@ pub struct SettingsSnapshot {
     pub hosts: Vec<SettingsHost>,
     pub shortcuts: Vec<SettingsShortcut>,
     pub server: SettingsServer,
+    /// The window shows this Mac's host: the Permissions page is for it.
+    pub local_host: bool,
+    /// Silo Server's macOS privacy permissions (`permissions.status`),
+    /// or why they can't be read; `None` until first read.
+    pub permissions: Option<Result<Permissions, String>>,
     pub version: String,
     /// Short form shown in the row; `revision_full` is copied.
     pub revision: String,
@@ -321,6 +327,8 @@ impl Default for SettingsSnapshot {
             hosts: Vec::new(),
             shortcuts: Vec::new(),
             server: SettingsServer::default(),
+            local_host: true,
+            permissions: None,
             version: env!("CARGO_PKG_VERSION").into(),
             revision: "Not supplied".into(),
             revision_full: "Not supplied".into(),
@@ -384,6 +392,12 @@ pub enum SettingsEvent {
     /// `pair.create`: show a new pairing ticket.
     PairDevice,
     RevokeDevice(String),
+    /// Re-read the permissions (their page was shown).
+    RefreshPermissions,
+    /// Help grant one: the permission helper (`permissions.rs`).
+    GrantPermission(PermissionId),
+    /// System Settings › Privacy & Security › Automation.
+    OpenAutomationSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -395,6 +409,7 @@ pub(crate) enum Section {
     Browser,
     Hosts,
     Server,
+    Permissions,
     About,
 }
 
@@ -447,15 +462,29 @@ fn sidebar_rows(shown: impl Fn(Section) -> bool) -> Vec<SidebarRow> {
 }
 
 impl Section {
-    const ALL: [Self; 8] =
-        [Self::Appearance, Self::Keyboard, Self::Notifications, Self::Terminal, Self::Browser, Self::Hosts, Self::Server, Self::About];
+    const ALL: [Self; 9] = [
+        Self::Appearance,
+        Self::Keyboard,
+        Self::Notifications,
+        Self::Terminal,
+        Self::Browser,
+        Self::Hosts,
+        Self::Server,
+        Self::Permissions,
+        Self::About,
+    ];
+
+    /// The page labelled `name` (any case).
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(name.trim()))
+    }
 
     pub(crate) fn group(self) -> Group {
         match self {
             Self::Appearance | Self::Keyboard | Self::Notifications => Group::General,
             Self::Terminal => Group::Terminal,
             Self::Browser => Group::Browser,
-            Self::Hosts | Self::Server => Group::Connections,
+            Self::Hosts | Self::Server | Self::Permissions => Group::Connections,
             Self::About => Group::About,
         }
     }
@@ -469,6 +498,7 @@ impl Section {
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
             Self::Server => "Server",
+            Self::Permissions => "Permissions",
             Self::About => "About",
         }
     }
@@ -482,6 +512,7 @@ impl Section {
             Self::Notifications => "settings-bell",
             Self::Hosts => "laptop",
             Self::Server => "settings-hard-drive",
+            Self::Permissions => "lock",
             Self::About => "settings-info",
         }
     }
@@ -496,6 +527,7 @@ impl Section {
             Self::Notifications => 0x00ef_4444,
             Self::Hosts => 0x000e_a5e9,
             Self::Server => 0x00f5_9e0b,
+            Self::Permissions => 0x0064_748b,
             Self::About => 0x0000_78d4,
         }
     }
@@ -510,6 +542,9 @@ impl Section {
             Self::Notifications => "alerts banners dock badge needs you done error",
             Self::Hosts => "remote local address add remove iroh notifications notify",
             Self::Server => "daemon status version log start stop restart sessions",
+            Self::Permissions => {
+                "privacy security macos system settings grant tcc screen recording capture accessibility full disk access files input monitoring keyboard automation silo server"
+            }
             Self::About => "silo version revision build libghostty",
         };
         format!("{own} {}", crate::settings_table::section_keywords(self))
@@ -737,6 +772,18 @@ impl SettingsPanel {
         self.selected == Section::Server || (!self.query.is_empty() && self.matches(Section::Server))
     }
 
+    /// Whether the Permissions page is on screen.
+    #[must_use]
+    pub fn showing_permissions(&self) -> bool {
+        self.shown(Section::Permissions) && (self.selected == Section::Permissions || (!self.query.is_empty() && self.matches(Section::Permissions)))
+    }
+
+    /// Whether `section` is in the sidebar: Permissions only for this Mac
+    /// (its own server's permissions), on macOS.
+    fn shown(&self, section: Section) -> bool {
+        section != Section::Permissions || (cfg!(target_os = "macos") && self.snapshot.local_host)
+    }
+
     pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.search.read(cx).focus.clone();
         focus.focus(window, cx);
@@ -789,6 +836,9 @@ impl SettingsPanel {
         self.query.clear();
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.search.update(cx, |field, cx| field.replace_text("", cx));
+        if section == Section::Permissions {
+            cx.emit(SettingsEvent::RefreshPermissions);
+        }
         cx.notify();
     }
 
@@ -802,7 +852,7 @@ impl SettingsPanel {
     }
 
     fn matches(&self, section: Section) -> bool {
-        section_matches(section, &self.snapshot, &self.words().collect::<Vec<_>>())
+        self.shown(section) && section_matches(section, &self.snapshot, &self.words().collect::<Vec<_>>())
     }
 
     // ---- building blocks ----
@@ -1921,6 +1971,7 @@ impl SettingsPanel {
                     out.push(self.devices_group(narrow, cx));
                 }
             }
+            Section::Permissions => out.extend(self.permissions_page(narrow, cx)),
             Section::About => {
                 out.push(self.group(
                     None,
@@ -2017,6 +2068,58 @@ impl SettingsPanel {
         out
     }
 
+    /// Settings › Permissions: each macOS privacy permission Silo Server
+    /// holds (what programs in Silo terminals get) with Grant, and
+    /// Automation's page.
+    fn permissions_page(&self, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        let (list, problem) = match &self.snapshot.permissions {
+            Some(Ok(list)) => (Some(list), None),
+            Some(Err(problem)) => (None, Some(problem.clone())),
+            None => (None, None),
+        };
+        let mut rows = Vec::new();
+        for (index, id) in PermissionId::ALL.into_iter().enumerate() {
+            let status = list.and_then(|l| l.get(id)).map(|p| p.status);
+            let label = match (status, &problem) {
+                (Some(PermissionStatus::Granted), _) => "Granted",
+                (Some(PermissionStatus::Denied), _) => "Not granted",
+                (Some(PermissionStatus::Unknown), _) => "Unknown",
+                (None, Some(_)) => "Unknown",
+                (None, None) => "Checking…",
+            };
+            let granted = status.is_some_and(PermissionStatus::granted);
+            let control = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().text_size(px(12.0)).text_color(rgb(if granted { theme::success() } else { theme::muted() })).child(label));
+            let control = if granted {
+                control
+            } else {
+                control.child(Self::emit_button(("settings-permission-grant", index), "Grant", SettingsEvent::GrantPermission(id), cx))
+            };
+            rows.push(Self::row(id.title(), Some(id.reason().into()), Some(control.into_any_element()), narrow));
+        }
+        out.push(self.group(Some("Silo Server"), rows));
+        out.push(self.group(
+            None,
+            vec![Self::row(
+                "Automation",
+                Some("macOS asks the first time a program controls another app".into()),
+                Some(Self::emit_button("settings-permission-automation", "Open Settings", SettingsEvent::OpenAutomationSettings, cx)),
+                narrow,
+            )],
+        ));
+        if let Some(problem) = problem {
+            out.push(div().px(px(4.0)).text_size(px(11.5)).text_color(rgb(theme::warning())).child(problem).into_any_element());
+        }
+        out.push(Self::note(
+            "Programs in Silo terminals get what Silo Server is granted. Programs already running may need restarting once granted.",
+        ));
+        out
+    }
+
     /// A host row's notification switch.
     fn host_notify(&self, index: usize, host: &SettingsHost, cx: &mut Context<Self>) -> AnyElement {
         let panel = cx.entity().downgrade();
@@ -2079,7 +2182,7 @@ impl SettingsPanel {
     fn sidebar(&self, width: f32, searching: bool, cx: &mut Context<Self>) -> AnyElement {
         // Rounded like the card on its outer side; see `render`.
         let mut items = div().id("settings-sidebar-items").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb(px(8.0));
-        for row in sidebar_rows(|section| !searching || self.matches(section)) {
+        for row in sidebar_rows(|section| self.shown(section) && (!searching || self.matches(section))) {
             let section = match row {
                 SidebarRow::Label(group) => {
                     items = items.child(
@@ -2214,8 +2317,10 @@ impl Render for SettingsPanel {
         let narrow = panel_width - sidebar_width < 480.0;
         let searching = !self.query.is_empty();
 
-        let sections: Vec<_> =
-            Section::ALL.into_iter().filter(|section| if searching { self.matches(*section) } else { *section == self.selected }).collect();
+        let sections: Vec<_> = Section::ALL
+            .into_iter()
+            .filter(|section| if searching { self.matches(*section) } else { *section == self.selected && self.shown(*section) })
+            .collect();
         let mut content =
             div().w_full().max_w(px(620.0)).relative().flex().flex_col().gap(px(14.0)).pb(px(28.0)).child(self.places.probe((None, "")));
         if let Some(message) = self.snapshot.message.clone() {
@@ -2402,7 +2507,7 @@ mod tests {
 
     #[test]
     fn sidebar_sections_have_search_terms_and_icons() {
-        assert_eq!(Section::ALL.len(), 8);
+        assert_eq!(Section::ALL.len(), 9);
         assert_eq!(Section::ALL[0], Section::Appearance, "Settings opens on Appearance");
         assert!(!Section::ALL.iter().any(|s| s.label() == "General"));
         assert!(!Section::ALL.iter().any(|s| ["Agents", "Models"].contains(&s.label())), "otto's settings are in the agent pane");
@@ -2416,11 +2521,11 @@ mod tests {
     #[test]
     fn sections_are_grouped_by_what_they_set_with_about_last() {
         use Section as S;
-        let order = [S::Appearance, S::Keyboard, S::Notifications, S::Terminal, S::Browser, S::Hosts, S::Server, S::About];
+        let order = [S::Appearance, S::Keyboard, S::Notifications, S::Terminal, S::Browser, S::Hosts, S::Server, S::Permissions, S::About];
         assert_eq!(Section::ALL, order);
         let groups: Vec<Group> = Section::ALL.iter().map(|s| s.group()).collect();
         use Group as G;
-        assert_eq!(groups, [G::General, G::General, G::General, G::Terminal, G::Browser, G::Connections, G::Connections, G::About]);
+        assert_eq!(groups, [G::General, G::General, G::General, G::Terminal, G::Browser, G::Connections, G::Connections, G::Connections, G::About]);
         // Each group's pages are together, so each label shows once.
         let mut seen: Vec<Group> = Vec::new();
         for g in groups {
@@ -2450,6 +2555,18 @@ mod tests {
         assert_eq!(shown, [Label(Group::General), P(Section::Keyboard), Label(Group::Browser), P(Section::Browser)]);
         assert!(sidebar_rows(|_| false).is_empty());
         assert!(section_matches(Section::Browser, &snapshot, &["browser"]));
+    }
+
+    #[test]
+    fn permissions_have_a_page_found_by_their_names() {
+        let snapshot = SettingsSnapshot::default();
+        for words in [&["screen", "recording"][..], &["full", "disk"], &["accessibility"], &["input", "monitoring"], &["automation"], &["privacy"]] {
+            let shown: Vec<Section> = Section::ALL.into_iter().filter(|s| section_matches(*s, &snapshot, words)).collect();
+            assert!(shown.contains(&Section::Permissions), "{words:?}: {shown:?}");
+        }
+        assert_eq!(Section::named("permissions"), Some(Section::Permissions));
+        assert_eq!(Section::named("Server"), Some(Section::Server));
+        assert_eq!(Section::named("nope"), None);
     }
 
     #[test]

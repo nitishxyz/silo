@@ -54,6 +54,8 @@ pub struct SettingsModal {
     _sub: Subscription,
     /// Refreshes paired devices while the Server page is shown.
     _devices: gpui::Task<()>,
+    /// Refreshes the permissions while their page is shown.
+    _permissions: gpui::Task<()>,
 }
 
 /// After a pairing call: `None` leaves the panel as is, `Some(message)`
@@ -62,6 +64,9 @@ type Refresh = Option<Option<String>>;
 
 /// How often the paired devices list is re-read while visible.
 const DEVICES_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the permissions are re-read while visible (each a probe
+/// child of the server).
+const PERMISSIONS_REFRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Workspace {
     pub(crate) fn settings_snapshot(&self, message: Option<String>, cx: &gpui::App) -> SettingsSnapshot {
@@ -147,6 +152,8 @@ impl Workspace {
             hosts,
             shortcuts,
             server,
+            local_host: self.hosts.get(self.active_host).is_some_and(|h| h.info.local),
+            permissions: self.permissions.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             revision: format!("Ghostty {}", short(silo_vt::GHOSTTY_REV)),
             revision_full: silo_vt::GHOSTTY_REV.to_owned(),
@@ -188,6 +195,38 @@ impl Workspace {
                     return None;
                 }
                 this.pairing.devices = devices;
+                Some(None)
+            },
+            cx,
+        );
+    }
+
+    /// Re-read Silo Server's permissions (`permissions.status`).
+    pub(crate) fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        use silo_proto::{control::Method, permissions::Permissions};
+        if self.hosts.first().and_then(|h| h.control.as_ref()).is_none() {
+            let next = Some(Err("Silo Server is not running, so permissions can't be checked.".to_owned()));
+            if next != self.permissions {
+                self.permissions = next;
+                self.refresh_settings(None, cx);
+            }
+            return;
+        }
+        self.pairing_call(
+            Method::PermissionsStatus {},
+            |this, result: anyhow::Result<Permissions>| {
+                let next = Some(result.map_err(|error| {
+                    tracing::debug!("permissions.status: {error:#}");
+                    if error.downcast_ref::<silo_client::NotSupported>().is_some() {
+                        "This Silo Server can't check permissions; update it.".to_owned()
+                    } else {
+                        "Could not check permissions.".to_owned()
+                    }
+                }));
+                if next == this.permissions {
+                    return None;
+                }
+                this.permissions = next;
                 Some(None)
             },
             cx,
@@ -262,7 +301,20 @@ impl Workspace {
                     }
                 }
             });
-            self.settings = Some(SettingsModal { panel, _sub: sub, _devices: devices });
+            let permissions = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(PERMISSIONS_REFRESH).await;
+                    let alive = this.update(cx, |this, cx| {
+                        if this.settings.as_ref().is_some_and(|m| m.panel.read(cx).showing_permissions()) {
+                            this.refresh_permissions(cx);
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            });
+            self.settings = Some(SettingsModal { panel, _sub: sub, _devices: devices, _permissions: permissions });
         }
         if let Some(modal) = &self.settings {
             modal.panel.update(cx, |panel, cx| panel.focus_search(window, cx));
@@ -454,6 +506,18 @@ impl Workspace {
             }
             SettingsEvent::OpenNotificationSettings => {
                 crate::notifications::open_system_settings();
+                Outcome::default()
+            }
+            SettingsEvent::RefreshPermissions => {
+                self.refresh_permissions(cx);
+                return None;
+            }
+            SettingsEvent::GrantPermission(id) => {
+                crate::permissions::request(*id, cx);
+                Outcome::default()
+            }
+            SettingsEvent::OpenAutomationSettings => {
+                crate::permissions::open_automation_settings();
                 Outcome::default()
             }
             SettingsEvent::SetUiFontFamily(family) => {

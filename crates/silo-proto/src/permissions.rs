@@ -9,7 +9,10 @@
 //! dodges TCC's per-process caching. Local only: a remote or paired client
 //! never reads or asks for them ([`crate::access::Need::Local`]).
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -163,6 +166,17 @@ impl Permissions {
     }
 }
 
+/// The app bundle `exe` runs from (`…/Silo Server.app/Contents/MacOS/silo`
+/// → `…/Silo Server.app`), if it is one.
+#[must_use]
+pub fn server_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let ok = macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && bundle.extension().is_some_and(|e| e == "app");
+    ok.then(|| bundle.to_owned())
+}
+
 /// What `silo permissions probe` prints: each permission's status as seen
 /// from the probing process.
 pub type ProbeReport = BTreeMap<PermissionId, PermissionStatus>;
@@ -228,6 +242,17 @@ mod tests {
         // What a probe prints round-trips.
         let printed = serde_json::to_string(&report).unwrap();
         assert_eq!(parse_probe(&printed).unwrap(), report);
+    }
+
+    #[test]
+    fn the_bundle_is_three_levels_up_from_its_executable() {
+        let exe = Path::new("/h/Library/Application Support/silo/runtime/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(server_bundle(exe), Some(PathBuf::from("/h/Library/Application Support/silo/runtime/Silo Server.app")));
+        let helper = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(server_bundle(helper), Some(PathBuf::from("/Applications/Silo.app/Contents/Helpers/Silo Server.app")));
+        assert_eq!(server_bundle(Path::new("/usr/local/bin/silo")), None);
+        assert_eq!(server_bundle(Path::new("/x/Silo Server/Contents/MacOS/silo")), None, "not an .app");
+        assert_eq!(server_bundle(Path::new("silo")), None);
     }
 
     #[test]

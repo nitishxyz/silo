@@ -52,6 +52,7 @@ mod offers;
 mod palette;
 mod pane;
 mod pane_header;
+mod permissions;
 mod qr;
 mod radius;
 mod remote;
@@ -297,8 +298,9 @@ fn main() {
             },
             Menu { name: "Window".into(), items: vec![MenuItem::action("Cycle Through Windows", CycleWindows)], disabled: false },
         ]);
+        // The permission helper alone does not keep the app open.
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
+            if !cx.windows().iter().any(|w| w.downcast::<Workspace>().is_some()) {
                 cx.quit();
             }
         })
@@ -347,7 +349,8 @@ fn show_settings(cx: &mut App) {
 /// Open a window showing `session` (host index, session id), or this
 /// Mac's last session. Windows cascade 28 px from the active one.
 pub fn open_window(session: Option<(usize, String)>, cx: &mut App) -> anyhow::Result<WindowHandle<Workspace>> {
-    let current = cx.active_window().or_else(|| cx.windows().last().copied());
+    let silo = |w: &gpui::AnyWindowHandle| w.downcast::<Workspace>().is_some();
+    let current = cx.active_window().filter(silo).or_else(|| cx.windows().into_iter().rfind(silo));
     let bounds = match current.and_then(|w| w.update(cx, |_, window, _| window.bounds()).ok()) {
         Some(b) => Bounds { origin: b.origin + point(px(28.), px(28.)), size: b.size },
         None => Bounds::centered(None, size(px(1000.), px(680.)), cx),

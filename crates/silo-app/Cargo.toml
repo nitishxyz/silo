@@ -52,7 +52,10 @@ tree-sitter-yaml.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDictionary", "NSError"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSURL", "NSValue"] }
+# The permission helper (`permissions.rs`): its drag tile, window chrome,
+# System Settings and screens.
+objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSImageView", "NSPasteboard", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 silo-web.workspace = true
 raw-window-handle = "0.6"

@@ -206,6 +206,11 @@ impl HostsState {
         cx.global::<GlobalHosts>().0.clone()
     }
 
+    /// [`Self::global`], if installed (not in every test).
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalHosts>().map(|g| g.0.clone())
+    }
+
     pub fn app_state(&self) -> &AppState {
         &self.state
     }

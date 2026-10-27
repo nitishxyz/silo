@@ -210,8 +210,21 @@ impl Workspace {
             Method::AppSettingsOpen { section: None, .. } => self.open_settings(window, cx),
             Method::AppSettingsOpen { section: Some(section), .. } => {
                 let id = setting(&section).ok().or_else(|| SETTINGS.iter().find(|s| s.section.label().eq_ignore_ascii_case(&section)).map(|s| s.id));
-                let id = id.ok_or_else(|| RpcError::not_found(format!("settings section {section}")))?;
-                self.open_settings_at(id, window, cx);
+                match id {
+                    Some(id) => self.open_settings_at(id, window, cx),
+                    // A page without settings of its own (Permissions).
+                    None => {
+                        let page = crate::settings_panel::Section::named(&section)
+                            .ok_or_else(|| RpcError::not_found(format!("settings section {section}")))?;
+                        self.open_settings_section(page, window, cx);
+                    }
+                }
+            }
+            Method::AppPermissionsShow { id, .. } => {
+                if id == silo_proto::permissions::PermissionId::Unknown {
+                    return Err(RpcError::bad_request("unknown permission"));
+                }
+                cx.defer(move |cx| crate::permissions::show(id, cx));
             }
             Method::AppSettingsGet { id, .. } => {
                 let snapshot = self.settings_snapshot(None, cx);

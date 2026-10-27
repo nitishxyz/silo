@@ -103,6 +103,8 @@ pub struct Workspace {
     pub(crate) launcher: crate::launcher::Launcher,
     pub(crate) settings: Option<crate::settings::SettingsModal>,
     pub(crate) pairing: crate::settings::Pairing,
+    /// Silo Server's privacy permissions, for Settings › Permissions.
+    pub(crate) permissions: Option<Result<silo_proto::permissions::Permissions, String>>,
     /// Last fullscreen state the titlebar was laid out for.
     pub(crate) last_fullscreen: std::cell::Cell<Option<bool>>,
     /// The titlebar's horizontally scrolling tab strip.
@@ -279,6 +281,7 @@ impl Workspace {
             launcher: crate::launcher::Launcher::default(),
             settings: None,
             pairing: crate::settings::Pairing::default(),
+            permissions: None,
             last_fullscreen: std::cell::Cell::new(None),
             tab_scroll: gpui::ScrollHandle::new(),
             tab_room: std::rc::Rc::default(),
