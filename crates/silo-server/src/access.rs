@@ -133,6 +133,8 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
     }
     let (on, wanted, approval) = match need {
         Need::Open => return Ok(open),
+        Need::Local if *principal == Principal::Owner => return Ok(open),
+        Need::Local => return Err(RpcError::denied(format!("{} is only for this Mac's own user", name()))),
         Need::AppReply if role == ClientRole::App => return Ok(open),
         Need::AppReply => return Err(RpcError::forbidden(&name())),
         Need::Rights { on, rights, approval } => (on, rights, approval),
@@ -356,6 +358,30 @@ mod tests {
         assert_eq!(check(&interact, ClientRole::Cli, &ghost, &reg).unwrap_err().code, N);
         // Sessions may be named.
         assert!(check(&interact, ClientRole::Cli, &Method::SessionView { session_id: "s-name".into() }, &reg).is_ok());
+    }
+
+    /// macOS privacy permissions are this Mac's user's alone: never a
+    /// paired device (even with owner rights), a link or an agent token.
+    #[test]
+    fn permissions_are_local_only() {
+        use silo_proto::permissions::PermissionId;
+        let reg = registry();
+        let id = PermissionId::ScreenRecording;
+        let methods = [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id, client_id: None }];
+        let others = [
+            ("device", grant(Who::Device { id: "d".into() }, Scope::Server, Rights::Owner)),
+            ("link", link(Scope::Server, Rights::Owner)),
+            ("token", grant(Who::Secret { kind: SecretKind::Token, hash: "t".into() }, Scope::Server, Rights::Owner)),
+            ("offer", Principal::Offer { invite_id: "i".into() }),
+        ];
+        for method in &methods {
+            for role in [ClientRole::Cli, ClientRole::App] {
+                assert_eq!(check(&Principal::Owner, role, method, &reg), Ok(Gate { approval: false }), "{method:?}");
+                for (who, principal) in &others {
+                    assert!(check(principal, role, method, &reg).is_err(), "{method:?} as {who}");
+                }
+            }
+        }
     }
 
     #[test]

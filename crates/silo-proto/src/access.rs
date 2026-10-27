@@ -211,6 +211,10 @@ pub enum Need {
     Rights { on: Target, rights: Rights, approval: bool },
     /// Only the app client the request was forwarded to.
     AppReply,
+    /// Only the user on this machine: the unix socket without a token.
+    /// Never a remote or paired client, a share link or an agent token
+    /// (macOS privacy permissions of this Mac).
+    Local,
 }
 
 const fn rights(on: Target, rights: Rights) -> Need {
@@ -271,6 +275,7 @@ pub fn need(method: &Method) -> Need {
         | M::ApprovalAnswer { .. } => Need::Open,
         M::HostOffer { .. } => Need::Offer,
         M::AppReply { .. } => Need::AppReply,
+        M::PermissionsStatus {} | M::PermissionsRequest { .. } | M::AppPermissionsShow { .. } => Need::Local,
 
         M::BlockView { .. }
         | M::TerminalCapture { .. }
@@ -365,6 +370,8 @@ pub enum AccessKind {
     Offer,
     Rights,
     AppReply,
+    /// Only the user on the server's machine (see [`Need::Local`]).
+    Local,
     #[serde(other)]
     Unknown,
 }
@@ -414,6 +421,7 @@ pub fn access(name: &str, method: &Method) -> Access {
         Need::Open => plain(AccessKind::Open),
         Need::Offer => plain(AccessKind::Offer),
         Need::AppReply => plain(AccessKind::AppReply),
+        Need::Local => plain(AccessKind::Local),
         Need::Rights { on, rights, approval } => {
             let (target, param) = on.describe();
             Access { kind: AccessKind::Rights, target: Some(target), param: param.map(str::to_owned), rights: Some(rights), approval, app }
@@ -456,6 +464,18 @@ mod tests {
             assert_eq!(need(&method), rights(Target::Block("block_id"), Rights::Interact), "{method:?}");
         }
         assert_eq!(need(&read), rights(Target::Block("block_id"), Rights::View));
+    }
+
+    #[test]
+    fn permissions_are_local_only() {
+        use crate::permissions::PermissionId;
+        let id = PermissionId::ScreenRecording;
+        for method in [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id, client_id: None }] {
+            assert_eq!(need(&method), Need::Local, "{method:?}");
+            let name = crate::api::method_name(&method);
+            assert_eq!(access(&name, &method).kind, AccessKind::Local, "{name}");
+        }
+        assert_eq!(serde_json::to_value(AccessKind::Local).unwrap(), "local");
     }
 
     #[test]

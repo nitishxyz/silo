@@ -20,6 +20,7 @@ pub mod handoff;
 pub mod layout_cmds;
 mod names;
 pub mod notify;
+pub mod permissions;
 pub mod persist;
 pub mod prompts;
 pub mod registry;

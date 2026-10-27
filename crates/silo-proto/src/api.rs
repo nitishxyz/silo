@@ -17,6 +17,7 @@ use crate::files::*;
 use crate::model::{
     Axis, BlockKind, ChangeMark, ChangesScope, ChangesState, FilesState, FloatRect, HistoryEntry, SessionSummary, SessionView, TermSize,
 };
+use crate::permissions::{PermissionId, PermissionInfo, Permissions};
 use crate::search::*;
 
 /// The description of method `name`; `None` for an unknown method.
@@ -192,6 +193,8 @@ fn result_schema(method: &Method) -> Schema {
         M::BrowserZoom { .. } | M::BrowserReport { .. } | M::AgentSet { .. } => schema_for!(Empty),
         M::HostOffer { .. } => schema_for!(Empty),
         M::ServiceSocket { .. } => schema_for!(ServiceSocket),
+        M::PermissionsStatus {} => schema_for!(Permissions),
+        M::PermissionsRequest { .. } => schema_for!(PermissionInfo),
         M::AppWindowNew { .. }
         | M::AppWindowCycle { .. }
         | M::AppSwitcher { .. }
@@ -220,7 +223,8 @@ fn result_schema(method: &Method) -> Schema {
         | M::AppJumpPrompt { .. }
         | M::AppSelectOutput { .. }
         | M::AppCopyOutput { .. }
-        | M::AppOpenShare { .. } => schema_for!(AppResult),
+        | M::AppOpenShare { .. }
+        | M::AppPermissionsShow { .. } => schema_for!(AppResult),
     }
 }
 
@@ -398,6 +402,8 @@ pub fn examples() -> Vec<Method> {
         M::GrantList {},
         M::GrantRevoke { id: "3f9a1c0d5e7b2a46".into() },
         M::ApprovalAnswer { id: "a1b2c3d4e5f60718".into(), allow: true },
+        M::PermissionsStatus {},
+        M::PermissionsRequest { id: PermissionId::ScreenRecording },
         M::AppReply { request_id: "r1b2c3d4e5f60718".into(), result: Some(json!({})), error: None },
         M::AppWindowNew { session_id: Some(s()), client_id: None },
         M::AppWindowCycle { client_id: None },
@@ -428,6 +434,7 @@ pub fn examples() -> Vec<Method> {
         M::AppSelectOutput { block_id: None, client_id: None },
         M::AppCopyOutput { block_id: None, client_id: None },
         M::AppOpenShare { link: "https://silo.example/#silos1aeaqcaibaeaq".into(), client_id: None },
+        M::AppPermissionsShow { id: PermissionId::Accessibility, client_id: None },
     ]
 }
 
@@ -550,6 +557,7 @@ mod tests {
                 Need::Open => assert_eq!(access.kind, AccessKind::Open, "{name}"),
                 Need::Offer => assert_eq!(access.kind, AccessKind::Offer, "{name}"),
                 Need::AppReply => assert_eq!(access.kind, AccessKind::AppReply, "{name}"),
+                Need::Local => assert_eq!(access.kind, AccessKind::Local, "{name}"),
                 Need::Rights { rights, approval, .. } => {
                     assert_eq!((access.kind, access.rights, access.approval), (AccessKind::Rights, Some(rights), approval), "{name}");
                     let target = access.target.unwrap_or_else(|| panic!("{name} has no target"));

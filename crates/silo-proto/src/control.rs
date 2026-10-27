@@ -9,6 +9,7 @@ use serde_json::Value;
 pub use crate::agent::*;
 pub use crate::changes::*;
 pub use crate::files::*;
+pub use crate::permissions::{PermissionId, PermissionInfo, PermissionStatus, Permissions};
 pub use crate::search::*;
 
 use crate::{
@@ -623,6 +624,18 @@ pub enum Method {
     #[serde(rename = "approval.answer")]
     ApprovalAnswer { id: String, allow: bool },
 
+    /// Local only: whether Silo Server holds each macOS privacy permission
+    /// (checked as the server), and the bundle to drag into System
+    /// Settings' lists.
+    #[serde(rename = "permissions.status")]
+    PermissionsStatus {},
+    /// Local only: help the user grant `id`. Screen Recording asks macOS
+    /// once (its own dialog); then the app shows its permission helper
+    /// (`app.permissions_show`). Fails with `no_app` when no Silo app is
+    /// connected; a granted permission returns at once.
+    #[serde(rename = "permissions.request")]
+    PermissionsRequest { id: PermissionId },
+
     /// An app's answer to an `app.request`.
     #[serde(rename = "app.reply")]
     AppReply {
@@ -814,6 +827,14 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
+    /// Local only: show the permission helper for `id` (a small floating
+    /// panel with Silo Server to drag into System Settings' list).
+    #[serde(rename = "app.permissions_show")]
+    AppPermissionsShow {
+        id: PermissionId,
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
 }
 
 /// Method names and one-line descriptions, for `api.list`.
@@ -923,6 +944,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("grant.list", "List grants (owner only)."),
     ("grant.revoke", "Remove a grant and close its connections (owner only)."),
     ("approval.answer", "Allow or deny a call waiting for approval."),
+    ("permissions.status", "Which macOS privacy permissions Silo Server holds, and the app to drag into System Settings (local only)."),
+    ("permissions.request", "Help grant a macOS privacy permission: ask macOS, then show the app's permission helper (local only)."),
     ("app.reply", "Answer an app.request (the app it went to only)."),
     ("app.window_new", "Open a new app window."),
     ("app.window_cycle", "Cycle through app windows."),
@@ -953,6 +976,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.select_output", "Select the last command's output."),
     ("app.copy_output", "Copy the last command's output."),
     ("app.open_share", "Open a shared link."),
+    ("app.permissions_show", "Show the permission helper for a macOS privacy permission (local only)."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

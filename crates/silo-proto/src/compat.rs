@@ -61,6 +61,10 @@ pub mod feature {
     /// §2). Older servers answer `method_not_found`; the app hides its
     /// Files and Grep categories there.
     pub const SEARCH: &str = "search";
+    /// `permissions.status`, `permissions.request` and the app's
+    /// `app.permissions_show` (macOS privacy permissions of Silo Server).
+    /// Older servers answer `method_not_found`.
+    pub const PERMISSIONS: &str = "permissions";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -79,6 +83,7 @@ pub const FEATURES: &[&str] = &[
     feature::FILES_WRITE,
     feature::CHANGES,
     feature::SEARCH,
+    feature::PERMISSIONS,
 ];
 
 /// Features this build's server supports that a client advertises only

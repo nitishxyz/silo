@@ -22,6 +22,7 @@ pub mod layout_ops;
 pub mod model;
 pub mod offer;
 pub mod paths;
+pub mod permissions;
 pub mod release;
 pub mod search;
 pub mod text;

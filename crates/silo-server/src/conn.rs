@@ -842,7 +842,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::AppJumpPrompt { .. }
         | Method::AppSelectOutput { .. }
         | Method::AppCopyOutput { .. }
-        | Method::AppOpenShare { .. } => crate::app_bridge::handle(server, client_id, method).await,
+        | Method::AppOpenShare { .. }
+        | Method::AppPermissionsShow { .. } => crate::app_bridge::handle(server, client_id, method).await,
+        Method::PermissionsStatus {} | Method::PermissionsRequest { .. } => crate::permissions::handle(server, client_id, method).await,
     }
 }
 

@@ -3,6 +3,7 @@
 mod attach;
 mod disclaim;
 mod generated;
+mod permissions;
 mod run;
 
 use std::{
@@ -23,6 +24,7 @@ use silo_proto::{
     control::{Capture, Created, InvitePurpose, Method, SpawnSpec},
     model::{BlockKind, SessionSummary, SessionView, TermSize},
     paths,
+    permissions::PermissionId,
 };
 
 #[derive(Parser)]
@@ -267,6 +269,16 @@ enum Command {
         #[command(subcommand)]
         command: ClipboardCommand,
     },
+    /// macOS privacy permissions of Silo Server (which programs in Silo
+    /// terminals get): Screen Recording, Accessibility, Full Disk Access,
+    /// Input Monitoring.
+    Permissions {
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        command: Option<PermissionsCommand>,
+    },
     /// Raw control API.
     Api {
         #[command(subcommand)]
@@ -287,6 +299,40 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+}
+
+#[derive(Subcommand)]
+enum PermissionsCommand {
+    /// Help grant a permission: macOS asks (Screen Recording), then Silo
+    /// shows Silo Server to drag into System Settings' list.
+    Request {
+        /// screen-recording, accessibility, full-disk-access or input-monitoring.
+        #[arg(value_parser = parse_permission)]
+        id: PermissionId,
+        /// Wait until it is granted.
+        #[arg(long)]
+        wait: bool,
+        /// How long `--wait` waits (`90s`, `10m`).
+        #[arg(long, value_parser = parse_duration, default_value = "5m", requires = "wait")]
+        timeout: Duration,
+    },
+    /// Open a permission's page in System Settings.
+    Open {
+        #[arg(value_parser = parse_permission)]
+        id: PermissionId,
+    },
+    /// Check every permission as this process (the server's child) and
+    /// print JSON; what the server runs.
+    #[command(hide = true)]
+    Probe {
+        /// Ask macOS first (Screen Recording shows its dialog).
+        #[arg(long, value_parser = parse_permission)]
+        request: Option<PermissionId>,
+    },
+}
+
+fn parse_permission(text: &str) -> Result<PermissionId, String> {
+    text.parse()
 }
 
 #[derive(Subcommand)]
@@ -595,6 +641,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Id
                 | Command::Hosts { .. }
                 | Command::Clipboard { .. }
+                | Command::Permissions { .. }
         )
     {
         bail!("--host is not supported for this command");
@@ -862,6 +909,19 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 out.flush()?;
             }
             Ok(0)
+        }
+        Command::Permissions { command: Some(PermissionsCommand::Probe { request }), .. } => {
+            silo_server::permissions::probe_main(request);
+            Ok(0)
+        }
+        Command::Permissions { command: Some(PermissionsCommand::Open { id }), .. } => permissions::open(id),
+        Command::Permissions { command: Some(PermissionsCommand::Request { id, wait, timeout }), .. } => {
+            let (control, _events, _net) = connect(None).await?;
+            permissions::request(&control, id, wait, timeout).await
+        }
+        Command::Permissions { json, command: None } => {
+            let (control, _events, _net) = connect(None).await?;
+            permissions::status(&control, json).await
         }
         Command::Api { command } => {
             let (control, _, _net) = connect(host).await?;
@@ -1579,6 +1639,39 @@ mod tests {
         let cli = Cli::parse_from(["silo", "server", "--relay", "https://relay.example.com"]);
         assert!(matches!(cli.command, Some(Command::Server { relay: RelayConfig::Custom(_), .. })));
         assert!(Cli::try_parse_from(["silo", "server", "--relay", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn permissions_commands_parse() {
+        let Some(Command::Permissions { json: false, command: None }) = Cli::parse_from(["silo", "permissions"]).command else { panic!() };
+        let Some(Command::Permissions { json: true, command: None }) = Cli::parse_from(["silo", "permissions", "--json"]).command else { panic!() };
+        let cli = Cli::parse_from(["silo", "permissions", "request", "screen-recording"]);
+        let Some(Command::Permissions { command: Some(PermissionsCommand::Request { id, wait, timeout }), .. }) = cli.command else { panic!() };
+        assert_eq!((id, wait, timeout), (PermissionId::ScreenRecording, false, Duration::from_secs(300)));
+        let cli = Cli::parse_from(["silo", "permissions", "request", "full_disk_access", "--wait", "--timeout", "30s"]);
+        let Some(Command::Permissions { command: Some(PermissionsCommand::Request { id, wait, timeout }), .. }) = cli.command else { panic!() };
+        assert_eq!((id, wait, timeout), (PermissionId::FullDiskAccess, true, Duration::from_secs(30)));
+        let cli = Cli::parse_from(["silo", "permissions", "open", "accessibility"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Permissions { command: Some(PermissionsCommand::Open { id: PermissionId::Accessibility }), .. })
+        ));
+        let cli = Cli::parse_from(["silo", "permissions", "probe", "--request", "screen-recording"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Permissions { command: Some(PermissionsCommand::Probe { request: Some(PermissionId::ScreenRecording) }), .. })
+        ));
+        // The words the server runs its probe child with.
+        let words = silo_server::permissions::probe_args(Some(PermissionId::ScreenRecording));
+        let cli = Cli::parse_from(std::iter::once("silo").chain(words.iter().map(String::as_str)));
+        assert!(matches!(cli.command, Some(Command::Permissions { command: Some(PermissionsCommand::Probe { request: Some(_) }), .. })));
+        assert!(Cli::try_parse_from(["silo", "permissions", "request", "camera"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "permissions", "request", "accessibility", "--timeout", "1m"]).is_err(), "--timeout needs --wait");
+        assert!(Cli::try_parse_from(["silo", "permissions", "open"]).is_err());
+        // The probe is the server's child, charged to it: it never disclaims.
+        assert!(!disclaim::disclaims(&words));
+        let help = <Cli as clap::CommandFactory>::command().find_subcommand("permissions").unwrap().clone().render_long_help().to_string();
+        assert!(!help.lines().any(|l| l.trim_start().starts_with("probe")), "{help}");
     }
 
     #[test]

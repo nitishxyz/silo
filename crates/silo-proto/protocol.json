@@ -2895,14 +2895,22 @@
             "type": "object"
           },
           "AccessKind": {
-            "enum": [
-              "open",
-              "offer",
-              "rights",
-              "app_reply",
-              "unknown"
-            ],
-            "type": "string"
+            "oneOf": [
+              {
+                "enum": [
+                  "open",
+                  "offer",
+                  "rights",
+                  "app_reply",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "local",
+                "type": "string"
+              }
+            ]
           },
           "Rights": {
             "oneOf": [
@@ -3442,6 +3450,54 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
+    "app.permissions_show": {
+      "params": {
+        "$defs": {
+          "PermissionId": {
+            "oneOf": [
+              {
+                "enum": [
+                  "screen_recording",
+                  "accessibility",
+                  "full_disk_access",
+                  "input_monitoring"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/PermissionId"
+          }
+        },
+        "required": [
+          "id"
+        ],
         "type": "object"
       },
       "result": {
@@ -10744,6 +10800,200 @@
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Empty",
+        "type": "object"
+      }
+    },
+    "permissions.request": {
+      "params": {
+        "$defs": {
+          "PermissionId": {
+            "oneOf": [
+              {
+                "enum": [
+                  "screen_recording",
+                  "accessibility",
+                  "full_disk_access",
+                  "input_monitoring"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PermissionId"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "PermissionId": {
+            "oneOf": [
+              {
+                "enum": [
+                  "screen_recording",
+                  "accessibility",
+                  "full_disk_access",
+                  "input_monitoring"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
+          "PermissionStatus": {
+            "oneOf": [
+              {
+                "enum": [
+                  "granted",
+                  "denied"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PermissionId"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "settings_url": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/PermissionStatus"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "reason",
+          "settings_url",
+          "status"
+        ],
+        "title": "PermissionInfo",
+        "type": "object"
+      }
+    },
+    "permissions.status": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "PermissionId": {
+            "oneOf": [
+              {
+                "enum": [
+                  "screen_recording",
+                  "accessibility",
+                  "full_disk_access",
+                  "input_monitoring"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
+          "PermissionInfo": {
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PermissionId"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "settings_url": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/PermissionStatus"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "reason",
+              "settings_url",
+              "status"
+            ],
+            "type": "object"
+          },
+          "PermissionStatus": {
+            "oneOf": [
+              {
+                "enum": [
+                  "granted",
+                  "denied"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "automation_url": {
+            "default": "",
+            "type": "string"
+          },
+          "bundle_name": {
+            "type": "string"
+          },
+          "bundle_path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permissions": {
+            "items": {
+              "$ref": "#/$defs/PermissionInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "permissions",
+          "bundle_name"
+        ],
+        "title": "Permissions",
         "type": "object"
       }
     },
