@@ -2,7 +2,7 @@
 
 pub mod remote;
 
-use crate::{Caps, Effort, ModelInfo, Pricing};
+use crate::{Caps, Effort, ModelInfo, PriceTier, Pricing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -303,7 +303,14 @@ impl Catalog {
             .filter_map(|effort| serde_json::from_value(Value::String(effort)).ok())
             .collect();
         Some(CatalogEntry {
-            info: ModelInfo { id: id.into(), name: model.name.clone(), provider: provider.into(), caps, pricing: pricing(&effective["cost"]) },
+            info: ModelInfo {
+                id: id.into(),
+                name: model.name.clone(),
+                provider: provider.into(),
+                caps,
+                pricing: pricing(&effective["cost"]),
+                list_pricing: list_pricing.clone(),
+            },
             auth,
             deprecated: status.as_deref() == Some("deprecated"),
             status,
@@ -315,6 +322,30 @@ impl Catalog {
             list_pricing,
             raw,
         })
+    }
+
+    /// The list (API) price of `provider`'s model `id`, any sign-in: its own entry's, else
+    /// the longest catalog id it extends (`claude-x-4-5-20260101` → `claude-x-4-5`); `None`
+    /// when the catalog has neither or lists no price.
+    #[must_use]
+    pub fn list_pricing(&self, provider: &str, id: &str) -> Option<Pricing> {
+        let models = &self.providers.get(provider)?.models;
+        let model = models.get(id).or_else(|| {
+            models
+                .iter()
+                .filter(|(k, _)| id.strip_prefix(k.as_str()).is_some_and(|rest| rest.starts_with('-')))
+                .max_by_key(|(k, _)| k.len())
+                .map(|(_, m)| m)
+        })?;
+        pricing(model.extra.get("cost")?)
+    }
+
+    /// The catalog prices are read from: the one [`install`]ed (otto's own, with the user's
+    /// refreshed cache), else the bundled [`Catalog::global`].
+    #[must_use]
+    pub fn current() -> std::sync::Arc<Self> {
+        static BUNDLED: LazyLock<std::sync::Arc<Catalog>> = LazyLock::new(|| std::sync::Arc::new(Catalog::global().clone()));
+        INSTALLED.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| BUNDLED.clone())
     }
 
     #[must_use]
@@ -357,16 +388,32 @@ impl Catalog {
             return None;
         }
         let mut info = template.map_or_else(
-            || ModelInfo { id: id.into(), name: id.into(), provider: provider.into(), caps: Caps::default(), pricing: None },
+            || ModelInfo { id: id.into(), name: id.into(), provider: provider.into(), caps: Caps::default(), pricing: None, list_pricing: None },
             |entry| entry.info.clone(),
         );
         info.id = id.into();
         info.name = id.into();
+        // A list price is a fact, not an estimate: a dated snapshot's base model's, else none.
+        info.list_pricing = self.list_pricing(provider, id);
         if provider == "openai" {
             openai_caps(&mut info.caps, id, mode);
         }
         Some(info)
     }
+}
+
+static INSTALLED: std::sync::RwLock<Option<std::sync::Arc<Catalog>>> = std::sync::RwLock::new(None);
+
+/// Make `catalog` the one [`Catalog::current`] answers (prices at read time): the
+/// providers' catalog, loaded with the state dir's cache, at start and after a refresh.
+pub fn install(catalog: Catalog) {
+    *INSTALLED.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::sync::Arc::new(catalog));
+}
+
+/// The list (API) price of `provider`'s `model` from [`Catalog::current`].
+#[must_use]
+pub fn list_pricing(provider: &str, model: &str) -> Option<Pricing> {
+    Catalog::current().list_pricing(provider, model)
 }
 
 /// Provider-level capabilities before the per-model fields.
@@ -425,13 +472,39 @@ fn text(value: &Value) -> Option<String> {
 fn strings(value: &Value) -> Vec<String> {
     value.as_array().into_iter().flatten().filter_map(text).collect()
 }
+/// A models.dev `cost`: the base prices and the long-context tiers, from `tiers`
+/// (`{"tier": {"type": "context", "size": n}, …}`), else the older `context_over_200k`
+/// (a tier above 200,000); a price a tier omits is the base's.
 fn pricing(value: &Value) -> Option<Pricing> {
-    Some(Pricing {
+    let mut base = Pricing {
         input: value.get("input")?.as_f64()?,
         output: value.get("output")?.as_f64()?,
         cache_read: value["cache_read"].as_f64().unwrap_or_default(),
         cache_write: value["cache_write"].as_f64().unwrap_or_default(),
-    })
+        tiers: Vec::new(),
+    };
+    let tier = |above: u64, t: &Value| PriceTier {
+        above_prompt_tokens: above,
+        input: t["input"].as_f64().unwrap_or(base.input),
+        output: t["output"].as_f64().unwrap_or(base.output),
+        cache_read: t["cache_read"].as_f64().unwrap_or(base.cache_read),
+        cache_write: t["cache_write"].as_f64().unwrap_or(base.cache_write),
+    };
+    let mut tiers: Vec<PriceTier> = value["tiers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["tier"]["type"] == "context")
+        .filter_map(|t| Some(tier(t["tier"]["size"].as_u64()?, t)))
+        .collect();
+    // `tiers` supersedes the older field, which some feeds keep beside it at another threshold.
+    if tiers.is_empty() && value["context_over_200k"].is_object() {
+        tiers.push(tier(200_000, &value["context_over_200k"]));
+    }
+    tiers.sort_by_key(|t| t.above_prompt_tokens);
+    tiers.dedup_by_key(|t| t.above_prompt_tokens);
+    base.tiers = tiers;
+    Some(base)
 }
 fn merge(target: &mut Value, source: &Value) {
     if let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) {

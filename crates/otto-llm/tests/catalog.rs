@@ -262,3 +262,73 @@ fn capabilities_and_efforts_come_from_source() {
     assert!(!nonreasoning.info.caps.reasoning);
     assert!(!nonreasoning.info.caps.reasoning_replay);
 }
+
+fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> otto_llm::Usage {
+    otto_llm::Usage { input, output, cache_read, cache_write, reasoning: 0 }
+}
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-9
+}
+
+#[test]
+fn tiered_list_prices_price_the_whole_request_by_its_prompt() {
+    let dir = TempDir::new();
+    let mut feed = snapshot();
+    // Terra-like: `tiers` at 272k, and a stale `context_over_200k` beside it that `tiers` supersedes.
+    let terra = json!({"input": 1, "output": 5, "cache_read": 0.05, "cache_write": 1.25,
+        "context_over_200k": {"input": 2, "output": 7.5, "cache_read": 0.1, "cache_write": 2.5},
+        "tiers": [{"input": 2, "output": 7.5, "cache_read": 0.1, "cache_write": 2.5, "tier": {"size": 272_000, "type": "context"}}]});
+    let mut model = feed["openai"]["models"]["gpt-5.5"].clone();
+    model["id"] = json!("gpt-terra");
+    model["cost"] = terra;
+    feed["openai"]["models"]["gpt-terra"] = model;
+    // Claude-like: only the older `context_over_200k`; a tier omitting a price keeps the base's.
+    let mut model = feed["anthropic"]["models"]["claude-sonnet-5-5"].clone();
+    model["id"] = json!("claude-long");
+    model["cost"] = json!({"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75,
+        "context_over_200k": {"input": 6, "output": 22.5, "cache_read": 0.6}});
+    feed["anthropic"]["models"]["claude-long"] = model;
+    dir.cache(feed, now());
+    let catalog = Catalog::load(Some(&dir.0));
+
+    let terra = catalog.list_pricing("openai", "gpt-terra").unwrap();
+    assert_eq!(terra.tiers.len(), 1, "the stale field adds no tier");
+    assert_eq!(terra.tiers[0].above_prompt_tokens, 272_000);
+    // 250k prompt: base prices (above the old 200k mark, below the tier).
+    assert!(close(terra.cost(&usage(50_000, 10_000, 200_000, 0)), (50_000.0 * 1.0 + 10_000.0 * 5.0 + 200_000.0 * 0.05) / 1e6));
+    // Exactly at the threshold: still base. One token over: all of it, output too, at the tier.
+    assert!(close(terra.cost(&usage(272_000, 0, 0, 0)), 0.272));
+    assert!(close(terra.cost(&usage(72_001, 1_000, 200_000, 0)), (72_001.0 * 2.0 + 1_000.0 * 7.5 + 200_000.0 * 0.1) / 1e6));
+
+    let claude = catalog.list_pricing("anthropic", "claude-long").unwrap();
+    assert_eq!(claude.tiers.len(), 1);
+    let tier = &claude.tiers[0];
+    assert_eq!((tier.above_prompt_tokens, tier.input, tier.output, tier.cache_read, tier.cache_write), (200_000, 6.0, 22.5, 0.6, 3.75));
+    assert!(close(claude.cost(&usage(1_000, 1_000, 100_000, 10_000)), (1_000.0 * 3.0 + 1_000.0 * 15.0 + 100_000.0 * 0.3 + 10_000.0 * 3.75) / 1e6));
+    // The prompt counts cached and written tokens: 150k read + 60k written + 1k is above 200k.
+    assert!(close(claude.cost(&usage(1_000, 1_000, 150_000, 60_000)), (1_000.0 * 6.0 + 1_000.0 * 22.5 + 150_000.0 * 0.6 + 60_000.0 * 3.75) / 1e6));
+    // A dated snapshot takes its base model's price; an unknown model has none.
+    assert_eq!(catalog.list_pricing("anthropic", "claude-long-20270101"), Some(claude));
+    assert_eq!(catalog.list_pricing("anthropic", "claude-nothing"), None);
+    assert_eq!(catalog.list_pricing("ollama", "llama"), None);
+}
+
+#[test]
+fn subscriptions_bill_nothing_but_keep_the_list_price() {
+    let catalog = Catalog::global();
+    let sub = catalog.info("openai", "gpt-6.1-sol", Some(AuthMode::Subscription)).unwrap();
+    let api = catalog.info("openai", "gpt-6.1-sol", Some(AuthMode::ApiKey)).unwrap();
+    let tokens = usage(10_000, 2_000, 50_000, 0);
+    assert_eq!(sub.pricing.unwrap().cost(&tokens), 0.0);
+    let list = sub.list_pricing.clone().unwrap();
+    assert!(list.cost(&tokens) > 0.0);
+    assert_eq!(Some(list), api.list_pricing);
+    assert_eq!(api.pricing, api.list_pricing, "an API key is billed the list price");
+    assert_eq!(catalog.list_pricing("openai", "gpt-6.1-sol"), api.list_pricing);
+    // A tier in the bundled feed (Haiku's above 100k) is parsed.
+    let haiku = catalog.list_pricing("anthropic", "claude-haiku-5-5").unwrap();
+    assert_eq!(haiku.tiers.iter().map(|t| t.above_prompt_tokens).collect::<Vec<_>>(), [100_000]);
+    // An unknown id priced from a template is an estimate; its list price is only a snapshot's base's.
+    let fallback = catalog.info_or_fallback("openai", "gpt-unknown-thing", Some(AuthMode::ApiKey)).unwrap();
+    assert_eq!(fallback.list_pricing, None);
+}

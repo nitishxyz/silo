@@ -12,7 +12,7 @@ use std::time::Duration;
 const TEXT: &str = include_str!("fixtures/openai/text.sse");
 
 fn info(id: &str) -> ModelInfo {
-    ModelInfo { id: id.into(), provider: "xai".into(), name: id.into(), caps: Caps::default(), pricing: None }
+    ModelInfo { id: id.into(), provider: "xai".into(), name: id.into(), caps: Caps::default(), pricing: None, list_pricing: None }
 }
 fn signed_in() -> CredentialSource {
     CredentialSource::Static(Credential::OAuth {

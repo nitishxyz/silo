@@ -373,13 +373,7 @@ async fn settle(
         }
     }
     cx.item(persisted, turn, step).await?;
-    let cost = live.model.info().pricing.as_ref().map(|p| {
-        (usage.input as f64 * p.input
-            + usage.output as f64 * p.output
-            + usage.cache_read as f64 * p.cache_read
-            + usage.cache_write as f64 * p.cache_write)
-            / 1_000_000.0
-    });
+    let cost = live.model.info().pricing.as_ref().map(|p| p.cost(usage));
     cx.emit(
         Event::Usage {
             turn,

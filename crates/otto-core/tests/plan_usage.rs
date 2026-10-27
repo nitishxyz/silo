@@ -47,7 +47,14 @@ fn config(dir: &Path, scripts: Vec<Vec<StreamEvent>>) -> RuntimeConfig {
 }
 fn polled_config(dir: &Path, scripts: Vec<Vec<StreamEvent>>, polled: Vec<PlanUsage>) -> RuntimeConfig {
     let model = Arc::new(Scripted {
-        info: ModelInfo { id: "test".into(), provider: "anthropic".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+        info: ModelInfo {
+            id: "test".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            caps: Caps::default(),
+            pricing: None,
+            list_pricing: None,
+        },
         scripts: Mutex::new(scripts.into()),
         polled: Mutex::new(polled.into()),
     });

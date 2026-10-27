@@ -37,7 +37,7 @@ pub use event::EventStream;
 pub use event::{FinishReason, StreamEvent, Usage};
 #[cfg(feature = "client")]
 pub use model::{CallCx, Model, ModelSession, RetryHook};
-pub use model::{Caps, ModelInfo, Pricing, RetryNotice, ToolFamily};
+pub use model::{Caps, ModelInfo, PriceTier, Pricing, RetryNotice, ToolFamily};
 pub use plan_usage::{PlanUsage, PlanWindow};
 #[cfg(feature = "client")]
 pub use providers::Providers;

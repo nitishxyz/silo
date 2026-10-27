@@ -7851,6 +7851,16 @@
               "id": {
                 "type": "string"
               },
+              "list_pricing": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pricing"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "name": {
                 "default": "",
                 "type": "string"
@@ -7877,6 +7887,39 @@
             ],
             "type": "object"
           },
+          "PriceTier": {
+            "properties": {
+              "above_prompt_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cache_read": {
+                "default": 0.0,
+                "format": "double",
+                "type": "number"
+              },
+              "cache_write": {
+                "default": 0.0,
+                "format": "double",
+                "type": "number"
+              },
+              "input": {
+                "format": "double",
+                "type": "number"
+              },
+              "output": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "above_prompt_tokens",
+              "input",
+              "output"
+            ],
+            "type": "object"
+          },
           "Pricing": {
             "properties": {
               "cache_read": {
@@ -7896,6 +7939,12 @@
               "output": {
                 "format": "double",
                 "type": "number"
+              },
+              "tiers": {
+                "items": {
+                  "$ref": "#/$defs/PriceTier"
+                },
+                "type": "array"
               }
             },
             "required": [

@@ -56,7 +56,14 @@ impl ModelResolver for Resolver {
 /// One turn against `calls`; every event it journaled.
 async fn turn(dir: &Path, calls: Vec<Call>) -> Vec<Event> {
     let model = Arc::new(Flaky {
-        info: ModelInfo { id: "test".into(), provider: "anthropic".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+        info: ModelInfo {
+            id: "test".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            caps: Caps::default(),
+            pricing: None,
+            list_pricing: None,
+        },
         calls: Mutex::new(calls.into()),
     });
     let config = RuntimeConfig {

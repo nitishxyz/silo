@@ -93,8 +93,13 @@ pub struct ModelInfo {
     #[serde(default)]
     pub name: String,
     pub caps: Caps,
+    /// What a request is billed at: zero for a subscription (its plan covers it).
     #[serde(default)]
     pub pricing: Option<Pricing>,
+    /// The provider's list (API) price, whatever the sign-in: what the same tokens
+    /// would cost with an API key. `None` when unknown (local models, subscription-only lists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_pricing: Option<Pricing>,
 }
 
 /// USD per million tokens.
@@ -106,6 +111,46 @@ pub struct Pricing {
     pub cache_read: f64,
     #[serde(default)]
     pub cache_write: f64,
+    /// Long-context prices, by ascending threshold: a request whose prompt is above a
+    /// tier's `above_prompt_tokens` is priced at that tier, all of it (models.dev `tiers`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<PriceTier>,
+}
+
+/// A long-context price (USD per million tokens) for requests whose prompt
+/// (`input + cache_read + cache_write`) exceeds `above_prompt_tokens`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PriceTier {
+    pub above_prompt_tokens: u64,
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
+}
+
+impl Pricing {
+    /// The rates (input, output, cache read, cache write) a request with a prompt
+    /// of `prompt` tokens is priced at: the highest tier it is above, else the base.
+    #[must_use]
+    pub fn rates(&self, prompt: u64) -> [f64; 4] {
+        self.tiers
+            .iter()
+            .filter(|t| prompt > t.above_prompt_tokens)
+            .max_by_key(|t| t.above_prompt_tokens)
+            .map_or([self.input, self.output, self.cache_read, self.cache_write], |t| [t.input, t.output, t.cache_read, t.cache_write])
+    }
+
+    /// What one request's `usage` costs in USD. The tier is chosen by the request's own
+    /// prompt (`usage.total_input()`), and then prices every token of it, output included.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn cost(&self, usage: &crate::Usage) -> f64 {
+        let [input, output, cache_read, cache_write] = self.rates(usage.total_input());
+        (usage.input as f64 * input + usage.output as f64 * output + usage.cache_read as f64 * cache_read + usage.cache_write as f64 * cache_write)
+            / 1_000_000.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

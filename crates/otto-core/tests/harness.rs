@@ -19,7 +19,14 @@ struct Scripted {
 impl Scripted {
     fn new(scripts: Vec<Vec<StreamEvent>>) -> Arc<Self> {
         Arc::new(Self {
-            info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+            info: ModelInfo {
+                id: "test".into(),
+                provider: "test".into(),
+                name: "test".into(),
+                caps: Caps::default(),
+                pricing: None,
+                list_pricing: None,
+            },
             scripts: Mutex::new(scripts.into()),
             requests: Mutex::new(vec![]),
         })
@@ -745,7 +752,7 @@ async fn native_compaction_is_opt_in_and_replays_the_opaque_checkpoint() {
 
 fn with_caps(caps: Caps, scripts: Vec<Vec<StreamEvent>>) -> Arc<Scripted> {
     Arc::new(Scripted {
-        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps, pricing: None },
+        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps, pricing: None, list_pricing: None },
         scripts: Mutex::new(scripts.into()),
         requests: Mutex::new(vec![]),
     })

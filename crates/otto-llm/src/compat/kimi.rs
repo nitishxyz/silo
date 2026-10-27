@@ -46,6 +46,7 @@ impl RemoteModel {
                 ..super::base_caps(&DIALECT)
             },
             pricing: None,
+            list_pricing: None,
         }
     }
 }

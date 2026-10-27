@@ -256,6 +256,7 @@ async fn an_old_session_gets_its_context_from_its_last_step() {
             name: "test".into(),
             caps: Caps { context_window: 200_000, ..Caps::default() },
             pricing: None,
+            list_pricing: None,
         },
         scripts: Mutex::new(VecDeque::new()),
         requests: Mutex::new(vec![]),
@@ -765,7 +766,14 @@ struct ScriptedModel {
 impl ScriptedModel {
     fn new(scripts: Vec<Vec<StreamEvent>>) -> Arc<Self> {
         Arc::new(Self {
-            info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+            info: ModelInfo {
+                id: "test".into(),
+                provider: "test".into(),
+                name: "test".into(),
+                caps: Caps::default(),
+                pricing: None,
+                list_pricing: None,
+            },
             scripts: Mutex::new(scripts.into()),
             requests: Mutex::new(vec![]),
         })
@@ -980,7 +988,8 @@ impl ModelResolver for AnyResolver {
 }
 async fn steer_mid_stream(native: bool) -> (Arc<SteerModel>, Vec<Item>) {
     let (signal, inbox) = tokio::sync::mpsc::unbounded_channel();
-    let mut info = ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None };
+    let mut info =
+        ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None, list_pricing: None };
     info.caps.steering = native;
     let model = Arc::new(SteerModel {
         info,

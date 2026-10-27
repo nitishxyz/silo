@@ -90,7 +90,7 @@ pub async fn turn(state: &Path, cwd: &Path, steps: Vec<Vec<StreamEvent>>, defaul
     let mut scripts: VecDeque<_> = steps.into();
     scripts.push_back(text("done"));
     let model = Arc::new(Scripted {
-        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None, list_pricing: None },
         scripts: Mutex::new(scripts),
     });
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));

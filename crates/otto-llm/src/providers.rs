@@ -182,9 +182,11 @@ impl Providers {
     /// # Errors
     /// Returns an auth error if the credential store cannot be opened.
     pub fn new(auth_dir: PathBuf, state_dir: PathBuf) -> Result<Self, LlmError> {
+        let catalog = Catalog::load(Some(&state_dir));
+        crate::catalog::install(catalog.clone());
         Ok(Self {
             store: CredentialStore::open(auth_dir)?,
-            catalog: Arc::new(RwLock::new(Catalog::load(Some(&state_dir)))),
+            catalog: Arc::new(RwLock::new(catalog)),
             remote: RemoteStore::load(&state_dir),
             remote_fetch: Arc::new(fetch_remote),
             state_dir,
@@ -268,6 +270,7 @@ impl Providers {
             name: id.into(),
             caps: crate::catalog::base_caps(provider),
             pricing: None,
+            list_pricing: None,
         });
         if info.caps.context_window == 0 {
             info.caps.context_window = 32_768;
@@ -309,7 +312,9 @@ impl Providers {
         Catalog::refresh(HttpClient::new()?.client(), &self.state_dir)
             .await
             .map_err(|error| LlmError::new(ErrorClass::Other, format!("catalog refresh: {error}")))?;
-        *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = Catalog::load(Some(&self.state_dir));
+        let catalog = Catalog::load(Some(&self.state_dir));
+        crate::catalog::install(catalog.clone());
+        *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = catalog;
         Ok(true)
     }
 

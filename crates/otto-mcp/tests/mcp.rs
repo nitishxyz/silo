@@ -187,7 +187,7 @@ fn schema_problems(name: &str, schema: &serde_json::Value) -> Vec<String> {
 async fn mcp_tools_in_a_session_are_provider_safe_and_load_on_demand() {
     let dir = project(12);
     let model = Arc::new(Scripted {
-        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+        info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None, list_pricing: None },
         scripts: Mutex::new(
             vec![
                 vec![call("load", "load_tools", json!({"query":"echo"}))],

@@ -115,7 +115,14 @@ impl Fixture {
     async fn new(scripts: Vec<Vec<StreamEvent>>) -> Self {
         let dir = tempfile::Builder::new().prefix("otto-server-").tempdir_in("/tmp").unwrap();
         let model = Arc::new(ScriptedModel {
-            info: ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None },
+            info: ModelInfo {
+                id: "test".into(),
+                provider: "test".into(),
+                name: "test".into(),
+                caps: Caps::default(),
+                pricing: None,
+                list_pricing: None,
+            },
             scripts: StdMutex::new(scripts.into()),
         });
         let models: Arc<dyn ModelResolver> = Arc::new(Resolver(model));

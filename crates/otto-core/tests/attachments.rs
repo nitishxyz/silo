@@ -60,7 +60,8 @@ async fn setup(pdf: bool) -> (tempfile::TempDir, Runtime, SessionHandle, Arc<Scr
 }
 async fn setup_caps(vision: bool, pdf: bool) -> (tempfile::TempDir, Runtime, SessionHandle, Arc<Scripted>) {
     let dir = tempfile::tempdir().unwrap();
-    let mut info = ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None };
+    let mut info =
+        ModelInfo { id: "test".into(), provider: "test".into(), name: "test".into(), caps: Caps::default(), pricing: None, list_pricing: None };
     info.caps.vision = vision;
     info.caps.pdf = pdf;
     let model = Arc::new(Scripted { info, scripts: Mutex::new(VecDeque::new()), requests: Mutex::new(vec![]) });

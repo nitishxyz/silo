@@ -23,6 +23,7 @@ pub fn load() -> anyhow::Result<Option<Arc<ScriptModel>>> {
             provider: "test".into(),
             name: "Offline test script".into(),
             pricing: None,
+            list_pricing: None,
             caps: otto_llm::Caps { context_window: 128_000, max_output: 4096, ..Default::default() },
         },
     })))

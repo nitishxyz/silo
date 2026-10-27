@@ -36,6 +36,7 @@ pub fn info(model: &RemoteModel) -> ModelInfo {
             ..crate::Caps::default()
         },
         pricing: None,
+        list_pricing: None,
     }
 }
 

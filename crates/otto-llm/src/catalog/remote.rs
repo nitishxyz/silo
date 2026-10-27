@@ -60,6 +60,7 @@ impl RemoteModel {
                     ..base_caps(provider)
                 },
                 pricing: None,
+                list_pricing: None,
             },
         };
         CatalogEntry {
