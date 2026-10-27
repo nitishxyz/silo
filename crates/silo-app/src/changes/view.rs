@@ -893,6 +893,8 @@ impl ChangesPane {
             .flex()
             .flex_col()
             .border_l_1()
+            // Its top edge meets the block header: a rule there, as on its left.
+            .border_t_1()
             .border_color(rgb(theme::border()))
             .text_size(px(12.5))
             .children(head)

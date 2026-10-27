@@ -376,6 +376,8 @@ impl FilesPane {
             .w(px(width))
             .h_full()
             .border_l_1()
+            // Its top edge meets the block header: a rule there, as on its left.
+            .border_t_1()
             .border_color(rgb(theme::border()))
             .track_focus(&self.tree_focus)
             .text_size(px(12.5))
