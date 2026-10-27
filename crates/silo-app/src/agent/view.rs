@@ -273,7 +273,7 @@ fn violet() -> u32 {
 }
 
 /// A count with thousands separators (`48,213`).
-fn grouped(n: u64) -> String {
+pub(super) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -1718,6 +1718,7 @@ impl AgentPane {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(&q, cx)))
                 }))
                 .children(branch)
+                .children(self.render_turn_usage(item, key))
         });
         let body = div().group(SharedString::from(format!("answer-{key}"))).flex().flex_col().children(els).children(actions);
         // The list follows the glide at the bottom, so the transcript scrolls smoothly.
@@ -1748,10 +1749,11 @@ impl AgentPane {
                 .child(crate::browser_pane::spinner(&format!("agent-reconnect-{}", self.block_id), 12.0, theme::muted(), cx))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text))
         });
-        let popovers: Vec<AnyElement> = [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Menu, Overlay::Slash, Overlay::Mention]
-            .into_iter()
-            .filter_map(|o| self.popover(o, window, cx))
-            .collect();
+        let popovers: Vec<AnyElement> =
+            [Overlay::Agents, Overlay::Models, Overlay::Effort, Overlay::Usage, Overlay::Menu, Overlay::Slash, Overlay::Mention]
+                .into_iter()
+                .filter_map(|o| self.popover(o, window, cx))
+                .collect();
         let fit = self.fit();
         div()
             .flex_none()
@@ -2311,7 +2313,7 @@ impl AgentPane {
     }
 
     /// The model the next prompt goes to: the session's, else the pick, else the daemon's default.
-    fn model(&self) -> Option<(String, String)> {
+    pub(super) fn model(&self) -> Option<(String, String)> {
         if let Some(update) = self.update.model.clone().filter(|_| self.mirror().is_some()) {
             return Some(update);
         }
@@ -2341,7 +2343,12 @@ impl AgentPane {
                 .whitespace_nowrap()
                 .font_features(tabular())
                 .text_color(rgb(level.color()))
+                .continuous(6.0)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover_fill()))
+                .when(self.overlay == Some(Overlay::Usage), |el| el.bg(theme::hover_fill()))
                 .tooltip(tip)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_usage(window, cx)))
                 .child(label)
                 .into_any_element(),
         )
@@ -2505,6 +2512,10 @@ impl AgentPane {
             Overlay::Models => self.render_models(window, cx),
             Overlay::Agents => self.render_agents(cx),
             Overlay::Effort => self.render_efforts(cx),
+            Overlay::Usage => {
+                let provider = self.usage_provider();
+                self.render_usage(provider.as_deref())
+            }
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),
             Overlay::Mention => self.render_mention(cx),
@@ -2513,6 +2524,7 @@ impl AgentPane {
             Overlay::Sessions | Overlay::Projects => 440.0,
             Overlay::Models => 340.0,
             Overlay::Effort => 260.0,
+            Overlay::Usage => 300.0,
             Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
             Overlay::Mention => 360.0,
         };
@@ -2549,8 +2561,8 @@ impl AgentPane {
             .flex()
             .map(|el| match which {
                 Overlay::Models => el.justify_center(),
-                // Above the brain, at the composer's right.
-                Overlay::Effort => el.justify_end().pr(px(pill_input::HALO)),
+                // Above the brain, at the composer's right; the usage card above the count and ring there.
+                Overlay::Effort | Overlay::Usage => el.justify_end().pr(px(pill_input::HALO)),
                 Overlay::Sessions | Overlay::Projects => el,
                 _ => el.pl(px(pill_input::HALO)),
             })

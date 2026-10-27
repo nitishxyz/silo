@@ -132,7 +132,10 @@ See §8 for status.
   so a finished reply looks as its last streaming frame did.
   Parsing goes through `markdown::Doc`: a top-level block followed by another is final, only the open last one
   parses again (at most once a frame). Reduce Motion: lines show at once, no glide.
-- **Hover actions** under a finished answer: copy, retry.
+- **Hover actions** under a finished answer: copy, retry, branch; on the row's right, the turn's tokens when otto
+  reported them (`SessionMirror.turn_usage`, `agent/usage.rs`): `12.4k in · 1.2k out · 89% cached` muted (`in`
+  counts cached input; `cached` = `cache_read / (input + cache_read + cache_write)`, omitted without a hit), the
+  tooltip a line per kind (input, cache read, cache write, output, reasoning, total, hit rate, cost).
 - **Approvals and questions:** a card pinned above the composer (the one other framed element), keyboard: ⏎ allow,
   esc deny, plus "Always" when the decision supports it; questions show options + free text.
 - **Scroll:** follows new activity while at the bottom; scrolling up (anywhere, including into an open group) stops
@@ -231,6 +234,11 @@ Units are points.
   sign-in for the provider) and while nothing is known. The pane calls `plan.usage` when it loads and follows
   otto's global `plan.usage` events; the session's `SessionInfo.plan` is the fallback. Static, so Reduce Motion
   has nothing to drop. A sub-agent's block shows its own provider's.
+  As built (usage card, `agent/usage.rs`): clicking the count or the ring opens a 300 popover above them, right
+  aligned like the effort menu (esc or a click outside closes it): Limits (each plan window's label, % used, a bar,
+  `% left · resets …`, the plan's name; `Not reported by <provider>` for API keys and local models, `Shows after
+  the next reply` for a subscription not reported yet), Context (`used / window`, %, a bar) and Session tokens
+  (input, cache read (hit), cache write, output, reasoning when any, total, cache hit rate, cost when priced).
   As built: the subscription marker is the plan otto reports (` (Max)`, ` (Pro)`), ` (sub)` when it reports none.
   `brain` shows only when the model has `caps.reasoning` and opens the effort menu (also `/effort`): a 260 popover
   above it, right-aligned, rows `Default` (the agent's effort, else the model's), `Low`, `Medium`, `High`, `Max`,

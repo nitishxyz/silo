@@ -10,10 +10,10 @@ use otto_llm::PlanUsage;
 use otto_proto::{Event, Method, ProviderPlan, ServerMessage};
 
 use super::{AgentPane, ring, view::Fit};
-use crate::tooltip::Tooltip;
+use crate::{theme::Continuous as _, tooltip::Tooltip};
 
 /// A window's share as shown: 0 once its reset has passed (the provider reports the new one with the next reply).
-fn used(window: &otto_llm::PlanWindow, now: i64) -> f32 {
+pub(super) fn used(window: &otto_llm::PlanWindow, now: i64) -> f32 {
     if window.resets_at.is_some_and(|at| at <= now) { 0.0 } else { window.used.clamp(0.0, 1.0) }
 }
 
@@ -33,7 +33,7 @@ fn until(seconds: i64) -> String {
 }
 
 /// When a window resets: relative under a day (`resets in 1h 40m`), else its day and time (`resets Mon 09:00`).
-fn resets<Tz: TimeZone>(at: i64, now: &DateTime<Tz>) -> Option<String>
+pub(super) fn resets<Tz: TimeZone>(at: i64, now: &DateTime<Tz>) -> Option<String>
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -49,7 +49,7 @@ where
 }
 
 /// The provider's subscription as people name it (`Claude Max`); `None` for an unknown plan.
-fn plan_name(provider: &str, plan: Option<&str>) -> Option<String> {
+pub(super) fn plan_name(provider: &str, plan: Option<&str>) -> Option<String> {
     let plan = plan.filter(|p| !p.trim().is_empty() && *p != "sub")?;
     let brand = match provider {
         "anthropic" => "Claude",
@@ -163,7 +163,7 @@ impl AgentPane {
     }
 
     /// The ring after the token count, before the buttons: `provider`'s subscription usage, filled to its tightest
-    /// window. None for API keys and local models, while nothing is known, or when too narrow.
+    /// window. None for API keys and local models, while nothing is known, or when too narrow. Opens the usage card.
     pub(super) fn render_plan(&self, fit: Fit, provider: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let provider = provider.filter(|_| fit.ring)?;
         let plan = self.catalog.as_ref()?.subscription(provider)?;
@@ -182,7 +182,12 @@ impl AgentPane {
                 .px(px(4.0))
                 .flex()
                 .items_center()
+                .continuous(6.0)
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover_fill()))
+                .when(self.overlay == Some(super::Overlay::Usage), |el| el.bg(crate::theme::hover_fill()))
                 .tooltip(tip)
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| this.toggle_usage(window, cx)))
                 .child(ring::ring(fill, ring::Fill::of(fill).color()))
                 .into_any_element(),
         )

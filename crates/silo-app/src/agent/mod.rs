@@ -29,6 +29,7 @@ mod settings_agents;
 mod signin;
 mod subagents;
 mod transcript;
+mod usage;
 mod view;
 
 use std::{
@@ -119,6 +120,8 @@ enum Overlay {
     Slash,
     /// `@` mentions (agents, project paths), typed into the composer.
     Mention,
+    /// Limits, context and the session's tokens, from the footer's count or plan ring (`usage.rs`).
+    Usage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1506,7 +1509,7 @@ impl AgentPane {
             Some(Overlay::Menu) => MENU_ROWS,
             Some(Overlay::Slash) => self.slash_choices(cx).len(),
             Some(Overlay::Mention) => mention::pickable(&self.mention_choices()),
-            None => 0,
+            Some(Overlay::Usage) | None => 0,
         }
     }
 
@@ -2010,7 +2013,7 @@ impl AgentPane {
                 let focus = self.filter.read(cx).focus.clone();
                 window.focus(&focus, cx);
             }
-            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash | Overlay::Mention => self.focus_composer(window, cx),
+            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash | Overlay::Mention | Overlay::Usage => self.focus_composer(window, cx),
         }
         cx.notify();
     }
@@ -2110,7 +2113,7 @@ impl AgentPane {
                     self.editor.update(cx, |e, cx| e.insert_chip(range, kind, target, cx));
                 }
             }
-            None => {}
+            Some(Overlay::Usage) | None => {}
         }
     }
 
