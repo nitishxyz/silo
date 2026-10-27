@@ -29,6 +29,7 @@ pub mod search;
 pub mod shell;
 pub mod status;
 pub mod sysclip;
+pub mod trash;
 pub mod tunnel;
 pub mod upgrade;
 
@@ -92,6 +93,9 @@ pub struct Config {
     pub services: std::collections::HashMap<String, ServiceFn>,
     /// Search pickers kept and their idle time (docs/FINDER.md §2).
     pub search: search::Limits,
+    /// Where `files.trash` puts items, in the XDG trash layout; `None` (the
+    /// default) for the host's Trash. For tests.
+    pub trash: Option<PathBuf>,
 }
 
 /// See [`Config::agent_closed`].
@@ -119,6 +123,7 @@ impl Default for Config {
             agent_closed: None,
             services: std::collections::HashMap::new(),
             search: search::Limits::default(),
+            trash: None,
         }
     }
 }
@@ -159,6 +164,8 @@ pub struct Server {
     pub services: std::collections::HashMap<String, ServiceFn>,
     /// `search.*` and `files.find`: fff pickers, frecency, query history.
     pub search: search::Search,
+    /// See [`Config::trash`].
+    pub trash: Option<PathBuf>,
 }
 
 /// Counts a data stream's writer task while it runs, so a server handing
@@ -547,6 +554,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         data_writers: tokio::sync::watch::channel(0).0,
         services: config.services.clone(),
         search: search::Search::new(paths::search(&home), config.search),
+        trash: config.trash.clone(),
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();

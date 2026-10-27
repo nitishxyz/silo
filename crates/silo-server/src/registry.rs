@@ -1414,7 +1414,10 @@ impl Registry {
 
     /// A data ticket for `block_id`, whose streams get `rights`.
     pub fn issue_ticket(&mut self, client_id: ClientId, block_id: &str, rights: Rights) -> Result<DataTicket, RpcError> {
-        self.block(block_id)?;
+        // Terminals (output, uploads) and files blocks (uploads, downloads).
+        if !matches!(self.blocks.get(block_id), Some(Block::Files(_))) {
+            self.block(block_id)?;
+        }
         let now = Instant::now();
         self.tickets.retain(|_, t| t.expires > now);
         let ticket = ticket_hex(&rand::random::<[u8; 16]>());

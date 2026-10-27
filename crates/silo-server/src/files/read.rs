@@ -19,6 +19,41 @@ pub(super) fn mtime(meta: &Metadata) -> u64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
 }
 
+pub(super) fn created(meta: &Metadata) -> u64 {
+    meta.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Hidden as Finder hides it: a dot name, or (macOS) the hidden flag.
+pub(super) fn hidden(name: &str, meta: &Metadata) -> bool {
+    #[cfg(target_os = "macos")]
+    const UF_HIDDEN: u32 = 0x8000;
+    #[cfg(target_os = "macos")]
+    let flagged = std::os::macos::fs::MetadataExt::st_flags(meta) & UF_HIDDEN != 0;
+    #[cfg(not(target_os = "macos"))]
+    let flagged = {
+        let _ = meta;
+        false
+    };
+    name.starts_with('.') || flagged
+}
+
+/// The entry for `path` (named `name`) under canonical root `canonical`:
+/// a symlink's target described when it is inside the root.
+pub(super) fn entry_of(canonical: &Path, path: &Path, name: String) -> Option<FileEntry> {
+    let meta = path.symlink_metadata().ok()?;
+    let kind = kind_of(&meta);
+    let hidden = hidden(&name, &meta);
+    let (target, meta) = if kind == FileKind::Symlink {
+        match path.canonicalize().ok().filter(|t| inside(canonical, t)).and_then(|t| t.metadata().ok()) {
+            Some(target) => (Some(kind_of(&target)), target),
+            None => (None, meta),
+        }
+    } else {
+        (None, meta)
+    };
+    Some(FileEntry { name, kind, target, size: meta.len(), mtime: mtime(&meta), created: created(&meta), hidden })
+}
+
 pub(super) fn io_error(path: &str, error: &std::io::Error) -> RpcError {
     match error.kind() {
         std::io::ErrorKind::NotFound => RpcError::not_found(path),
@@ -61,17 +96,9 @@ pub fn list(root: &Path, rel: &str) -> Result<FileList, RpcError> {
             truncated = true;
             break;
         }
-        let Ok(meta) = entry.path().symlink_metadata() else { continue };
-        let kind = kind_of(&meta);
-        let (target, meta) = if kind == FileKind::Symlink {
-            match entry.path().canonicalize().ok().filter(|t| inside(&canonical, t)).and_then(|t| t.metadata().ok()) {
-                Some(target) => (Some(kind_of(&target)), target),
-                None => (None, meta),
-            }
-        } else {
-            (None, meta)
-        };
-        entries.push(FileEntry { name, kind, target, size: meta.len(), mtime: mtime(&meta) });
+        if let Some(entry) = entry_of(&canonical, &entry.path(), name) {
+            entries.push(entry);
+        }
     }
     let dir = |e: &FileEntry| e.kind == FileKind::Dir || e.target == Some(FileKind::Dir);
     entries.sort_by(|a, b| dir(b).cmp(&dir(a)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())).then_with(|| a.name.cmp(&b.name)));

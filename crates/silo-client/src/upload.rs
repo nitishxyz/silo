@@ -95,7 +95,26 @@ fn rejected(frame: &Frame) -> anyhow::Error {
 /// # Errors
 /// Unreadable sources, more than [`MAX_UPLOAD`] bytes or [`MAX_ENTRIES`]
 /// entries, connection failures or a server rejection.
-pub async fn upload(control: &Control, block_id: &str, files: Vec<Upload>, mut progress: impl FnMut(u64, u64) + Send) -> anyhow::Result<Vec<String>> {
+pub async fn upload(control: &Control, block_id: &str, files: Vec<Upload>, progress: impl FnMut(u64, u64) + Send) -> anyhow::Result<Vec<String>> {
+    upload_to(control, block_id, files, None, false, progress).await
+}
+
+/// Upload `files` into folder `to_dir` of files block `block_id` (feature
+/// `files_ops`); returns each top-level item's path relative to the block's
+/// root. A taken name gets Finder's next free one (`name 2.ext`) unless
+/// `replace` (the old item goes to the host's Trash). `to_dir: None` is
+/// [`upload`] (a terminal block's staging folder).
+///
+/// # Errors
+/// As [`upload`]'s.
+pub async fn upload_to(
+    control: &Control,
+    block_id: &str,
+    files: Vec<Upload>,
+    to_dir: Option<String>,
+    replace: bool,
+    mut progress: impl FnMut(u64, u64) + Send,
+) -> anyhow::Result<Vec<String>> {
     let planned = tokio::task::spawn_blocking(move || plan(files)).await??;
     let total: u64 = planned.iter().map(|p| p.size).sum();
     if total > MAX_UPLOAD {
@@ -106,7 +125,8 @@ pub async fn upload(control: &Control, block_id: &str, files: Vec<Upload>, mut p
     let (reader, mut writer) = tokio::io::split(stream);
     let mut replies = spawn_reader(reader, 4);
     let send = async {
-        write_frame(&mut writer, &Frame::json(kind::UPLOAD_HELLO, &UploadHello::ours(ticket.ticket, total))?).await?;
+        let hello = UploadHello { to_dir, replace, ..UploadHello::ours(ticket.ticket, total) };
+        write_frame(&mut writer, &Frame::json(kind::UPLOAD_HELLO, &hello)?).await?;
         let mut sent = 0;
         progress(sent, total);
         let mut buf = vec![0; CHUNK];

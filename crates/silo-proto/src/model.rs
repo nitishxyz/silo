@@ -642,6 +642,34 @@ pub struct FilesState {
     /// with the tab when it closes. Additive: older peers ignore it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub highlights: std::collections::BTreeMap<String, Vec<FileHighlight>>,
+    /// Which view the block shows: the editor (tabs, tree) or the
+    /// Finder-like browser. Additive: older peers ignore it (and show the
+    /// editor).
+    #[serde(default, skip_serializing_if = "FilesView::is_edit")]
+    pub view: FilesView,
+    /// The folder the browser shows (empty: the root); watched like the
+    /// expanded folders. Additive.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub browse: String,
+}
+
+/// A files block's view (`FilesState::view`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesView {
+    /// A Finder-like list of one folder, with file operations.
+    Browse,
+    /// Tabs of files beside the folder tree; also any view of a newer peer.
+    #[default]
+    #[serde(other)]
+    Edit,
+}
+
+impl FilesView {
+    #[must_use]
+    pub fn is_edit(&self) -> bool {
+        *self == Self::Edit
+    }
 }
 
 /// Lines `start..=end` (1-based) of a file marked in a files block, with
@@ -684,6 +712,8 @@ impl FilesState {
             expanded: Vec::new(),
             scroll: std::collections::BTreeMap::new(),
             highlights: std::collections::BTreeMap::new(),
+            view: FilesView::Edit,
+            browse: String::new(),
         }
     }
 }

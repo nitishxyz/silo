@@ -245,8 +245,17 @@ pub fn need(method: &Method) -> Need {
         | M::FilesList(_)
         | M::FilesRead(_)
         | M::FilesReadImage(_)
-        | M::FilesFind(_) => rights(Block(BLOCK), View),
-        M::FilesSet(_) | M::FilesRoot(_) | M::FilesWrite(_) | M::FilesCreate(_) => rights(Block(BLOCK), Interact),
+        | M::FilesFind(_)
+        | M::FilesSearch(_) => rights(Block(BLOCK), View),
+        M::FilesSet(_)
+        | M::FilesRoot(_)
+        | M::FilesWrite(_)
+        | M::FilesCreate(_)
+        | M::FilesMkdir(_)
+        | M::FilesRename(_)
+        | M::FilesCopy(_)
+        | M::FilesMove(_)
+        | M::FilesTrash(_) => rights(Block(BLOCK), Interact),
         M::ChangesStatus(_) | M::ChangesDiff(_) => rights(Block(BLOCK), View),
         M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => rights(Folder("root"), View),
         M::ChangesSet(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) | M::ChangesCommit(_) | M::ChangesRoot(_) => {

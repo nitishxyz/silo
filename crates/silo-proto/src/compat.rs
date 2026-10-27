@@ -65,6 +65,13 @@ pub mod feature {
     /// `app.permissions_show` (macOS privacy permissions of Silo Server).
     /// Older servers answer `method_not_found`.
     pub const PERMISSIONS: &str = "permissions";
+    /// Files blocks browse and manage files: `files.mkdir`, `files.rename`,
+    /// `files.copy`, `files.move`, `files.trash`, `files.search`,
+    /// `FilesState::view`/`browse`, uploads into a files block's folder
+    /// (`UploadHello::to_dir`) and download streams
+    /// ([`crate::kind::DOWNLOAD_HELLO`]). Older servers answer
+    /// `method_not_found`; the app hides the browser there.
+    pub const FILES_OPS: &str = "files_ops";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -84,6 +91,7 @@ pub const FEATURES: &[&str] = &[
     feature::CHANGES,
     feature::SEARCH,
     feature::PERMISSIONS,
+    feature::FILES_OPS,
 ];
 
 /// Features this build's server supports that a client advertises only

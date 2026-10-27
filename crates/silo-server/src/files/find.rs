@@ -9,9 +9,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use silo_proto::{control::RpcError, files::FileFound};
+use silo_proto::{
+    control::RpcError,
+    files::{FileFound, FileHit, FileSearch, FilesSearchParams},
+};
 
-use super::paths::{canonical_root, relative};
+use super::paths::{canonical_root, normalize, relative, resolve};
 use crate::search::Search;
 
 /// Directories never walked.
@@ -92,6 +95,82 @@ fn walk(root: &Path, query: &str, limit: usize) -> Result<FileFound, RpcError> {
     Ok(FileFound { paths: found.into_iter().map(|(_, p)| p).collect(), truncated })
 }
 
+/// `files.search`: items under `params.path` whose name holds every word
+/// of the query, case-insensitively; best first.
+///
+/// # Errors
+/// Path errors as [`resolve`]'s; `bad_request` when the folder is no
+/// folder.
+pub fn search(root: &Path, params: &FilesSearchParams) -> Result<FileSearch, RpcError> {
+    let canonical = canonical_root(root)?;
+    let dir = resolve(root, &params.path)?;
+    let rel = normalize(&params.path)?;
+    if !dir.is_dir() {
+        return Err(RpcError::bad_request(format!("{rel} is not a folder")));
+    }
+    let limit = params.limit.unwrap_or(FileSearch::DEFAULT_LIMIT).clamp(1, FileSearch::MAX_LIMIT) as usize;
+    let words: Vec<String> = params.query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Ok(FileSearch { path: rel, hits: Vec::new(), truncated: false });
+    }
+    let ignored = params.ignored;
+    let walk = ignore::WalkBuilder::new(&dir)
+        .hidden(!params.hidden)
+        .git_ignore(!ignored)
+        .git_exclude(!ignored)
+        .git_global(!ignored)
+        .ignore(!ignored)
+        .parents(!ignored)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(move |e| e.depth() == 0 || !e.file_name().to_str().is_some_and(|n| n == ".git" || (!ignored && SKIP.contains(&n))))
+        .build();
+    let started = Instant::now();
+    let (mut seen, mut truncated) = (0, false);
+    let mut found: Vec<(u8, String)> = Vec::new();
+    for entry in walk {
+        let Ok(entry) = entry else { continue };
+        if entry.depth() == 0 {
+            continue;
+        }
+        seen += 1;
+        if seen > WALK_MAX || (seen % 256 == 0 && started.elapsed() > WALK_TIME) {
+            truncated = true;
+            break;
+        }
+        let Some(name) = entry.file_name().to_str() else { continue };
+        let lower = name.to_lowercase();
+        if !words.iter().all(|w| lower.contains(w.as_str())) {
+            continue;
+        }
+        let Some(path) = relative(&canonical, entry.path()) else { continue };
+        let joined = words.join(" ");
+        let rank = if lower == joined {
+            0
+        } else if lower.starts_with(&words[0]) {
+            1
+        } else {
+            2
+        };
+        found.push((rank, path));
+    }
+    let depth = |p: &str| p.matches('/').count();
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| depth(&a.1).cmp(&depth(&b.1))).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    if found.len() > limit {
+        truncated = true;
+        found.truncate(limit);
+    }
+    let hits = found
+        .into_iter()
+        .filter_map(|(_, path)| {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+            let entry = super::read::entry_of(&canonical, &canonical.join(&path), name)?;
+            Some(FileHit { path, entry })
+        })
+        .collect();
+    Ok(FileSearch { path: rel, hits, truncated })
+}
+
 /// How well `path` matches `query` (lowercase, no spaces), or `None` when
 /// the query is not a subsequence of it. Matches in the file name,
 /// consecutive matches and matches at word starts score higher; longer
@@ -155,6 +234,37 @@ mod tests {
 
     fn q(s: &str) -> Vec<char> {
         s.chars().collect()
+    }
+
+    #[test]
+    fn search_matches_names_under_a_folder() {
+        let dir = std::env::temp_dir().join(format!("silo-files-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for path in ["README.md", "docs/readme-old.txt", "docs/Read Me/x", "src/lib.rs", ".hidden/readme", "ignored/readme", "target/readme"] {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), b"").unwrap();
+        }
+        std::fs::write(dir.join(".gitignore"), b"ignored/\n").unwrap();
+        let params = |query: &str, path: &str, ignored: bool, hidden: bool| FilesSearchParams {
+            block_id: "b".into(),
+            query: query.into(),
+            path: path.into(),
+            limit: None,
+            ignored,
+            hidden,
+        };
+        let paths = |found: FileSearch| found.hits.into_iter().map(|h| h.path).collect::<Vec<_>>();
+        assert_eq!(paths(search(&dir, &params("readme", "", false, false)).unwrap()), ["README.md", "docs/readme-old.txt"]);
+        assert_eq!(paths(search(&dir, &params("read me", "docs", false, false)).unwrap()), ["docs/Read Me", "docs/readme-old.txt"]);
+        let all = paths(search(&dir, &params("readme", "", true, true)).unwrap());
+        assert!(
+            all.contains(&".hidden/readme".to_owned()) && all.contains(&"ignored/readme".to_owned()) && all.contains(&"target/readme".to_owned()),
+            "{all:?}"
+        );
+        assert_eq!(search(&dir, &params("x", "../", false, false)).unwrap_err().code, RpcError::FORBIDDEN);
+        let hit = search(&dir, &params("lib", "src", false, false)).unwrap().hits.remove(0);
+        assert_eq!((hit.path.as_str(), hit.entry.name.as_str()), ("src/lib.rs", "lib.rs"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -9,10 +9,11 @@ use std::{
 use silo_client::{Control, Events};
 use silo_proto::{
     control::{
-        ContentKind, Created, Event, FileBase, FileFound, FileImage, FileKind, FileList, FileRead, FileWritten, FilesCreateParams, FilesFindParams,
-        FilesListParams, FilesReadImageParams, FilesReadParams, FilesRootParams, FilesSetParams, FilesWriteParams, Method, RpcError, SpawnSpec,
+        ContentKind, Created, Event, FileBase, FileFound, FileImage, FileKind, FileList, FileRead, FileSearch, FileWritten, FilesCreateParams,
+        FilesDone, FilesFindParams, FilesListParams, FilesMkdirParams, FilesReadImageParams, FilesReadParams, FilesRenameParams, FilesRootParams,
+        FilesSearchParams, FilesSetParams, FilesTransferParams, FilesTrashParams, FilesWriteParams, Method, RpcError, SpawnSpec,
     },
-    model::{Axis, BlockInfo, BlockKind, FileHighlight, FilesState, TermSize},
+    model::{Axis, BlockInfo, BlockKind, FileHighlight, FilesState, FilesView, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -56,6 +57,8 @@ fn config(home: &Path) -> silo_server::Config {
         checkpoint_interval: Duration::from_millis(200),
         relay: silo_server::RelayConfig::Disabled,
         mdns: false,
+        // `files.trash` puts items here (XDG layout), not in this Mac's Trash.
+        trash: Some(home.join("trash")),
         ..Default::default()
     }
 }
@@ -205,8 +208,8 @@ async fn split_lists_reads_and_finds() {
     assert_eq!(main.paths.first().map(String::as_str), Some("src/main.rs"), "{:?}", main.paths);
     assert!(find(&control, id, "zzz").await.paths.is_empty());
 
-    // Terminal methods are refused; other blocks have no files.
-    assert_eq!(code(&control.call_value(Method::DataConnect { block_id: id.into() }).await.unwrap_err()), "bad_request");
+    // Tickets are for uploads and downloads (a terminal stream refuses them); other blocks have no files.
+    assert!(control.call_value(Method::DataConnect { block_id: id.into() }).await.is_ok());
     let view: silo_proto::model::SessionView = control.call(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap();
     let terminal = view.blocks.iter().find(|b| b.kind == BlockKind::Terminal).unwrap().id.clone();
     assert_eq!(code(&list(&control, &terminal, "").await.unwrap_err()), "bad_request");
@@ -562,5 +565,243 @@ async fn state_survives_takeover() {
     assert_eq!(info(&control, &created).await.files.as_deref().unwrap().clone(), before);
     assert_eq!(list(&control, &created.block_id, "src").await.unwrap().entries.len(), 2);
     stop(control, new).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+// ------------------------------------------------------------ operations
+
+async fn mkdir(control: &Control, block: &str, path: &str, unique: bool) -> anyhow::Result<FilesDone> {
+    control.call(Method::FilesMkdir(FilesMkdirParams { block_id: block.into(), path: path.into(), unique })).await
+}
+
+async fn rename(control: &Control, block: &str, from: &str, to: &str, replace: bool) -> anyhow::Result<FilesDone> {
+    control.call(Method::FilesRename(FilesRenameParams { block_id: block.into(), from: from.into(), to: to.into(), replace })).await
+}
+
+async fn transfer(control: &Control, block: &str, from: &[&str], to_dir: &str, copy: bool) -> anyhow::Result<FilesDone> {
+    let params =
+        FilesTransferParams { block_id: block.into(), from: from.iter().map(|&p| p.to_owned()).collect(), to_dir: to_dir.into(), replace: false };
+    control.call(if copy { Method::FilesCopy(params) } else { Method::FilesMove(params) }).await
+}
+
+async fn trash(control: &Control, block: &str, paths: &[&str]) -> anyhow::Result<FilesDone> {
+    control.call(Method::FilesTrash(FilesTrashParams { block_id: block.into(), paths: paths.iter().map(|&p| p.to_owned()).collect() })).await
+}
+
+fn moved(done: &FilesDone) -> Vec<(&str, &str)> {
+    done.done.iter().map(|m| (m.from.as_str(), m.to.as_str())).collect()
+}
+
+fn failed(done: &FilesDone) -> Vec<(&str, &str)> {
+    done.failed.iter().map(|f| (f.path.as_str(), f.code.as_str())).collect()
+}
+
+#[tokio::test]
+async fn operations_stay_in_the_root() {
+    let (home, root) = temp("ops-escape");
+    let outside = root.parent().unwrap().join("outside");
+    let task = start(&home).await;
+    let (control, _) = connect(&home).await;
+    let id = files(&control, &root).await.block_id;
+
+    for path in ["../x", "escape/x", "src/../../x"] {
+        assert_eq!(code(&mkdir(&control, &id, path, false).await.unwrap_err()), RpcError::FORBIDDEN, "{path}");
+        assert_eq!(code(&rename(&control, &id, "a.txt", path, false).await.unwrap_err()), RpcError::FORBIDDEN, "{path}");
+    }
+    for path in ["/tmp/x", "~/x"] {
+        assert_eq!(code(&mkdir(&control, &id, path, false).await.unwrap_err()), "bad_request", "{path}");
+    }
+    assert_eq!(code(&rename(&control, &id, "escape/secret.txt", "stolen.txt", false).await.unwrap_err()), RpcError::FORBIDDEN);
+    assert_eq!(code(&rename(&control, &id, "", "x", false).await.unwrap_err()), "bad_request");
+    let done = transfer(&control, &id, &["escape/secret.txt", "../outside/secret.txt", "a.txt"], "src", true).await.unwrap();
+    assert_eq!(failed(&done), [("escape/secret.txt", RpcError::FORBIDDEN), ("../outside/secret.txt", RpcError::FORBIDDEN)]);
+    assert_eq!(moved(&done), [("a.txt", "src/a.txt")]);
+    for to_dir in ["escape", "..", "/tmp"] {
+        assert!(transfer(&control, &id, &["a.txt"], to_dir, false).await.is_err(), "{to_dir}");
+    }
+    let done = trash(&control, &id, &["escape/secret.txt", "..", ""]).await.unwrap();
+    assert!(done.done.is_empty() && done.failed.len() == 3, "{done:?}");
+    // A link leaving the root is itself an item: trashing it leaves its target.
+    let done = trash(&control, &id, &["secret.txt"]).await.unwrap();
+    assert_eq!(moved(&done), [("secret.txt", "")]);
+    assert!(outside.join("secret.txt").is_file() && root.join("secret.txt").symlink_metadata().is_err());
+    // Its copy is a link too, and still can't be read.
+    let done = transfer(&control, &id, &["main-link.rs"], "src", true).await.unwrap();
+    assert_eq!(moved(&done), [("main-link.rs", "src/main-link.rs")]);
+    assert!(root.join("src/main-link.rs").symlink_metadata().unwrap().file_type().is_symlink());
+    let search = |path: &str| {
+        Method::FilesSearch(FilesSearchParams {
+            block_id: id.clone(),
+            query: "secret".into(),
+            path: path.into(),
+            limit: None,
+            ignored: true,
+            hidden: true,
+        })
+    };
+    assert_eq!(code(&control.call_value(search("escape")).await.unwrap_err()), RpcError::FORBIDDEN);
+    let found: FileSearch = control.call(search("")).await.unwrap();
+    assert!(found.hits.is_empty(), "{:?}", found.hits);
+
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+#[tokio::test]
+async fn operations_rename_copy_move_and_trash() {
+    let (home, root) = temp("ops");
+    let task = start(&home).await;
+    let (control, mut events) = connect(&home).await;
+    control.subscribe().await.unwrap();
+    let id = files(&control, &root).await.block_id;
+
+    // New Folder: a free name each time.
+    assert_eq!(moved(&mkdir(&control, &id, "docs", false).await.unwrap()), [("", "docs")]);
+    assert_eq!(code(&mkdir(&control, &id, "docs", false).await.unwrap_err()), RpcError::EXISTS);
+    assert_eq!(moved(&mkdir(&control, &id, "docs", true).await.unwrap()), [("", "docs 2")]);
+    assert!(changed(&mut events, &id, "docs 2", TIMEOUT).await);
+
+    // Rename refuses to overwrite; with replace the old item goes to the Trash.
+    assert_eq!(code(&rename(&control, &id, "a.txt", "e.txt", false).await.unwrap_err()), RpcError::EXISTS);
+    assert_eq!(moved(&rename(&control, &id, "a.txt", "docs/notes.txt", false).await.unwrap()), [("a.txt", "docs/notes.txt")]);
+    assert_eq!(std::fs::read(root.join("docs/notes.txt")).unwrap(), b"hello\n");
+    assert_eq!(moved(&rename(&control, &id, "docs/notes.txt", "e.txt", true).await.unwrap()), [("docs/notes.txt", "e.txt")]);
+    assert_eq!(std::fs::read(root.join("e.txt")).unwrap(), b"hello\n");
+    assert_eq!(std::fs::read(home.join("trash/files/e.txt")).unwrap(), "h\u{e9}llo".as_bytes());
+    assert_eq!(code(&rename(&control, &id, "src", "src/inner", false).await.unwrap_err()), "bad_request");
+    assert_eq!(code(&rename(&control, &id, "gone.txt", "x.txt", false).await.unwrap_err()), "not_found");
+
+    // Copy: folders recursively; the same folder makes `name copy`, a taken name `name 2`.
+    let done = transfer(&control, &id, &["src", "e.txt"], "docs", true).await.unwrap();
+    assert_eq!(moved(&done), [("src", "docs/src"), ("e.txt", "docs/e.txt")]);
+    assert_eq!(std::fs::read(root.join("docs/src/main.rs")).unwrap(), b"fn main() {}\n");
+    assert_eq!(moved(&transfer(&control, &id, &["e.txt"], "docs", true).await.unwrap()), [("e.txt", "docs/e 2.txt")]);
+    assert_eq!(moved(&transfer(&control, &id, &["e.txt", "src"], "", true).await.unwrap()), [("e.txt", "e copy.txt"), ("src", "src copy")]);
+    assert_eq!(moved(&transfer(&control, &id, &["e.txt"], "", true).await.unwrap()), [("e.txt", "e copy 2.txt")]);
+    let done = transfer(&control, &id, &["src"], "src copy", true).await.unwrap();
+    assert_eq!(moved(&done), [("src", "src copy/src")]);
+    let done = transfer(&control, &id, &["src"], "src", true).await.unwrap();
+    assert_eq!(failed(&done), [("src", "bad_request")]);
+
+    // Move: into another folder (a taken name gets the next free one); a no-op in its own folder.
+    let done = transfer(&control, &id, &["e copy.txt", "e copy 2.txt", "missing"], "docs", false).await.unwrap();
+    assert_eq!(moved(&done), [("e copy.txt", "docs/e copy.txt"), ("e copy 2.txt", "docs/e copy 2.txt")]);
+    assert_eq!(failed(&done), [("missing", "not_found")]);
+    assert!(!root.join("e copy.txt").exists());
+    assert_eq!(moved(&transfer(&control, &id, &["docs/e.txt"], "docs", false).await.unwrap()), [("docs/e.txt", "docs/e.txt")]);
+    assert!(changed(&mut events, &id, "docs/e copy.txt", TIMEOUT).await);
+
+    // Trash: recoverable, with where it was; a taken name in the Trash is numbered.
+    let done = trash(&control, &id, &["docs/src", "docs/e.txt"]).await.unwrap();
+    assert_eq!(moved(&done), [("docs/src", ""), ("docs/e.txt", "")]);
+    assert!(home.join("trash/files/src/main.rs").is_file());
+    assert_eq!(std::fs::read(home.join("trash/files/e 2.txt")).unwrap(), b"hello\n");
+    let info = std::fs::read_to_string(home.join("trash/info/src.trashinfo")).unwrap();
+    assert!(info.contains(&format!("Path={}/docs/src\n", root.display())), "{info}");
+    assert!(!root.join("docs/src").exists());
+
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+#[tokio::test]
+async fn search_lists_and_browse_state() {
+    let (home, root) = temp("search");
+    let task = start(&home).await;
+    let (control, mut events) = connect(&home).await;
+    control.subscribe().await.unwrap();
+    let id = files(&control, &root).await.block_id;
+
+    let search = |query: &str, path: &str, ignored: bool| {
+        Method::FilesSearch(FilesSearchParams { block_id: id.clone(), query: query.into(), path: path.into(), limit: None, ignored, hidden: false })
+    };
+    let found: FileSearch = control.call(search("MAIN", "", false)).await.unwrap();
+    let paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, ["main-link.rs", "src/main.rs"]);
+    assert_eq!(found.hits[1].entry.kind, FileKind::File);
+    let found: FileSearch = control.call(search("main", "", true)).await.unwrap();
+    assert!(found.hits.iter().any(|h| h.path == "node_modules/n/main.js"), "{:?}", found.hits);
+    let found: FileSearch = control.call(search("rs", "src", false)).await.unwrap();
+    assert_eq!(found.hits.len(), 2);
+    let found: FileSearch = control.call(search("src", "", false)).await.unwrap();
+    assert_eq!(found.hits[0].entry.kind, FileKind::Dir);
+
+    // Hidden items say so; listings carry creation times where kept.
+    let listed = list(&control, &id, "").await.unwrap();
+    let hidden: Vec<&str> = listed.entries.iter().filter(|e| e.hidden).map(|e| e.name.as_str()).collect();
+    assert_eq!(hidden, [".github", ".gitignore"]);
+    if cfg!(target_os = "macos") {
+        assert!(listed.entries.iter().all(|e| e.created > 0));
+    }
+
+    // The browser's view and folder are kept, and its folder is watched.
+    let browse = FilesSetParams { view: Some(FilesView::Browse), browse: Some("src/".into()), ..set(&id) };
+    let state: FilesState = control.call(Method::FilesSet(browse)).await.unwrap();
+    assert_eq!((state.view, state.browse.as_str()), (FilesView::Browse, "src"));
+    let bad = FilesSetParams { browse: Some("../outside".into()), ..set(&id) };
+    assert_eq!(code(&control.call_value(Method::FilesSet(bad)).await.unwrap_err()), RpcError::FORBIDDEN);
+    write_seen(&mut events, &id, &root, "src/new.rs", "src/new.rs").await;
+
+    stop(control, task).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+#[tokio::test]
+async fn uploads_land_in_a_folder_and_downloads_round_trip() {
+    let (home, root) = temp("transfer");
+    let task = start(&home).await;
+    let (control, mut events) = connect(&home).await;
+    control.subscribe().await.unwrap();
+    let id = files(&control, &root).await.block_id;
+    let local = home.parent().unwrap().join("local");
+    std::fs::create_dir_all(local.join("pics/deep")).unwrap();
+    std::fs::write(local.join("pics/deep/one.bin"), vec![7u8; 600_000]).unwrap();
+    std::fs::write(local.join("pics/two.txt"), b"two").unwrap();
+    std::fs::write(local.join("a.txt"), b"new a").unwrap();
+    let upload = |name: &str| silo_client::Upload { name: name.into(), source: silo_client::UploadSource::Path(local.join(name)) };
+
+    // Into a folder: taken names get Finder's next free one.
+    let mut seen = Vec::new();
+    let paths = silo_client::upload_to(&control, &id, vec![upload("pics"), upload("a.txt")], Some("src".into()), false, |s, t| seen.push((s, t)))
+        .await
+        .unwrap();
+    assert_eq!(paths, ["src/pics", "src/a.txt"]);
+    assert_eq!(seen.last(), Some(&(600_008, 600_008)));
+    assert_eq!(std::fs::read(root.join("src/pics/deep/one.bin")).unwrap().len(), 600_000);
+    assert!(changed(&mut events, &id, "src/pics", TIMEOUT).await);
+    let paths = silo_client::upload_to(&control, &id, vec![upload("a.txt")], Some(String::new()), false, |_, _| {}).await.unwrap();
+    assert_eq!(paths, ["a 2.txt"]);
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"hello\n");
+    // Replace: the old one goes to the Trash.
+    let paths = silo_client::upload_to(&control, &id, vec![upload("a.txt")], Some(String::new()), true, |_, _| {}).await.unwrap();
+    assert_eq!(paths, ["a.txt"]);
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"new a");
+    assert_eq!(std::fs::read(home.join("trash/files/a.txt")).unwrap(), b"hello\n");
+    // Never outside the root.
+    let error = silo_client::upload_to(&control, &id, vec![upload("a.txt")], Some("escape".into()), false, |_, _| {}).await.unwrap_err();
+    assert!(error.to_string().contains("outside"), "{error:#}");
+
+    // Download: folders recursively, links inside skipped, names kept or numbered.
+    std::os::unix::fs::symlink("/etc", root.join("src/pics/etc")).unwrap();
+    let dest = home.parent().unwrap().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut seen = Vec::new();
+    let got = silo_client::download(&control, &id, vec!["src/pics".into(), "a.txt".into()], &dest, |r, t| seen.push((r, t))).await.unwrap();
+    assert_eq!(got, [dest.join("pics"), dest.join("a.txt")]);
+    assert_eq!(std::fs::read(dest.join("pics/deep/one.bin")).unwrap(), vec![7u8; 600_000]);
+    assert_eq!(std::fs::read(dest.join("pics/two.txt")).unwrap(), b"two");
+    assert!(dest.join("pics/etc").symlink_metadata().is_err());
+    assert_eq!(seen.last(), Some(&(600_008, 600_008)));
+    let got = silo_client::download(&control, &id, vec!["a.txt".into()], &dest, |_, _| {}).await.unwrap();
+    assert_eq!(got, [dest.join("a 2.txt")]);
+    for path in ["escape/secret.txt", "../outside/secret.txt", "secret.txt"] {
+        let error = silo_client::download(&control, &id, vec![path.into()], &dest, |_, _| {}).await.unwrap_err();
+        assert!(error.to_string().contains("outside"), "{path}: {error:#}");
+    }
+    let error = silo_client::download(&control, &id, vec!["a.txt".into(), "gone".into()], &dest, |_, _| {}).await.unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert!(!dest.join("a 3.txt").exists());
+
+    stop(control, task).await;
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
 }

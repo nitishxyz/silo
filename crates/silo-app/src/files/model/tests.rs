@@ -34,7 +34,7 @@ fn tab_labels_name_the_folder_of_twins() {
 }
 
 fn entry(name: &str, kind: FileKind) -> FileEntry {
-    FileEntry { name: name.into(), kind, target: (kind == FileKind::Symlink).then_some(FileKind::Dir), size: 0, mtime: 0 }
+    FileEntry { name: name.into(), kind, target: (kind == FileKind::Symlink).then_some(FileKind::Dir), size: 0, mtime: 0, created: 0, hidden: false }
 }
 
 #[test]

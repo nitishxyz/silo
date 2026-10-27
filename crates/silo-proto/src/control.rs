@@ -246,6 +246,18 @@ pub enum Method {
     FilesWrite(FilesWriteParams),
     #[serde(rename = "files.create")]
     FilesCreate(FilesCreateParams),
+    #[serde(rename = "files.mkdir")]
+    FilesMkdir(FilesMkdirParams),
+    #[serde(rename = "files.rename")]
+    FilesRename(FilesRenameParams),
+    #[serde(rename = "files.copy")]
+    FilesCopy(FilesTransferParams),
+    #[serde(rename = "files.move")]
+    FilesMove(FilesTransferParams),
+    #[serde(rename = "files.trash")]
+    FilesTrash(FilesTrashParams),
+    #[serde(rename = "files.search")]
+    FilesSearch(FilesSearchParams),
     #[serde(rename = "changes.status")]
     ChangesStatus(ChangesStatusParams),
     #[serde(rename = "changes.diff")]
@@ -865,6 +877,12 @@ pub const METHODS: &[(&str, &str)] = &[
     ("files.root", "Show another directory in a files block."),
     ("files.write", "Save a text file of a files block atomically, refusing when it changed on disk since the edit's base."),
     ("files.create", "Create a new file in a files block."),
+    ("files.mkdir", "Create a folder in a files block."),
+    ("files.rename", "Rename or move one item of a files block, refusing to overwrite unless asked."),
+    ("files.copy", "Copy items of a files block into one of its folders (recursively; taken names get the next free one)."),
+    ("files.move", "Move items of a files block into one of its folders (taken names get the next free one)."),
+    ("files.trash", "Move items of a files block to the host's Trash."),
+    ("files.search", "Find items of a files block whose name contains a query, under one folder."),
     ("changes.status", "The changed files of a changes block's scope, with the branch and line counts."),
     ("changes.diff", "One file's diff hunks in a changes block's scope."),
     ("changes.set", "Change a changes block's scope, tabs, layout, review comments, agent or marks."),

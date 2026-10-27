@@ -4,8 +4,10 @@
 //! folders shown. Unsaved edits live in the app only.
 
 pub mod find;
+pub mod ops;
 pub mod paths;
 pub mod read;
+pub mod transfer;
 pub mod watch;
 pub mod write;
 
@@ -84,7 +86,10 @@ impl FilesBlock {
         let Some(watch) = &mut self.watch else { return };
         let root = PathBuf::from(&self.state.root);
         let parent = |p: &str| p.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_owned());
-        let dirs = std::iter::once(String::new()).chain(self.state.expanded.iter().cloned()).chain(self.state.open.iter().map(|p| parent(p)));
+        let dirs = std::iter::once(String::new())
+            .chain(self.state.expanded.iter().cloned())
+            .chain(self.state.open.iter().map(|p| parent(p)))
+            .chain(Some(self.state.browse.clone()).filter(|b| !b.is_empty()));
         let want = dirs.filter_map(|d| paths::resolve(&root, &d).ok()).filter(|p| p.is_dir()).collect();
         watch.sync(want);
     }
@@ -143,10 +148,16 @@ impl FilesBlock {
                 state.highlights.insert(path, marks);
             }
         }
+        if let Some(view) = params.view {
+            state.view = view;
+        }
+        if let Some(browse) = params.browse {
+            state.browse = paths::normalize(&browse)?;
+        }
         let open = state.open.clone();
         state.scroll.retain(|path, _| open.contains(path));
         state.highlights.retain(|path, _| open.contains(path));
-        let resync = (&state.open, &state.expanded) != (&self.state.open, &self.state.expanded);
+        let resync = (&state.open, &state.expanded, &state.browse) != (&self.state.open, &self.state.expanded, &self.state.browse);
         let changed = state != self.state;
         self.state = state;
         if resync {
@@ -200,7 +211,7 @@ pub fn changed(root: &std::path::Path, paths: Vec<PathBuf>) -> (Vec<String>, boo
 }
 
 /// The root of files block `block_id`.
-fn root_of(server: &Server, block_id: &str) -> Result<PathBuf, RpcError> {
+pub fn root_of(server: &Server, block_id: &str) -> Result<PathBuf, RpcError> {
     match server.registry.lock().unwrap().blocks.get(block_id) {
         Some(Block::Files(files)) => Ok(files.root()),
         Some(_) => Err(RpcError::bad_request(format!("block {block_id} is not a files block"))),
@@ -219,6 +230,23 @@ fn reply(value: &impl serde::Serialize) -> Result<Value, RpcError> {
         return Err(RpcError::new("too_large", "the reply would not fit in a frame; read fewer bytes"));
     }
     serde_json::from_slice(&bytes).map_err(RpcError::internal)
+}
+
+/// `files.changed` for what an operation touched (the watch may not cover
+/// those folders, and is slower).
+pub fn touched(server: &Server, block_id: &str, done: &silo_proto::files::FilesDone) {
+    let paths = ops::touched(done);
+    if !paths.is_empty() {
+        server.registry.lock().unwrap().emit(silo_proto::control::Event::FilesChanged { block_id: block_id.to_owned(), paths, truncated: false });
+    }
+}
+
+async fn transfer(server: &Server, p: silo_proto::files::FilesTransferParams, copy: bool) -> Result<Value, RpcError> {
+    let (root, trash) = (root_of(server, &p.block_id)?, server.trash.clone());
+    let block_id = p.block_id.clone();
+    let done = blocking(move || ops::transfer(&root, &p, copy, trash.as_deref())).await?;
+    touched(server, &block_id, &done);
+    reply(&done)
 }
 
 pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> {
@@ -247,6 +275,32 @@ pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> 
         Method::FilesCreate(p) => {
             let root = root_of(server, &p.block_id)?;
             reply(&blocking(move || write::create(&root, &p.path, &p.text)).await?)
+        }
+        Method::FilesMkdir(p) => {
+            let root = root_of(server, &p.block_id)?;
+            let done = blocking(move || ops::mkdir(&root, &p.path, p.unique)).await?;
+            touched(server, &p.block_id, &done);
+            reply(&done)
+        }
+        Method::FilesRename(p) => {
+            let (root, trash) = (root_of(server, &p.block_id)?, server.trash.clone());
+            let block_id = p.block_id.clone();
+            let done = blocking(move || ops::rename(&root, &p.from, &p.to, p.replace, trash.as_deref())).await?;
+            touched(server, &block_id, &done);
+            reply(&done)
+        }
+        Method::FilesCopy(p) => transfer(server, p, true).await,
+        Method::FilesMove(p) => transfer(server, p, false).await,
+        Method::FilesTrash(p) => {
+            let (root, trash) = (root_of(server, &p.block_id)?, server.trash.clone());
+            let block_id = p.block_id.clone();
+            let done = blocking(move || ops::trash(&root, &p.paths, trash.as_deref())).await?;
+            touched(server, &block_id, &done);
+            reply(&done)
+        }
+        Method::FilesSearch(p) => {
+            let root = root_of(server, &p.block_id)?;
+            reply(&blocking(move || find::search(&root, &p)).await?)
         }
         Method::FilesSet(p) => reply(&server.registry.lock().unwrap().files_set(p)?),
         Method::FilesRoot(p) => {

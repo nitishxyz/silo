@@ -264,3 +264,37 @@ tab follows the reload rules of §4 Editing (a clean tab shows it as it lands; o
   files rather than the whole tree.
 - Remote images: send the bytes over the control channel up to 20 MiB, or stream them over a data stream like
   terminal output? Start with the control channel and its cap.
+
+## 8. Browse and file operations
+
+Built on 2026-10-28 (feature `files_ops`; on older servers the app shows the editor only).
+
+**State:** `FilesState.view` (`edit` | `browse`, default `edit`, not written while `edit`) and `browse` (the folder the
+browser shows, relative to the root, watched like the expanded folders). Both are set with `files.set`.
+
+**Methods** (interact rights, except `files.search`). Items are named by a folder, resolved and checked to be under
+the root, plus a name: a symlink is the link itself, never its target, so a link leaving the root can be renamed,
+moved or trashed but its target is never touched. The root itself can't be changed. Each answers
+`FilesDone { done: [{from, to}], failed: [{path, code, message}] }` and sends `files.changed` for the items and their
+folders.
+
+| Method | Params | Notes |
+|---|---|---|
+| `files.mkdir` | `path`, `unique?` | `exists` when taken; `unique` picks `name 2`, `name 3`… (New Folder) |
+| `files.rename` | `from`, `to`, `replace?` | rename or move within the root; `exists` unless `replace` (the old item goes to the Trash); a folder can't go inside itself |
+| `files.copy` | `from: []`, `to_dir`, `replace?` | recursive, links copied as links; a taken name gets Finder's `name 2.ext`, a copy into its own folder `name copy.ext` |
+| `files.move` | `from: []`, `to_dir`, `replace?` | rename, or copy then remove across file systems; a no-op in its own folder |
+| `files.trash` | `paths: []` | macOS: NSFileManager (the Finder's Trash, Put Back works), else a rename into `~/.Trash`; Linux: the XDG trash with `.trashinfo` (`<mount>/.Trash-<uid>` on another file system). Never a delete. |
+| `files.search` | `query`, `path?`, `limit?` (500, max 5000), `ignored?`, `hidden?` | Finder's "Name contains": every word in the name, case-insensitive, files and folders, with their entries; `.gitignore`d paths, `target` and `node_modules` only with `ignored` |
+
+`files.list` entries also carry `created` (birth time, where kept) and `hidden` (a dot name or macOS's hidden flag).
+
+**Uploads into a folder:** `UploadHello.to_dir` (with a ticket for a files block) puts the uploaded items in that
+folder under the root; taken names get `name 2.ext` unless `replace` (the old item to the Trash). On failure what the
+upload made is removed. Terminal uploads are unchanged (a staging folder; `to_dir` refused).
+
+**Downloads:** a data stream of its own (`DOWNLOAD_HELLO`, then `DOWNLOAD_REQUEST { paths }`); the server answers
+`DOWNLOAD_PLAN { total, entries }`, then mirrors an upload (`DOWNLOAD_ENTRY` = `UploadEntry`, `DOWNLOAD_CHUNK`,
+`DOWNLOAD_END`) or `REJECT`. Items resolve under the root; symlinks inside folders are skipped. The client
+(`silo_client::download`) checks every name is one component, takes `name 2.ext` for taken names and removes what it
+wrote when it fails or is dropped (cancel).

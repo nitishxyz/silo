@@ -5,6 +5,7 @@
 
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
+use silo_proto::download::{DownloadHello, DownloadPlan, DownloadRequest};
 use silo_proto::{
     Frame, PROTOCOL, api,
     control::{ClientHello, Event, METHODS, ServerHello},
@@ -146,6 +147,9 @@ fn schema() -> Value {
             "UploadHello": plain(schema_for!(UploadHello).to_value()),
             "UploadEntry": plain(schema_for!(UploadEntry).to_value()),
             "Uploaded": plain(schema_for!(Uploaded).to_value()),
+            "DownloadHello": plain(schema_for!(DownloadHello).to_value()),
+            "DownloadRequest": plain(schema_for!(DownloadRequest).to_value()),
+            "DownloadPlan": plain(schema_for!(DownloadPlan).to_value()),
         },
         "events": plain(schema_for!(Event).to_value()),
         "terminal_config": plain(schema_for!(TerminalConfig).to_value()),

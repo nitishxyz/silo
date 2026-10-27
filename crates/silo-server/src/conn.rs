@@ -91,6 +91,7 @@ where
         (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
         (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
         (kind::UPLOAD_HELLO, Expect::Any | Expect::Data) => upload(server, first, reader, writer, peer).await,
+        (kind::DOWNLOAD_HELLO, Expect::Any | Expect::Data) => download(server, first, reader, writer, peer).await,
         (kind::UPGRADE_HELLO, Expect::Any | Expect::Control) => crate::upgrade::serve(server, first, reader, writer, peer).await,
         other => {
             tracing::debug!("unexpected first frame {:#x}", other.0);
@@ -795,7 +796,13 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::FilesSet(_)
         | Method::FilesRoot(_)
         | Method::FilesWrite(_)
-        | Method::FilesCreate(_) => crate::files::handle(server, method).await,
+        | Method::FilesCreate(_)
+        | Method::FilesMkdir(_)
+        | Method::FilesRename(_)
+        | Method::FilesCopy(_)
+        | Method::FilesMove(_)
+        | Method::FilesTrash(_)
+        | Method::FilesSearch(_) => crate::files::handle(server, method).await,
         Method::ChangesStatus(_)
         | Method::ChangesDiff(_)
         | Method::ChangesSet(_)
@@ -967,11 +974,35 @@ where
     } else if redeemed.as_ref().is_some_and(|(_, _, rights)| *rights < Rights::Interact) {
         Err((RpcError::FORBIDDEN, "this grant cannot upload files".to_owned()))
     } else if let Some((block_id, _, _)) = redeemed {
-        if server.registry.lock().unwrap().blocks.get(&block_id).and_then(Block::terminal).is_some() {
-            let mut frames = spawn_reader(reader, 16);
-            crate::drops::receive(&server.home, hello.total, &mut frames).await
-        } else {
-            Err(("not_found", "block no longer exists".to_owned()))
+        let (terminal, files) = {
+            let reg = server.registry.lock().unwrap();
+            let block = reg.blocks.get(&block_id);
+            (
+                block.and_then(Block::terminal).is_some(),
+                match block {
+                    Some(Block::Files(files)) => Some(files.root()),
+                    _ => None,
+                },
+            )
+        };
+        match (terminal, files, hello.to_dir) {
+            (true, _, None) => {
+                let mut frames = spawn_reader(reader, 16);
+                crate::drops::receive(&server.home, hello.total, &mut frames).await
+            }
+            (true, _, Some(_)) => Err(("bad_request", "a terminal block's uploads take no folder".to_owned())),
+            (_, Some(root), to_dir) => {
+                let mut frames = spawn_reader(reader, 16);
+                let to_dir = to_dir.unwrap_or_default();
+                let result = crate::files::transfer::receive(&root, &to_dir, hello.replace, server.trash.clone(), hello.total, &mut frames).await;
+                if let Ok(uploaded) = &result {
+                    let mut paths: Vec<String> = uploaded.paths.clone();
+                    paths.push(to_dir);
+                    server.registry.lock().unwrap().emit(silo_proto::control::Event::FilesChanged { block_id, paths, truncated: false });
+                }
+                result
+            }
+            _ => Err(("not_found", "block no longer exists".to_owned())),
         }
     } else {
         Err(("ticket", "invalid or expired ticket".to_owned()))
@@ -987,6 +1018,42 @@ where
     }
     drop(tx);
     let _ = writer_task.await;
+    Ok(())
+}
+
+/// A download stream: items of the ticket's files block, to the client.
+async fn download<R, W>(server: Arc<Server>, hello: Frame, reader: R, mut writer: W, peer: Peer) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let hello: silo_proto::download::DownloadHello = hello.parse()?;
+    let redeemed = server.registry.lock().unwrap().redeem(&hello.ticket, peer.conn_id());
+    let root = if let Err(error) = compat::check(hello.protocol, &hello.vt) {
+        Err((RpcError::INCOMPATIBLE, error.message))
+    } else if let Some((block_id, _, _)) = redeemed {
+        match server.registry.lock().unwrap().blocks.get(&block_id) {
+            Some(Block::Files(files)) => Ok(files.root()),
+            Some(_) => Err(("bad_request", "only files blocks download".to_owned())),
+            None => Err(("not_found", "block no longer exists".to_owned())),
+        }
+    } else {
+        Err(("ticket", "invalid or expired ticket".to_owned()))
+    };
+    let result = match root {
+        Ok(root) => {
+            let mut frames = spawn_reader(reader, 4);
+            crate::files::transfer::send(root, &mut frames, &mut writer).await
+        }
+        Err(refusal) => Err(refusal),
+    };
+    if let Err((code, reason)) = result {
+        tracing::debug!(code, reason, "download refused");
+        if code != "closed" {
+            write_frame(&mut writer, &Frame::json(kind::REJECT, &Reject { code: code.into(), reason })?).await?;
+            writer.flush().await?;
+        }
+    }
     Ok(())
 }
 

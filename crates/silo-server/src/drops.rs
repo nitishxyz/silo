@@ -119,11 +119,11 @@ fn size_of(dir: &Path) -> u64 {
 /// A rejected upload: `(code, reason)`.
 pub type Refusal = (&'static str, String);
 
-fn refuse(code: &'static str, reason: impl Into<String>) -> Refusal {
+pub fn refuse(code: &'static str, reason: impl Into<String>) -> Refusal {
     (code, reason.into())
 }
 
-fn io(error: std::io::Error) -> Refusal {
+pub fn io(error: std::io::Error) -> Refusal {
     refuse("io", error.to_string())
 }
 
@@ -151,15 +151,25 @@ pub async fn receive(home: &Path, total: u64, frames: &mut Receiver<std::io::Res
     let dir = drops.join(silo_proto::drops::name());
     tokio::fs::create_dir(&dir).await.map_err(io)?;
     let dir = tokio::fs::canonicalize(&dir).await.map_err(io)?;
-    let result = receive_into(&dir, total, frames).await;
+    let mut created = Vec::new();
+    let result = receive_into(&dir, total, frames, &mut created, |dir, name| Ok(unique(dir, &sanitize(name)))).await;
     if result.is_err() {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
-    result
+    result.map(|()| Uploaded { paths: created.iter().map(|p| p.to_string_lossy().into_owned()).collect() })
 }
 
-async fn receive_into(dir: &Path, total: u64, frames: &mut Receiver<std::io::Result<Frame>>) -> Result<Uploaded, Refusal> {
-    let mut paths = Vec::new();
+/// Receive an upload's entries (after the hello) into `dir`: each
+/// top-level item lands where `place` says (given the folder and the name
+/// as sent) and is added to `created`; deeper entries go inside it,
+/// sanitized.
+pub async fn receive_into(
+    dir: &Path,
+    total: u64,
+    frames: &mut Receiver<std::io::Result<Frame>>,
+    created: &mut Vec<PathBuf>,
+    place: impl Fn(&Path, &str) -> Result<PathBuf, Refusal>,
+) -> Result<(), Refusal> {
     // The current top-level item: its name as sent and where it landed.
     let mut top: Option<(String, PathBuf, bool)> = None;
     let mut received = 0u64;
@@ -171,7 +181,7 @@ async fn receive_into(dir: &Path, total: u64, frames: &mut Receiver<std::io::Res
             None => return Err(refuse("closed", "upload ended early")),
         };
         match frame.kind {
-            kind::UPLOAD_END => return Ok(Uploaded { paths }),
+            kind::UPLOAD_END => return Ok(()),
             kind::UPLOAD_ENTRY => {}
             other => return Err(refuse("protocol", format!("unexpected upload frame {other:#x}"))),
         }
@@ -183,8 +193,8 @@ async fn receive_into(dir: &Path, total: u64, frames: &mut Receiver<std::io::Res
         let target = match entry.path.as_slice() {
             [] => return Err(refuse("protocol", "empty path")),
             [name] => {
-                let path = unique(dir, &sanitize(name));
-                paths.push(path.to_string_lossy().into_owned());
+                let path = place(dir, name)?;
+                created.push(path.clone());
                 top = Some((name.clone(), path.clone(), entry.dir));
                 path
             }

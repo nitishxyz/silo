@@ -5,6 +5,7 @@ pub mod cache;
 pub mod callback;
 mod control;
 mod data;
+mod download;
 pub mod hosts;
 mod mirror;
 pub mod mismatch;
@@ -23,12 +24,13 @@ pub use control::{
     Upgrading, advertise, set_role, set_token,
 };
 pub use data::{DataSender, DataStream};
+pub use download::download;
 pub use mirror::{Applied, MAX_COMMAND_ROWS, Mirror, engine_config};
 pub use mismatch::IncompatibleServer;
 pub use predict::{PredCell, Predictor, RTT_OFF, RTT_ON, Rtt};
 pub use remote::{client_identity, device_proof, offer_host, pair};
 pub use spawn::{connect_or_spawn, server_running};
-pub use upload::{Upload, UploadSource, upload};
+pub use upload::{Upload, UploadSource, upload, upload_to};
 
 pub use silo_proto as proto;
 pub use silo_transport as transport;

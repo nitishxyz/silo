@@ -75,6 +75,13 @@ pub struct FilesSetParams {
     /// dropped. Older servers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlights: Option<BTreeMap<String, Vec<crate::model::FileHighlight>>>,
+    /// Editor or browser. Older servers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<crate::model::FilesView>,
+    /// The folder the browser shows (empty: the root). Older servers
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse: Option<String>,
 }
 
 /// The version of a file an edit started from: what `files.read` (or the
@@ -171,6 +178,24 @@ pub struct FileEntry {
     /// Last modification, unix ms.
     #[serde(default)]
     pub mtime: u64,
+    /// Creation (birth) time, unix ms; 0 where the file system doesn't
+    /// keep it. Older servers leave it out.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created: u64,
+    /// Hidden as Finder hides it: a dot name, or macOS's hidden flag.
+    /// Older servers leave it out (go by the name).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// `files.list`'s result: directories first, then by name.
@@ -262,4 +287,149 @@ pub struct FileFound {
 impl FileFound {
     pub const DEFAULT_LIMIT: u32 = 50;
     pub const MAX_LIMIT: u32 = 1000;
+}
+
+// ------------------------------------------------------------ operations
+//
+// Feature [`crate::compat::feature::FILES_OPS`]: older servers answer
+// `method_not_found`, and the app hides what they lack. Every path is
+// relative to the block's root and stays under it: an item is named by its
+// folder (resolved, symlinks followed, inside the root) and its own name (a
+// symlink is the link itself, never its target). The root itself can't be
+// renamed, moved, copied or trashed. Each changes the folders it touches,
+// so `files.changed` follows for them.
+
+/// `files.mkdir`: a new folder (its parent must exist).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesMkdirParams {
+    pub block_id: BlockId,
+    pub path: String,
+    /// When the name is taken, use the first free `name 2`, `name 3`…
+    /// (New Folder); otherwise refuse with
+    /// [`crate::control::RpcError::EXISTS`].
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// `files.rename`: rename an item, or move it to another folder under the
+/// root under a new name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesRenameParams {
+    pub block_id: BlockId,
+    pub from: String,
+    pub to: String,
+    /// Replace an item at `to` (it goes to the Trash first); otherwise a
+    /// taken `to` is refused with [`crate::control::RpcError::EXISTS`].
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// `files.copy` and `files.move`: items into a folder, keeping their names.
+/// A name taken there gets Finder's next free one (`name 2.ext`); copies
+/// into the folder they are in are `name copy.ext` (Duplicate). Folders
+/// copy recursively, symlinks as links.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesTransferParams {
+    pub block_id: BlockId,
+    pub from: Vec<String>,
+    /// The destination folder (empty: the root).
+    #[serde(default)]
+    pub to_dir: String,
+    /// Replace items with the same name instead (they go to the Trash).
+    #[serde(default)]
+    pub replace: bool,
+}
+
+impl FilesTransferParams {
+    /// Most items one call takes.
+    pub const MAX_ITEMS: usize = 10_000;
+}
+
+/// `files.trash`: move items to the host's Trash (macOS: the Finder's,
+/// with Put Back; Linux: the XDG trash, `~/.local/share/Trash`). Nothing
+/// is ever deleted outright.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesTrashParams {
+    pub block_id: BlockId,
+    pub paths: Vec<String>,
+}
+
+/// One item an operation handled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileMoved {
+    /// As named in the call (empty for `files.mkdir`).
+    pub from: String,
+    /// Where it is now, relative to the root (empty for `files.trash`).
+    pub to: String,
+}
+
+/// One item an operation could not handle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileFailed {
+    pub path: String,
+    /// An [`crate::control::RpcError`] code: `exists`, `not_found`,
+    /// `forbidden` (outside the root), `read_only`, `bad_request`,
+    /// `internal`.
+    pub code: String,
+    pub message: String,
+}
+
+/// The result of `files.mkdir`, `files.rename`, `files.copy`, `files.move`
+/// and `files.trash`: each item done or failed, in the call's order. A
+/// call whose every item failed still answers this (single-item calls,
+/// `files.mkdir` and `files.rename`, answer an error instead).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FilesDone {
+    #[serde(default)]
+    pub done: Vec<FileMoved>,
+    #[serde(default)]
+    pub failed: Vec<FileFailed>,
+}
+
+/// `files.search`: items under a folder whose name contains the query
+/// (case-insensitive; every space-separated word must be in the name), like
+/// Finder's “Name contains”. Folders match too.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesSearchParams {
+    pub block_id: BlockId,
+    pub query: String,
+    /// The folder searched (empty: the root).
+    #[serde(default)]
+    pub path: String,
+    /// Most items returned (default [`FileSearch::DEFAULT_LIMIT`], at most
+    /// [`FileSearch::MAX_LIMIT`]).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Also search what `.gitignore` leaves out (and `target`,
+    /// `node_modules`).
+    #[serde(default)]
+    pub ignored: bool,
+    /// Also search hidden (dot) items.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+/// A `files.search` match.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileHit {
+    /// Relative to the root.
+    pub path: String,
+    pub entry: FileEntry,
+}
+
+/// `files.search`'s result: best first (whole name, then name start, then
+/// shallower).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FileSearch {
+    pub path: String,
+    pub hits: Vec<FileHit>,
+    /// The walk stopped early (too many items, or out of time), or more
+    /// matched than `limit`.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl FileSearch {
+    pub const DEFAULT_LIMIT: u32 = 500;
+    pub const MAX_LIMIT: u32 = 5000;
 }

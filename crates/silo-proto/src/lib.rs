@@ -5,7 +5,8 @@
 //! The first frame of a stream decides its role: [`kind::CONTROL_HELLO`]
 //! opens a JSON control stream, [`kind::DATA_HELLO`] attaches a binary data
 //! stream to one block using a ticket obtained over control,
-//! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket.
+//! [`kind::UPLOAD_HELLO`] uploads files for one block with such a ticket,
+//! [`kind::DOWNLOAD_HELLO`] downloads a files block's items.
 
 pub mod access;
 pub mod agent;
@@ -15,6 +16,7 @@ pub mod compat;
 pub mod control;
 pub mod data;
 pub mod device;
+pub mod download;
 pub mod drops;
 pub mod files;
 pub mod frame;
@@ -139,6 +141,21 @@ pub mod kind {
     // Upload stream, server -> client (or `REJECT`).
     /// JSON [`crate::upload::Uploaded`].
     pub const UPLOADED: u8 = 0x8e;
+
+    /// JSON [`crate::download::DownloadHello`].
+    pub const DOWNLOAD_HELLO: u8 = 0x24;
+    // Download stream, client -> server.
+    /// JSON [`crate::download::DownloadRequest`].
+    pub const DOWNLOAD_REQUEST: u8 = 0x25;
+    // Download stream, server -> client (or `REJECT`).
+    /// JSON [`crate::download::DownloadPlan`].
+    pub const DOWNLOAD_PLAN: u8 = 0x91;
+    /// JSON [`crate::upload::UploadEntry`]: the next file or folder.
+    pub const DOWNLOAD_ENTRY: u8 = 0x92;
+    /// Bytes of the current file.
+    pub const DOWNLOAD_CHUNK: u8 = 0x93;
+    /// Every entry was sent.
+    pub const DOWNLOAD_END: u8 = 0x94;
 
     // Upgrade stream (stable across builds, see `crate::upgrade`).
     /// JSON [`crate::upgrade::UpgradeHello`].
