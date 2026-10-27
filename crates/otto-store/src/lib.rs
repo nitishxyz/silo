@@ -136,7 +136,7 @@ pub struct ToolCall {
     pub finished_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub provider: String,
     pub model: String,
@@ -148,6 +148,17 @@ pub struct UsageRecord {
 pub struct UsageTotals {
     pub usage: Usage,
     pub cost_usd: f64,
+}
+
+/// One stored step's usage (a `usage` row): what it ran on, its tokens and billed cost.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageRow {
+    pub session_id: String,
+    pub turn: i64,
+    pub step: i64,
+    /// When its turn started (ms since the Unix epoch); else its last event in that turn.
+    pub at: i64,
+    pub record: UsageRecord,
 }
 
 #[derive(Clone, Debug)]
@@ -511,6 +522,42 @@ impl Store {
         Ok(self.connection.query_row("SELECT coalesce(sum(input),0),coalesce(sum(output),0),coalesce(sum(cache_read),0),coalesce(sum(cache_write),0),coalesce(sum(reasoning),0),coalesce(sum(cost_usd),0) FROM usage WHERE session_id=?",[session_id],|r| Ok(UsageTotals {
             usage:Usage { input:r.get(0)?,output:r.get(1)?,cache_read:r.get(2)?,cache_write:r.get(3)?,reasoning:r.get(4)? },cost_usd:r.get(5)?
         }))?)
+    }
+
+    /// The session's stored steps, oldest first: what each ran on, its tokens and billed cost.
+    /// # Errors
+    /// Returns database errors, including integer overflow.
+    pub fn usage_rows(&self, session_id: &str) -> Result<Vec<UsageRow>> {
+        self.usage_query("u.session_id=?1", params![session_id])
+    }
+
+    /// Every session's steps whose turn started at or after `since_ms` (ms since the Unix epoch), oldest first.
+    /// # Errors
+    /// Returns database errors, including integer overflow.
+    pub fn usage_since(&self, since_ms: i64) -> Result<Vec<UsageRow>> {
+        self.usage_query("at>=?1", params![since_ms])
+    }
+
+    fn usage_query(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<UsageRow>> {
+        // A step is dated by its turn's start; a row without a turn (none recorded) by its turn's last event.
+        let sql = format!(
+            "SELECT * FROM (SELECT u.session_id,u.turn,u.step,u.provider,u.model,u.input,u.output,u.cache_read,u.cache_write,u.reasoning,u.cost_usd,\
+             coalesce(t.started_at,(SELECT max(e.at) FROM events e WHERE e.session_id=u.session_id AND e.turn=u.turn),0) AS at \
+             FROM usage u LEFT JOIN turns t ON t.session_id=u.session_id AND t.turn=u.turn) u WHERE {filter} ORDER BY at,u.session_id,u.turn,u.step"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        Ok(stmt
+            .query_map(params, |r| {
+                let usage = Usage { input: r.get(5)?, output: r.get(6)?, cache_read: r.get(7)?, cache_write: r.get(8)?, reasoning: r.get(9)? };
+                Ok(UsageRow {
+                    session_id: r.get(0)?,
+                    turn: r.get(1)?,
+                    step: r.get(2)?,
+                    at: r.get(11)?,
+                    record: UsageRecord { provider: r.get(3)?, model: r.get(4)?, usage, cost_usd: r.get(10)? },
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// Each turn's usage summed over its steps, oldest first, with the turn's last assistant item (the reply it

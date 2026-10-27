@@ -381,6 +381,10 @@ impl Connection {
     pub async fn model_list(&self, provider: Option<String>) -> Result<Vec<ModelInfo>> {
         self.call_typed(Method::ModelList { provider }).await
     }
+    /// Every session's usage since `since_ms`, days starting `utc_offset_minutes` east of UTC.
+    pub async fn usage_summary(&self, since_ms: i64, utc_offset_minutes: Option<i32>) -> Result<UsageSummary> {
+        self.call_typed(Method::UsageSummary { since_ms, utc_offset_minutes }).await
+    }
 }
 struct PendingGuard {
     id: u64,

@@ -379,6 +379,43 @@
           }
         ]
       },
+      "ModelUsage": {
+        "properties": {
+          "api_cost_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_usd": {
+            "format": "double",
+            "type": "number"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "steps": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "usage": {
+            "$ref": "#/$defs/Usage"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "usage",
+          "cost_usd"
+        ],
+        "type": "object"
+      },
       "Opaque": {
         "properties": {
           "data": true,
@@ -1021,6 +1058,19 @@
       },
       "UsageTotals": {
         "properties": {
+          "api_cost_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "by_model": {
+            "items": {
+              "$ref": "#/$defs/ModelUsage"
+            },
+            "type": "array"
+          },
           "cost_usd": {
             "format": "double",
             "type": "number"
@@ -1553,6 +1603,13 @@
         "properties": {
           "data": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
               "context": {
                 "$ref": "#/$defs/ContextUse",
                 "default": {
@@ -1564,6 +1621,18 @@
                 "format": "double",
                 "type": [
                   "number",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "type": [
+                  "string",
                   "null"
                 ]
               },
@@ -10948,6 +11017,43 @@
             ],
             "type": "object"
           },
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -11038,6 +11144,19 @@
           },
           "UsageTotals": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "format": "double",
                 "type": "number"
@@ -11470,6 +11589,43 @@
             ],
             "type": "object"
           },
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -11560,6 +11716,19 @@
           },
           "UsageTotals": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "format": "double",
                 "type": "number"
@@ -12237,6 +12406,43 @@
             ],
             "type": "object"
           },
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -12436,6 +12642,19 @@
           },
           "UsageTotals": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "format": "double",
                 "type": "number"
@@ -14589,6 +14808,43 @@
             ],
             "type": "object"
           },
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
           "PlanUsage": {
             "properties": {
               "windows": {
@@ -14679,6 +14935,19 @@
           },
           "UsageTotals": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "format": "double",
                 "type": "number"
@@ -15434,6 +15703,43 @@
               }
             ]
           },
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
           "Opaque": {
             "properties": {
               "data": true,
@@ -16181,6 +16487,19 @@
           },
           "TurnUsage": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "default": 0.0,
                 "format": "double",
@@ -16245,6 +16564,19 @@
           },
           "UsageTotals": {
             "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
               "cost_usd": {
                 "format": "double",
                 "type": "number"
@@ -17443,6 +17775,419 @@
         "title": "Array_of_ToolInfo",
         "type": "array"
       }
+    },
+    "usage.summary": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "since_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          },
+          "utc_offset_minutes": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ModelUsage": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "steps": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "provider",
+              "model",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
+          "Usage": {
+            "properties": {
+              "cache_read": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cache_write": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "input": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "output": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reasoning": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "input",
+              "output"
+            ],
+            "type": "object"
+          },
+          "UsageDay": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "start_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "start_ms",
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          },
+          "UsageTotals": {
+            "properties": {
+              "api_cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "by_model": {
+                "items": {
+                  "$ref": "#/$defs/ModelUsage"
+                },
+                "type": "array"
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": "number"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "usage",
+              "cost_usd"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "days": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/UsageDay"
+            },
+            "type": "array"
+          },
+          "sessions": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "totals": {
+            "$ref": "#/$defs/UsageTotals"
+          }
+        },
+        "required": [
+          "since_ms",
+          "totals",
+          "sessions"
+        ],
+        "title": "UsageSummary",
+        "type": "object"
+      }
     }
   },
   "protocol": 1,
@@ -18087,6 +18832,13 @@
             "properties": {
               "data": {
                 "properties": {
+                  "api_cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
                   "context": {
                     "$ref": "#/$defs/ContextUse",
                     "default": {
@@ -18098,6 +18850,18 @@
                     "format": "double",
                     "type": [
                       "number",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "provider": {
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
@@ -18717,6 +19481,43 @@
             "type": "string"
           }
         ]
+      },
+      "ModelUsage": {
+        "properties": {
+          "api_cost_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_usd": {
+            "format": "double",
+            "type": "number"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "steps": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "usage": {
+            "$ref": "#/$defs/Usage"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "usage",
+          "cost_usd"
+        ],
+        "type": "object"
       },
       "Opaque": {
         "properties": {
@@ -19376,6 +20177,19 @@
       },
       "UsageTotals": {
         "properties": {
+          "api_cost_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "by_model": {
+            "items": {
+              "$ref": "#/$defs/ModelUsage"
+            },
+            "type": "array"
+          },
           "cost_usd": {
             "format": "double",
             "type": "number"
@@ -19984,6 +20798,13 @@
             "properties": {
               "data": {
                 "properties": {
+                  "api_cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
                   "context": {
                     "$ref": "#/$defs/ContextUse",
                     "default": {
@@ -19995,6 +20816,18 @@
                     "format": "double",
                     "type": [
                       "number",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "provider": {
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },

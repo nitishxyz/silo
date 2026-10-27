@@ -258,6 +258,9 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!({}))
         }
         Method::PlanUsage { provider } => Ok(json!(runtime.plan_usage(provider.as_deref()))),
+        Method::UsageSummary { since_ms, utc_offset_minutes } => {
+            Ok(json!(runtime.usage_summary(since_ms, utc_offset_minutes.unwrap_or(0)).await.map_err(core_error)?))
+        }
     }
 }
 pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcError> {

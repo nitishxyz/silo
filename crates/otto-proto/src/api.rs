@@ -75,6 +75,7 @@ fn result_schema(method: &Method) -> Schema {
         M::FilesComplete { .. } => schema_for!(Vec<FileMatch>),
         M::ConfigGet { .. } => schema_for!(ConfigValue),
         M::PlanUsage { .. } => schema_for!(Vec<ProviderPlan>),
+        M::UsageSummary { .. } => schema_for!(UsageSummary),
         M::JobList { .. } => schema_for!(Vec<JobInfo>),
         M::ServerShutdown {}
         | M::Ping {}
@@ -189,6 +190,7 @@ pub fn examples() -> Vec<Method> {
         M::ConfigGet { key: None },
         M::ConfigSet { key: "model".into(), value: json!("example-model") },
         M::PlanUsage { provider: Some("anthropic".into()) },
+        M::UsageSummary { since_ms: 1_798_761_600_000, utc_offset_minutes: Some(330) },
     ]
 }
 

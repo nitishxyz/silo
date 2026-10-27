@@ -204,6 +204,10 @@ async fn hello_api_validation_lock_and_shutdown() {
     assert!(matches!(error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST));
     client.call(Method::ConfigSet { key: "model".into(), value: json!("test") }).await.unwrap();
     assert_eq!(client.call(Method::ConfigGet { key: Some("model".into()) }).await.unwrap()["value"], "test");
+    // Nothing ran yet: an empty summary, unknown API cost; the typed call too.
+    let summary = client.usage_summary(0, Some(-480)).await.unwrap();
+    assert_eq!((summary.sessions, summary.totals.api_cost_usd, summary.days.len()), (0, None, 0));
+    assert!(client.call(Method::UsageSummary { since_ms: 0, utc_offset_minutes: None }).await.unwrap()["totals"].is_object());
     client.call(Method::ServerShutdown {}).await.unwrap();
     server.serve_forever().await.unwrap();
     assert!(!paths::socket(f.dir.path()).exists());

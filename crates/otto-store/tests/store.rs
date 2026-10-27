@@ -389,3 +389,32 @@ fn turn_usage_sums_each_turns_steps_under_its_reply() {
     assert_eq!(turns.len(), 2);
     assert!(store.turn_usage("none").unwrap().is_empty());
 }
+
+#[test]
+fn usage_rows_keep_each_step_and_its_model_dated_by_its_turn() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = new_session(&mut store).id;
+    let at = |turn: i64, step: i64, kind: &str| EventRecord { turn, step, kind: kind.into(), payload: json!({}) };
+    let usage = |model: &str, input: u64| {
+        Projection::Usage(UsageRecord {
+            provider: "anthropic".into(),
+            model: model.into(),
+            usage: Usage { input, output: 1, ..Usage::default() },
+            cost_usd: 0.0,
+        })
+    };
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    store.append(&id, at(1, 0, "turn.started"), Projection::TurnStatus(TurnStatus::Running)).unwrap();
+    store.append(&id, at(1, 1, "usage"), usage("a", 10)).unwrap();
+    // A switch mid-turn: a row of its own.
+    store.append(&id, at(1, 2, "usage"), usage("b", 20)).unwrap();
+    // A step the turns table doesn't know (no turn status): dated by its events.
+    store.append(&id, at(2, 1, "usage"), usage("a", 30)).unwrap();
+    let rows = store.usage_rows(&id).unwrap();
+    let seen: Vec<_> = rows.iter().map(|r| (r.turn, r.step, r.record.model.as_str(), r.record.usage.input)).collect();
+    assert_eq!(seen, [(1, 1, "a", 10), (1, 2, "b", 20), (2, 1, "a", 30)]);
+    assert!(rows.iter().all(|r| r.at >= before && r.session_id == id));
+    assert_eq!(store.usage_since(before).unwrap().len(), 3);
+    assert!(store.usage_since(i64::MAX).unwrap().is_empty());
+    assert!(store.usage_rows("none").unwrap().is_empty());
+}

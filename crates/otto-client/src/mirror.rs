@@ -397,18 +397,14 @@ impl SessionMirror {
             }
             Event::QuestionResolved { question_id, .. } => self.pending_questions.retain(|q| q.question_id != *question_id),
             Event::QueueChanged { queued } => self.queue = queued.clone(),
-            Event::Usage { turn, usage, cost_usd, context, .. } => {
-                let entry = self.turn_entry(*turn);
-                entry.usage.accumulate(usage);
-                entry.cost_usd += cost_usd.unwrap_or(0.0);
+            Event::Usage { turn, usage, cost_usd, context, api_cost_usd, provider, model, .. } => {
+                // An older server names no model: the session's (a step runs on it).
+                let provider = provider.clone().unwrap_or_else(|| self.info.provider.clone());
+                let model = model.clone().unwrap_or_else(|| self.info.model.clone());
+                let cost = cost_usd.unwrap_or(0.0);
+                self.turn_entry(*turn).add_step(&provider, &model, usage, cost, *api_cost_usd);
                 self.info.context = *context;
-                let total = &mut self.info.usage.usage;
-                total.input = total.input.saturating_add(usage.input);
-                total.output = total.output.saturating_add(usage.output);
-                total.cache_read = total.cache_read.saturating_add(usage.cache_read);
-                total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-                total.reasoning = total.reasoning.saturating_add(usage.reasoning);
-                self.info.usage.cost_usd += cost_usd.unwrap_or(0.0);
+                self.info.usage.add_step(&provider, &model, usage, cost, *api_cost_usd);
             }
             Event::Error { class, message, retryable } => {
                 self.last_error = Some((class.clone(), message.clone(), *retryable));

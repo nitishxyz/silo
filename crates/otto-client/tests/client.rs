@@ -268,6 +268,9 @@ fn approvals_questions_tools_and_usage() {
             usage: Usage { input: 4, output: 2, ..Usage::default() },
             cost_usd: Some(0.1),
             context: otto_proto::ContextUse { used: 4, window: 1000 },
+            api_cost_usd: None,
+            provider: None,
+            model: None,
         },
         Event::TurnFinished { turn: 1, status: TurnStatus::Done, usage: Usage { input: 4, output: 2, ..Usage::default() }, changes: None },
     ];
@@ -304,7 +307,19 @@ fn compactions_stream_live_and_give_way_to_their_checkpoint() {
     assert_eq!(m.apply_live(2, &Event::CompactionDelta { id: "c".into(), text: "Goal: ".into() }), ApplyResult::Applied);
     m.apply(3, &Event::QueueChanged { queued: vec![] });
     assert_eq!(m.apply_live(3, &Event::CompactionDelta { id: "c".into(), text: "ship".into() }), ApplyResult::Applied);
-    m.apply(4, &Event::Usage { turn: 0, step: 0, usage: Usage::default(), cost_usd: None, context: ContextUse::default() });
+    m.apply(
+        4,
+        &Event::Usage {
+            turn: 0,
+            step: 0,
+            usage: Usage::default(),
+            cost_usd: None,
+            context: ContextUse::default(),
+            api_cost_usd: None,
+            provider: None,
+            model: None,
+        },
+    );
     assert_eq!(m.compactions[0].summary, "Goal: ship");
     assert_eq!(m.apply_live(1, &Event::CompactionDelta { id: "c".into(), text: "stale".into() }), ApplyResult::Duplicate);
     // The checkpoint item takes over; the live entry leaves.
@@ -614,7 +629,13 @@ fn mirror_keeps_the_turns_that_changed_files() {
 #[test]
 fn mirror_keeps_each_turns_usage_under_its_reply() {
     let mut v = view(0);
-    v.turn_usage = vec![TurnUsage { turn: 1, item_id: Some("old".into()), usage: Usage { input: 9, ..Default::default() }, cost_usd: 0.1 }];
+    v.turn_usage = vec![TurnUsage {
+        turn: 1,
+        item_id: Some("old".into()),
+        usage: Usage { input: 9, ..Default::default() },
+        cost_usd: 0.1,
+        ..Default::default()
+    }];
     let mut m = SessionMirror::new(v);
     let step = |input: u64, cache_read: u64, cost: f64| Event::Usage {
         turn: 2,
@@ -622,6 +643,9 @@ fn mirror_keeps_each_turns_usage_under_its_reply() {
         usage: Usage { input, output: 3, cache_read, cache_write: 0, reasoning: 1 },
         cost_usd: Some(cost),
         context: ContextUse::default(),
+        api_cost_usd: None,
+        provider: None,
+        model: None,
     };
     m.apply(1, &Event::ItemDone { item: Item::user_text("u2", "go") });
     m.apply(2, &step(10, 0, 0.25));
@@ -639,4 +663,38 @@ fn mirror_keeps_each_turns_usage_under_its_reply() {
     // A turn that ran no step (stopped before the model answered) adds nothing.
     m.apply(6, &Event::TurnFinished { turn: 3, status: TurnStatus::Cancelled, usage: Usage::default(), changes: None });
     assert_eq!(m.turn_usage.len(), 2);
+}
+#[test]
+fn mirror_folds_api_equivalent_costs_by_model() {
+    let mut v = view(0);
+    v.info.provider = "anthropic".into();
+    v.info.model = "claude-a".into();
+    // The view's totals: one model, priced.
+    v.info.usage.add_step("anthropic", "claude-a", &Usage { input: 100, output: 10, ..Usage::default() }, 0.0, Some(1.0));
+    let mut m = SessionMirror::new(v);
+    let step = |turn: i64, model: Option<&str>, api: Option<f64>| Event::Usage {
+        turn,
+        step: 1,
+        usage: Usage { input: 10, output: 2, cache_read: 50, ..Usage::default() },
+        cost_usd: Some(0.0),
+        context: ContextUse::default(),
+        api_cost_usd: api,
+        provider: model.map(|_| "anthropic".into()),
+        model: model.map(Into::into),
+    };
+    // An older server's step names no model: the session's.
+    m.apply(1, &step(2, None, Some(0.5)));
+    // A switch mid-session: its own row, its own price; then a model without one.
+    m.apply(2, &step(2, Some("claude-b"), Some(0.25)));
+    m.apply(3, &step(3, Some("local"), None));
+    let totals = &m.info.usage;
+    assert_eq!(totals.api_cost_usd, Some(1.75), "unknown adds nothing");
+    assert_eq!(totals.cost_usd, 0.0, "billed nothing (a subscription)");
+    let models: Vec<_> = totals.by_model.iter().map(|b| (b.model.as_str(), b.steps, b.api_cost_usd)).collect();
+    assert_eq!(models, [("claude-a", 2, Some(1.5)), ("claude-b", 1, Some(0.25)), ("local", 1, None)]);
+    assert_eq!(totals.usage.input, 130);
+    let turn = m.turn_usage.iter().find(|t| t.turn == 2).unwrap();
+    assert_eq!((turn.api_cost_usd, turn.by_model.len()), (Some(0.75), 2));
+    let turn = m.turn_usage.iter().find(|t| t.turn == 3).unwrap();
+    assert_eq!((turn.api_cost_usd, turn.by_model[0].api_cost_usd), (None, None), "never $0");
 }

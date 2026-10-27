@@ -374,12 +374,18 @@ async fn settle(
     }
     cx.item(persisted, turn, step).await?;
     let cost = live.model.info().pricing.as_ref().map(|p| p.cost(usage));
+    // At list prices: the live model's, else the catalog's for what the session runs (as read back later).
+    let list = live.model.info().list_pricing.clone().or_else(|| otto_llm::catalog::list_pricing(&live.row.provider, &live.row.model));
+    let api_cost = list.map(|p| p.cost(usage));
     cx.emit(
         Event::Usage {
             turn,
             step,
             usage: usage.clone(),
             cost_usd: cost,
+            api_cost_usd: api_cost,
+            provider: Some(live.row.provider.clone()),
+            model: Some(live.row.model.clone()),
             // A provider that reported no usage leaves the last known prompt size.
             context: otto_proto::ContextUse {
                 used: Some(usage.total_input())

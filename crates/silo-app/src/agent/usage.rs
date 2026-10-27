@@ -216,7 +216,7 @@ impl AgentPane {
             }
             None => card.child(note("The model's window is unknown")),
         };
-        let UsageTotals { usage, cost_usd } = &m.info.usage;
+        let UsageTotals { usage, cost_usd, .. } = &m.info.usage;
         card = card.child(menu::divider()).child(heading("Session tokens"));
         for (label, value) in token_rows(usage, *cost_usd) {
             card = card.child(stat(label, value, fg));
@@ -308,7 +308,8 @@ mod tests {
         assert_eq!(turn_label(&usage(1_200, 1_234, 11_200, 0, 0)).as_deref(), Some("12.4k in · 1.2k out · 90% cached"));
         assert_eq!(turn_label(&usage(900, 40, 0, 0, 0)).as_deref(), Some("900 in · 40 out"), "no hit: no cached");
         assert_eq!(turn_label(&Usage::default()), None, "nothing reported: nothing shown");
-        let turn = TurnUsage { turn: 3, item_id: Some("r".into()), usage: usage(1_200, 1_234, 11_200, 100, 300), cost_usd: 0.0412 };
+        let turn =
+            TurnUsage { turn: 3, item_id: Some("r".into()), usage: usage(1_200, 1_234, 11_200, 100, 300), cost_usd: 0.0412, ..TurnUsage::default() };
         assert_eq!(
             turn_tip(&turn),
             "Input: 1,200\nCache read (hit): 11,200\nCache write: 100\nOutput: 1,234\nReasoning (in output): 300\nTotal: 13,734\nCache hit rate: 90%\nCost: $0.04"

@@ -20,6 +20,7 @@ mod step;
 mod subagents;
 mod title;
 mod tools;
+mod usage;
 pub use otto_tools::attachments;
 pub use runtime::*;
 pub use session::SessionHandle;

@@ -221,10 +221,54 @@ fn turn_changes_are_additive() {
     // Nor `turn_usage`.
     assert!(sample_view().turn_usage.is_empty());
     let mut with = sample_view();
-    with.turn_usage = vec![otto_proto::TurnUsage { turn: 1, item_id: None, usage: Default::default(), cost_usd: 0.0 }];
+    with.turn_usage = vec![otto_proto::TurnUsage { turn: 1, item_id: None, usage: Default::default(), cost_usd: 0.0, ..Default::default() }];
     let wire = serde_json::to_value(&with).unwrap();
     assert!(wire["turn_usage"][0].get("item_id").is_none(), "no reply yet: omitted");
     assert_eq!(serde_json::from_value::<SessionView>(wire).unwrap().turn_usage, with.turn_usage);
+}
+#[test]
+fn api_equivalent_costs_are_additive() {
+    use otto_proto::{ModelUsage, TurnUsage, UsageTotals};
+    // An older server's totals, turn usage and usage event have none: they read as unknown, no models.
+    let view = sample_view();
+    assert_eq!((view.info.usage.api_cost_usd, view.info.usage.by_model.len()), (None, 0));
+    let turn: TurnUsage = serde_json::from_value(json!({"turn": 1, "usage": {"input": 1, "output": 2}, "cost_usd": 0.0})).unwrap();
+    assert_eq!((turn.api_cost_usd, turn.by_model.len()), (None, 0));
+    let event: Event =
+        serde_json::from_value(json!({"event": "usage", "data": {"turn": 1, "step": 1, "usage": {"input": 1, "output": 2}, "cost_usd": null}}))
+            .unwrap();
+    assert!(matches!(event, Event::Usage { api_cost_usd: None, provider: None, model: None, .. }));
+    // None is omitted on the wire, and an older client's shape still reads the new one.
+    assert!(serde_json::to_value(UsageTotals::default()).unwrap().get("api_cost_usd").is_none());
+    let mut totals = UsageTotals::default();
+    let usage = otto_proto::Usage { input: 10, output: 5, cache_read: 100, ..Default::default() };
+    totals.add_step("anthropic", "claude", &usage, 0.0, Some(0.25));
+    totals.add_step("ollama", "llama", &usage, 0.0, None);
+    totals.add_step("anthropic", "claude", &usage, 0.0, Some(0.5));
+    totals.sort_models();
+    assert_eq!(totals.api_cost_usd, Some(0.75), "the priced steps' sum");
+    assert_eq!(totals.usage.cache_read, 300);
+    assert_eq!(
+        totals.by_model[0],
+        ModelUsage {
+            provider: "anthropic".into(),
+            model: "claude".into(),
+            usage: otto_proto::Usage { input: 20, output: 10, cache_read: 200, ..Default::default() },
+            cost_usd: 0.0,
+            api_cost_usd: Some(0.75),
+            steps: 2
+        }
+    );
+    assert_eq!(totals.by_model[1].api_cost_usd, None);
+    let wire = serde_json::to_value(&totals).unwrap();
+    assert_eq!(serde_json::from_value::<UsageTotals>(wire.clone()).unwrap(), totals);
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OldTotals {
+        usage: otto_proto::Usage,
+        cost_usd: f64,
+    }
+    assert!(serde_json::from_value::<OldTotals>(wire).is_ok());
 }
 fn sample_view() -> otto_proto::SessionView {
     serde_json::from_value(json!({

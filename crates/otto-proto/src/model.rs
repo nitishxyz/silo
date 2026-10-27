@@ -29,10 +29,108 @@ pub enum SessionStatus {
     Archived,
 }
 
+/// Tokens and cost summed over steps: a session's (`SessionInfo.usage`), a turn's or a period's (`usage.summary`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UsageTotals {
     pub usage: Usage,
+    /// What was billed: 0 for a subscription's steps and for models without pricing.
     pub cost_usd: f64,
+    /// What the same steps cost at the providers' list (API) prices, each step priced by its own model and
+    /// prompt size (long-context tiers) with the catalog's current prices, so older steps are priced too. The
+    /// sum of the steps whose model has a list price; `None` when none has (and from older servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_cost_usd: Option<f64>,
+    /// Per provider and model, most API-equivalent cost first (additive; absent from older servers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_model: Vec<ModelUsage>,
+}
+
+impl UsageTotals {
+    /// Add one step's usage: `cost_usd` billed, `api_cost_usd` at list prices (`None`: unknown),
+    /// by `provider` and `model`.
+    pub fn add_step(&mut self, provider: &str, model: &str, usage: &Usage, cost_usd: f64, api_cost_usd: Option<f64>) {
+        add_usage(&mut self.usage, usage);
+        self.cost_usd += cost_usd;
+        self.api_cost_usd = add_cost(self.api_cost_usd, api_cost_usd);
+        let at = match self.by_model.iter().position(|m| m.provider == provider && m.model == model) {
+            Some(at) => at,
+            None => {
+                self.by_model.push(ModelUsage { provider: provider.into(), model: model.into(), ..ModelUsage::default() });
+                self.by_model.len() - 1
+            }
+        };
+        let entry = &mut self.by_model[at];
+        add_usage(&mut entry.usage, usage);
+        entry.cost_usd += cost_usd;
+        entry.api_cost_usd = add_cost(entry.api_cost_usd, api_cost_usd);
+        entry.steps = entry.steps.saturating_add(1);
+    }
+    /// `by_model` most API-equivalent cost first (unknown last), then most tokens, then by name.
+    pub fn sort_models(&mut self) {
+        self.by_model.sort_by(|a, b| {
+            b.api_cost_usd
+                .unwrap_or(-1.0)
+                .total_cmp(&a.api_cost_usd.unwrap_or(-1.0))
+                .then_with(|| (b.usage.total_input() + b.usage.output).cmp(&(a.usage.total_input() + a.usage.output)))
+                .then_with(|| (&a.provider, &a.model).cmp(&(&b.provider, &b.model)))
+        });
+    }
+}
+
+fn add_usage(total: &mut Usage, usage: &Usage) {
+    total.input = total.input.saturating_add(usage.input);
+    total.output = total.output.saturating_add(usage.output);
+    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+    total.reasoning = total.reasoning.saturating_add(usage.reasoning);
+}
+
+/// A sum of known costs: unknown adds nothing, and stays unknown only while nothing is known.
+fn add_cost(total: Option<f64>, cost: Option<f64>) -> Option<f64> {
+    match (total, cost) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
+}
+
+/// One provider and model's share of a [`UsageTotals`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelUsage {
+    pub provider: String,
+    pub model: String,
+    pub usage: Usage,
+    /// Billed (0 on a subscription).
+    pub cost_usd: f64,
+    /// At list (API) prices; `None` when the catalog has no price for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_cost_usd: Option<f64>,
+    /// Model requests (steps) counted.
+    #[serde(default)]
+    pub steps: u32,
+}
+
+/// Every session's usage since `since_ms` (`usage.summary`), each step dated by its turn's start.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct UsageSummary {
+    pub since_ms: i64,
+    pub totals: UsageTotals,
+    /// Sessions with usage in the period (sub-agents and archived sessions included).
+    pub sessions: u32,
+    /// The last 30 days' usage, a day each (days without usage left out), oldest first: days at
+    /// `utc_offset_minutes` (the request's; UTC without one).
+    #[serde(default)]
+    pub days: Vec<UsageDay>,
+}
+
+/// One day of [`UsageSummary::days`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct UsageDay {
+    /// The day's start (ms since the Unix epoch).
+    pub start_ms: i64,
+    pub usage: Usage,
+    pub cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_cost_usd: Option<f64>,
 }
 
 /// How full the context is: the last request's prompt (`input + cache_read +
@@ -262,6 +360,33 @@ pub struct TurnUsage {
     /// What its steps cost, 0 when the model has no pricing.
     #[serde(default)]
     pub cost_usd: f64,
+    /// Its steps at list (API) prices, as [`UsageTotals::api_cost_usd`] (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_cost_usd: Option<f64>,
+    /// Per provider and model, as [`UsageTotals::by_model`] (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_model: Vec<ModelUsage>,
+}
+
+impl TurnUsage {
+    /// Add one step, as [`UsageTotals::add_step`].
+    pub fn add_step(&mut self, provider: &str, model: &str, usage: &Usage, cost_usd: f64, api_cost_usd: Option<f64>) {
+        let mut totals = UsageTotals {
+            usage: std::mem::take(&mut self.usage),
+            cost_usd: self.cost_usd,
+            api_cost_usd: self.api_cost_usd,
+            by_model: std::mem::take(&mut self.by_model),
+        };
+        totals.add_step(provider, model, usage, cost_usd, api_cost_usd);
+        self.set_totals(totals);
+    }
+    /// Take `totals`' tokens, costs and models.
+    pub fn set_totals(&mut self, totals: UsageTotals) {
+        self.usage = totals.usage;
+        self.cost_usd = totals.cost_usd;
+        self.api_cost_usd = totals.api_cost_usd;
+        self.by_model = totals.by_model;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

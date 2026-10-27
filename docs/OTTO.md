@@ -289,7 +289,11 @@ pub struct Opaque { pub provider: ProviderId, pub model: String, pub data: Value
   `claude-sonnet-5-5`: `shell`/`read` accepted, 200 with a `shell` call, also with a history call to a `Bash` not in
   the list), so its shaping is only the `SYSTEM_PREFIX` block and the headers; every provider gets the same names.
 - Catalog: generated at build from a models.dev-style source plus a manual overlay, refreshed at runtime with a
-  cache. Pricing feeds usage and cost events.
+  cache. Pricing feeds usage and cost events. `Pricing` carries models.dev's long-context `tiers` (type
+  `context`; else the older `context_over_200k`, a tier above 200,000; `tiers` supersede it where both are
+  given): a request whose prompt (`input + cache_read + cache_write`) is above a tier's size is priced at that
+  tier, all of it, output included (`Pricing::cost`). `ModelInfo.pricing` is what is billed (zero on a
+  subscription), `ModelInfo.list_pricing` the list (API) price whatever the sign-in.
 - Remote model lists (`catalog/remote.rs`): subscription providers' own lists (Kimi Code `/models`, Antigravity
   `fetchAvailableModels`) are saved to `<state>/catalog/remote-<provider>.json` and refreshed after login and when
   older than a jittered 4–6 h. Catalog metadata wins on matching ids, list-only ids use the list's fields, and with no
@@ -999,6 +1003,20 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   item) is among its items, and the latest turn; `SessionMirror.turn_usage` keeps them, adding each live `usage`
   step to its turn and taking `turn.finished.usage` (the turn's sum) under the reply then loaded. Older peers
   skip it (and an older server's view has none: only turns run while the pane follows show their usage).
+- API-equivalent costs (additive, built 2026-10-28): `UsageTotals` (a session's `usage`, a turn's
+  `TurnUsage`) adds `api_cost_usd?` and `by_model: [ModelUsage {provider, model, usage, cost_usd, api_cost_usd?,
+  steps}]` (most API cost first). They are computed when read, never stored: each `usage` row (one per step and
+  model) is priced at its own model's list price from the catalog otto loaded (the user's refreshed cache
+  included; `catalog::list_pricing`: the model's entry, else the id a dated snapshot extends) and its own prompt
+  (tiers), so sessions recorded at $0 on a subscription and steps before a model switch are priced too. The
+  stored `cost_usd` stays the billed cost. A model without a list price (local, subscription-only lists) has
+  `api_cost_usd: null`, never 0; a total sums the priced steps and is null only when none is. The live `usage`
+  event adds `api_cost_usd?` (the live model's `list_pricing`, else the catalog's) and `provider?`/`model?`;
+  `SessionMirror` folds each step into the session's and the turn's totals and models (an older server's step
+  counts under the session's model). `usage.summary {since_ms, utc_offset_minutes?}` → `UsageSummary {since_ms,
+  totals, sessions, days: [UsageDay {start_ms, usage, cost_usd, api_cost_usd?}]}`: every session's steps
+  (archived and sub-agents included) whose turn started since then, and the last 30 days a day each (days at the
+  client's offset, UTC without one; days without usage left out).
 - **Bounded views and frames** (additive, `otto_proto::clip`). A frame is at most `MAX_FRAME` (16 MiB), and a
   session's items can be far larger (screenshots, page dumps), so:
   - `session.view {session_id, limit?, before_seq?}` returns the newest items that fit `VIEW_BUDGET` (8 MiB of

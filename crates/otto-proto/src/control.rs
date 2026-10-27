@@ -282,6 +282,15 @@ pub enum Method {
         #[serde(default)]
         provider: Option<String>,
     },
+    /// Every session's tokens and costs since `since_ms`, by model, and the last 30 days a day each.
+    #[serde(rename = "usage.summary")]
+    UsageSummary {
+        #[serde(default)]
+        since_ms: i64,
+        /// The client's offset from UTC (minutes east), where its days start; UTC without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        utc_offset_minutes: Option<i32>,
+    },
 }
 
 impl std::fmt::Debug for Method {
@@ -345,6 +354,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("config.get", "Read a configuration key, or all configuration."),
     ("config.set", "Set a configuration key."),
     ("plan.usage", "Subscription limits per provider, as the last response reported them."),
+    ("usage.summary", "Every session's tokens and costs (billed and at API prices) since a time, by model and by day."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -629,6 +639,9 @@ pub const EVENTS: &[&str] = &[
     "auth.changed",
 ];
 
+// `session.changed` carries a whole `SessionInfo` (its usage by model); events are built, sent and
+// dropped, so its size is not worth boxing every constructor and match for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", content = "data")]
 pub enum Event {
@@ -677,7 +690,8 @@ pub enum Event {
     #[serde(rename = "question.resolved")]
     QuestionResolved { question_id: String, answer: String },
     #[serde(rename = "usage")]
-    /// `context` is the session's [`SessionInfo::context`] after this step.
+    /// `context` is the session's [`SessionInfo::context`] after this step. `api_cost_usd` (additive): the step at
+    /// its model's list (API) price, `None` when unknown; `provider` and `model` (additive) the model it ran on.
     Usage {
         turn: i64,
         step: i64,
@@ -685,6 +699,12 @@ pub enum Event {
         cost_usd: Option<f64>,
         #[serde(default)]
         context: ContextUse,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Otto began compacting the history (additive). `trigger` is `manual`
     /// (`session.compact`) or `auto` (the context filled up mid-turn, or the

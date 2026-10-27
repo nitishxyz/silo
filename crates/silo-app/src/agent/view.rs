@@ -3689,6 +3689,7 @@ mod tests {
         let usage = otto_proto::UsageTotals {
             usage: otto_llm::Usage { input: 1_200_000, output: 84_000, cache_read: 800_000, cache_write: 100_000, reasoning: 0 },
             cost_usd: 0.31,
+            ..Default::default()
         };
         assert_eq!(
             context_tip(ContextUse { used: 48_213, window: 200_000 }, &usage),

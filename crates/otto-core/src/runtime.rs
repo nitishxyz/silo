@@ -1,6 +1,6 @@
 use crate::{Error, Result, session::SessionHandle};
 use otto_llm::{Model, ModelInfo};
-use otto_proto::{ApprovalDecision, Delivery, Event, InputPart, ProjectInfo, SessionInfo, SessionStatus, SessionView, UsageTotals};
+use otto_proto::{ApprovalDecision, Delivery, Event, InputPart, ProjectInfo, SessionInfo, SessionStatus, SessionView};
 use otto_store::{EventRecord, NewSession, SessionUpdate, Store};
 use std::{
     collections::HashMap,
@@ -554,6 +554,15 @@ impl Runtime {
             .map(|(provider, usage)| otto_proto::ProviderPlan { provider: provider.clone(), usage: usage.clone() })
             .collect()
     }
+    /// Every session's usage since `since_ms` (`usage.summary`): totals by model, billed and at list prices,
+    /// and the last 30 days a day each, days starting at midnight `utc_offset_minutes` east of UTC.
+    pub async fn usage_summary(&self, since_ms: i64, utc_offset_minutes: i32) -> Result<otto_proto::UsageSummary> {
+        let now =
+            i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(i64::MAX);
+        let offset = utc_offset_minutes.clamp(-18 * 60, 18 * 60);
+        let rows = self.db(move |s| Ok(s.usage_since(crate::usage::summary_from(since_ms, offset, now))?)).await?;
+        Ok(crate::usage::summary(&rows, since_ms, offset, now))
+    }
     /// `info` with its provider's plan usage (`SessionInfo.plan`).
     #[must_use]
     pub fn with_plan(&self, mut info: SessionInfo) -> SessionInfo {
@@ -821,7 +830,8 @@ fn with_context(s: &mut Store, models: &dyn ModelResolver, mut row: otto_store::
     Ok(row)
 }
 pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
-    let usage = s.usage_totals(&row.id)?;
+    let rows = s.usage_rows(&row.id)?;
+    let usage = crate::usage::totals(&mut crate::usage::Prices::default(), rows.iter().map(|r| &r.record));
     Ok(SessionInfo {
         id: row.id,
         project_id: row.project_id,
@@ -845,7 +855,7 @@ pub(crate) fn info(s: &Store, row: otto_store::Session) -> Result<SessionInfo> {
         created_at: row.created_at,
         updated_at: row.updated_at,
         last_seq: row.last_seq,
-        usage: UsageTotals { usage: usage.usage, cost_usd: usage.cost_usd },
+        usage,
     })
 }
 /// A fork's source and sequence (`SessionInfo::forked_from`): a session with a parent whose meta has
@@ -953,9 +963,17 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
     let mut turn_usage = s.turn_usage(id)?;
     let latest = turn_usage.last().map(|(turn, ..)| *turn);
     turn_usage.retain(|(turn, item, _)| Some(*turn) == latest || item.as_ref().is_some_and(|item| items.iter().any(|i| i.id == *item)));
+    // Priced a step at a time (each by its own model and prompt), as the session's totals.
+    let mut priced = crate::usage::by_turn(&mut crate::usage::Prices::default(), &s.usage_rows(id)?);
     let turn_usage = turn_usage
         .into_iter()
-        .map(|(turn, item_id, totals)| otto_proto::TurnUsage { turn, item_id, usage: totals.usage, cost_usd: totals.cost_usd })
+        .map(|(turn, item_id, totals)| {
+            let mut usage = otto_proto::TurnUsage { turn, item_id, usage: totals.usage, cost_usd: totals.cost_usd, ..Default::default() };
+            if let Some(priced) = priced.remove(&turn) {
+                usage.set_totals(priced);
+            }
+            usage
+        })
         .collect();
     let streaming_tool_calls = if busy && newest { open_inputs(s, id, info.last_seq)? } else { Vec::new() };
     let mut running_tool_calls: Vec<_> = s
