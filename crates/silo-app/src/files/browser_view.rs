@@ -453,12 +453,20 @@ impl FilesPane {
                                 this.browser.menu = Some(super::browser::Menu { at: e.position, target: Some(row_right.path.clone()) });
                                 cx.notify();
                             });
-                        })
-                        .on_drag(drag, move |_, _, _, cx| {
+                        });
+                    // Local files on macOS: the native drag from the first move (the system's file icon and
+                    // badge throughout, like Finder), still dropped back onto our own rows. Elsewhere, or
+                    // remote: the in-app preview, promoted for local files when it leaves the window.
+                    let native = local && cfg!(target_os = "macos");
+                    el = if native {
+                        el.on_native_drag(drag, |d: &DraggedFiles, _, _, _| d.external())
+                    } else {
+                        el.on_drag(drag, move |_, _, _, cx| {
                             let preview = DragPreview { label: preview.label.clone(), icon: preview.icon };
                             cx.new(|_| preview)
-                        });
-                    if local {
+                        })
+                    };
+                    if local && !native {
                         el = el.external_drag_payload(|d: &DraggedFiles, _, _| d.external());
                     }
                     if row.dir {

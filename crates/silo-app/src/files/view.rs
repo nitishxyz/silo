@@ -365,8 +365,13 @@ impl FilesPane {
                             }
                             let drag = DraggedFiles { paths: Rc::new(vec![row.path.clone()]), ..template.clone() };
                             let preview = (drag.label(), if row.dir { "folder" } else { "file-text" });
-                            let el = el.on_drag(drag, move |_, _, _, cx| cx.new(|_| DragPreview { label: preview.0.clone(), icon: preview.1 }));
-                            let el = if local { el.external_drag_payload(|d: &DraggedFiles, _, _| d.external()) } else { el };
+                            // Local files on macOS: the native drag from the first move (browser_view.rs).
+                            let el = if local && cfg!(target_os = "macos") {
+                                el.on_native_drag(drag, |d: &DraggedFiles, _, _, _| d.external())
+                            } else {
+                                let el = el.on_drag(drag, move |_, _, _, cx| cx.new(|_| DragPreview { label: preview.0.clone(), icon: preview.1 }));
+                                if local { el.external_drag_payload(|d: &DraggedFiles, _, _| d.external()) } else { el }
+                            };
                             if !row.dir {
                                 return el;
                             }
