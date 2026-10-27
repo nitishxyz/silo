@@ -306,9 +306,10 @@ The header's **Browse | Edit** switch (hosts with `files_ops`) sets `FilesState.
 `silo-app/src/files/browse.rs` (rows, sort, selection, history, path bar; no gpui), `browser.rs` (state and
 operations), `browser_view.rs` (drawing, menu, Quick Look, keys).
 
-- A toolbar (back, forward, enclosing folder, the path bar, hidden items, `+` for New Folder / New File, search) over
-  Finder's list: Name (icon by kind), Date Modified, Size (folders `—`), Kind; a search adds a Folder column. Click a
-  header to sort, again to reverse; a toggle keeps folders on top. Columns drop out as the pane narrows. Folders open in
+- A toolbar (back, forward, enclosing folder, the path bar, hidden items, folders on top, `+` for New Folder / New
+  File, search) over Finder's list: Name (icon by kind), Date Modified, Size (folders `—`), Kind; a search adds a
+  Folder column. Click a header to sort, again to reverse. Columns drop out as the pane narrows, keeping the name at
+  least 180 pt: Kind first, then Date Modified (a search's Folder before it), then Size. Folders open in
   place with their triangle, listed lazily. The list is a `uniform_list` and its rows are cached until a listing,
   the sort, the expanded folders or the hits change, with fixed column widths, so nothing is measured per frame.
 - Keys: ↑ ↓ (⇧ extends), ← → close and open a folder in place, typing jumps to a name, Space Quick Look (text and

@@ -31,6 +31,10 @@ const DATE_W: f32 = 158.0;
 const SIZE_W: f32 = 74.0;
 const KIND_W: f32 = 136.0;
 const FOLDER_W: f32 = 170.0;
+/// The name column never gets narrower than this to make room for others.
+const NAME_MIN: f32 = 180.0;
+/// The columns' side padding, both sides: the list's 4 and a row's 8.
+const SIDES: f32 = 24.0;
 /// Most lines Quick Look draws of a text file.
 const PREVIEW_LINES: usize = 600;
 
@@ -43,7 +47,7 @@ fn centered(child: impl IntoElement) -> AnyElement {
 }
 
 /// Which columns fit `width`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Columns {
     date: bool,
     size: bool,
@@ -52,9 +56,30 @@ struct Columns {
 }
 
 impl Columns {
+    /// The columns that fit beside a name of at least [`NAME_MIN`], taken
+    /// in order (Size, a search's Folder, Date Modified, Kind) until one
+    /// doesn't: as the pane narrows Kind goes first, then Date Modified,
+    /// like Finder's.
     fn for_width(width: f32, searching: bool) -> Self {
-        let folder = searching && width >= 520.0;
-        Self { date: width >= 420.0, size: width >= 340.0, kind: width >= 620.0 + if folder { FOLDER_W } else { 0.0 }, folder }
+        let mut room = width - SIDES - NAME_MIN;
+        let mut fits = |w: f32| {
+            let fit = room >= w;
+            if fit {
+                room -= w;
+            }
+            fit
+        };
+        let size = fits(SIZE_W);
+        let folder = size && searching && fits(FOLDER_W);
+        let date = size && folder == searching && fits(DATE_W);
+        let kind = date && fits(KIND_W);
+        Self { date, size, kind, folder }
+    }
+
+    /// Their widths together.
+    #[cfg(test)]
+    fn width(self) -> f32 {
+        [(self.date, DATE_W), (self.size, SIZE_W), (self.kind, KIND_W), (self.folder, FOLDER_W)].iter().filter(|(on, _)| *on).map(|(_, w)| w).sum()
     }
 }
 
@@ -185,6 +210,7 @@ impl FilesPane {
         ));
         let (back, forward) = (!self.browser.history.back.is_empty(), !self.browser.history.forward.is_empty());
         let hidden = self.browser.hidden;
+        let folders_first = self.browser.sort.folders_first;
         let search = match &self.browser.search {
             Some(search) => div()
                 .flex()
@@ -246,6 +272,12 @@ impl FilesPane {
                 .when(hidden, |el| el.bg(theme::row_fill()))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
             )
+            // Folders on top: here, never over a column's label.
+            .child(
+                self.tool("files-folders-first", "folder", if folders_first { "Folders on Top: On" } else { "Folders on Top: Off" }, true)
+                    .when(folders_first, |el| el.bg(theme::row_fill()))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_folders_first(cx))),
+            )
             .child(self.tool("files-new", "plus", "New Folder ⇧⌘N, New File", true).on_click(cx.listener(|this, e: &gpui::ClickEvent, _, cx| {
                 let at = e.position();
                 this.browser.menu = Some(super::browser::Menu { at, target: None });
@@ -276,38 +308,23 @@ impl FilesPane {
                 .children(arrow)
                 .when_some(key, |el, key| el.on_click(cx.listener(move |this, _, _, cx| this.set_sort(key, cx))))
         };
-        let folders_first = sort.folders_first;
+        // The list's 4 and a row's 8: the labels sit over their columns.
         div()
             .flex_none()
             .flex()
             .items_center()
             .h(px(24.0))
-            .px(px(8.0))
+            .px(px(SIDES / 2.0))
             .border_b_1()
             .border_color(rgb(theme::border()))
             .text_size(px(11.5))
             .text_color(rgb(theme::muted()))
+            .overflow_hidden()
             .child(head("files-col-name", "Name", Some(SortKey::Name)).flex_1().min_w_0().pl(px(26.0)))
             .when(columns.folder, |el| el.child(head("files-col-folder", "Folder", None).w(px(FOLDER_W)).flex_none()))
             .when(columns.date, |el| el.child(head("files-col-date", "Date Modified", Some(SortKey::Modified)).w(px(DATE_W)).flex_none()))
             .when(columns.size, |el| el.child(head("files-col-size", "Size", Some(SortKey::Size)).w(px(SIZE_W)).flex_none().justify_end()))
             .when(columns.kind, |el| el.child(head("files-col-kind", "Kind", Some(SortKey::Kind)).w(px(KIND_W)).flex_none()))
-            .child(
-                div()
-                    .id("files-folders-first")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(20.0))
-                    .continuous(5.0)
-                    .cursor_pointer()
-                    .when(folders_first, |el| el.bg(theme::row_fill()))
-                    .hover(|s| s.bg(theme::hover_fill()))
-                    .child(crate::assets::icon("folder", 11.0, theme::muted()))
-                    .tooltip(crate::tooltip::Tooltip::text(if folders_first { "Folders on top: on" } else { "Folders on top: off" }))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_folders_first(cx))),
-            )
             .into_any_element()
     }
 
@@ -416,7 +433,6 @@ impl FilesPane {
                             el.child(cell(SIZE_W).flex().justify_end().text_color(rgb(theme::muted())).child(browse::size_label(&row)))
                         })
                         .when(columns.kind, |el| el.child(cell(KIND_W).text_color(rgb(theme::muted())).child(row.kind)))
-                        .child(div().w(px(20.0)).flex_none())
                         .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             let m = e.modifiers;
@@ -900,4 +916,33 @@ impl FilesPane {
 /// Crumb `i`'s folder (the path bar of the folder shown).
 fn this_crumb(this: &FilesPane, i: usize) -> String {
     browse::crumbs(&this.state.root, &this.state.browse).get(i).map(|(_, p)| p.clone()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_drop_kind_then_date_as_the_pane_narrows() {
+        let all = Columns { date: true, size: true, kind: true, folder: false };
+        assert_eq!(Columns::for_width(1000.0, false), all);
+        let no_kind = Columns { kind: false, ..all };
+        assert_eq!(Columns::for_width(560.0, false), no_kind, "a half-width pane");
+        assert_eq!(Columns::for_width(380.0, false), Columns { date: false, ..no_kind });
+        assert_eq!(Columns::for_width(250.0, false), Columns { date: false, size: false, kind: false, folder: false });
+        // Searching: the Folder column before Date Modified.
+        assert_eq!(Columns::for_width(560.0, true), Columns { date: false, size: true, kind: false, folder: true });
+        assert_eq!(Columns::for_width(1200.0, true), Columns { folder: true, ..all });
+        for searching in [false, true] {
+            for width in (150..1600).step_by(10) {
+                #[allow(clippy::cast_precision_loss)]
+                let width = width as f32;
+                let c = Columns::for_width(width, searching);
+                assert!(c.width() == 0.0 || SIDES + NAME_MIN + c.width() <= width, "{width}: {c:?} overflows");
+                assert!(!c.kind || c.date, "{width}: Kind only with Date Modified");
+                assert!(!c.date || c.size, "{width}: Date Modified only with Size");
+                assert!(!c.folder || searching);
+            }
+        }
+    }
 }
