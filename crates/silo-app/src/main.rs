@@ -183,6 +183,11 @@ fn main() {
     if std::env::args().any(|arg| arg.starts_with("--type=")) {
         std::process::exit(silo_web::run_helper());
     }
+    // Before any thread: loading CEF swaps the process's allocator, so it can't
+    // happen later, when the first page opens (`silo_web::preload`).
+    let cef = std::time::Instant::now();
+    let preloaded = silo_web::preload();
+    let cef = cef.elapsed();
     // The app's calls are the user's own: they need no approval.
     silo_client::set_role(silo_proto::control::ClientRole::App);
     let refused = channel_guard();
@@ -205,6 +210,7 @@ fn main() {
     for warning in refused {
         tracing::warn!("{warning}");
     }
+    tracing::info!(preloaded, ms = cef.as_millis(), "browser engine framework");
 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("silo-net").enable_all().build().expect("tokio runtime");
     let rt = runtime.handle().clone();

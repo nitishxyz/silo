@@ -26,7 +26,7 @@ pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
 pub use keyboard::KeyInput;
 pub use profile::{AGENT, Profile, Tunnel};
-pub use runtime::{Config, Runtime, Schedule};
+pub use runtime::{Config, Runtime, Schedule, preload};
 pub use shared::{Cursor, Event, Security, ViewSize, is_blank};
 
 /// Entry point of the `<App> Helper*.app` subprocesses; returns the process exit code.

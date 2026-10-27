@@ -82,7 +82,30 @@ pub struct Runtime {
     profiles_dir: PathBuf,
     profiles: std::cell::RefCell<std::collections::HashMap<String, crate::Profile>>,
     _args: args::Args,
-    _loader: library_loader::LibraryLoader,
+    /// Loaded here (no [`preload`]): unloaded with the runtime.
+    _loader: Option<library_loader::LibraryLoader>,
+}
+
+/// The framework is mapped for the life of the process ([`preload`]).
+static PRELOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Load the CEF framework now, for [`Runtime::init`] to initialize later; call
+/// first thing in `main`, before any other thread exists. Its static
+/// initializers install Chromium's allocator as the process's `malloc`, and a
+/// thread freeing memory meanwhile lands in the half-installed allocator,
+/// which traps (an app that loaded it lazily crashed when a page opened while
+/// a tokio worker dropped a map). Whether it loaded: `false` outside a bundle
+/// with the framework (a cargo run), where `init` fails as before.
+pub fn preload() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(layout) = Layout::for_main(&exe) else { return false };
+    if !layout.framework().exists() {
+        return false;
+    }
+    // Never unloaded: CEF can't be loaded twice in a process anyway.
+    let loaded = std::mem::ManuallyDrop::new(library_loader::LibraryLoader::new(&exe, false)).load();
+    PRELOADED.store(loaded, std::sync::atomic::Ordering::Release);
+    loaded
 }
 
 impl Runtime {
@@ -91,10 +114,15 @@ impl Runtime {
     pub fn init(config: Config) -> Result<Runtime> {
         let exe = std::env::current_exe().context("current_exe")?;
         let layout = Layout::for_main(&exe)?;
-        let loader = library_loader::LibraryLoader::new(&exe, false);
-        if !loader.load() {
-            bail!("failed to load {}", layout.framework().display());
-        }
+        let loader = if PRELOADED.load(std::sync::atomic::Ordering::Acquire) {
+            None
+        } else {
+            let loader = library_loader::LibraryLoader::new(&exe, false);
+            if !loader.load() {
+                bail!("failed to load {}", layout.framework().display());
+            }
+            Some(loader)
+        };
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         crate::cr_app::install(ns_app_class()?)?;
 
