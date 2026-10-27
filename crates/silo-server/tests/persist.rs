@@ -41,7 +41,8 @@ async fn start(home: &Path) -> JoinHandle<()> {
     let inode = |path: &Path| std::fs::metadata(path).ok().map(|m| std::os::unix::fs::MetadataExt::ino(&m));
     let stale = inode(&socket);
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
-    for _ in 0..300 {
+    // Up to 10 s: a loaded CI runner took over 3 s to restart it (crash_restores_last_checkpoint, Linux).
+    for _ in 0..1000 {
         if inode(&socket).is_some_and(|ino| Some(ino) != stale) && silo_client::server_running(home).await {
             return task;
         }
