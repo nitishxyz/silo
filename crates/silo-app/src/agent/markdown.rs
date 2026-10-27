@@ -9,7 +9,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 /// code-like text such as `--flag` or quotes), nor `ENABLE_GFM` (it swallows `> [!NOTE]` labels).
 const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES).union(Options::ENABLE_TASKLISTS);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub bold: bool,
     pub italic: bool,

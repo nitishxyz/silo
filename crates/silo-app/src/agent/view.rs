@@ -3415,8 +3415,38 @@ fn table_columns(natural: &[Vec<f32>], cols: usize) -> Vec<f32> {
 }
 
 /// A cell's text width unwrapped, at the table's size: its code spans in the mono font, bold ones and the
-/// header's semibold (advances summed; no kerning, which only makes it a little wider).
+/// header's semibold (advances summed; no kerning, which only makes it a little wider). Memoized
+/// ([`cell_width_cached`]): a visible table is laid out every frame, and measuring its cells glyph by glyph
+/// each time made scrolling a long thread with tables lag.
 fn cell_width(ts: &gpui::TextSystem, inline: &Inline, head: bool) -> f32 {
+    cell_width_cached(inline, head, || cell_width_measured(ts, inline, head))
+}
+
+/// Measured widths by cell (text, spans, header) and fonts; cleared once it grows past [`WIDTHS_MAX`].
+const WIDTHS_MAX: usize = 50_000;
+
+fn cell_width_cached(inline: &Inline, head: bool, measure: impl FnOnce() -> f32) -> f32 {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static WIDTHS: std::cell::RefCell<std::collections::HashMap<u64, f32>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&inline.text, &inline.spans, head, theme::ui_font(), mono()).hash(&mut hasher);
+    let key = hasher.finish();
+    if let Some(width) = WIDTHS.with_borrow(|w| w.get(&key).copied()) {
+        return width;
+    }
+    let width = measure();
+    WIDTHS.with_borrow_mut(|w| {
+        if w.len() >= WIDTHS_MAX {
+            w.clear();
+        }
+        w.insert(key, width);
+    });
+    width
+}
+
+fn cell_width_measured(ts: &gpui::TextSystem, inline: &Inline, head: bool) -> f32 {
     let mut fonts: [Option<gpui::FontId>; 8] = [None; 8];
     let size = px(TABLE_TEXT);
     let mut width = 0.0;
@@ -3519,6 +3549,29 @@ fn render_table(
 #[cfg(test)]
 mod tests {
     use super::{DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, Tail, context_fraction, context_label, context_tip, grouped, live_budget, tokens};
+
+    #[test]
+    fn a_cell_is_measured_once() {
+        let cell = super::Inline { text: "a_cell_is_measured_once".into(), ..Default::default() };
+        let mut measured = 0;
+        for _ in 0..3 {
+            assert!(
+                (super::cell_width_cached(&cell, false, || {
+                    measured += 1;
+                    42.0
+                }) - 42.0)
+                    .abs()
+                    < f32::EPSILON
+            );
+        }
+        assert_eq!(measured, 1, "later frames reuse the width");
+        // The header's semibold is another width.
+        super::cell_width_cached(&cell, true, || {
+            measured += 1;
+            50.0
+        });
+        assert_eq!(measured, 2);
+    }
 
     #[test]
     fn a_live_window_makes_room_for_its_open_details_as_drawn() {
