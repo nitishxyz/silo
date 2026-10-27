@@ -62,7 +62,7 @@ fn mount_point(path: &Path) -> io::Result<PathBuf> {
     let dev = path.symlink_metadata()?.dev();
     let mut top = path.parent().unwrap_or(path).to_path_buf();
     while let Some(up) = top.parent() {
-        if up.metadata().map(|m| m.dev()) != Ok(dev) {
+        if up.metadata().ok().map(|m| m.dev()) != Some(dev) {
             break;
         }
         top = up.to_path_buf();
