@@ -107,6 +107,9 @@ pub struct Workspace {
     pub(crate) last_fullscreen: std::cell::Cell<Option<bool>>,
     /// The titlebar's horizontally scrolling tab strip.
     pub(crate) tab_scroll: gpui::ScrollHandle,
+    /// The width left after the tab strip last frame (its spacer's): the
+    /// strip only overflows (and fades its edges) once that is gone.
+    pub(crate) tab_room: std::rc::Rc<std::cell::Cell<f32>>,
     /// Active tab the strip was last rendered for, and a pending
     /// scroll-into-view of the active tab (window id, frames left).
     pub(crate) tab_last_active: std::cell::RefCell<Option<String>>,
@@ -278,6 +281,7 @@ impl Workspace {
             pairing: crate::settings::Pairing::default(),
             last_fullscreen: std::cell::Cell::new(None),
             tab_scroll: gpui::ScrollHandle::new(),
+            tab_room: std::rc::Rc::default(),
             tab_last_active: std::cell::RefCell::new(None),
             tab_reveal: std::cell::RefCell::new(None),
             tab_drop: None,
@@ -1015,7 +1019,11 @@ impl Workspace {
                 if let Some(index) = old.session.windows.iter().position(|w| &w.id == id) {
                     let title = self.window_title(&old.session.windows[index], cx);
                     let icon = self.tab_icon(&old.session.windows[index]);
-                    tab_ghosts.push(TabGhost { id: id.clone(), title, icon, index, started: now });
+                    // The strip's children were its tabs (no ghost yet): the
+                    // closed tab is child `index`.
+                    let width =
+                        self.motion.tab_ghosts.is_empty().then(|| self.tab_scroll.bounds_for_item(index)).flatten().map(|b| f32::from(b.size.width));
+                    tab_ghosts.push(TabGhost { id: id.clone(), title, icon, index, width, started: now });
                 }
             }
         }

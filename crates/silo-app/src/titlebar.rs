@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 use silo_proto::control::Method;
 
 use crate::theme::Continuous as _;
@@ -75,7 +75,12 @@ pub fn reveal_offset(offset: f32, width: f32, item_left: f32, item_width: f32, m
 
 /// Which edges hide tabs (left, right) at a scroll offset in `-max..=0`.
 #[must_use]
-pub fn edge_fades(offset: f32, max: f32) -> (bool, bool) {
+pub fn edge_fades(offset: f32, max: f32, room: f32) -> (bool, bool) {
+    // Room left after the strip: it isn't overflowing, whatever its scroll
+    // range says (a tab growing in or collapsing out briefly reports one).
+    if room > 0.5 {
+        return (false, false);
+    }
     let scrolled = -offset;
     (scrolled > 0.5, scrolled < max - 0.5)
 }
@@ -214,7 +219,10 @@ impl Workspace {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(TAB_GAP))
+                // No row gap: each tab after the first leads with its own
+                // (a closing tab's shrinks with it). A collapsing tab's
+                // negative margin closing a gap left gpui's scroll row
+                // measured narrower than its tabs: it clipped them all.
                 .pl(px(PILL_GAP))
                 // Room for the insertion bar after the last tab.
                 .pr(px(TAB_GAP))
@@ -230,7 +238,8 @@ impl Workspace {
             let mut child = 0;
             let mut active_child = None;
             let mut active_entering = false;
-            let (fade_left, fade_right) = edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x));
+            let (fade_left, fade_right) =
+                edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x), self.tab_room.get());
             let strip = self.tab_scroll.bounds();
             // Tabs fade out where the strip scrolls on, by their own
             // opacity (no overlay to stack on a frosted titlebar).
@@ -242,24 +251,38 @@ impl Workspace {
                     left.min(right)
                 })
             };
+            // The gap before the next tab: none at the start, a full one after
+            // a tab, and shrinking with a closing first tab (so it ends at none).
+            let mut gap_before = 0.0;
             for (index, w) in view.session.windows.iter().enumerate() {
                 while let Some(ghost) = ghosts.next_if(|g| g.index <= index) {
-                    if let Some(ghost) = render_tab_ghost(ghost, self.chrome, now) {
-                        tabs = tabs.child(ghost);
+                    let keep = 1.0 - motion::progress(ghost.started, motion::TAB_EXIT, now).unwrap_or(1.0);
+                    if let Some(el) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
+                        tabs = tabs.child(el);
+                        if child == 0 {
+                            gap_before = keep;
+                        }
                         child += 1;
                     }
                 }
                 let selected = several && active_index == Some(index);
                 let appear = self.motion.tab_enter.get(&w.id).and_then(|s| motion::progress(*s, motion::TAB_ENTER, now)).unwrap_or(1.0);
+
                 if w.id == active_id {
                     active_child = Some(child);
                     active_entering = appear < 1.0;
                 }
-                tabs = tabs.child(self.render_tab(w, index, selected, several, appear, fade(child), now, cx));
+                // Its gap grows in with it.
+                let lead = TAB_GAP * appear * gap_before;
+                gap_before = 1.0;
+                tabs = tabs.child(self.render_tab(w, index, selected, several, appear, fade(child), lead, now, cx));
                 child += 1;
             }
             for ghost in ghosts {
-                tabs = tabs.children(render_tab_ghost(ghost, self.chrome, now));
+                if let Some(ghost) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
+                    tabs = tabs.child(ghost);
+                    child += 1;
+                }
             }
             self.step_tab_reveal(&active_id, active_child, active_entering, !cx.reduce_motion(), window);
             let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
@@ -268,12 +291,18 @@ impl Workspace {
             // The strip and the empty space after it take tab drops. The
             // space after the last tab means "move to the end".
             let last = view.session.windows.len().saturating_sub(1);
-            let spacer = div().flex_1().h_full().on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
-                if ev.bounds.contains(&ev.event.position) {
-                    let id = ev.drag(cx).window_id.clone();
-                    this.set_tab_drop(&id, Some((last, true)), cx);
-                }
-            }));
+            let room = self.tab_room.clone();
+            let spacer = div()
+                .relative()
+                .flex_1()
+                .h_full()
+                .child(canvas(move |b, _, _| room.set(f32::from(b.size.width)), |_, (), _, _| {}).absolute().inset_0())
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                    if ev.bounds.contains(&ev.event.position) {
+                        let id = ev.drag(cx).window_id.clone();
+                        this.set_tab_drop(&id, Some((last, true)), cx);
+                    }
+                }));
             let drop_zone = div()
                 .flex()
                 .flex_row()
@@ -387,6 +416,7 @@ impl Workspace {
         several: bool,
         appear: f32,
         fade: f32,
+        lead: f32,
         now: Instant,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -463,6 +493,7 @@ impl Workspace {
             .flex_col()
             // Full size in the scrolling strip; overflow scrolls instead.
             .flex_none()
+            .ml(px(lead))
             // Content-sized: no minimum width, so nothing pads the end.
             .max_w(px(TAB_MAX * appear))
             .when(entering, |el| el.overflow_hidden())
@@ -743,7 +774,7 @@ pub fn watcher_labels(watchers: &[silo_proto::model::Watcher], me: Option<u64>) 
 
 /// A closed tab collapsing in width and fading at its old position. Visual
 /// only: no listeners, and the server close was already sent.
-fn render_tab_ghost(ghost: &TabGhost, chrome: crate::adaptive::Chrome, now: Instant) -> Option<AnyElement> {
+fn render_tab_ghost(ghost: &TabGhost, lead: bool, chrome: crate::adaptive::Chrome, now: Instant) -> Option<AnyElement> {
     let gone = motion::progress(ghost.started, motion::TAB_EXIT, now)?;
     let keep = 1.0 - gone;
     Some(
@@ -752,9 +783,14 @@ fn render_tab_ghost(ghost: &TabGhost, chrome: crate::adaptive::Chrome, now: Inst
             .flex()
             .flex_col()
             .flex_none()
-            .max_w(px(TAB_MAX * keep))
-            // Collapse the row gap too, so neighbours close up smoothly.
-            .mr(px(-TAB_GAP * gone))
+            // An exact width as it collapses: a max width alone left the
+            // scrolling strip mismeasured (its tabs clipped and faded).
+            .map(|el| match ghost.width {
+                Some(w) => el.w(px(w * keep)),
+                None => el.max_w(px(TAB_MAX * keep)),
+            })
+            // Its gap collapses with it, so neighbours close up smoothly.
+            .when(lead, |el| el.ml(px(TAB_GAP * keep)))
             .overflow_hidden()
             .opacity(keep)
             .text_size(px(12.0))
@@ -778,6 +814,81 @@ fn render_tab_ghost(ghost: &TabGhost, chrome: crate::adaptive::Chrome, now: Inst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tab strip's layout (as `render_titlebar` builds it) while a closing tab collapses: the strip
+    /// always holds its tabs. A negative margin closing the gap made gpui measure it at its padding.
+    mod strip_layout {
+        use std::{cell::RefCell, rc::Rc};
+
+        use gpui::{Bounds, Context, IntoElement, Pixels, Render, TestAppContext, Window, canvas, div, prelude::*, px, size};
+
+        use super::super::{PILL_GAP, TAB_GAP, TAB_HEIGHT, TAB_MAX};
+
+        type Seen = Rc<RefCell<Vec<(&'static str, Bounds<Pixels>)>>>;
+
+        struct Bar {
+            keep: f32,
+            seen: Seen,
+        }
+
+        fn probe(name: &'static str, seen: &Seen) -> impl IntoElement {
+            let seen = seen.clone();
+            canvas(move |b, _, _| seen.borrow_mut().push((name, b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+        }
+
+        impl Render for Bar {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let label = || div().w(px(46.0)).h(px(TAB_HEIGHT));
+                let tab = div().id("tab").relative().flex().flex_col().flex_none().max_w(px(TAB_MAX)).child(label()).child(probe("tab", &self.seen));
+                let ghost = div()
+                    .id("ghost")
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .w(px(46.0 * self.keep))
+                    .ml(px(TAB_GAP * self.keep))
+                    .overflow_hidden()
+                    .child(label());
+                let strip = div()
+                    .id("tab-strip")
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .pl(px(PILL_GAP))
+                    .pr(px(TAB_GAP))
+                    .h_full()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .overflow_x_scroll()
+                    .child(tab)
+                    .child(ghost)
+                    .child(probe("strip", &self.seen));
+                let view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(strip);
+                let zone = div().flex().flex_row().flex_1().min_w_0().h_full().child(view).child(div().flex_1().h_full());
+                div().size_full().flex().flex_row().child(div().w(px(240.0)).flex_none()).child(zone)
+            }
+        }
+
+        #[gpui::test]
+        fn a_closing_tab_never_clips_the_strip(cx: &mut TestAppContext) {
+            for keep in [1.0, 0.75, 0.5, 0.25, 0.0] {
+                let seen = Seen::default();
+                let (_, cx) = cx.add_window_view({
+                    let seen = seen.clone();
+                    move |_, _| Bar { keep, seen }
+                });
+                cx.simulate_resize(size(px(1000.0), px(40.0)));
+                cx.run_until_parked();
+                let seen = seen.borrow();
+                let last = |name| seen.iter().rev().find(|(n, _)| *n == name).map(|(_, b)| f32::from(b.size.width)).unwrap();
+                let want = PILL_GAP + 46.0 + TAB_GAP * keep + 46.0 * keep + TAB_GAP;
+                assert!((last("strip") - want).abs() < 0.6, "keep {keep}: strip {} for {want}", last("strip"));
+                assert!((last("tab") - 46.0).abs() < 0.01);
+            }
+        }
+    }
 
     #[test]
     fn reveal_moves_minimally_and_clamps() {
@@ -818,11 +929,13 @@ mod tests {
 
     #[test]
     fn fades_only_where_tabs_are_hidden() {
-        assert_eq!(edge_fades(0.0, 0.0), (false, false), "everything fits");
-        assert_eq!(edge_fades(0.0, 200.0), (false, true), "at the start");
-        assert_eq!(edge_fades(-80.0, 200.0), (true, true), "in the middle");
-        assert_eq!(edge_fades(-200.0, 200.0), (true, false), "at the end");
-        assert_eq!(edge_fades(-199.8, 200.0), (true, false), "sub-pixel rounding at the end");
+        assert_eq!(edge_fades(0.0, 0.0, 0.0), (false, false), "everything fits");
+        assert_eq!(edge_fades(0.0, 200.0, 0.0), (false, true), "at the start");
+        assert_eq!(edge_fades(-80.0, 200.0, 0.0), (true, true), "in the middle");
+        assert_eq!(edge_fades(-200.0, 200.0, 0.0), (true, false), "at the end");
+        assert_eq!(edge_fades(-199.8, 200.0, 0.0), (true, false), "sub-pixel rounding at the end");
+        // Room left after the strip: a tab growing in or collapsing out reports a scroll range; nothing fades.
+        assert_eq!(edge_fades(0.0, 64.0, 300.0), (false, false), "not overflowing");
     }
 
     #[test]

@@ -253,6 +253,8 @@ pub struct TabGhost {
     pub title: String,
     pub icon: &'static str,
     pub index: usize,
+    /// Its width as last drawn; it collapses from there.
+    pub width: Option<f32>,
     pub started: Instant,
 }
 
