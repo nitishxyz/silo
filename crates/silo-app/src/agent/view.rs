@@ -1236,7 +1236,7 @@ impl AgentPane {
                 .blocks()
                 .iter()
                 .enumerate()
-                .map(|(i, block)| render_block(&format!("{key}-{i}"), block, None, theme::foreground(), &self.scroll))
+                .map(|(i, block)| render_block(&format!("{key}-{i}"), block, None, theme::foreground(), &self.scroll, cx))
                 .collect();
             self.parsed.insert(key.clone(), doc);
             let body = div().ml(px(24.0)).px(px(12.0)).pt(px(10.0)).pb(px(2.0)).continuous(8.0).bg(rgb(ink(0.04))).flex().flex_col().children(blocks);
@@ -1639,7 +1639,7 @@ impl AgentPane {
         let els: Vec<AnyElement> = blocks
             .iter()
             .enumerate()
-            .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), fg, &self.scroll))
+            .map(|(i, block)| render_block(&format!("{key}-{i}"), block, fx.as_ref().filter(|_| i >= settled), fg, &self.scroll, cx))
             .collect();
         self.parsed.insert(key.to_owned(), doc);
         (els, reveal.zip(shown))
@@ -1857,7 +1857,7 @@ impl AgentPane {
                             let mut doc = super::markdown::Doc::default();
                             doc.update(&q.question, false);
                             div().flex_1().min_w_0().flex().flex_col().mb(px(-8.0)).children(doc.blocks().iter().enumerate().map(|(i, block)| {
-                                render_block(&format!("question-{}-{i}", q.question_id), block, None, theme::foreground(), &self.scroll)
+                                render_block(&format!("question-{}-{i}", q.question_id), block, None, theme::foreground(), &self.scroll, cx)
                             }))
                         }),
                 )
@@ -3154,11 +3154,11 @@ fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u3
 
 /// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
 /// A block drawn as a settled transcript text draws it (a test view's rows, the Files block's markdown).
-pub(super) fn render_settled(id: &str, block: &Block, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
-    render_block(id, block, None, theme::foreground(), scroll)
+pub(super) fn render_settled(id: &str, block: &Block, scroll: &std::rc::Rc<super::scroll::Inner>, cx: &App) -> AnyElement {
+    render_block(id, block, None, theme::foreground(), scroll, cx)
 }
 
-fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std::rc::Rc<super::scroll::Inner>) -> AnyElement {
+fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std::rc::Rc<super::scroll::Inner>, cx: &App) -> AnyElement {
     let lines = fx.and_then(|f| f.lines.get(id)).map(Vec::as_slice);
     // A revealed text reports its wrapped lines once laid out; a line sweeping in is cut into segments.
     let text = |inline: &Inline| {
@@ -3298,7 +3298,7 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .children(blocks.iter().enumerate().map(|(j, b)| render_block(&format!("{id}-{i}-{j}"), b, fx, fg, scroll))),
+                            .children(blocks.iter().enumerate().map(|(j, b)| render_block(&format!("{id}-{i}-{j}"), b, fx, fg, scroll, cx))),
                     )
             }))
             .into_any_element(),
@@ -3308,14 +3308,14 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
         Block::Table { .. } if lines.is_some_and(<[_]>::is_empty) => {
             div().relative().children(fx.map(|f| table_report(f, id, None))).into_any_element()
         }
-        Block::Table { align, head, rows } => render_table(id, align, head, rows, lines, fx, fg, scroll),
+        Block::Table { align, head, rows } => render_table(id, align, head, rows, lines, fx, fg, scroll, cx),
         Block::Quote(blocks) => div()
             .mb(px(8.0))
             .pl(px(12.0))
             .border_l_2()
             .border_color(rgb(theme::border()))
             .text_color(rgb(theme::muted()))
-            .children(blocks.iter().enumerate().map(|(i, b)| render_block(&format!("{id}-q{i}"), b, fx, theme::muted(), scroll)))
+            .children(blocks.iter().enumerate().map(|(i, b)| render_block(&format!("{id}-q{i}"), b, fx, theme::muted(), scroll, cx)))
             .into_any_element(),
         Block::Rule => {
             // A revealed rule reports its top (its space opens in turn).
@@ -3377,12 +3377,56 @@ fn table_report(fx: &Fx, id: &str, row: Option<usize>) -> impl IntoElement {
 
 /// A table cell's most width: longer text wraps in it; a table wider than the pane scrolls sideways.
 const CELL_MAX: f32 = 320.0;
+/// A table column's least width.
+const CELL_MIN: f32 = 36.0;
+/// A table's text size (set on it, so its columns are measured at what they draw).
+const TABLE_TEXT: f32 = TEXT;
 
 /// A table as a grid: each column as wide as its widest cell (up to [`CELL_MAX`], where text wraps), a
 /// header row in bold on the code box's tint, hairlines between rows and columns, the whole in a rounded
 /// border. It keeps its natural width: wider than the pane, it scrolls sideways (like a code box) instead
 /// of squashing its columns. `lines`: the rows given their space while it's revealed (header 0) and how far
 /// each has swept in.
+#[allow(clippy::too_many_arguments)]
+/// Each column's width (border-box, its left rule included after the first): its widest cell's natural
+/// width with padding, at least [`CELL_MIN`], at most [`CELL_MAX`] (a longer cell wraps). `natural`: each
+/// row's cells' unwrapped text widths.
+fn table_columns(natural: &[Vec<f32>], cols: usize) -> Vec<f32> {
+    (0..cols)
+        .map(|c| {
+            let text = natural.iter().filter_map(|row| row.get(c)).copied().fold(0.0_f32, f32::max);
+            // A point of slack: summed advances round differently from the shaped line.
+            let w = (text + 2.0 * reveal::CELL_PAD_X + 1.0).ceil().clamp(CELL_MIN, CELL_MAX);
+            if c > 0 { w + 1.0 } else { w }
+        })
+        .collect()
+}
+
+/// A cell's text width unwrapped, at the table's size: its code spans in the mono font, bold ones and the
+/// header's semibold (advances summed; no kerning, which only makes it a little wider).
+fn cell_width(ts: &gpui::TextSystem, inline: &Inline, head: bool) -> f32 {
+    let mut fonts: [Option<gpui::FontId>; 8] = [None; 8];
+    let size = px(TABLE_TEXT);
+    let mut width = 0.0;
+    for (at, ch) in inline.text.char_indices() {
+        let style = inline.spans.iter().find(|(r, _)| r.start <= at && at < r.end).map(|(_, s)| *s).unwrap_or_default();
+        let (bold, italic) = (style.bold || head, style.italic);
+        let slot = usize::from(style.code) << 2 | usize::from(bold) << 1 | usize::from(italic);
+        let id = *fonts[slot].get_or_insert_with(|| {
+            let mut font = gpui::font(if style.code { mono() } else { theme::ui_font() });
+            if bold {
+                font.weight = FontWeight::SEMIBOLD;
+            }
+            if italic {
+                font.style = FontStyle::Italic;
+            }
+            ts.resolve_font(&font)
+        });
+        width += f32::from(ts.layout_width(id, size, ch));
+    }
+    width
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_table(
     id: &str,
@@ -3393,21 +3437,31 @@ fn render_table(
     fx: Option<&Fx>,
     fg: u32,
     scroll: &std::rc::Rc<super::scroll::Inner>,
+    cx: &App,
 ) -> AnyElement {
     let drawn = lines.map_or(rows.len() + 1, <[_]>::len).min(rows.len() + 1);
     let last = drawn.saturating_sub(1);
     let cols = align.len().max(1);
-    let mut cells: Vec<AnyElement> = Vec::with_capacity(drawn * cols);
+    // Columns sized here, not by a grid: gpui's grid gave its tracks more than the box it drew (a capped
+    // cell counts its cap), so rows ran out past the table's border.
+    let ts = cx.text_system();
+    let natural: Vec<Vec<f32>> = std::iter::once(head)
+        .chain(rows.iter().map(Vec::as_slice))
+        .enumerate()
+        .map(|(r, row)| row.iter().map(|cell| cell_width(ts, cell, r == 0)).collect())
+        .collect();
+    let widths = table_columns(&natural, cols);
+    let mut lines_el: Vec<AnyElement> = Vec::with_capacity(drawn);
     for (r, row) in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)).take(drawn).enumerate() {
         let alpha = if lines.is_some() { line_alpha(lines, r) } else { 1.0 };
-        for (c, cell) in row.iter().enumerate() {
-            let (text, _) = inline_text(&format!("{id}-r{r}-c{c}"), cell, None, fg);
+        let cells = (0..cols).map(|c| {
+            let text = row.get(c).map(|cell| inline_text(&format!("{id}-r{r}-c{c}"), cell, None, fg).0);
             // The header's tint stays inside the table's rounded corners.
             let inner = px(7.0);
-            let el = div()
+            div()
                 .relative()
-                .min_w(px(36.0))
-                .max_w(px(CELL_MAX))
+                .flex_none()
+                .w(px(widths[c]))
                 .px(px(reveal::CELL_PAD_X))
                 .py(px(reveal::CELL_PAD_Y))
                 .border_color(rgb(theme::border()))
@@ -3427,25 +3481,27 @@ fn render_table(
                     Align::Left | Align::None => el,
                 })
                 .when(alpha < 1.0, |el| el.opacity(alpha))
-                .child(text)
-                .children(fx.filter(|_| c == 0 && lines.is_some()).map(|f| table_report(f, id, Some(r))));
-            cells.push(el.into_any_element());
-        }
+                .children(text)
+                .children(fx.filter(|_| c == 0 && lines.is_some()).map(|f| table_report(f, id, Some(r))))
+        });
+        // Cells of a row stretch to its tallest.
+        lines_el.push(div().flex().flex_row().children(cells).into_any_element());
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let grid = div()
+    let table = div()
         .relative()
         .flex_none()
-        .grid()
-        .grid_cols_max_content(cols.min(usize::from(u16::MAX)) as u16)
+        .flex()
+        .flex_col()
         .border_1()
         .border_color(rgb(theme::border()))
         .rounded(px(8.0))
+        .font_family(theme::ui_font())
+        .text_size(px(TABLE_TEXT))
         .line_height(px(reveal::CELL_LINE))
-        .children(cells)
+        .children(lines_el)
         .children(fx.filter(|_| lines.is_some()).map(|f| table_report(f, id, None)));
     let el = div().id(gpui::ElementId::Name(id.to_owned().into())).mb(px(reveal::TABLE_MARGIN)).flex().items_start();
-    scroll.scroller(id, el, true).child(grid).into_any_element()
+    scroll.scroller(id, el, true).child(table).into_any_element()
 }
 
 #[cfg(test)]
@@ -3577,6 +3633,16 @@ mod tests {
         assert!(!context_tip(ContextUse { used: 1, window: 10 }, &free).contains('$'), "no cost when unknown");
     }
 
+    #[test]
+    fn table_columns_fit_their_widest_cell_within_bounds() {
+        use super::{CELL_MAX, CELL_MIN, reveal::CELL_PAD_X, table_columns};
+        let pad = 2.0 * CELL_PAD_X + 1.0;
+        let cols = table_columns(&[vec![10.0, 50.0, 900.0], vec![2.0, 80.4]], 3);
+        // Widest cell with padding (rounded up); a rule's point after the first; empty or tiny at least CELL_MIN.
+        assert_eq!(cols, vec![CELL_MIN, (80.4_f32 + pad).ceil() + 1.0, CELL_MAX + 1.0]);
+        assert_eq!(table_columns(&[], 2), vec![CELL_MIN, CELL_MIN + 1.0]);
+    }
+
     /// A table laid out in a window (gpui's test text system): its natural width, scrolling when wider.
     mod table_layout {
         use std::rc::Rc;
@@ -3592,8 +3658,8 @@ mod tests {
         }
 
         impl Render for Table {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().flex().flex_col().child(render_block("t", &self.block, None, 0x00ff_ffff, &self.scroll))
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(render_block("t", &self.block, None, 0x00ff_ffff, &self.scroll, cx))
             }
         }
 
@@ -3629,6 +3695,33 @@ mod tests {
             assert!(f32::from(grid.size.width) <= 3.0 * CELL_MAX + 2.0, "a long cell wraps at its most width: {grid:?}");
             // Three rows, one of them several lines tall.
             assert!(f32::from(grid.size.height) > 5.0 * super::super::reveal::CELL_LINE, "{grid:?}");
+        }
+
+        #[gpui::test]
+        fn the_box_holds_its_columns_and_a_short_column_stays_narrow(cx: &mut TestAppContext) {
+            // The thread's case: a short first column, a second one long enough to wrap.
+            let block = Block::Table {
+                align: vec![Align::None; 2],
+                head: vec![cell("Tab"), cell("Status")],
+                rows: vec![
+                    vec![cell("4180/8790 (playable game)"), cell("Running again, in its existing tab")],
+                    vec![cell("5173/8787 (dev servers)"), cell(&"Stopped. Only the subagents use these, and none are working now ".repeat(2))],
+                ],
+            };
+            let widths = cx.update(|cx| {
+                let ts = cx.text_system();
+                let Block::Table { head, rows, .. } = &block else { unreachable!() };
+                let natural: Vec<Vec<f32>> = std::iter::once(head)
+                    .chain(rows.iter())
+                    .enumerate()
+                    .map(|(r, row)| row.iter().map(|c| super::super::cell_width(ts, c, r == 0)).collect())
+                    .collect();
+                super::super::table_columns(&natural, 2)
+            });
+            let (_, table, _) = layout(cx, block, 1400.0);
+            assert!(widths[0] < CELL_MAX && (widths[1] - (CELL_MAX + 1.0)).abs() < 0.01, "short stays narrow, long caps: {widths:?}");
+            // Its border goes round exactly its columns (no row runs out past it).
+            assert!((f32::from(table.size.width) - (widths.iter().sum::<f32>() + 2.0)).abs() < 0.5, "{table:?} vs {widths:?}");
         }
 
         #[gpui::test]

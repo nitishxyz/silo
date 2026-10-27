@@ -44,8 +44,8 @@ impl MarkdownView {
     pub(crate) fn render(&self, pad: f32) -> AnyElement {
         let (blocks, scroll) = (self.blocks.clone(), self.scroll.clone());
         let count = blocks.len();
-        let list = gpui::list(self.list.clone(), move |ix, _, _| {
-            let block = render_settled(&format!("md-{ix}"), &blocks[ix], &scroll);
+        let list = gpui::list(self.list.clone(), move |ix, _, cx| {
+            let block = render_settled(&format!("md-{ix}"), &blocks[ix], &scroll, cx);
             div()
                 .px(px(pad))
                 .when(ix == 0, |el| el.pt(px(pad * 0.75)))

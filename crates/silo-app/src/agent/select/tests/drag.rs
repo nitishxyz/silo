@@ -31,7 +31,7 @@ impl Render for Transcript {
         let frame = self.select.sel.as_ref().and_then(|s| s.bounds(&self.doc));
         let ranges = frame.map(|f| ranges(&self.doc, f, 0)).unwrap_or_default();
         let _scope = view::scope(self.select.registry.clone(), "r".into(), ranges, super::super::wire::colour());
-        let blocks = self.md.blocks().iter().enumerate().map(|(i, b)| render_settled(&format!("r-{i}"), b, &self.scroll));
+        let blocks = self.md.blocks().iter().enumerate().map(|(i, b)| render_settled(&format!("r-{i}"), b, &self.scroll, cx));
         div()
             .size_full()
             .flex()
