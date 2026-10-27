@@ -1,6 +1,7 @@
 //! `silo`: the server daemon and command-line client in one binary.
 
 mod attach;
+mod disclaim;
 mod generated;
 mod run;
 
@@ -426,6 +427,10 @@ impl BrowserCmd {
 }
 
 fn main() -> std::process::ExitCode {
+    // First, before any thread: a server (or otto daemon) becomes its own
+    // responsible process, so macOS privacy prompts for its shells name
+    // Silo Server, not whatever started it.
+    disclaim::at_start();
     let cli = Cli::parse();
     // otto runs as itself: its own runtime, logging and exit code.
     if let Some(Command::Otto { args }) = cli.command {
