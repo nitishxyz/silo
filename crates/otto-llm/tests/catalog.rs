@@ -114,11 +114,12 @@ fn auth_and_subscription_limits() {
     assert!(catalog.supports("openai", "gpt-4o", AuthMode::ApiKey));
     assert!(!catalog.supports("openai", "gpt-4o", AuthMode::Subscription));
     assert!(!catalog.supports("openai", "gpt-5.3-codex-spark", AuthMode::Subscription));
-    for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] {
+    for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"] {
         assert!(catalog.supports("openai", id, AuthMode::Subscription));
     }
     assert!(catalog.models("google", Some(AuthMode::Subscription)).is_empty());
-    assert_eq!(catalog.models("xai", Some(AuthMode::Subscription)).len(), 4);
+    assert_eq!(catalog.models("xai", Some(AuthMode::Subscription)).len(), 5);
+    assert!(catalog.supports("xai", "grok-4.7", AuthMode::Subscription));
     assert!(catalog.supports("xai", "grok-composer-2.5-fast", AuthMode::Subscription));
     assert!(!catalog.supports("xai", "grok-composer-2.5-fast", AuthMode::ApiKey));
     assert!(catalog.supports("xai", "grok-build", AuthMode::Subscription) && !catalog.supports("xai", "grok-build", AuthMode::ApiKey));

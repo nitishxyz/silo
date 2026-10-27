@@ -15,7 +15,7 @@
     "comment": "Codex policy checked against https://developers.openai.com/codex/models.md on 2026-10-21. ChatGPT sign-in retirements: GPT-5.5 on 2026-10-14, GPT-5.4/5.4-mini on 2026-08-31, Spark on 2026-09-14; GPT-5.2 and GPT-5.3-Codex already deprecated. Retired ids remain API-key available. GPT-6.1 Sol is the recommended coding default. Availability still depends on plan/workspace rollout; this catalog is not an entitlement check.",
     "auth": {
       "default": ["api_key"],
-      "subscription_ids": ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5.2-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"],
+      "subscription_ids": ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5.2-codex", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"],
       "subscription_prefixes": [],
       "overrides": {}
     },
@@ -64,7 +64,7 @@
   },
   "xai": {
     "comment": "Responses API transport (API key). Subscription ids, manual CLI models and the hidden build alias follow catalog-auth.ts and catalog-manual.ts in the TS reference; the subscription (Grok Build sign-in, openai/xai.rs) serves grok-4.x on api.x.ai and grok-build/grok-composer through the Grok CLI proxy. Manual entries omit unknown list prices and output limits.",
-    "auth": {"default": ["api_key"], "subscription_ids": ["grok-4.5", "grok-4.6", "grok-composer-2.5-fast", "grok-build"], "subscription_prefixes": [], "overrides": {"grok-build": ["subscription"], "grok-composer-2.5-fast": ["subscription"]}},
+    "auth": {"default": ["api_key"], "subscription_ids": ["grok-4.5", "grok-4.6", "grok-4.7", "grok-composer-2.5-fast", "grok-build"], "subscription_prefixes": [], "overrides": {"grok-build": ["subscription"], "grok-composer-2.5-fast": ["subscription"]}},
     "subscription_overrides": {},
     "defaults": {"api_key": "grok-4.6", "subscription": "grok-4.6"},
     "manual": {

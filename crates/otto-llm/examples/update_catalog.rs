@@ -3,7 +3,7 @@
 #[cfg(feature = "client")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use otto_llm::catalog::{SOURCE, trim_feed};
+    use otto_llm::catalog::{PROVIDERS, SOURCE, trim_feed};
     let args: Vec<_> = std::env::args().skip(1).collect();
     let feed = match args.as_slice() {
         [] => reqwest::Client::new().get(SOURCE).timeout(std::time::Duration::from_secs(60)).send().await?.error_for_status()?.json().await?,
@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("usage: update_catalog [--from /path/api.json]".into()),
     };
     let providers = trim_feed(feed)?;
-    if providers.len() != 4 || providers.values().any(|p| p.models.is_empty()) {
+    if providers.len() != PROVIDERS.len() || providers.values().any(|p| p.models.is_empty()) {
         return Err("models.dev feed is missing supported providers or chat models".into());
     }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/snapshot.json");

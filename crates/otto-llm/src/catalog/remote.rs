@@ -307,7 +307,7 @@ mod tests {
         let catalog = Catalog::load(None);
         let mode = Some(AuthMode::Subscription);
         let ids: Vec<_> = catalog.merge_remote("xai", None, mode).into_iter().map(|e| e.info.id).collect();
-        assert_eq!(ids, ["grok-4.5", "grok-4.6", "grok-composer-2.5-fast", "grok-build"]);
+        assert_eq!(ids, ["grok-4.5", "grok-4.6", "grok-4.7", "grok-composer-2.5-fast", "grok-build"]);
         let kimi: Vec<_> = catalog.merge_remote("kimi-code", None, mode).into_iter().map(|e| e.info.id).collect();
         assert_eq!(kimi, ["kimi-k3", "kimi-k3.1-pro", "kimi-k2.7-code-highspeed"]);
         let store = RemoteStore::load(&temp("fallback"));
