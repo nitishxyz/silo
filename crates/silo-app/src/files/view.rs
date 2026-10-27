@@ -2,14 +2,18 @@
 //! find and the tree toggle), the viewer, the tree and the ⇧⌘P finder.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Render, SharedString, StyledImage as _,
-    Window, div, img, prelude::*, px, rgb,
+    AnyElement, AppContext as _, ClickEvent, Context, ExternalPaths, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Render,
+    SharedString, StyledImage as _, Window, div, img, prelude::*, px, rgb,
 };
 use silo_proto::model::BlockInfo;
 
 use std::rc::Rc;
 
-use super::{Content, Drag, FilesPane, model};
+use super::{
+    Content, Drag, FilesPane, browse,
+    browser::{DragPreview, DraggedFiles},
+    model,
+};
 use crate::{
     commands::act,
     pane_header::{BUTTON, BlockHeader, HeaderParts, HeaderStyle, button, keep_press, labels},
@@ -34,13 +38,21 @@ impl BlockHeader for FilesPane {
         let root = self.state.root.clone();
         let name = model::name(&root).to_owned();
         let name = if name.is_empty() { root.clone() } else { name };
-        let mut parts = if self.state.open.is_empty() {
+        let browsing = self.browsing();
+        let mut parts = if self.state.open.is_empty() || browsing {
             labels(name.clone(), Some(tilde(&root)), style)
         } else {
             HeaderParts::new(self.tabs(style, cx), name.clone())
         };
+        if browsing {
+            parts.actions = vec![self.view_switch(style, cx)];
+            return parts;
+        }
         let active_md = self.active().is_some_and(|a| matches!(self.contents.get(a), Some(Content::Text(f)) if f.shown == model::Shown::Markdown));
         let mut actions = Vec::new();
+        if self.ops() {
+            actions.push(self.view_switch(style, cx));
+        }
         if active_md {
             actions.push(self.source_switch(style, cx));
         }
@@ -295,6 +307,9 @@ impl FilesPane {
         let loading = !self.listings.contains_key("") && root_error.is_none();
         let pane = cx.entity();
         let count = rows.len();
+        // Drags: a row alone (within the block, and out of the window for this Mac's files).
+        let template = self.drag_of("", &Rc::new(Vec::new()));
+        let (local, ops) = (template.local_root.is_some(), self.ops());
         let list = gpui::uniform_list("files-tree", count, move |range, _, _| {
             let rows = &rows;
             range
@@ -344,6 +359,34 @@ impl FilesPane {
                                 .text_color(rgb(if is_active { theme::foreground() } else { theme::ink_on(theme::background()) }))
                                 .child(row.name.clone()),
                         )
+                        .map(|el| {
+                            if !ops {
+                                return el;
+                            }
+                            let drag = DraggedFiles { paths: Rc::new(vec![row.path.clone()]), ..template.clone() };
+                            let preview = (drag.label(), if row.dir { "folder" } else { "file-text" });
+                            let el = el.on_drag(drag, move |_, _, _, cx| cx.new(|_| DragPreview { label: preview.0.clone(), icon: preview.1 }));
+                            let el = if local { el.external_drag_payload(|d: &DraggedFiles, _, _| d.external()) } else { el };
+                            if !row.dir {
+                                return el;
+                            }
+                            let (moves, uploads, target) = (pane.clone(), pane.clone(), row.path.clone());
+                            let (to_move, to_upload) = (row.path.clone(), row.path.clone());
+                            el.drag_over::<DraggedFiles>(move |s, d, _, _| {
+                                if browse::can_drop(&d.paths, &target) { s.bg(rgb(theme::accent()).opacity(0.22)) } else { s }
+                            })
+                            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.22)))
+                            .on_drop(move |d: &DraggedFiles, window, cx| {
+                                cx.stop_propagation();
+                                let copy = window.modifiers().alt;
+                                moves.update(cx, |this, cx| this.drop_files(d, &to_move, copy, cx));
+                            })
+                            .on_drop(move |paths: &ExternalPaths, _, cx| {
+                                cx.stop_propagation();
+                                let paths = paths.paths().to_vec();
+                                uploads.update(cx, |this, cx| this.upload_into(paths, to_upload.clone(), cx));
+                            })
+                        })
                         .on_click(move |e: &ClickEvent, window, cx| {
                             let behind = e.modifiers().platform;
                             pane.update(cx, |this, cx| this.tree_click(&row, behind, window, cx));
@@ -382,6 +425,13 @@ impl FilesPane {
             .track_focus(&self.tree_focus)
             .text_size(px(12.5))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.tree_focus, cx)))
+            // Drops on the tree's background go into the root (files from Finder: uploaded, on hosts that take them).
+            .when(self.ops(), |el| {
+                el.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.06)))
+                    .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.04)))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.upload_into(paths.paths().to_vec(), String::new(), cx)))
+                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, cx| this.drop_files(d, "", window.modifiers().alt, cx)))
+            })
             .child(div().size_full().py(px(4.0)).child(body))
             .child(edge)
             .into_any_element()
@@ -475,6 +525,10 @@ impl FilesPane {
     }
 
     fn key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browsing() && self.browse_key(e, window, cx) {
+            cx.stop_propagation();
+            return cx.notify();
+        }
         let k = &e.keystroke;
         let m = k.modifiers;
         let key = k.key.as_str();
@@ -536,10 +590,17 @@ fn hint_text(text: impl Into<SharedString>) -> gpui::Div {
 
 impl Render for FilesPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bars = self.bars(cx);
-        let viewer = self.render_viewer(window, cx);
-        let tree = self.state.tree.then(|| self.render_tree(window, cx));
+        let browsing = self.browsing();
+        let main = if browsing {
+            self.render_browser(window, cx)
+        } else {
+            let bars = self.bars(cx);
+            let viewer = self.render_viewer(window, cx);
+            div().size_full().flex().flex_col().children(bars).child(div().flex_1().min_h_0().child(viewer)).into_any_element()
+        };
+        let tree = (self.state.tree && !browsing).then(|| self.render_tree(window, cx));
         let finder = self.render_finder(cx);
+        let overlays: Vec<AnyElement> = [self.render_transfer(cx), self.render_preview(cx), self.render_menu(cx)].into_iter().flatten().collect();
         let body = self.body_bounds.clone();
         let pane = cx.entity().downgrade();
         let dragging_tree = matches!(self.drag, Some(Drag::Tree { .. }));
@@ -583,32 +644,86 @@ impl Render for FilesPane {
                 if this.finder.is_some() || this.find.is_some() || this.goto.is_some() {
                     return this.close_bars(window, cx);
                 }
+                if this.browsing() {
+                    // The browser has no tabs: ⌘W closes the block.
+                    return cx.propagate();
+                }
                 match this.state.active.clone() {
                     Some(path) => this.close(&path, cx),
                     // No tab left: ⌘W closes the block.
                     None => cx.propagate(),
                 }
             }))
-            .on_action(cx.listener(|this, _: &act::Copy, _, cx| match this.selected_text() {
-                Some(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
-                None => cx.propagate(),
+            .on_action(cx.listener(|this, _: &act::Copy, window, cx| {
+                if this.browsing() && this.browser.focus.is_focused(window) {
+                    return this.copy_selected(cx);
+                }
+                match this.selected_text() {
+                    Some(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
+                    None => cx.propagate(),
+                }
             }))
-            .on_action(cx.listener(|this, _: &act::SelectAll, _, cx| this.select_all(cx)))
-            .on_action(cx.listener(|this, _: &act::Paste, _, cx| {
+            .on_action(cx.listener(|this, _: &act::SelectAll, window, cx| {
+                if this.browsing() {
+                    if this.browser.focus.is_focused(window) {
+                        this.browse_select_all(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                    return;
+                }
+                this.select_all(cx);
+            }))
+            .on_action(cx.listener(|this, _: &act::Paste, window, cx| {
+                if this.browsing() && this.browser.focus.is_focused(window) {
+                    return this.paste_files(cx);
+                }
                 if !this.paste(cx) {
                     cx.propagate();
                 }
             }))
-            // ⌘↑ ⌘↓ are the terminal's prompt jumps; editing, they go to the text's start and end.
-            .on_action(cx.listener(|this, _: &act::JumpToPreviousPrompt, _, cx| {
+            // ⌘↑ ⌘↓ are the terminal's prompt jumps; editing, they go to the text's start and end; browsing, to
+            // the enclosing folder and into the selection.
+            .on_action(cx.listener(|this, _: &act::JumpToPreviousPrompt, window, cx| {
+                if this.browsing() && this.browser.focus.contains_focused(window, cx) {
+                    return this.go_parent(cx);
+                }
                 if !this.caret_to_end(false, cx) {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &act::JumpToNextPrompt, _, cx| {
+            .on_action(cx.listener(|this, _: &act::JumpToNextPrompt, window, cx| {
+                if this.browsing() && this.browser.focus.is_focused(window) {
+                    return this.open_selected(window, cx);
+                }
                 if !this.caret_to_end(true, cx) {
                     cx.propagate();
                 }
+            }))
+            // Browsing, Finder's keys win over the app's: ⌘D duplicates, ⌘[ ⌘] go back and forward, ⇧⌘N makes a folder.
+            .on_action(cx.listener(|this, _: &act::SplitRight, window, cx| {
+                if this.browsing() && this.browser.focus.is_focused(window) {
+                    return this.duplicate_selected(cx);
+                }
+                cx.propagate();
+            }))
+            .on_action(cx.listener(|this, _: &act::FocusPreviousPane, window, cx| {
+                if this.browsing() && this.browser.focus.contains_focused(window, cx) {
+                    return this.go_back(cx);
+                }
+                cx.propagate();
+            }))
+            .on_action(cx.listener(|this, _: &act::FocusNextPane, window, cx| {
+                if this.browsing() && this.browser.focus.contains_focused(window, cx) {
+                    return this.go_forward(cx);
+                }
+                cx.propagate();
+            }))
+            .on_action(cx.listener(|this, _: &act::NewSession, window, cx| {
+                if this.browsing() && this.browser.focus.contains_focused(window, cx) {
+                    return this.new_folder(window, cx);
+                }
+                cx.propagate();
             }))
             .on_key_down(cx.listener(Self::key_down))
             // A press anywhere else in the block (a picture, rendered markdown) focuses it.
@@ -616,13 +731,15 @@ impl Render for FilesPane {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     if !this.focus.contains_focused(window, cx) {
-                        window.focus(&this.focus, cx);
+                        let focus = if this.browsing() { this.browser.focus.clone() } else { this.focus.clone() };
+                        window.focus(&focus, cx);
                     }
                 }),
             )
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().children(bars).child(div().flex_1().min_h_0().child(viewer)))
+            .child(div().flex_1().min_w_0().h_full().child(main))
             .children(tree)
             .children(finder)
+            .children(overlays)
             .child(probe)
     }
 }

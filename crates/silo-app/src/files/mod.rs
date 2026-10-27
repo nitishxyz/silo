@@ -6,6 +6,9 @@
 //! it, changes it with `files.set` and re-reads what `files.changed` names.
 //! Unsaved text lives here only.
 
+pub(crate) mod browse;
+mod browser;
+mod browser_view;
 pub(crate) mod edit;
 mod editor;
 pub(crate) mod model;
@@ -57,6 +60,9 @@ pub enum FilesPaneEvent {
     /// Closing these tabs would lose unsaved edits: ask first (Save / Don't
     /// Save / Cancel), then [`FilesPane::close_now`].
     Unsaved(Vec<String>),
+    /// Open in Terminal: a terminal block at this folder (absolute, on the
+    /// block's host).
+    OpenTerminal(String),
 }
 
 /// What a tab holds once read.
@@ -90,6 +96,26 @@ pub(crate) struct TextFile {
     pub cursor: Option<Selection>,
     /// The highlight waiting for typing to pause.
     highlighting: Option<Task<()>>,
+}
+
+impl TextFile {
+    /// Plain text, not editable (Quick Look).
+    pub(crate) fn plain(doc: Rc<Doc>, truncated: bool, size: u64) -> Self {
+        Self {
+            doc,
+            shown: Shown::Text,
+            syntax: None,
+            truncated,
+            size,
+            markdown: None,
+            markdown_stale: false,
+            lang: None,
+            version: 0,
+            edit: None,
+            cursor: None,
+            highlighting: None,
+        }
+    }
 }
 
 /// The find bar (⌘F).
@@ -172,6 +198,11 @@ pub struct FilesPane {
     blink_task: Option<Task<()>>,
     /// The last `TextFile::version` given out.
     versions: u64,
+    /// The browser (docs/FILES_BLOCK.md §8).
+    pub(crate) browser: browser::Browser,
+    /// The block's host is this Mac: its paths are this Mac's (drags out,
+    /// Reveal in Finder).
+    pub local: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -226,6 +257,8 @@ impl FilesPane {
             caret_on: false,
             blink_task: None,
             versions: 0,
+            browser: browser::Browser::new(cx.focus_handle()),
+            local: false,
             _subs: subs,
         };
         // Unsaved tabs kept while the block was out of view (another session shown).
@@ -262,6 +295,7 @@ impl FilesPane {
         if state == self.state {
             return;
         }
+        self.browser.dirty();
         if state.root != self.state.root {
             self.listings.clear();
             self.list_errors.clear();
@@ -327,7 +361,7 @@ impl FilesPane {
         if self.state.root.is_empty() {
             return;
         }
-        for dir in std::iter::once(String::new()).chain(self.state.expanded.clone()) {
+        for dir in self.shown_dirs() {
             self.list(dir, cx);
         }
         if let Some(active) = self.state.active.clone() {
@@ -335,9 +369,18 @@ impl FilesPane {
         }
     }
 
+    /// The folders shown: the root, expanded folders and the browser's.
+    fn shown_dirs(&self) -> Vec<String> {
+        let mut dirs: Vec<String> = std::iter::once(String::new()).chain(self.state.expanded.clone()).collect();
+        if !self.state.browse.is_empty() && !dirs.contains(&self.state.browse) {
+            dirs.push(self.state.browse.clone());
+        }
+        dirs
+    }
+
     /// List what's expanded but not listed, and read the shown tab.
     fn load_needed(&mut self, cx: &mut Context<Self>) {
-        for dir in std::iter::once(String::new()).chain(self.state.expanded.clone()) {
+        for dir in self.shown_dirs() {
             if !self.listings.contains_key(&dir) && !self.list_errors.contains_key(&dir) {
                 self.list(dir, cx);
             }
@@ -378,10 +421,16 @@ impl FilesPane {
                 Ok(list) => {
                     this.list_errors.remove(&dir);
                     this.listings.insert(dir, list.entries);
+                    this.browser.dirty();
+                    let rows = this.browse_rows();
+                    if !this.browser.searching() {
+                        this.browser.picked.retain_listed(&rows);
+                    }
                 }
                 Err(error) => {
                     this.listings.remove(&dir);
                     this.list_errors.insert(dir, describe(&error));
+                    this.browser.dirty();
                 }
             }
             cx.notify();
@@ -657,6 +706,7 @@ impl FilesPane {
             return;
         }
         self.state.expanded.clone_from(&expanded);
+        self.browser.dirty();
         self.set(FilesSetParams { expanded: Some(expanded), ..FilesSetParams::default() }, cx);
         if open && !self.listings.contains_key(dir) {
             self.list(dir.to_owned(), cx);
@@ -850,6 +900,9 @@ impl FilesPane {
     pub(crate) fn finder_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.finder.as_ref().and_then(|f| f.found.get(index)).map(|f| f.path.clone()) else { return };
         self.finder = None;
+        if self.state.view == silo_proto::model::FilesView::Browse {
+            self.set_view(silo_proto::model::FilesView::Edit, window, cx);
+        }
         self.open(&path, true, cx);
         self.tree_selected = Some(path.clone());
         let expanded = model::reveal(&self.state.expanded, &path);

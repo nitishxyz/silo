@@ -330,3 +330,101 @@ fn an_edited_tab_draws_its_caret_and_marked_text(cx: &mut TestAppContext) {
     cx.update(|window, cx| _ = window.draw(cx));
     pane.update(cx, |pane, _| assert!(pane.caret_on, "a caret while focused"));
 }
+
+fn entry(name: &str, dir: bool, size: u64) -> silo_proto::control::FileEntry {
+    silo_proto::control::FileEntry {
+        name: name.into(),
+        kind: if dir { silo_proto::control::FileKind::Dir } else { silo_proto::control::FileKind::File },
+        target: None,
+        size,
+        mtime: 1_761_300_000_000,
+        created: 0,
+        hidden: name.starts_with('.'),
+    }
+}
+
+fn press(pane: &mut FilesPane, k: &str, window: &mut gpui::Window, cx: &mut gpui::Context<FilesPane>) -> bool {
+    let event = KeyDownEvent { keystroke: Keystroke::parse(k).unwrap(), is_held: false, prefer_character_input: false };
+    pane.browse_key(&event, window, cx)
+}
+
+#[gpui::test]
+fn the_browser_lists_navigates_and_selects(cx: &mut TestAppContext) {
+    use silo_proto::model::FilesView;
+    let (pane, cx, _rt) = pane(cx);
+    let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| _ = window.draw(cx));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.browser.test_ops = true;
+            pane.listings
+                .insert(String::new(), vec![entry("src", true, 0), entry("b.txt", false, 10), entry("a.md", false, 20), entry(".env", false, 1)]);
+            pane.listings.insert("src".into(), vec![entry("main.rs", false, 5), entry("lib.rs", false, 7)]);
+            pane.set_view(FilesView::Browse, window, cx);
+            assert!(pane.browsing());
+            let rows = pane.browse_rows();
+            assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["src", "a.md", "b.txt"]);
+        });
+    });
+    draw(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            window.focus(&pane.browser.focus, cx);
+            // Arrows, type-to-select, ⇧⌘. for hidden items.
+            assert!(press(pane, "down", window, cx));
+            assert_eq!(pane.picked_paths(), ["src"]);
+            assert!(press(pane, "shift-down", window, cx));
+            assert_eq!(pane.picked_paths(), ["src", "a.md"]);
+            assert!(press(pane, "b", window, cx));
+            assert_eq!(pane.picked_paths(), ["b.txt"]);
+            assert!(press(pane, "cmd-shift-.", window, cx));
+            assert_eq!(pane.browse_rows().len(), 4);
+            // A folder opens in place, then is shown; ⌘[ comes back and selects it.
+            pane.toggle_folder("src", cx);
+            assert_eq!(pane.browse_rows().iter().filter(|r| r.depth == 1).count(), 2);
+            pane.navigate("src".into(), true, cx);
+            assert_eq!(pane.state.browse, "src");
+            assert_eq!(pane.browse_rows().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["lib.rs", "main.rs"]);
+            pane.go_parent(cx);
+            assert_eq!((pane.state.browse.as_str(), pane.picked_paths()), ("", vec!["src".to_owned()]));
+            pane.go_back(cx);
+            assert_eq!(pane.state.browse, "src");
+            pane.go_forward(cx);
+            assert_eq!(pane.state.browse, "");
+            // Sort by size, largest first; the drag out offers this Mac's paths only.
+            pane.set_sort(super::browse::SortKey::Size, cx);
+            pane.toggle_folders_first(cx);
+            assert_eq!(pane.browse_rows()[0].name, "a.md");
+            let drag = pane.drag_of("a.md", &std::rc::Rc::new(vec![]));
+            assert!(drag.external().is_none());
+            pane.local = true;
+            let drag = pane.drag_of("a.md", &std::rc::Rc::new(vec!["a.md".into(), "src".into()]));
+            let Some(gpui::ExternalDragPayload::Files(files)) = drag.external() else { panic!("no payload") };
+            assert_eq!(files.entries().iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>(), ["/work/app/a.md", "/work/app/src"]);
+            let items = pane.drag_out_items(&["src".into(), "a.md".into()]);
+            assert_eq!(items.iter().map(|i| (i.name.as_str(), i.is_dir, i.size)).collect::<Vec<_>>(), [("src", true, 0), ("a.md", false, 20)]);
+            // Space: Quick Look; Return: rename in place.
+            pane.browser.picked.only("a.md");
+            assert!(press(pane, "space", window, cx));
+            assert!(pane.browser.preview.is_some());
+            assert!(press(pane, "escape", window, cx));
+            assert!(pane.browser.preview.is_none());
+            assert!(press(pane, "enter", window, cx));
+            assert_eq!(pane.browser.rename.as_ref().map(|r| r.path.as_str()), Some("a.md"));
+            pane.browser.menu = Some(super::browser::Menu { at: gpui::point(gpui::px(10.0), gpui::px(10.0)), target: Some("a.md".into()) });
+        });
+    });
+    draw(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.open_browse_search(window, cx);
+            pane.browser.search.as_mut().unwrap().query = "main".into();
+            pane.browser.search.as_mut().unwrap().hits =
+                vec![silo_proto::control::FileHit { path: "src/main.rs".into(), entry: entry("main.rs", false, 5) }];
+            pane.browser.dirty();
+            assert_eq!(pane.browse_rows()[0].folder.as_deref(), Some("src"));
+            pane.set_view(FilesView::Edit, window, cx);
+            assert!(!pane.browsing());
+        });
+    });
+    draw(cx);
+}

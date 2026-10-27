@@ -114,6 +114,7 @@ commands! {
     OttoSettings => "Otto Settings", "Agent", [], "Providers, models and agents of the agent in front";
     // Files
     NewFiles => "New Files Pane", "Files", ["cmd-shift-e"], "The focused block's folder, beside it";
+    BrowseFiles => "Browse Files", "Files", [], "The focused block's folder as a Finder-like list, beside it";
     // Changes
     NewChanges => "New Changes Pane", "Changes", [], "The focused block's repo, beside it";
     ReviewChanges => "Review Changes", "Changes", ["cmd-shift-g"], "This session's Changes block, or a new one beside the focused pane";
@@ -198,6 +199,7 @@ impl Command {
             | Self::NewBrowser
             | Self::NewAgent
             | Self::NewFiles
+            | Self::BrowseFiles
             | Self::NewChanges
             | Self::ReviewChanges => Method("block.split"),
             Self::OttoSettings => Method("app.settings_open"),
@@ -251,6 +253,7 @@ impl Command {
     pub fn feature(self) -> Option<&'static str> {
         match self {
             Self::NewFiles | Self::NewFilesTab => Some(silo_proto::compat::feature::FILES),
+            Self::BrowseFiles => Some(silo_proto::compat::feature::FILES_OPS),
             Self::NewChanges | Self::NewChangesTab | Self::ReviewChanges => Some(silo_proto::compat::feature::CHANGES),
             _ => None,
         }

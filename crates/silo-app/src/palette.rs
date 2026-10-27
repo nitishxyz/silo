@@ -318,6 +318,11 @@ impl Workspace {
                     self.new_files(block, cx);
                 }
             }
+            Command::BrowseFiles => {
+                if let Some(block) = block {
+                    self.browse_files(block, cx);
+                }
+            }
             Command::NewChanges => {
                 if let Some(block) = block {
                     self.new_changes(block, cx);
@@ -484,6 +489,7 @@ impl Workspace {
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::OttoSettings | Command::BrowseBlocks => self.view.is_some(),
             Command::NewFiles | Command::NewFilesTab => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES),
+            Command::BrowseFiles => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES_OPS),
             Command::NewChanges | Command::NewChangesTab | Command::ReviewChanges => {
                 connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::CHANGES)
             }

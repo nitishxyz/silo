@@ -66,7 +66,12 @@ impl Workspace {
         }
         let info = self.block_info(block).cloned();
         let (id, rt, control) = (block.to_owned(), self.rt.clone(), self.control());
-        let pane = cx.new(|cx| FilesPane::new(id, info, rt, control, window, cx));
+        let local = matches!(self.hosts[self.active_host].info.transport, crate::hosts::Transport::Local { .. });
+        let pane = cx.new(|cx| {
+            let mut pane = FilesPane::new(id, info, rt, control, window, cx);
+            pane.local = local;
+            pane
+        });
         let sub = cx.subscribe_in(&pane, window, |this, pane, event: &FilesPaneEvent, window, cx| {
             match event {
                 FilesPaneEvent::Activated => {
@@ -74,6 +79,12 @@ impl Workspace {
                     this.pane_activated(block);
                 }
                 FilesPaneEvent::Header => {}
+                FilesPaneEvent::OpenTerminal(dir) => {
+                    let block = pane.read(cx).block_id.clone();
+                    let axis = this.auto_axis(&block);
+                    let spawn = SpawnSpec { cwd: Some(dir.clone()), command: Vec::new(), size: None };
+                    this.call(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Terminal, url: None, agent: None });
+                }
                 FilesPaneEvent::Unsaved(paths) => {
                     let block = pane.read(cx).block_id.clone();
                     let files = vec![(block.clone(), paths.clone())];
@@ -280,6 +291,31 @@ impl Workspace {
         let axis = self.auto_axis(&block);
         let cwd = self.cwd_of(&block, cx);
         self.call(files_split(block, axis, cwd));
+    }
+
+    /// Browse Files: a Files block beside `block`, at its folder, showing
+    /// the browser.
+    pub(crate) fn browse_files(&mut self, block: String, cx: &mut Context<Self>) {
+        let Some(control) = self.control() else { return };
+        let axis = self.auto_axis(&block);
+        let cwd = self.cwd_of(&block, cx);
+        let method = files_split(block, axis, cwd);
+        let task = self.rt.spawn(async move {
+            let created: Created = control.call(method).await?;
+            let browse = FilesSetParams { block_id: created.block_id, view: Some(silo_proto::model::FilesView::Browse), ..FilesSetParams::default() };
+            control.call_value(Method::FilesSet(browse)).await?;
+            anyhow::Ok(())
+        });
+        cx.spawn(async move |this, cx| {
+            let error = match task.await {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => error,
+                Err(error) => anyhow::Error::from(error),
+            };
+            tracing::warn!("browse files: {error:#}");
+            let _ = this.update(cx, |this, cx| this.flash(this.failed(&error, "Couldn't open a Files pane"), cx));
+        })
+        .detach();
     }
 
     /// Open a Files block for a typed `path` with `method` (its spawn's cwd
