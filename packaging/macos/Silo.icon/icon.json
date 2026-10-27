@@ -1,0 +1,40 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.13333,0.16471,0.21961,1.00000",
+      "srgb:0.03922,0.05098,0.07451,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "mark.png",
+          "name" : "Mark",
+          "position" : { "scale" : 1, "translation-in-points" : [ 0, -12 ] }
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "Mark",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
+      "translucency" : { "enabled" : false, "value" : 0.5 }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "pool.png",
+          "name" : "Pool",
+          "position" : { "scale" : 1, "translation-in-points" : [ 0, 278 ] }
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "Pool",
+      "shadow" : { "kind" : "neutral", "opacity" : 0 },
+      "specular" : false,
+      "translucency" : { "enabled" : false, "value" : 0.5 }
+    }
+  ],
+  "supported-platforms" : { "squares" : "shared" }
+}

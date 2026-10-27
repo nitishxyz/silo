@@ -44,6 +44,9 @@ app="$root/target/Silo.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$out/silo-app" "$app/Contents/MacOS/Silo"
+# The app icon (scripts/make-icons.sh): Assets.car for macOS 26 and later,
+# Silo.icns before; shared with Silo Server.app below.
+cp "$root/packaging/macos/Assets.car" "$root/packaging/macos/Silo.icns" "$app/Contents/Resources/"
 # The server/CLI: Contents/Helpers/Silo Server.app/Contents/MacOS/silo. It is
 # the responsible process of every shell (it disclaims whoever started it,
 # crates/silo-cli/src/disclaim.rs), so privacy prompts and System Settings
@@ -87,12 +90,11 @@ PLIST
 done
 # The app finds the server at ../Helpers/Silo Server.app/Contents/MacOS/silo
 # (crates/silo-app/src/conn.rs); in Contents/MacOS `silo` and `Silo` would
-# collide on a case-insensitive volume. It gets the app's icon, once the app
-# has one.
+# collide on a case-insensitive volume. It gets the app's icon.
 icon=""
-if [[ -f "$app/Contents/Resources/Silo.icns" ]]; then
-  cp "$app/Contents/Resources/Silo.icns" "$server_app/Contents/Resources/Silo.icns"
-  icon=Silo.icns
+if [[ -f "$app/Contents/Resources/Assets.car" ]]; then
+  cp "$app/Contents/Resources/Assets.car" "$app/Contents/Resources/Silo.icns" "$server_app/Contents/Resources/"
+  icon=Silo
 fi
 "$root/scripts/server-info-plist.sh" "Silo Server" xyz.nitish.silo.server "$version" ${icon:+"$icon"} > "$server_app/Contents/Info.plist"
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -106,6 +108,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>${version}</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleExecutable</key><string>Silo</string>
+  <key>CFBundleIconFile</key><string>Silo</string>
+  <key>CFBundleIconName</key><string>Silo</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>

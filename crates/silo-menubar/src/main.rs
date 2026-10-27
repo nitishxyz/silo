@@ -12,16 +12,16 @@ use std::{
 };
 
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, NSObject},
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSBitmapImageRep, NSImage, NSMenu, NSMenuItem,
+    NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSString, NSTimer};
+use objc2_foundation::{NSData, NSSize, NSString, NSTimer};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::net::{Cmd, Shared};
@@ -231,19 +231,30 @@ impl Controller {
         if let Some(item) = self.ivars().item.borrow().as_ref() {
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
-                let symbol = if state.server.is_some() { "terminal.fill" } else { "terminal" };
-                if let Some(image) = symbol_image(symbol) {
+                if let Some(image) = mark_image() {
                     button.setImage(Some(&image));
                 }
+                // The mark dims while no server runs.
+                button.setAppearsDisabled(state.server.is_none());
                 button.setToolTip(Some(&NSString::from_str(&status)));
             }
         }
     }
 }
 
-fn symbol_image(name: &str) -> Option<Retained<NSImage>> {
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), Some(&NSString::from_str("Silo")))?;
+/// The Silo mark as an 18 pt template image (`scripts/make-icons.sh`),
+/// built in: the agent runs from a runtime copy outside any bundle.
+fn mark_image() -> Option<Retained<NSImage>> {
+    const PNGS: [&[u8]; 2] = [include_bytes!("../assets/menubar.png"), include_bytes!("../assets/menubar@2x.png")];
+    let size = NSSize { width: 18.0, height: 18.0 };
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    for png in PNGS {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png))?;
+        rep.setSize(size);
+        image.addRepresentation(&rep);
+    }
     image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str("Silo")));
     Some(image)
 }
 

@@ -26,7 +26,7 @@ if [[ -x "$out/silo" ]]; then
 fi
 framework="Chromium Embedded Framework.framework"
 
-plist() { # exe id [helper]
+plist() { # exe id [helper] [icon]
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,6 +40,7 @@ plist() { # exe id [helper]
   <key>NSCameraUsageDescription</key><string>Web pages in Silo can ask to use the camera.</string>
   <key>NSMicrophoneUsageDescription</key><string>Web pages in Silo can ask to use the microphone.</string>
   ${3:+<key>LSUIElement</key><true/>}
+  ${4:+<key>CFBundleIconFile</key><string>$4</string><key>CFBundleIconName</key><string>$4</string>}
 </dict></plist>
 PLIST
 }
@@ -57,8 +58,12 @@ sign() {
   log=$(codesign --force --sign - --timestamp=none "$1" 2>&1) || { echo "$log" >&2; return 1; }
 }
 
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
-plist SiloDev xyz.nitish.silo.dev > "$app/Contents/Info.plist"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
+icons=("$root/packaging/macos/Assets.car" "$root/packaging/macos/Silo.icns") # scripts/make-icons.sh
+for f in "${icons[@]}"; do
+  cmp -s "$f" "$app/Contents/Resources/$(basename "$f")" || cp "$f" "$app/Contents/Resources/"
+done
+plist SiloDev xyz.nitish.silo.dev "" Silo > "$app/Contents/Info.plist"
 install_bin "$out/silo-app" "$app/Contents/MacOS/SiloDev"
 for bin in silo silo-menubar otto-silo; do
   [[ -f "$out/$bin" ]] && ln -sf "$out/$bin" "$app/Contents/MacOS/$bin"
@@ -70,12 +75,13 @@ done
 server_app="$app/Contents/Helpers/SiloDev Server.app"
 if [[ -f "$out/silo" ]]; then
   version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
-  info="$("$root/scripts/server-info-plist.sh" "SiloDev Server" xyz.nitish.silo.dev.server "$version")"
+  info="$("$root/scripts/server-info-plist.sh" "SiloDev Server" xyz.nitish.silo.dev.server "$version" Silo)"
   stamp="$out/.silodev-server.stamp"
-  want="$(stat -f '%m %z %i' "$out/silo") $(printf '%s' "$info" | shasum | cut -c1-40)"
+  want="$(stat -f '%m %z %i' "$out/silo") $(printf '%s' "$info" | shasum | cut -c1-40) $(cat "${icons[@]}" | shasum | cut -c1-40)"
   if [[ ! -x "$server_app/Contents/MacOS/silo" || "$(cat "$stamp" 2>/dev/null)" != "$want" ]]; then
-    mkdir -p "$server_app/Contents/MacOS"
+    mkdir -p "$server_app/Contents/MacOS" "$server_app/Contents/Resources"
     printf '%s\n' "$info" > "$server_app/Contents/Info.plist"
+    cp "${icons[@]}" "$server_app/Contents/Resources/"
     install_bin "$out/silo" "$server_app/Contents/MacOS/silo"
     sign "$server_app"
     echo "$want" > "$stamp"

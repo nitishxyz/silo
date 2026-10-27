@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Print the Info.plist of the server's helper app (Silo.app/Contents/Helpers/
 # <name>.app, crates/silo-client/src/runtime.rs):
-#   scripts/server-info-plist.sh NAME BUNDLE_ID VERSION [ICON_FILE]
+#   scripts/server-info-plist.sh NAME BUNDLE_ID VERSION [ICON]
+# ICON names both Resources/ICON.icns and the Assets.car icon (scripts/make-icons.sh).
 # The server is the responsible process of every program run in Silo's
 # terminals (crates/silo-cli/src/disclaim.rs), so macOS privacy prompts show
 # these usage strings, worded for those programs.
@@ -24,6 +25,7 @@ cat <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
 ${icon:+  <key>CFBundleIconFile</key><string>$icon</string>
+  <key>CFBundleIconName</key><string>$icon</string>
 }  <key>NSAppleEventsUsageDescription</key><string>$terminal wants to control another app. Silo does not control other apps itself.</string>
   <key>NSAudioCaptureUsageDescription</key><string>$terminal wants to record audio from other apps. Silo does not record audio itself.</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>$terminal wants to use Bluetooth. Silo does not use Bluetooth itself.</string>
