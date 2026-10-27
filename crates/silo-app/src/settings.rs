@@ -761,6 +761,7 @@ pub(crate) fn allowed_while_open(command: Command) -> bool {
             | Command::Permissions
             | Command::Quit
             | Command::HideSilo
+            | Command::CloseWindow
             | Command::HideOthers
             | Command::ShowAll
             | Command::ToggleFullScreen

@@ -3978,6 +3978,29 @@
         "type": "object"
       }
     },
+    "app.window_close": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
     "app.window_cycle": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

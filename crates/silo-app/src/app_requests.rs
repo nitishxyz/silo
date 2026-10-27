@@ -147,6 +147,7 @@ impl Workspace {
                     | Method::AppSettingsOpenFile { .. }
                     | Method::AppUpdateCheck { .. }
                     | Method::AppHide { .. }
+                    | Method::AppWindowClose { .. }
                     | Method::AppHideOthers { .. }
                     | Method::AppShowAll { .. }
             )

@@ -68,6 +68,7 @@ commands! {
     NewWindow => "New Window…", "Sessions", ["cmd-n"], "Open a session in another window";
     RenameSession => "Rename Session…", "Sessions", [];
     CloseSession => "Close Session", "Sessions", [], "Ends every process in the session";
+    CloseWindow => "Close Window", "Sessions", ["cmd-shift-w"], "Its session keeps running";
     SwitchSession => "Switch to Session…", "Sessions", ["cmd-k"];
     NextSession => "Next Session", "Sessions", ["cmd-alt-]"];
     PreviousSession => "Previous Session", "Sessions", ["cmd-alt-["];
@@ -79,7 +80,7 @@ commands! {
     NewFilesTab => "New Files Tab", "Tabs", [], "The focused block's folder";
     NewChangesTab => "New Changes Tab", "Tabs", [], "The focused block's repo";
     NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"], "Choose a terminal, browser, agent, address or >command";
-    CloseTab => "Close Tab", "Tabs", ["cmd-shift-w"];
+    CloseTab => "Close Tab", "Tabs", [];
     RenameTab => "Rename Tab…", "Tabs", [];
     NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
     PreviousTab => "Previous Tab", "Tabs", ["cmd-{", "cmd-shift-["];
@@ -243,6 +244,7 @@ impl Command {
             // The palette, on its Blocks.
             Self::CommandPalette | Self::BrowseBlocks => Method("app.palette"),
             Self::HideSilo => Method("app.hide"),
+            Self::CloseWindow => Method("app.window_close"),
             Self::HideOthers => Method("app.hide_others"),
             Self::ShowAll => Method("app.show_all"),
             Self::Quit => Method("app.quit"),

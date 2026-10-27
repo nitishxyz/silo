@@ -219,6 +219,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::AppUpdateCheck { .. }
         | M::AppPalette { .. }
         | M::AppHide { .. }
+        | M::AppWindowClose { .. }
         | M::AppHideOthers { .. }
         | M::AppShowAll { .. }
         | M::AppQuit { .. }
@@ -424,6 +425,7 @@ pub fn examples() -> Vec<Method> {
         M::AppReply { request_id: "r1b2c3d4e5f60718".into(), result: Some(json!({})), error: None },
         M::AppWindowNew { session_id: Some(s()), client_id: None },
         M::AppWindowCycle { client_id: None },
+        M::AppWindowClose { client_id: None },
         M::AppSwitcher { client_id: None },
         M::AppSessionStep { delta: 1, client_id: None },
         M::AppHostsAdd { ticket: Some("silo1aeaqcaibaeaq".into()), client_id: None },

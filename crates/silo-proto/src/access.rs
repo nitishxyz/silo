@@ -351,6 +351,7 @@ pub fn need(method: &Method) -> Need {
         | M::AppUpdateCheck { .. }
         | M::AppPalette { .. }
         | M::AppHide { .. }
+        | M::AppWindowClose { .. }
         | M::AppHideOthers { .. }
         | M::AppShowAll { .. }
         | M::AppQuit { .. }

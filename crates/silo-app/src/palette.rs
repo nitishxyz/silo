@@ -438,6 +438,8 @@ impl Workspace {
             }
             Command::CommandPalette => self.toggle_palette(window, cx),
             Command::BrowseBlocks => self.open_palette_with(finder::BLOCKS_QUERY.to_owned(), window, cx),
+            // The session stays on the server; the last window closing quits the app as usual.
+            Command::CloseWindow => window.remove_window(),
             Command::HideSilo => cx.hide(),
             Command::HideOthers => cx.hide_other_apps(),
             Command::ShowAll => cx.unhide_other_apps(),

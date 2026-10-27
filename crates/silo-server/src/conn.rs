@@ -843,6 +843,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::AppUpdateCheck { .. }
         | Method::AppPalette { .. }
         | Method::AppHide { .. }
+        | Method::AppWindowClose { .. }
         | Method::AppHideOthers { .. }
         | Method::AppShowAll { .. }
         | Method::AppQuit { .. }

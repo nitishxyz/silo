@@ -77,7 +77,9 @@ mod workspace;
 use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, point, prelude::*, px, size};
 
 use crate::{
-    commands::act::{BrowseBlocks, CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll},
+    commands::act::{
+        BrowseBlocks, CloseWindow, CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll,
+    },
     workspace::Workspace,
 };
 
@@ -297,7 +299,11 @@ fn main() {
                 ],
                 disabled: false,
             },
-            Menu { name: "Window".into(), items: vec![MenuItem::action("Cycle Through Windows", CycleWindows)], disabled: false },
+            Menu {
+                name: "Window".into(),
+                items: vec![MenuItem::action("Close Window", CloseWindow), MenuItem::action("Cycle Through Windows", CycleWindows)],
+                disabled: false,
+            },
         ]);
         // The Permissions panel alone does not keep the app open.
         cx.on_window_closed(|cx, _| {

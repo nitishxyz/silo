@@ -669,6 +669,11 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
+    #[serde(rename = "app.window_close")]
+    AppWindowClose {
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
     #[serde(rename = "app.switcher")]
     AppSwitcher {
         #[serde(default)]
@@ -969,6 +974,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.reply", "Answer an app.request (the app it went to only)."),
     ("app.window_new", "Open a new app window."),
     ("app.window_cycle", "Cycle through app windows."),
+    ("app.window_close", "Close the front app window; its session keeps running."),
     ("app.switcher", "Show the session switcher."),
     ("app.session_step", "Show the session delta places from the current one."),
     ("app.hosts_add", "Add a host to the app."),
