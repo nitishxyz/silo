@@ -316,8 +316,12 @@ fn context_tip(context: otto_proto::ContextUse, usage: &otto_proto::UsageTotals)
     let pct = (context.used as f64 * 100.0 / context.window.max(1) as f64).round();
     let u = &usage.usage;
     let mut totals = format!("In {} · Out {} · Cache {}", tokens(u.input), tokens(u.output), tokens(u.cache_read + u.cache_write));
-    if usage.cost_usd > 0.0 {
-        totals.push_str(&format!(" · ${:.2}", usage.cost_usd));
+    // At API prices when every step is priced, else what was billed.
+    let api = usage.api_cost_usd.filter(|_| super::usage::complete(usage));
+    if let Some(cost) = api.filter(|c| *c > 0.0) {
+        totals.push_str(&format!(" · {} at API prices", super::usage::usd(cost)));
+    } else if usage.cost_usd > 0.0 {
+        totals.push_str(&format!(" · {}", super::usage::usd(usage.cost_usd)));
     }
     format!("{} of {} tokens ({pct:.0}%)\n{totals}", grouped(context.used), grouped(context.window))
 }
@@ -2514,7 +2518,7 @@ impl AgentPane {
             Overlay::Effort => self.render_efforts(cx),
             Overlay::Usage => {
                 let provider = self.usage_provider();
-                self.render_usage(provider.as_deref())
+                self.render_usage(provider.as_deref(), cx)
             }
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),
@@ -2524,7 +2528,7 @@ impl AgentPane {
             Overlay::Sessions | Overlay::Projects => 440.0,
             Overlay::Models => 340.0,
             Overlay::Effort => 260.0,
-            Overlay::Usage => 300.0,
+            Overlay::Usage => super::usage::CARD_W,
             Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
             Overlay::Mention => 360.0,
         };
@@ -3695,8 +3699,12 @@ mod tests {
             context_tip(ContextUse { used: 48_213, window: 200_000 }, &usage),
             "48,213 of 200,000 tokens (24%)\nIn 1.2M · Out 84k · Cache 900k · $0.31"
         );
-        let free = otto_proto::UsageTotals { cost_usd: 0.0, ..usage };
+        let free = otto_proto::UsageTotals { cost_usd: 0.0, ..usage.clone() };
         assert!(!context_tip(ContextUse { used: 1, window: 10 }, &free).contains('$'), "no cost when unknown");
+        // A subscription's session: its API-equivalent cost.
+        let mut plan = otto_proto::UsageTotals::default();
+        plan.add_step("anthropic", "m", &usage.usage, 0.0, Some(12.5));
+        assert!(context_tip(ContextUse { used: 1, window: 10 }, &plan).ends_with(" · $12.50 at API prices"));
     }
 
     #[test]

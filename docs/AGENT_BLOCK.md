@@ -234,11 +234,21 @@ Units are points.
   sign-in for the provider) and while nothing is known. The pane calls `plan.usage` when it loads and follows
   otto's global `plan.usage` events; the session's `SessionInfo.plan` is the fallback. Static, so Reduce Motion
   has nothing to drop. A sub-agent's block shows its own provider's.
-  As built (usage card, `agent/usage.rs`): clicking the count or the ring opens a 300 popover above them, right
-  aligned like the effort menu (esc or a click outside closes it): Limits (each plan window's label, % used, a bar,
-  `% left · resets …`, the plan's name; `Not reported by <provider>` for API keys and local models, `Shows after
-  the next reply` for a subscription not reported yet), Context (`used / window`, %, a bar) and Session tokens
-  (input, cache read (hit), cache write, output, reasoning when any, total, cache hit rate, cost when priced).
+  As built (usage card, `agent/usage.rs`): clicking the count or the ring opens a 380 popover above them, right
+  aligned like the effort menu (esc or a click outside closes it; its body scrolls past 540): Limits (each plan
+  window's label, % used, a bar, `% left · resets …`, the plan's name; `Not reported by <provider>` for API keys and
+  local models, `Shows after the next reply` for a subscription not reported yet), Context (`used / window`, %, a
+  bar), Session tokens (input, cache read (hit), cache write, output, reasoning when any, total, cache hit rate)
+  with its cost (`$4.82 at API prices · $0 on your plan` on a subscription, `$4.82` on an API key where billed is
+  the API price, `· billed $X` when they differ, `—` when no model has a list price) and a per-model table (the
+  catalog's name, In/Out/Read/Write tokens, Hit %, cost at API prices; most cost first, a Total row when several;
+  shown only when the models add up to the session's tokens, so never from an older otto), then All sessions: a
+  Today / 7 days / 30 days segmented control (local midnights), the period's cost at API prices (and billed when
+  different), its sessions and tokens and the same per-model table, from `usage.summary` (loaded each time the
+  card opens and per period on first pick; `Loading…` meanwhile). Dollars: `$0`, `<$0.01` under a cent, else
+  cents with thousands separated. A reply's usage tooltip adds `Cost: $0.42 at API prices · billed $0` (one figure
+  when they agree, `—` unknown) and, for a turn on several models, a line per model. The footer count's tooltip
+  shows the API price when known.
   As built: the subscription marker is the plan otto reports (` (Max)`, ` (Pro)`), ` (sub)` when it reports none.
   `brain` shows only when the model has `caps.reasoning` and opens the effort menu (also `/effort`): a 260 popover
   above it, right-aligned, rows `Default` (the agent's effort, else the model's), `Low`, `Medium`, `High`, `Max`,

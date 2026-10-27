@@ -464,6 +464,8 @@ pub struct AgentPane {
     /// Each provider's subscription usage as otto last reported it (`plan.rs`).
     plans: HashMap<String, otto_llm::PlanUsage>,
     plan_watch: Option<Task<()>>,
+    /// The usage card's All sessions section (`usage.rs`), reloaded each time the card opens.
+    all_usage: usage::AllUsage,
     /// Text selected in the transcript (`select.rs`).
     select: select::Select,
     _subscriptions: Vec<Subscription>,
@@ -622,6 +624,7 @@ impl AgentPane {
             parsed: HashMap::new(),
             plans: HashMap::new(),
             plan_watch: None,
+            all_usage: usage::AllUsage::default(),
             select: select::Select::new(cx.focus_handle()),
             _subscriptions: subscriptions,
         };
@@ -2013,7 +2016,11 @@ impl AgentPane {
                 let focus = self.filter.read(cx).focus.clone();
                 window.focus(&focus, cx);
             }
-            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash | Overlay::Mention | Overlay::Usage => self.focus_composer(window, cx),
+            Overlay::Usage => {
+                self.load_all_usage(true, cx);
+                self.focus_composer(window, cx);
+            }
+            Overlay::Agents | Overlay::Effort | Overlay::Menu | Overlay::Slash | Overlay::Mention => self.focus_composer(window, cx),
         }
         cx.notify();
     }

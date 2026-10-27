@@ -1,18 +1,27 @@
 //! The usage card (click the footer's token count or plan ring): what is left
-//! of the provider's limits, how full the context is and the session's tokens;
-//! and each reply's tokens, right of its copy/retry/branch row.
+//! of the provider's limits, how full the context is, the session's tokens and
+//! cost (billed and at API prices, by model), and every session's cost over a
+//! period (`usage.summary`); and each reply's tokens, right of its
+//! copy/retry/branch row, its cost and models on hover.
 
-use chrono::{DateTime, TimeZone};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Offset, TimeZone};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, relative, rgb};
 use otto_llm::{PlanUsage, Usage};
-use otto_proto::{ContextUse, TurnUsage, UsageTotals};
+use otto_proto::{ContextUse, ModelUsage, TurnUsage, UsageSummary, UsageTotals};
 
 use super::{
     AgentPane, plan, ring,
     rows::menu,
     view::{grouped, provider_name},
 };
-use crate::{theme, tooltip::Tooltip};
+use crate::{controls::Segmented, theme, tooltip::Tooltip};
+
+/// The card's width: room for the per-model table's columns.
+pub(super) const CARD_W: f32 = 380.0;
+/// The card's body scrolls past this (the popover's own cap, less its padding).
+const BODY_MAX_H: f32 = 540.0;
 
 /// A count in a few characters: `999`, `1.2k`, `12.4k`, `124k`, `1.2M`, `12M`.
 pub(super) fn compact(n: u64) -> String {
@@ -63,15 +72,32 @@ pub(super) fn turn_label(usage: &Usage) -> Option<String> {
     Some(label)
 }
 
-/// A reply's tooltip: the turn's full breakdown, a line each.
-pub(super) fn turn_tip(turn: &TurnUsage) -> String {
-    let lines: Vec<String> = token_rows(&turn.usage, turn.cost_usd).into_iter().map(|(label, value)| format!("{label}: {value}")).collect();
+/// A reply's tooltip: the turn's full breakdown, a line each, then its cost and, when it ran on more than one
+/// model, each model's share (`name` names a model).
+pub(super) fn turn_tip(turn: &TurnUsage, name: impl Fn(&str, &str) -> String) -> String {
+    let mut lines: Vec<String> = token_rows(&turn.usage).into_iter().map(|(label, value)| format!("{label}: {value}")).collect();
+    let totals = turn_totals(turn);
+    if let Some(cost) = cost_text(&totals, false) {
+        lines.push(format!("Cost: {cost}"));
+    }
+    if complete(&totals) && totals.by_model.len() > 1 {
+        lines.push("Models:".into());
+        for m in sorted(&totals.by_model) {
+            lines.push(format!(
+                "  {}: {} in · {} out · {}",
+                name(&m.provider, &m.model),
+                compact(m.usage.total_input()),
+                compact(m.usage.output),
+                api_or_billed(m)
+            ));
+        }
+    }
     lines.join("\n")
 }
 
 /// The breakdown of `usage` (a turn's or the session's) as label/value rows: every input kind, output (with
-/// its reasoning when reported), the total, the cache hit rate when there was input, the cost when known.
-pub(super) fn token_rows(usage: &Usage, cost_usd: f64) -> Vec<(&'static str, String)> {
+/// its reasoning when reported), the total and the cache hit rate when there was input.
+pub(super) fn token_rows(usage: &Usage) -> Vec<(&'static str, String)> {
     let mut rows = vec![
         ("Input", grouped(usage.input)),
         ("Cache read (hit)", grouped(usage.cache_read)),
@@ -85,15 +111,130 @@ pub(super) fn token_rows(usage: &Usage, cost_usd: f64) -> Vec<(&'static str, Str
     if let Some(rate) = hit_rate(usage) {
         rows.push(("Cache hit rate", percent(rate)));
     }
-    if cost_usd > 0.0 {
-        rows.push(("Cost", cost(cost_usd)));
-    }
     rows
 }
 
-/// `$0.31`; under a cent `<$0.01`.
-fn cost(usd: f64) -> String {
-    if usd < 0.005 { "<$0.01".into() } else { format!("${usd:.2}") }
+/// Dollars: `$0` for nothing, `<$0.01` under a cent, else cents with thousands separated (`$1,234.50`).
+pub(super) fn usd(amount: f64) -> String {
+    if amount <= 0.0 || !amount.is_finite() {
+        return "$0".into();
+    }
+    if amount < 0.005 {
+        return "<$0.01".into();
+    }
+    let text = format!("{amount:.2}");
+    let (whole, cents) = text.split_once('.').unwrap_or((&text, "00"));
+    format!("${}.{cents}", grouped(whole.parse().unwrap_or_default()))
+}
+
+/// A known cost as [`usd`], an unknown one (no list price) as `—`, never `$0`.
+fn usd_or_dash(amount: Option<f64>) -> String {
+    amount.map_or_else(|| "—".into(), usd)
+}
+
+/// A model's cost as listed: at API prices when known, else what it was billed when anything, else `—`.
+fn api_or_billed(m: &ModelUsage) -> String {
+    m.api_cost_usd.map(usd).or_else(|| (m.cost_usd > 0.0).then(|| usd(m.cost_usd))).unwrap_or_else(|| "—".into())
+}
+
+/// A turn's usage as totals.
+fn turn_totals(turn: &TurnUsage) -> UsageTotals {
+    UsageTotals { usage: turn.usage.clone(), cost_usd: turn.cost_usd, api_cost_usd: turn.api_cost_usd, by_model: turn.by_model.clone() }
+}
+
+/// The models add up to the totals' tokens: every step was priced (an older otto's view has no models, and
+/// the steps the pane saw live would cover only part of it).
+pub(super) fn complete(totals: &UsageTotals) -> bool {
+    let mut sum = Usage::default();
+    for m in &totals.by_model {
+        sum.accumulate(&m.usage);
+    }
+    let u = &totals.usage;
+    !totals.by_model.is_empty() && (sum.input, sum.output, sum.cache_read, sum.cache_write) == (u.input, u.output, u.cache_read, u.cache_write)
+}
+
+/// The models, most API-equivalent cost first (unknown last), then most tokens.
+fn sorted(models: &[ModelUsage]) -> Vec<&ModelUsage> {
+    let mut models: Vec<_> = models.iter().collect();
+    let cost = |m: &ModelUsage| m.api_cost_usd.unwrap_or(-1.0);
+    models.sort_by(|a, b| {
+        cost(b).total_cmp(&cost(a)).then_with(|| (b.usage.total_input() + b.usage.output).cmp(&(a.usage.total_input() + a.usage.output)))
+    });
+    models
+}
+
+/// The cost line of `totals`: at API prices and what was billed when they differ (`$4.82 at API prices · $0 on
+/// your plan` in `plan` wording, else `· billed $0`), the one figure when they agree (an API key), `—` when no
+/// step has a list price and nothing was billed; `None` without tokens or cost.
+pub(super) fn cost_text(totals: &UsageTotals, plan: bool) -> Option<String> {
+    let billed = totals.cost_usd;
+    let u = &totals.usage;
+    if u.total_input() + u.output == 0 && billed <= 0.0 {
+        return None;
+    }
+    // With models missing from the sum (an older otto) the API figure would be short.
+    let api = totals.api_cost_usd.filter(|_| complete(totals));
+    Some(match api {
+        Some(api) if billed <= 0.0 && api > 0.0 => {
+            if plan {
+                format!("{} at API prices · $0 on your plan", usd(api))
+            } else {
+                format!("{} at API prices · billed $0", usd(api))
+            }
+        }
+        Some(api) if (api - billed).abs() >= 0.005 => format!("{} at API prices · billed {}", usd(api), usd(billed)),
+        Some(api) => usd(api),
+        None if billed > 0.0 => usd(billed),
+        None => "—".into(),
+    })
+}
+
+/// A period of the All sessions section.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(super) enum Period {
+    #[default]
+    Today,
+    Week,
+    Month,
+}
+
+impl Period {
+    pub(super) const ALL: [Period; 3] = [Period::Today, Period::Week, Period::Month];
+    fn label(self) -> &'static str {
+        match self {
+            Period::Today => "Today",
+            Period::Week => "7 days",
+            Period::Month => "30 days",
+        }
+    }
+    fn days(self) -> u64 {
+        match self {
+            Period::Today => 1,
+            Period::Week => 7,
+            Period::Month => 30,
+        }
+    }
+    /// Where the period starts (ms since the Unix epoch): midnight `days - 1` days before `now`'s day, in its zone.
+    pub(super) fn since_ms<Tz: TimeZone>(self, now: &DateTime<Tz>) -> i64 {
+        let day = now.date_naive() - chrono::Days::new(self.days() - 1);
+        let midnight = day.and_hms_opt(0, 0, 0).unwrap_or_default();
+        let zone = now.timezone();
+        // A midnight a clock change skips: the hour after it.
+        zone.from_local_datetime(&midnight)
+            .earliest()
+            .or_else(|| zone.from_local_datetime(&(midnight + chrono::Duration::hours(1))).earliest())
+            .map_or_else(|| now.timestamp_millis(), |at| at.timestamp_millis())
+    }
+}
+
+/// The All sessions section: the chosen period and each period's summary since the card opened.
+#[derive(Default)]
+pub(super) struct AllUsage {
+    period: Period,
+    loaded: HashMap<Period, Result<UsageSummary, String>>,
+    loading: Option<Period>,
+    /// Bumped each time the card opens, so a reply to an older opening is dropped.
+    generation: u64,
 }
 
 /// The context line: `48,213 / 200,000` and `24%`; `None` without a known window.
@@ -182,11 +323,53 @@ fn heading(label: &'static str) -> gpui::Div {
         .child(label)
 }
 
+/// A figure of the per-model table: right-aligned in its column.
+fn cell(text: impl Into<SharedString>, width: f32, color: u32) -> gpui::Div {
+    div().flex_none().w(px(width)).flex().justify_end().whitespace_nowrap().text_color(rgb(color)).child(text.into())
+}
+
+/// The per-model table's figure columns, after the model's name: tokens in (uncached), out, cache read and
+/// write, the cache hit rate and the cost.
+const COLUMNS: [(&str, f32); 6] = [("In", 38.0), ("Out", 38.0), ("Read", 40.0), ("Write", 38.0), ("Hit", 32.0), ("Cost", 58.0)];
+
+/// One row of the per-model table: the name (ellipsized, in full on hover) and its figures.
+fn table_row(id: SharedString, name: String, figures: [String; 6], weight: FontWeight) -> gpui::Stateful<gpui::Div> {
+    let fg = theme::foreground();
+    let mut row = div()
+        .id(id)
+        .h(px(20.0))
+        .px(px(menu::ROW_X))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.5))
+        .font_features(tabular())
+        .font_weight(weight)
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(fg)).child(name.clone()))
+        .tooltip(Tooltip::text(name));
+    for ((_, width), figure) in COLUMNS.iter().zip(figures) {
+        row = row.child(cell(figure, *width, fg));
+    }
+    row
+}
+
+/// A row's figures: `usage`'s input, output, cache read and write tokens, its cache hit rate, then `cost`.
+fn figures(usage: &Usage, cost: String) -> [String; 6] {
+    [
+        compact(usage.input),
+        compact(usage.output),
+        compact(usage.cache_read),
+        compact(usage.cache_write),
+        hit_rate(usage).map_or_else(|| "—".into(), percent),
+        cost,
+    ]
+}
+
 impl AgentPane {
-    /// The usage card's body: Limits, Context, then the session's tokens.
-    pub(super) fn render_usage(&mut self, provider: Option<&str>) -> AnyElement {
+    /// The usage card's body: Limits, Context, the session's tokens and cost, then All sessions; it scrolls.
+    pub(super) fn render_usage(&mut self, provider: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let fg = theme::foreground();
-        let mut card = div().id("agent-usage").flex().flex_col().child(heading("Limits"));
+        let mut card = div().id("agent-usage").flex().flex_col().max_h(px(BODY_MAX_H)).overflow_y_scroll().child(heading("Limits"));
         let subscription = provider.and_then(|p| self.catalog.as_ref().and_then(|c| c.subscription(p)));
         let shown = provider.and_then(|p| self.plan_of(p)).map(|u| limits(u, &chrono::Local::now())).unwrap_or_default();
         if shown.is_empty() {
@@ -206,28 +389,146 @@ impl AgentPane {
             card = card.child(note(plan));
         }
         card = card.child(menu::divider()).child(heading("Context"));
-        let Some(m) = self.mirror() else {
-            return card.child(note("No session yet")).into_any_element();
-        };
-        card = match context_row(m.info.context) {
-            Some((used, pct)) => {
-                let share = ring::fraction(m.info.context.used, m.info.context.window).unwrap_or_default();
-                card.child(stat(used, pct, ring::Fill::of(share).color())).child(bar(share, ring::Fill::of(share).color()))
+        match self.mirror() {
+            None => card = card.child(note("No session yet")),
+            Some(m) => {
+                card = match context_row(m.info.context) {
+                    Some((used, pct)) => {
+                        let share = ring::fraction(m.info.context.used, m.info.context.window).unwrap_or_default();
+                        card.child(stat(used, pct, ring::Fill::of(share).color())).child(bar(share, ring::Fill::of(share).color()))
+                    }
+                    None => card.child(note("The model's window is unknown")),
+                };
+                let totals = &m.info.usage;
+                card = card.child(menu::divider()).child(heading("Session tokens"));
+                for (label, value) in token_rows(&totals.usage) {
+                    card = card.child(stat(label, value, fg));
+                }
+                if let Some(cost) = cost_text(totals, true) {
+                    card = card.child(stat("Cost", cost, fg));
+                }
+                if let Some(table) = self.model_table("session", totals) {
+                    card = card.child(table);
+                }
             }
-            None => card.child(note("The model's window is unknown")),
-        };
-        let UsageTotals { usage, cost_usd, .. } = &m.info.usage;
-        card = card.child(menu::divider()).child(heading("Session tokens"));
-        for (label, value) in token_rows(usage, *cost_usd) {
-            card = card.child(stat(label, value, fg));
         }
-        card.into_any_element()
+        card.child(menu::divider()).child(self.render_all_usage(cx)).into_any_element()
     }
 
-    /// The reply `item`'s tokens, right of its action row: muted, the full breakdown on hover; none without data.
+    /// The All sessions section: a period, its cost at API prices (and billed, when different) and its models.
+    fn render_all_usage(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let fg = theme::foreground();
+        let period = self.all_usage.period;
+        let entity = cx.entity().downgrade();
+        let selected = Period::ALL.iter().position(|p| *p == period).unwrap_or_default();
+        let picker =
+            Segmented::new("agent-usage-period", Period::ALL.map(Period::label), selected).segment_width(60.0).on_select(move |index, _, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    this.all_usage.period = Period::ALL[index.min(Period::ALL.len() - 1)];
+                    this.load_all_usage(false, cx);
+                    cx.notify();
+                });
+            });
+        let top = div().flex().items_center().justify_between().pr(px(menu::ROW_X)).mb(px(2.0)).child(heading("All sessions")).child(picker);
+        let section = div().flex().flex_col().child(top);
+        match self.all_usage.loaded.get(&period) {
+            None => section.child(note(if self.all_usage.loading.is_some() { "Loading…" } else { "Not loaded yet" })),
+            Some(Err(error)) => section.child(note(error.clone())),
+            Some(Ok(summary)) if summary.totals.by_model.is_empty() => section.child(note("No usage")),
+            Some(Ok(summary)) => {
+                let t = &summary.totals;
+                let mut section = section.child(stat("At API prices", usd_or_dash(t.api_cost_usd), fg));
+                if t.api_cost_usd.is_none_or(|api| (api - t.cost_usd).abs() >= 0.005) {
+                    section = section.child(stat("Billed", usd(t.cost_usd), fg));
+                }
+                let sessions = if summary.sessions == 1 { "1 session".to_owned() } else { format!("{} sessions", summary.sessions) };
+                section = section.child(stat(sessions, format!("{} tokens", compact(t.usage.total_input() + t.usage.output)), theme::muted()));
+                match self.model_table("all", t) {
+                    Some(table) => section.child(table),
+                    None => section,
+                }
+            }
+        }
+    }
+
+    /// The per-model table of `totals` (each model's tokens, cache hit rate and cost at API prices), most cost
+    /// first, and their total when there are several; `None` when its models don't add up to the totals.
+    fn model_table(&self, key: &str, totals: &UsageTotals) -> Option<gpui::Div> {
+        if !complete(totals) {
+            return None;
+        }
+        let muted = theme::muted();
+        let mut header = div().h(px(20.0)).px(px(menu::ROW_X)).flex().items_center().gap(px(4.0)).text_size(px(11.0)).font_weight(FontWeight::MEDIUM);
+        header = header.child(div().flex_1().min_w_0().text_color(rgb(muted)).child("Model"));
+        for (label, width) in COLUMNS {
+            header = header.child(cell(label, width, muted));
+        }
+        let mut table = div().mt(px(4.0)).flex().flex_col().child(header);
+        for (i, m) in sorted(&totals.by_model).into_iter().enumerate() {
+            let id = SharedString::from(format!("usage-{key}-model-{i}"));
+            table = table.child(table_row(id, self.model_name(&m.provider, &m.model), figures(&m.usage, api_or_billed(m)), FontWeight::NORMAL));
+        }
+        if totals.by_model.len() > 1 {
+            let cost = totals.api_cost_usd.map_or_else(|| usd(totals.cost_usd), usd);
+            let id = SharedString::from(format!("usage-{key}-total"));
+            table = table.child(table_row(id, "Total".into(), figures(&totals.usage, cost), FontWeight::MEDIUM));
+        }
+        Some(table)
+    }
+
+    /// A model's name as the catalog has it, else its id.
+    pub(super) fn model_name(&self, provider: &str, model: &str) -> String {
+        self.catalog
+            .as_ref()
+            .and_then(|c| c.models.iter().find(|m| m.provider.as_str() == provider && m.id == model))
+            .map(|m| m.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| model.to_owned())
+    }
+
+    /// Load the chosen period's summary (`usage.summary`) unless loaded; `fresh` (the card opened) forgets
+    /// what was loaded before.
+    pub(super) fn load_all_usage(&mut self, fresh: bool, cx: &mut Context<Self>) {
+        let all = &mut self.all_usage;
+        if fresh {
+            all.loaded.clear();
+            all.loading = None;
+            all.generation += 1;
+        }
+        let period = all.period;
+        if all.loaded.contains_key(&period) || all.loading == Some(period) {
+            return;
+        }
+        all.loading = Some(period);
+        let generation = all.generation;
+        let now = chrono::Local::now();
+        let since = period.since_ms(&now);
+        let offset = now.offset().fix().local_minus_utc() / 60;
+        self.run(
+            cx,
+            move |c| async move { c.usage_summary(since, Some(offset)).await },
+            move |this, result, _| {
+                let all = &mut this.all_usage;
+                if all.generation != generation {
+                    return;
+                }
+                if all.loading == Some(period) {
+                    all.loading = None;
+                }
+                // An older otto has no `usage.summary`.
+                let result =
+                    result.map_err(|e| if e.contains("usage.summary") || e.contains("unknown variant") { "Needs a newer otto".into() } else { e });
+                all.loaded.insert(period, result);
+            },
+        );
+    }
+
+    /// The reply `item`'s tokens, right of its action row: muted, the full breakdown, cost and models on hover;
+    /// none without data.
     pub(super) fn render_turn_usage(&self, item: &str, key: &str) -> Option<AnyElement> {
         let turn = self.mirror()?.turn_usage_of(item)?;
         let label = turn_label(&turn.usage)?;
+        let tip = turn_tip(turn, |provider, model| self.model_name(provider, model));
         Some(
             div()
                 .id(SharedString::from(format!("turn-usage-{key}")))
@@ -241,7 +542,7 @@ impl AgentPane {
                 .text_size(px(11.5))
                 .font_features(tabular())
                 .text_color(rgb(theme::muted()))
-                .tooltip(Tooltip::text(turn_tip(turn)))
+                .tooltip(Tooltip::text(tip))
                 .child(label)
                 .into_any_element(),
         )
@@ -310,14 +611,94 @@ mod tests {
         assert_eq!(turn_label(&Usage::default()), None, "nothing reported: nothing shown");
         let turn =
             TurnUsage { turn: 3, item_id: Some("r".into()), usage: usage(1_200, 1_234, 11_200, 100, 300), cost_usd: 0.0412, ..TurnUsage::default() };
+        let name = |_: &str, model: &str| format!("Model {model}");
         assert_eq!(
-            turn_tip(&turn),
+            turn_tip(&turn, name),
             "Input: 1,200\nCache read (hit): 11,200\nCache write: 100\nOutput: 1,234\nReasoning (in output): 300\nTotal: 13,734\nCache hit rate: 90%\nCost: $0.04"
         );
-        // No reasoning, rate or cost when there is none.
+        // No reasoning or rate when there is none; a cost nothing priced is unknown, never $0.
         let quiet = TurnUsage { usage: usage(0, 12, 0, 0, 0), ..TurnUsage::default() };
-        assert_eq!(turn_tip(&quiet), "Input: 0\nCache read (hit): 0\nCache write: 0\nOutput: 12\nTotal: 12");
-        assert_eq!(cost(0.001), "<$0.01");
+        assert_eq!(turn_tip(&quiet, name), "Input: 0\nCache read (hit): 0\nCache write: 0\nOutput: 12\nTotal: 12\nCost: —");
+        // A subscription turn on two models: its API cost, billed $0, and each model's share.
+        let mut two = TurnUsage { turn: 4, ..TurnUsage::default() };
+        two.add_step("anthropic", "b", &usage(100, 10, 0, 0, 0), 0.0, Some(0.02));
+        two.add_step("anthropic", "a", &usage(1_000, 200, 9_000, 0, 0), 0.0, Some(1.5));
+        let tip = turn_tip(&two, name);
+        assert!(
+            tip.ends_with("Cost: $1.52 at API prices · billed $0\nModels:\n  Model a: 10k in · 200 out · $1.50\n  Model b: 100 in · 10 out · $0.02"),
+            "{tip}"
+        );
+    }
+
+    #[test]
+    fn dollars() {
+        assert_eq!(usd(0.0), "$0");
+        assert_eq!(usd(0.0042), "<$0.01");
+        assert_eq!(usd(0.005), "$0.01");
+        assert_eq!(usd(4.8249), "$4.82");
+        assert_eq!(usd(1_234.5), "$1,234.50");
+        assert_eq!(usd(1_234_567.891), "$1,234,567.89");
+        assert_eq!(usd(999.999), "$1,000.00", "rounding carries into the thousands");
+        assert_eq!(usd_or_dash(None), "—");
+    }
+
+    fn totals(steps: &[(&str, Usage, f64, Option<f64>)]) -> UsageTotals {
+        let mut t = UsageTotals::default();
+        for (model, usage, billed, api) in steps {
+            t.add_step("p", model, usage, *billed, *api);
+        }
+        t
+    }
+
+    #[test]
+    fn a_sessions_cost_line() {
+        let tokens = usage(1_000, 100, 0, 0, 0);
+        // A subscription: API prices, nothing on the plan.
+        assert_eq!(cost_text(&totals(&[("m", tokens.clone(), 0.0, Some(4.82))]), true).as_deref(), Some("$4.82 at API prices · $0 on your plan"));
+        // An API key: billed is the API price, one figure.
+        assert_eq!(cost_text(&totals(&[("m", tokens.clone(), 4.82, Some(4.82))]), true).as_deref(), Some("$4.82"));
+        // Switched from a key to a plan midway: both.
+        let mixed = totals(&[("m", tokens.clone(), 1.0, Some(1.0)), ("n", tokens.clone(), 0.0, Some(3.0))]);
+        assert_eq!(cost_text(&mixed, true).as_deref(), Some("$4.00 at API prices · billed $1.00"));
+        // Nothing priced (a local model): unknown, never $0; nothing at all: no line.
+        assert_eq!(cost_text(&totals(&[("local", tokens.clone(), 0.0, None)]), true).as_deref(), Some("—"));
+        assert_eq!(cost_text(&UsageTotals::default(), true), None);
+        // An older otto's totals with only the steps seen live: their API figure would be short.
+        let mut partial = totals(&[("m", tokens.clone(), 0.0, Some(1.0))]);
+        partial.usage.input += 5_000;
+        assert!(!complete(&partial));
+        assert_eq!(cost_text(&partial, true).as_deref(), Some("—"));
+        partial.cost_usd = 0.3;
+        assert_eq!(cost_text(&partial, true).as_deref(), Some("$0.30"));
+    }
+
+    #[test]
+    fn models_sort_by_cost_unknown_last_and_figures_fill_the_columns() {
+        let t = totals(&[
+            ("cheap", usage(10, 1, 0, 0, 0), 0.0, Some(0.01)),
+            ("local", usage(50_000, 1, 0, 0, 0), 0.0, None),
+            ("dear", usage(1_200, 300, 8_800, 40, 0), 0.0, Some(2.0)),
+        ]);
+        assert!(complete(&t));
+        let order: Vec<_> = sorted(&t.by_model).iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(order, ["dear", "cheap", "local"]);
+        let dear = sorted(&t.by_model)[0];
+        assert_eq!(figures(&dear.usage, api_or_billed(dear)), ["1.2k", "300", "8.8k", "40", "88%", "$2.00"].map(String::from));
+        assert_eq!(api_or_billed(sorted(&t.by_model)[2]), "—");
+        // The models add up to the total.
+        let sum: f64 = t.by_model.iter().filter_map(|m| m.api_cost_usd).sum();
+        assert_eq!(Some(sum), t.api_cost_usd);
+    }
+
+    #[test]
+    fn periods_start_at_local_midnight() {
+        // 2027-01-10 15:00 at +05:30.
+        let zone = FixedOffset::east_opt(330 * 60).unwrap();
+        let now = zone.with_ymd_and_hms(2027, 1, 10, 15, 0, 0).unwrap();
+        let midnight = zone.with_ymd_and_hms(2027, 1, 10, 0, 0, 0).unwrap().timestamp_millis();
+        assert_eq!(Period::Today.since_ms(&now), midnight);
+        assert_eq!(Period::Week.since_ms(&now), midnight - 6 * 86_400_000);
+        assert_eq!(Period::Month.since_ms(&now), midnight - 29 * 86_400_000);
     }
 
     #[test]
