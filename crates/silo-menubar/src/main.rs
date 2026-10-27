@@ -197,7 +197,7 @@ impl Controller {
         let mtm = MainThreadMarker::from(self);
         let alert = NSAlert::new(mtm);
         alert.setAlertStyle(NSAlertStyle::Warning);
-        alert.setMessageText(&NSString::from_str("Quit Silo?"));
+        alert.setMessageText(&NSString::from_str(&format!("Quit {}?", silo_proto::CHANNEL.app_name())));
         alert.setInformativeText(&NSString::from_str(&warning));
         alert.addButtonWithTitle(&NSString::from_str("Quit"));
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -241,11 +241,12 @@ impl Controller {
             let short: String = error.chars().take(80).collect();
             self.add(&menu, &format!("⚠︎ {short}"), None, "");
         }
-        self.add(&menu, "Open Silo", Some(Action::Open), "o");
+        let name = silo_proto::CHANNEL.app_name();
+        self.add(&menu, &format!("Open {name}"), Some(Action::Open), "o");
         self.add(&menu, "Settings…", Some(Action::Settings), ",");
         self.add(&menu, "Permissions…", Some(Action::Permissions), "");
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        self.add(&menu, "Quit Silo", Some(Action::Quit), "q");
+        self.add(&menu, &format!("Quit {name}"), Some(Action::Quit), "q");
         if let Some(item) = self.ivars().item.borrow().as_ref() {
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
@@ -254,6 +255,11 @@ impl Controller {
                 }
                 // The mark dims while no server runs.
                 button.setAppearsDisabled(state.server.is_none());
+                // Dev builds say so beside the mark, so the two agents never look alike.
+                if silo_proto::CHANNEL == silo_proto::Channel::Dev {
+                    button.setTitle(&NSString::from_str("Dev"));
+                    button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
+                }
                 button.setToolTip(Some(&NSString::from_str(&status)));
             }
         }
@@ -272,7 +278,7 @@ fn mark_image() -> Option<Retained<NSImage>> {
         image.addRepresentation(&rep);
     }
     image.setTemplate(true);
-    image.setAccessibilityDescription(Some(&NSString::from_str("Silo")));
+    image.setAccessibilityDescription(Some(&NSString::from_str(silo_proto::CHANNEL.app_name())));
     Some(image)
 }
 

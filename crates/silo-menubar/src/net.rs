@@ -34,17 +34,18 @@ pub struct MenuState {
 impl MenuState {
     /// The menu's status line.
     pub fn status(&self) -> String {
+        let name = silo_proto::CHANNEL.app_name();
         if let Some(busy) = self.busy {
-            return format!("Silo — {busy}");
+            return format!("{name} — {busy}");
         }
         match (&self.server, &self.incompatible) {
             (Some(_), _) => match self.sessions {
-                1 => "Silo — Running · 1 session".to_owned(),
-                n => format!("Silo — Running · {n} sessions"),
+                1 => format!("{name} — Running · 1 session"),
+                n => format!("{name} — Running · {n} sessions"),
             },
-            (None, _) if self.unresponsive => "Silo — Not responding".to_owned(),
-            (None, Some(_)) => format!("Silo — {}", IncompatibleServer::LABEL),
-            (None, None) => "Silo — Not running".to_owned(),
+            (None, _) if self.unresponsive => format!("{name} — Not responding"),
+            (None, Some(_)) => format!("{name} — {}", IncompatibleServer::LABEL),
+            (None, None) => format!("{name} — Not running"),
         }
     }
 
@@ -241,7 +242,7 @@ async fn command(config: &Config, shared: &Shared, control: Option<&Control>, cm
         s.busy = None;
         s.error = result.err().map(|e| {
             tracing::warn!("menu command: {e:#}");
-            "Could not quit Silo.".to_owned()
+            format!("Could not quit {}.", silo_proto::CHANNEL.app_name())
         });
     });
 }
@@ -257,13 +258,13 @@ mod tests {
     #[test]
     fn status_line() {
         let mut state = MenuState::default();
-        assert_eq!(state.status(), "Silo — Not running");
+        assert_eq!(state.status(), format!("{} — Not running", silo_proto::CHANNEL.app_name()));
         assert_eq!(state.running_sessions(), 0);
         state.incompatible = Some(other(Some(2)));
-        assert_eq!(state.status(), "Silo — Incompatible server");
+        assert_eq!(state.status(), format!("{} — Incompatible server", silo_proto::CHANNEL.app_name()));
         assert_eq!(state.running_sessions(), 2);
         state.unresponsive = true;
-        assert_eq!(state.status(), "Silo — Not responding");
+        assert_eq!(state.status(), format!("{} — Not responding", silo_proto::CHANNEL.app_name()));
         state.server = Some(ServerInfo {
             version: "x".into(),
             pid: 2,
@@ -276,11 +277,11 @@ mod tests {
             started_at: 0,
         });
         state.sessions = 1;
-        assert_eq!(state.status(), "Silo — Running · 1 session");
+        assert_eq!(state.status(), format!("{} — Running · 1 session", silo_proto::CHANNEL.app_name()));
         state.sessions = 3;
-        assert_eq!(state.status(), "Silo — Running · 3 sessions");
+        assert_eq!(state.status(), format!("{} — Running · 3 sessions", silo_proto::CHANNEL.app_name()));
         assert_eq!(state.running_sessions(), 3);
         state.busy = Some("Quitting…");
-        assert_eq!(state.status(), "Silo — Quitting…");
+        assert_eq!(state.status(), format!("{} — Quitting…", silo_proto::CHANNEL.app_name()));
     }
 }

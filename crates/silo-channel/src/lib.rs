@@ -81,6 +81,15 @@ impl Channel {
         }
     }
 
+    /// The app's name in Silo's own UI (the menu-bar agent): `Silo`, `Silo Dev`.
+    #[must_use]
+    pub const fn app_name(self) -> &'static str {
+        match self {
+            Self::Release => "Silo",
+            Self::Dev => "Silo Dev",
+        }
+    }
+
     /// The server's helper app bundle id (`Silo.app/Contents/Helpers/Silo
     /// Server.app`): the identity macOS privacy prompts and System Settings
     /// show for programs run in Silo's terminals.
