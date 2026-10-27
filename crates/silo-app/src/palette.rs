@@ -425,6 +425,7 @@ impl Workspace {
             Command::ReloadTerminalSettings => self.reload_terminal_settings(window, cx),
             Command::ToggleFullScreen => window.toggle_fullscreen(),
             Command::OpenSettings => self.open_settings(window, cx),
+            Command::Permissions => crate::permissions::show(None, cx),
             Command::OttoSettings => self.open_otto_settings(window, cx),
             Command::AppearanceComfortable => self.set_density(crate::hosts::Density::Comfortable, cx),
             Command::AppearanceCompact => self.set_density(crate::hosts::Density::Compact, cx),

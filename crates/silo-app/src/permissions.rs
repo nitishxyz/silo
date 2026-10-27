@@ -1,54 +1,78 @@
-//! The permission helper: a small floating panel that helps the user grant
-//! a macOS privacy permission to Silo Server (`app.permissions_show`,
-//! Settings › Permissions › Grant).
+//! The Permissions panel: one small floating window that helps the user
+//! grant Silo Server its macOS privacy permissions (`app.permissions_show`,
+//! Settings › Permissions › Grant, the palette's and the menu-bar agent's
+//! Permissions…).
 //!
 //! TCC charges every program in a Silo terminal to the server (its
-//! responsible process), so the permission goes to Silo Server's bundle,
-//! the runtime copy the server runs from (`permissions.status`'s
-//! `bundle_path`; this app's own `Contents/Helpers` copy until it is
-//! known). System Settings takes an app dropped into its list, so the panel
-//! shows that bundle as a native drag tile ([`native`]: gpui can't drag out
-//! of the app), with Open System Settings (which then moves the panel
-//! beside the Settings window, [`place`]) and the status, polled every
-//! second while the panel is open; once granted it says so and closes.
+//! responsible process), so the permissions go to Silo Server's bundle, the
+//! runtime copy the server runs from (`permissions.status`'s `bundle_path`;
+//! this app's own `Contents/Helpers` copy until it is known). System
+//! Settings takes an app dropped into its list, so the panel shows that
+//! bundle once, as a native drag tile ([`native`]: gpui can't drag out of
+//! the app) that works for every list. Below it, a row per permission:
+//! its status (polled every second while the panel is open; a row turning
+//! granted flashes its pill) and Open Settings, which opens the
+//! permission's page and moves the panel beside the System Settings window
+//! ([`place`]). Automation is only linked: macOS asks per target app.
 //!
-//! One panel at a time ([`show`] retargets it). The window has a fixed
-//! size and a fixed layout, so the native drag view gets a fixed frame
-//! ([`TILE`]) instead of following gpui's layout.
+//! A row not granted also offers a reset for System Settings' stale entry:
+//! with ad-hoc signing each build has a new code hash, and macOS keeps an
+//! older Silo Server entry (by bundle id) whose code requirement no longer
+//! matches, switched on yet denying. `tccutil reset <service> <server
+//! bundle id>` removes it ([`silo_client::tcc`]), then the permission is
+//! asked for again (`permissions.request`).
+//!
+//! One panel at a time; [`show`] with a permission highlights its row and
+//! scrolls to it (the focus), again on an open panel. The window has a
+//! fixed size and the drag tile a fixed place at its top, so the native
+//! view gets a fixed frame ([`TILE`]) instead of following gpui's layout;
+//! the rows below it scroll.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    App, Bounds, Context, FontWeight, Global, IntoElement, Task, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, FontWeight, Global, IntoElement, ScrollHandle, Task, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use silo_proto::{
     control::Method,
-    permissions::{PermissionId, PermissionStatus, Permissions},
+    permissions::{AUTOMATION_URL, PermissionId, PermissionStatus, Permissions},
 };
 
 use crate::{assets::icon, theme, theme::Continuous as _};
 
 /// The panel's size, in points.
-pub const PANEL_W: f32 = 340.0;
-pub const PANEL_H: f32 = 200.0;
+pub const PANEL_W: f32 = 440.0;
+pub const PANEL_H: f32 = 480.0;
+/// The window-moving strip at the top, with the title and close button.
+const HEADER_H: f32 = 40.0;
 /// The drag tile, in window points from the top left. The native drag
-/// view sits exactly here (the layout below is absolute and fixed).
-pub const TILE: Frame = Frame { x: 16.0, y: 48.0, w: 104.0, h: 116.0 };
-/// The bundle icon in the tile: this size, this far below its top.
-const ICON: f32 = 56.0;
-const ICON_TOP: f32 = 12.0;
-// The tile, its icon and the note below it fit the panel.
-const _: () = assert!(TILE.x + TILE.w < PANEL_W && TILE.y + TILE.h + 8.0 + 14.0 < PANEL_H && ICON_TOP + ICON < TILE.h);
+/// view sits exactly here (the layout above the rows is absolute).
+pub const TILE: Frame = Frame { x: 16.0, y: HEADER_H + 4.0, w: PANEL_W - 32.0, h: 60.0 };
+/// The bundle icon in the tile: this size, this far from its left and top.
+const ICON: f32 = 40.0;
+const ICON_LEFT: f32 = 12.0;
+const ICON_TOP: f32 = (TILE.h - ICON) / 2.0;
+/// The rows' scrolling area: below the tile, above the footer.
+const ROWS_TOP: f32 = TILE.y + TILE.h + 10.0;
+const FOOTER_H: f32 = 28.0;
+// The tile and its icon fit the panel, with room for the rows.
+const _: () = assert!(TILE.x + TILE.w <= PANEL_W - 16.0 && ICON_TOP >= 0.0 && ICON_LEFT + ICON < TILE.w && PANEL_H - ROWS_TOP - FOOTER_H >= 300.0);
 /// Space between the panel and the System Settings window.
 const GAP: f32 = 12.0;
-/// How often the open panel checks the status.
+/// How often the open panel checks the statuses.
 const POLL: Duration = Duration::from_secs(1);
-/// How long "Granted ✓" shows before the panel closes.
-const CLOSE_AFTER: Duration = Duration::from_millis(1500);
+/// How long a pill flashes once its permission is granted.
+const FLASH: Duration = Duration::from_millis(1600);
 /// How long to look for the System Settings window after opening it.
 const SETTINGS_WAIT: Duration = Duration::from_secs(2);
 const SETTINGS_EVERY: Duration = Duration::from_millis(150);
+/// The Automation row's index (after every checked permission).
+const AUTOMATION_ROW: usize = PermissionId::ALL.len();
 
 /// A rectangle with a top-left origin, y down: window points, or global
 /// display points (CoreGraphics' space: the primary display's top left is
@@ -118,11 +142,11 @@ pub fn fetch(cx: &App) -> Option<impl Future<Output = anyhow::Result<Permissions
 }
 
 /// Settings' Grant: `permissions.request` (macOS's own dialog for Screen
-/// Recording, then the server has this app show the panel); the panel
-/// right away if the server can't.
+/// Recording, then the server has this app show the panel at `id`); the
+/// panel right away if the server can't.
 pub fn request(id: PermissionId, cx: &mut App) {
     let Some((control, rt)) = local(cx) else {
-        show(id, cx);
+        show(Some(id), cx);
         return;
     };
     let call = rt.spawn(async move { control.call_value(Method::PermissionsRequest { id }).await });
@@ -132,7 +156,7 @@ pub fn request(id: PermissionId, cx: &mut App) {
             if let Ok(Err(error)) = &answered {
                 tracing::debug!("permissions.request {id}: {error:#}");
             }
-            cx.update(|cx| show(id, cx));
+            cx.update(|cx| show(Some(id), cx));
         }
     })
     .detach();
@@ -144,15 +168,14 @@ struct Sidecar(Option<WindowHandle<PermissionsPanel>>);
 
 impl Global for Sidecar {}
 
-/// Show the panel for `id`: the open one, retargeted and brought forward,
-/// or a new one.
-pub fn show(id: PermissionId, cx: &mut App) {
-    if id == PermissionId::Unknown {
-        return;
-    }
+/// Show the panel, `focus`'s row highlighted and scrolled to (none for
+/// `None` or a permission this app doesn't know): the open one, refocused
+/// and brought forward, or a new one.
+pub fn show(focus: Option<PermissionId>, cx: &mut App) {
+    let focus = focus.filter(|id| *id != PermissionId::Unknown);
     if let Some(handle) = cx.try_global::<Sidecar>().and_then(|s| s.0) {
         let shown = handle.update(cx, |panel, window, cx| {
-            panel.retarget(id, cx);
+            panel.set_focus(focus, cx);
             window.activate_window();
         });
         if shown.is_ok() {
@@ -163,11 +186,7 @@ pub fn show(id: PermissionId, cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(PANEL_W), px(PANEL_H)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(format!("{} permission", id.title()).into()),
-            appears_transparent: true,
-            traffic_light_position: None,
-        }),
+        titlebar: Some(TitlebarOptions { title: Some("Permissions".into()), appears_transparent: true, traffic_light_position: None }),
         kind: WindowKind::Floating,
         is_resizable: false,
         is_minimizable: false,
@@ -179,7 +198,7 @@ pub fn show(id: PermissionId, cx: &mut App) {
         native::configure(window);
         let bundle = fallback_bundle();
         let drag = bundle.as_deref().and_then(|b| native::DragTile::attach(window, TILE, b));
-        cx.new(|cx| PermissionsPanel::new(id, bundle, drag, window, cx))
+        cx.new(|cx| PermissionsPanel::new(focus, bundle, drag, window, cx))
     });
     match opened {
         Ok(handle) => {
@@ -205,22 +224,61 @@ fn fallback_bundle() -> Option<PathBuf> {
     silo_proto::permissions::server_bundle(&exe).filter(|b| b.exists())
 }
 
+/// A row's index in the panel.
+fn row_of(id: PermissionId) -> Option<usize> {
+    PermissionId::ALL.iter().position(|p| *p == id)
+}
+
+/// Each row's icon, and a shorter reason than [`PermissionId::reason`]
+/// (the panel says once that it's about programs in Silo terminals).
+fn row_texts(id: PermissionId) -> (&'static str, &'static str) {
+    match id {
+        PermissionId::ScreenRecording => ("laptop", "Capture the screen and other apps' windows"),
+        PermissionId::Accessibility => ("key", "Control your Mac and other apps"),
+        PermissionId::FullDiskAccess => ("settings-hard-drive", "Read protected files: Mail, Messages, Safari…"),
+        PermissionId::InputMonitoring => ("settings-keyboard", "Read the keyboard and mouse in other apps"),
+        PermissionId::Unknown => ("lock", "Needed by some programs"),
+    }
+}
+
+/// Where a row's "Already on in System Settings?" reset stands.
+#[derive(Clone, Debug, PartialEq)]
+enum Reset {
+    /// Explained, waiting for Reset.
+    Asking,
+    Running,
+    /// Reset and asked again: turn it on again.
+    Done,
+    Failed(String),
+}
+
+/// Whether a status change from `before` to `now` is a grant to flash: a
+/// row seen not granted that now is (not one granted from the start).
+fn newly_granted(before: Option<PermissionStatus>, now: PermissionStatus) -> bool {
+    before.is_some_and(|b| !b.granted()) && now.granted()
+}
+
 pub struct PermissionsPanel {
-    id: PermissionId,
-    /// `None` until the first answer.
-    status: Option<PermissionStatus>,
-    /// Why the status can't be read (no server).
+    /// The highlighted row.
+    focus: Option<PermissionId>,
+    /// The last answer; `None` until the first.
+    statuses: Option<Permissions>,
+    /// Why the statuses can't be read (no server).
     problem: Option<&'static str>,
     bundle: Option<PathBuf>,
     bundle_name: String,
     drag: Option<native::DragTile>,
+    scroll: ScrollHandle,
+    /// Rows just granted, since when.
+    flashes: HashMap<PermissionId, Instant>,
+    resets: HashMap<PermissionId, Reset>,
     _poll: Task<()>,
-    closing: Option<Task<()>>,
+    flash_done: Option<Task<()>>,
     placing: Option<Task<()>>,
 }
 
 impl PermissionsPanel {
-    fn new(id: PermissionId, bundle: Option<PathBuf>, drag: Option<native::DragTile>, window: &Window, cx: &mut Context<Self>) -> Self {
+    fn new(focus: Option<PermissionId>, bundle: Option<PathBuf>, drag: Option<native::DragTile>, window: &Window, cx: &mut Context<Self>) -> Self {
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
                 let fetch = cx.update(|_, cx| fetch(cx)).ok().flatten();
@@ -234,35 +292,63 @@ impl PermissionsPanel {
                 cx.background_executor().timer(POLL).await;
             }
         });
-        Self {
-            id,
-            status: None,
+        let mut panel = Self {
+            focus: None,
+            statuses: None,
             problem: None,
             bundle,
             bundle_name: silo_proto::CHANNEL.server_name().into(),
             drag,
+            scroll: ScrollHandle::new(),
+            flashes: HashMap::new(),
+            resets: HashMap::new(),
             _poll: poll,
-            closing: None,
+            flash_done: None,
             placing: None,
-        }
+        };
+        panel.set_focus(focus, cx);
+        panel
     }
 
-    fn retarget(&mut self, id: PermissionId, cx: &mut Context<Self>) {
-        if id != self.id {
-            self.id = id;
-            self.status = None;
+    fn set_focus(&mut self, focus: Option<PermissionId>, cx: &mut Context<Self>) {
+        self.focus = focus;
+        if let Some(row) = focus.and_then(row_of) {
+            self.scroll.scroll_to_item(row);
         }
-        self.closing = None;
         cx.notify();
+    }
+
+    fn status(&self, id: PermissionId) -> Option<PermissionStatus> {
+        self.statuses.as_ref().map(|s| s.get(id).map_or(PermissionStatus::Unknown, |p| p.status))
     }
 
     fn apply(&mut self, answer: Option<anyhow::Result<Permissions>>, window: &Window, cx: &mut Context<Self>) {
         match answer {
             Some(Ok(permissions)) => {
                 self.problem = None;
-                self.status = Some(permissions.get(self.id).map_or(PermissionStatus::Unknown, |p| p.status));
+                let now = Instant::now();
+                let mut flashed = false;
+                for id in PermissionId::ALL {
+                    let status = permissions.get(id).map_or(PermissionStatus::Unknown, |p| p.status);
+                    if newly_granted(self.status(id), status) {
+                        self.flashes.insert(id, now);
+                        flashed = true;
+                    }
+                    if status.granted() {
+                        self.resets.remove(&id);
+                    }
+                }
+                if flashed {
+                    self.flash_done = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(FLASH).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.flashes.retain(|_, at| at.elapsed() < FLASH);
+                            cx.notify();
+                        });
+                    }));
+                }
                 self.bundle_name = permissions.bundle_name.clone();
-                if let Some(bundle) = permissions.bundle_path.filter(|b| b.exists())
+                if let Some(bundle) = permissions.bundle_path.clone().filter(|b| b.exists())
                     && self.bundle.as_ref() != Some(&bundle)
                 {
                     match &self.drag {
@@ -271,6 +357,7 @@ impl PermissionsPanel {
                     }
                     self.bundle = Some(bundle);
                 }
+                self.statuses = Some(permissions);
             }
             Some(Err(error)) => {
                 tracing::debug!("permissions.status: {error:#}");
@@ -278,19 +365,13 @@ impl PermissionsPanel {
             }
             None => self.problem = Some("Silo Server is not running"),
         }
-        if self.status.is_some_and(PermissionStatus::granted) && self.closing.is_none() {
-            self.closing = Some(cx.spawn(async move |_, cx| {
-                cx.background_executor().timer(CLOSE_AFTER).await;
-                cx.update(close);
-            }));
-        }
         cx.notify();
     }
 
-    /// Open System Settings at the permission, then move beside its window
-    /// once it shows (or stay put).
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        native::open_url(self.id.settings_url());
+    /// Open System Settings at `url`, then move beside its window once it
+    /// shows (or stay put).
+    fn open_settings(&mut self, url: &'static str, cx: &mut Context<Self>) {
+        native::open_url(url);
         self.placing = Some(cx.spawn(async move |_, cx| {
             let mut waited = Duration::ZERO;
             while waited < SETTINGS_WAIT {
@@ -309,21 +390,216 @@ impl PermissionsPanel {
         }));
     }
 
-    fn status_line(&self) -> (String, u32) {
-        match (self.status, self.problem) {
-            (Some(PermissionStatus::Granted), _) => ("Granted ✓".into(), theme::success()),
-            (_, Some(problem)) => (problem.into(), theme::warning()),
-            (None, None) => ("Checking…".into(), theme::muted()),
-            (Some(_), None) => ("Not granted yet".into(), theme::muted()),
+    /// Reset System Settings' entry for `id` (`tccutil`, off the main
+    /// thread), then ask for it again: Screen Recording's own dialog, and
+    /// the row says to turn it on again.
+    fn reset(&mut self, id: PermissionId, cx: &mut Context<Self>) {
+        self.resets.insert(id, Reset::Running);
+        cx.notify();
+        let reset = cx.background_executor().spawn(async move { silo_client::tcc::reset(id) });
+        cx.spawn(async move |this, cx| {
+            let result = reset.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.resets.insert(id, Reset::Done);
+                        ask_again(id, cx);
+                    }
+                    Err(error) => {
+                        tracing::warn!("reset {id}: {error}");
+                        this.resets.insert(id, Reset::Failed(error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_reset(&mut self, id: PermissionId, reset: Option<Reset>, cx: &mut Context<Self>) {
+        match reset {
+            Some(reset) => self.resets.insert(id, reset),
+            None => self.resets.remove(&id),
+        };
+        cx.notify();
+    }
+
+    fn pill(&self, id: PermissionId) -> gpui::Div {
+        let status = self.status(id);
+        let flashing = self.flashes.get(&id).is_some_and(|at| at.elapsed() < FLASH);
+        let label = match (status, self.problem) {
+            (Some(PermissionStatus::Granted), _) => "Granted ✓",
+            (Some(PermissionStatus::Denied), _) => "Not granted",
+            (Some(PermissionStatus::Unknown), _) | (None, Some(_)) => "Unknown",
+            (None, None) => "Checking…",
+        };
+        let granted = status.is_some_and(PermissionStatus::granted);
+        let pill =
+            div().flex_none().h(px(18.0)).px(px(7.0)).flex().items_center().continuous(9.0).text_size(px(10.5)).font_weight(FontWeight::MEDIUM);
+        if flashing {
+            pill.bg(rgb(theme::success())).text_color(rgb(theme::on_accent())).child(label)
+        } else if granted {
+            pill.bg(rgb(theme::success()).opacity(0.14)).text_color(rgb(theme::success())).child(label)
+        } else {
+            pill.bg(theme::well_fill()).text_color(rgb(theme::muted())).child(label)
         }
     }
+
+    fn button(id: impl Into<gpui::ElementId>, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .flex_none()
+            .h(px(24.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .continuous(6.0)
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .when(primary, |b| b.bg(rgb(theme::accent())).text_color(rgb(theme::on_accent())).hover(|s| s.opacity(0.88)))
+            .when(!primary, |b| b.bg(theme::well_fill()).border_1().border_color(rgb(theme::border())).hover(|s| s.bg(theme::hover_fill())))
+            .child(label)
+    }
+
+    /// Under a row not granted: "Already on in System Settings?", then
+    /// the reset's explanation and progress.
+    fn reset_line(&self, ix: usize, id: PermissionId, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let small = || div().text_size(px(11.0)).line_height(px(15.0));
+        match self.resets.get(&id) {
+            None => small()
+                .id(("permission-already-on", ix))
+                .text_color(rgb(theme::accent()))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.8))
+                .child("Already on in System Settings?")
+                .on_click(cx.listener(move |this, _, _, cx| this.set_reset(id, Some(Reset::Asking), cx)))
+                .into_any_element(),
+            Some(Reset::Asking) => div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    small()
+                        .text_color(rgb(theme::muted()))
+                        .child(format!("An older {} entry may no longer match this build. Reset it, then turn it on again.", self.bundle_name)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(Self::button(("permission-reset", ix), "Reset", true).on_click(cx.listener(move |this, _, _, cx| this.reset(id, cx))))
+                        .child(
+                            Self::button(("permission-reset-cancel", ix), "Cancel", false)
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_reset(id, None, cx))),
+                        ),
+                )
+                .into_any_element(),
+            Some(Reset::Running) => small().text_color(rgb(theme::muted())).child("Resetting…").into_any_element(),
+            Some(Reset::Done) => small().text_color(rgb(theme::foreground())).child("Reset. Turn it on again in System Settings.").into_any_element(),
+            Some(Reset::Failed(error)) => small().text_color(rgb(theme::warning())).child(format!("Couldn't reset: {error}")).into_any_element(),
+        }
+    }
+
+    fn row(&self, ix: usize, id: PermissionId, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (glyph, reason) = row_texts(id);
+        let granted = self.status(id).is_some_and(PermissionStatus::granted);
+        let focused = self.focus == Some(id);
+        let url = id.settings_url();
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(id.title()))
+                    .child(self.pill(id)),
+            )
+            .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).whitespace_nowrap().overflow_hidden().text_ellipsis().child(reason))
+            .when(!granted && self.statuses.is_some(), |c| c.child(div().pt(px(2.0)).child(self.reset_line(ix, id, cx))));
+        Self::row_frame(ix, glyph, focused)
+            .child(text)
+            .when(!granted, |r| {
+                r.child(
+                    Self::button(("permission-open", ix), "Open Settings", true)
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_settings(url, cx))),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn automation_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        Self::row_frame(AUTOMATION_ROW, "bot", false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("Automation"))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .line_height(px(15.0))
+                            .text_color(rgb(theme::muted()))
+                            .child("macOS asks per app, the first time a program controls it; allowed apps are listed here"),
+                    ),
+            )
+            .child(
+                Self::button("permission-open-automation", "Open Settings", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(AUTOMATION_URL, cx))),
+            )
+            .into_any_element()
+    }
+
+    fn row_frame(ix: usize, glyph: &'static str, focused: bool) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(("permission-row", ix))
+            .flex_none()
+            .flex()
+            .items_start()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(9.0))
+            .continuous(9.0)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(focused, |r| r.bg(rgb(theme::accent()).opacity(0.10)).border_color(rgb(theme::accent()).opacity(0.55)))
+            .child(
+                div()
+                    .flex_none()
+                    .mt(px(1.0))
+                    .size(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .continuous(7.0)
+                    .bg(theme::well_fill())
+                    .child(icon(glyph, 15.0, theme::muted())),
+            )
+    }
+}
+
+/// After a reset: ask for `id` again (`permissions.request`: macOS's own
+/// dialog for Screen Recording; the server then shows this panel at it).
+fn ask_again(id: PermissionId, cx: &mut App) {
+    let Some((control, rt)) = local(cx) else { return };
+    rt.spawn(async move {
+        if let Err(error) = control.call_value(Method::PermissionsRequest { id }).await {
+            tracing::debug!("permissions.request {id}: {error:#}");
+        }
+    });
 }
 
 impl Render for PermissionsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = self.id;
-        let (status, status_color) = self.status_line();
-        let granted = self.status.is_some_and(PermissionStatus::granted);
         let tile = div()
             .absolute()
             .left(px(TILE.x))
@@ -335,36 +611,37 @@ impl Render for PermissionsPanel {
             .border_color(rgb(theme::border()))
             .bg(theme::well_fill())
             .flex()
-            .flex_col()
             .items_center()
             .child(
                 // The native view draws the bundle's icon here (see `native`).
                 div()
-                    .mt(px(ICON_TOP))
+                    .flex_none()
+                    .ml(px(ICON_LEFT))
                     .size(px(ICON))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(self.drag.is_none(), |d| d.child(icon("lock", 28.0, theme::muted()))),
+                    .when(self.drag.is_none(), |d| d.child(icon("lock", 24.0, theme::muted()))),
             )
-            .child(div().mt(px(6.0)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(self.bundle_name.clone()))
-            .child(div().mt(px(2.0)).text_size(px(10.5)).text_color(rgb(theme::muted())).whitespace_nowrap().child("Drag into the list"));
-        let button = div()
-            .id("permissions-open-settings")
-            .h(px(28.0))
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .continuous(8.0)
-            .bg(rgb(theme::accent()))
-            .text_color(rgb(theme::on_accent()))
-            .text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child("Open System Settings")
-            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .ml(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(self.bundle_name.clone()))
+                    .child(
+                        div().text_size(px(11.5)).text_color(rgb(theme::muted())).whitespace_nowrap().child("Drag into the list in System Settings"),
+                    ),
+            );
+        let mut rows: Vec<gpui::AnyElement> = PermissionId::ALL.into_iter().enumerate().map(|(ix, id)| self.row(ix, id, cx)).collect();
+        rows.push(self.automation_row(cx));
+        let footer = match self.problem {
+            Some(problem) => div().text_color(rgb(theme::warning())).child(problem),
+            None => div().text_color(rgb(theme::muted())).child("Programs already running may need restarting."),
+        };
         div()
             .id("permissions-panel")
             .size_full()
@@ -382,14 +659,25 @@ impl Render for PermissionsPanel {
                     .top_0()
                     .left_0()
                     .w_full()
-                    .h(px(40.0))
+                    .h(px(HEADER_H))
                     .pl(px(16.0))
                     .pr(px(10.0))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.start_window_move())
-                    .child(div().flex_1().min_w_0().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(id.title()))
+                    .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child("Permissions"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::muted()))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child("for programs in Silo terminals"),
+                    )
                     .child(
                         div()
                             .id("permissions-close")
@@ -409,29 +697,33 @@ impl Render for PermissionsPanel {
             .child(tile)
             .child(
                 div()
+                    .id("permissions-rows")
                     .absolute()
-                    .left(px(TILE.right() + 12.0))
-                    .top(px(TILE.y))
-                    .w(px(PANEL_W - TILE.right() - 12.0 - 16.0))
-                    .h(px(TILE.h))
+                    .left(px(8.0))
+                    .top(px(ROWS_TOP))
+                    .w(px(PANEL_W - 16.0))
+                    .h(px(PANEL_H - ROWS_TOP - FOOTER_H))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
-                    .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(rgb(theme::muted())).child(id.reason()))
-                    .child(div().text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(status_color)).child(status))
-                    .child(div().flex_1())
-                    .when(!granted, |c| c.child(button)),
+                    .gap(px(2.0))
+                    .children(rows),
             )
             .child(
                 div()
                     .absolute()
                     .left(px(16.0))
-                    .top(px(TILE.bottom() + 8.0))
+                    .top(px(PANEL_H - FOOTER_H))
                     .w(px(PANEL_W - 32.0))
-                    .text_size(px(10.5))
-                    .text_color(rgb(theme::muted()))
+                    .h(px(FOOTER_H))
+                    .flex()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .text_size(px(11.0))
                     .whitespace_nowrap()
-                    .child("Programs already running may need restarting."),
+                    .child(footer),
             )
     }
 }
@@ -455,7 +747,7 @@ mod native {
     use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    use super::{Frame, ICON, ICON_TOP};
+    use super::{Frame, ICON, ICON_LEFT, ICON_TOP};
 
     /// System Settings' bundle id (its window's owner).
     const SETTINGS_APP: &str = "com.apple.systempreferences";
@@ -533,7 +825,7 @@ mod native {
     impl DragView {
         fn icon_frame(&self) -> NSRect {
             let bounds = self.bounds();
-            let x = (bounds.size.width - f64::from(ICON)) / 2.0;
+            let x = f64::from(ICON_LEFT);
             let top = f64::from(ICON_TOP);
             let y = if self.isFlipped() { top } else { bounds.size.height - top - f64::from(ICON) };
             NSRect::new(NSPoint::new(x, y), NSSize::new(f64::from(ICON), f64::from(ICON)))
@@ -781,6 +1073,24 @@ mod tests {
 
     const SCREEN: Frame = Frame { x: 0.0, y: 25.0, w: 1728.0, h: 1080.0 };
     const PANEL: (f32, f32) = (PANEL_W, PANEL_H);
+
+    #[test]
+    fn rows_follow_the_permissions_and_flash_only_on_a_grant() {
+        for (ix, id) in PermissionId::ALL.into_iter().enumerate() {
+            assert_eq!(row_of(id), Some(ix));
+            let (glyph, reason) = row_texts(id);
+            assert!(!glyph.is_empty() && reason.len() <= 48, "{id}: {reason}");
+        }
+        assert_eq!(row_of(PermissionId::Unknown), None);
+        assert_eq!(AUTOMATION_ROW, PermissionId::ALL.len());
+        let (granted, denied, unknown) = (PermissionStatus::Granted, PermissionStatus::Denied, PermissionStatus::Unknown);
+        assert!(newly_granted(Some(denied), granted));
+        assert!(newly_granted(Some(unknown), granted));
+        assert!(!newly_granted(None, granted), "granted from the first answer");
+        assert!(!newly_granted(Some(granted), granted));
+        assert!(!newly_granted(Some(denied), denied));
+        assert!(!newly_granted(Some(granted), denied));
+    }
 
     #[test]
     fn the_panel_goes_right_of_settings_level_with_its_top_third() {

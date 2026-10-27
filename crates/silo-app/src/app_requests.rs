@@ -220,13 +220,8 @@ impl Workspace {
                     }
                 }
             }
-            Method::AppPermissionsShow { id, .. } => {
-                let id = id.unwrap_or(silo_proto::permissions::PermissionId::ScreenRecording);
-                if id == silo_proto::permissions::PermissionId::Unknown {
-                    return Err(RpcError::bad_request("unknown permission"));
-                }
-                cx.defer(move |cx| crate::permissions::show(id, cx));
-            }
+            // A permission this app doesn't know: the panel without a highlight.
+            Method::AppPermissionsShow { id, .. } => cx.defer(move |cx| crate::permissions::show(id, cx)),
             Method::AppSettingsGet { id, .. } => {
                 let snapshot = self.settings_snapshot(None, cx);
                 let value = |id: SettingId| {

@@ -394,7 +394,7 @@ pub enum SettingsEvent {
     RevokeDevice(String),
     /// Re-read the permissions (their page was shown).
     RefreshPermissions,
-    /// Help grant one: the permission helper (`permissions.rs`).
+    /// Help grant one: the Permissions panel at it (`permissions.rs`).
     GrantPermission(PermissionId),
     /// System Settings › Privacy & Security › Automation.
     OpenAutomationSettings,

@@ -758,6 +758,7 @@ pub(crate) fn allowed_while_open(command: Command) -> bool {
     matches!(
         command,
         Command::OpenSettings
+            | Command::Permissions
             | Command::Quit
             | Command::HideSilo
             | Command::HideOthers

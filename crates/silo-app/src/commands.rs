@@ -149,6 +149,7 @@ commands! {
     ToggleFullScreen => "Toggle Full Screen", "View", ["ctrl-cmd-f"];
     CycleWindows => "Cycle Through Windows", "View", ["cmd-`"];
     OpenSettings => "Settings…", "App", ["cmd-,"];
+    Permissions => "Permissions…", "App", [], "macOS privacy permissions of Silo Server, for programs in Silo terminals";
     ReloadTerminalSettings => "Reload Terminal Settings", "App", [], "Apply changes made by hand";
     OpenTerminalSettingsFile => "Open Terminal Settings File", "App", [];
     CheckForUpdates => "Check for Updates", "App", [];
@@ -235,6 +236,7 @@ impl Command {
             Self::ToggleFullScreen => Method("app.full_screen"),
             Self::CycleWindows => Method("app.window_cycle"),
             Self::OpenSettings => Method("app.settings_open"),
+            Self::Permissions => Method("app.permissions_show"),
             Self::ReloadTerminalSettings => Method("app.settings_reload"),
             Self::OpenTerminalSettingsFile => Method("app.settings_open_file"),
             Self::CheckForUpdates => Method("app.update_check"),

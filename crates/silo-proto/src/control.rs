@@ -642,7 +642,7 @@ pub enum Method {
     #[serde(rename = "permissions.status")]
     PermissionsStatus {},
     /// Local only: help the user grant `id`. Screen Recording asks macOS
-    /// once (its own dialog); then the app shows its permission helper
+    /// once (its own dialog); then the app shows its Permissions panel
     /// (`app.permissions_show`). Fails with `no_app` when no Silo app is
     /// connected; a granted permission returns at once.
     #[serde(rename = "permissions.request")]
@@ -965,7 +965,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("grant.revoke", "Remove a grant and close its connections (owner only)."),
     ("approval.answer", "Allow or deny a call waiting for approval."),
     ("permissions.status", "Which macOS privacy permissions Silo Server holds, and the app to drag into System Settings (local only)."),
-    ("permissions.request", "Help grant a macOS privacy permission: ask macOS, then show the app's permission helper (local only)."),
+    ("permissions.request", "Help grant a macOS privacy permission: ask macOS, then show the app's Permissions panel at it (local only)."),
     ("app.reply", "Answer an app.request (the app it went to only)."),
     ("app.window_new", "Open a new app window."),
     ("app.window_cycle", "Cycle through app windows."),

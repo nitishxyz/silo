@@ -1,6 +1,6 @@
 //! `silo-menubar`: a menu-bar agent (no Dock icon) for the always-on silo
-//! server. Shows its status, opens the app or its Settings (where the server
-//! controls live), and quits Silo. One instance per state directory.
+//! server. Shows its status, opens the app, its Settings (where the server
+//! controls live) or its Permissions panel, and quits Silo. One instance per state directory.
 
 mod net;
 
@@ -52,19 +52,20 @@ impl AppLauncher {
         }
     }
 
-    /// Open the app; with `settings`, at its Settings panel.
-    pub fn open(&self, settings: bool) {
+    /// Open the app; with `page`, at its Settings or Permissions panel.
+    pub fn open(&self, page: Option<Page>) {
         let mut command = match self {
             Self::Bundle(_) | Self::Installed => {
-                // `silo://settings` reaches a running app as well as a
-                // launching one (CFBundleURLTypes in the bundle).
+                // `silo://settings` (`silo://permissions`) reaches a running
+                // app as well as a launching one (CFBundleURLTypes in the
+                // bundle).
                 let mut c = std::process::Command::new("/usr/bin/open");
                 match self {
                     Self::Bundle(bundle) => c.arg("-a").arg(bundle),
                     _ => c.args(["-b", BUNDLE_ID]),
                 };
-                if settings {
-                    c.arg(SETTINGS_URL);
+                if let Some(page) = page {
+                    c.arg(format!("silo://{}", page.name()));
                 }
                 c
             }
@@ -75,8 +76,8 @@ impl AppLauncher {
                     return;
                 }
                 let mut c = std::process::Command::new(app);
-                if settings {
-                    c.env("SILO_OPEN", "settings");
+                if let Some(page) = page {
+                    c.env("SILO_OPEN", page.name());
                 }
                 c.env("SILO_NO_MENUBAR", "1");
                 c
@@ -89,7 +90,21 @@ impl AppLauncher {
     }
 }
 
-const SETTINGS_URL: &str = "silo://settings";
+/// A panel of the app the agent opens (`silo://<name>`, `SILO_OPEN`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Settings,
+    Permissions,
+}
+
+impl Page {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Settings => "settings",
+            Self::Permissions => "permissions",
+        }
+    }
+}
 /// This channel's app (`xyz.nitish.silo`, dev `xyz.nitish.silo.dev`).
 const BUNDLE_ID: &str = silo_proto::CHANNEL.bundle_id();
 
@@ -105,6 +120,7 @@ fn activate_running(name: &str) -> bool {
 enum Action {
     Open,
     Settings,
+    Permissions,
     Quit,
 }
 
@@ -144,8 +160,9 @@ define_class!(
             let action = self.ivars().actions.borrow().get(index).cloned();
             let Some(action) = action else { return };
             match action {
-                Action::Open => self.ivars().app.open(false),
-                Action::Settings => self.ivars().app.open(true),
+                Action::Open => self.ivars().app.open(None),
+                Action::Settings => self.ivars().app.open(Some(Page::Settings)),
+                Action::Permissions => self.ivars().app.open(Some(Page::Permissions)),
                 Action::Quit => {
                     if self.confirm_quit() {
                         let _ = self.ivars().cmds.send(Cmd::Quit);
@@ -226,6 +243,7 @@ impl Controller {
         }
         self.add(&menu, "Open Silo", Some(Action::Open), "o");
         self.add(&menu, "Settings…", Some(Action::Settings), ",");
+        self.add(&menu, "Permissions…", Some(Action::Permissions), "");
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         self.add(&menu, "Quit Silo", Some(Action::Quit), "q");
         if let Some(item) = self.ivars().item.borrow().as_ref() {

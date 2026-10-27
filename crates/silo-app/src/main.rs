@@ -238,8 +238,9 @@ fn main() {
         start_menubar(&agent, &home);
     }
 
-    // `silo://settings` (sent by the menu-bar agent) opens Settings, in a
-    // running app or at launch.
+    // `silo://settings` and `silo://permissions` (sent by the menu-bar
+    // agent) open Settings or the Permissions panel, in a running app or at
+    // launch.
     let (urls_tx, mut urls) = tokio::sync::mpsc::unbounded_channel::<String>();
     let application = gpui_platform::application().with_assets(assets::Assets);
     application.on_open_urls(move |list| {
@@ -298,7 +299,7 @@ fn main() {
             },
             Menu { name: "Window".into(), items: vec![MenuItem::action("Cycle Through Windows", CycleWindows)], disabled: false },
         ]);
-        // The permission helper alone does not keep the app open.
+        // The Permissions panel alone does not keep the app open.
         cx.on_window_closed(|cx, _| {
             if !cx.windows().iter().any(|w| w.downcast::<Workspace>().is_some()) {
                 cx.quit();
@@ -313,16 +314,18 @@ fn main() {
             cx.quit();
             return;
         }
-        if std::env::var("SILO_OPEN").is_ok_and(|v| v == "settings") {
-            show_settings(cx);
+        match std::env::var("SILO_OPEN").ok().and_then(|v| opens(&format!("silo://{v}"))) {
+            Some(Opens::Settings) => show_settings(cx),
+            Some(Opens::Permissions(focus)) => permissions::show(focus, cx),
+            None => {}
         }
         cx.spawn(async move |cx| {
             while let Some(url) = urls.recv().await {
-                if !opens_settings(&url) {
-                    tracing::info!(url, "ignoring URL");
-                    continue;
+                match opens(&url) {
+                    Some(Opens::Settings) => cx.update(show_settings),
+                    Some(Opens::Permissions(focus)) => cx.update(|cx| permissions::show(focus, cx)),
+                    None => tracing::info!(url, "ignoring URL"),
                 }
-                cx.update(show_settings);
             }
         })
         .detach();
@@ -375,9 +378,26 @@ fn log_filter(spec: Option<String>) -> String {
     if spec.contains(FONTS) { spec } else { format!("{spec},{FONTS}=error") }
 }
 
-/// `silo://settings` (any trailing slash or query).
-fn opens_settings(url: &str) -> bool {
-    url.strip_prefix("silo://settings").is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
+/// What a `silo://` URL opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Opens {
+    Settings,
+    /// The Permissions panel, a permission highlighted.
+    Permissions(Option<silo_proto::permissions::PermissionId>),
+}
+
+/// `silo://settings`, `silo://permissions` or `silo://permissions/<id>`
+/// (any trailing slash or query).
+fn opens(url: &str) -> Option<Opens> {
+    let rest = url.strip_prefix("silo://")?;
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let mut words = path.split('/').filter(|w| !w.is_empty());
+    let opened = match words.next()? {
+        "settings" => Opens::Settings,
+        "permissions" => Opens::Permissions(words.next().and_then(|w| w.parse().ok())),
+        _ => return None,
+    };
+    Some(opened)
 }
 
 fn reduce_motion() -> bool {
@@ -410,9 +430,15 @@ fn start_menubar(agent: &std::path::Path, home: &std::path::Path) {
 mod url_tests {
     #[test]
     fn settings_url() {
-        assert!(super::opens_settings("silo://settings"));
-        assert!(super::opens_settings("silo://settings/"));
-        assert!(!super::opens_settings("silo://settingsx"));
-        assert!(!super::opens_settings("https://settings"));
+        use super::{Opens, opens};
+        use silo_proto::permissions::PermissionId;
+        assert_eq!(opens("silo://settings"), Some(Opens::Settings));
+        assert_eq!(opens("silo://settings/"), Some(Opens::Settings));
+        assert_eq!(opens("silo://settings?x=1"), Some(Opens::Settings));
+        assert_eq!(opens("silo://settingsx"), None);
+        assert_eq!(opens("https://settings"), None);
+        assert_eq!(opens("silo://permissions"), Some(Opens::Permissions(None)));
+        assert_eq!(opens("silo://permissions/screen-recording"), Some(Opens::Permissions(Some(PermissionId::ScreenRecording))));
+        assert_eq!(opens("silo://permissions/camera"), Some(Opens::Permissions(None)));
     }
 }
