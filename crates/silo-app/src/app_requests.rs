@@ -221,6 +221,7 @@ impl Workspace {
                 }
             }
             Method::AppPermissionsShow { id, .. } => {
+                let id = id.unwrap_or(silo_proto::permissions::PermissionId::ScreenRecording);
                 if id == silo_proto::permissions::PermissionId::Unknown {
                     return Err(RpcError::bad_request("unknown permission"));
                 }

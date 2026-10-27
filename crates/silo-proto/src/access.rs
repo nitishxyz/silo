@@ -479,7 +479,8 @@ mod tests {
     fn permissions_are_local_only() {
         use crate::permissions::PermissionId;
         let id = PermissionId::ScreenRecording;
-        for method in [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id, client_id: None }] {
+        for method in [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id: Some(id), client_id: None }]
+        {
             assert_eq!(need(&method), Need::Local, "{method:?}");
             let name = crate::api::method_name(&method);
             assert_eq!(access(&name, &method).kind, AccessKind::Local, "{name}");

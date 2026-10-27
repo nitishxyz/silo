@@ -1,6 +1,7 @@
 //! `silo permissions`: the macOS privacy permissions Silo Server holds
 //! (`permissions.status`), help granting one (`permissions.request`, the
-//! app's permission helper), or its System Settings page.
+//! app's Permissions panel), its System Settings page, or resetting a stale
+//! entry (`tccutil reset`).
 
 use std::time::{Duration, Instant};
 
@@ -79,6 +80,18 @@ pub async fn request(control: &Control, id: PermissionId, wait: bool, timeout: D
             return Ok(1);
         }
     }
+}
+
+/// `silo permissions reset <id|all>`: remove System Settings' entries for
+/// Silo Server (`tccutil reset`; the caller then asks again).
+pub fn reset(ids: &[PermissionId]) -> anyhow::Result<()> {
+    let name = silo_proto::CHANNEL.server_name();
+    for id in ids {
+        silo_client::tcc::reset(*id).map_err(|e| anyhow::anyhow!("reset {}: {e}", id.title()))?;
+        println!("Reset {} for {name}.", id.title());
+    }
+    println!("Turn it on again in System Settings.");
+    Ok(())
 }
 
 /// `silo permissions open <id>`: its page in System Settings.

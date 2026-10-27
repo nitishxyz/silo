@@ -839,11 +839,13 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
-    /// Local only: show the permission helper for `id` (a small floating
-    /// panel with Silo Server to drag into System Settings' list).
+    /// Local only: show the Permissions panel (a small floating window
+    /// listing every permission, with Silo Server to drag into System
+    /// Settings' lists), `id`'s row highlighted; without `id`, none.
     #[serde(rename = "app.permissions_show")]
     AppPermissionsShow {
-        id: PermissionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<PermissionId>,
         #[serde(default)]
         client_id: Option<ClientId>,
     },
@@ -994,7 +996,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.select_output", "Select the last command's output."),
     ("app.copy_output", "Copy the last command's output."),
     ("app.open_share", "Open a shared link."),
-    ("app.permissions_show", "Show the permission helper for a macOS privacy permission (local only)."),
+    ("app.permissions_show", "Show the Permissions panel, a macOS privacy permission highlighted (local only)."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

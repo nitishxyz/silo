@@ -451,7 +451,7 @@ pub fn examples() -> Vec<Method> {
         M::AppSelectOutput { block_id: None, client_id: None },
         M::AppCopyOutput { block_id: None, client_id: None },
         M::AppOpenShare { link: "https://silo.example/#silos1aeaqcaibaeaq".into(), client_id: None },
-        M::AppPermissionsShow { id: PermissionId::Accessibility, client_id: None },
+        M::AppPermissionsShow { id: Some(PermissionId::Accessibility), client_id: None },
     ]
 }
 

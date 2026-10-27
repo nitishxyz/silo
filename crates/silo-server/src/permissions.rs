@@ -44,7 +44,7 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
             if status.granted() {
                 return to_value(id.info(status));
             }
-            let show = Method::AppPermissionsShow { id, client_id: None };
+            let show = Method::AppPermissionsShow { id: Some(id), client_id: None };
             match crate::app_bridge::handle(server, client_id, show).await {
                 Ok(_) => to_value(id.info(status)),
                 Err(error) if error.code == RpcError::NO_APP => Err(RpcError::new(

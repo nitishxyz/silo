@@ -90,6 +90,18 @@ impl PermissionId {
         }
     }
 
+    /// Its service in TCC, as `tccutil reset` takes it (`ScreenCapture`).
+    #[must_use]
+    pub const fn tcc_service(self) -> Option<&'static str> {
+        match self {
+            Self::ScreenRecording => Some("ScreenCapture"),
+            Self::Accessibility => Some("Accessibility"),
+            Self::FullDiskAccess => Some("SystemPolicyAllFiles"),
+            Self::InputMonitoring => Some("ListenEvent"),
+            Self::Unknown => None,
+        }
+    }
+
     /// The wire name (`screen_recording`).
     #[must_use]
     pub fn name(self) -> String {
@@ -177,6 +189,16 @@ pub fn server_bundle(exe: &Path) -> Option<PathBuf> {
     ok.then(|| bundle.to_owned())
 }
 
+/// `tccutil`'s arguments resetting `id` for the server bundle
+/// `bundle_id`: `reset <service> <bundle id>`, which removes System
+/// Settings' entry for it, a stale one included (with ad-hoc signing each
+/// build has a new code hash, and an older entry whose code requirement no
+/// longer matches stays switched on while denying).
+#[must_use]
+pub fn tccutil_reset_args(id: PermissionId, bundle_id: &str) -> Option<[String; 3]> {
+    Some(["reset".into(), id.tcc_service()?.into(), bundle_id.into()])
+}
+
 /// What `silo permissions probe` prints: each permission's status as seen
 /// from the probing process.
 pub type ProbeReport = BTreeMap<PermissionId, PermissionStatus>;
@@ -226,6 +248,37 @@ mod tests {
         assert!("camera".parse::<PermissionId>().unwrap_err().contains("screen-recording"));
         assert_eq!(serde_json::to_value(PermissionStatus::Denied).unwrap(), json!("denied"));
         assert_eq!(serde_json::from_value::<PermissionStatus>(json!("restricted")).unwrap(), PermissionStatus::Unknown);
+    }
+
+    #[test]
+    fn each_permission_resets_its_tcc_service_for_the_server_bundle() {
+        let expected = [
+            (PermissionId::ScreenRecording, "ScreenCapture"),
+            (PermissionId::Accessibility, "Accessibility"),
+            (PermissionId::FullDiskAccess, "SystemPolicyAllFiles"),
+            (PermissionId::InputMonitoring, "ListenEvent"),
+        ];
+        assert_eq!(expected.len(), PermissionId::ALL.len());
+        for (id, service) in expected {
+            assert_eq!(id.tcc_service(), Some(service));
+            assert_eq!(tccutil_reset_args(id, "xyz.nitish.silo.server").unwrap(), ["reset", service, "xyz.nitish.silo.server"]);
+        }
+        assert_eq!(PermissionId::Unknown.tcc_service(), None);
+        assert_eq!(tccutil_reset_args(PermissionId::Unknown, "x"), None);
+    }
+
+    #[test]
+    fn the_panel_shows_with_or_without_a_permission() {
+        use crate::control::Method;
+        let show = |params: serde_json::Value| serde_json::from_value::<Method>(json!({"method": "app.permissions_show", "params": params})).unwrap();
+        assert!(matches!(show(json!({})), Method::AppPermissionsShow { id: None, .. }));
+        assert!(matches!(show(json!({"id": "accessibility"})), Method::AppPermissionsShow { id: Some(PermissionId::Accessibility), .. }));
+        assert!(matches!(show(json!({"id": "camera"})), Method::AppPermissionsShow { id: Some(PermissionId::Unknown), .. }));
+        // Without one, older apps' required `id` is never sent as null.
+        let none = serde_json::to_value(Method::AppPermissionsShow { id: None, client_id: None }).unwrap();
+        assert_eq!(none["params"].get("id"), None, "{none}");
+        let some = serde_json::to_value(Method::AppPermissionsShow { id: Some(PermissionId::FullDiskAccess), client_id: None }).unwrap();
+        assert_eq!(some["params"]["id"], json!("full_disk_access"));
     }
 
     #[test]

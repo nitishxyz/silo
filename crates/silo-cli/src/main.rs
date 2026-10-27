@@ -321,6 +321,14 @@ enum PermissionsCommand {
         #[arg(value_parser = parse_permission)]
         id: PermissionId,
     },
+    /// Remove System Settings' entry for Silo Server (`tccutil reset`),
+    /// then ask again: for a permission switched on in System Settings that
+    /// still doesn't work (an entry of an older build).
+    Reset {
+        /// A permission, or `all`.
+        #[arg(value_parser = parse_permissions)]
+        ids: PermissionList,
+    },
     /// Check every permission as this process (the server's child) and
     /// print JSON; what the server runs.
     #[command(hide = true)]
@@ -329,6 +337,18 @@ enum PermissionsCommand {
         #[arg(long, value_parser = parse_permission)]
         request: Option<PermissionId>,
     },
+}
+
+/// Some permissions, as `silo permissions reset` names them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionList(Vec<PermissionId>);
+
+/// A permission, or `all` of them.
+fn parse_permissions(text: &str) -> Result<PermissionList, String> {
+    if text.trim().eq_ignore_ascii_case("all") {
+        return Ok(PermissionList(PermissionId::ALL.to_vec()));
+    }
+    parse_permission(text).map(|id| PermissionList(vec![id]))
 }
 
 fn parse_permission(text: &str) -> Result<PermissionId, String> {
@@ -925,6 +945,18 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             Ok(0)
         }
         Command::Permissions { command: Some(PermissionsCommand::Open { id }), .. } => permissions::open(id),
+        Command::Permissions { command: Some(PermissionsCommand::Reset { ids: PermissionList(ids) }), .. } => {
+            permissions::reset(&ids)?;
+            // Ask again: macOS's dialog for Screen Recording, the app's panel.
+            let first = ids[0];
+            match connect(None).await {
+                Ok((control, _events, _net)) => permissions::request(&control, first, false, Duration::ZERO).await,
+                Err(error) => {
+                    eprintln!("silo: {error:#}");
+                    permissions::open(first)
+                }
+            }
+        }
         Command::Permissions { command: Some(PermissionsCommand::Request { id, wait, timeout }), .. } => {
             let (control, _events, _net) = connect(None).await?;
             permissions::request(&control, id, wait, timeout).await
@@ -1678,6 +1710,14 @@ mod tests {
         assert!(Cli::try_parse_from(["silo", "permissions", "request", "camera"]).is_err());
         assert!(Cli::try_parse_from(["silo", "permissions", "request", "accessibility", "--timeout", "1m"]).is_err(), "--timeout needs --wait");
         assert!(Cli::try_parse_from(["silo", "permissions", "open"]).is_err());
+        let reset = |word: &str| match Cli::try_parse_from(["silo", "permissions", "reset", word]).ok()?.command {
+            Some(Command::Permissions { command: Some(PermissionsCommand::Reset { ids: PermissionList(ids) }), .. }) => Some(ids),
+            _ => None,
+        };
+        assert_eq!(reset("input-monitoring"), Some(vec![PermissionId::InputMonitoring]));
+        assert_eq!(reset("ALL"), Some(PermissionId::ALL.to_vec()));
+        assert_eq!(reset("camera"), None);
+        assert!(Cli::try_parse_from(["silo", "permissions", "reset"]).is_err());
         // The probe is the server's child, charged to it: it never disclaims.
         assert!(!disclaim::disclaims(&words));
         let help = <Cli as clap::CommandFactory>::command().find_subcommand("permissions").unwrap().clone().render_long_help().to_string();

@@ -14,6 +14,7 @@ mod remote;
 pub mod runtime;
 pub mod service;
 mod spawn;
+pub mod tcc;
 pub mod tunnel;
 pub mod update;
 pub mod upgrade;

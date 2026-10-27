@@ -3589,12 +3589,16 @@
             ]
           },
           "id": {
-            "$ref": "#/$defs/PermissionId"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PermissionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
-        "required": [
-          "id"
-        ],
         "type": "object"
       },
       "result": {

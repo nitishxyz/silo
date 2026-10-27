@@ -367,7 +367,7 @@ mod tests {
         use silo_proto::permissions::PermissionId;
         let reg = registry();
         let id = PermissionId::ScreenRecording;
-        let methods = [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id, client_id: None }];
+        let methods = [Method::PermissionsStatus {}, Method::PermissionsRequest { id }, Method::AppPermissionsShow { id: Some(id), client_id: None }];
         let others = [
             ("device", grant(Who::Device { id: "d".into() }, Scope::Server, Rights::Owner)),
             ("link", link(Scope::Server, Rights::Owner)),
