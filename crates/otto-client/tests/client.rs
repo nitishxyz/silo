@@ -611,3 +611,32 @@ fn mirror_keeps_the_turns_that_changed_files() {
     assert_eq!(turns, [(1, Some("old")), (2, Some("r2"))]);
     assert_eq!(m.turns[1].changes, changes);
 }
+#[test]
+fn mirror_keeps_each_turns_usage_under_its_reply() {
+    let mut v = view(0);
+    v.turn_usage = vec![TurnUsage { turn: 1, item_id: Some("old".into()), usage: Usage { input: 9, ..Default::default() }, cost_usd: 0.1 }];
+    let mut m = SessionMirror::new(v);
+    let step = |input: u64, cache_read: u64, cost: f64| Event::Usage {
+        turn: 2,
+        step: 1,
+        usage: Usage { input, output: 3, cache_read, cache_write: 0, reasoning: 1 },
+        cost_usd: Some(cost),
+        context: ContextUse::default(),
+    };
+    m.apply(1, &Event::ItemDone { item: Item::user_text("u2", "go") });
+    m.apply(2, &step(10, 0, 0.25));
+    m.apply(3, &step(2, 8, 0.5));
+    // Mid-turn: summed, no reply yet.
+    assert_eq!((m.turn_usage[1].usage.input, m.turn_usage[1].usage.cache_read, m.turn_usage[1].item_id.as_deref()), (12, 8, None));
+    let mut reply = Item::user_text("r2", "done");
+    reply.role = Role::Assistant;
+    m.apply(4, &Event::ItemDone { item: reply });
+    let total = Usage { input: 12, output: 6, cache_read: 8, cache_write: 0, reasoning: 2 };
+    m.apply(5, &Event::TurnFinished { turn: 2, status: TurnStatus::Done, usage: total.clone(), changes: None });
+    let t = m.turn_usage_of("r2").unwrap();
+    assert_eq!((t.turn, &t.usage, t.cost_usd), (2, &total, 0.75));
+    assert_eq!(m.turn_usage_of("old").unwrap().usage.input, 9);
+    // A turn that ran no step (stopped before the model answered) adds nothing.
+    m.apply(6, &Event::TurnFinished { turn: 3, status: TurnStatus::Cancelled, usage: Usage::default(), changes: None });
+    assert_eq!(m.turn_usage.len(), 2);
+}

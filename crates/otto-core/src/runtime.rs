@@ -949,6 +949,14 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         .filter(|(_, item, _)| item.as_ref().is_some_and(|item| items.iter().any(|i| i.id == *item)))
         .filter_map(|(turn, item_id, changes)| Some(otto_proto::TurnSummary { turn, item_id, changes: serde_json::from_value(changes).ok()? }))
         .collect();
+    // The loaded replies' turns, and the latest (a running turn's reply may not be written or loaded yet).
+    let mut turn_usage = s.turn_usage(id)?;
+    let latest = turn_usage.last().map(|(turn, ..)| *turn);
+    turn_usage.retain(|(turn, item, _)| Some(*turn) == latest || item.as_ref().is_some_and(|item| items.iter().any(|i| i.id == *item)));
+    let turn_usage = turn_usage
+        .into_iter()
+        .map(|(turn, item_id, totals)| otto_proto::TurnUsage { turn, item_id, usage: totals.usage, cost_usd: totals.cost_usd })
+        .collect();
     let streaming_tool_calls = if busy && newest { open_inputs(s, id, info.last_seq)? } else { Vec::new() };
     let mut running_tool_calls: Vec<_> = s
         .tool_calls(id)?
@@ -987,6 +995,7 @@ pub(crate) fn build_view(s: &mut Store, id: &str, window: Option<ViewWindow>, st
         oldest_seq,
         todos,
         turns,
+        turn_usage,
         item_seqs,
     })
 }

@@ -994,6 +994,11 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   item_id?, changes}]` for the turns among its items that changed files (`item_id` is the turn's last assistant
   item, the reply the changes show under; read back from the journaled `turn.finished`), and `SessionMirror.turns`
   keeps them, adding each live `turn.finished` with `changes`. Older peers skip both.
+- Turn usage (additive): `session.view` adds `turn_usage: [TurnUsage {turn, item_id?, usage, cost_usd}]`, each
+  turn's steps summed from the `usage` table, for the turns whose reply (`item_id`, the turn's last assistant
+  item) is among its items, and the latest turn; `SessionMirror.turn_usage` keeps them, adding each live `usage`
+  step to its turn and taking `turn.finished.usage` (the turn's sum) under the reply then loaded. Older peers
+  skip it (and an older server's view has none: only turns run while the pane follows show their usage).
 - **Bounded views and frames** (additive, `otto_proto::clip`). A frame is at most `MAX_FRAME` (16 MiB), and a
   session's items can be far larger (screenshots, page dumps), so:
   - `session.view {session_id, limit?, before_seq?}` returns the newest items that fit `VIEW_BUDGET` (8 MiB of

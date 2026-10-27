@@ -16130,6 +16130,33 @@
             ],
             "type": "object"
           },
+          "TurnUsage": {
+            "properties": {
+              "cost_usd": {
+                "default": 0.0,
+                "format": "double",
+                "type": "number"
+              },
+              "item_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "turn": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "turn",
+              "usage"
+            ],
+            "type": "object"
+          },
           "Usage": {
             "properties": {
               "cache_read": {
@@ -16259,6 +16286,12 @@
               "integer",
               "null"
             ]
+          },
+          "turn_usage": {
+            "items": {
+              "$ref": "#/$defs/TurnUsage"
+            },
+            "type": "array"
           },
           "turns": {
             "items": {

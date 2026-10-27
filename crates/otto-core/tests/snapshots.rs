@@ -129,3 +129,20 @@ async fn turn_snapshots_off_takes_none() {
     assert_eq!(git(&repo_dir, &["count-objects", "-v"]), objects);
     t.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_reopened_thread_has_each_turns_usage_under_its_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    repo(&repo_dir);
+    let used = otto_llm::Usage { input: 100, output: 20, cache_read: 300, cache_write: 5, reasoning: 4 };
+    let step = vec![otto_llm::StreamEvent::Usage(used.clone()), call("w", "write", serde_json::json!({"path":"a.txt","content":"a\n"}))];
+    let t = turn(dir.path(), &repo_dir, vec![step], SessionDefaults::default()).await;
+    let view = t.runtime.view(&t.session).await.unwrap();
+    let reply = view.items.iter().rev().find(|i| i.role == Role::Assistant).unwrap();
+    assert_eq!(view.turn_usage.len(), 1);
+    let turn = &view.turn_usage[0];
+    // Both steps (the second reported none), under the turn's last reply.
+    assert_eq!((turn.turn, turn.item_id.as_deref(), &turn.usage), (1, Some(reply.id.as_str()), &used));
+    t.runtime.shutdown().await.unwrap();
+}

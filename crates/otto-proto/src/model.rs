@@ -251,6 +251,19 @@ pub struct TurnSummary {
     pub changes: TurnChanges,
 }
 
+/// A turn's tokens summed over its steps, in `SessionView.turn_usage` (additive).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnUsage {
+    pub turn: i64,
+    /// The turn's last assistant item, the reply its usage shows under; absent when it has none yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    pub usage: Usage,
+    /// What its steps cost, 0 when the model has no pricing.
+    #[serde(default)]
+    pub cost_usd: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PendingApproval {
     pub approval_id: String,
@@ -335,6 +348,10 @@ pub struct SessionView {
     /// in `items`), oldest first, so a reopened thread shows their changes. Absent from older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<TurnSummary>,
+    /// Each turn's usage among `items` (its reply, `item_id`, is in `items`), and the session's latest turn,
+    /// oldest first. Absent from older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turn_usage: Vec<TurnUsage>,
     /// The sequence each stored item in `items` was last written at (its latest version), by item id:
     /// `session.fork` at an item's sequence keeps the history through it. Items still being written
     /// have none. Absent from older servers.

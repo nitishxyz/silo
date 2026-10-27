@@ -513,6 +513,22 @@ impl Store {
         }))?)
     }
 
+    /// Each turn's usage summed over its steps, oldest first, with the turn's last assistant item (the reply it
+    /// shows under; `None` when it has none yet).
+    /// # Errors
+    /// Returns database errors, including integer overflow.
+    pub fn turn_usage(&self, session_id: &str) -> Result<Vec<(i64, Option<String>, UsageTotals)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT u.turn,(SELECT i.item_id FROM items i JOIN events e ON e.session_id=i.session_id AND e.seq=i.seq WHERE i.session_id=u.session_id AND e.turn=u.turn AND i.role='assistant' ORDER BY i.seq DESC LIMIT 1),sum(u.input),sum(u.output),sum(u.cache_read),sum(u.cache_write),sum(u.reasoning),sum(u.cost_usd) FROM usage u WHERE u.session_id=?1 GROUP BY u.turn ORDER BY u.turn",
+        )?;
+        Ok(stmt
+            .query_map([session_id], |r| {
+                let usage = Usage { input: r.get(2)?, output: r.get(3)?, cache_read: r.get(4)?, cache_write: r.get(5)?, reasoning: r.get(6)? };
+                Ok((r.get(0)?, r.get(1)?, UsageTotals { usage, cost_usd: r.get(7)? }))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Marks unfinished calls unknown and running turns interrupted, journaling both.
     /// The runtime must emit error result items for returned calls, never execute them.
     /// # Errors

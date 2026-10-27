@@ -357,3 +357,35 @@ fn turn_trees_and_changes_survive_the_migration() {
     store.append(&id, plain, Projection::TurnStatus(TurnStatus::Done)).unwrap();
     assert_eq!(store.turn_changes(&id).unwrap().len(), 1);
 }
+
+#[test]
+fn turn_usage_sums_each_turns_steps_under_its_reply() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = new_session(&mut store).id;
+    let at = |turn: i64, step: i64, kind: &str| EventRecord { turn, step, kind: kind.into(), payload: json!({}) };
+    let usage = |input: u64, cache_read: u64, cost_usd: f64| {
+        Projection::Usage(UsageRecord {
+            provider: "test".into(),
+            model: "model".into(),
+            usage: Usage { input, output: 10, cache_read, cache_write: 1, reasoning: 2 },
+            cost_usd,
+        })
+    };
+    let mut reply = Item::user_text("r1", "done");
+    reply.role = serde_json::from_value(json!("assistant")).unwrap();
+    let mut call = reply.clone();
+    call.id = "c1".into();
+    store.append(&id, at(1, 0, "item.done"), Projection::PutItem(Item::user_text("u1", "go"))).unwrap();
+    store.append(&id, at(1, 1, "item.done"), Projection::PutItem(call)).unwrap();
+    store.append(&id, at(1, 1, "usage"), usage(100, 0, 0.25)).unwrap();
+    store.append(&id, at(1, 2, "item.done"), Projection::PutItem(reply)).unwrap();
+    store.append(&id, at(1, 2, "usage"), usage(5, 95, 0.5)).unwrap();
+    // A turn whose reply isn't written yet.
+    store.append(&id, at(2, 1, "usage"), usage(7, 0, 0.0)).unwrap();
+    let turns = store.turn_usage(&id).unwrap();
+    let first = UsageTotals { usage: Usage { input: 105, output: 20, cache_read: 95, cache_write: 2, reasoning: 4 }, cost_usd: 0.75 };
+    assert_eq!(turns[0], (1, Some("r1".into()), first));
+    assert_eq!((turns[1].0, turns[1].1.as_deref(), turns[1].2.usage.input), (2, None, 7));
+    assert_eq!(turns.len(), 2);
+    assert!(store.turn_usage("none").unwrap().is_empty());
+}

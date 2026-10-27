@@ -91,6 +91,9 @@ pub struct SessionMirror {
     /// The loaded turns that changed files (`SessionView::turns`, then each `turn.finished` with `changes`,
     /// under the last assistant item loaded), oldest first.
     pub turns: Vec<TurnSummary>,
+    /// Each loaded turn's usage (`SessionView::turn_usage`, then the live `usage` steps and `turn.finished`, under
+    /// the last assistant item loaded), oldest first. Empty from an older server's view until a turn runs.
+    pub turn_usage: Vec<TurnUsage>,
     /// The sequence each stored item was last written at (`SessionView::item_seqs`, then each `item.done`):
     /// what `session.fork` takes to keep the history through it. Empty from an older server's view.
     pub item_seqs: HashMap<String, i64>,
@@ -131,6 +134,7 @@ impl SessionMirror {
             oldest_seq: view.oldest_seq,
             todos: view.todos,
             turns: view.turns,
+            turn_usage: view.turn_usage,
             item_seqs: view.item_seqs.into_iter().collect(),
             indices,
             durable: None,
@@ -158,6 +162,9 @@ impl SessionMirror {
         let mut turns: Vec<TurnSummary> = page.turns.into_iter().filter(|t| !self.turns.iter().any(|s| s.turn == t.turn)).collect();
         turns.append(&mut self.turns);
         self.turns = turns;
+        let mut usage: Vec<TurnUsage> = page.turn_usage.into_iter().filter(|t| !self.turn_usage.iter().any(|s| s.turn == t.turn)).collect();
+        usage.append(&mut self.turn_usage);
+        self.turn_usage = usage;
         if let Some((items, _)) = &mut self.durable {
             items.splice(0..0, older.iter().cloned());
         }
@@ -181,6 +188,7 @@ impl SessionMirror {
             oldest_seq: old.oldest_seq,
             todos: None,
             turns: old.turns.iter().filter(|t| t.item_id.as_deref().is_some_and(|id| ids.contains(id))).cloned().collect(),
+            turn_usage: old.turn_usage.iter().filter(|t| t.item_id.as_deref().is_some_and(|id| ids.contains(id))).cloned().collect(),
             item_seqs: old.item_seqs.iter().filter(|(id, _)| ids.contains(id.as_str())).map(|(id, seq)| (id.clone(), *seq)).collect(),
             info: self.info.clone(),
             pending_approvals: Vec::new(),
@@ -196,6 +204,22 @@ impl SessionMirror {
     #[must_use]
     pub fn item(&self, id: &str) -> Option<&Item> {
         self.indices.get(id).map(|i| &self.items[*i])
+    }
+    /// `turn`'s usage, added (after the others) when it has none yet.
+    fn turn_entry(&mut self, turn: i64) -> &mut TurnUsage {
+        let at = match self.turn_usage.iter().position(|t| t.turn == turn) {
+            Some(at) => at,
+            None => {
+                self.turn_usage.push(TurnUsage { turn, ..TurnUsage::default() });
+                self.turn_usage.len() - 1
+            }
+        };
+        &mut self.turn_usage[at]
+    }
+    /// The usage of the turn whose reply is `item_id`.
+    #[must_use]
+    pub fn turn_usage_of(&self, item_id: &str) -> Option<&TurnUsage> {
+        self.turn_usage.iter().find(|t| t.item_id.as_deref() == Some(item_id))
     }
     fn put(&mut self, item: Item) {
         if let Some(i) = self.indices.get(&item.id) {
@@ -282,11 +306,17 @@ impl SessionMirror {
                 self.info.status = SessionStatus::Busy;
                 self.last_error = None;
             }
-            Event::TurnFinished { turn, status, changes, .. } => {
+            Event::TurnFinished { turn, status, changes, usage } => {
+                let item_id = self.items.iter().rev().find(|i| i.role == Role::Assistant).map(|i| i.id.clone());
                 if let Some(changes) = changes {
-                    let item_id = self.items.iter().rev().find(|i| i.role == Role::Assistant).map(|i| i.id.clone());
                     self.turns.retain(|t| t.turn != *turn);
-                    self.turns.push(TurnSummary { turn: *turn, item_id, changes: changes.clone() });
+                    self.turns.push(TurnSummary { turn: *turn, item_id: item_id.clone(), changes: changes.clone() });
+                }
+                // The turn's own sum is authoritative (steps may have run before the view); its cost is the steps'.
+                if *usage != Usage::default() {
+                    let entry = self.turn_entry(*turn);
+                    entry.usage = usage.clone();
+                    entry.item_id = item_id;
                 }
                 // A compaction still running when its turn ended never reported its end: the turn stopped it.
                 for c in self.compactions.iter_mut().filter(|c| c.status == CompactionStatus::Running) {
@@ -367,7 +397,10 @@ impl SessionMirror {
             }
             Event::QuestionResolved { question_id, .. } => self.pending_questions.retain(|q| q.question_id != *question_id),
             Event::QueueChanged { queued } => self.queue = queued.clone(),
-            Event::Usage { usage, cost_usd, context, .. } => {
+            Event::Usage { turn, usage, cost_usd, context, .. } => {
+                let entry = self.turn_entry(*turn);
+                entry.usage.accumulate(usage);
+                entry.cost_usd += cost_usd.unwrap_or(0.0);
                 self.info.context = *context;
                 let total = &mut self.info.usage.usage;
                 total.input = total.input.saturating_add(usage.input);

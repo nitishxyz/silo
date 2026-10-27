@@ -218,6 +218,13 @@ fn turn_changes_are_additive() {
     let mut view = serde_json::to_value(sample_view()).unwrap();
     view.as_object_mut().unwrap().remove("turns");
     assert!(serde_json::from_value::<SessionView>(view).unwrap().turns.is_empty());
+    // Nor `turn_usage`.
+    assert!(sample_view().turn_usage.is_empty());
+    let mut with = sample_view();
+    with.turn_usage = vec![otto_proto::TurnUsage { turn: 1, item_id: None, usage: Default::default(), cost_usd: 0.0 }];
+    let wire = serde_json::to_value(&with).unwrap();
+    assert!(wire["turn_usage"][0].get("item_id").is_none(), "no reply yet: omitted");
+    assert_eq!(serde_json::from_value::<SessionView>(wire).unwrap().turn_usage, with.turn_usage);
 }
 fn sample_view() -> otto_proto::SessionView {
     serde_json::from_value(json!({
