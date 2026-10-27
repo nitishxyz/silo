@@ -266,8 +266,9 @@ fn is_silo_process(pid: u32) -> bool {
         .is_ok_and(|o| o.status.success() && is_silo_command(String::from_utf8_lossy(&o.stdout).trim()))
 }
 
-/// `ps -o comm=` output of a silo server: `silo` (CLI) or `silo-server`
-/// (app bundle), possibly with a path.
+/// `ps -o comm=` output of a silo server: `silo` (CLI, and the app's `Silo
+/// Server.app` helper) or `silo-server` (app bundles before the helper),
+/// possibly with a path.
 fn is_silo_command(comm: &str) -> bool {
     Path::new(comm).file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "silo" || n == "silo-server")
 }
@@ -299,6 +300,7 @@ mod tests {
     #[test]
     fn recognises_silo_processes() {
         assert!(is_silo_command("/Applications/Silo.app/Contents/MacOS/silo-server"));
+        assert!(is_silo_command("/Users/bat/Library/Application Support/silo/runtime/Silo Server.app/Contents/MacOS/silo"));
         assert!(is_silo_command("silo"));
         assert!(!is_silo_command("/bin/zsh"));
         assert!(!is_silo_command("silo-menubar"));

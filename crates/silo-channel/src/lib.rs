@@ -81,6 +81,27 @@ impl Channel {
         }
     }
 
+    /// The server's helper app bundle id (`Silo.app/Contents/Helpers/Silo
+    /// Server.app`): the identity macOS privacy prompts and System Settings
+    /// show for programs run in Silo's terminals.
+    #[must_use]
+    pub const fn server_bundle_id(self) -> &'static str {
+        match self {
+            Self::Release => "xyz.nitish.silo.server",
+            Self::Dev => "xyz.nitish.silo.dev.server",
+        }
+    }
+
+    /// The server's helper app name (`<name>.app` in the app's
+    /// `Contents/Helpers`, its `CFBundleName`): `Silo Server`, `SiloDev Server`.
+    #[must_use]
+    pub const fn server_name(self) -> &'static str {
+        match self {
+            Self::Release => "Silo Server",
+            Self::Dev => "SiloDev Server",
+        }
+    }
+
     /// The launchd job running the server (`silo up`).
     #[must_use]
     pub const fn launchd_label(self) -> &'static str {
@@ -218,6 +239,11 @@ mod tests {
         use Channel::{Dev, Release};
         assert_eq!((Release.silo_dir(), Dev.silo_dir()), ("silo", "silo-dev"));
         assert_eq!((Release.bundle_id(), Dev.bundle_id()), ("xyz.nitish.silo", "xyz.nitish.silo.dev"));
+        assert_eq!((Release.server_bundle_id(), Dev.server_bundle_id()), ("xyz.nitish.silo.server", "xyz.nitish.silo.dev.server"));
+        assert_eq!((Release.server_name(), Dev.server_name()), ("Silo Server", "SiloDev Server"));
+        for channel in [Release, Dev] {
+            assert_eq!(channel.server_bundle_id(), format!("{}.server", channel.bundle_id()));
+        }
         assert_eq!((Release.launchd_label(), Dev.launchd_label()), ("dev.silo.server", "dev.silo.server.dev"));
         assert_eq!((Release.systemd_unit(), Dev.systemd_unit()), ("silo.service", "silo-dev.service"));
         assert_eq!((Release.suffix(), Dev.suffix()), ("", "-dev"));

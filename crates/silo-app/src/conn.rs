@@ -94,8 +94,9 @@ fn jitter() -> f64 {
     f64::from(nanos % 1000) / 999.0
 }
 
-/// The server binary: `silo-server` (app bundle) or `silo` (cargo target
-/// dir) next to this executable, else `silo` on `PATH`.
+/// The server binary: the app bundle's `Silo Server.app` helper (in
+/// `Contents/Helpers`), `silo-server` (bundles before the helper) or `silo`
+/// (cargo target dir) next to this executable, else `silo` on `PATH`.
 #[must_use]
 pub fn server_exe() -> PathBuf {
     server_exe_path()
@@ -110,6 +111,9 @@ pub fn client_name() -> String {
 fn server_exe_path() -> PathBuf {
     if let Some(path) = std::env::var_os("SILO_SERVER_EXE") {
         return path.into();
+    }
+    if let Some(path) = helper() {
+        return path;
     }
     if let Some(path) = sibling(&["silo-server", "silo"]) {
         return path;
@@ -162,7 +166,7 @@ enum Place {
 /// for debug builds, dev bundles and bare binaries.
 fn release_app<'a>(o: &Origin<'a>) -> Option<(&'a Path, Place)> {
     let app = bundle_of(o.app_exe).filter(|_| o.release)?;
-    if o.server_exe != app.join("Contents/MacOS/silo-server") || o.bundle_id != Some(BUNDLE_ID) {
+    if o.server_exe != runtime::helper_exe(app, silo_proto::Channel::Release) || o.bundle_id != Some(BUNDLE_ID) {
         return None;
     }
     let dir = app.parent().unwrap_or(app);
@@ -246,9 +250,10 @@ pub fn local_service(home: &Path, server_exe: PathBuf) -> Result<Service, String
     })
 }
 
-/// The launchd job's `silo`: this build's runtime copy of the bundled server.
+/// The launchd job's `silo`: this build's runtime copy of the bundled
+/// server (`<home>/runtime/Silo Server.app/Contents/MacOS/silo`).
 fn managed_exe(home: &Path, server_exe: &Path) -> std::io::Result<PathBuf> {
-    runtime::install(home, server_exe.parent().unwrap_or(Path::new("/")))
+    runtime::install(home, server_exe)
 }
 
 /// `service::up` on a blocking thread (launchctl and the waits stay off
@@ -370,6 +375,19 @@ pub async fn upgrade(svc: &Service, server: &IncompatibleServer) -> anyhow::Resu
     tracing::info!(?upgraded, "upgraded server");
     up(svc).await?;
     Ok(upgraded)
+}
+
+/// This channel's server helper app's `silo`, when this executable is an
+/// app bundle's: `../Helpers/<Silo Server|SiloDev Server>.app/Contents/MacOS/silo`.
+fn helper() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    helper_of(&exe)
+}
+
+fn helper_of(exe: &Path) -> Option<PathBuf> {
+    let app = exe.parent().filter(|macos| macos.ends_with("Contents/MacOS"))?.parent()?.parent()?;
+    Some(runtime::helper_exe(app, silo_proto::CHANNEL)).filter(|exe| exe.is_file())
 }
 
 /// A binary next to this executable (not this executable itself, which on a
@@ -631,12 +649,14 @@ mod tests {
     #[test]
     fn launchd_for_a_release_bundle_where_users_run_apps() {
         let app = Path::new("/Applications/Silo.app/Contents/MacOS/Silo");
-        let server = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        let server = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
         let home = Path::new("/Users/bat");
         let base = Origin { silo_home: None, release: true, app_exe: app, server_exe: server, bundle_id: Some(BUNDLE_ID), user_home: home };
         assert_eq!(launch(&base), Launch::Launchd);
         assert_eq!(launch(&Origin { silo_home: Some(OsStr::new("")), ..base }), Launch::Launchd);
-        let at = |dir: &str| (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/MacOS/silo-server"));
+        let at = |dir: &str| {
+            (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"))
+        };
         for dir in ["/Users/bat/Applications", "/Volumes/Silo", "/private/var/folders/x/T/AppTranslocation/1234/d"] {
             let (exe, server) = at(dir);
             assert_eq!(launch(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&server), ..base }), Launch::Launchd, "{dir}");
@@ -652,7 +672,14 @@ mod tests {
         assert_eq!(launch(&Origin { bundle_id: Some("xyz.nitish.silo.dev"), ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { bundle_id: None, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { server_exe: Path::new("/usr/local/bin/silo"), ..base }), Launch::Plain);
-        assert_eq!(launch(&Origin { server_exe: Path::new("/Volumes/Silo/Silo.app/Contents/MacOS/silo-server"), ..base }), Launch::Plain);
+        assert_eq!(
+            launch(&Origin { server_exe: Path::new("/Volumes/Silo/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"), ..base }),
+            Launch::Plain
+        );
+        // The layout before the server helper app, or a dev helper.
+        assert_eq!(launch(&Origin { server_exe: Path::new("/Applications/Silo.app/Contents/MacOS/silo-server"), ..base }), Launch::Plain);
+        let dev_helper = "/Applications/Silo.app/Contents/Helpers/SiloDev Server.app/Contents/MacOS/silo";
+        assert_eq!(launch(&Origin { server_exe: Path::new(dev_helper), ..base }), Launch::Plain);
         let dev = Path::new("/w/target/debug/SiloDev.app/Contents/MacOS/SiloDev");
         assert_eq!(launch(&Origin { app_exe: dev, ..base }), Launch::Plain);
         assert_eq!(launch(&Origin { app_exe: Path::new("/w/target/release/silo-app"), ..base }), Launch::Plain);
@@ -661,11 +688,13 @@ mod tests {
     #[test]
     fn updates_only_an_installed_release_bundle() {
         let app = Path::new("/Applications/Silo.app/Contents/MacOS/Silo");
-        let server = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        let server = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
         let home = Path::new("/Users/bat");
         let base = Origin { silo_home: None, release: true, app_exe: app, server_exe: server, bundle_id: Some(BUNDLE_ID), user_home: home };
         assert_eq!(updatable(&base, false), Some(Path::new("/Applications/Silo.app")));
-        let at = |dir: &str| (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/MacOS/silo-server"));
+        let at = |dir: &str| {
+            (format!("{dir}/Silo.app/Contents/MacOS/Silo"), format!("{dir}/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"))
+        };
         let (exe, srv) = at("/Users/bat/Applications");
         assert_eq!(
             updatable(&Origin { app_exe: Path::new(&exe), server_exe: Path::new(&srv), ..base }, false),
@@ -691,8 +720,14 @@ mod tests {
     }
 
     fn plan(manager: Manager, home: &Path, runner: &Fake, server: service::Server) -> Vec<service::Action> {
-        let svc =
-            Service::new(manager, "/Applications/Silo.app/Contents/MacOS/silo-server".into(), home.join("state"), home.to_owned(), 501, "bat".into());
+        let svc = Service::new(
+            manager,
+            "/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo".into(),
+            home.join("state"),
+            home.to_owned(),
+            501,
+            "bat".into(),
+        );
         service::plan_up(&svc.unwrap().probe(runner, server).unwrap())
     }
 
@@ -700,17 +735,26 @@ mod tests {
     fn launchd_job_runs_the_runtime_copy() {
         let base = std::env::temp_dir().join(format!("silo-managed-exe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let (home, macos) = (base.join("home"), base.join("Silo.app/Contents/MacOS"));
-        std::fs::create_dir_all(&macos).unwrap();
-        for name in ["silo-server", "silo-menubar"] {
-            std::fs::write(macos.join(name), name).unwrap();
-        }
-        let exe = managed_exe(&home, &macos.join("silo-server")).unwrap();
-        assert_eq!(exe, home.join("runtime").join("silo"), "one fixed path for every build");
+        let (home, app) = (base.join("home"), base.join("Silo.app"));
+        let server = runtime::helper_exe(&app, silo_proto::Channel::Release);
+        std::fs::create_dir_all(server.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(&server, "silo").unwrap();
+        std::fs::write(app.join("Contents/MacOS/silo-menubar"), "silo-menubar").unwrap();
+        let exe = managed_exe(&home, &server).unwrap();
+        assert_eq!(exe, home.join("runtime/Silo Server.app/Contents/MacOS/silo"), "one fixed path for every build");
+        assert_eq!(exe, runtime::server_exe(&home));
         let svc = Service::new(Manager::Launchd, exe.clone(), home.clone(), base.clone(), 501, "bat".into()).unwrap();
         let plist = svc.unit_text().unwrap();
         assert!(plist.contains(&format!("<string>{}</string>\n\t\t<string>server</string>", exe.display())));
         assert!(!plist.contains("Silo.app"));
+        // The bundle's helper is found next to the app's executable.
+        let app_exe = app.join("Contents/MacOS/Silo");
+        let channel_helper = runtime::helper_exe(&app, silo_proto::CHANNEL);
+        std::fs::create_dir_all(channel_helper.parent().unwrap()).unwrap();
+        std::fs::write(&channel_helper, "silo").unwrap();
+        assert_eq!(helper_of(&app_exe), Some(channel_helper));
+        assert_eq!(helper_of(&base.join("target/debug/silo-app")), None);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -719,7 +763,7 @@ mod tests {
         let home = Path::new("/nonexistent/silo-revive");
         let svc = Service::new(
             Manager::Launchd,
-            "/Applications/Silo.app/Contents/MacOS/silo-server".into(),
+            "/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo".into(),
             home.join("s"),
             home.into(),
             501,

@@ -1,4 +1,5 @@
-//! `<SILO_HOME>/bin/silo` → this build's runtime `silo`, and
+//! `<SILO_HOME>/bin/silo` → this build's runtime `silo` (in
+//! `<SILO_HOME>/runtime/Silo Server.app`), and
 //! `~/.local/bin/silo` → that stable path when `~/.local/bin` exists. Never
 //! edits shell files, never replaces a file or a link to something else.
 
@@ -48,13 +49,23 @@ fn link(path: &Path, target: &Path) {
     }
 }
 
-/// Missing, or a link into a Silo.app (which an update would break).
+/// Missing, or a link into a Silo.app (which an update would break): its
+/// server helper app's `silo`, or where older bundles kept it.
 fn should_link(existing: &Existing, target: &Path) -> bool {
     match existing {
         Existing::Missing => true,
-        Existing::Link(to) => to != target && (to.ends_with("Contents/Resources/bin/silo") || to.ends_with("Contents/MacOS/silo-server")),
+        Existing::Link(to) => to != target && into_bundle(to),
         Existing::Other => false,
     }
+}
+
+fn into_bundle(to: &Path) -> bool {
+    let helper = || {
+        let bundle = to.ancestors().nth(3)?;
+        let helpers = bundle.parent()?;
+        Some(to.ends_with("Contents/MacOS/silo") && bundle.extension()? == "app" && helpers.ends_with("Contents/Helpers"))
+    };
+    to.ends_with("Contents/Resources/bin/silo") || to.ends_with("Contents/MacOS/silo-server") || helper() == Some(true)
 }
 
 #[cfg(test)]
@@ -67,7 +78,12 @@ mod tests {
         assert!(should_link(&Existing::Missing, target));
         assert!(should_link(&Existing::Link("/Applications/Silo.app/Contents/Resources/bin/silo".into()), target));
         assert!(should_link(&Existing::Link("/Users/bat/Downloads/Silo.app/Contents/MacOS/silo-server".into()), target));
+        assert!(should_link(&Existing::Link("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo".into()), target));
         assert!(!should_link(&Existing::Link(target.into()), target));
+        assert!(!should_link(
+            &Existing::Link("/Users/bat/Library/Application Support/silo/runtime/Silo Server.app/Contents/MacOS/silo".into()),
+            target
+        ));
         assert!(!should_link(&Existing::Link("/Applications/Other.app/Contents/MacOS/tool".into()), target));
         assert!(!should_link(&Existing::Link("/opt/homebrew/bin/silo".into()), target));
         assert!(!should_link(&Existing::Other, target));

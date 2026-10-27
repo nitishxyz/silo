@@ -740,6 +740,39 @@ mod tests {
     }
 
     #[test]
+    fn migrates_the_bare_runtime_copy_to_the_server_bundle() {
+        use Action::*;
+        // The job of an app from before the server bundle runs
+        // `<home>/runtime/silo`; this build's runs the bundle's `silo`.
+        let home = temp_home("migrate-bundle");
+        let silo_home = home.join("Library/Application Support/silo");
+        let exe = crate::runtime::server_exe(&silo_home);
+        let svc = Service::new(Manager::Launchd, exe.clone(), silo_home.clone(), home.clone(), 501, "bat".into()).unwrap();
+        let plist = svc.unit_path().unwrap();
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, launchd_plist(&silo_home.join("runtime/silo"), &silo_home)).unwrap();
+        let running = Fake { stdout: vec![("launchctl print", "\tstate = running\n\tpid = 7\n")], ..Fake::default() };
+        // Stale either way: the running server (another build, or even this
+        // one) hands its sessions to a takeover outside launchd first, which
+        // the refreshed job then adopts; nothing is stopped with sessions.
+        for server in [Server::Other, Server::Current] {
+            let state = svc.probe(&running, server).unwrap();
+            assert_ne!(state.installed, state.desired, "{server:?}");
+            assert_eq!(plan_up(&state), [Takeover, WriteUnit, Bootout, Enable, Bootstrap], "{server:?}");
+        }
+        let fake = Fake::default();
+        svc.apply(&fake, &plan_up(&svc.probe(&running, Server::Other).unwrap())).unwrap();
+        let takeover = fake.calls()[0].clone();
+        assert_eq!(takeover, format!("{} server --takeover --daemon --idle-exit 0", exe.display()), "the new bundle takes over");
+        let text = std::fs::read_to_string(&plist).unwrap();
+        assert!(text.contains("runtime/Silo Server.app/Contents/MacOS/silo</string>\n\t\t<string>server</string>\n\t\t<string>--adopt</string>"));
+        assert!(!text.contains("runtime/silo<"));
+        // Refreshed: the next launch leaves the job alone.
+        assert_eq!(plan_up(&svc.probe(&running, Server::Current).unwrap()), []);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn failed_action_stops_apply() {
         let home = temp_home("apply-fail");
         let svc = service(Manager::Systemd, &home);

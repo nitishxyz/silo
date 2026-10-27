@@ -261,6 +261,11 @@ mod tests {
         let standalone = job("/Users/bat/.local/bin/silo");
         assert!(app_runs_server(true, None, home), "Silo.app is installed");
         assert!(app_runs_server(false, Some(&runtime), home), "the job runs the app's runtime copy");
+        let legacy = job("/Users/bat/Library/Application Support/silo/runtime/silo");
+        assert!(app_runs_server(false, Some(&legacy), home), "the bare copy before the server bundle");
+        let bundle = job(&silo_client::runtime::server_exe(home).to_string_lossy());
+        assert!(bundle.contains("runtime/Silo Server.app/Contents/MacOS/silo"));
+        assert!(app_runs_server(false, Some(&bundle), home), "the runtime server bundle");
         assert!(!app_runs_server(false, Some(&standalone), home));
         assert!(!app_runs_server(false, None, home));
     }

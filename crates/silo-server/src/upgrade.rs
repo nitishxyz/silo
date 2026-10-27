@@ -167,10 +167,17 @@ fn target_exe(home: &Path) -> Result<PathBuf, Refusal> {
         .canonicalize()
         .map_err(|_| ("install", format!("the server's executable {} was removed since it started; reinstall silo there", path.display())))?;
     let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-    if crate::bundle::runtime_dir(&target, &home).is_some() {
+    // The app's runtime copy, or a signed bundle's own executable (renaming
+    // a bare binary over it would break the bundle's signature).
+    if crate::bundle::runtime_dir(&target, &home).is_some() || in_app_bundle(&target) {
         return Err(("managed", "this server comes with Silo.app; update the app on that machine".into()));
     }
     Ok(target)
+}
+
+/// Whether `exe` is inside an app bundle (`<X>.app/Contents/…`).
+fn in_app_bundle(exe: &Path) -> bool {
+    exe.ancestors().skip(1).any(|dir| dir.file_name() == Some("Contents".as_ref()) && dir.parent().and_then(Path::extension) == Some("app".as_ref()))
 }
 
 /// Removes a file on drop unless disarmed.
@@ -306,6 +313,15 @@ fn alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_servers_are_not_replaced() {
+        assert!(in_app_bundle(Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo")));
+        assert!(in_app_bundle(Path::new("/Applications/Silo.app/Contents/MacOS/silo-server")));
+        assert!(!in_app_bundle(Path::new("/usr/local/bin/silo")));
+        assert!(!in_app_bundle(Path::new("/home/me/Contents/silo")));
+        assert!(!in_app_bundle(Path::new("/w/x.app/silo")));
+    }
 
     #[test]
     fn stale_files() {

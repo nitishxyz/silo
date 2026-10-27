@@ -231,9 +231,18 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
 
 - The server crate builds both a library and the `<name>` binary, which is server and CLI in one.
 - **macOS app:**
-  - Bundles it. Under launchd the app copies the server and menu-bar agent to `<SILO_HOME>/runtime/`
-    (`silo`, `silo-menubar`) and the agent runs them from there, so nothing holds Silo.app open and Finder can
-    replace it while the server runs; moving to the new build is a hot upgrade. Once this build's job serves, runtime
+  - Bundles it as an app of its own, `Silo.app/Contents/Helpers/Silo Server.app` (`Contents/MacOS/silo`, bundle id
+    `xyz.nitish.silo.server`, dev `SiloDev Server.app`/`xyz.nitish.silo.dev.server`, `LSUIElement`, usage strings
+    worded for terminal programs, signed with the entitlements those programs may need under the hardened runtime).
+    macOS privacy controls (TCC) charge a request to the *responsible process*, inherited parent to child unless a
+    launcher disclaims it; every shell descends from the server, so the server and the otto daemon (`silo server`,
+    `silo otto server`) re-execute themselves in place disclaimed when they are not their own
+    (`silo-cli/src/disclaim.rs`; launchd jobs already are), and prompts and System Settings name Silo Server
+    whoever started it. Under launchd the app copies the server bundle and menu-bar agent to `<SILO_HOME>/runtime/`
+    (`Silo Server.app`, swapped in atomically when it differs, and `silo-menubar`) and the agent runs them from
+    there, so nothing holds Silo.app open and Finder can replace it while the server runs; moving to the new build is
+    a hot upgrade (a job of an older app, running the bare `runtime/silo`, is stale and refreshed that way; the bare
+    copy is removed once nothing runs it). Once this build's job serves, runtime
     dirs of other builds that no process runs from and nothing touched in 5 minutes are removed (under
     `runtime.lock`). A new menu-bar agent replaces the one `menubar.lock` records if that is of another build.
   - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications, on a disk image or translocated, with the

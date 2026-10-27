@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build target/Silo.app: the GPUI client, the `silo` server/CLI binary (as
-# silo-server), the silo-menubar agent and the otto-silo daemon (agent
-# blocks) in Contents/MacOS.
+# Build target/Silo.app: the GPUI client, the silo-menubar agent and the
+# otto-silo daemon (agent blocks) in Contents/MacOS, and the `silo`
+# server/CLI binary as an app of its own, Contents/Helpers/Silo Server.app
+# (the identity macOS privacy prompts show for programs in Silo's terminals).
 #
 # Signed ad-hoc, or with SILO_SIGN_IDENTITY (a Developer ID Application
 # identity in the keychain) under the hardened runtime with secure
@@ -43,10 +44,17 @@ app="$root/target/Silo.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$out/silo-app" "$app/Contents/MacOS/Silo"
-cp "$out/silo" "$app/Contents/MacOS/silo-server"
+# The server/CLI: Contents/Helpers/Silo Server.app/Contents/MacOS/silo. It is
+# the responsible process of every shell (it disclaims whoever started it,
+# crates/silo-cli/src/disclaim.rs), so privacy prompts and System Settings
+# name it, with usage strings worded for terminal programs
+# (scripts/server-info-plist.sh).
+server_app="$app/Contents/Helpers/Silo Server.app"
+mkdir -p "$server_app/Contents/MacOS" "$server_app/Contents/Resources"
+cp "$out/silo" "$server_app/Contents/MacOS/silo"
 # Menu-bar agent (accessory app, no Dock icon). Under launchd the app runs
-# copies of both out of <SILO_HOME>/runtime (one fixed place) as `silo` and
-# `silo-menubar`, so the bundle can be replaced while they run.
+# copies of both out of <SILO_HOME>/runtime (one fixed place) as `Silo
+# Server.app` and `silo-menubar`, so the bundle can be replaced while they run.
 cp "$out/silo-menubar" "$app/Contents/MacOS/silo-menubar"
 # The otto daemon agent blocks connect to (started by the app).
 cp "$out/otto-silo" "$app/Contents/MacOS/otto-silo"
@@ -77,8 +85,16 @@ for suffix in "" " (GPU)" " (Renderer)" " (Plugin)"; do
 PLIST
   helpers+=("$app/Contents/Frameworks/$name.app")
 done
-# On a case-insensitive volume `silo` and `Silo` collide, so the server/CLI
-# binary ships as `silo-server`; the app looks for it next to itself.
+# The app finds the server at ../Helpers/Silo Server.app/Contents/MacOS/silo
+# (crates/silo-app/src/conn.rs); in Contents/MacOS `silo` and `Silo` would
+# collide on a case-insensitive volume. It gets the app's icon, once the app
+# has one.
+icon=""
+if [[ -f "$app/Contents/Resources/Silo.icns" ]]; then
+  cp "$app/Contents/Resources/Silo.icns" "$server_app/Contents/Resources/Silo.icns"
+  icon=Silo.icns
+fi
+"$root/scripts/server-info-plist.sh" "Silo Server" xyz.nitish.silo.server "$version" ${icon:+"$icon"} > "$server_app/Contents/Info.plist"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -133,6 +149,13 @@ jit="$root/target/helper-jit.entitlements"
 entitlements "$jit" com.apple.security.cs.allow-jit
 devices="$root/target/app.entitlements"
 entitlements "$devices" com.apple.security.device.audio-input com.apple.security.device.camera
+# What programs in Silo's terminals may ask for under the hardened runtime
+# (the server is their responsible process).
+terminal="$root/target/server.entitlements"
+entitlements "$terminal" com.apple.security.automation.apple-events \
+  com.apple.security.device.audio-input com.apple.security.device.camera \
+  com.apple.security.personal-information.addressbook com.apple.security.personal-information.calendars \
+  com.apple.security.personal-information.location com.apple.security.personal-information.photos-library
 for lib in "$app/Contents/Frameworks/$framework/Libraries/"*.dylib; do
   sign "$lib"
 done
@@ -143,7 +166,8 @@ for helper in "${helpers[@]}"; do
     *) sign "$helper" ;;
   esac
 done
-sign "$app/Contents/MacOS/silo-server"
+sign --entitlements "$terminal" "$server_app"
+codesign --verify --strict "$server_app"
 sign "$app/Contents/MacOS/silo-menubar"
 sign "$app/Contents/MacOS/otto-silo"
 sign --entitlements "$devices" "$app"

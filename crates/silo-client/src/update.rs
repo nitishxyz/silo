@@ -698,15 +698,28 @@ pub fn origin(exe: &Path, home: &Path, release: bool) -> Origin {
         return Origin::Dev;
     }
     let dir = exe.parent();
-    if exe.file_name() == Some(OsStr::new("silo")) && dir.and_then(Path::parent) == Some(&crate::runtime::root(home)) {
+    let legacy_runtime = exe.file_name() == Some(OsStr::new("silo")) && dir.and_then(Path::parent) == Some(&crate::runtime::root(home));
+    if crate::runtime::is_runtime_exe(exe, home) || legacy_runtime {
         return Origin::App(None);
     }
-    let bundle =
-        dir.filter(|d| exe.file_name() == Some(OsStr::new("silo-server")) && d.ends_with("Contents/MacOS")).and_then(|d| d.parent()?.parent());
-    match bundle.filter(|b| b.extension() == Some(OsStr::new("app"))) {
+    match bundle_of_server(exe) {
         Some(app) => Origin::App(Some(app.to_owned())),
         None => Origin::Standalone(exe.to_owned()),
     }
+}
+
+/// The app bundle shipping server `exe`: `<X>.app` for
+/// `<X>.app/Contents/Helpers/<S>.app/Contents/MacOS/silo`, or for
+/// `<X>.app/Contents/MacOS/silo-server` (before the server helper app).
+fn bundle_of_server(exe: &Path) -> Option<&Path> {
+    let is_app = |p: &Path| p.extension() == Some(OsStr::new("app"));
+    let app = if exe.file_name() == Some(OsStr::new("silo-server")) {
+        exe.parent().filter(|d| d.ends_with("Contents/MacOS"))?.parent()?.parent()?
+    } else {
+        let helper = exe.ancestors().nth(3).filter(|h| is_app(h) && h.join(crate::runtime::BUNDLE_EXE) == exe)?;
+        helper.parent().filter(|d| d.ends_with("Contents/Helpers"))?.parent()?.parent()?
+    };
+    is_app(app).then_some(app)
 }
 
 /// Folders Silo.app is installed in: /Applications and ~/Applications
@@ -1004,8 +1017,15 @@ mod tests {
         let home = dir.join("state");
         let runtime = home.join("runtime/0123456789abcdef/silo");
         assert_eq!(origin(&runtime, &home, true), Origin::App(None), "the app's runtime copy");
-        let bundled = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        assert_eq!(origin(&home.join("runtime/silo"), &home, true), Origin::App(None), "the bare copy before the server bundle");
+        let copy = home.join("runtime/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(origin(&copy, &home, true), Origin::App(None), "the runtime server bundle");
+        let bundled = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
         assert_eq!(origin(bundled, &home, true), Origin::App(Some("/Applications/Silo.app".into())));
+        let legacy = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
+        assert_eq!(origin(legacy, &home, true), Origin::App(Some("/Applications/Silo.app".into())));
+        let loose = Path::new("/tmp/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(origin(loose, &home, true), Origin::Standalone(loose.into()), "a server bundle outside an app");
         let standalone = dir.join(".local/bin/silo");
         assert_eq!(origin(&standalone, &home, true), Origin::Standalone(standalone.clone()));
         assert_eq!(origin(Path::new("/usr/local/bin/silo"), &home, true), Origin::Standalone("/usr/local/bin/silo".into()));
@@ -1015,6 +1035,7 @@ mod tests {
         std::fs::write(dir.join("w/target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
         assert_eq!(origin(&dir.join("w/target/release/silo"), &home, true), Origin::Dev);
         assert_eq!(origin(&dir.join("w/target/Silo.app/Contents/MacOS/silo-server"), &home, true), Origin::Dev);
+        assert_eq!(origin(&dir.join("w/target/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"), &home, true), Origin::Dev);
         // Another home's runtime copy, or a `silo` elsewhere in a bundle, is standalone.
         assert_eq!(origin(&dir.join("other/runtime/x/silo"), &home, true), Origin::Standalone(dir.join("other/runtime/x/silo")));
         // Apps are looked for where installed; with the test feed only in the home's.

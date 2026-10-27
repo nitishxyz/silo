@@ -223,7 +223,8 @@ fn main() {
         rt.spawn_blocking(move || cli_link::refresh(&home, &silo));
     }
     let agent = match managed {
-        Some(svc) => svc.exe.parent().map(|dir| dir.join("silo-menubar")),
+        // Installed beside the runtime server bundle (`runtime::install`).
+        Some(svc) => Some(silo_client::runtime::menubar_exe(&svc.silo_home)),
         None => conn::sibling(&["silo-menubar"]),
     };
     let loaded = terminal_prefs::load(&home);

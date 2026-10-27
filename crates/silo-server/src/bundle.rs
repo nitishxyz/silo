@@ -1,5 +1,7 @@
 //! Exposing `silo` to shells spawned by a server run from its runtime
-//! directory (`<SILO_HOME>/runtime/silo`, installed by the app),
+//! directory (`<SILO_HOME>/runtime/Silo Server.app/Contents/MacOS/silo`,
+//! installed by the app; `<SILO_HOME>/runtime/silo` before the server was a
+//! bundle),
 //! through the stable `<SILO_HOME>/bin/silo` link that survives upgrades,
 //! and the clipboard tool shims in `<SILO_HOME>/shims`.
 
@@ -12,11 +14,16 @@ use std::{
 /// Tools shimmed to `silo clipboard shim <tool>`.
 pub const SHIMMED: &[&str] = &["pbpaste", "pbcopy", "xclip", "xsel", "wl-paste", "wl-copy"];
 
-/// `exe`'s directory when it is `home`'s runtime directory (the app's copy).
+/// The server bundle in the runtime directory and its executable (as
+/// `silo_client::runtime` installs them).
+const RUNTIME_SERVER: &str = "Silo Server.app/Contents/MacOS/silo";
+
+/// `home`'s runtime directory when `exe` is the app's copy of the server in
+/// it: the server bundle's `silo`, or the bare `silo` from before it.
 #[must_use]
 pub fn runtime_dir(exe: &Path, home: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    (exe.file_name()? == "silo" && dir == home.join("runtime")).then(|| dir.to_owned())
+    let dir = home.join("runtime");
+    (exe == dir.join(RUNTIME_SERVER) || exe == dir.join("silo")).then_some(dir)
 }
 
 /// The `silo` the shims run: the stable `<home>/bin/silo` for a
@@ -112,6 +119,7 @@ mod tests {
     fn runtime_server_is_recognized() {
         let home = Path::new("/Users/bat/Library/Application Support/silo");
         assert_eq!(runtime_dir(&home.join("runtime/silo"), home), Some(home.join("runtime")));
+        assert_eq!(runtime_dir(&home.join("runtime/Silo Server.app/Contents/MacOS/silo"), home), Some(home.join("runtime")));
     }
 
     #[test]
@@ -120,6 +128,9 @@ mod tests {
         for exe in [
             "/h/runtime/old/silo",
             "/h/runtime/silo-menubar",
+            "/h/runtime/Silo Server.app/Contents/MacOS/silo-menubar",
+            "/h/runtime/Other.app/Contents/MacOS/silo",
+            "/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo",
             "/h/abc/silo",
             "/Applications/Silo.app/Contents/MacOS/silo-server",
             "/Users/me/dev/term/target/debug/silo",
