@@ -113,10 +113,10 @@ commands! {
     NewAgent => "New Agent", "Agent", ["cmd-shift-o"], "An otto agent beside the focused pane";
     OttoSettings => "Otto Settings", "Agent", [], "Providers, models and agents of the agent in front";
     // Files
-    NewFiles => "New Files Pane", "Files", [], "The focused block's folder, beside it";
+    NewFiles => "New Files Pane", "Files", ["cmd-shift-e"], "The focused block's folder, beside it";
     // Changes
     NewChanges => "New Changes Pane", "Changes", [], "The focused block's repo, beside it";
-    ReviewChanges => "Review Changes", "Changes", [], "This session's Changes block, or a new one beside the focused pane";
+    ReviewChanges => "Review Changes", "Changes", ["cmd-shift-g"], "This session's Changes block, or a new one beside the focused pane";
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];

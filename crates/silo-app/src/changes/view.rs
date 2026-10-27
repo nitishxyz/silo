@@ -881,6 +881,7 @@ impl ChangesPane {
                 .border_color(rgb(theme::border()))
                 .text_size(px(12.0))
                 .text_color(rgb(theme::muted()))
+                .child(div().flex_none().child(crate::assets::icon("git-branch", 12.0, theme::muted())))
                 .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(format!("{branch}{sync}")))
                 .when(s.truncated, |el| el.child(div().flex_none().child("· truncated")))
         });
