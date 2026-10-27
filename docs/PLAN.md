@@ -237,7 +237,8 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
     macOS privacy controls (TCC) charge a request to the *responsible process*, inherited parent to child unless a
     launcher disclaims it; every shell descends from the server, so the server and the otto daemon (`silo server`,
     `silo otto server`) re-execute themselves in place disclaimed when they are not their own
-    (`silo-cli/src/disclaim.rs`; launchd jobs already are), and prompts and System Settings name Silo Server
+    (`silo-cli/src/disclaim.rs`; launchd jobs already are; `silo server --daemon` does it in its final process after
+    the forks that detach it, since the pre-fork pid it would otherwise leave responsible exits), and prompts and System Settings name Silo Server
     whoever started it. Under launchd the app copies the server bundle and menu-bar agent to `<SILO_HOME>/runtime/`
     (`Silo Server.app`, swapped in atomically when it differs, and `silo-menubar`) and the agent runs them from
     there, so nothing holds Silo.app open and Finder can replace it while the server runs; moving to the new build is

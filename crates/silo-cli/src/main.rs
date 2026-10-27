@@ -475,8 +475,9 @@ impl BrowserCmd {
 fn main() -> std::process::ExitCode {
     // First, before any thread: a server (or otto daemon) becomes its own
     // responsible process, so macOS privacy prompts for its shells name
-    // Silo Server, not whatever started it.
-    disclaim::at_start();
+    // Silo Server, not whatever started it (`server --daemon` after its
+    // forks: then this is the detached daemon, re-executed).
+    let daemonized = disclaim::at_start();
     let cli = Cli::parse();
     // otto runs as itself: its own runtime, logging and exit code.
     if let Some(Command::Otto { args }) = cli.command {
@@ -489,8 +490,9 @@ fn main() -> std::process::ExitCode {
     silo_client::advertise(silo_proto::compat::feature::CLOSE_GUARD);
     let command = cli.command.unwrap_or(Command::Attach { target: None, watch: false });
     let server = matches!(command, Command::Server { .. });
-    let status = match &command {
-        Command::Server { daemon: true, takeover, .. } => daemonize(*takeover),
+    let status = match (&command, daemonized) {
+        (Command::Server { daemon: true, .. }, Some(daemonized)) => daemonized.status,
+        (Command::Server { daemon: true, takeover, .. }, None) => daemonize(*takeover),
         _ => None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
@@ -544,11 +546,18 @@ fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
 /// waits for one status byte (0 = success) on a pipe whose write end the
 /// daemon gets, and exits with it; EOF without a byte is failure.
 fn daemonize(report: bool) -> Option<std::fs::File> {
-    use std::os::fd::{AsRawFd, FromRawFd};
     let home = paths::home();
     let _ = std::fs::create_dir_all(&home);
-    // Never hold the caller's terminal or pipes open.
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log(&home)).ok();
+    daemonize_to(report, log)
+}
+
+/// [`daemonize`], the daemon's output going to `log`. On macOS the final
+/// process then re-executes itself in place as its own responsible process
+/// (`disclaim::after_daemonize`): the one that started it is gone by then.
+fn daemonize_to(report: bool, log: Option<std::fs::File>) -> Option<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // Never hold the caller's terminal or pipes open.
     let mut pipe = [-1; 2];
     #[allow(unsafe_code)]
     // SAFETY: single-threaded at this point (before the tokio runtime);
@@ -600,7 +609,8 @@ fn daemonize(report: bool) -> Option<std::fs::File> {
             libc::dup2(log.as_raw_fd(), 2);
         }
         libc::chdir(c"/".as_ptr());
-        report.then(|| std::fs::File::from_raw_fd(pipe[1]))
+        drop(log);
+        disclaim::after_daemonize(report.then(|| std::fs::File::from_raw_fd(pipe[1])))
     }
 }
 
