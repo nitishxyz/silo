@@ -2082,6 +2082,10 @@
     "ServerHello": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "build": {
+          "default": "",
+          "type": "string"
+        },
         "client_id": {
           "type": "string"
         },
@@ -9641,6 +9645,10 @@
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "build": {
+            "default": "",
+            "type": "string"
+          },
           "pid": {
             "format": "uint32",
             "minimum": 0,

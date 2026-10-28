@@ -49,6 +49,8 @@ pub struct ServerConfig {
     pub models: Arc<dyn ModelResolver>,
     pub auth: Arc<dyn AuthService>,
     pub idle_exit: Option<Duration>,
+    /// [`ServerHello::build`](otto_proto::ServerHello::build).
+    pub build: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +137,7 @@ impl Server {
             pid: std::process::id(),
             started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(i64::MAX),
             silo_home: paths::silo_home().to_string_lossy().into_owned(),
+            build: config.build.clone(),
         };
         let metadata = paths::Runtime {
             pid: info.pid,

@@ -140,6 +140,7 @@ impl Fixture {
             models: self.models.clone(),
             auth: Arc::new(NoAuth),
             idle_exit: None,
+            build: "test-build".into(),
         }
     }
     async fn connect(&self) -> Connection {

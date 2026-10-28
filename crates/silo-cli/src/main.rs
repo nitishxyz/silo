@@ -1536,7 +1536,9 @@ async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyh
     };
     let (version, serves) = (otto.hello().version.clone(), otto.hello().silo_home.clone());
     let ours = std::path::Path::new(&serves) == silo_home;
-    if ours && !older(&version, env!("CARGO_PKG_VERSION")) {
+    // Same version is not enough: a rebuild (or an older daemon naming no
+    // build) can speak another terminal format or protocol than this server.
+    if ours && !older(&version, env!("CARGO_PKG_VERSION")) && otto.hello().build == silo_proto::BUILD {
         return Ok(true);
     }
     if ours {
@@ -1545,7 +1547,7 @@ async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyh
             .await
             .map(|s| s.iter().filter(|s| matches!(s.status, otto_proto::SessionStatus::Busy | otto_proto::SessionStatus::WaitingApproval)).count())
             .unwrap_or(0);
-        tracing::info!(old = %version, busy = sessions, "restarting an older otto daemon");
+        tracing::info!(old = %version, build = %otto.hello().build, busy = sessions, "restarting an otto daemon of another build");
     } else {
         let serves = if serves.is_empty() { "an unknown Silo" } else { serves.as_str() };
         tracing::warn!(%version, %serves, home = %home.display(), "replacing an otto daemon that serves another Silo");
@@ -1750,6 +1752,7 @@ mod tests {
     async fn fake_otto(
         name: &str,
         version: &str,
+        build: &str,
         silo_home: &str,
         busy: bool,
         stops: bool,
@@ -1762,7 +1765,8 @@ mod tests {
         lock.try_lock().unwrap();
         let listener = tokio::net::UnixListener::bind(otto_proto::paths::socket(&home)).unwrap();
         let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (version, silo_home, flag, socket) = (version.to_owned(), silo_home.to_owned(), asked.clone(), otto_proto::paths::socket(&home));
+        let (version, build, silo_home, flag, socket) =
+            (version.to_owned(), build.to_owned(), silo_home.to_owned(), asked.clone(), otto_proto::paths::socket(&home));
         tokio::spawn(async move {
             let mut lock = Some(lock);
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -1776,6 +1780,7 @@ mod tests {
                     client_id: "c".into(),
                     home: String::new(),
                     silo_home: silo_home.clone(),
+                    build: build.clone(),
                 };
                 let _ = write_frame(&mut stream, &Frame::json(kind::HELLO, &hello).unwrap()).await;
                 while let Ok(Some(frame)) = read_frame(&mut stream).await {
@@ -1806,32 +1811,36 @@ mod tests {
 
     /// Whether `otto_claim` keeps the daemon, whether it asked it to stop,
     /// and its error.
-    async fn claim(name: &str, version: &str, serves: &str, busy: bool, stops: bool) -> (Option<bool>, bool, String) {
-        let (home, asked) = fake_otto(name, version, serves, busy, stops).await;
+    async fn claim(name: &str, version: &str, build: &str, serves: &str, busy: bool, stops: bool) -> (Option<bool>, bool, String) {
+        let (home, asked) = fake_otto(name, version, build, serves, busy, stops).await;
         let result = otto_claim(std::path::Path::new("/here/silo"), &home).await;
         std::fs::remove_dir_all(&home).unwrap();
         let error = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
         (result.ok(), asked.load(std::sync::atomic::Ordering::SeqCst), error)
     }
 
-    /// This server's otto home holds its own daemon: a current one serving
-    /// this Silo is kept; one serving another or an unknown Silo, or an older
-    /// one of this Silo, is stopped even when busy (an upgrade moves otto too).
+    /// This server's otto home holds its own daemon: a current one of this
+    /// build serving this Silo is kept; one serving another or an unknown
+    /// Silo, an older one, or one of another build (a rebuild of the same
+    /// version, or a daemon naming none) is stopped even when busy (an
+    /// upgrade moves otto too).
     #[tokio::test]
     async fn otto_claim_replaces_a_daemon_of_another_silo() {
-        let current = env!("CARGO_PKG_VERSION");
-        assert_eq!(claim("ours", current, "/here/silo", false, true).await, (Some(true), false, String::new()));
-        assert_eq!(claim("ours-busy", current, "/here/silo", true, true).await, (Some(true), false, String::new()));
-        assert_eq!(claim("other", current, "/elsewhere/silo", true, true).await, (Some(false), true, String::new()));
-        assert_eq!(claim("pre", current, "", true, true).await, (Some(false), true, String::new()));
-        assert_eq!(claim("old-busy", "0.0.1", "/here/silo", true, true).await, (Some(false), true, String::new()));
-        assert_eq!(claim("old-idle", "0.0.1", "/here/silo", false, true).await, (Some(false), true, String::new()));
+        let (current, build) = (env!("CARGO_PKG_VERSION"), silo_proto::BUILD);
+        assert_eq!(claim("ours", current, build, "/here/silo", false, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("ours-busy", current, build, "/here/silo", true, true).await, (Some(true), false, String::new()));
+        assert_eq!(claim("other", current, build, "/elsewhere/silo", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("pre", current, build, "", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("old-busy", "0.0.1", build, "/here/silo", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("old-idle", "0.0.1", build, "/here/silo", false, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("rebuilt", current, "0000000000000000", "/here/silo", true, true).await, (Some(false), true, String::new()));
+        assert_eq!(claim("no-build", current, "", "/here/silo", false, true).await, (Some(false), true, String::new()));
     }
 
     /// A daemon of another Silo that does not stop is refused, never reused.
     #[tokio::test]
     async fn otto_claim_refuses_a_daemon_of_another_silo_that_stays() {
-        let (kept, asked, error) = claim("stays", env!("CARGO_PKG_VERSION"), "/elsewhere/silo", false, false).await;
+        let (kept, asked, error) = claim("stays", env!("CARGO_PKG_VERSION"), silo_proto::BUILD, "/elsewhere/silo", false, false).await;
         assert_eq!((kept, asked, error.as_str()), (None, true, "otto here serves another Silo"));
     }
 

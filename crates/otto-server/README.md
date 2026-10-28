@@ -11,6 +11,7 @@ let handle = Server::start(ServerConfig {
     models,
     auth,
     idle_exit: Some(Duration::from_secs(60)),
+    build: String::new(),
 }).await?;
 handle.serve_forever().await?;
 ```

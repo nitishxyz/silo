@@ -69,6 +69,10 @@ pub struct ServerHello {
     /// The Silo home whose server the daemon's silo tools drive (`paths::silo_home`).
     #[serde(default)]
     pub silo_home: String,
+    /// The build of the program hosting the daemon (Silo's build id), empty
+    /// when it names none: a Silo server replaces a daemon of another build.
+    #[serde(default)]
+    pub build: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -81,6 +85,9 @@ pub struct ServerInfo {
     /// As in [`ServerHello::silo_home`].
     #[serde(default)]
     pub silo_home: String,
+    /// As in [`ServerHello::build`].
+    #[serde(default)]
+    pub build: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]

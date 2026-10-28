@@ -5969,6 +5969,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "silo-proto",
  "tempfile",
  "tokio",
  "tokio-util",

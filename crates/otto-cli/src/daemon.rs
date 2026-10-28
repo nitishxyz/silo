@@ -73,6 +73,7 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         models: services.clone(),
         auth: services,
         idle_exit: args.idle_exit.or(args.daemon.then_some(300)).map(Duration::from_secs),
+        build: silo_proto::BUILD.into(),
     })
     .await?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
