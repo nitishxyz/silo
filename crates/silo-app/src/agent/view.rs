@@ -2527,7 +2527,7 @@ impl AgentPane {
             Overlay::Effort => self.render_efforts(cx),
             Overlay::Usage => {
                 let provider = self.usage_provider();
-                self.render_usage(provider.as_deref(), cx)
+                self.render_usage(provider.as_deref())
             }
             Overlay::Menu => self.render_menu(cx),
             Overlay::Slash => self.render_slash(cx),

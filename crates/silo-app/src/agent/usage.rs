@@ -1,22 +1,19 @@
 //! The usage card (click the footer's token count or plan ring): what is left
 //! of the provider's limits, how full the context is, the session's tokens and
-//! cost (billed and at API prices, by model), and every session's cost over a
-//! period (`usage.summary`); and each reply's tokens, right of its
-//! copy/retry/branch row, its cost and models on hover.
+//! cost (billed and at API prices, by model); and each reply's tokens, right
+//! of its copy/retry/branch row, its cost and models on hover.
 
-use std::collections::HashMap;
-
-use chrono::{DateTime, Offset, TimeZone};
+use chrono::{DateTime, TimeZone};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, relative, rgb};
 use otto_llm::{PlanUsage, Usage};
-use otto_proto::{ContextUse, ModelUsage, TurnUsage, UsageSummary, UsageTotals};
+use otto_proto::{ContextUse, ModelUsage, TurnUsage, UsageTotals};
 
 use super::{
     AgentPane, plan, ring,
     rows::menu,
     view::{grouped, provider_name},
 };
-use crate::{controls::Segmented, theme, tooltip::Tooltip};
+use crate::{theme, tooltip::Tooltip};
 
 /// The card's width: room for the per-model table's columns.
 pub(super) const CARD_W: f32 = 380.0;
@@ -128,10 +125,6 @@ pub(super) fn usd(amount: f64) -> String {
 }
 
 /// A known cost as [`usd`], an unknown one (no list price) as `—`, never `$0`.
-fn usd_or_dash(amount: Option<f64>) -> String {
-    amount.map_or_else(|| "—".into(), usd)
-}
-
 /// A model's cost as listed: at API prices when known, else what it was billed when anything, else `—`.
 fn api_or_billed(m: &ModelUsage) -> String {
     m.api_cost_usd.map(usd).or_else(|| (m.cost_usd > 0.0).then(|| usd(m.cost_usd))).unwrap_or_else(|| "—".into())
@@ -189,55 +182,6 @@ pub(super) fn cost_text(totals: &UsageTotals, plan: bool) -> Option<String> {
     })
 }
 
-/// A period of the All sessions section.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) enum Period {
-    #[default]
-    Today,
-    Week,
-    Month,
-}
-
-impl Period {
-    pub(super) const ALL: [Period; 3] = [Period::Today, Period::Week, Period::Month];
-    fn label(self) -> &'static str {
-        match self {
-            Period::Today => "Today",
-            Period::Week => "7 days",
-            Period::Month => "30 days",
-        }
-    }
-    fn days(self) -> u64 {
-        match self {
-            Period::Today => 1,
-            Period::Week => 7,
-            Period::Month => 30,
-        }
-    }
-    /// Where the period starts (ms since the Unix epoch): midnight `days - 1` days before `now`'s day, in its zone.
-    pub(super) fn since_ms<Tz: TimeZone>(self, now: &DateTime<Tz>) -> i64 {
-        let day = now.date_naive() - chrono::Days::new(self.days() - 1);
-        let midnight = day.and_hms_opt(0, 0, 0).unwrap_or_default();
-        let zone = now.timezone();
-        // A midnight a clock change skips: the hour after it.
-        zone.from_local_datetime(&midnight)
-            .earliest()
-            .or_else(|| zone.from_local_datetime(&(midnight + chrono::Duration::hours(1))).earliest())
-            .map_or_else(|| now.timestamp_millis(), |at| at.timestamp_millis())
-    }
-}
-
-/// The All sessions section: the chosen period and each period's summary since the card opened.
-#[derive(Default)]
-pub(super) struct AllUsage {
-    period: Period,
-    loaded: HashMap<Period, Result<UsageSummary, String>>,
-    loading: Option<Period>,
-    /// Bumped each time the card opens, so a reply to an older opening is dropped.
-    generation: u64,
-}
-
-/// The context line: `48,213 / 200,000` and `24%`; `None` without a known window.
 pub(super) fn context_row(context: ContextUse) -> Option<(String, String)> {
     let share = ring::fraction(context.used, context.window)?;
     Some((format!("{} / {}", grouped(context.used), grouped(context.window)), percent(f64::from(share))))
@@ -366,8 +310,8 @@ fn figures(usage: &Usage, cost: String) -> [String; 6] {
 }
 
 impl AgentPane {
-    /// The usage card's body: Limits, Context, the session's tokens and cost, then All sessions; it scrolls.
-    pub(super) fn render_usage(&mut self, provider: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    /// The usage card's body: Limits, Context, the session's tokens and cost; it scrolls.
+    pub(super) fn render_usage(&self, provider: Option<&str>) -> AnyElement {
         let fg = theme::foreground();
         let mut card = div().id("agent-usage").flex().flex_col().max_h(px(BODY_MAX_H)).overflow_y_scroll().child(heading("Limits"));
         let subscription = provider.and_then(|p| self.catalog.as_ref().and_then(|c| c.subscription(p)));
@@ -412,43 +356,7 @@ impl AgentPane {
                 }
             }
         }
-        card.child(menu::divider()).child(self.render_all_usage(cx)).into_any_element()
-    }
-
-    /// The All sessions section: a period, its cost at API prices (and billed, when different) and its models.
-    fn render_all_usage(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let fg = theme::foreground();
-        let period = self.all_usage.period;
-        let entity = cx.entity().downgrade();
-        let selected = Period::ALL.iter().position(|p| *p == period).unwrap_or_default();
-        let picker =
-            Segmented::new("agent-usage-period", Period::ALL.map(Period::label), selected).segment_width(60.0).on_select(move |index, _, cx| {
-                let _ = entity.update(cx, |this, cx| {
-                    this.all_usage.period = Period::ALL[index.min(Period::ALL.len() - 1)];
-                    this.load_all_usage(false, cx);
-                    cx.notify();
-                });
-            });
-        let top = div().flex().items_center().justify_between().pr(px(menu::ROW_X)).mb(px(2.0)).child(heading("All sessions")).child(picker);
-        let section = div().flex().flex_col().child(top);
-        match self.all_usage.loaded.get(&period) {
-            None => section.child(note(if self.all_usage.loading.is_some() { "Loading…" } else { "Not loaded yet" })),
-            Some(Err(error)) => section.child(note(error.clone())),
-            Some(Ok(summary)) if summary.totals.by_model.is_empty() => section.child(note("No usage")),
-            Some(Ok(summary)) => {
-                let t = &summary.totals;
-                let mut section = section.child(stat("At API prices", usd_or_dash(t.api_cost_usd), fg));
-                if t.api_cost_usd.is_none_or(|api| (api - t.cost_usd).abs() >= 0.005) {
-                    section = section.child(stat("Billed", usd(t.cost_usd), fg));
-                }
-                let sessions = if summary.sessions == 1 { "1 session".to_owned() } else { format!("{} sessions", summary.sessions) };
-                section = section.child(stat(sessions, format!("{} tokens", compact(t.usage.total_input() + t.usage.output)), theme::muted()));
-                match self.model_table("all", t) {
-                    Some(table) => section.child(table),
-                    None => section,
-                }
-            }
-        }
+        card.into_any_element()
     }
 
     /// The per-model table of `totals` (each model's tokens, cache hit rate and cost at API prices), most cost
@@ -484,43 +392,6 @@ impl AgentPane {
             .map(|m| m.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| model.to_owned())
-    }
-
-    /// Load the chosen period's summary (`usage.summary`) unless loaded; `fresh` (the card opened) forgets
-    /// what was loaded before.
-    pub(super) fn load_all_usage(&mut self, fresh: bool, cx: &mut Context<Self>) {
-        let all = &mut self.all_usage;
-        if fresh {
-            all.loaded.clear();
-            all.loading = None;
-            all.generation += 1;
-        }
-        let period = all.period;
-        if all.loaded.contains_key(&period) || all.loading == Some(period) {
-            return;
-        }
-        all.loading = Some(period);
-        let generation = all.generation;
-        let now = chrono::Local::now();
-        let since = period.since_ms(&now);
-        let offset = now.offset().fix().local_minus_utc() / 60;
-        self.run(
-            cx,
-            move |c| async move { c.usage_summary(since, Some(offset)).await },
-            move |this, result, _| {
-                let all = &mut this.all_usage;
-                if all.generation != generation {
-                    return;
-                }
-                if all.loading == Some(period) {
-                    all.loading = None;
-                }
-                // An older otto has no `usage.summary`.
-                let result =
-                    result.map_err(|e| if e.contains("usage.summary") || e.contains("unknown variant") { "Needs a newer otto".into() } else { e });
-                all.loaded.insert(period, result);
-            },
-        );
     }
 
     /// The reply `item`'s tokens, right of its action row: muted, the full breakdown, cost and models on hover;
@@ -639,7 +510,6 @@ mod tests {
         assert_eq!(usd(1_234.5), "$1,234.50");
         assert_eq!(usd(1_234_567.891), "$1,234,567.89");
         assert_eq!(usd(999.999), "$1,000.00", "rounding carries into the thousands");
-        assert_eq!(usd_or_dash(None), "—");
     }
 
     fn totals(steps: &[(&str, Usage, f64, Option<f64>)]) -> UsageTotals {
@@ -688,17 +558,6 @@ mod tests {
         // The models add up to the total.
         let sum: f64 = t.by_model.iter().filter_map(|m| m.api_cost_usd).sum();
         assert_eq!(Some(sum), t.api_cost_usd);
-    }
-
-    #[test]
-    fn periods_start_at_local_midnight() {
-        // 2027-01-10 15:00 at +05:30.
-        let zone = FixedOffset::east_opt(330 * 60).unwrap();
-        let now = zone.with_ymd_and_hms(2027, 1, 10, 15, 0, 0).unwrap();
-        let midnight = zone.with_ymd_and_hms(2027, 1, 10, 0, 0, 0).unwrap().timestamp_millis();
-        assert_eq!(Period::Today.since_ms(&now), midnight);
-        assert_eq!(Period::Week.since_ms(&now), midnight - 6 * 86_400_000);
-        assert_eq!(Period::Month.since_ms(&now), midnight - 29 * 86_400_000);
     }
 
     #[test]
