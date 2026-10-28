@@ -144,6 +144,7 @@ impl AgentPane {
                     return this.refresh_sessions(cx);
                 }
                 this.forget_sends();
+                this.left = None;
                 this.session_id = Some(info.id.clone());
                 this.follow(cx);
                 this.title.clone_from(&title);
