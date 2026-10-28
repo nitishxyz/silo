@@ -1,6 +1,6 @@
 //! State shared between a `Browser` handle and its CEF handlers.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,11 @@ pub enum Event {
     /// The page's colour (`theme-color`, else its opaque background) as
     /// `0x00RRGGBB`; `None` when it has none.
     ThemeColor(Option<u32>),
-    /// The page asked for a new window; open it as a new browser block.
-    Popup(String),
+    /// The page asked for a new tab (a modified link click, `window.open`,
+    /// `target=_blank`): open it as a new browser tab.
+    NewTab(crate::popup::NewTab),
+    /// The page's context menu: answer with `Browser::menu_command`.
+    ContextMenu(crate::menu::ContextMenu),
     /// The connection of the main frame's current entry.
     Security(Security),
     CursorChanged(Cursor),
@@ -38,8 +41,12 @@ pub enum Event {
         width: i32,
         height: i32,
     },
-    /// `on_before_close` ran; the handle is dead.
-    Closed,
+    /// `on_before_close` ran; the handle is dead. `by_page`: not asked for
+    /// with `Browser::close` (a popup's `window.close()`, or a popup CEF
+    /// never created): its tab should close.
+    Closed {
+        by_page: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +99,8 @@ pub(crate) struct Shared {
     /// Set by `on_after_created`, cleared by `on_before_close`.
     pub(crate) browser: Mutex<Option<cef::Browser>>,
     pub(crate) events: Mutex<Vec<Event>>,
-    pub(crate) notify: Notify,
+    /// Replaced once when the app adopts a popup (`Popup::open`).
+    pub(crate) notify: Mutex<Notify>,
     /// Last `Browser::set_focus`; re-applied to each new page's widget.
     pub(crate) focused: AtomicBool,
     /// Last mouse press or key press sent to the page.
@@ -114,6 +122,20 @@ pub(crate) struct Shared {
     pub(crate) cert_failed: Mutex<Option<String>>,
     /// The root layer's scroll offset in view points.
     pub(crate) scroll: Mutex<(f64, f64)>,
+    /// The open context menu's answer, until `Browser::menu_command`.
+    pub(crate) menu: Mutex<Option<cef::RunContextMenuCallback>>,
+    /// Popups this page allowed that CEF has not created yet, by popup id.
+    pub(crate) popups: Mutex<Vec<(i32, Arc<Shared>)>>,
+    /// `Browser::close` was called: the close is the app's, not the page's.
+    pub(crate) closing: AtomicBool,
+    /// The windowless frame rate (`Browser::set_frame_rate`).
+    pub(crate) frame_rate: AtomicU32,
+    /// The last frame asked for (`Browser::begin_frame`, `Runtime::drive_pages`).
+    pub(crate) frame_asked: Mutex<Option<Instant>>,
+    /// Wheel fractions not sent yet (CEF takes whole points).
+    pub(crate) wheel_rest: Mutex<(f32, f32)>,
+    /// Flipped by each pinch: wheel events carry it as NumLock (`Browser::pinch`).
+    pub(crate) wheel_relatch: AtomicBool,
 }
 
 /// Whether `url` is no page: empty or `about:blank`.
@@ -141,9 +163,43 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    pub(crate) fn new(view: ViewSize, notify: Notify) -> Arc<Self> {
+        let shared = Arc::new(Self {
+            devtools: Arc::default(),
+            view: Mutex::new(view),
+            frame: Mutex::new(None),
+            browser: Mutex::new(None),
+            events: Mutex::new(Vec::new()),
+            notify: Mutex::new(notify),
+            focused: AtomicBool::new(false),
+            last_input: Mutex::new(None),
+            dropped: Mutex::new(None),
+            theme_tag: theme_tag(),
+            blank: AtomicBool::new(true),
+            shown: AtomicBool::new(false),
+            queued: Mutex::new(None),
+            cert_failed: Mutex::new(None),
+            scroll: Mutex::new((0.0, 0.0)),
+            menu: Mutex::new(None),
+            popups: Mutex::new(Vec::new()),
+            closing: AtomicBool::new(false),
+            frame_rate: AtomicU32::new(60),
+            frame_asked: Mutex::new(None),
+            wheel_rest: Mutex::new((0.0, 0.0)),
+            wheel_relatch: AtomicBool::new(false),
+        });
+        crate::runtime::track(&shared);
+        shared
+    }
+
+    pub(crate) fn notify(&self) {
+        let notify = lock(&self.notify).clone();
+        notify();
+    }
+
     pub(crate) fn push(&self, event: Event) {
         lock(&self.events).push(event);
-        (self.notify)();
+        self.notify();
     }
 
     /// The main frame committed `url`: a blank document hides the page

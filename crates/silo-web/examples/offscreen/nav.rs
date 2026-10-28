@@ -46,7 +46,13 @@ pub fn run(runtime: &Runtime, browser: &Browser) -> Result<()> {
     let none = Modifiers::default();
     browser.mouse_button(100.0, 50.0, MouseButton::Left, true, 1, none);
     browser.mouse_button(100.0, 50.0, MouseButton::Left, false, 1, none);
-    wait_event(runtime, browser, "popup", |e| matches!(e, Event::Popup(url) if url.contains("popup.silo-test")))?;
+    wait_event(runtime, browser, "popup", |e| match e {
+        // Nobody adopts it here: close it.
+        Event::NewTab(tab) if tab.url.contains("popup.silo-test") && tab.foreground => {
+            tab.popup.clone().map(|p| p.open(std::sync::Arc::new(|| {})).close()).is_some()
+        }
+        _ => false,
+    })?;
     browser.navigate(YELLOW_PAGE);
     wait_for(runtime, browser, YELLOW, SIZE, "navigate again")?;
     browser.back();

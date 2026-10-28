@@ -9,7 +9,7 @@ use std::{
 use silo_client::{Control, Events};
 use silo_proto::{
     control::{BrowserCommand, Created, Event, Method, OwnMode, RpcError, SpawnSpec},
-    model::{Axis, BlockInfo, BlockKind, BrowserState, HistoryEntry, TermSize},
+    model::{Axis, BlockInfo, BlockKind, BrowserState, HistoryEntry, SessionView, TermSize},
     paths,
 };
 use tokio::task::JoinHandle;
@@ -164,9 +164,29 @@ async fn split_creates_browser_and_commands_edit_history() {
     assert!((state(&control, &created).await.zoom - 1.5).abs() < f32::EPSILON);
 
     // A new browser window.
-    let window = Method::WindowCreate { session_id: created.session_id.clone(), spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: None };
+    let window = Method::WindowCreate {
+        session_id: created.session_id.clone(),
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Browser,
+        url: None,
+        background: false,
+    };
     let window: Created = control.call(window).await.unwrap();
     assert_eq!(state(&control, &window).await.url, "about:blank");
+    // A tab opened behind leaves the active window alone.
+    let view = || async { control.call::<SessionView>(Method::SessionView { session_id: created.session_id.clone() }).await.unwrap() };
+    let behind = Method::WindowCreate {
+        session_id: created.session_id.clone(),
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Browser,
+        url: Some("example.com/next".into()),
+        background: true,
+    };
+    let behind: Created = control.call(behind).await.unwrap();
+    let shown = view().await.session;
+    assert_eq!(shown.active_window, window.window_id, "background: the active window stays");
+    assert!(shown.windows.iter().any(|w| w.id == behind.window_id));
+    assert_eq!(state(&control, &behind).await.url, "https://example.com/next");
     let session = Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: Some("10.0.0.2:8080".into()) };
     let session: Created = control.call(session).await.unwrap();
     assert_eq!(state(&control, &session).await.url, "http://10.0.0.2:8080");

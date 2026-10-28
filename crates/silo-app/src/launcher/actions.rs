@@ -162,14 +162,16 @@ impl Workspace {
             (Target::Tab, Row::Path(path)) => {
                 let Some(view) = &self.view else { return };
                 let spawn = SpawnSpec { cwd: Some(path), command: Vec::new(), size: None };
-                let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None };
+                let method =
+                    Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false };
                 self.open_files_path(method, cx);
             }
             (Target::Tab, Row::Run(command)) => {
                 let Some(view) = &self.view else { return };
                 let cwd = self.new_block_folder(window, cx);
                 let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-                let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Terminal, url: None };
+                let method =
+                    Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Terminal, url: None, background: false };
                 self.launch_command(method, command, cx);
             }
             (Target::Split { block, side, .. }, row) => {

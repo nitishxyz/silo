@@ -21,6 +21,7 @@ pub enum MouseButton {
 use cef::sys::cef_event_flags_t as F;
 
 pub(crate) const IS_REPEAT: u32 = F::EVENTFLAG_IS_REPEAT.0;
+pub(crate) const NUM_LOCK: u32 = F::EVENTFLAG_NUM_LOCK_ON.0;
 
 impl Modifiers {
     pub(crate) fn flags(self) -> u32 {

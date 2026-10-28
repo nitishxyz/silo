@@ -283,7 +283,7 @@ impl Workspace {
         let Some(view) = &self.view else { return };
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None });
+        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false });
     }
 
     /// New Files Pane: a Files block beside `block`, at its folder.
@@ -371,8 +371,8 @@ fn with_cwd(method: Method, cwd: String) -> Method {
         Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {
             Method::BlockSplit { block_id, axis, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, agent }
         }
-        Method::WindowCreate { session_id, spawn, kind, url } => {
-            Method::WindowCreate { session_id, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url }
+        Method::WindowCreate { session_id, spawn, kind, url, background } => {
+            Method::WindowCreate { session_id, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, background }
         }
         other => other,
     }

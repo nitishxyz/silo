@@ -315,7 +315,7 @@ impl Tools {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Files, url: None },
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false },
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Files, url: None },
                         }
                     }
@@ -411,7 +411,13 @@ impl Tools {
                             Ok(created) => created,
                             // A floating or parked agent: a tab in its session.
                             Err(_) => {
-                                let tab = Method::WindowCreate { session_id: agent.session_id.clone(), spawn, kind: BlockKind::Changes, url: None };
+                                let tab = Method::WindowCreate {
+                                    session_id: agent.session_id.clone(),
+                                    spawn,
+                                    kind: BlockKind::Changes,
+                                    url: None,
+                                    background: false,
+                                };
                                 self.control.call(tab).await?
                             }
                         }
@@ -420,7 +426,9 @@ impl Tools {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         let method = match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Changes, url: None },
+                            Some(s) => {
+                                Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Changes, url: None, background: false }
+                            }
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Changes, url: None },
                         };
                         self.control.call(method).await?
@@ -536,18 +544,18 @@ impl Tools {
                 Some(session) => {
                     let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                     match sessions.iter().find(|s| s.name == session || s.id == session) {
-                        Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url },
+                        Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false },
                         None => Method::SessionCreate { name: Some(session.into()), spawn, kind, url },
                     }
                 }
                 // Else the session the agent works in (its block's), then the default one.
                 None => match self.anchor_session(anchor.as_deref()).await? {
-                    Some(session_id) => Method::WindowCreate { session_id, spawn, kind, url },
+                    Some(session_id) => Method::WindowCreate { session_id, spawn, kind, url, background: false },
                     None => {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url },
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false },
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind, url },
                         }
                     }

@@ -352,6 +352,10 @@ pub enum Method {
         /// Browser blocks: the start URL (default `about:blank`).
         #[serde(default)]
         url: Option<String>,
+        /// Leave the active window as it is (a tab opened behind, like a
+        /// ⌘-clicked link).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        background: bool,
     },
     #[serde(rename = "window.select")]
     WindowSelect { session_id: SessionId, window_id: WindowId },

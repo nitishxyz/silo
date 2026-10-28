@@ -1274,7 +1274,13 @@ impl Workspace {
     pub(crate) fn open_page_tab(&mut self, url: String) {
         let Some(view) = &self.view else { return };
         let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url) });
+        self.call(Method::WindowCreate {
+            session_id: view.session.id.clone(),
+            spawn,
+            kind: silo_proto::model::BlockKind::Browser,
+            url: Some(url),
+            background: false,
+        });
     }
 
     fn activate_entry(&mut self, entry: Entry, how: finder::OpenIn, window: &mut Window, cx: &mut Context<Self>) {

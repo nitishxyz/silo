@@ -59,16 +59,35 @@ overlap overlays and stay in one scene. So **CEF**, with two pieces of fork work
 
 **Message loop:**
 - `multi_threaded_message_loop` is unsupported on macOS, so we use `external_message_pump: true`.
-- `CefApp::on_schedule_message_pump_work(delay)` posts a GPUI foreground task that calls
-  `cef::do_message_loop_work()` after `delay`, plus a 30 Hz safety tick while any browser exists. That is the
-  pattern of desktop-platform's old `pump.rs`.
-- Paint callbacks arrive on the UI thread, so there are no mutexes on the hot path.
+- `CefApp::on_schedule_message_pump_work(delay)` records the due time and wakes the app's pump loop
+  (`silo-app/src/web.rs`, a `Notify`, no polling), which calls `cef::do_message_loop_work()` when it's due,
+  plus a 30 Hz safety tick while any browser exists: CEF never re-announces delayed work it saw during a
+  pump (the old 4 ms poll woke the main thread 250 times a second, browsers or not).
+- Paint callbacks arrive on the UI thread, so there are no mutexes on the hot path. A paint marks its pane,
+  which the loop notifies right after that pump.
+
+**Frames (external begin frames):**
+- CEF's own frame timer runs as delayed tasks on the UI thread and missed most frames while a page
+  scrolled: 18–35 fps with 80–135 ms gaps, at any `windowless_frame_rate`, however the pump ran. So
+  every page has `external_begin_frame_enabled` and paints only when asked (`Browser::begin_frame`).
+- A shown pane asks on each refresh of its window (`window.on_next_frame`, `web::Frames`) while it is
+  active: it painted or got input in the last second (input with no loop running asks once at once).
+  An idle page, a hidden tab's (5 fps) and the off-screen host's get frames from `Runtime::drive_pages`
+  on the pump's tick, so a change still shows and wakes the refresh loop.
+- `windowless_frame_rate` is the display's refresh (`display_rate`: the fastest screen's
+  `maximumFramesPerSecond`, 60–240): CEF captures no more frames than that, asked or not.
+- `cargo run -p silo-web --example offscreen -- --perf` measures it (800x600@2x text page, a 120 Hz
+  display, 2026-10-28): scrolling at 120 Hz input painted 18–22 fps (paint interval p50 35 ms, p95
+  135 ms) before, 116–118 fps (p50 8.3 ms, p95 10 ms) after; wheel → paint p50 34 → 20 ms; rAF 60 →
+  120 fps.
 
 **Accelerated paint on macOS:**
 - `on_accelerated_paint(info)` hands over `info.shared_texture_io_surface`, which is valid only during the
   callback.
 - We `CVPixelBufferCreateWithIOSurface` (retaining the IOSurface), store it as the pane's current frame and
-  `cx.notify()`. The surface element paints the latest buffer.
+  `cx.notify()`. The surface element paints the latest buffer (gpui's `CVMetalTextureCache`: no copy).
+- CEF paints into 3 surfaces in turn: the one held is painted again 2–3 frames later at the soonest, after
+  gpui drew it (`--perf` prints it).
 - Software `on_paint` isn't implemented (no fallback). Init fails loudly if `shared_texture_enabled` isn't honoured.
 
 ## 3. Server-held state (proto, registry, persistence)
@@ -128,8 +147,31 @@ checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs`
     `main.rs`.
 - `Browser` handle: `navigate/back/forward/reload/zoom/resize(scale,size)/focus`, mouse/key/wheel/IME events,
   and `frame() -> Option<CVPixelBuffer>`.
-- Events: `UrlChanged`, `TitleChanged`, `FaviconChanged`, `Loading`, `HistoryChanged`, `Popup(url)` (opened as a
-  new browser block via `block.split`), `CursorChanged`.
+- Events: `UrlChanged`, `TitleChanged`, `FaviconChanged`, `Loading`, `HistoryChanged`, `NewTab`, `ContextMenu`,
+  `CursorChanged`, `Closed {by_page}`.
+- **New tabs** (`silo-web/src/popup.rs`, `silo-app/src/browser_pane/tabs.rs`): one path for ⌘-/middle-/⇧⌘-clicked
+  links, `target=_blank`, `window.open` and the context menu's Open in New Tab: `window.create {kind: browser,
+  background}` in the page's session (a tab; `background` leaves the active tab alone).
+  - Dispositions: `NEW_BACKGROUND_TAB` (⌘-click, middle click) opens behind; `NEW_FOREGROUND_TAB` (⇧⌘),
+    `NEW_POPUP`, `NEW_WINDOW` (⇧-click, `window.open`) in front; downloads, PiP and the current tab are not tabs.
+  - Modified link clicks reach `on_open_urlfrom_tab` (no opener, as in Chrome): cancelled there, a fresh page opens.
+  - `window.open` and `target=_blank` reach `on_before_popup`: it sets windowless `WindowInfo`, this crate's
+    client (a new `Shared`) and returns 0, so CEF creates the popup in the opener's process and context with
+    `window.opener` intact. `Event::NewTab {popup: Some(Popup)}` hands it to the app; `Popup::open(notify)` adopts
+    it. The new block starts blank (no second load); the adopting pane keeps its engine state over the
+    server's until it owns the block, then reports. A window showing the block takes that pane; else the
+    off-screen host runs it (also for remote hosts), so a tab opened behind loads and gets its title.
+    `on_before_popup_aborted` and a popup closed before CEF made it are handled. `window.open` features
+    (`size`) are reported but a tab ignores them.
+  - `window.close()` in a popup: `Closed {by_page: true}` → `block.close`; the opener sees `closed`.
+  - No popup blocker: popups without a user gesture open too (at most 8 pending per page).
+- **Context menu:** `run_context_menu` holds CEF's callback and sends `Event::ContextMenu` (link, image,
+  selection, editable + edit flags, misspelled word + suggestions). The pane draws `context_menu.rs` (the Files
+  menu's look; ↑↓ ↩ esc) with rows from `browser_pane/menu.rs`; engine rows answer with
+  `Browser::menu_command` (CEF runs them on the clicked frame), app rows (new tab, copy link/image/address,
+  search, back/forward/reload) cancel it. Copy Image downloads the image as PNG (`Browser::image_png`).
+  No Save Image, View Source or Inspect (no downloads or devtools UI; `view-source:` is not a block URL).
+- Verified by `cargo run -p silo-web --example offscreen -- --popups` (also part of the full run).
 - Ported from desktop-platform `web-runtime/session/*` and `webview/{pump,keyboard,input,frame}.rs`.
   DMA-BUF is replaced by IOSurface, and agentkit is dropped.
 
@@ -157,6 +199,20 @@ checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs`
   Chromium's gesture recognizer turns the spread into a page-scale pinch, clamped to 1×–3× (measured in this
   windowless browser); navigation resets it. One gesture's spread is limited to 0.35×–6× of its start, so
   going from 3× back to 1× may take two pinches.
+  - CEF takes no trackpad pinch (no gesture events), and CDP's `Input.synthesizePinchGesture` neither zooms a
+    windowless page nor keeps up (~100 ms a step), so touches it is.
+  - Scrolling must work after any pinch (`--pinch` in the offscreen example proves each):
+    - Touches are always **cancelled**, never released: a release with the fingers still moving flings, and a
+      fling over a cross-site frame left Chromium's touch scroll running, which took every wheel scroll after.
+    - Touches left down take no wheel scroll: a step-less pinch is lifted after 300 ms (a lost end, resting
+      fingers; the next step starts a new sequence), and a click, blur, navigation, hidden tab, detach or
+      closed page lifts them. Scrolling while the touches are down pans them (the page follows the fingers).
+    - A wheel scroll just before or during a pinch stayed latched through it (CEF adds wheel phases by a
+      500 ms timer) and swallowed the next scroll while the wheel kept coming. Each pinch's end flips the
+      NumLock flag on later wheel events: a modifier change starts a new wheel scroll at once.
+  - After a pinch the pane reads `visualViewport.scale` back (its own count is an estimate).
+- **Wheel:** CEF takes whole points; fractions carry to the next event (rounding lost slow trackpad scrolls
+  and inflated others). No phases reach CEF's windowless API: it adds its own, momentum included.
 - **Smart zoom** (two-finger double tap, `on_smart_magnify`; fork `SmartMagnifyEvent`): 2× at the pointer, or back
   to 1× (the narrowest spread, clamped by Chromium), as a short synthetic pinch of 12 frames (2 under Reduce
   Motion). The scale the pane tracks is an estimate; it only decides which way smart zoom goes.

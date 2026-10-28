@@ -1254,6 +1254,7 @@ impl Workspace {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
         self.call(Method::BlockSplit {
+            background: false,
             block_id: block,
             axis,
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },

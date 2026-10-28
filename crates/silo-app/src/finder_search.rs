@@ -110,7 +110,7 @@ impl Workspace {
                     let axis = self.auto_axis(&block);
                     Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Files, url: None, agent: None }
                 }
-                None => Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None },
+                None => Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None, background: false },
             };
             let control = control.clone();
             let task = self.rt.spawn(async move {

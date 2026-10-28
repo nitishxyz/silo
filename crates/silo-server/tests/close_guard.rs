@@ -216,7 +216,13 @@ async fn session_close_is_all_or_nothing_until_forced() {
     let mut raw = Raw::guarded(&home).await;
     let created = session(&control, IDLE).await;
     let window: Created = control
-        .call(Method::WindowCreate { session_id: created.session_id.clone(), spawn: command(SLEEP), kind: BlockKind::Terminal, url: None })
+        .call(Method::WindowCreate {
+            session_id: created.session_id.clone(),
+            spawn: command(SLEEP),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+        })
         .await
         .unwrap();
     until_busy(&mut raw, &created.session_id, &[&window.block_id]).await;

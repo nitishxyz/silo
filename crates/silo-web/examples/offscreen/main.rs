@@ -1,10 +1,13 @@
 //! Smoke test: init CEF windowless, load solid-colour pages, wait for accelerated paints and check
 //! the IOSurface centre pixel after input, navigation and tunnel-PAC loads. Re-execs itself inside a dev
-//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen`
+//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen [-- --popups | --pinch | --perf]`
 
 mod arrows;
 mod bundle;
 mod nav;
+mod perf;
+mod pinch;
+mod popups;
 mod server;
 mod sigchld;
 mod tunnel;
@@ -47,8 +50,9 @@ fn pixels_match(pixel: [u8; 4], expected: [u8; 4]) -> bool {
     pixel.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 2)
 }
 
-/// Earliest pump CEF asked for; the example pumps exactly like silo-app (`web.rs`): when due,
-/// plus a 33 ms safety tick while browsers are live, never otherwise.
+/// Earliest pump CEF asked for; the example pumps like silo-app (`web.rs`): when due, plus a
+/// 33 ms safety tick while browsers are live, never otherwise. Pages get frames from
+/// `Runtime::drive_pages` (no window drives them).
 static DUE: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -77,6 +81,28 @@ fn pump_once(runtime: &Runtime) {
         *last = Some(now);
         runtime.pump();
     }
+    runtime.drive_pages();
+}
+
+/// Like the app's pump (`silo-app/src/web.rs`): when CEF's requested time
+/// comes (0.25 ms run-loop slices stand in for its wake-up), plus the tick.
+fn pump_precise(runtime: &Runtime) {
+    NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.000_25));
+    let now = Instant::now();
+    let due = {
+        let mut due = DUE.lock().unwrap();
+        let ready = due.is_some_and(|d| d <= now);
+        if ready {
+            *due = None;
+        }
+        ready
+    };
+    let mut last = LAST.lock().unwrap();
+    if due || (Runtime::live_browsers() > 0 && last.is_none_or(|l| now - l >= Duration::from_millis(33))) {
+        *last = Some(now);
+        runtime.pump();
+    }
+    runtime.drive_pages();
 }
 
 fn pump_for(runtime: &Runtime, duration: Duration) {
@@ -140,6 +166,23 @@ fn run() -> Result<()> {
     probe.check("after init")?;
     let handling = app.respondsToSelector(sel!(isHandlingSendEvent));
     println!("offscreen: CEF initialized; NSApp answers isHandlingSendEvent: {handling}");
+    // `--popups`: only the new tab and context menu checks.
+    if std::env::args().any(|arg| arg == "--popups") {
+        let result = popups::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
+
+    if std::env::args().any(|arg| arg == "--perf") {
+        let result = perf::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
+    if std::env::args().any(|arg| arg == "--pinch") {
+        let result = pinch::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
 
     // Like the app on launch: the engine idles (pumped only when CEF asks) before the first
     // page, longer than the helpers' 15 s connection timeout; then a tunnelled profile opens.
@@ -172,6 +215,8 @@ fn run() -> Result<()> {
         wait_for(&runtime, &browser, BLUE, (200, 100), "after resize to 200x100@1x")?;
         arrows::run(&runtime, &browser)?;
         nav::run(&runtime, &browser)?;
+        popups::run(&runtime)?;
+        pinch::run(&runtime)?;
         pump_for(&runtime, Duration::from_secs(2));
         probe.check("after navigation")
     })();

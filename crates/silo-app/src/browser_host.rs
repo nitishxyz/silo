@@ -179,9 +179,56 @@ impl BrowserHost {
         cx.try_global::<GlobalHost>().map(|g| g.0.clone())
     }
 
-    /// A window shows `block`: the hosted pane, if any.
-    pub fn take(block: &str, cx: &mut App) -> Option<Entity<BrowserPane>> {
-        Self::global(cx)?.update(cx, |this, _| this.hosted.take(block))
+    /// A window shows `block` (of the remote host `remote`, else of this
+    /// Mac's server): the hosted pane, if any.
+    pub fn take(block: &str, remote: Option<usize>, cx: &mut App) -> Option<Entity<BrowserPane>> {
+        Self::global(cx)?.update(cx, |this, _| match remote {
+            Some(host) => this.remote.get_mut(&host)?.take(block),
+            None => this.hosted.take(block),
+        })
+    }
+
+    /// A new tab's pane made by the page that opened it (`browser_pane/tabs.rs`):
+    /// a window already showing its block gets it in place of its own pane
+    /// when `replace` (an adopted popup), else keeps its own; no window: it
+    /// runs here until one shows it. False when it was not kept.
+    pub fn adopt(pane: Entity<BrowserPane>, replace: bool, cx: &mut App) -> bool {
+        let (block, route) = {
+            let pane = pane.read(cx);
+            (pane.block_id.clone(), pane.route().clone())
+        };
+        let remote = match &route {
+            Route::Local => None,
+            Route::Remote { host_id, .. } => {
+                let hosts = HostsState::global(cx);
+                let index = hosts.read(cx).entries().iter().position(|e| match &e.info.transport {
+                    crate::hosts::Transport::Iroh { addr, .. } => addr.id.to_string() == *host_id,
+                    crate::hosts::Transport::Shared { ticket, .. } => ticket.addr.id.to_string() == *host_id,
+                    crate::hosts::Transport::Local { .. } => false,
+                });
+                let Some(index) = index else { return false };
+                Some(index)
+            }
+        };
+        let showing = cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).find(|w| {
+            w.read(cx).ok().is_some_and(|w| {
+                let host = match remote {
+                    Some(index) => w.active_host == index,
+                    None => w.hosts.get(w.active_host).is_some_and(|h| h.info.local),
+                };
+                host && w.blocks.browser(&block).is_some()
+            })
+        });
+        if let Some(window) = showing {
+            return replace && window.update(cx, |w, window, cx| w.install_browser(&block, pane, window, cx)).is_ok();
+        }
+        let Some(host) = Self::global(cx) else { return false };
+        pane.update(cx, |pane, _| pane.detach());
+        host.update(cx, |this, _| match remote {
+            Some(index) => this.remote.entry(index).or_default().keep(block, pane),
+            None => this.hosted.keep(block, pane),
+        });
+        true
     }
 
     /// A window stops showing `panes`: those of this Mac's server run on
@@ -258,6 +305,19 @@ impl BrowserHost {
         if let Some(hosted) = self.remote.get_mut(&host) {
             hosted.apply(&event.event, |pane| pane.read(cx).info.as_ref().map(|i| i.session_id.clone()));
             hosted.retain_unshown(|block| on_host(block, cx));
+            match &event.event {
+                ConnEvent::Event(Event::BlockChanged { block }) => {
+                    if let Some(pane) = hosted.get(&block.id) {
+                        pane.update(cx, |pane, cx| pane.set_info(block.clone(), cx));
+                    }
+                }
+                ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
+                    if let Some(pane) = hosted.get(block_id) {
+                        pane.update(cx, |pane, cx| pane.apply_command(command, cx));
+                    }
+                }
+                _ => {}
+            }
         }
         if let (ConnEvent::Event(Event::AppRequest { request_id, request, .. }), Some(control)) = (&event.event, control) {
             match runner(request, |block| on_host(block, cx)) {

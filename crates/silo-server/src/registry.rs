@@ -893,7 +893,8 @@ impl Registry {
         Ok(Created { session_id, window_id, block_id })
     }
 
-    pub fn create_window(&mut self, session_id: &str, new: &New<'_>) -> Result<Created, RpcError> {
+    /// A new window (tab) of one block, made active unless `background`.
+    pub fn create_window(&mut self, session_id: &str, new: &New<'_>, background: bool) -> Result<Created, RpcError> {
         let session = self.session(session_id)?;
         let sid = session.id.clone();
         let fallback = session.windows.iter().find(|w| w.id == session.active_window).map(|w| self.window_size(w)).unwrap_or(TermSize::new(80, 24));
@@ -907,7 +908,9 @@ impl Registry {
         let window_id = self.fresh_id('w');
         let session = self.session_mut(&sid)?;
         session.windows.push(Window::new(window_id.clone(), &block_id));
-        session.active_window = window_id.clone();
+        if !background {
+            session.active_window = window_id.clone();
+        }
         let si = self.sessions.iter().position(|s| s.id == sid).unwrap_or(0);
         self.session_changed(si);
         self.sessions_changed();

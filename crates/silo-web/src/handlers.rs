@@ -2,10 +2,12 @@
 //! which with the external message pump is the app's main thread.
 
 #![allow(clippy::transmute_ptr_to_ptr)]
+// `wrap_client!`'s generated `new` takes one argument per handler.
+#![allow(clippy::too_many_arguments)]
 
 use std::os::raw::c_int;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 use cef::*;
@@ -138,7 +140,7 @@ wrap_render_handler! {
                 Ok(frame) => {
                     *lock(&self.shared.frame) = Some(frame);
                     self.shared.painted();
-                    (self.shared.notify)();
+                    self.shared.notify();
                 }
                 Err(err) => tracing::error!("silo-web: accelerated paint dropped: {err:#}"),
             }
@@ -293,13 +295,7 @@ wrap_download_image_callback! {
             if status != 0 && !(200..400).contains(&status) {
                 return;
             }
-            // libcef rejects null out-params, so the pixel size must be passed even though unused.
-            let (mut width, mut height) = (0, 0);
-            let png = image.and_then(|image| image.as_png(1.0, 1, Some(&mut width), Some(&mut height)));
-            let Some(png) = png else { return };
-            let mut bytes = vec![0; png.size()];
-            let copied = png.data(Some(&mut bytes), 0);
-            bytes.truncate(copied);
+            let Some(bytes) = image.and_then(png) else { return };
             if bytes.is_empty() || bytes.len() > FAVICON_LIMIT {
                 return;
             }
@@ -307,6 +303,39 @@ wrap_download_image_callback! {
             self.shared.push(Event::FaviconChanged(url));
         }
     }
+}
+
+/// `image` encoded as PNG at 1x.
+fn png(image: &mut Image) -> Option<Vec<u8>> {
+    // libcef rejects null out-params, so the pixel size must be passed even though unused.
+    let (mut width, mut height) = (0, 0);
+    let png = image.as_png(1.0, 1, Some(&mut width), Some(&mut height))?;
+    let mut bytes = vec![0; png.size()];
+    let copied = png.data(Some(&mut bytes), 0);
+    bytes.truncate(copied);
+    Some(bytes)
+}
+
+type ImageReply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Option<Vec<u8>>>>>>;
+
+wrap_download_image_callback! {
+    pub(crate) struct ImageCallback {
+        reply: ImageReply,
+    }
+
+    impl DownloadImageCallback {
+        fn on_download_image_finished(&self, _url: Option<&CefString>, status: c_int, image: Option<&mut Image>) {
+            let ok = status == 0 || (200..400).contains(&status);
+            let bytes = image.filter(|_| ok).and_then(png).filter(|bytes| !bytes.is_empty());
+            if let Some(reply) = lock(&self.reply).take() {
+                let _ = reply.send(bytes);
+            }
+        }
+    }
+}
+
+pub(crate) fn image_callback(reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>) -> DownloadImageCallback {
+    ImageCallback::new(Arc::new(Mutex::new(Some(reply))))
 }
 
 wrap_load_handler! {
@@ -361,32 +390,62 @@ wrap_load_handler! {
     }
 }
 
+/// Popups a page may have waiting for CEF to create them; more are refused.
+const PENDING_POPUPS: usize = 8;
+
 wrap_life_span_handler! {
     pub(crate) struct PageLifeSpanHandler {
         shared: Arc<Shared>,
+        tunnel: SharedTunnel,
     }
 
     impl LifeSpanHandler {
+        // A new tab: CEF creates the popup windowless with this crate's handlers (its opener link,
+        // `postMessage` and `closed`, intact) and the app adopts it from `Event::NewTab`.
         fn on_before_popup(
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            _popup_id: c_int,
+            popup_id: c_int,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
-            _target_disposition: WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             _user_gesture: c_int,
-            _popup_features: Option<&PopupFeatures>,
-            _window_info: Option<&mut WindowInfo>,
-            _client: Option<&mut Option<Client>>,
-            _settings: Option<&mut BrowserSettings>,
+            popup_features: Option<&PopupFeatures>,
+            window_info: Option<&mut WindowInfo>,
+            client: Option<&mut Option<Client>>,
+            settings: Option<&mut BrowserSettings>,
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
-            if let Some(url) = target_url.map(ToString::to_string).filter(|url| !url.is_empty()) {
-                self.shared.push(Event::Popup(url));
+            let Some(foreground) = crate::popup::tab_for(target_disposition) else { return 1 };
+            let url = target_url.map(ToString::to_string).unwrap_or_default();
+            let size = popup_features.filter(|f| f.width_set != 0 && f.height_set != 0).map(|f| (f.width, f.height));
+            let mut pending = lock(&self.shared.popups);
+            pending.retain(|(_, popup)| lock(&popup.browser).is_none() && !popup.closing.load(Ordering::Acquire));
+            let (Some(window_info), Some(client), Some(settings)) = (window_info, client, settings) else { return 1 };
+            if pending.len() >= PENDING_POPUPS {
+                return 1;
             }
-            1
+            let popup = crate::popup::Popup::shared(*lock(&self.shared.view));
+            *window_info = crate::browser::window_info();
+            *settings = crate::browser::settings(!foreground);
+            popup.frame_rate.store(crate::browser::frame_rate(!foreground), Ordering::Relaxed);
+            *client = Some(crate::handlers::client(&popup, &self.tunnel));
+            pending.push((popup_id, Arc::clone(&popup)));
+            drop(pending);
+            crate::runtime::browser_opened();
+            self.shared.push(Event::NewTab(crate::NewTab { url, foreground, popup: Some(crate::Popup(popup)), size }));
+            0
+        }
+
+        fn on_before_popup_aborted(&self, _browser: Option<&mut Browser>, popup_id: c_int) {
+            let mut pending = lock(&self.shared.popups);
+            let Some(index) = pending.iter().position(|(id, _)| *id == popup_id) else { return };
+            let (_, popup) = pending.remove(index);
+            drop(pending);
+            popup.push(Event::Closed { by_page: true });
+            crate::runtime::browser_closed();
         }
 
         fn on_after_created(&self, browser: Option<&mut Browser>) {
@@ -394,15 +453,50 @@ wrap_life_span_handler! {
             if let (Some(url), Some(frame)) = (queued, browser.as_ref().and_then(|browser| browser.main_frame())) {
                 frame.load_url(Some(&CefString::from(url.as_str())));
             }
+            // A popup the app closed before CEF had created it.
+            if self.shared.closing.load(Ordering::Acquire)
+                && let Some(host) = browser.as_ref().and_then(|browser| browser.host())
+            {
+                host.close_browser(1);
+            }
             *lock(&self.shared.browser) = browser.map(|browser| browser.clone());
-            (self.shared.notify)();
+            self.shared.notify();
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             self.shared.devtools.close();
             lock(&self.shared.browser).take();
-            self.shared.push(Event::Closed);
+            if let Some(menu) = lock(&self.shared.menu).take() {
+                menu.cancel();
+            }
+            self.shared.push(Event::Closed { by_page: !self.shared.closing.load(Ordering::Acquire) });
             crate::runtime::browser_closed();
+        }
+    }
+}
+
+wrap_context_menu_handler! {
+    pub(crate) struct PageMenuHandler {
+        shared: Arc<Shared>,
+    }
+
+    impl ContextMenuHandler {
+        // The app draws the menu (`Event::ContextMenu`) and answers with `Browser::menu_command`.
+        fn run_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            _model: Option<&mut MenuModel>,
+            callback: Option<&mut RunContextMenuCallback>,
+        ) -> c_int {
+            let (Some(params), Some(callback)) = (params, callback) else { return 0 };
+            let menu = crate::menu::ContextMenu::from_params(params);
+            if let Some(previous) = lock(&self.shared.menu).replace(callback.clone()) {
+                previous.cancel();
+            }
+            self.shared.push(Event::ContextMenu(menu));
+            1
         }
     }
 }
@@ -414,6 +508,22 @@ wrap_request_handler! {
     }
 
     impl RequestHandler {
+        // A navigation asking for another tab that CEF doesn't make a popup of (e.g. a ⌘-clicked
+        // link): it opens fresh in a new tab, this page stays.
+        fn on_open_urlfrom_tab(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            target_url: Option<&CefString>,
+            target_disposition: WindowOpenDisposition,
+            _user_gesture: c_int,
+        ) -> c_int {
+            let Some(foreground) = crate::popup::tab_for(target_disposition) else { return 0 };
+            let url = target_url.map(ToString::to_string).unwrap_or_default();
+            self.shared.push(Event::NewTab(crate::NewTab { url, foreground, popup: None, size: None }));
+            1
+        }
+
         // UI thread. A file drop the page didn't handle never navigates the block.
         fn on_before_browse(
             &self,
@@ -553,6 +663,7 @@ wrap_client! {
         request: RequestHandler,
         permission: PermissionHandler,
         dialogs: JsdialogHandler,
+        menu: ContextMenuHandler,
     }
 
     impl Client {
@@ -587,6 +698,10 @@ wrap_client! {
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
             Some(PageKeys::new())
         }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(self.menu.clone())
+        }
     }
 }
 
@@ -595,10 +710,11 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         ViewHandler::new(Arc::clone(shared)),
         PageDisplayHandler::new(Arc::clone(shared)),
         PageLoadHandler::new(Arc::clone(shared)),
-        PageLifeSpanHandler::new(Arc::clone(shared)),
+        PageLifeSpanHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PageRequestHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PagePermissionHandler::new(Arc::clone(shared)),
         AgentDialogs::new(Arc::clone(shared)),
+        PageMenuHandler::new(Arc::clone(shared)),
     )
 }
 

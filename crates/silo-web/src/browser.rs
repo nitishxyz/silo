@@ -1,7 +1,7 @@
 //! One windowless browser (a browser block's engine side).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Result, bail};
 use cef::*;
@@ -16,14 +16,40 @@ use crate::{Profile, Runtime};
 /// optional-in-spirit IME ranges must be passed explicitly.
 const NO_RANGE: Range = Range { from: u32::MAX, to: u32::MAX };
 
-/// Frames per second of a page a window shows, and of one nobody sees (the
-/// off-screen host): still painting, so CDP screenshots and timers work.
-pub const FRAME_RATE: u32 = 60;
+/// Frames per second of a page nobody sees (the off-screen host): still
+/// painting, so CDP screenshots and timers work. A page a window shows
+/// paints at the display's rate ([`display_rate`]).
 pub const HIDDEN_FRAME_RATE: u32 = 5;
+
+/// The fastest refresh rate among the Mac's displays (a ProMotion panel's
+/// 120 Hz), 60 when unknown: CEF paints at most this often. Main thread.
+pub fn display_rate() -> u32 {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    let Some(class) = AnyClass::get(c"NSScreen") else { return 60 };
+    let screens: *mut AnyObject = unsafe { msg_send![class, screens] };
+    if screens.is_null() {
+        return 60;
+    }
+    let count: usize = unsafe { msg_send![screens, count] };
+    let fastest = (0..count)
+        .map(|i| {
+            let screen: *mut AnyObject = unsafe { msg_send![screens, objectAtIndex: i] };
+            let fps: isize = unsafe { msg_send![screen, maximumFramesPerSecond] };
+            fps
+        })
+        .max()
+        .unwrap_or(60);
+    clamp_rate(fastest)
+}
+
+fn clamp_rate(fps: isize) -> u32 {
+    u32::try_from(fps).unwrap_or(60).clamp(60, 240)
+}
 
 /// The windowless frame rate of a page shown or kept off screen.
 pub fn frame_rate(offscreen: bool) -> u32 {
-    if offscreen { HIDDEN_FRAME_RATE } else { FRAME_RATE }
+    if offscreen { HIDDEN_FRAME_RATE } else { display_rate() }
 }
 
 pub struct BrowserOptions<'a> {
@@ -63,28 +89,10 @@ pub enum Pinch {
 
 impl Runtime {
     pub fn create_browser(&self, options: BrowserOptions) -> Result<Browser> {
-        let shared = Arc::new(Shared {
-            devtools: Arc::default(),
-            view: Mutex::new(options.size),
-            frame: Mutex::new(None),
-            browser: Mutex::new(None),
-            events: Mutex::new(Vec::new()),
-            notify: options.notify,
-            focused: AtomicBool::new(false),
-            last_input: Mutex::new(None),
-            dropped: Mutex::new(None),
-            theme_tag: crate::shared::theme_tag(),
-            blank: AtomicBool::new(true),
-            shown: AtomicBool::new(false),
-            queued: Mutex::new(None),
-            cert_failed: Mutex::new(None),
-            scroll: Mutex::new((0.0, 0.0)),
-        });
-        let window_info =
-            WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
-        #[allow(clippy::cast_possible_wrap)]
-        let rate = frame_rate(options.offscreen) as i32;
-        let settings = BrowserSettings { windowless_frame_rate: rate, background_color: 0xFFFF_FFFF, ..Default::default() };
+        let shared = Shared::new(options.size, options.notify);
+        shared.frame_rate.store(frame_rate(options.offscreen), Ordering::Relaxed);
+        let window_info = window_info();
+        let settings = settings(options.offscreen);
         let mut client = crate::handlers::client(&shared, &options.profile.tunnel);
         let mut context = options.profile.context.clone();
         let url = CefString::from(options.url);
@@ -97,7 +105,31 @@ impl Runtime {
     }
 }
 
+/// A windowless page's window: accelerated paint, Alloy (like every page
+/// here), and frames only when asked for ([`Browser::begin_frame`]): CEF's
+/// own frame timer, on its UI thread, misses most frames while the page
+/// scrolls (30 fps or less, with 80 ms gaps, at any frame rate).
+pub(crate) fn window_info() -> WindowInfo {
+    WindowInfo {
+        windowless_rendering_enabled: 1,
+        shared_texture_enabled: 1,
+        external_begin_frame_enabled: 1,
+        runtime_style: RuntimeStyle::ALLOY,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn settings(offscreen: bool) -> BrowserSettings {
+    #[allow(clippy::cast_possible_wrap)]
+    let rate = frame_rate(offscreen) as i32;
+    BrowserSettings { windowless_frame_rate: rate, background_color: 0xFFFF_FFFF, ..Default::default() }
+}
+
 impl Browser {
+    pub(crate) fn from_shared(shared: Arc<Shared>) -> Self {
+        Self { shared }
+    }
+
     /// In-process CDP; poll this future on the main thread.
     pub async fn cdp(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let host = self.host().ok_or_else(|| anyhow::anyhow!("browser is not ready or has closed"))?;
@@ -237,9 +269,24 @@ impl Browser {
 
     /// Shown in a window (full rate) or kept off screen (throttled).
     pub fn set_offscreen(&self, offscreen: bool) {
+        self.set_frame_rate(frame_rate(offscreen));
+    }
+
+    /// The most frames a second the page paints, asked for or not.
+    pub fn set_frame_rate(&self, fps: u32) {
+        self.shared.frame_rate.store(fps, Ordering::Relaxed);
         if let Some(host) = self.host() {
-            #[allow(clippy::cast_possible_wrap)]
-            host.set_windowless_frame_rate(frame_rate(offscreen) as i32);
+            host.set_windowless_frame_rate(i32::try_from(fps).unwrap_or(60));
+        }
+    }
+
+    /// Asks the page for a frame (call once per display refresh while it
+    /// shows): it runs its animations and paints what changed. A page no
+    /// one asks gets frames from [`Runtime::drive_pages`].
+    pub fn begin_frame(&self) {
+        if let Some(host) = self.host() {
+            *lock(&self.shared.frame_asked) = Some(std::time::Instant::now());
+            host.send_external_begin_frame();
         }
     }
 
@@ -248,18 +295,52 @@ impl Browser {
         if let Some(host) = self.host() {
             host.invalidate(PaintElementType::VIEW);
         }
+        self.begin_frame();
     }
 
     /// Asks the page to close; `Event::Closed` follows once CEF is done with it.
     pub fn close(&self) {
+        self.shared.closing.store(true, Ordering::Release);
+        self.menu_command(None);
         if let Some(host) = self.host() {
             host.close_browser(1);
         }
+    }
+
+    /// Answers the open context menu: run `command` (in the frame and with
+    /// the facts it opened on), or `None` when it closed with no engine
+    /// command picked.
+    pub fn menu_command(&self, command: Option<crate::MenuCommand>) {
+        let Some(callback) = lock(&self.shared.menu).take() else { return };
+        match command {
+            Some(command) => {
+                self.shared.input();
+                callback.cont(command.id(), EventFlags::default());
+            }
+            None => callback.cancel(),
+        }
+    }
+
+    /// The image at `url` as PNG bytes, loaded in this page's profile.
+    pub fn image_png(&self, url: &str) -> tokio::sync::oneshot::Receiver<Option<Vec<u8>>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(host) = self.host() {
+            let mut callback = crate::handlers::image_callback(tx);
+            host.download_image(Some(&CefString::from(url)), 0, 0, 0, Some(&mut callback));
+        }
+        rx
     }
 }
 
 fn copy_operation() -> DragOperationsMask {
     DragOperationsMask::from(sys::cef_drag_operations_mask_t::DRAG_OPERATION_COPY)
+}
+
+/// `delta` as whole points to send now and the fraction left over.
+#[allow(clippy::cast_possible_truncation)]
+fn whole(delta: f32) -> (i32, f32) {
+    let sent = delta.trunc();
+    (sent as i32, delta - sent)
 }
 
 /// Input, in view points (DIP) relative to the browser's top-left.
@@ -317,18 +398,38 @@ impl Browser {
     }
 
     /// Scroll by `(dx, dy)` points; positive `dy` moves content down, i.e. towards the top of the
-    /// page (gpui's and CEF's shared convention).
+    /// page (gpui's and CEF's shared convention). CEF takes whole points: fractions carry over
+    /// to the next event, so a slow trackpad scroll moves the page as far as the fingers.
     pub fn wheel(&self, x: f32, y: f32, dx: f32, dy: f32, mods: Modifiers) {
-        let event = mouse_event(x, y, mods, &[]);
+        let (rx, ry) = *lock(&self.shared.wheel_rest);
+        let ((sx, rx), (sy, ry)) = (whole(rx + dx), whole(ry + dy));
+        *lock(&self.shared.wheel_rest) = (rx, ry);
+        if (sx, sy) == (0, 0) {
+            return;
+        }
+        let mut event = mouse_event(x, y, mods, &[]);
+        if self.shared.wheel_relatch.load(Ordering::Relaxed) {
+            event.modifiers |= crate::input::NUM_LOCK;
+        }
         if let Some(host) = self.host() {
-            host.send_mouse_wheel_event(Some(&event), dx.round() as i32, dy.round() as i32);
+            host.send_mouse_wheel_event(Some(&event), sx, sy);
         }
     }
 
     /// A pinch as two touch points: Chromium's gesture recognizer turns
     /// their spread into a page-scale (visual viewport) zoom.
+    ///
+    /// A wheel scroll just before or during the pinch stays latched through
+    /// it and then takes no more wheel input until the wheel pauses for half
+    /// a second (CEF adds wheel phases by timer). Each pinch's end flips the
+    /// NumLock flag of later wheel events: a change of modifiers starts a
+    /// new wheel scroll at once (Macs have no NumLock key; pages see it only
+    /// through `getModifierState`).
     pub fn pinch(&self, step: Pinch, points: [(f32, f32); 2]) {
         let Some(host) = self.host() else { return };
+        if matches!(step, Pinch::End | Pinch::Cancel) {
+            self.shared.wheel_relatch.fetch_xor(true, Ordering::Relaxed);
+        }
         let type_ = match step {
             Pinch::Start => TouchEventType::PRESSED,
             Pinch::Move => TouchEventType::MOVED,
@@ -403,8 +504,29 @@ mod tests {
 
     #[test]
     fn pages_nobody_sees_render_slowly_but_still_render() {
-        assert_eq!(frame_rate(false), FRAME_RATE);
         assert_eq!(frame_rate(true), HIDDEN_FRAME_RATE);
         assert!((1..=5).contains(&HIDDEN_FRAME_RATE), "a few frames a second: screenshots and rAF keep working");
+    }
+
+    #[test]
+    fn wheel_fractions_carry_over() {
+        let mut rest = 0.0;
+        let mut sent = 0;
+        for _ in 0..10 {
+            let (whole, left) = whole(rest + 0.4);
+            sent += whole;
+            rest = left;
+        }
+        assert_eq!(sent, 4, "ten 0.4 pt steps scroll 4 pt, not 0 (rounded) or 10");
+        assert_eq!(whole(-2.7).0, -2);
+        assert!((whole(-2.7).1 + 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn shown_pages_paint_at_the_display_rate() {
+        assert_eq!(clamp_rate(120), 120, "ProMotion");
+        assert_eq!(clamp_rate(0), 60, "unknown");
+        assert_eq!(clamp_rate(30), 60);
+        assert_eq!(clamp_rate(500), 240);
     }
 }

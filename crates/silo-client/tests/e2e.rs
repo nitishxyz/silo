@@ -487,7 +487,9 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
 
     // Cross-window swaps are rejected and change nothing.
-    let other: Created = call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
+    let other: Created =
+        call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
+            .await;
     let after_create = next_view(&mut events, &sid).await;
     let err = call_err(&control, Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await;
     assert!(err.to_string().contains("different windows"), "{err}");
@@ -497,7 +499,9 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(unchanged.session.revision, after_create.session.revision);
 
     // window.move: order changes for every client.
-    let third: Created = call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
+    let third: Created =
+        call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
+            .await;
     next_view(&mut events, &sid).await;
     call_value(&control, Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await;
     let view = next_view(&mut events, &sid).await;

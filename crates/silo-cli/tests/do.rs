@@ -42,8 +42,10 @@ async fn do_calls_methods_with_generated_flags() {
     let spawn = || SpawnSpec { command: vec!["sleep".into(), "100".into()], ..SpawnSpec::default() };
     let created: Created = control.call(Method::SessionCreate { name: None, spawn: spawn(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let session = created.session_id.clone();
-    let second: Created =
-        control.call(Method::WindowCreate { session_id: session.clone(), spawn: spawn(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let second: Created = control
+        .call(Method::WindowCreate { session_id: session.clone(), spawn: spawn(), kind: BlockKind::Terminal, url: None, background: false })
+        .await
+        .unwrap();
     let active = || async {
         let view: SessionView = control.call(Method::SessionView { session_id: session.clone() }).await.unwrap();
         view.session.active_window

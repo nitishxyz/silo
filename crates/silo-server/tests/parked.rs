@@ -118,7 +118,13 @@ async fn parked_browsers_spawn_reveal_and_close_with_their_owner() {
     let v = view(&control, &main.session_id).await;
     assert!(v.session.windows[0].layout.contains(&page.block_id));
     let other: Created = control
-        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None })
+        .call(Method::WindowCreate {
+            session_id: main.session_id.clone(),
+            spawn: SpawnSpec::default(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+        })
         .await
         .unwrap();
     control.call_value(Method::BlockClose { block_id: main.block_id.clone(), force: true }).await.unwrap();
@@ -200,7 +206,13 @@ async fn parked_blocks_spawn_reveal_park_and_close() {
     let revealed = control.call_value(Method::BlockReveal { block_id: kept.block_id.clone(), reveal: Reveal::Float }).await.unwrap_err();
     assert_eq!(code(&revealed), "bad_request");
     let lone: Created = control
-        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None })
+        .call(Method::WindowCreate {
+            session_id: main.session_id.clone(),
+            spawn: SpawnSpec::default(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+        })
         .await
         .unwrap();
     assert_eq!(code(&control.call_value(Method::BlockPark { block_id: lone.block_id }).await.unwrap_err()), "conflict");

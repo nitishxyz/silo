@@ -216,7 +216,13 @@ async fn split_lists_reads_and_finds() {
 
     // A new window opens in the focused block's folder (the files block's
     // root); a new session in the home directory.
-    let window = Method::WindowCreate { session_id: created.session_id.clone(), spawn: SpawnSpec::default(), kind: BlockKind::Files, url: None };
+    let window = Method::WindowCreate {
+        session_id: created.session_id.clone(),
+        spawn: SpawnSpec::default(),
+        kind: BlockKind::Files,
+        url: None,
+        background: false,
+    };
     let window: Created = control.call(window).await.unwrap();
     assert_eq!(info(&control, &window).await.files.as_deref().unwrap().clone().root, root_s);
     let session = Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Files, url: None };

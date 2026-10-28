@@ -23,6 +23,24 @@ pub(crate) fn browser_closed() {
     LIVE_BROWSERS.fetch_sub(1, Ordering::SeqCst);
 }
 
+thread_local! {
+    /// Every page's state, for [`Runtime::drive_pages`] (CEF's UI thread).
+    static PAGES: std::cell::RefCell<Vec<std::sync::Weak<crate::shared::Shared>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn track(shared: &Arc<crate::shared::Shared>) {
+    PAGES.with_borrow_mut(|pages| {
+        pages.retain(|page| page.strong_count() > 0);
+        pages.push(Arc::downgrade(shared));
+    });
+}
+
+/// Whether a page last asked for a frame at `asked` is due one at `now`,
+/// at `fps` frames a second.
+fn frame_due(asked: Option<Instant>, fps: u32, now: Instant) -> bool {
+    asked.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1) / fps.max(1))
+}
+
 /// Called (from any thread) when CEF wants `Runtime::pump` after `delay`.
 pub type Schedule = Arc<dyn Fn(Duration) + Send + Sync>;
 
@@ -167,14 +185,34 @@ impl Runtime {
 }
 
 impl Runtime {
-    /// One `cef::do_message_loop_work`. Call when `Config::schedule` fires, and on a ~30 Hz
-    /// safety tick while `live_browsers() > 0`.
+    /// One `cef::do_message_loop_work`. Call as soon as `Config::schedule` asks (a delay of 0
+    /// means now: a frame or an input reply is waiting), and on a ~30 Hz safety tick while
+    /// `live_browsers() > 0`: CEF never re-announces delayed work it saw during a pump.
     pub fn pump(&self) {
         do_message_loop_work();
     }
 
     pub fn live_browsers() -> usize {
         LIVE_BROWSERS.load(Ordering::SeqCst)
+    }
+
+    /// Pages paint only when asked for a frame ([`crate::Browser::begin_frame`]): a page
+    /// nobody asked for one in its frame period (no window shows it, or its window
+    /// stopped drawing) gets one here. Call on every pump tick.
+    pub fn drive_pages(&self) {
+        let now = Instant::now();
+        let pages: Vec<_> = PAGES.with_borrow(|pages| pages.iter().filter_map(std::sync::Weak::upgrade).collect());
+        for page in pages {
+            let fps = page.frame_rate.load(Ordering::Relaxed);
+            if !frame_due(*crate::shared::lock(&page.frame_asked), fps, now) {
+                continue;
+            }
+            let host = crate::shared::lock(&page.browser).as_ref().and_then(|browser| browser.host());
+            if let Some(host) = host {
+                *crate::shared::lock(&page.frame_asked) = Some(now);
+                host.send_external_begin_frame();
+            }
+        }
     }
 
     /// The named profile, created on first use. `tunnel` only applies at creation; use
@@ -216,4 +254,20 @@ fn ns_app_class() -> Result<&'static objc2::runtime::AnyClass> {
     // `-class`, not the isa: KVO may have swizzled NSApp to an NSKVONotifying_ subclass.
     let class: &'static objc2::runtime::AnyClass = unsafe { objc2::msg_send![&*app, class] };
     Ok(class)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undriven_pages_get_a_frame_per_period() {
+        let now = Instant::now();
+        assert!(frame_due(None, 5, now), "never asked: due");
+        assert!(!frame_due(Some(now - Duration::from_millis(100)), 5, now), "5 fps: 200 ms apart");
+        assert!(frame_due(Some(now - Duration::from_millis(200)), 5, now));
+        assert!(frame_due(Some(now - Duration::from_millis(9)), 120, now));
+        assert!(!frame_due(Some(now), 120, now), "a window just asked");
+        assert!(frame_due(Some(now), 0, now + Duration::from_secs(1)), "no rate: once a second");
+    }
 }

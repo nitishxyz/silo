@@ -11,6 +11,12 @@ use core_video::r#return::kCVReturnSuccess;
 unsafe extern "C" {
     fn CVPixelBufferCreateWithIOSurface(allocator: *const c_void, surface: *mut c_void, attributes: *const c_void, out: *mut CVPixelBufferRef)
     -> i32;
+    fn CVPixelBufferGetIOSurface(buffer: CVPixelBufferRef) -> *mut c_void;
+}
+
+#[link(name = "IOSurface", kind = "framework")]
+unsafe extern "C" {
+    fn IOSurfaceGetID(surface: *mut c_void) -> u32;
 }
 
 /// `'BGRA'`, the only format CEF's accelerated paint produces on macOS.
@@ -48,6 +54,13 @@ impl Frame {
 }
 
 impl Frame {
+    /// The IOSurface's system-wide id: CEF paints into a small pool of
+    /// surfaces in turn, so ids repeat (for diagnostics).
+    pub fn surface_id(&self) -> u32 {
+        let surface = unsafe { CVPixelBufferGetIOSurface(self.buffer.as_concrete_TypeRef()) };
+        if surface.is_null() { 0 } else { unsafe { IOSurfaceGetID(surface) } }
+    }
+
     /// Reads one BGRA pixel back from the surface (CPU lock; for tests and diagnostics).
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if x >= self.width || y >= self.height {

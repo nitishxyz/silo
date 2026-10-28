@@ -14238,6 +14238,9 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "background": {
+            "type": "boolean"
+          },
           "kind": {
             "$ref": "#/$defs/BlockKind",
             "default": "terminal"

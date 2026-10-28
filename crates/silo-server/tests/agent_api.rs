@@ -154,6 +154,7 @@ async fn reports_notifications_and_browser_actions() {
             spawn: Default::default(),
             kind: BlockKind::Browser,
             url: Some("https://example.com".into()),
+            background: false,
         })
         .await
         .unwrap();

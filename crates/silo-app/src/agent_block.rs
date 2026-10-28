@@ -234,7 +234,7 @@ impl crate::workspace::Workspace {
         let session_id = view.session.id.clone();
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None }, cx);
+        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None, background: false }, cx);
     }
 
     pub(crate) fn create_agent(&mut self, method: Method, cx: &mut gpui::Context<Self>) {

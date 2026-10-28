@@ -4,6 +4,9 @@
 
 use std::time::{Duration, Instant};
 
+mod menu;
+mod tabs;
+
 use gpui::AppContext as _;
 use silo_proto::{
     control::{BrowserCommand, Method},
@@ -12,6 +15,9 @@ use silo_proto::{
 
 /// Engine changes are reported at most this often.
 pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// A pinch with no step this long has its touches lifted.
+const PINCH_IDLE: Duration = Duration::from_millis(300);
 
 use crate::blocks::Kind;
 
@@ -223,8 +229,6 @@ pub fn report(block_id: &str, state: &BrowserState) -> Method {
 
 pub enum BrowserPaneEvent {
     Activated,
-    /// The page asked for a new window.
-    Popup(String),
     /// The page's colour changed.
     Backdrop,
     /// The header's settings button: Settings › Browser.
@@ -307,10 +311,16 @@ pub struct BrowserPane {
     swipe_scrollers: Option<[bool; 2]>,
     swipe_query: u64,
     /// The touch points of a pinch or smart zoom in flight.
-    pinch: Option<crate::gesture::PinchTouch>,
+    pinch: crate::gesture::PinchGesture,
+    /// The last pinch step, and the watch that lifts touches left down.
+    pinch_at: Instant,
+    pinch_watch: Option<gpui::Task<()>>,
     smart_zoom: Option<gpui::Task<()>>,
-    /// The page scale as pinched here, reset by navigation.
+    /// The page scale as pinched here (synced with the page after each
+    /// pinch), reset by navigation.
     page_scale: f32,
+    /// Frames asked on the window's refreshes while the page is active.
+    frames: crate::web::Frames<gpui::AnyWindowHandle>,
     /// In the off-screen host (`browser_host.rs`): the page opens without
     /// a layout, at the last (or a default) size.
     offscreen: bool,
@@ -319,6 +329,11 @@ pub struct BrowserPane {
     /// The page's first document committed (or its first load ended):
     /// actions before it would act on the engine's blank start page.
     committed: bool,
+    /// The page is a popup this pane adopted (`tabs.rs`): its engine state
+    /// wins over the server's until this app owns the block and reported it.
+    adopting: bool,
+    /// The page's context menu, while open.
+    menu: Option<crate::context_menu::Menu<menu::Action>>,
     _subs: Vec<gpui::Subscription>,
     /// Focus subscriptions of the window showing the pane.
     window_subs: Vec<gpui::Subscription>,
@@ -393,12 +408,17 @@ impl BrowserPane {
             swipe_arrow: None,
             swipe_scrollers: None,
             swipe_query: 0,
-            pinch: None,
+            pinch: Default::default(),
+            pinch_at: Instant::now(),
+            pinch_watch: None,
             smart_zoom: None,
             page_scale: 1.0,
+            frames: Default::default(),
             offscreen: false,
             hidden: false,
             committed: false,
+            adopting: false,
+            menu: None,
             _subs: subs,
             window_subs: Vec::new(),
         }
@@ -433,6 +453,9 @@ impl BrowserPane {
     pub(crate) fn set_hidden(&mut self, hidden: bool) {
         if self.hidden != hidden {
             self.hidden = hidden;
+            if hidden {
+                self.end_pinch();
+            }
             if let Some(page) = self.page.as_ref().filter(|_| !self.offscreen) {
                 page.set_offscreen(hidden);
             }
@@ -442,6 +465,7 @@ impl BrowserPane {
     /// Run in the off-screen host: no window; a page not open yet opens on
     /// the next server state or [`Self::open_offscreen`].
     pub(crate) fn detach(&mut self) {
+        self.end_pinch();
         self.window_subs.clear();
         self.held.clear();
         self.editing = false;
@@ -496,7 +520,7 @@ impl BrowserPane {
         }
         let server = info.browser.clone();
         self.info = Some(info);
-        if (self.state.is_none() || (!self.is_owner() && !self.debounce.pending()))
+        if (self.state.is_none() || (!self.is_owner() && !self.debounce.pending() && !self.adopting))
             && let Some(server) = server
         {
             let fresh = self.state.is_none();
@@ -514,6 +538,12 @@ impl BrowserPane {
                 // tree, or the owner followed a link): load the server's.
                 self.load_entry(self.span.lo, &page);
             }
+        }
+        // An adopted page's state replaces the server's blank one.
+        if self.adopting && self.is_owner() {
+            self.adopting = false;
+            self.debounce.changed(Instant::now());
+            self.schedule_report(cx);
         }
         cx.notify();
     }
@@ -573,6 +603,9 @@ impl BrowserPane {
         if focused {
             self.own(silo_proto::control::OwnMode::Take);
             cx.emit(BrowserPaneEvent::Activated);
+        } else {
+            self.close_menu();
+            self.end_pinch();
         }
         cx.notify();
     }
@@ -757,8 +790,10 @@ impl BrowserPane {
     /// New frame or events from the engine (called by the pump).
     pub fn engine_changed(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(page) = self.page.clone() else { return };
+        self.frames.wake(Instant::now());
         let mut changed = false;
         let mut visits = Vec::new();
+        let (mut tabs, mut menu, mut closed) = (Vec::new(), None, false);
         for event in page.take_events() {
             let Some(state) = self.state.as_mut() else { break };
             match event {
@@ -768,8 +803,10 @@ impl BrowserPane {
                         self.engine_url.clone_from(&url);
                     }
                     self.page_scale = 1.0;
+                    self.end_pinch();
                     self.security_open = false;
                     self.blocked = None;
+                    self.close_menu();
                     visits.push((url, None));
                     changed = true;
                 }
@@ -814,15 +851,31 @@ impl BrowserPane {
                         cx.emit(BrowserPaneEvent::Backdrop);
                     }
                 }
-                silo_web::Event::Popup(url) => cx.emit(BrowserPaneEvent::Popup(url)),
+                silo_web::Event::NewTab(tab) => tabs.push(tab),
+                silo_web::Event::ContextMenu(m) => menu = Some(m),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
-                silo_web::Event::Closed => {
+                silo_web::Event::Closed { by_page } => {
                     self.page = None;
+                    self.pinch = Default::default();
+                    self.smart_zoom = None;
+                    self.pinch_watch = None;
                     self.actions = None;
                     self.theme_color = None;
+                    self.menu = None;
+                    closed = by_page;
                 }
             }
+        }
+        for tab in tabs {
+            self.open_tab(tab.url, tab.foreground, tab.popup, cx);
+        }
+        if let Some(m) = menu {
+            self.show_menu(m, cx);
+        }
+        // A popup's `window.close()`: its tab closes, as in a browser.
+        if closed {
+            self.send(Method::BlockClose { block_id: self.block_id.clone(), force: false });
         }
         if changed {
             self.sync_address(cx);
@@ -947,6 +1000,10 @@ impl BrowserPane {
         self.state.as_ref().is_some_and(|s| step(s, self.span, delta).is_some())
     }
 
+    pub(crate) fn route(&self) -> &Route {
+        &self.route
+    }
+
     pub(crate) fn loading(&self) -> bool {
         self.page.is_some() && self.state.as_ref().is_some_and(|s| s.loading)
     }
@@ -1055,6 +1112,81 @@ impl BrowserPane {
     }
 }
 
+/// The page's context menu (`menu.rs` builds its rows).
+impl BrowserPane {
+    fn show_menu(&mut self, facts: silo_web::ContextMenu, cx: &mut gpui::Context<Self>) {
+        let Some(page) = self.page.clone() else { return };
+        let Some(bounds) = self.bounds.filter(|_| !self.offscreen && !self.hidden) else { return page.menu_command(None) };
+        let engine = crate::hosts_state::HostsState::global(cx).read(cx).app_state().search_engine.label();
+        #[allow(clippy::cast_precision_loss)]
+        let at = bounds.origin + gpui::point(gpui::px(facts.x as f32), gpui::px(facts.y as f32));
+        let open = crate::context_menu::Menu::new(at, menu::items(&facts, engine, self.history_step(-1), self.history_step(1)));
+        if open.is_empty() {
+            return page.menu_command(None);
+        }
+        self.menu = Some(open);
+        cx.notify();
+    }
+
+    /// Close the menu, if open, with nothing picked.
+    fn close_menu(&mut self) {
+        if self.menu.take().is_some()
+            && let Some(page) = &self.page
+        {
+            page.menu_command(None);
+        }
+    }
+
+    fn menu_key(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        let Some(open) = self.menu.as_mut() else { return };
+        match open.key(key) {
+            crate::context_menu::Key::Pick(action) => self.menu_pick(Some(action), cx),
+            crate::context_menu::Key::Close => self.menu_pick(None, cx),
+            crate::context_menu::Key::Stay => {}
+        }
+        cx.notify();
+    }
+
+    /// A row picked (`None`: dismissed): the engine runs its own commands;
+    /// the rest are the app's, the engine's menu closing with nothing.
+    fn menu_pick(&mut self, action: Option<menu::Action>, cx: &mut gpui::Context<Self>) {
+        if self.menu.take().is_none() {
+            return;
+        }
+        let Some(page) = self.page.clone() else { return };
+        let action = match action {
+            Some(menu::Action::Engine(command)) => return page.menu_command(Some(command)),
+            other => {
+                page.menu_command(None);
+                let Some(action) = other else { return };
+                action
+            }
+        };
+        match action {
+            menu::Action::OpenTab(url) => self.open_tab(url, false, None, cx),
+            menu::Action::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
+            menu::Action::CopyImage(url) => {
+                let png = page.image_png(&url);
+                cx.spawn(async move |_, cx| {
+                    if let Ok(Some(png)) = png.await {
+                        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png);
+                        cx.update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image)));
+                    }
+                })
+                .detach();
+            }
+            menu::Action::Search(text) => {
+                let engine = crate::hosts_state::HostsState::global(cx).read(cx).app_state().search_engine;
+                self.open_tab(engine.url(&text), true, None, cx);
+            }
+            menu::Action::Back => self.back(),
+            menu::Action::Forward => self.forward(),
+            menu::Action::Reload => self.reload(),
+            menu::Action::Engine(_) => {}
+        }
+    }
+}
+
 /// Esc closes an open security popover, and goes no further.
 fn close_on_escape(open: &mut bool, key: &str) -> bool {
     let close = *open && key == "escape";
@@ -1082,8 +1214,26 @@ impl BrowserPane {
         Some((f32::from(position.x - b.origin.x), f32::from(position.y - b.origin.y)))
     }
 
+    /// In a window's shown tab, with a page.
+    fn shown(&self) -> bool {
+        !self.offscreen && !self.hidden && self.page.is_some()
+    }
+
+    /// Input to the page: frames on every refresh again, the first one now.
+    fn input_frames(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.frames.wake(Instant::now()) && self.shown() {
+            if let Some(page) = &self.page {
+                page.begin_frame();
+            }
+            cx.notify();
+        }
+    }
+
     fn mouse_button(&mut self, position: gpui::Point<gpui::Pixels>, b: gpui::MouseButton, down: bool, clicks: usize, m: gpui::Modifiers) {
         let (Some(page), Some((x, y)), Some(b)) = (self.page.clone(), self.local(position), button(b)) else { return };
+        if down {
+            self.end_pinch();
+        }
         self.held.retain(|h| *h != b);
         if down {
             self.held.push(b);
@@ -1103,6 +1253,14 @@ impl BrowserPane {
         let (Some(page), Some((x, y))) = (self.page.clone(), self.local(event.position)) else { return };
         let delta = event.delta.pixel_delta(gpui::px(40.0));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        self.input_frames(cx);
+        // The page takes no wheel while a pinch's touches are down: the
+        // fingers pan it instead.
+        if self.pinch.active() {
+            let step = self.pinch.pan((dx, dy));
+            self.touch(step);
+            return;
+        }
         if event.delta.precise() && event.touch_phase == gpui::TouchPhase::Started {
             self.swipe_enabled = gpui_platform::swipe_navigation_enabled();
             if self.swipe_enabled {
@@ -1185,72 +1343,124 @@ impl BrowserPane {
         .detach();
     }
 
-    /// A trackpad pinch, as two touch points the page zooms its visual
-    /// viewport by.
-    fn pinch(&mut self, event: &gpui::PinchEvent) {
-        let Some(page) = self.page.clone() else { return };
-        match event.phase {
-            gpui::TouchPhase::Started => {
-                self.end_pinch(silo_web::Pinch::Cancel);
-                let Some(center) = self.local(event.position) else { return };
-                let mut touch = crate::gesture::PinchTouch::new(center);
-                page.pinch(silo_web::Pinch::Start, touch.start_points());
-                page.pinch(silo_web::Pinch::Move, touch.points());
-                if event.delta != 0.0 {
-                    self.page_scale = crate::gesture::scaled(self.page_scale, touch.magnify(event.delta));
-                    page.pinch(silo_web::Pinch::Move, touch.points());
-                }
-                self.pinch = Some(touch);
+    /// Sends a pinch's touch steps to the page.
+    fn touch(&self, steps: impl IntoIterator<Item = crate::gesture::TouchStep>) {
+        if let Some(page) = &self.page {
+            for (step, points) in steps {
+                page.pinch(step, points);
             }
-            gpui::TouchPhase::Moved => {
-                if self.smart_zoom.is_some() {
-                    return;
-                }
-                let Some(touch) = &mut self.pinch else { return };
-                self.page_scale = crate::gesture::scaled(self.page_scale, touch.magnify(event.delta));
-                page.pinch(silo_web::Pinch::Move, touch.points());
-            }
-            gpui::TouchPhase::Ended if self.smart_zoom.is_none() => self.end_pinch(silo_web::Pinch::End),
-            gpui::TouchPhase::Ended => {}
-            gpui::TouchPhase::Cancelled => self.end_pinch(silo_web::Pinch::Cancel),
         }
     }
 
-    /// Lifts (or cancels) the touch points of a pinch or smart zoom.
-    fn end_pinch(&mut self, step: silo_web::Pinch) {
-        self.smart_zoom = None;
-        if let (Some(touch), Some(page)) = (self.pinch.take(), &self.page) {
-            page.pinch(step, touch.points());
+    /// A trackpad pinch, as two touch points the page zooms its visual
+    /// viewport by. A watch lifts touches whose end never came.
+    fn pinch(&mut self, event: &gpui::PinchEvent, cx: &mut gpui::Context<Self>) {
+        let (Some(_), Some(center)) = (&self.page, self.local(event.position)) else { return };
+        match event.phase {
+            gpui::TouchPhase::Started => {
+                self.smart_zoom = None;
+                let mut steps = self.pinch.begin(center);
+                if event.delta != 0.0 {
+                    let (more, factor) = self.pinch.magnify(center, event.delta);
+                    self.page_scale = crate::gesture::scaled(self.page_scale, factor);
+                    steps.extend(more);
+                }
+                self.touch(steps);
+                self.watch_pinch(cx);
+            }
+            gpui::TouchPhase::Moved if self.smart_zoom.is_none() => {
+                let (steps, factor) = self.pinch.magnify(center, event.delta);
+                self.page_scale = crate::gesture::scaled(self.page_scale, factor);
+                self.touch(steps);
+                self.watch_pinch(cx);
+            }
+            gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled if self.smart_zoom.is_none() && self.end_pinch() => self.sync_scale(cx),
+            _ => {}
         }
+    }
+
+    /// Lifts the touch points of a pinch or smart zoom; whether any were down.
+    fn end_pinch(&mut self) -> bool {
+        self.smart_zoom = None;
+        self.pinch_watch = None;
+        let step = self.pinch.end();
+        self.touch(step);
+        step.is_some()
+    }
+
+    /// Lifts a pinch's touches once its steps stop for [`PINCH_IDLE`]: an
+    /// end that never reached the pane (or fingers resting) would leave the
+    /// page's touch sequence open, and it takes no wheel scroll until it ends.
+    /// The next step starts a new sequence.
+    fn watch_pinch(&mut self, cx: &mut gpui::Context<Self>) {
+        self.pinch_at = Instant::now();
+        if self.pinch_watch.is_some() {
+            return;
+        }
+        self.pinch_watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PINCH_IDLE / 3).await;
+                let watching = this.update(cx, |this, cx| {
+                    if !this.pinch.active() || this.smart_zoom.is_some() {
+                        this.pinch_watch = None;
+                        return false;
+                    }
+                    if this.pinch_at.elapsed() < PINCH_IDLE {
+                        return true;
+                    }
+                    this.end_pinch();
+                    this.sync_scale(cx);
+                    false
+                });
+                if !watching.unwrap_or(false) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Reads the page's scale once a pinch settled (Chromium's limits and
+    /// touch slop make the scale tracked here an estimate).
+    fn sync_scale(&self, cx: &mut gpui::Context<Self>) {
+        let Some(page) = self.page.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+            let reply = page.cdp("Runtime.evaluate", serde_json::json!({"expression": "visualViewport.scale", "returnByValue": true})).await;
+            let Some(scale) = reply.ok().and_then(|r| r["result"]["value"].as_f64()) else { return };
+            let _ = this.update(cx, |this, _| {
+                if !this.pinch.active() {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scale = scale as f32;
+                    this.page_scale = scale;
+                }
+            });
+        })
+        .detach();
     }
 
     /// Smart zoom (two-finger double tap): to 2× at the pointer, or back to 1×.
     fn smart_zoom(&mut self, event: &gpui::SmartMagnifyEvent, cx: &mut gpui::Context<Self>) {
-        let (Some(page), Some(center)) = (self.page.clone(), self.local(event.position)) else { return };
-        self.end_pinch(silo_web::Pinch::Cancel);
-        let touch = crate::gesture::PinchTouch::new(center);
-        page.pinch(silo_web::Pinch::Start, touch.start_points());
-        page.pinch(silo_web::Pinch::Move, touch.points());
-        self.pinch = Some(touch);
-        let steps = crate::gesture::smart_zoom_steps(self.page_scale, if cx.reduce_motion() { 2 } else { 12 });
+        let (Some(_), Some(center)) = (&self.page, self.local(event.position)) else { return };
+        self.end_pinch();
+        let steps = self.pinch.begin(center);
+        self.touch(steps);
+        let spreads = crate::gesture::smart_zoom_steps(self.page_scale, if cx.reduce_motion() { 2 } else { 12 });
         self.smart_zoom = Some(cx.spawn(async move |this, cx| {
-            for spread in steps {
+            for spread in spreads {
                 cx.background_executor().timer(Duration::from_millis(16)).await;
                 let moved = this.update(cx, |this, _| {
-                    let (Some(touch), Some(page)) = (this.pinch.as_mut(), this.page.as_ref()) else { return false };
-                    this.page_scale = crate::gesture::scaled(this.page_scale, touch.spread_to(spread));
-                    page.pinch(silo_web::Pinch::Move, touch.points());
+                    let Some((step, factor)) = this.pinch.spread_to(spread) else { return false };
+                    this.page_scale = crate::gesture::scaled(this.page_scale, factor);
+                    this.touch([step]);
                     true
                 });
                 if !moved.unwrap_or(false) {
                     return;
                 }
             }
-            let _ = this.update(cx, |this, _| {
-                if let (Some(touch), Some(page)) = (this.pinch.take(), this.page.as_ref()) {
-                    page.pinch(silo_web::Pinch::End, touch.points());
-                }
-                this.smart_zoom = None;
+            let _ = this.update(cx, |this, cx| {
+                this.end_pinch();
+                this.sync_scale(cx);
             });
         }));
     }
@@ -1427,6 +1637,10 @@ fn page_canvas(entity: gpui::Entity<BrowserPane>) -> impl gpui::IntoElement {
         move |bounds, (), window, cx| {
             let scale = window.scale_factor();
             entity.update(cx, |pane, cx| pane.layout(bounds, scale, cx));
+            let handle = window.window_handle();
+            if entity.update(cx, |pane, _| pane.frames.start(handle, pane.shown(), Instant::now())) {
+                drive_frames(entity.downgrade(), window);
+            }
             if let Some(frame) = entity.read(cx).page.as_ref().filter(|_| !entity.read(cx).empty).and_then(|p| p.frame()) {
                 let (left, right) = entity.read(cx).corners;
                 let corners = gpui::Corners { bottom_left: gpui::px(left), bottom_right: gpui::px(right), ..Default::default() };
@@ -1449,6 +1663,25 @@ fn page_canvas(entity: gpui::Entity<BrowserPane>) -> impl gpui::IntoElement {
         },
     )
     .size_full()
+}
+
+/// Asks the pane's page for a frame on each refresh of `window`, while it
+/// shows there and is active ([`crate::web::Frames`]): its frames are made
+/// in step with the display, one per refresh.
+fn drive_frames(pane: gpui::WeakEntity<BrowserPane>, window: &gpui::Window) {
+    window.on_next_frame(move |window, cx| {
+        let handle = window.window_handle();
+        let go = pane.update(cx, |pane, _| {
+            let go = pane.frames.refresh(handle, pane.shown(), Instant::now());
+            if let Some(page) = pane.page.as_ref().filter(|_| go) {
+                page.begin_frame();
+            }
+            go
+        });
+        if go.unwrap_or(false) {
+            drive_frames(pane, window);
+        }
+    });
 }
 
 impl Drop for BrowserPane {
@@ -1798,7 +2031,11 @@ impl gpui::Render for BrowserPane {
             .min_h_0()
             .cursor(cursor_style(self.cursor))
             .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
-                if close_on_escape(&mut this.security_open, &e.keystroke.key) {
+                this.input_frames(cx);
+                if this.menu.is_some() {
+                    this.menu_key(&e.keystroke.key, cx);
+                    cx.stop_propagation()
+                } else if close_on_escape(&mut this.security_open, &e.keystroke.key) {
                     cx.notify();
                     cx.stop_propagation()
                 } else if this.key(&e.keystroke, false) {
@@ -1814,12 +2051,25 @@ impl gpui::Render for BrowserPane {
             // never saw its press, so it gets neither the moves nor the release.
             .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _, cx| {
                 if !cx.has_active_drag() {
+                    this.input_frames(cx);
                     this.mouse_move(e.position, e.modifiers);
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| this.wheel(e, cx)))
-            .on_pinch(cx.listener(|this, e: &gpui::PinchEvent, _, _| this.pinch(e)))
-            .on_smart_magnify(cx.listener(|this, e: &gpui::SmartMagnifyEvent, _, cx| this.smart_zoom(e, cx)))
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+                if this.menu.is_some() {
+                    this.menu_pick(None, cx);
+                    cx.notify();
+                }
+                this.wheel(e, cx)
+            }))
+            .on_pinch(cx.listener(|this, e: &gpui::PinchEvent, _, cx| {
+                this.input_frames(cx);
+                this.pinch(e, cx)
+            }))
+            .on_smart_magnify(cx.listener(|this, e: &gpui::SmartMagnifyEvent, _, cx| {
+                this.input_frames(cx);
+                this.smart_zoom(e, cx)
+            }))
             .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
                 let inside = e.bounds.contains(&e.event.position);
                 let (Some(page), Some((x, y))) = (this.page.clone(), this.local(e.event.position)) else { return };
@@ -1845,6 +2095,7 @@ impl gpui::Render for BrowserPane {
                     b,
                     cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
                         this.focus.focus(window, cx);
+                        this.input_frames(cx);
                         this.mouse_button(e.position, e.button, true, e.click_count, e.modifiers);
                     }),
                 )
@@ -1878,7 +2129,8 @@ impl gpui::Render for BrowserPane {
                 )
             })
             .children(arrow);
-        div().flex().flex_col().size_full().min_w_0().min_h_0().child(page)
+        let menu = self.menu.as_ref().map(|m| m.render("browser-menu", cx, |this, action, _, cx| this.menu_pick(action, cx)));
+        div().flex().flex_col().size_full().min_w_0().min_h_0().child(page).children(menu)
     }
 }
 
@@ -1898,26 +2150,40 @@ impl crate::workspace::Workspace {
             }
         };
         // A page the off-screen host runs is shown as it is: no reload.
-        let adopted = host.local.then(|| crate::browser_host::BrowserHost::take(block, cx)).flatten();
+        let remote = (!host.local).then_some(self.active_host);
+        let adopted = crate::browser_host::BrowserHost::take(block, remote, cx);
         let pane = adopted.unwrap_or_else(|| {
             let (id, rt, control, home) = (block.to_owned(), self.rt.clone(), self.control(), self.home.clone());
             cx.new(|cx| BrowserPane::new(id, rt, control, route, home, cx))
         });
+        self.install_browser(block, pane, window, cx);
+    }
+
+    /// Show `pane` for `block` here, in place of any pane it had.
+    pub(crate) fn install_browser(&mut self, block: &str, pane: gpui::Entity<BrowserPane>, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         pane.update(cx, |pane, cx| pane.attach(window, cx));
         let sub = cx.subscribe_in(&pane, window, |this, pane, event: &BrowserPaneEvent, window, cx| {
             let block = pane.read(cx).block_id.clone();
             match event {
                 BrowserPaneEvent::Activated => this.pane_activated(block),
-                BrowserPaneEvent::Popup(url) => this.split_browser(block, Some(url.clone())),
                 BrowserPaneEvent::Backdrop => {}
                 BrowserPaneEvent::OpenSettings => this.open_settings_section(crate::settings_panel::Section::Browser, window, cx),
             }
             cx.notify();
         });
-        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Browser(pane), sub);
+        self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Browser(pane.clone()), sub);
+        let shown = self.active_window().is_some_and(|w| crate::floats::window_blocks(w).iter().any(|b| b == block));
+        let info = self.view.as_ref().and_then(|v| v.blocks.iter().find(|b| b.id == block)).cloned();
+        pane.update(cx, |pane, cx| {
+            pane.set_hidden(!shown);
+            if let Some(info) = info {
+                pane.set_info(info, cx);
+            }
+        });
+        cx.notify();
     }
 
-    /// Split `block` with a new browser (popup, New Browser, Open URL).
+    /// Split `block` with a new browser (Open URL).
     pub(crate) fn split_browser(&mut self, block: String, url: Option<String>) {
         let axis = self.auto_axis(&block);
         self.call(browser_split(block, axis, url));
@@ -1933,7 +2199,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn new_browser_tab(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(view) = &self.view else { return };
         let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-        let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Browser, url: None };
+        let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Browser, url: None, background: false };
         self.create_browser(method, window, cx);
     }
 

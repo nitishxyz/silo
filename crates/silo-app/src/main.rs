@@ -29,6 +29,7 @@ mod commands;
 mod composition;
 mod confirm_card;
 mod conn;
+mod context_menu;
 mod controls;
 mod files;
 mod files_block;

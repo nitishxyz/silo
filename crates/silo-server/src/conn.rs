@@ -537,9 +537,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().close_session(&session_id)?;
             Ok(json!({}))
         }
-        Method::WindowCreate { session_id, spawn, kind, url } => {
+        Method::WindowCreate { session_id, spawn, kind, url, background } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None };
-            to_value(server.registry.lock().unwrap().create_window(&session_id, &new)?)
+            to_value(server.registry.lock().unwrap().create_window(&session_id, &new, background)?)
         }
         Method::WindowSelect { session_id, window_id } => {
             server.registry.lock().unwrap().select_window(&session_id, &window_id)?;

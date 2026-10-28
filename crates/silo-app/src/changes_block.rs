@@ -120,7 +120,7 @@ impl Workspace {
         let Some(view) = &self.view else { return };
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Changes, url: None });
+        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Changes, url: None, background: false });
     }
 
     /// New Changes Pane: a Changes block beside `block`, on its repo.

@@ -131,7 +131,7 @@ async fn populate(control: &Control) -> (Created, Created, Created) {
         .await
         .unwrap();
     let window: Created = control
-        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None })
+        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
         .await
         .unwrap();
     control.call_value(Method::WindowRename { window_id: window.window_id.clone(), name: Some("logs".into()) }).await.unwrap();

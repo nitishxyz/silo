@@ -1,5 +1,7 @@
 //! Trackpad gestures on browser panes: a pinch as two touch points (so
-//! Chromium zooms the visual viewport), smart zoom, and two-finger
+//! Chromium zooms the visual viewport, as from a touch screen: CEF takes no
+//! trackpad pinch, and CDP's synthesized pinch neither zooms a windowless
+//! page nor keeps up, at ~100 ms a step), smart zoom, and two-finger
 //! horizontal swipes that navigate back and forward.
 
 use gpui::TouchPhase;
@@ -58,6 +60,68 @@ impl PinchTouch {
         let (x, y) = self.center;
         let r = PINCH_RADIUS * self.spread - PRIME;
         [(x - r, y), (x + r, y)]
+    }
+
+    /// Both fingers move by `(dx, dy)`: the page pans with them.
+    pub fn pan(&mut self, (dx, dy): (f32, f32)) {
+        self.center = (self.center.0 + dx, self.center.1 + dy);
+    }
+}
+
+/// A touch event for both points of a pinch.
+pub type TouchStep = (silo_web::Pinch, [(f32, f32); 2]);
+
+/// A pinch's touch sequence, always ended by a cancel: a release with the
+/// fingers still moving flings, and a fling started over a cross-site frame
+/// left Chromium's touch scroll running, which swallowed every wheel scroll
+/// after it. Cancelled touches also never tap or click.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PinchGesture {
+    touch: Option<PinchTouch>,
+}
+
+impl PinchGesture {
+    pub fn active(&self) -> bool {
+        self.touch.is_some()
+    }
+
+    /// Touches go down around `center` (any earlier ones are cancelled).
+    pub fn begin(&mut self, center: (f32, f32)) -> Vec<TouchStep> {
+        let mut steps: Vec<TouchStep> = self.end().into_iter().collect();
+        let touch = PinchTouch::new(center);
+        steps.extend([(silo_web::Pinch::Start, touch.start_points()), (silo_web::Pinch::Move, touch.points())]);
+        self.touch = Some(touch);
+        steps
+    }
+
+    /// A magnification step at `center`, starting a fresh sequence there when
+    /// none is down (its start was missed, or it was lifted while the
+    /// fingers rested); also the scale factor applied.
+    pub fn magnify(&mut self, center: (f32, f32), delta: f32) -> (Vec<TouchStep>, f32) {
+        let mut steps = if self.touch.is_none() { self.begin(center) } else { Vec::new() };
+        let Some(touch) = &mut self.touch else { return (steps, 1.0) };
+        let factor = touch.magnify(delta);
+        steps.push((silo_web::Pinch::Move, touch.points()));
+        (steps, factor)
+    }
+
+    /// Spread to `spread` of the starting span (smart zoom's steps).
+    pub fn spread_to(&mut self, spread: f32) -> Option<(TouchStep, f32)> {
+        let touch = self.touch.as_mut()?;
+        let factor = touch.spread_to(spread);
+        Some(((silo_web::Pinch::Move, touch.points()), factor))
+    }
+
+    /// Two-finger scrolling while pinching pans the page, as the fingers move.
+    pub fn pan(&mut self, delta: (f32, f32)) -> Option<TouchStep> {
+        let touch = self.touch.as_mut()?;
+        touch.pan(delta);
+        Some((silo_web::Pinch::Move, touch.points()))
+    }
+
+    /// Lifts the touches, if down.
+    pub fn end(&mut self) -> Option<TouchStep> {
+        self.touch.take().map(|touch| (silo_web::Pinch::Cancel, touch.points()))
     }
 }
 
@@ -262,6 +326,42 @@ mod tests {
         let [(a, _), (b, _)] = pinch.points();
         assert!((b - a) >= 2.0 * PINCH_RADIUS * MIN_SPREAD - 1e-3);
         assert!(pinch.magnify(-0.5) >= 1.0 - 1e-6, "no further shrink at the floor");
+    }
+
+    #[test]
+    fn a_pinch_always_ends_cancelled() {
+        use silo_web::Pinch::{Cancel, Move, Start};
+        let mut pinch = PinchGesture::default();
+        let kinds = |steps: &[TouchStep]| steps.iter().map(|s| s.0).collect::<Vec<_>>();
+        assert_eq!(kinds(&pinch.begin((300.0, 200.0))), [Start, Move]);
+        assert_eq!(kinds(&pinch.begin((300.0, 200.0))), [Cancel, Start, Move], "a new start lifts the old touches first");
+        let (steps, factor) = pinch.magnify((0.0, 0.0), 0.5);
+        assert_eq!(kinds(&steps), [Move]);
+        assert!((factor - 1.5).abs() < 1e-6);
+        assert_eq!(pinch.end().map(|s| s.0), Some(Cancel), "never a release: that flings");
+        assert_eq!(pinch.end(), None);
+        assert!(!pinch.active());
+    }
+
+    #[test]
+    fn a_pinch_whose_start_was_missed_starts_at_its_next_step() {
+        use silo_web::Pinch::{Move, Start};
+        let mut pinch = PinchGesture::default();
+        let (steps, factor) = pinch.magnify((300.0, 200.0), 0.1);
+        assert_eq!(steps.iter().map(|s| s.0).collect::<Vec<_>>(), [Start, Move, Move]);
+        assert_eq!(steps[1].1, [(100.0, 200.0), (500.0, 200.0)]);
+        assert!((factor - 1.1).abs() < 1e-6);
+        assert!(pinch.active());
+        assert_eq!(PinchGesture::default().spread_to(2.0), None, "smart zoom steps need touches down");
+    }
+
+    #[test]
+    fn scrolling_while_pinching_pans_both_fingers() {
+        let mut pinch = PinchGesture::default();
+        assert_eq!(pinch.pan((5.0, 5.0)), None);
+        pinch.begin((300.0, 200.0));
+        let (_, points) = pinch.pan((10.0, -20.0)).unwrap();
+        assert_eq!(points, [(110.0, 180.0), (510.0, 180.0)]);
     }
 
     #[test]

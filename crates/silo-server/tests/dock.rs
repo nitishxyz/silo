@@ -82,8 +82,10 @@ async fn tiled_blocks_dock_on_any_side_of_another() {
     assert_eq!((w.layout.blocks(), w.zoomed, w.focused.as_str()), (vec![b.clone(), a.clone(), c.clone()], false, b.as_str()));
 
     // Itself, a block of another window and unknown blocks are refused.
-    let other: Created =
-        control.call(Method::WindowCreate { session_id: session.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
+    let other: Created = control
+        .call(Method::WindowCreate { session_id: session.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
+        .await
+        .unwrap();
     for (block, target) in [(&a, &a), (&a, &other.block_id), (&other.block_id, &a)] {
         let err = control.call_value(dock(block, target, Axis::Vertical, true)).await.unwrap_err();
         assert_eq!(code(&err), "bad_request", "{block} onto {target}");
