@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build target/Silo.app: the GPUI client, the silo-menubar agent and the
-# otto-silo daemon (agent blocks) in Contents/MacOS, and the `silo`
-# server/CLI binary as an app of its own, Contents/Helpers/Silo Server.app
-# (the identity macOS privacy prompts show for programs in Silo's terminals).
+# Build target/Silo.app: the GPUI client and the otto-silo daemon (agent
+# blocks) in Contents/MacOS, and two helper apps in Contents/Helpers: the
+# `silo` server/CLI binary as Silo Server.app (the identity macOS privacy
+# prompts show for programs in Silo's terminals) and the silo-menubar agent
+# as Silo Menu Bar.app (its own bundle id, so it is never taken for Silo).
 #
 # Signed ad-hoc, or with SILO_SIGN_IDENTITY (a Developer ID Application
 # identity in the keychain) under the hardened runtime with secure
@@ -55,10 +56,16 @@ cp "$root/packaging/macos/Assets.car" "$root/packaging/macos/Silo.icns" "$app/Co
 server_app="$app/Contents/Helpers/Silo Server.app"
 mkdir -p "$server_app/Contents/MacOS" "$server_app/Contents/Resources"
 cp "$out/silo" "$server_app/Contents/MacOS/silo"
-# Menu-bar agent (accessory app, no Dock icon). Under launchd the app runs
-# copies of both out of <SILO_HOME>/runtime (one fixed place) as `Silo
-# Server.app` and `silo-menubar`, so the bundle can be replaced while they run.
-cp "$out/silo-menubar" "$app/Contents/MacOS/silo-menubar"
+# Menu-bar agent (accessory app, no Dock icon):
+# Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar. In the
+# app's Contents/MacOS, AppKit would take it for Silo.app itself (same bundle
+# id) and Launch Services could send the app's reopen and open events to it
+# (scripts/menubar-info-plist.sh). Under launchd the app runs copies of both
+# helper bundles out of <SILO_HOME>/runtime (one fixed place), so the app
+# can be replaced while they run.
+menubar_app="$app/Contents/Helpers/Silo Menu Bar.app"
+mkdir -p "$menubar_app/Contents/MacOS" "$menubar_app/Contents/Resources"
+cp "$out/silo-menubar" "$menubar_app/Contents/MacOS/silo-menubar"
 # The otto daemon agent blocks connect to (started by the app).
 cp "$out/otto-silo" "$app/Contents/MacOS/otto-silo"
 # Browser engine: CEF framework + four helper apps (copies of
@@ -90,13 +97,16 @@ PLIST
 done
 # The app finds the server at ../Helpers/Silo Server.app/Contents/MacOS/silo
 # (crates/silo-app/src/conn.rs); in Contents/MacOS `silo` and `Silo` would
-# collide on a case-insensitive volume. It gets the app's icon.
+# collide on a case-insensitive volume. Both helpers get the app's icon.
 icon=""
 if [[ -f "$app/Contents/Resources/Assets.car" ]]; then
-  cp "$app/Contents/Resources/Assets.car" "$app/Contents/Resources/Silo.icns" "$server_app/Contents/Resources/"
+  for helper_app in "$server_app" "$menubar_app"; do
+    cp "$app/Contents/Resources/Assets.car" "$app/Contents/Resources/Silo.icns" "$helper_app/Contents/Resources/"
+  done
   icon=Silo
 fi
 "$root/scripts/server-info-plist.sh" "Silo Server" xyz.nitish.silo.server "$version" ${icon:+"$icon"} > "$server_app/Contents/Info.plist"
+"$root/scripts/menubar-info-plist.sh" "Silo Menu Bar" xyz.nitish.silo.menubar "$version" ${icon:+"$icon"} > "$menubar_app/Contents/Info.plist"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -172,7 +182,8 @@ for helper in "${helpers[@]}"; do
 done
 sign --entitlements "$terminal" "$server_app"
 codesign --verify --strict "$server_app"
-sign "$app/Contents/MacOS/silo-menubar"
+sign "$menubar_app"
+codesign --verify --strict "$menubar_app"
 sign "$app/Contents/MacOS/otto-silo"
 sign --entitlements "$devices" "$app"
 codesign --verify --deep --strict "$app"

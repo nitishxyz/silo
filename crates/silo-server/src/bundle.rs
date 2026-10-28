@@ -129,6 +129,7 @@ mod tests {
             "/h/runtime/old/silo",
             "/h/runtime/silo-menubar",
             "/h/runtime/Silo Server.app/Contents/MacOS/silo-menubar",
+            "/h/runtime/Silo Menu Bar.app/Contents/MacOS/silo-menubar",
             "/h/runtime/Other.app/Contents/MacOS/silo",
             "/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo",
             "/h/abc/silo",

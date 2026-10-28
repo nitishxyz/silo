@@ -249,6 +249,10 @@ jobs:
           codesign --verify --strict "$mnt/$server"
           codesign -dv "$mnt/$server" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.server'
           [ ! -e "$mnt/Silo.app/Contents/MacOS/silo-server" ]
+          menubar="Silo.app/Contents/Helpers/Silo Menu Bar.app"
+          codesign --verify --strict "$mnt/$menubar"
+          codesign -dv "$mnt/$menubar" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.menubar'
+          [ ! -e "$mnt/Silo.app/Contents/MacOS/silo-menubar" ]
           hdiutil detach "$mnt"
           echo "- $(basename "$dmg"): $(du -h "$dmg" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Delete signing keychain

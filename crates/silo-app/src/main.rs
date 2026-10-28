@@ -47,6 +47,7 @@ mod latency;
 mod launcher;
 mod layout;
 mod material;
+mod menubar;
 mod motion;
 mod notifications;
 mod offers;
@@ -57,6 +58,7 @@ mod permissions;
 mod qr;
 mod radius;
 mod remote;
+mod reopen;
 mod search;
 mod settings;
 mod settings_panel;
@@ -230,7 +232,7 @@ fn main() {
     let agent = match managed {
         // Installed beside the runtime server bundle (`runtime::install`).
         Some(svc) => Some(silo_client::runtime::menubar_exe(&svc.silo_home)),
-        None => conn::sibling(&["silo-menubar"]),
+        None => conn::menubar_exe(),
     };
     let loaded = terminal_prefs::load(&home);
     if let Some(problem) = &loaded.problem {
@@ -238,9 +240,7 @@ fn main() {
     }
     tracing::info!(theme = %loaded.prefs.theme, font = %loaded.prefs.font_family, "terminal preferences");
     theme::install(loaded.prefs, loaded.problem);
-    if let Some(agent) = agent {
-        start_menubar(&agent, &home);
-    }
+    let menubar_home = home.clone();
 
     // `silo://settings` and `silo://permissions` (sent by the menu-bar
     // agent) open Settings or the Permissions panel, in a running app or at
@@ -252,16 +252,21 @@ fn main() {
             let _ = urls_tx.send(url);
         }
     });
-    // "Open Silo" (menu bar, Dock) on a running app: the frontmost window.
-    application.on_reopen(|cx| match frontmost(cx) {
-        Some(handle) => {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        }
-        None => {
-            let _ = open_window(None, cx).inspect_err(|e| tracing::warn!("open window: {e:#}"));
-        }
-    });
+    // "Open Silo" (menu bar, Dock, Spotlight, Raycast) on a running app,
+    // with or without visible windows: `reopen.rs`.
+    let (reopens_tx, mut reopens) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    if let Err(error) = reopen::install(reopens_tx) {
+        tracing::warn!("reopen handler: {error:#}");
+        application.on_reopen(|cx| reopened(false, cx));
+    }
     application.run(move |cx: &mut App| {
+        // Only now: the app has checked in with Launch Services. An agent
+        // started earlier (in the app's launch job) checked in first and took
+        // the app's launch (Dock, Spotlight, Raycast): a Dock icon bouncing
+        // for it forever, the app a second one.
+        if let Some(agent) = agent {
+            menubar::start(agent, menubar_home);
+        }
         theme::apply_font(cx);
         theme::warm_fonts(cx);
         // System Settings › Accessibility › Display › Reduce motion, read
@@ -329,6 +334,12 @@ fn main() {
             None => {}
         }
         cx.spawn(async move |cx| {
+            while let Some(visible) = reopens.recv().await {
+                cx.update(|cx| reopened(visible, cx));
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
             while let Some(url) = urls.recv().await {
                 match opens(&url) {
                     Some(Opens::Settings) => cx.update(show_settings),
@@ -346,6 +357,23 @@ fn main() {
 /// The frontmost Silo window, if any.
 fn frontmost(cx: &App) -> Option<WindowHandle<Workspace>> {
     cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().find_map(|w| w.downcast::<Workspace>())
+}
+
+/// Silo reopened (Dock, Spotlight, Raycast, the menu bar's Open Silo): its
+/// frontmost window (a minimized one comes back) in front of every other
+/// app's, or a new window when none is open.
+fn reopened(visible: bool, cx: &mut App) {
+    let front = frontmost(cx);
+    tracing::info!(visible, window = front.is_some(), "reopen");
+    match front {
+        Some(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        None => {
+            let _ = open_window(None, cx).inspect_err(|e| tracing::warn!("open window: {e:#}"));
+        }
+    }
+    cx.activate(true);
 }
 
 /// Settings in the frontmost window (a new one if none is open).
@@ -421,25 +449,6 @@ fn reduce_motion() -> bool {
 
 /// Launch the menu-bar agent unless one already runs for this state
 /// directory; it outlives the app.
-fn start_menubar(agent: &std::path::Path, home: &std::path::Path) {
-    if std::env::var_os("SILO_NO_MENUBAR").is_some() {
-        return;
-    }
-    let mut command = std::process::Command::new(agent);
-    // Not as this app: the agent would register as Silo.app and take its
-    // `silo://` URLs (the menu's Settings… and Permissions… did nothing).
-    for var in silo_proto::APP_IDENTITY_ENV {
-        command.env_remove(var);
-    }
-    command.env("SILO_HOME", home).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    // The agent exits at once when another instance holds its lock.
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-    if let Err(error) = command.spawn() {
-        tracing::warn!("menubar agent: {error}");
-    }
-}
-
 #[cfg(test)]
 mod url_tests {
     #[test]

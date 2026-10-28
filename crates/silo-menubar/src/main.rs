@@ -22,14 +22,16 @@ use objc2_app_kit::{
     NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSData, NSSize, NSString, NSTimer};
+use silo_client::runtime::MENUBAR;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::net::{Cmd, Shared};
 
-/// Opens the Silo app: the enclosing `.app` bundle when bundled, the
-/// `silo-app` binary next to this one (development), else the installed
-/// app by bundle id (run from the runtime directory).
-#[derive(Clone, Debug)]
+/// Opens the Silo app: the `.app` bundle whose `Contents/Helpers` holds this
+/// agent's helper bundle, the `silo-app` binary next to this one
+/// (development), else the installed app by bundle id (run from the runtime
+/// directory).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppLauncher {
     Bundle(PathBuf),
     Binary(PathBuf),
@@ -42,9 +44,17 @@ impl AppLauncher {
             return Self::Installed;
         };
         let exe = exe.canonicalize().unwrap_or(exe);
-        // .../Silo.app/Contents/MacOS/silo-menubar
-        if let Some(bundle) = exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|e| e == "app")) {
-            return Self::Bundle(bundle.to_owned());
+        Self::of(&exe)
+    }
+
+    fn of(exe: &Path) -> Self {
+        // .../Silo.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar
+        let helper = exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|e| e == "app"));
+        if let Some(helper) = helper {
+            return match helper.parent().filter(|h| h.ends_with("Contents/Helpers")).and_then(|h| h.parent()?.parent()) {
+                Some(app) if app.extension().is_some_and(|e| e == "app") => Self::Bundle(app.to_owned()),
+                _ => Self::Installed,
+            };
         }
         match exe.parent().map(|d| d.join("silo-app")).filter(|p| p.is_file()) {
             Some(app) => Self::Binary(app),
@@ -144,6 +154,7 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &AnyObject) {
             if self.ivars().shared.quit.load(Ordering::Acquire) {
+                tracing::info!("quitting");
                 NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
                 return;
             }
@@ -267,7 +278,7 @@ impl Controller {
 }
 
 /// The Silo mark as an 18 pt template image (`scripts/make-icons.sh`),
-/// built in: the agent runs from a runtime copy outside any bundle.
+/// built in (an unbundled dev agent has no Resources).
 fn mark_image() -> Option<Retained<NSImage>> {
     const PNGS: [&[u8]; 2] = [include_bytes!("../assets/menubar.png"), include_bytes!("../assets/menubar@2x.png")];
     let size = NSSize { width: 18.0, height: 18.0 };
@@ -294,7 +305,7 @@ fn single_instance(home: &Path) -> Option<std::fs::File> {
     if !lock(&file) {
         let mut record = String::new();
         file.read_to_string(&mut record).ok()?;
-        let pid = stale_holder(&record, silo_proto::BUILD, silo_client::runtime::exe_of)?;
+        let pid = stale_holder(&record, silo_proto::BUILD, silo_client::runtime::name_of)?;
         tracing::info!(pid, "replacing the menu-bar agent of another build");
         let _ = rustix::process::kill_process(rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?, rustix::process::Signal::TERM);
         (0..50).find(|_| {
@@ -310,12 +321,30 @@ fn single_instance(home: &Path) -> Option<std::fs::File> {
 }
 
 /// The pid of the agent `record` names, if it is of another build than
-/// `build` and still runs the recorded `silo-menubar`.
-fn stale_holder(record: &str, build: &str, exe_of: impl Fn(u32) -> Option<PathBuf>) -> Option<u32> {
+/// `build` and still runs a `silo-menubar` (from any layout: a helper
+/// bundle, the runtime copy, an older app's `Contents/MacOS`). By process
+/// name, not path: a runtime bundle swapped out under a running agent moves
+/// and goes away. The record's pid holds the lock (so it has not exited),
+/// which leaves no reused pid to mistake.
+fn stale_holder(record: &str, build: &str, name_of: impl Fn(u32) -> Option<String>) -> Option<u32> {
     let mut parts = record.splitn(3, ' ');
     let (pid, holder_build, exe) = (parts.next()?.parse().ok()?, parts.next()?, Path::new(parts.next()?));
     let ours = holder_build == build || pid == std::process::id();
-    (!ours && exe.file_name()? == "silo-menubar" && exe_of(pid).as_deref() == Some(exe)).then_some(pid)
+    (!ours && exe.file_name()? == MENUBAR && name_of(pid).as_deref() == Some(MENUBAR)).then_some(pid)
+}
+
+/// Past this the log starts over, the previous one kept as `menubar.log.old`.
+const LOG_CAP: u64 = 1024 * 1024;
+
+/// `<home>/menubar.log`, appended: whoever starts the agent (the app, the
+/// `silo` CLI) discards its output.
+fn log_file(home: &Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(home).ok()?;
+    let path = home.join("menubar.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_CAP) {
+        let _ = std::fs::rename(&path, home.join("menubar.log.old"));
+    }
+    std::fs::File::options().create(true).append(true).open(path).ok()
 }
 
 fn main() {
@@ -326,13 +355,26 @@ fn main() {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::remove_var(var) };
     }
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
     let home = silo_proto::paths::home();
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
+    match log_file(&home) {
+        Some(file) => {
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).try_init();
+        }
+        None => {
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+        }
+    }
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
     let Some(_lock) = single_instance(&home) else {
         tracing::info!("another silo-menubar is running for {}", home.display());
         return;
     };
+    tracing::info!(pid = std::process::id(), build = silo_proto::BUILD, "menu-bar agent started");
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -355,19 +397,42 @@ fn main() {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{quit_warning, stale_holder};
+    use super::{AppLauncher, quit_warning, stale_holder};
+
+    #[test]
+    fn opens_the_app_holding_the_helper() {
+        let helper = |app: &str, name: &str| PathBuf::from(format!("{app}/Contents/Helpers/{name}.app/Contents/MacOS/silo-menubar"));
+        let release = helper("/Applications/Silo.app", "Silo Menu Bar");
+        assert_eq!(AppLauncher::of(&release), AppLauncher::Bundle("/Applications/Silo.app".into()));
+        let dev = helper("/w/target/debug/SiloDev.app", "SiloDev Menu Bar");
+        assert_eq!(AppLauncher::of(&dev), AppLauncher::Bundle("/w/target/debug/SiloDev.app".into()));
+        // The runtime copy, and a bundle in no app's Helpers.
+        assert_eq!(AppLauncher::of(Path::new("/h/Library/Application Support/silo/runtime/silo-menubar")), AppLauncher::Installed);
+        assert_eq!(AppLauncher::of(Path::new("/x/Silo Menu Bar.app/Contents/MacOS/silo-menubar")), AppLauncher::Installed);
+        assert_eq!(AppLauncher::of(Path::new("/x/Silo.app/Contents/Other/Silo Menu Bar.app/Contents/MacOS/silo-menubar")), AppLauncher::Installed);
+        // Development: `silo-app` beside it.
+        let dir = std::env::temp_dir().join(format!("silo-menubar-launcher-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(AppLauncher::of(&dir.join("silo-menubar")), AppLauncher::Installed);
+        std::fs::write(dir.join("silo-app"), "").unwrap();
+        assert_eq!(AppLauncher::of(&dir.join("silo-menubar")), AppLauncher::Binary(dir.join("silo-app")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn replaces_only_a_live_agent_of_another_build() {
-        let old = "/h/runtime/old b/silo-menubar";
-        let running = |pid: u32| (pid == 10).then(|| PathBuf::from(old));
+        let old = "/h/runtime/Silo Menu Bar.app/Contents/MacOS/silo-menubar";
+        let running = |pid: u32| (pid == 10).then(|| "silo-menubar".to_owned());
         assert_eq!(stale_holder(&format!("10 oldbuild {old}"), "new", running), Some(10));
+        // Older layouts: the bare runtime copy, an older app's `Contents/MacOS`.
+        assert_eq!(stale_holder("10 oldbuild /h/runtime/silo-menubar", "new", running), Some(10));
+        assert_eq!(stale_holder("10 oldbuild /Applications/Silo.app/Contents/MacOS/silo-menubar", "new", running), Some(10));
         // Same build (dev, a second launch): leave it.
         assert_eq!(stale_holder(&format!("10 new {old}"), "new", running), None);
         // The pid is gone or now runs something else.
         assert_eq!(stale_holder(&format!("11 oldbuild {old}"), "new", running), None);
-        assert_eq!(stale_holder("10 oldbuild /h/runtime/old b/vim", "new", |_| Some(Path::new("/h/runtime/old b/vim").to_owned())), None);
-        assert_eq!(stale_holder("10 oldbuild /elsewhere/silo-menubar", "new", running), None);
+        assert_eq!(stale_holder(&format!("10 oldbuild {old}"), "new", |_| Some("vim".to_owned())), None);
+        assert_eq!(stale_holder("10 oldbuild /h/runtime/old b/vim", "new", running), None);
         // No or a garbled record.
         assert_eq!(stale_holder("", "new", running), None);
         assert_eq!(stale_holder("x oldbuild a", "new", running), None);

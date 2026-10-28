@@ -386,8 +386,29 @@ fn helper() -> Option<PathBuf> {
 }
 
 fn helper_of(exe: &Path) -> Option<PathBuf> {
-    let app = exe.parent().filter(|macos| macos.ends_with("Contents/MacOS"))?.parent()?.parent()?;
-    Some(runtime::helper_exe(app, silo_proto::CHANNEL)).filter(|exe| exe.is_file())
+    Some(runtime::helper_exe(app_of(exe)?, silo_proto::CHANNEL)).filter(|exe| exe.is_file())
+}
+
+/// The app bundle executable `exe` (in its `Contents/MacOS`) belongs to.
+fn app_of(exe: &Path) -> Option<&Path> {
+    exe.parent().filter(|macos| macos.ends_with("Contents/MacOS"))?.parent()?.parent()
+}
+
+/// The menu-bar agent this app runs when no launchd job manages the server:
+/// its bundle's `<Silo|SiloDev> Menu Bar.app` helper, or `silo-menubar` next
+/// to an unbundled executable (the cargo target dir).
+#[must_use]
+pub fn menubar_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    menubar_of(&exe)
+}
+
+fn menubar_of(exe: &Path) -> Option<PathBuf> {
+    match app_of(exe) {
+        Some(app) => Some(runtime::menubar_helper_exe(app, silo_proto::CHANNEL)).filter(|agent| agent.is_file()),
+        None => Some(exe.with_file_name(runtime::MENUBAR)).filter(|agent| agent.is_file()),
+    }
 }
 
 /// A binary next to this executable (not this executable itself, which on a
@@ -740,7 +761,9 @@ mod tests {
         std::fs::create_dir_all(server.parent().unwrap()).unwrap();
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(&server, "silo").unwrap();
-        std::fs::write(app.join("Contents/MacOS/silo-menubar"), "silo-menubar").unwrap();
+        let menubar = runtime::menubar_helper_exe(&app, silo_proto::Channel::Release);
+        std::fs::create_dir_all(menubar.parent().unwrap()).unwrap();
+        std::fs::write(&menubar, "silo-menubar").unwrap();
         let exe = managed_exe(&home, &server).unwrap();
         assert_eq!(exe, home.join("runtime/Silo Server.app/Contents/MacOS/silo"), "one fixed path for every build");
         assert_eq!(exe, runtime::server_exe(&home));
@@ -755,6 +778,19 @@ mod tests {
         std::fs::write(&channel_helper, "silo").unwrap();
         assert_eq!(helper_of(&app_exe), Some(channel_helper));
         assert_eq!(helper_of(&base.join("target/debug/silo-app")), None);
+        // So is its menu-bar agent (never a stray `Contents/MacOS/silo-menubar`).
+        std::fs::write(app.join("Contents/MacOS/silo-menubar"), "old layout").unwrap();
+        assert_eq!(menubar_of(&app_exe), None);
+        let channel_menubar = runtime::menubar_helper_exe(&app, silo_proto::CHANNEL);
+        std::fs::create_dir_all(channel_menubar.parent().unwrap()).unwrap();
+        std::fs::write(&channel_menubar, "silo-menubar").unwrap();
+        assert_eq!(menubar_of(&app_exe), Some(channel_menubar));
+        // Unbundled (cargo target dir): the agent beside the app.
+        let debug = base.join("target/debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        assert_eq!(menubar_of(&debug.join("silo-app")), None);
+        std::fs::write(debug.join("silo-menubar"), "silo-menubar").unwrap();
+        assert_eq!(menubar_of(&debug.join("silo-app")), Some(debug.join("silo-menubar")));
         let _ = std::fs::remove_dir_all(&base);
     }
 

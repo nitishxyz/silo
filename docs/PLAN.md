@@ -239,13 +239,22 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
     `silo otto server`) re-execute themselves in place disclaimed when they are not their own
     (`silo-cli/src/disclaim.rs`; launchd jobs already are; `silo server --daemon` does it in its final process after
     the forks that detach it, since the pre-fork pid it would otherwise leave responsible exits), and prompts and System Settings name Silo Server
-    whoever started it. Under launchd the app copies the server bundle and menu-bar agent to `<SILO_HOME>/runtime/`
-    (`Silo Server.app`, swapped in atomically when it differs, and `silo-menubar`) and the agent runs them from
-    there, so nothing holds Silo.app open and Finder can replace it while the server runs; moving to the new build is
+    whoever started it.
+  - The menu-bar agent is a helper app too, `Silo.app/Contents/Helpers/Silo Menu Bar.app` (`Contents/MacOS/silo-menubar`,
+    bundle id `xyz.nitish.silo.menubar`, dev `SiloDev Menu Bar.app`/`xyz.nitish.silo.dev.menubar`, `LSUIElement`,
+    the app's icon, no entitlements): run from the app's own `Contents/MacOS`, AppKit took it for Silo.app (same
+    bundle id) and Launch Services could deliver Dock clicks, `open` and reopen events to the windowless agent.
+    Without launchd the app runs that helper (an unbundled `silo-app` runs the `silo-menubar` beside it); its
+    "Open Silo" opens the `.app` whose `Contents/Helpers` holds it, a runtime copy opens the installed app by id.
+  - Under launchd the app copies the server bundle and menu-bar agent to `<SILO_HOME>/runtime/`
+    (`Silo Server.app` and `Silo Menu Bar.app`, each swapped in atomically when it differs; whole bundles, as their
+    executables' signatures seal the bundle) and the launchd job and the app run them from there, so nothing holds Silo.app open and Finder can replace it while the server runs; moving to the new build is
     a hot upgrade (a job of an older app, running the bare `runtime/silo`, is stale and refreshed that way; the bare
-    copy is removed once nothing runs it). Once this build's job serves, runtime
+    copies `runtime/silo` and `runtime/silo-menubar` are removed once nothing runs them). Once this build's job serves, runtime
     dirs of other builds that no process runs from and nothing touched in 5 minutes are removed (under
-    `runtime.lock`). A new menu-bar agent replaces the one `menubar.lock` records if that is of another build.
+    `runtime.lock`). A new menu-bar agent replaces the one `menubar.lock` records if that is of another build
+    and its process is still named `silo-menubar` (by name: a swapped-out runtime bundle moves under a running agent),
+    whichever layout it runs from.
   - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications, on a disk image or translocated, with the
     default state dir installs or refreshes the launchd agent for its runtime `silo` (shared `silo_client::service`),
     taking over or adopting a running server live, points `<SILO_HOME>/bin/silo` at that `silo` and links

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Wrap already-built debug binaries in a dev bundle CEF can start from:
 #   <target>/debug/SiloDev.app  (exe = silo-app, helpers = copies of it,
-#   framework = symlink into CEF_PATH, silo/silo-menubar/otto-silo symlinked
-#   next to the exe, and the server the app runs: a copy of silo as
-#   Contents/Helpers/SiloDev Server.app, as in Silo.app).
+#   framework = symlink into CEF_PATH, silo/otto-silo symlinked next to the
+#   exe, and as in Silo.app the server and menu-bar agent the app runs:
+#   copies as Contents/Helpers/SiloDev Server.app and SiloDev Menu Bar.app).
 # Usage: scripts/dev-bundle.sh   (prints the bundle's executable path)
 #
 # The binaries must be dev-channel builds (plain `cargo build`, SILO_CHANNEL
@@ -65,28 +65,33 @@ for f in "${icons[@]}"; do
 done
 plist SiloDev xyz.nitish.silo.dev "" Silo > "$app/Contents/Info.plist"
 install_bin "$out/silo-app" "$app/Contents/MacOS/SiloDev"
-for bin in silo silo-menubar otto-silo; do
+for bin in silo otto-silo; do
   [[ -f "$out/$bin" ]] && ln -sf "$out/$bin" "$app/Contents/MacOS/$bin"
 done
-# The server's helper app (scripts/bundle-macos.sh): a real copy, as a
-# symlinked executable resolves to target/debug/silo and runs without the
-# bundle's identity. Copied and signed only when silo or the plist changed,
-# so a running server's bundle stays put and its signature stable.
-server_app="$app/Contents/Helpers/SiloDev Server.app"
-if [[ -f "$out/silo" ]]; then
-  version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
-  info="$("$root/scripts/server-info-plist.sh" "SiloDev Server" xyz.nitish.silo.dev.server "$version" Silo)"
-  stamp="$out/.silodev-server.stamp"
-  want="$(stat -f '%m %z %i' "$out/silo") $(printf '%s' "$info" | shasum | cut -c1-40) $(cat "${icons[@]}" | shasum | cut -c1-40)"
-  if [[ ! -x "$server_app/Contents/MacOS/silo" || "$(cat "$stamp" 2>/dev/null)" != "$want" ]]; then
-    mkdir -p "$server_app/Contents/MacOS" "$server_app/Contents/Resources"
-    printf '%s\n' "$info" > "$server_app/Contents/Info.plist"
-    cp "${icons[@]}" "$server_app/Contents/Resources/"
-    install_bin "$out/silo" "$server_app/Contents/MacOS/silo"
-    sign "$server_app"
-    echo "$want" > "$stamp"
+# The agent is a helper app of its own (below): a silo-menubar here would
+# register as SiloDev itself.
+rm -f "$app/Contents/MacOS/silo-menubar"
+# The helper apps (scripts/bundle-macos.sh): real copies, as a symlinked
+# executable resolves to target/debug and runs without the bundle's
+# identity. Copied and signed only when the binary or the plist changed, so
+# a running server's or agent's bundle stays put and its signature stable.
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
+helper_app() { # bin name id plist-script stamp
+  local bundle="$app/Contents/Helpers/$2.app" info want
+  [[ -f "$out/$1" ]] || return 0
+  info="$("$root/scripts/$4" "$2" "$3" "$version" Silo)"
+  want="$(stat -f '%m %z %i' "$out/$1") $(printf '%s' "$info" | shasum | cut -c1-40) $(cat "${icons[@]}" | shasum | cut -c1-40)"
+  if [[ ! -x "$bundle/Contents/MacOS/$1" || "$(cat "$out/$5" 2>/dev/null)" != "$want" ]]; then
+    mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+    printf '%s\n' "$info" > "$bundle/Contents/Info.plist"
+    cp "${icons[@]}" "$bundle/Contents/Resources/"
+    install_bin "$out/$1" "$bundle/Contents/MacOS/$1"
+    sign "$bundle"
+    echo "$want" > "$out/$5"
   fi
-fi
+}
+helper_app silo "SiloDev Server" xyz.nitish.silo.dev.server server-info-plist.sh .silodev-server.stamp
+helper_app silo-menubar "SiloDev Menu Bar" xyz.nitish.silo.dev.menubar menubar-info-plist.sh .silodev-menubar.stamp
 for suffix in "" " (GPU)" " (Renderer)" " (Plugin)"; do
   name="SiloDev Helper$suffix"
   dir="$app/Contents/Frameworks/$name.app/Contents"

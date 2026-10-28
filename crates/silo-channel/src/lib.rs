@@ -111,6 +111,18 @@ impl Channel {
         }
     }
 
+    /// The menu-bar agent's helper app name (`<name>.app` in the app's
+    /// `Contents/Helpers`, its `CFBundleName`, bundle id `<app id>.menubar`):
+    /// `Silo Menu Bar`, `SiloDev Menu Bar`. Its own bundle, so Launch
+    /// Services never takes the agent for the app.
+    #[must_use]
+    pub const fn menubar_name(self) -> &'static str {
+        match self {
+            Self::Release => "Silo Menu Bar",
+            Self::Dev => "SiloDev Menu Bar",
+        }
+    }
+
     /// The launchd job running the server (`silo up`).
     #[must_use]
     pub const fn launchd_label(self) -> &'static str {
@@ -250,6 +262,7 @@ mod tests {
         assert_eq!((Release.bundle_id(), Dev.bundle_id()), ("xyz.nitish.silo", "xyz.nitish.silo.dev"));
         assert_eq!((Release.server_bundle_id(), Dev.server_bundle_id()), ("xyz.nitish.silo.server", "xyz.nitish.silo.dev.server"));
         assert_eq!((Release.server_name(), Dev.server_name()), ("Silo Server", "SiloDev Server"));
+        assert_eq!((Release.menubar_name(), Dev.menubar_name()), ("Silo Menu Bar", "SiloDev Menu Bar"));
         for channel in [Release, Dev] {
             assert_eq!(channel.server_bundle_id(), format!("{}.server", channel.bundle_id()));
         }

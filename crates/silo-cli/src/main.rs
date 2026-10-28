@@ -1582,7 +1582,7 @@ async fn otto_released(home: &std::path::Path) -> anyhow::Result<()> {
     bail!("the old otto did not stop")
 }
 
-/// Launch the menu-bar agent next to this binary when it runs from its
+/// Launch the menu-bar agent's runtime bundle when this binary runs from its
 /// runtime directory (it exits at once if one already runs for this state dir).
 #[cfg(target_os = "macos")]
 fn start_menubar() {
@@ -1594,7 +1594,7 @@ fn start_menubar() {
     };
     let home = paths::home();
     let home = home.canonicalize().unwrap_or(home);
-    let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home).map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
+    let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home).map(|_| silo_client::runtime::menubar_exe(&home)).filter(|p| p.is_file()) else {
         return;
     };
     let mut command = std::process::Command::new(agent);
