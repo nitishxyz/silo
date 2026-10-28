@@ -138,3 +138,45 @@ fn encode_time_for_large_history() {
         assert!(rows as usize >= lines);
     }
 }
+
+/// CRC32C over the tag, the payload length and the payload, as in a record header.
+fn record(tag: u16, payload: &[u8]) -> Vec<u8> {
+    let mut crc = !0u32;
+    for byte in tag.to_le_bytes().iter().chain(&(payload.len() as u32).to_le_bytes()).chain(payload) {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
+        }
+    }
+    let mut out = tag.to_le_bytes().to_vec();
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(!crc).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+#[test]
+fn unknown_records_after_ready_are_skipped_in_any_chunking() {
+    let mut source = TerminalCore::new(grid(80, 24)).unwrap();
+    source.write_output(&history(3000)).unwrap();
+    let bytes = source.snapshot().unwrap();
+    let head = snapshot::head_len(&bytes).unwrap();
+    assert_eq!(record(snapshot::tag::READY, b""), bytes[head - snapshot::RECORD_HEADER_LEN..head], "CRC32C helper matches the encoder");
+
+    // A newer (Kitty-enabled) encoder may put optional records after any
+    // record, e.g. KITTY_IMAGE_PAGE_PLACEMENTS after a PAGE.
+    let mut spliced = bytes[..head].to_vec();
+    let mut splitter = snapshot::RecordSplitter::default();
+    splitter.push(&bytes[head..]);
+    while let Some((tag, rec)) = splitter.next_record() {
+        spliced.extend_from_slice(rec);
+        if tag != snapshot::tag::FINISH {
+            spliced.extend(record(snapshot::tag::KITTY_IMAGE_PAGE_PLACEMENTS, b"opaque"));
+            spliced.extend(record(0x4000, b""));
+        }
+    }
+    for chunk in [1, 7, 4096, spliced.len()] {
+        let mut restored = restore_incrementally(&spliced, chunk);
+        assert_eq!(dump(&mut source), dump(&mut restored), "chunk {chunk}");
+    }
+}

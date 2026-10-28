@@ -17,7 +17,7 @@ case "$target" in
 esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 revision=$(tr -d '[:space:]' < "$root/GHOSTTY_REV")
-zig_version=0.16.0
+zig_version=0.17.0
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) zig_target=aarch64-macos ;;
     Darwin-x86_64) zig_target=x86_64-macos ;;
@@ -47,7 +47,7 @@ if [[ ! -d $cache/source/.git ]]; then
 fi
 (
     cd "$cache/source"
-    "$zig" build ${cross[@]+"${cross[@]}"} -Dcpu="$cpu" -Demit-lib-vt=true -Doptimize=ReleaseFast -Dsimd=false \
+    "$zig" build ${cross[@]+"${cross[@]}"} -Dcpu="$cpu" -Demit-lib-vt=true -Doptimize=fast -Dsimd=false \
         -Dvt-features=-kitty-graphics --prefix "$runtime" >&2
 )
 printf '%s\n' "${target:-host}" > "$runtime/silo-target"

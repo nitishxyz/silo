@@ -19,6 +19,17 @@ pub mod tag {
     pub const READY: u16 = 5;
     pub const FINISH: u16 = 6;
     pub const CONTINUATION: u16 = 7;
+    /// Optional Kitty graphics records. libghostty-vt is built without
+    /// Kitty graphics, so its decoder skips them like any unknown tag.
+    pub const KITTY_IMAGE_STORAGE: u16 = 8;
+    pub const KITTY_IMAGE_PAYLOAD: u16 = 9;
+    pub const KITTY_IMAGE_PAGE_PLACEMENTS: u16 = 10;
+
+    /// Whether our decoder decodes `tag` rather than skipping it.
+    #[must_use]
+    pub const fn known(tag: u16) -> bool {
+        matches!(tag, TERMINAL..=CONTINUATION)
+    }
 }
 
 /// Snapshot format version from the envelope.

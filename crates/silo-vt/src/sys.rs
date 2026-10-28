@@ -306,6 +306,16 @@ pub struct RestoreProgress {
     pub finished: bool,
 }
 
+/// Incremental history restore state.
+#[derive(Default)]
+struct Restore {
+    records: crate::snapshot::RecordSplitter,
+    /// A PAGE is buffered but not decoded yet: the decoder reads the header
+    /// of the next known record right after a page (to find the page's
+    /// Kitty placements), so a page waits until that record is buffered.
+    page: bool,
+}
+
 /// Thread-confined terminal. Handles and borrowed upstream data never escape.
 pub struct TerminalCore {
     handle: NonNull<c_void>,
@@ -322,7 +332,7 @@ pub struct TerminalCore {
     raw_links: Vec<RawLink>,
     searching: bool,
     /// Present while history is still being restored from a snapshot.
-    restore: Option<crate::snapshot::RecordSplitter>,
+    restore: Option<Restore>,
 }
 
 // SAFETY: the handle is exclusively owned and every access goes through
@@ -644,7 +654,7 @@ impl TerminalCore {
             core.size.cell_width = 8;
             core.size.cell_height = 18;
         }
-        core.restore = Some(crate::snapshot::RecordSplitter::default());
+        core.restore = Some(Restore::default());
         if split < head.len() {
             core.restore_history(&head[split..])?;
         }
@@ -665,38 +675,45 @@ impl TerminalCore {
     /// Rejects malformed history; the terminal stays usable either way.
     pub fn restore_history(&mut self, bytes: &[u8]) -> Result<RestoreProgress, TerminalError> {
         let mut progress = RestoreProgress::default();
-        let Some(mut splitter) = self.restore.take() else {
+        let Some(mut restore) = self.restore.take() else {
             return Ok(RestoreProgress { finished: true, ..progress });
         };
-        splitter.push(bytes);
-        while let Some((tag, record)) = splitter.next_record() {
+        restore.records.push(bytes);
+        while let Some((tag, record)) = restore.records.next_record() {
             // SAFETY: exclusive handle; the shim copies the record bytes.
             check(unsafe { silo_vt_restore_push(self.handle.as_ptr(), record.as_ptr(), record.len()) })?;
-            if tag != crate::snapshot::tag::PAGE && tag != crate::snapshot::tag::FINISH {
+            // The decoder skips unknown records while reading a header.
+            if !crate::snapshot::tag::known(tag) {
                 continue;
             }
-            let mut rows = 0;
-            // SAFETY: exclusive handle; every record next() consumes is buffered.
-            match unsafe { silo_vt_restore_next(self.handle.as_ptr(), &raw mut rows) } {
-                0 => {
-                    progress.pages += 1;
-                    progress.rows += rows;
-                }
-                1 => {
-                    progress.finished = true;
-                    self.cells = None;
-                    return Ok(progress);
-                }
-                error => {
-                    self.cells = None;
-                    return Err(TerminalError(format!("snapshot history failed ({error})")));
+            // Decode the waiting page now that the header after it is buffered,
+            // then FINISH, or hold a new page until its successor arrives.
+            let steps = usize::from(std::mem::take(&mut restore.page)) + usize::from(tag == crate::snapshot::tag::FINISH);
+            restore.page = tag == crate::snapshot::tag::PAGE;
+            for _ in 0..steps {
+                let mut rows = 0;
+                // SAFETY: exclusive handle; every record next() reads is buffered.
+                match unsafe { silo_vt_restore_next(self.handle.as_ptr(), &raw mut rows) } {
+                    0 => {
+                        progress.pages += 1;
+                        progress.rows += rows;
+                    }
+                    1 => {
+                        progress.finished = true;
+                        self.cells = None;
+                        return Ok(progress);
+                    }
+                    error => {
+                        self.cells = None;
+                        return Err(TerminalError(format!("snapshot history failed ({error})")));
+                    }
                 }
             }
         }
         if progress.rows > 0 {
             self.cells = None;
         }
-        self.restore = Some(splitter);
+        self.restore = Some(restore);
         Ok(progress)
     }
 
