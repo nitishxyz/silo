@@ -112,10 +112,18 @@ pub struct Workspace {
     /// The width left after the tab strip last frame (its spacer's): the
     /// strip only overflows (and fades its edges) once that is gone.
     pub(crate) tab_room: std::rc::Rc<std::cell::Cell<f32>>,
-    /// Active tab the strip was last rendered for, and a pending
+    /// Where the tabs were last rendered and their active tab, and a pending
     /// scroll-into-view of the active tab (window id, frames left).
-    pub(crate) tab_last_active: std::cell::RefCell<Option<String>>,
+    pub(crate) tab_last_active: std::cell::RefCell<Option<(hosts::TabPosition, String)>>,
     pub(crate) tab_reveal: std::cell::RefCell<Option<(String, u16)>>,
+    /// Side tabs: the sidebar's scrolling list, the height left below it
+    /// last frame (as `tab_room`), whether this window hides the sidebar,
+    /// and, while its edge is dragged, where on it the press was and its
+    /// width (saved on release).
+    pub(crate) sidebar_scroll: gpui::ScrollHandle,
+    pub(crate) sidebar_room: std::rc::Rc<std::cell::Cell<f32>>,
+    pub(crate) sidebar_hidden: bool,
+    pub(crate) sidebar_resize: Option<(f32, f32)>,
     /// Tab under a dragged tab and whether the drop lands after it.
     pub(crate) tab_drop: Option<(usize, bool)>,
     /// The tab being dragged (window id), while its drag lasts.
@@ -287,6 +295,10 @@ impl Workspace {
             tab_room: std::rc::Rc::default(),
             tab_last_active: std::cell::RefCell::new(None),
             tab_reveal: std::cell::RefCell::new(None),
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_room: std::rc::Rc::default(),
+            sidebar_hidden: false,
+            sidebar_resize: None,
             tab_drop: None,
             tab_dragging: None,
             float_drag: None,
@@ -1023,9 +1035,11 @@ impl Workspace {
                     let title = self.window_title(&old.session.windows[index], cx);
                     let icon = self.tab_icon(&old.session.windows[index]);
                     // The strip's children were its tabs (no ghost yet): the
-                    // closed tab is child `index`.
-                    let width =
-                        self.motion.tab_ghosts.is_empty().then(|| self.tab_scroll.bounds_for_item(index)).flatten().map(|b| f32::from(b.size.width));
+                    // closed tab is child `index`. Side tabs collapse in height.
+                    let width = (self.motion.tab_ghosts.is_empty() && self.state.tabs == hosts::TabPosition::Top)
+                        .then(|| self.tab_scroll.bounds_for_item(index))
+                        .flatten()
+                        .map(|b| f32::from(b.size.width));
                     tab_ghosts.push(TabGhost { id: id.clone(), title, icon, index, width, started: now });
                 }
             }
@@ -1075,7 +1089,8 @@ impl Workspace {
             return;
         }
         let viewport = window.viewport_size();
-        let body = Bounds::new(point(px(0.), px(TITLEBAR_HEIGHT)), size(viewport.width, viewport.height - px(TITLEBAR_HEIGHT)));
+        let left = px(self.tab_sidebar_width(window).unwrap_or(0.0));
+        let body = Bounds::new(point(left, px(TITLEBAR_HEIGHT)), size(viewport.width - left, viewport.height - px(TITLEBAR_HEIGHT)));
         let (leaving, entering) = motion::pane_moves(&old_active.layout, &new_active.layout, &blocks);
         for id in leaving {
             // The whole card's slot (header and outline), as last laid out.
@@ -1239,6 +1254,7 @@ impl Workspace {
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
             kind: BlockKind::Terminal,
             url: None,
+            background: false,
         });
     }
 
@@ -1254,7 +1270,6 @@ impl Workspace {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
         self.call(Method::BlockSplit {
-            background: false,
             block_id: block,
             axis,
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
@@ -1659,6 +1674,7 @@ impl Render for Workspace {
         let launcher = self.render_launcher(window, cx);
         let settings = self.render_settings(window, cx);
         let titlebar = self.render_titlebar(window, cx);
+        let sidebar = self.render_tab_sidebar(now, window, cx);
         let switcher = self.render_switcher(window, cx);
         let sheet = self.render_add_host(cx);
         let share = self.render_share(cx);
@@ -1691,7 +1707,15 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SelectWindow8, window, cx| this.number_key(7, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow9, window, cx| this.number_key(8, window, cx)))
             .child(div().flex_none().when(frosted, |el| el.bg(self.chrome.fill())).child(titlebar))
-            .child(div().flex_1().min_h_0().when(frosted && !cards, |el| el.bg(self.chrome.fill())).child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .children(sidebar)
+                    .child(div().flex_1().min_w_0().h_full().when(frosted && !cards, |el| el.bg(self.chrome.fill())).child(body)),
+            )
             .children(self.status_bar().map(|status| crate::status::pill(status, self.panes_bottom() + crate::status::PILL_CLEARANCE, cx)))
             .children(ghosts)
             .children(appearance)

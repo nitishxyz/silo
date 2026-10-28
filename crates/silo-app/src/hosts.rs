@@ -317,8 +317,23 @@ pub enum Density {
     Comfortable,
 }
 
+/// Where a window shows its tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabPosition {
+    /// A strip in the titlebar.
+    #[default]
+    Top,
+    /// A list in a sidebar on the left, under the titlebar.
+    Side,
+}
+
 fn yes() -> bool {
     true
+}
+
+fn sidebar_width() -> f32 {
+    crate::titlebar::SIDEBAR_DEFAULT
 }
 
 /// App-side state and settings remembered across launches
@@ -329,6 +344,11 @@ pub struct AppState {
     pub last_session: Option<String>,
     #[serde(default)]
     pub density: Density,
+    #[serde(default)]
+    pub tabs: TabPosition,
+    /// Side tabs: the sidebar's width (points), as last dragged.
+    #[serde(default = "sidebar_width")]
+    pub tab_sidebar_width: f32,
     /// Which block types show their header.
     #[serde(default)]
     pub pane_headers: crate::pane_header::PaneHeaders,
@@ -373,6 +393,8 @@ impl Default for AppState {
         Self {
             last_session: None,
             density: Density::default(),
+            tabs: TabPosition::Top,
+            tab_sidebar_width: sidebar_width(),
             pane_headers: crate::pane_header::PaneHeaders::default(),
             ui_font_family: String::new(),
             match_running_app: true,
@@ -507,6 +529,8 @@ pub(crate) mod tests {
         // Older files without settings get the reference design.
         let old: AppState = serde_json::from_str(r#"{"last_session":"s1"}"#).unwrap();
         assert_eq!(old.density, Density::Comfortable);
+        assert_eq!(old.tabs, TabPosition::Top, "tabs stay on top");
+        assert!((old.tab_sidebar_width - crate::titlebar::SIDEBAR_DEFAULT).abs() < f32::EPSILON);
         assert_eq!(old.pane_headers, crate::pane_header::PaneHeaders::all(true));
         assert_eq!(old.ui_font_family, "", "Automatic UI font");
         assert!(old.match_running_app);
@@ -519,6 +543,8 @@ pub(crate) mod tests {
         let state = AppState {
             last_session: None,
             density: Density::Compact,
+            tabs: TabPosition::Side,
+            tab_sidebar_width: 260.0,
             pane_headers: crate::pane_header::PaneHeaders { terminal: false, agent: true },
             ui_font_family: String::new(),
             match_running_app: false,
@@ -537,6 +563,9 @@ pub(crate) mod tests {
         assert!(!text.contains("ui_font_family"), "Automatic is not written: {text}");
         let back = load_state(&dir);
         assert_eq!((back.density, back.pane_headers, back.match_running_app), (Density::Compact, state.pane_headers, false));
+        assert!(text.contains(r#""tabs": "side""#), "{text}");
+        assert_eq!(back.tabs, TabPosition::Side);
+        assert!((back.tab_sidebar_width - 260.0).abs() < f32::EPSILON);
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         assert!(!back.check_updates);
         assert!(!back.confirm_close);

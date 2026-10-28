@@ -88,6 +88,7 @@ icons!(
     "eye-off",
     "plug",
     "sidebar-right",
+    "sidebar-left",
     "layers",
     "git-diff",
     "git-branch",

@@ -135,6 +135,7 @@ impl Workspace {
         let ui_font = UiFontSettings { family: self.ui_font_family().to_owned(), choices: theme::ui_fonts(cx), missing: ui.missing };
         SettingsSnapshot {
             density: self.density(),
+            tabs: self.state.tabs,
             pane_headers: self.pane_headers(),
             match_running_app: self.match_running_app(),
             material: self.material().0,
@@ -454,6 +455,10 @@ impl Workspace {
             }
             SettingsEvent::SetDensity(density) => {
                 self.set_density(*density, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetTabs(tabs) => {
+                self.set_tab_position(*tabs, cx);
                 Outcome::default()
             }
             SettingsEvent::SetPaneHeaders(block, show) => {

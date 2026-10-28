@@ -271,6 +271,7 @@ enum FontTarget {
 #[derive(Clone, Debug)]
 pub struct SettingsSnapshot {
     pub density: Density,
+    pub tabs: crate::hosts::TabPosition,
     pub pane_headers: crate::pane_header::PaneHeaders,
     pub match_running_app: bool,
     pub material: crate::material::Material,
@@ -310,6 +311,7 @@ impl Default for SettingsSnapshot {
     fn default() -> Self {
         Self {
             density: Density::Comfortable,
+            tabs: crate::hosts::TabPosition::Top,
             pane_headers: crate::pane_header::PaneHeaders::default(),
             match_running_app: true,
             material: crate::material::Material::Solid,
@@ -348,6 +350,7 @@ pub enum ServerAction {
 pub enum SettingsEvent {
     Close,
     SetDensity(Density),
+    SetTabs(crate::hosts::TabPosition),
     SetSearchEngine(crate::search::SearchEngine),
     /// Show a block type's headers.
     SetPaneHeaders(crate::pane_header::HeaderBlock, bool),
@@ -1061,6 +1064,10 @@ impl SettingsPanel {
         )
     }
 
+    fn tabs_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        Self::segmented("settings-tabs", &crate::settings_table::TAB_POSITIONS, self.snapshot.tabs, 92.0, SettingsEvent::SetTabs, cx)
+    }
+
     /// A text field styled as an inline input.
     fn field_box(field: &Entity<TextField>, width: f32) -> AnyElement {
         div()
@@ -1678,7 +1685,13 @@ impl SettingsPanel {
         let mut out = Vec::new();
         match section {
             Section::Appearance => {
-                out.push(self.group(Some("Layout"), vec![Self::row(SettingId::PaneDensity.label(), None, Some(self.density_control(cx)), narrow)]));
+                out.push(self.group(
+                    Some("Layout"),
+                    vec![
+                        Self::row(SettingId::PaneDensity.label(), None, Some(self.density_control(cx)), narrow),
+                        Self::row(SettingId::TabPosition.label(), None, Some(self.tabs_control(cx)), narrow),
+                    ],
+                ));
                 {
                     use crate::pane_header::HeaderBlock;
                     let headers = s.pane_headers;

@@ -1,6 +1,6 @@
-//! The appearance menu behind the titlebar's eye button: pane layout
-//! density and pane headers, the same settings as the palette's
-//! `Appearance: …` and `Show/Hide Pane Headers` commands.
+//! The appearance menu behind the titlebar's settings button: pane layout
+//! density, tab position and pane headers (density and headers are also the
+//! palette's `Appearance: …` and `Show/Hide Pane Headers` commands).
 
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ use gpui::{AnyElement, Context, FocusHandle, IntoElement, Subscription, Window, 
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
-    hosts::Density,
+    hosts::{Density, TabPosition},
     theme,
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
@@ -63,6 +63,7 @@ impl Workspace {
             return None;
         }
         let density = self.density();
+        let side = self.state.tabs == TabPosition::Side;
         let headers = self.pane_headers().every();
         let row = |id: &'static str, label: &'static str, checked: bool| {
             div()
@@ -115,6 +116,10 @@ impl Workspace {
                     row("appearance-compact", "Compact", density == Density::Compact)
                         .on_click(cx.listener(|this, _, _, cx| this.set_density(Density::Compact, cx))),
                 )
+                .child(div().h(px(1.0)).mx(px(4.0)).my(px(4.0)).bg(rgb(theme::border())))
+                .child(div().px(px(8.0)).pt(px(4.0)).pb(px(2.0)).text_size(px(11.0)).text_color(rgb(theme::muted())).child("Tabs"))
+                .child(row("appearance-tabs-top", "Top", !side).on_click(cx.listener(|this, _, _, cx| this.set_tab_position(TabPosition::Top, cx))))
+                .child(row("appearance-tabs-side", "Side", side).on_click(cx.listener(|this, _, _, cx| this.set_tab_position(TabPosition::Side, cx))))
                 .child(div().h(px(1.0)).mx(px(4.0)).my(px(4.0)).bg(rgb(theme::border())))
                 .child(
                     row("appearance-headers", "Show Pane Headers", headers)

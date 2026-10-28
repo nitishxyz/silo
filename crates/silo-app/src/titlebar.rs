@@ -10,6 +10,10 @@
 //! mouse wheel's vertical motion); the pill and the right-hand buttons stay
 //! put. Soft fades in the titlebar color mark a side with hidden tabs, and
 //! the active tab is scrolled fully into view when it changes.
+//!
+//! With side tabs (`titlebar/sidebar.rs`) the strip's place is empty
+//! titlebar, and a sidebar button after the traffic lights hides and shows
+//! the sidebar.
 
 use std::time::Instant;
 
@@ -19,10 +23,15 @@ use silo_proto::control::Method;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
+    hosts::TabPosition,
     motion::{self, TabGhost},
     theme,
     workspace::{TITLEBAR_HEIGHT, Workspace},
 };
+
+mod sidebar;
+
+pub use sidebar::SIDEBAR_DEFAULT;
 
 /// Width reserved for the traffic lights.
 pub const TRAFFIC_LIGHTS: f32 = 86.0;
@@ -166,14 +175,13 @@ impl Workspace {
     }
 
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let several = self.view.as_ref().is_some_and(|v| v.session.windows.len() > 1);
+        let side = self.state.tabs == TabPosition::Side;
         let hover = self.chrome.hover();
         let fullscreen = window.is_fullscreen();
         let inset = if fullscreen { FULLSCREEN_INSET } else { TRAFFIC_LIGHTS };
         if self.last_fullscreen.replace(Some(fullscreen)) != Some(fullscreen) {
             tracing::debug!(fullscreen, inset, "titlebar inset");
         }
-        let now = Instant::now();
         let compact = self.density() == crate::hosts::Density::Compact;
         let mut bar = div()
             .id("titlebar")
@@ -204,126 +212,15 @@ impl Workspace {
                 }
             })
             .font_family(theme::ui_font())
+            .when(side && self.view.is_some(), |el| el.child(self.render_sidebar_toggle(cx)))
             .child(self.render_pill(cx));
-        if let Some(view) = &self.view {
-            let active_index = view.session.windows.iter().position(|w| w.id == view.session.active_window);
-            let active_id = view.session.active_window.clone();
-            if self.tab_last_active.replace(Some(active_id.clone())).as_ref() != Some(&active_id) {
-                *self.tab_reveal.borrow_mut() = Some((active_id.clone(), REVEAL_FRAMES));
-            }
-            // Tabs size to their titles, ellipsized beyond `TAB_MAX`, and
-            // scroll when they overflow. Vertical wheel motion scrolls
-            // horizontally too (GPUI maps it when only x scrolls).
-            let mut tabs = div()
-                .id("tab-strip")
-                .flex()
-                .flex_row()
-                .items_center()
-                // No row gap: each tab after the first leads with its own
-                // (a closing tab's shrinks with it). A collapsing tab's
-                // negative margin closing a gap left gpui's scroll row
-                // measured narrower than its tabs: it clipped them all.
-                .pl(px(PILL_GAP))
-                // Room for the insertion bar after the last tab.
-                .pr(px(TAB_GAP))
-                .h_full()
-                .min_w_0()
-                .flex_shrink(1.0)
-                .overflow_x_scroll()
-                .track_scroll(&self.tab_scroll);
-            let mut ghosts: Vec<&TabGhost> = self.motion.tab_ghosts.iter().collect();
-            ghosts.sort_by_key(|g| g.index);
-            let mut ghosts = ghosts.into_iter().peekable();
-            // Child index of the active tab among tabs and ghosts.
-            let mut child = 0;
-            let mut active_child = None;
-            let mut active_entering = false;
-            let (fade_left, fade_right) =
-                edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x), self.tab_room.get());
-            let strip = self.tab_scroll.bounds();
-            // Tabs fade out where the strip scrolls on, by their own
-            // opacity (no overlay to stack on a frosted titlebar).
-            let fade = |child: usize| {
-                self.tab_scroll.bounds_for_item(child).map_or(1.0, |tab| {
-                    let ramp = |inset: gpui::Pixels| 0.3 + 0.7 * (f32::from(inset) / FADE_WIDTH).clamp(0.0, 1.0);
-                    let left = if fade_left { ramp(tab.left() - strip.left()) } else { 1.0 };
-                    let right = if fade_right { ramp(strip.right() - tab.right()) } else { 1.0 };
-                    left.min(right)
-                })
-            };
-            // The gap before the next tab: none at the start, a full one after
-            // a tab, and shrinking with a closing first tab (so it ends at none).
-            let mut gap_before = 0.0;
-            for (index, w) in view.session.windows.iter().enumerate() {
-                while let Some(ghost) = ghosts.next_if(|g| g.index <= index) {
-                    let keep = 1.0 - motion::progress(ghost.started, motion::TAB_EXIT, now).unwrap_or(1.0);
-                    if let Some(el) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
-                        tabs = tabs.child(el);
-                        if child == 0 {
-                            gap_before = keep;
-                        }
-                        child += 1;
-                    }
-                }
-                let selected = several && active_index == Some(index);
-                let appear = self.motion.tab_enter.get(&w.id).and_then(|s| motion::progress(*s, motion::TAB_ENTER, now)).unwrap_or(1.0);
-
-                if w.id == active_id {
-                    active_child = Some(child);
-                    active_entering = appear < 1.0;
-                }
-                // Its gap grows in with it.
-                let lead = TAB_GAP * appear * gap_before;
-                gap_before = 1.0;
-                tabs = tabs.child(self.render_tab(w, index, selected, several, appear, fade(child), lead, now, cx));
-                child += 1;
-            }
-            for ghost in ghosts {
-                if let Some(ghost) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
-                    tabs = tabs.child(ghost);
-                    child += 1;
-                }
-            }
-            self.step_tab_reveal(&active_id, active_child, active_entering, !cx.reduce_motion(), window);
-            let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
+        if self.view.is_some() {
             let menu_open = self.appearance_menu.open;
             let new_tab_open = self.launcher.is_open_for_tab();
-            // The strip and the empty space after it take tab drops. The
-            // space after the last tab means "move to the end".
-            let last = view.session.windows.len().saturating_sub(1);
-            let room = self.tab_room.clone();
-            let spacer = div()
-                .relative()
-                .flex_1()
-                .h_full()
-                .child(canvas(move |b, _, _| room.set(f32::from(b.size.width)), |_, (), _, _| {}).absolute().inset_0())
-                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
-                    if ev.bounds.contains(&ev.event.position) {
-                        let id = ev.drag(cx).window_id.clone();
-                        this.set_tab_drop(&id, Some((last, true)), cx);
-                    }
-                }));
-            let drop_zone = div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .child(strip_view)
-                .child(spacer)
-                .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<TabDrag>, _, cx| {
-                    if !ev.bounds.contains(&ev.event.position) {
-                        this.set_tab_drop("", None, cx);
-                    }
-                }))
-                .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
-                    if let Some((target, after)) = this.tab_drop.take() {
-                        this.move_tab(&drag.window_id, target, after, cx);
-                    }
-                    cx.notify();
-                }));
+            // Side tabs: the strip's place is plain titlebar, dragging the window.
+            let zone = if side { div().flex_1().h_full().into_any_element() } else { self.render_tab_strip(window, cx) };
             bar = bar
-                .child(drop_zone)
+                .child(zone)
                 .children(self.render_watchers())
                 .children(self.render_update_pill(cx))
                 .children(self.render_background_button(cx))
@@ -367,10 +264,151 @@ impl Workspace {
         bar.into_any_element()
     }
 
+    /// The titlebar's tab strip, with the empty space after it (both take
+    /// tab drops).
+    fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = &self.view else { return div().flex_1().into_any_element() };
+        let several = view.session.windows.len() > 1;
+        let now = Instant::now();
+        let active_index = view.session.windows.iter().position(|w| w.id == view.session.active_window);
+        let active_id = view.session.active_window.clone();
+        self.note_active_tab(TabPosition::Top, &active_id);
+        // Tabs size to their titles, ellipsized beyond `TAB_MAX`, and
+        // scroll when they overflow. Vertical wheel motion scrolls
+        // horizontally too (GPUI maps it when only x scrolls).
+        let mut tabs = div()
+            .id("tab-strip")
+            .flex()
+            .flex_row()
+            .items_center()
+            // No row gap: each tab after the first leads with its own
+            // (a closing tab's shrinks with it). A collapsing tab's
+            // negative margin closing a gap left gpui's scroll row
+            // measured narrower than its tabs: it clipped them all.
+            .pl(px(PILL_GAP))
+            // Room for the insertion bar after the last tab.
+            .pr(px(TAB_GAP))
+            .h_full()
+            .min_w_0()
+            .flex_shrink(1.0)
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
+        let mut ghosts: Vec<&TabGhost> = self.motion.tab_ghosts.iter().collect();
+        ghosts.sort_by_key(|g| g.index);
+        let mut ghosts = ghosts.into_iter().peekable();
+        // Child index of the active tab among tabs and ghosts.
+        let mut child = 0;
+        let mut active_child = None;
+        let mut active_entering = false;
+        let (fade_left, fade_right) =
+            edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x), self.tab_room.get());
+        let strip = self.tab_scroll.bounds();
+        // Tabs fade out where the strip scrolls on, by their own
+        // opacity (no overlay to stack on a frosted titlebar).
+        let fade = |child: usize| {
+            self.tab_scroll.bounds_for_item(child).map_or(1.0, |tab| {
+                let ramp = |inset: gpui::Pixels| 0.3 + 0.7 * (f32::from(inset) / FADE_WIDTH).clamp(0.0, 1.0);
+                let left = if fade_left { ramp(tab.left() - strip.left()) } else { 1.0 };
+                let right = if fade_right { ramp(strip.right() - tab.right()) } else { 1.0 };
+                left.min(right)
+            })
+        };
+        // The gap before the next tab: none at the start, a full one after
+        // a tab, and shrinking with a closing first tab (so it ends at none).
+        let mut gap_before = 0.0;
+        for (index, w) in view.session.windows.iter().enumerate() {
+            while let Some(ghost) = ghosts.next_if(|g| g.index <= index) {
+                let keep = 1.0 - motion::progress(ghost.started, motion::TAB_EXIT, now).unwrap_or(1.0);
+                if let Some(el) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
+                    tabs = tabs.child(el);
+                    if child == 0 {
+                        gap_before = keep;
+                    }
+                    child += 1;
+                }
+            }
+            let selected = several && active_index == Some(index);
+            let appear = self.motion.tab_enter.get(&w.id).and_then(|s| motion::progress(*s, motion::TAB_ENTER, now)).unwrap_or(1.0);
+
+            if w.id == active_id {
+                active_child = Some(child);
+                active_entering = appear < 1.0;
+            }
+            // Its gap grows in with it.
+            let lead = TAB_GAP * appear * gap_before;
+            gap_before = 1.0;
+            tabs = tabs.child(self.render_tab(w, index, selected, several, appear, fade(child), lead, now, cx));
+            child += 1;
+        }
+        for ghost in ghosts {
+            if let Some(ghost) = render_tab_ghost(ghost, child > 0, self.chrome, now) {
+                tabs = tabs.child(ghost);
+                child += 1;
+            }
+        }
+        self.step_tab_reveal(&self.tab_scroll, false, &active_id, active_child, active_entering, !cx.reduce_motion(), window);
+        let strip_view = div().relative().flex().flex_row().h_full().min_w_0().flex_shrink(1.0).child(tabs);
+        // The strip and the empty space after it take tab drops. The
+        // space after the last tab means "move to the end".
+        let last = view.session.windows.len().saturating_sub(1);
+        let room = self.tab_room.clone();
+        let spacer = div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .child(canvas(move |b, _, _| room.set(f32::from(b.size.width)), |_, (), _, _| {}).absolute().inset_0())
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let id = ev.drag(cx).window_id.clone();
+                    this.set_tab_drop(&id, Some((last, true)), cx);
+                }
+            }));
+        let drop_zone = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(strip_view)
+            .child(spacer)
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    this.set_tab_drop("", None, cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
+                if let Some((target, after)) = this.tab_drop.take() {
+                    this.move_tab(&drag.window_id, target, after, cx);
+                }
+                cx.notify();
+            }));
+        drop_zone.into_any_element()
+    }
+
+    /// Scroll the active tab into view once it changes, or the tabs move
+    /// between the titlebar and the sidebar.
+    fn note_active_tab(&self, position: TabPosition, active_id: &str) {
+        let key = Some((position, active_id.to_owned()));
+        if *self.tab_last_active.borrow() != key {
+            *self.tab_last_active.borrow_mut() = key;
+            *self.tab_reveal.borrow_mut() = Some((active_id.to_owned(), REVEAL_FRAMES));
+        }
+    }
+
     /// Advance a pending scroll-into-view of the active tab by one frame,
     /// using the previous frame's layout. It stays pending (and requests
     /// frames) while the tab is still growing in or not laid out yet.
-    fn step_tab_reveal(&self, active_id: &str, child: Option<usize>, entering: bool, smooth: bool, window: &mut Window) {
+    #[allow(clippy::too_many_arguments)]
+    fn step_tab_reveal(
+        &self,
+        scroll: &gpui::ScrollHandle,
+        vertical: bool,
+        active_id: &str,
+        child: Option<usize>,
+        entering: bool,
+        smooth: bool,
+        window: &mut Window,
+    ) {
         let mut pending = self.tab_reveal.borrow_mut();
         let Some((id, frames)) = pending.take() else {
             return;
@@ -379,22 +417,25 @@ impl Workspace {
             return;
         }
         let Some(child) = child else { return };
-        let viewport = self.tab_scroll.bounds();
-        let keep = match self.tab_scroll.bounds_for_item(child) {
-            Some(item) if viewport.size.width > px(0.0) => {
-                let offset = self.tab_scroll.offset();
-                let from = f32::from(offset.x);
+        let viewport = scroll.bounds();
+        // Along the strip's axis: x on top, y in the sidebar.
+        let along = |p: gpui::Point<gpui::Pixels>| f32::from(if vertical { p.y } else { p.x });
+        let extent = |s: gpui::Size<gpui::Pixels>| f32::from(if vertical { s.height } else { s.width });
+        let keep = match scroll.bounds_for_item(child) {
+            Some(item) if extent(viewport.size) > 0.0 => {
+                let offset = scroll.offset();
+                let from = along(offset);
                 let target = reveal_offset(
                     from,
-                    f32::from(viewport.size.width),
-                    f32::from(item.left() - viewport.left()),
-                    f32::from(item.size.width),
+                    extent(viewport.size),
+                    along(item.origin) - along(viewport.origin),
+                    extent(item.size),
                     REVEAL_MARGIN,
-                    f32::from(self.tab_scroll.max_offset().x),
+                    along(scroll.max_offset()),
                 );
                 let next = if smooth { ease_toward(from, target) } else { target };
                 if (next - from).abs() > 0.01 {
-                    self.tab_scroll.set_offset(gpui::point(px(next), offset.y));
+                    scroll.set_offset(if vertical { gpui::point(offset.x, px(next)) } else { gpui::point(px(next), offset.y) });
                 }
                 entering || (target - next).abs() > 0.01
             }

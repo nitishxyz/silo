@@ -3,7 +3,7 @@
 //! lists, reads and applies settings through it.
 
 use crate::{
-    hosts::NotifyField,
+    hosts::{NotifyField, TabPosition},
     material::Material,
     pane_header::HeaderBlock,
     settings_panel::{ColorSlot, CursorShape, Density, Section, SettingsEvent, SettingsSnapshot},
@@ -13,6 +13,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingId {
     PaneDensity,
+    TabPosition,
     TerminalHeaders,
     AgentHeaders,
     Theme,
@@ -77,6 +78,7 @@ macro_rules! setting {
 
 pub const SETTINGS: &[Setting] = &[
     setting!(SettingId::PaneDensity, "Pane density", "Pane density", Appearance, Some("Layout"), Choice, "density compact comfortable cards layout"),
+    setting!(SettingId::TabPosition, "Tabs", "Tabs", Appearance, Some("Layout"), Choice, "tabs top side vertical sidebar horizontal titlebar layout"),
     setting!(
         SettingId::TerminalHeaders,
         "Terminal headers",
@@ -280,6 +282,7 @@ fn on_off(on: bool) -> String {
 }
 
 const DENSITIES: [(Density, &str); 2] = [(Density::Comfortable, "Comfortable"), (Density::Compact, "Compact")];
+pub const TAB_POSITIONS: [(TabPosition, &str); 2] = [(TabPosition::Top, "Top"), (TabPosition::Side, "Side")];
 const MATERIALS: [(Material, &str); 2] = [(Material::Solid, "Solid"), (Material::Frosted, "Frosted")];
 pub const CURSOR_SHAPES: [(CursorShape, &str); 3] = [(CursorShape::Block, "Block"), (CursorShape::Bar, "Bar"), (CursorShape::Underline, "Underline")];
 
@@ -400,6 +403,7 @@ impl SettingId {
         let automatic = |family: &str| if family.is_empty() { "Automatic".to_owned() } else { family.to_owned() };
         Some(match self {
             Self::PaneDensity => label_of(&DENSITIES, &s.density),
+            Self::TabPosition => label_of(&TAB_POSITIONS, &s.tabs),
             Self::SearchEngine => s.search_engine.label().to_owned(),
             Self::WindowMaterial => label_of(&MATERIALS, &s.material),
             Self::Theme => t.themes.iter().find(|c| c.id == t.theme).map_or_else(|| t.theme.clone(), |c| c.name.clone()),
@@ -419,6 +423,7 @@ impl SettingId {
         let t = &s.terminal;
         match self {
             Self::PaneDensity => DENSITIES.iter().map(|(d, l)| simple(l, SettingsEvent::SetDensity(*d), *d == s.density)).collect(),
+            Self::TabPosition => TAB_POSITIONS.iter().map(|(t, l)| simple(l, SettingsEvent::SetTabs(*t), *t == s.tabs)).collect(),
             Self::SearchEngine => crate::search::SearchEngine::ALL
                 .iter()
                 .map(|e| simple(e.label(), SettingsEvent::SetSearchEngine(*e), *e == s.search_engine))
@@ -556,6 +561,17 @@ mod tests {
         assert!(matches!(SettingId::AgentHeaders.toggled(false), Some(SettingsEvent::SetPaneHeaders(HeaderBlock::Agent, false))));
         let words = section_keywords(Section::Appearance);
         assert!(["block headers", "terminal", "agent"].iter().all(|w| words.contains(w)), "{words}");
+    }
+
+    #[test]
+    fn tabs_are_top_or_side() {
+        let mut s = SettingsSnapshot::default();
+        assert_eq!(SettingId::TabPosition.value(&s).as_deref(), Some("Top"));
+        s.tabs = TabPosition::Side;
+        let choices = SettingId::TabPosition.choices(&s);
+        assert_eq!(choices.iter().map(|c| (c.label.as_str(), c.selected)).collect::<Vec<_>>(), [("Top", false), ("Side", true)]);
+        assert!(matches!(choices[0].event, SettingsEvent::SetTabs(TabPosition::Top)));
+        assert!(section_keywords(Section::Appearance).contains("vertical"));
     }
 
     #[test]

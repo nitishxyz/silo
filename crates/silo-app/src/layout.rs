@@ -70,7 +70,8 @@ impl Workspace {
         // Cards on the bottom edge sit in the window's bottom corners.
         // Compact panes are flush: the window clips them itself.
         let corner = if comfortable { radius::window_corner(window) } else { None };
-        let place = Placement { window: corner, left: true, right: true, bottom: true };
+        // Side tabs: the sidebar, not the window corner, is left of the cards.
+        let place = Placement { window: corner, left: self.tab_sidebar_width(window).is_none(), right: true, bottom: true };
         let zoom = self.motion.zoom_frame(now).filter(|(block, ..)| w.layout.blocks().iter().any(|b| b == block));
         let content = if zoom.is_some() {
             // Siblings stay tiled under the pane growing over them, and are
