@@ -89,15 +89,18 @@ pub(super) struct Tail {
     pub resume: bool,
     /// Something new arrived since the user left the bottom (kept).
     pub unseen: bool,
-    /// Show `↓ New activity`.
+    /// Show the pill: `↓ New activity`, or `↓ Jump to bottom` when well up with nothing new.
     pub pill: bool,
 }
+
+/// How far up (px) a reader is before the pill offers the way back down with nothing new.
+const JUMP_GAP: f32 = 200.0;
 
 impl Tail {
     pub(super) fn of(following: bool, gap: f32, unseen: bool) -> Self {
         let at_end = following || gap <= AT_END;
         let unseen = unseen && !at_end;
-        Self { at_end, resume: at_end && !following, unseen, pill: unseen }
+        Self { at_end, resume: at_end && !following, unseen, pill: unseen || (!at_end && gap > JUMP_GAP) }
     }
 }
 
@@ -746,7 +749,7 @@ impl AgentPane {
         gpui::canvas(
             move |_, window, _| {
                 let tail = Tail::of(list.is_following_tail(), gap_to_end(&list), pill);
-                if tail.resume || (pill && !tail.pill) {
+                if tail.resume || pill != tail.pill {
                     window.refresh();
                 }
             },
@@ -830,7 +833,13 @@ impl AgentPane {
     /// `↓ New activity` while scrolled up and something arrived below; it rises in and sinks away.
     fn render_new_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reduce = cx.reduce_motion();
-        let show = self.tail().pill && !self.rows.is_empty();
+        let tail = self.tail();
+        let show = tail.pill && !self.rows.is_empty();
+        // Keep the last label while it sinks away.
+        if show {
+            self.pill_new.set(tail.unseen);
+        }
+        let label = if self.pill_new.get() { "New activity" } else { "Jump to bottom" };
         self.unseen_anim.set(show, now, reduce);
         if self.unseen_anim.hidden(now, reduce) {
             return None;
@@ -865,7 +874,7 @@ impl AgentPane {
                         .hover(|s| s.bg(theme::hover_fill()))
                         .active(|s| s.scale(0.96))
                         .child(icon("chevron-down", 12.0, theme::muted()))
-                        .child("New activity")
+                        .child(label)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.list.scroll_to_end();
                             this.list.set_follow_mode(gpui::FollowMode::Tail);
@@ -3599,7 +3608,8 @@ mod tests {
         // Scrolled up with something new below: the pill, following stays off.
         assert_eq!(Tail::of(false, 240.0, true), Tail { at_end: false, resume: false, unseen: true, pill: true });
         // Scrolled up, nothing new yet: no pill.
-        assert!(!Tail::of(false, 240.0, false).pill);
+        assert!(Tail::of(false, 240.0, false).pill, "well up with nothing new: jump to bottom");
+        assert!(!Tail::of(false, 120.0, false).pill, "just a little up: no pill");
         // Back at the bottom (scrolled, or a group folding/remeasuring settled) before the list noticed:
         // no pill, follow again, and what was unseen is seen.
         assert_eq!(Tail::of(false, 0.0, true), Tail { at_end: true, resume: true, unseen: false, pill: false });

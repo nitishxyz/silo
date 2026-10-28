@@ -286,6 +286,14 @@ pub(crate) fn reconnecting(remote: bool, host_up: bool, follower: Option<bool>) 
     remote && (!host_up || follower == Some(false))
 }
 
+/// Whether the pane follows the session the server names for its block.
+/// A new session isn't on the server until its first prompt creates it, so
+/// until then the server still names the one the pane `left` for it:
+/// following that would pull the pane back mid-draft.
+fn follows_server(shown: Option<&str>, left: Option<&str>, server: Option<&str>) -> bool {
+    server.is_some() && shown != server && !(shown.is_none() && left == server)
+}
+
 /// The tunnel's refusal of remote host `id`'s otto, probed after a failed connect.
 async fn probe_refusal(id: &str) -> Option<TunnelErrCode> {
     let error = match client::dialer(id).await {
@@ -317,6 +325,9 @@ pub struct AgentPane {
     home: Option<String>,
     /// A folder this pane moved to that the server hasn't echoed yet.
     moving: Option<String>,
+    /// The session this pane left for a new one, which the server still
+    /// names until the new one is created ([`follows_server`]).
+    left: Option<String>,
     /// Whether the session's folder is in a git work tree, for the folder
     /// last asked about (the header's Review changes shows only then).
     git_repo: std::cell::RefCell<Option<(String, bool)>>,
@@ -448,6 +459,8 @@ pub struct AgentPane {
     anims: HashMap<String, (String, crate::motion::Toggle)>,
     /// The `↓ New activity` pill.
     unseen_anim: crate::motion::Toggle,
+    /// The pill says New activity (else Jump to bottom); kept while it hides.
+    pill_new: std::cell::Cell<bool>,
     /// Last status of each line, when it changed and the one before it (the icons crossfade).
     line_status: HashMap<String, (transcript::Status, Instant, Option<transcript::Status>)>,
     /// Streaming reasoning under a `Thinking` line: eases its height as it grows and when it ends.
@@ -532,6 +545,7 @@ impl AgentPane {
             host,
             home: None,
             moving: None,
+            left: None,
             git_repo: std::cell::RefCell::new(None),
             rt,
             width: std::rc::Rc::default(),
@@ -615,6 +629,7 @@ impl AgentPane {
             card_anim: crate::motion::Toggle::new(false, crate::motion::UI),
             anims: HashMap::new(),
             unseen_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
+            pill_new: std::cell::Cell::new(false),
             line_status: HashMap::new(),
             streams: HashMap::new(),
             body_mode: (0, None),
@@ -673,6 +688,7 @@ impl AgentPane {
             self.cwd = cwd;
             self.project = None;
             self.sessions.clear();
+            self.left = None;
             if self.session_id != session_id {
                 self.forget_sends();
                 self.session_id = session_id;
@@ -682,7 +698,8 @@ impl AgentPane {
             return;
         }
         // A session this pane is about to create is not on the server yet.
-        if self.session_id != session_id && session_id.is_some() {
+        if follows_server(self.session_id.as_deref(), self.left.as_deref(), session_id.as_deref()) {
+            self.left = None;
             self.session_id = session_id;
             self.follow(cx);
         }
@@ -1731,6 +1748,7 @@ impl AgentPane {
             move |this, result, cx| match result {
                 Ok(info) => {
                     this.session_id = Some(info.id.clone());
+                    this.left = None;
                     this.fresh = true;
                     cx.emit(AgentPaneEvent::Session { session_id: info.id.clone(), title: info.title.clone() });
                     this.follow(cx);
@@ -1953,8 +1971,8 @@ impl AgentPane {
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_overlay(None, cx);
         self.forget_sends();
-        if self.session_id.is_some() {
-            self.session_id = None;
+        if let Some(left) = self.session_id.take() {
+            self.left = Some(left);
             self.follow(cx);
         }
         self.focus_composer(window, cx);
@@ -1965,6 +1983,7 @@ impl AgentPane {
         if self.session_id.as_deref() != Some(id.as_str()) {
             self.forget_sends();
             let title = self.sessions.iter().find(|s| s.id == id).map(|s| s.title.clone()).unwrap_or_default();
+            self.left = None;
             self.session_id = Some(id.clone());
             self.follow(cx);
             cx.emit(AgentPaneEvent::Session { session_id: id, title });
@@ -2367,6 +2386,19 @@ impl Render for AgentPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_session_is_not_pulled_back_to_the_one_it_left() {
+        // New session from `a`: the server still names `a` until the first prompt.
+        assert!(!follows_server(None, Some("a"), Some("a")));
+        // Another window or device switched the block to `b`: followed.
+        assert!(follows_server(None, Some("a"), Some("b")));
+        assert!(follows_server(Some("a"), None, Some("b")));
+        assert!(follows_server(None, None, Some("a")), "a pane opening on its block's session");
+        // Nothing to switch to, or already there.
+        assert!(!follows_server(Some("a"), None, None));
+        assert!(!follows_server(Some("a"), None, Some("a")));
+    }
 
     #[test]
     fn otto_out_of_reach_is_retried_and_refusals_are_not() {
