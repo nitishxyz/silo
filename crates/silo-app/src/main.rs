@@ -78,7 +78,8 @@ use gpui::{App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowHan
 
 use crate::{
     commands::act::{
-        BrowseBlocks, CloseWindow, CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit, ShowAll,
+        BrowseBlocks, CheckForUpdates, CloseWindow, CommandPalette, CycleWindows, HideOthers, HideSilo, NewSession, NewWindow, OpenSettings, Quit,
+        ShowAll,
     },
     workspace::Workspace,
 };
@@ -280,6 +281,7 @@ fn main() {
                 name: "Silo".into(),
                 items: vec![
                     MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
                     MenuItem::separator(),
                     MenuItem::action("Hide Silo", HideSilo),
                     MenuItem::action("Hide Others", HideOthers),
@@ -423,6 +425,11 @@ fn start_menubar(agent: &std::path::Path, home: &std::path::Path) {
         return;
     }
     let mut command = std::process::Command::new(agent);
+    // Not as this app: the agent would register as Silo.app and take its
+    // `silo://` URLs (the menu's Settings… and Permissions… did nothing).
+    for var in silo_proto::APP_IDENTITY_ENV {
+        command.env_remove(var);
+    }
     command.env("SILO_HOME", home).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     // The agent exits at once when another instance holds its lock.
     use std::os::unix::process::CommandExt;

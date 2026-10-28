@@ -433,8 +433,13 @@ impl Workspace {
             Command::HidePaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(false), cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),
             Command::CheckForUpdates => {
-                let me = cx.entity_id();
-                self.updater.update(cx, |updater, cx| updater.check(Some(me), cx));
+                // A build that can't update says why instead of doing nothing.
+                if let Some(why) = self.updater.read(cx).off() {
+                    self.flash(Status::info(why), cx);
+                } else {
+                    let me = cx.entity_id();
+                    self.updater.update(cx, |updater, cx| updater.check(Some(me), cx));
+                }
             }
             Command::CommandPalette => self.toggle_palette(window, cx),
             Command::BrowseBlocks => self.open_palette_with(finder::BLOCKS_QUERY.to_owned(), window, cx),
@@ -449,7 +454,7 @@ impl Workspace {
     }
 
     /// Whether a command applies right now (hidden from the palette if not).
-    pub(crate) fn available(&self, command: Command, cx: &gpui::App) -> bool {
+    pub(crate) fn available(&self, command: Command, _cx: &gpui::App) -> bool {
         let host = self.hosts.get(self.active_host);
         let connected = host.is_some_and(|h| h.control.is_some());
         let paused = host.is_some_and(|h| h.paused.load(Ordering::Acquire));
@@ -487,7 +492,7 @@ impl Workspace {
             Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
-            Command::CheckForUpdates => self.updater.read(cx).enabled(),
+            Command::CheckForUpdates => true,
             Command::NewSession => connected,
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::OttoSettings | Command::BrowseBlocks => self.view.is_some(),

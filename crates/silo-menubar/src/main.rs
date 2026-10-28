@@ -319,6 +319,13 @@ fn stale_holder(record: &str, build: &str, exe_of: impl Fn(u32) -> Option<PathBu
 }
 
 fn main() {
+    // Started by something that left its app identity (Silo.app's), the
+    // agent would register as that app and take its `silo://` URLs; drop it
+    // before AppKit reads it (single-threaded here).
+    for var in silo_proto::APP_IDENTITY_ENV {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::remove_var(var) };
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info".into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
     let home = silo_proto::paths::home();

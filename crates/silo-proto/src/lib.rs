@@ -38,6 +38,11 @@ pub use frame::{Frame, read_frame, spawn_reader, write_frame};
 /// This build's channel (`SILO_CHANNEL` at compile time, see `silo_channel`).
 pub use silo_channel::{CURRENT as CHANNEL, Channel};
 
+/// Environment LaunchServices gives an app (`__CFBundleIdentifier`,
+/// `XPC_SERVICE_NAME`): a GUI child that inherits it registers as that app,
+/// and macOS then sends the app's URLs and reopen events to the child.
+pub const APP_IDENTITY_ENV: [&str; 2] = ["__CFBundleIdentifier", "XPC_SERVICE_NAME"];
+
 /// Build id: a hash of every workspace source (see `build.rs`). Hellos
 /// carry it for display and upgrade decisions; peers of any build work
 /// together when they speak the same [`PROTOCOL`] and [`VT`].

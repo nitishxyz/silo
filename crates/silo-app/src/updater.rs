@@ -61,6 +61,8 @@ pub struct Updater {
     app: Option<PathBuf>,
     /// How `app` is signed (known whenever `app` is).
     running: Option<update::Signature>,
+    /// Why this build doesn't update, when it doesn't (shown by Check for Updates).
+    off: Option<&'static str>,
     feed: Feed,
     state: State,
     last_check: Option<SystemTime>,
@@ -122,6 +124,13 @@ pub fn pill(state: &State) -> Option<(String, String, PillKind)> {
     })
 }
 
+/// A local build: ad-hoc signed, so no update can be checked against its signature.
+const OFF_AD_HOC: &str =
+    "This is a local build (ad-hoc signed) and can't update itself. Install Silo from github.com/nitishxyz/silo/releases to get updates";
+/// Not running from an installed Silo.app (a development run).
+const OFF_NOT_INSTALLED: &str =
+    "This Silo isn't an installed app and can't update itself. Install Silo from github.com/nitishxyz/silo/releases to get updates";
+
 /// Whether an automatic check is due at `now` after one at `last`.
 fn due(last: Option<SystemTime>, now: SystemTime) -> bool {
     last.is_none_or(|last| now.duration_since(last).map_or(true, |since| since >= INTERVAL))
@@ -136,7 +145,13 @@ impl Updater {
         // How this app is signed, once: what every update must match.
         let running =
             app.as_ref().and_then(|app| rt.block_on(update::signature(app)).inspect_err(|error| tracing::warn!("update: this app: {error}")).ok());
-        let app = app.filter(|_| running.as_ref().is_some_and(|running| updates_allowed(&running.1, test)));
+        let off = match (&app, &running) {
+            (None, _) => Some(OFF_NOT_INSTALLED),
+            (Some(_), Some(running)) if !updates_allowed(&running.1, test) => Some(OFF_AD_HOC),
+            (Some(_), None) => Some(OFF_NOT_INSTALLED),
+            _ => None,
+        };
+        let app = app.filter(|_| off.is_none());
         tracing::info!(app = ?app, signed = ?running.as_ref().map(|r| &r.1), "updates");
         if let Some(app) = app.clone() {
             rt.spawn_blocking(move || update::clean_stale(&app));
@@ -173,7 +188,7 @@ impl Updater {
             } else {
                 Task::ready(())
             };
-            Self { rt, app, running, feed, state: State::Idle, last_check: None, requesters: Vec::new(), hosts, check: None, _tick: tick }
+            Self { rt, app, running, off, feed, state: State::Idle, last_check: None, requesters: Vec::new(), hosts, check: None, _tick: tick }
         });
         cx.set_global(GlobalUpdater(updater));
     }
@@ -185,6 +200,11 @@ impl Updater {
     /// Whether this build updates at all.
     pub fn enabled(&self) -> bool {
         self.app.is_some()
+    }
+
+    /// Why this build doesn't update itself; `None` when it does.
+    pub fn off(&self) -> Option<&'static str> {
+        self.off.filter(|_| self.app.is_none())
     }
 
     pub fn state(&self) -> &State {

@@ -1595,11 +1595,11 @@ fn start_menubar() {
     let Some(agent) = silo_server::bundle::runtime_dir(&exe, &home).map(|d| d.join("silo-menubar")).filter(|p| p.is_file()) else {
         return;
     };
-    let _ = std::process::Command::new(agent)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let mut command = std::process::Command::new(agent);
+    for var in silo_proto::APP_IDENTITY_ENV {
+        command.env_remove(var);
+    }
+    let _ = command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 /// The local server (spawned if needed) or, with `host`, a remote one
