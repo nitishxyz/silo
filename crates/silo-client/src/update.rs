@@ -512,8 +512,11 @@ pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature
     result.map(|()| staged)
 }
 
-/// Swap `staged` and `app` in one rename: `app` becomes the new app and
-/// `staged` holds the old one.
+/// Swap the contents of `staged` and `app` in one rename: `app` becomes the
+/// new app and `staged` holds the old one. `app` itself stays the same
+/// folder: the Dock's pinned tile (and aliases, Login Items) keep pointing
+/// at it, where swapping whole bundles left them on the replaced one, a dead
+/// tile beside the relaunched app's new one.
 ///
 /// # Errors
 /// The rename fails (the folder is not writable, `staged` is gone).
@@ -521,9 +524,14 @@ pub async fn prepare(feed: &Feed, version: &str, app: &Path, running: &Signature
 pub fn install(staged: &Path, app: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    let (from, to) = (c(staged)?, c(app)?);
+    let (from, to) = (c(&staged.join("Contents"))?, c(&app.join("Contents"))?);
     // SAFETY: both are valid NUL-terminated paths.
-    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // A newer bundle for Finder, the Dock and Launch Services' caches.
+    let _ = std::fs::File::open(app).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+    Ok(())
 }
 
 /// The staging directory holding the app [`install`] replaced.
@@ -1059,8 +1067,11 @@ mod tests {
         assert_eq!(stage, dir.join(format!(".silo-update.{}", std::process::id())));
         let staged = stage.join("Silo.app");
         bundle(&staged, "0.1.2");
+        let inode = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+        let folder = inode(&app);
         install(&staged, &app).unwrap();
         assert_eq!(version_of(&app), "0.1.2", "the new app is in place");
+        assert_eq!(inode(&app), folder, "in the same folder: the Dock's tile still points at it");
         assert_eq!(version_of(&staged), "0.1.1", "the old one waits in the staging folder");
         assert_eq!(replaced(&staged), Some(stage.as_path()));
         assert_eq!(replaced(&app), None);
