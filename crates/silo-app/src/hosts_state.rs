@@ -600,15 +600,20 @@ fn test_clicks(rt: &tokio::runtime::Handle, clicks: tokio::sync::mpsc::Unbounded
 }
 
 /// A clicked notification: bring Silo forward and show its host, session
-/// and block in the frontmost window.
+/// and block in the frontmost window showing that session, else the
+/// frontmost window.
 fn reveal(target: &notifications::Target, cx: &mut App) {
     let shared = HostsState::global(cx);
     let Some(host) = shared.read(cx).entries.iter().position(|h| !h.removed && h.info.key() == target.host) else {
         tracing::info!(host = target.host, "notification for a host no longer here");
         return;
     };
-    let frontmost = cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().find_map(|w| w.downcast::<crate::workspace::Workspace>());
-    let Some(handle) = frontmost.or_else(|| crate::open_window(None, cx).ok()) else { return };
+    let windows: Vec<_> =
+        cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().filter_map(|w| w.downcast::<crate::workspace::Workspace>()).collect();
+    let shown: Vec<_> = windows.iter().map(|w| w.read(cx).ok().map(|w| (w.active_host, w.view.as_ref().map(|v| v.session.id.clone())))).collect();
+    let pick = reveal_window(&shown, host, target.session_id.as_deref());
+    tracing::info!(host, session = ?target.session_id, windows = windows.len(), ?pick, "notification reveal");
+    let Some(handle) = pick.map(|i| windows[i]).or_else(|| crate::open_window(None, cx).ok()) else { return };
     let _ = handle.update(cx, |workspace, window, cx| {
         window.activate_window();
         workspace.reveal_block(host, target.session_id.clone(), target.block_id.clone(), window, cx);
@@ -616,10 +621,32 @@ fn reveal(target: &notifications::Target, cx: &mut App) {
     cx.activate(true);
 }
 
+/// Which of the windows (front to back: each one's host and shown session,
+/// `None` when unreadable) a notification for `session` on `host` opens in:
+/// the frontmost showing that session, else the frontmost.
+fn reveal_window(windows: &[Option<(usize, Option<String>)>], host: usize, session: Option<&str>) -> Option<usize> {
+    let shows = |w: &Option<(usize, Option<String>)>| {
+        w.as_ref().is_some_and(|(h, s)| *h == host && session.is_none_or(|session| s.as_deref() == Some(session)))
+    };
+    windows.iter().position(shows).or_else(|| (!windows.is_empty()).then_some(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hosts::tests::{addr, temp};
+
+    #[test]
+    fn a_notification_opens_in_the_window_showing_its_session() {
+        let w = |host, session: &str| Some((host, Some(session.to_owned())));
+        let windows = [w(0, "a"), w(0, "b"), w(1, "b")];
+        assert_eq!(reveal_window(&windows, 0, Some("b")), Some(1), "behind the frontmost, it still shows b");
+        assert_eq!(reveal_window(&windows, 1, Some("b")), Some(2), "same session id, other host");
+        assert_eq!(reveal_window(&windows, 0, Some("c")), Some(0), "no window shows it: the frontmost");
+        assert_eq!(reveal_window(&windows, 1, None), Some(2), "a host's notification: a window on that host");
+        assert_eq!(reveal_window(&[None, w(0, "b")], 0, Some("b")), Some(1));
+        assert_eq!(reveal_window(&[], 0, Some("b")), None, "no window: a new one");
+    }
 
     #[test]
     fn hosts_file_changes_become_a_plan() {
