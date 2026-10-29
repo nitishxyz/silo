@@ -177,6 +177,22 @@ fn keys_walk_hunks_and_act_on_the_one_gone_to(cx: &mut TestAppContext) {
     });
 }
 
+/// A new scope clears the old list and drops a reply still on its way for
+/// the old scope. (That the list is read only after `changes.set` returns
+/// needs a server: these panes have no connection.)
+#[gpui::test]
+fn a_new_scope_drops_the_old_list(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx, working());
+    pane.update(cx, |pane, cx| {
+        pane.took_status(Ok(status(vec![file("src/a.rs", FileStatus::Modified, false)])), cx);
+        let before = pane.generation;
+        pane.set_scope(ChangesScope::Staged, cx);
+        // Cleared, and a reply already on its way for the old scope is dropped.
+        assert!(pane.status.is_none());
+        assert!(pane.generation > before, "an old reply must not be taken");
+    });
+}
+
 #[gpui::test]
 fn comments_build_the_review_sent_to_the_linked_agent(cx: &mut TestAppContext) {
     let mut state = working();

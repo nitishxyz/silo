@@ -245,6 +245,13 @@ impl ChangesPane {
 
     /// Take `state` as the view state, reading what it newly shows.
     fn adopt(&mut self, state: ChangesState, cx: &mut Context<Self>) {
+        self.adopt_and(state, true, cx);
+    }
+
+    /// [`Self::adopt`]; with `read` false a new view is cleared but not read
+    /// yet: the server answers `changes.status` with the view it holds, so
+    /// a view changed here is read once the server has taken it.
+    fn adopt_and(&mut self, state: ChangesState, read: bool, cx: &mut Context<Self>) {
         if state == self.state {
             return;
         }
@@ -257,7 +264,11 @@ impl ChangesPane {
             self.current = None;
             self.selection = None;
             self.list.reset(0);
-            self.refresh(cx);
+            // A reply for the old view is dropped.
+            self.generation += 1;
+            if read {
+                self.refresh(cx);
+            }
         } else if old.active != self.state.active {
             self.list.scroll_to(ListOffset::default());
             self.load_diffs(cx);
@@ -435,14 +446,22 @@ impl ChangesPane {
         if let Some(agent) = params.agent.clone() {
             state.agent = agent;
         }
-        self.adopt(state, cx);
+        let view_changed = state.root != self.state.root || state.scope != self.state.scope || state.context != self.state.context;
+        self.adopt_and(state, false, cx);
         self.in_flight += 1;
         let method = Method::ChangesSet(ChangesSetParams { block_id: self.block_id.clone(), ..params });
-        self.request(method, cx, |this, result: anyhow::Result<ChangesState>, cx| {
+        self.request(method, cx, move |this, result: anyhow::Result<ChangesState>, cx| {
             this.in_flight = this.in_flight.saturating_sub(1);
             match result {
-                Ok(state) if this.in_flight == 0 => this.adopt(state, cx),
-                Ok(_) => {}
+                Ok(state) => {
+                    if this.in_flight == 0 {
+                        this.adopt(state, cx);
+                    }
+                    // The server holds the new view now: read it (a later set reads again).
+                    if view_changed {
+                        this.refresh(cx);
+                    }
+                }
                 Err(error) => this.notice = Some((crate::files::describe(&error), true)),
             }
         });
