@@ -1527,9 +1527,8 @@ impl Workspace {
     /// when its pane fills the window) and derive this frame's chrome.
     fn step_chrome(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) {
         let theme_bg = theme::background();
-        let alone = self.active_window().is_some_and(|w| w.zoomed || crate::floats::window_blocks(w).len() <= 1);
         let backdrop = self.focused_block(window, cx).and_then(|id| self.backdrop(&id, cx));
-        let target = crate::adaptive::chrome_target(theme_bg, backdrop, alone);
+        let target = crate::adaptive::chrome_target(theme_bg, backdrop);
         if self.blend_theme != theme_bg {
             self.blend_theme = theme_bg;
             self.blend = crate::adaptive::Blend::new(target);

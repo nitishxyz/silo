@@ -15,9 +15,6 @@ pub const KEEP_SHARE: f32 = 0.5;
 pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 /// Duration of a chrome colour change.
 pub const BLEND: Duration = Duration::from_millis(200);
-/// With several panes visible, the chrome goes this far from the theme
-/// background toward the focused block's backdrop.
-pub const SHARED_MIX: f32 = 0.65;
 
 /// Sampled cells as `(index, weight)`: the left and right columns, which
 /// meet the card's side padding, weigh double; the top and bottom rows
@@ -260,15 +257,12 @@ impl Chrome {
     }
 }
 
-/// The chrome's target: the focused block's backdrop, fully when it fills
-/// the window, else partly; the theme background without one.
+/// The chrome's target: the focused block's backdrop, whether or not it
+/// fills the window (a partial mix matched neither the block nor the
+/// theme); the theme background without one.
 #[must_use]
-pub fn chrome_target(theme_bg: u32, backdrop: Option<u32>, alone: bool) -> u32 {
-    match backdrop {
-        Some(c) if alone => c,
-        Some(c) => theme::mix(theme_bg, c, SHARED_MIX),
-        None => theme_bg,
-    }
+pub fn chrome_target(theme_bg: u32, backdrop: Option<u32>) -> u32 {
+    backdrop.unwrap_or(theme_bg)
 }
 
 /// An eased transition of the chrome surface toward a target colour.
@@ -404,10 +398,9 @@ mod tests {
     }
 
     #[test]
-    fn chrome_matches_fully_only_when_alone() {
-        assert_eq!(chrome_target(0x000000, Some(0x0000c8), true), 0x0000c8);
-        assert_eq!(chrome_target(0x000000, Some(0x0000c8), false), theme::mix(0x000000, 0x0000c8, SHARED_MIX));
-        assert_eq!(chrome_target(0x101010, None, false), 0x101010);
+    fn chrome_matches_the_focused_backdrop_fully() {
+        assert_eq!(chrome_target(0x000000, Some(0x0000c8)), 0x0000c8);
+        assert_eq!(chrome_target(0x101010, None), 0x101010);
     }
 
     #[test]

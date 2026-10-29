@@ -41,9 +41,14 @@ report();
 
 /// Run in the main frame on load (`__TAG__` replaced by the browser's
 /// theme tag): reports the page's colour as `#rrggbb`, or empty for none,
-/// whenever it changes. The colour is a `theme-color` meta matching the
-/// current appearance, else the background of the root or body when it is
-/// a plain opaque colour. Any CSS colour is normalized by painting it.
+/// whenever it changes. The colour is what the page paints along its top
+/// edge (against the toolbar) when three points there agree on a plain
+/// opaque colour, at the top of the page or from a fixed or sticky bar;
+/// else a `theme-color` meta matching the current appearance (many are
+/// stale: YouTube's dark one is #212121 over a #0f0f0f page, GitHub's
+/// #1e2327 over #0d1117), else the background of the root or body when it
+/// is a plain opaque colour. Any CSS colour is normalized by painting it,
+/// a translucent one over the page's background.
 const THEME_SCRIPT: &str = r#"(() => {
 if (window !== top || window.__siloTheme) return;
 window.__siloTheme = true;
@@ -51,23 +56,45 @@ const log = console.log.bind(console);
 const canvas = document.createElement('canvas');
 canvas.width = canvas.height = 1;
 const pen = canvas.getContext('2d', { willReadFrequently: true });
-const hex = c => {
-  if (!c || /currentcolor/i.test(c) || !CSS.supports('color', c)) return '';
+const rgba = c => {
+  if (!c || /currentcolor/i.test(c) || !CSS.supports('color', c)) return null;
   pen.clearRect(0, 0, 1, 1);
   pen.fillStyle = '#000';
   pen.fillStyle = c;
   pen.fillRect(0, 0, 1, 1);
-  const [r, g, b, a] = pen.getImageData(0, 0, 1, 1).data;
-  if (a === 0) return '';
-  const over = v => Math.round((v * a + 255 * (255 - a)) / 255);
-  return '#' + [r, g, b].map(v => over(v).toString(16).padStart(2, '0')).join('');
+  const px = pen.getImageData(0, 0, 1, 1).data;
+  return px[3] === 0 ? null : [px[0], px[1], px[2], px[3]];
 };
-const color = () => {
-  for (const m of document.querySelectorAll('meta[name="theme-color" i]')) {
-    const media = m.getAttribute('media');
-    const c = hex((m.getAttribute('content') || '').trim());
-    if (c && (!media || matchMedia(media).matches)) return c;
+const hex = (c, under = [255, 255, 255]) => {
+  const v = rgba(c);
+  if (!v) return '';
+  const a = v[3];
+  const over = (x, u) => Math.round((x * a + u * (255 - a)) / 255);
+  return '#' + [0, 1, 2].map(i => over(v[i], under[i]).toString(16).padStart(2, '0')).join('');
+};
+const replaced = /^(IMG|VIDEO|CANVAS|IFRAME|PICTURE|svg)$/i;
+// The plain opaque colour behind point (x, y) and whether a fixed or sticky
+// ancestor paints it; null over an image, video or gradient.
+const under = (x, y) => {
+  let pinned = false;
+  for (let el = document.elementFromPoint(x, y); el; el = el.parentElement) {
+    const style = getComputedStyle(el);
+    if (style.position === 'fixed' || style.position === 'sticky') pinned = true;
+    if (style.backgroundImage !== 'none' || replaced.test(el.tagName)) return null;
+    const v = rgba(style.backgroundColor);
+    if (v && v[3] >= 230) return { c: hex(style.backgroundColor), pinned };
   }
+  return null;
+};
+const edge = () => {
+  const w = innerWidth;
+  if (!w || !innerHeight) return '';
+  const found = [w * 0.25, w * 0.5, w * 0.75].map(x => under(x, 1));
+  const first = found[0];
+  if (!first || found.some(f => !f || f.c !== first.c)) return '';
+  return scrollY <= 0 || found.every(f => f.pinned) ? first.c : '';
+};
+const page = () => {
   for (const el of [document.documentElement, document.body]) {
     if (!el) continue;
     const style = getComputedStyle(el);
@@ -77,9 +104,27 @@ const color = () => {
   }
   return '';
 };
+const parse = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+// Kept while scrolled content (not a pinned bar) is under the top edge.
+let seen = '';
+const color = () => {
+  const top = edge();
+  if (top) return (seen = top);
+  if (seen && scrollY > 0) return seen;
+  const bg = page();
+  for (const m of document.querySelectorAll('meta[name="theme-color" i]')) {
+    const media = m.getAttribute('media');
+    const c = hex((m.getAttribute('content') || '').trim(), bg ? parse(bg) : undefined);
+    if (c && (!media || matchMedia(media).matches)) return c;
+  }
+  return bg;
+};
 let last;
+// No colour is reported only once the page has loaded: before its styles
+// apply it has none, and the previous page's colour stays meanwhile.
 const report = () => {
   const c = color();
+  if (!c && document.readyState !== 'complete') return;
   if (c !== last) { last = c; log('__TAG__' + c); }
 };
 let queued = false;
@@ -94,6 +139,8 @@ const start = () => {
   observer.observe(document.documentElement, { attributes: true });
   if (document.body) observer.observe(document.body, { attributes: true });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', soon);
+  addEventListener('scroll', soon, { passive: true });
+  addEventListener('resize', soon);
   setInterval(report, 2500);
   report();
 };
@@ -388,8 +435,9 @@ wrap_load_handler! {
             frame.execute_java_script(Some(&CefString::from(crate::menu::menu_script(&self.shared.menu_tag).as_str())), None, 0);
             let main = frame.is_main() != 0;
             if main {
-                // The old page's colour goes with it.
-                self.shared.push(Event::ThemeColor(None));
+                // The old page's colour stays until the new one reports its
+                // own (or none, once loaded): clearing it here flashed the
+                // chrome to the theme's colour on every navigation.
                 let script = THEME_SCRIPT.replace("__TAG__", &self.shared.theme_tag);
                 frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
                 self.shared.push(Event::EditableFocus(false));
