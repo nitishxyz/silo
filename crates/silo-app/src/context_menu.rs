@@ -10,6 +10,9 @@ use crate::{
     theme::{self, Continuous as _},
 };
 
+/// The box's inset around its rows: their corners stay concentric with its own.
+const PAD: f32 = 5.0;
+
 pub enum Item<A> {
     /// `check`: a toggle row (`Some(on)`), its mark in a leading column.
     Action {
@@ -135,7 +138,7 @@ impl<A: Clone + 'static> Menu<A> {
                     .gap(px(18.0))
                     .h(px(24.0))
                     .px(px(10.0))
-                    .continuous(5.0)
+                    .continuous(crate::radius::concentric(crate::radius::CARD, PAD))
                     .whitespace_nowrap()
                     .child(div().flex().items_center().children(mark).child(label.clone()))
                     .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child(*keys))
@@ -161,10 +164,10 @@ impl<A: Clone + 'static> Menu<A> {
             .occlude()
             .min_w(px(210.0))
             .max_w(px(360.0))
-            .p(px(4.0))
+            .p(px(PAD))
             .flex()
             .flex_col()
-            .glass(8.0)
+            .glass(crate::radius::CARD)
             .font_family(theme::ui_font())
             .text_size(px(12.5))
             .text_color(rgb(theme::foreground()))
