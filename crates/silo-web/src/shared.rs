@@ -106,6 +106,8 @@ pub(crate) struct Shared {
     pub(crate) notify: Mutex<Notify>,
     /// Last `Browser::set_focus`; re-applied to each new page's widget.
     pub(crate) focused: AtomicBool,
+    /// Last `Browser::set_hidden`; applied once CEF has made the browser.
+    pub(crate) hidden: AtomicBool,
     /// Last mouse press or key press sent to the page.
     pub(crate) last_input: Mutex<Option<Instant>>,
     /// Last external file drop on the page: the navigation Chromium starts
@@ -192,6 +194,7 @@ impl Shared {
             events: Mutex::new(Vec::new()),
             notify: Mutex::new(notify),
             focused: AtomicBool::new(false),
+            hidden: AtomicBool::new(false),
             last_input: Mutex::new(None),
             dropped: Mutex::new(None),
             theme_tag: theme_tag(),

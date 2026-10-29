@@ -343,6 +343,10 @@ pub struct BrowserPane {
     offscreen: bool,
     /// In a window, but in a tab it doesn't show: rendered slowly like the host's.
     hidden: bool,
+    /// A tab opened behind (`tabs.rs`) no window has shown yet: its page is
+    /// hidden from itself, so Chromium holds back its media (no video
+    /// starting in a tab you haven't looked at); shown once, it never is again.
+    pub(crate) unseen: bool,
     /// The page's first document committed (or its first load ended):
     /// actions before it would act on the engine's blank start page.
     committed: bool,
@@ -437,6 +441,7 @@ impl BrowserPane {
             frames: Default::default(),
             offscreen: false,
             hidden: false,
+            unseen: false,
             committed: false,
             adopting: false,
             menu: None,
@@ -481,6 +486,13 @@ impl BrowserPane {
             }
             if let Some(page) = self.page.as_ref().filter(|_| !self.offscreen) {
                 page.set_offscreen(hidden);
+            }
+        }
+        // First shown in a window: the page may play its media now.
+        if self.unseen && !hidden && !self.offscreen {
+            self.unseen = false;
+            if let Some(page) = &self.page {
+                page.set_hidden(false);
             }
         }
     }
@@ -794,6 +806,9 @@ impl BrowserPane {
         match opened {
             Ok((page, dirty)) => {
                 let page = std::rc::Rc::new(page);
+                if self.unseen {
+                    page.set_hidden(true);
+                }
                 crate::web::register(page.clone(), dirty, Some(cx.weak_entity()));
                 self.page = Some(page);
                 self.committed = false;

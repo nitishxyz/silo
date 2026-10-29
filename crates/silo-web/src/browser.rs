@@ -261,7 +261,11 @@ impl Browser {
         }
     }
 
+    /// Hidden from the page's point of view (`document.hidden`): Chromium
+    /// then defers loading media of a page never shown, so a tab opened
+    /// behind doesn't start playing. Kept until CEF has made the browser.
     pub fn set_hidden(&self, hidden: bool) {
+        self.shared.hidden.store(hidden, Ordering::Release);
         if let Some(host) = self.host() {
             host.was_hidden(i32::from(hidden));
         }

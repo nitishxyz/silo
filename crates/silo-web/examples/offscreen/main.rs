@@ -4,6 +4,7 @@
 
 mod arrows;
 mod bundle;
+mod hidden;
 mod menus;
 mod nav;
 mod perf;
@@ -182,6 +183,12 @@ fn run() -> Result<()> {
 
     if std::env::args().any(|arg| arg == "--perf") {
         let result = perf::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
+    // `--hidden`: a page hidden from creation holds its media until shown.
+    if std::env::args().any(|arg| arg == "--hidden") {
+        let result = hidden::run(&runtime);
         runtime.shutdown(Duration::from_secs(5))?;
         return result;
     }

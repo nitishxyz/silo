@@ -510,6 +510,12 @@ wrap_life_span_handler! {
         }
 
         fn on_after_created(&self, browser: Option<&mut Browser>) {
+            // Hidden before CEF had it (a tab opened behind): before anything loads.
+            if self.shared.hidden.load(Ordering::Acquire)
+                && let Some(host) = browser.as_ref().and_then(|browser| browser.host())
+            {
+                host.was_hidden(1);
+            }
             let queued = lock(&self.shared.queued).take();
             if let (Some(url), Some(frame)) = (queued, browser.as_ref().and_then(|browser| browser.main_frame())) {
                 frame.load_url(Some(&CefString::from(url.as_str())));

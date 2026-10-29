@@ -77,12 +77,25 @@ impl BrowserPane {
 /// The new tab `block` exists: make its pane if it needs one now.
 fn opened(block: String, url: String, foreground: bool, popup: Option<silo_web::Popup>, opener: Opener, cx: &mut App) {
     let pane = match popup {
-        Some(popup) => cx.new(|cx| BrowserPane::adopted(block.clone(), &opener, popup, &url, cx)),
+        Some(popup) => cx.new(|cx| {
+            let mut pane = BrowserPane::adopted(block.clone(), &opener, popup, &url, cx);
+            if !foreground {
+                pane.unseen = true;
+                if let Some(page) = &pane.page {
+                    page.set_hidden(true);
+                }
+            }
+            pane
+        }),
         // A tab in front: the window showing it makes its pane.
         None if foreground => return,
-        // Behind: its page loads now, as in a browser.
+        // Behind: its page loads now, as in a browser, but holds its media
+        // until first shown (`BrowserPane::unseen`).
         None => cx.new(|cx| {
-            BrowserPane::new(block.clone(), opener.rt.clone(), Some(opener.control.clone()), opener.route.clone(), opener.home.clone(), cx)
+            let mut pane =
+                BrowserPane::new(block.clone(), opener.rt.clone(), Some(opener.control.clone()), opener.route.clone(), opener.home.clone(), cx);
+            pane.unseen = true;
+            pane
         }),
     };
     let adopting = pane.read(cx).adopting;
