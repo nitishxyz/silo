@@ -44,13 +44,16 @@ const TAB_HEIGHT: f32 = 26.0;
 const TAB_GAP: f32 = 4.0;
 /// Longest tab, title ellipsized beyond it.
 const TAB_MAX: f32 = 190.0;
-/// Leading and resting trailing padding inside a tab pill.
+/// Leading and trailing padding inside a tab pill.
 const TAB_PAD: f32 = 10.0;
-/// Space between a shown close button and the pill's right edge.
-const CLOSE_INSET: f32 = 2.0;
-/// Close button diameter and its space before it; both collapse to zero
-/// when the tab is not hovered.
-const CLOSE_SIZE: f32 = 16.0;
+/// A shown close button sits at the pill's left end this far from its
+/// left, top and bottom edges alike, so it is concentric with the pill's
+/// rounded end.
+const CLOSE_INSET: f32 = 4.0;
+/// Close button diameter (the pill's height less the inset above and below)
+/// and its space before the icon; both collapse to zero when the tab is not
+/// hovered.
+const CLOSE_SIZE: f32 = TAB_HEIGHT - 2.0 * CLOSE_INSET;
 const CLOSE_GAP: f32 = 4.0;
 /// Gap between the session pill and the first tab.
 const PILL_GAP: f32 = TAB_GAP;
@@ -487,31 +490,25 @@ impl Workspace {
             .items_center()
             .h(px(TAB_HEIGHT))
             .min_w_0()
-            .pl(px(TAB_PAD))
             // Balanced padding at rest. A shown close button takes the
-            // trailing padding down to `CLOSE_INSET`, so it sits at the
-            // pill's right edge.
-            .pr(px(TAB_PAD - (TAB_PAD - CLOSE_INSET) * close))
+            // leading padding down to `CLOSE_INSET`, so it sits in the
+            // pill's left end.
+            .pl(px(TAB_PAD - (TAB_PAD - CLOSE_INSET) * close))
+            .pr(px(TAB_PAD))
             .capsule()
             .when(several && selected, |el| el.bg(fill))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
-            .child(self.block_icon_view(&w.focused, "tab", 12.0, if primary { chrome.accent } else { chrome.icon }, cx))
-            .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-            .when_some(self.window_mark(w), |el, mark| {
-                let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
-                el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
-            })
-            .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))))
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {
                 el.child(
-                    div().flex().flex_none().justify_end().w(px((CLOSE_GAP + CLOSE_SIZE) * close)).overflow_hidden().opacity(close).child(
+                    div().flex().flex_none().justify_end().w(px((CLOSE_SIZE + CLOSE_GAP) * close)).overflow_hidden().opacity(close).child(
                         div()
                             .id(gpui::ElementId::Name(format!("close-{}", w.id).into()))
                             .flex()
                             .items_center()
                             .justify_center()
                             .size(px(CLOSE_SIZE))
+                            .mr(px(CLOSE_GAP))
                             .flex_none()
                             .capsule()
                             .hover(|s| s.bg(hover))
@@ -522,7 +519,14 @@ impl Workspace {
                             })),
                     ),
                 )
-            });
+            })
+            .child(self.block_icon_view(&w.focused, "tab", 12.0, if primary { chrome.accent } else { chrome.icon }, cx))
+            .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .when_some(self.window_mark(w), |el, mark| {
+                let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
+                el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
+            })
+            .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))));
         let entering = appear < 1.0;
         div()
             .id(gpui::ElementId::Name(group.clone().into()))
@@ -845,6 +849,13 @@ fn render_tab_ghost(ghost: &TabGhost, lead: bool, chrome: crate::adaptive::Chrom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_close_button_is_as_far_from_the_pills_left_top_and_bottom() {
+        let top = (TAB_HEIGHT - CLOSE_SIZE) / 2.0;
+        assert!((top - CLOSE_INSET).abs() < f32::EPSILON, "top and bottom {top}, left {CLOSE_INSET}");
+        const { assert!(CLOSE_SIZE >= 16.0, "still a comfortable target") };
+    }
 
     /// The tab strip's layout (as `render_titlebar` builds it) while a closing tab collapses: the strip
     /// always holds its tabs. A negative margin closing the gap made gpui measure it at its padding.
