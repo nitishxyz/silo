@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use gpui::{AnyElement, Context, DragMoveEvent, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 
-use super::{CLOSE_GAP, CLOSE_INSET, CLOSE_SIZE, FADE_WIDTH, PILL_HEIGHT, TabDrag, claim_press, edge_fades};
+use super::{CLOSE_GAP, CLOSE_SIZE, FADE_WIDTH, PILL_HEIGHT, TabDrag, claim_press, edge_fades};
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -29,6 +29,8 @@ const SIDEBAR_SHARE: f32 = 0.4;
 const ROW_HEIGHT: f32 = 30.0;
 const ROW_GAP: f32 = 2.0;
 const ROW_PAD: f32 = 8.0;
+/// The close button's gap to the row's right edge: as above and below it.
+const SIDE_CLOSE_INSET: f32 = (ROW_HEIGHT - CLOSE_SIZE) / 2.0;
 /// The list's inset from the sidebar's edges.
 const INSET: f32 = 8.0;
 /// Pointer target of the resizable right edge, inside the sidebar.
@@ -343,7 +345,7 @@ impl Workspace {
             .w_full()
             .h(px(ROW_HEIGHT))
             .pl(px(ROW_PAD))
-            .pr(px(ROW_PAD - (ROW_PAD - CLOSE_INSET) * close))
+            .pr(px(ROW_PAD - (ROW_PAD - SIDE_CLOSE_INSET) * close))
             .continuous(crate::radius::MENU_ROW)
             .when(several && selected, |el| el.bg(chrome.selected()))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
