@@ -301,6 +301,7 @@ async fn come_back(home: &Path, endpoint: &Endpoint, host: &Host, build: &str) -
 /// ssh fails, no silo is installed there, or the host refuses.
 pub fn over_ssh(target: &str, candidate: &Candidate, force: bool) -> anyhow::Result<String> {
     let install = Install::new(target)?;
+    eprintln!("silo: connecting to {target} over ssh…");
     let probe = output(&install.probe()).with_context(|| format!("could not reach {target} over ssh"))?;
     let mut lines = probe.lines();
     let platform = Platform::from_uname(lines.next().unwrap_or_default())?;
@@ -327,6 +328,7 @@ pub fn over_ssh(target: &str, candidate: &Candidate, force: bool) -> anyhow::Res
             return settled.map(Option::unwrap_or_default);
         }
     }
+    eprintln!("silo: starting the new silo on {target}…");
     run(&install.upgrade_uploaded())?;
     Ok(format!("{target}: {running} → {}", version_text(&new_version, &new_build)))
 }
@@ -339,10 +341,13 @@ pub fn over_ssh(target: &str, candidate: &Candidate, force: bool) -> anyhow::Res
 /// fails.
 pub fn stage(install: &Install, platform: Platform, candidate: &Candidate) -> anyhow::Result<()> {
     match candidate {
-        Candidate::File { path, .. } => run(&install.upload(path)),
+        Candidate::File { path, .. } => {
+            eprintln!("silo: uploading {} to {}…", path.display(), install.target);
+            run(&install.upload(path))
+        }
         Candidate::Release { version } => {
             check_release(install, platform, version)?;
-            eprintln!("silo: downloading silo {version} on {}", install.target);
+            eprintln!("silo: downloading silo {version} on {}…", install.target);
             // install.sh reports progress and PATH hints on stderr: shown only on failure.
             let argv = install.stage_release(version);
             let out = std::process::Command::new(&argv[0]).args(&argv[1..]).output().with_context(|| format!("run {}", argv[0]))?;

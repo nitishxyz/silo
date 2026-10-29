@@ -212,6 +212,24 @@ pub fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// Options for every ssh and scp to the target:
+/// - an unreachable host (asleep, off the network) fails in seconds
+///   instead of the system's TCP timeout (~75 s on macOS) with nothing shown;
+/// - one connection is shared by all of them (`ControlMaster`), so a
+///   password or key prompt comes once, not once per step; it stays up a
+///   minute after the last.
+#[must_use]
+pub fn ssh_options() -> Vec<String> {
+    // In /tmp, not $TMPDIR: a socket path has ~104 bytes and ssh adds 17
+    // while creating it; macOS's $TMPDIR alone is ~50. The uid keeps users
+    // apart; %C hashes local host, remote host, port and user.
+    let path = format!("/tmp/silo-ssh-{}-%C", rustix::process::getuid().as_raw());
+    ["ConnectTimeout=15".to_owned(), "ControlMaster=auto".to_owned(), format!("ControlPath={path}"), "ControlPersist=60".to_owned()]
+        .into_iter()
+        .flat_map(|option| ["-o".to_owned(), option])
+        .collect()
+}
+
 /// The commands `silo remote install` runs, as argv.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Install {
@@ -224,6 +242,7 @@ impl Install {
     /// interactive one.
     fn ssh(&self, tty: bool, script: &str) -> Vec<String> {
         let mut argv = vec!["ssh".to_owned()];
+        argv.extend(ssh_options());
         if tty {
             argv.push("-t".into());
         }
@@ -248,7 +267,10 @@ impl Install {
 
     #[must_use]
     pub fn upload(&self, binary: &Path) -> Vec<String> {
-        vec!["scp".into(), "-q".into(), binary.to_string_lossy().into_owned(), format!("{}:{UPLOAD_TEMP}", self.target)]
+        let mut argv = vec!["scp".to_owned(), "-q".to_owned()];
+        argv.extend(ssh_options());
+        argv.extend([binary.to_string_lossy().into_owned(), format!("{}:{UPLOAD_TEMP}", self.target)]);
+        argv
     }
 
     /// Install the uploaded binary and join with `ticket`.
@@ -424,6 +446,37 @@ mod tests {
         assert_eq!(staged_failure(Some(3), "", "\n"), "exit status 3");
     }
 
+    /// `argv` without its `-o` options (ssh_options, tested on their own).
+    fn plain(argv: Vec<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut args = argv.into_iter();
+        while let Some(arg) = args.next() {
+            if arg == "-o" {
+                args.next();
+            } else {
+                out.push(arg);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ssh_shares_one_connection_and_times_out() {
+        let install = Install::new("me@box").unwrap();
+        for argv in [install.detect(), install.join_download("0.1.0", "t"), install.upload(Path::new("/x"))] {
+            let options: Vec<&str> = argv.windows(2).filter(|w| w[0] == "-o").map(|w| w[1].as_str()).collect();
+            assert!(options.contains(&"ConnectTimeout=15"), "{argv:?}");
+            assert!(options.contains(&"ControlMaster=auto"), "{argv:?}");
+            // ssh's 17-byte temporary suffix and %C's 40 hex digits fit a socket path (104).
+            assert!(
+                options.iter().any(|o| o
+                    .strip_prefix("ControlPath=")
+                    .is_some_and(|p| p.starts_with("/tmp/silo-ssh-") && p.ends_with("-%C") && p.len() - 2 + 40 + 17 < 104)),
+                "{argv:?}"
+            );
+        }
+    }
+
     /// The remote command ssh hands to the login shell.
     fn sh(script: &str) -> String {
         format!("sh -c {}", quote(script))
@@ -432,18 +485,18 @@ mod tests {
     #[test]
     fn scripts_run_under_sh_whatever_the_login_shell() {
         let install = Install::new("me@box").unwrap();
-        assert_eq!(install.discard(), ["ssh", "me@box", "sh -c 'rm -f ~/.local/bin/.silo.upload'"]);
-        assert_eq!(install.join_uploaded("silo1abc")[..3], ["ssh", "-t", "me@box"]);
+        assert_eq!(plain(install.discard()), ["ssh", "me@box", "sh -c 'rm -f ~/.local/bin/.silo.upload'"]);
+        assert_eq!(plain(install.join_uploaded("silo1abc"))[..3], ["ssh", "-t", "me@box"]);
         // Single quotes inside the script survive the outer quoting.
-        assert!(install.join_uploaded("silo1abc")[3].ends_with(r"silo join '\''silo1abc'\'''"));
+        assert!(plain(install.join_uploaded("silo1abc"))[3].ends_with(r"silo join '\''silo1abc'\'''"));
         // The login shell may be fish or csh: the remote command is only `sh -c '…'`.
         for argv in [
-            install.detect(),
-            install.probe(),
-            install.staged_version(),
-            install.discard(),
-            install.upgrade_uploaded(),
-            install.stage_release("0.1.0"),
+            plain(install.detect()),
+            plain(install.probe()),
+            plain(install.staged_version()),
+            plain(install.discard()),
+            plain(install.upgrade_uploaded()),
+            plain(install.stage_release("0.1.0")),
         ] {
             assert!(argv.last().unwrap().starts_with("sh -c '"), "{argv:?}");
         }
@@ -457,9 +510,9 @@ mod tests {
     #[test]
     fn upgrade_commands() {
         let install = Install::new("me@box").unwrap();
-        assert_eq!(install.probe()[2], sh("uname -sm && { ~/.local/bin/silo --version 2>/dev/null || true; }"));
+        assert_eq!(plain(install.probe())[2], sh("uname -sm && { ~/.local/bin/silo --version 2>/dev/null || true; }"));
         assert_eq!(
-            install.staged_version(),
+            plain(install.staged_version()),
             [
                 "ssh".to_owned(),
                 "me@box".to_owned(),
@@ -467,9 +520,9 @@ mod tests {
                     $((s - 128)) 2>/dev/null || echo $((s - 128)))\"; exit $s; }")
             ]
         );
-        assert_eq!(install.discard(), ["ssh".to_owned(), "me@box".to_owned(), sh("rm -f ~/.local/bin/.silo.upload")]);
+        assert_eq!(plain(install.discard()), ["ssh".to_owned(), "me@box".to_owned(), sh("rm -f ~/.local/bin/.silo.upload")]);
         assert_eq!(
-            install.upgrade_uploaded(),
+            plain(install.upgrade_uploaded()),
             [
                 "ssh".to_owned(),
                 "me@box".to_owned(),
@@ -483,10 +536,10 @@ mod tests {
         assert!(Install::new("-oProxyCommand=x").is_err());
         assert!(Install::new("").is_err());
         let install = Install::new("me@box").unwrap();
-        assert_eq!(install.detect(), ["ssh".to_owned(), "me@box".to_owned(), sh("mkdir -p ~/.local/bin && uname -sm")]);
-        assert_eq!(install.upload(Path::new("/tmp/my silo")), ["scp", "-q", "/tmp/my silo", "me@box:.local/bin/.silo.upload"]);
+        assert_eq!(plain(install.detect()), ["ssh".to_owned(), "me@box".to_owned(), sh("mkdir -p ~/.local/bin && uname -sm")]);
+        assert_eq!(plain(install.upload(Path::new("/tmp/my silo"))), ["scp", "-q", "/tmp/my silo", "me@box:.local/bin/.silo.upload"]);
         assert_eq!(
-            install.join_uploaded("silo1abc"),
+            plain(install.join_uploaded("silo1abc")),
             [
                 "ssh".to_owned(),
                 "-t".to_owned(),
@@ -495,7 +548,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            install.join_download("0.1.0", "silo1abc"),
+            plain(install.join_download("0.1.0", "silo1abc")),
             [
                 "ssh".to_owned(),
                 "-t".to_owned(),

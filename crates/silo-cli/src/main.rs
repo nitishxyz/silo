@@ -1312,20 +1312,26 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
     let (control, mut events, _net) = connect(None).await?;
     link::require_remote(&control).await?;
     let detect = install.detect();
+    eprintln!("silo: connecting to {target} over ssh…");
     let output = std::process::Command::new(&detect[0]).args(&detect[1..]).stderr(std::process::Stdio::inherit()).output().context("run ssh")?;
     if !output.status.success() {
+        // 255 is ssh's own failure (unreachable, refused, auth); ssh printed why.
+        if output.status.code() == Some(255) {
+            bail!("could not reach {target} over ssh: check that it is awake and on this network, and that Remote Login (sshd) is on");
+        }
         bail!("could not reach {target} over ssh ({})", output.status);
     }
     let platform = link::Platform::from_uname(&String::from_utf8_lossy(&output.stdout))?;
     candidate.check_platform(target, platform.name())?;
     if let Candidate::Release { version } = &candidate {
+        eprintln!("silo: checking that {target} ({}) can download silo {version}…", platform.name());
         silo_cli::upgrade::check_release(&install, platform, version)?;
     }
     control.subscribe().await?;
     let invite = link::invite(&control, link::INSTALL_JOIN_TTL, InvitePurpose::Join).await?;
     match &candidate {
         Candidate::File { path, .. } => {
-            eprintln!("silo: uploading {} to {target}", path.display());
+            eprintln!("silo: uploading {} to {target}…", path.display());
             run_interactive(&install.upload(path))?;
             silo_cli::upgrade::check_staged(&install)?;
             run_interactive(&install.join_uploaded(&invite.ticket))?;
@@ -1335,6 +1341,7 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
             run_interactive(&install.join_download(version, &invite.ticket))?;
         }
     }
+    eprintln!("silo: waiting for {target} to pair…");
     let offer = link::wait_offer(&mut events, &invite.invite_id, Duration::from_secs(30)).await?;
     // A reinstall keeps the server's key: the host keeps the name given here.
     let host = silo_cli::add_host(&paths::home(), &offer.ticket, None, &NetOptions::default(), &device_name()).await?;

@@ -99,10 +99,18 @@ main() {
         base=https://github.com/$repo/releases/latest/download
     fi
 
+    # The archive shows a progress bar on a terminal (also under
+    # `silo remote install`, whose ssh has one); small files never do.
     if command -v curl > /dev/null 2>&1; then
         fetch() { curl -fsL --retry 3 -o "$2" "$1"; }
+        if [ -t 2 ]; then
+            fetch_shown() { curl -fL --progress-bar --retry 3 -o "$2" "$1"; }
+        else
+            fetch_shown() { fetch "$@"; }
+        fi
     elif command -v wget > /dev/null 2>&1; then
         fetch() { wget -q -O "$2" "$1"; }
+        fetch_shown() { fetch "$@"; }
     else
         die "need curl or wget"
     fi
@@ -119,7 +127,7 @@ main() {
     trap 'exit 1' HUP INT TERM
 
     say "downloading ${version:-latest} for $os-$arch"
-    fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
+    fetch_shown "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
     fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
     expected=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$tmp/SHA256SUMS")
     [ -n "$expected" ] || die "$asset is not listed in SHA256SUMS"
@@ -152,6 +160,7 @@ main() {
     esac
 
     [ -n "$start" ] || return 0
+    say "starting the server"
 
     # `join` and `up` start the server themselves.
     case ${1:-} in
