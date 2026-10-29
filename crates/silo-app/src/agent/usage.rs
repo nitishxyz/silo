@@ -313,7 +313,7 @@ impl AgentPane {
     /// The usage card's body: Limits, Context, the session's tokens and cost; it scrolls.
     pub(super) fn render_usage(&self, provider: Option<&str>) -> AnyElement {
         let fg = theme::foreground();
-        let mut card = div().id("agent-usage").flex().flex_col().max_h(px(BODY_MAX_H)).overflow_y_scroll().child(heading("Limits"));
+        let mut card = div().id("agent-usage").min_h_0().flex().flex_col().max_h(px(BODY_MAX_H)).overflow_y_scroll().child(heading("Limits"));
         let subscription = provider.and_then(|p| self.catalog.as_ref().and_then(|c| c.subscription(p)));
         let shown = provider.and_then(|p| self.plan_of(p)).map(|u| limits(u, &chrono::Local::now())).unwrap_or_default();
         if shown.is_empty() {

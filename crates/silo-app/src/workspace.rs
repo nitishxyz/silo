@@ -76,6 +76,9 @@ pub struct Workspace {
     pub(crate) blocks: crate::blocks::Blocks,
     /// The server's focused block of the active window, as last applied.
     server_focus: Option<String>,
+    /// A block focus this client sent (a click, a pane move) and when, until a view shows it: views sent
+    /// before the server saw it don't pull focus back (`blocks::follow_focus`).
+    focus_asked: Option<(String, Option<String>, Instant)>,
     /// A blank browser this client created: its address bar gets focus
     /// once its pane exists.
     pub(crate) address_pending: Option<String>,
@@ -178,6 +181,8 @@ struct SeenWatch {
 /// records to count as seen, and how often that is checked.
 const SEEN_AFTER: Duration = Duration::from_secs(1);
 const SEEN_TICK: Duration = Duration::from_millis(200);
+/// How long a focus this client asked for outranks views that don't show it yet.
+const FOCUS_ASK_TTL: Duration = Duration::from_secs(2);
 
 impl Workspace {
     /// A window on the process's hosts, showing `session` (host index,
@@ -271,6 +276,7 @@ impl Workspace {
             wanted_block: None,
             blocks: crate::blocks::Blocks::default(),
             server_focus: None,
+            focus_asked: None,
             address_pending: None,
             composer_pending: None,
             otto_settings_pending: false,
@@ -496,10 +502,22 @@ impl Workspace {
         }
     }
 
-    /// Show `block` (a clicked notification): its host and session in this
-    /// window, its tab, and focus on it.
+    /// Show `block` (a clicked notification, a picked space or block): its
+    /// host and session, its tab, and focus on it. Another session than this
+    /// window's that another window shows opens there instead: the frontmost
+    /// such window comes forward and this one keeps its session.
     pub(crate) fn reveal_block(&mut self, host: usize, session: Option<String>, block: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!(host, ?session, ?block, "reveal");
+        if let Some(id) = session.as_deref()
+            && !(host == self.active_host && self.view.as_ref().is_some_and(|v| v.session.id == id))
+        {
+            let others = self.window_sessions(window, cx);
+            let shown: Vec<_> = others.iter().map(|(_, s)| s.clone()).collect();
+            if let Some(i) = crate::hosts_state::window_showing(&shown, host, Some(id)) {
+                tracing::info!(host, session = id, "reveal in the window showing it");
+                return bring_forward(others[i].0, block.map(|b| (host, id.to_owned(), b)), cx);
+            }
+        }
         match session {
             Some(session) => self.open_session(host, session, window, cx),
             None => self.switch_host(host, window, cx),
@@ -873,6 +891,23 @@ impl Workspace {
         is_root_window::<Self>(handle, window, cx.entity_id(), cx)
     }
 
+    /// The other Silo windows, front to back, with the host and session each
+    /// shows (`None` while unreadable). This window is left out: it is never
+    /// read through its handle (`is_own_window`). Not while drawing (see
+    /// `other_windows`).
+    pub(crate) fn window_sessions(&self, window: &Window, cx: &Context<Self>) -> Vec<(gpui::AnyWindowHandle, crate::hosts_state::WindowShows)> {
+        cx.window_stack()
+            .unwrap_or_else(|| cx.windows())
+            .into_iter()
+            .filter(|w| w.downcast::<Self>().is_some() && !self.is_own_window(*w, window, cx))
+            .map(|w| {
+                let shown =
+                    w.downcast::<Self>().and_then(|h| h.read(cx).ok()).map(|ws| (ws.active_host, ws.view.as_ref().map(|v| v.session.id.clone())));
+                (w, shown)
+            })
+            .collect()
+    }
+
     pub(crate) fn active_window(&self) -> Option<&WindowInfo> {
         let view = self.view.as_ref()?;
         view.session.windows.iter().find(|w| w.id == view.session.active_window).or_else(|| view.session.windows.first())
@@ -991,13 +1026,16 @@ impl Workspace {
         }
         // Follow the server's focus when it changed (split, new window,
         // another client); otherwise keep the local focus.
-        if let Some(active) = active
-            && self.switcher.is_none()
-            && self.add_host.is_none()
-        {
+        // Never out of an overlay that owns focus (⌘P while an agent retitles its session).
+        if let Some(active) = active {
             let focused = active.focused.clone();
+            let shown = crate::floats::window_blocks(&active);
+            self.focus_asked
+                .take_if(|(b, before, at)| *b == focused || before.as_ref() != Some(&focused) || !shown.contains(b) || at.elapsed() > FOCUS_ASK_TTL);
+            let asked = self.focus_asked.as_ref().map(|(b, before, _)| (b.as_str(), before.as_deref()));
             let local = self.block_with_focus(window, cx).is_some();
-            if self.server_focus.as_deref() != Some(&focused) || !local {
+            let overlay = self.overlay_owns_focus();
+            if crate::blocks::follow_focus(&focused, self.server_focus.as_deref(), asked, local, overlay) == crate::blocks::Follow::Focus {
                 self.server_focus = Some(focused.clone());
                 self.focus_block(&focused, window, cx);
             }
@@ -1136,8 +1174,25 @@ impl Workspace {
         if self.server_focus.as_deref() == Some(&block) {
             return;
         }
-        self.server_focus = Some(block.clone());
+        let before = self.server_focus.replace(block.clone());
+        self.focus_asked = Some((block.clone(), before, Instant::now()));
         self.call(Method::BlockFocus { block_id: block });
+    }
+
+    /// A window overlay (⌘P, the switcher, a dialog, a menu) is open and owns keyboard focus: nothing moves
+    /// focus to a block meanwhile; closing it does (`refocus_block`).
+    pub(crate) fn overlay_owns_focus(&self) -> bool {
+        self.switcher.is_some()
+            || self.palette.is_some()
+            || self.picker.is_some()
+            || self.settings.is_some()
+            || self.add_host.is_some()
+            || self.share.is_some()
+            || self.close_confirm.is_some()
+            || self.unsaved.is_some()
+            || self.appearance_menu.open
+            || self.background_shown()
+            || self.launcher.is_open()
     }
 
     pub(crate) fn call(&self, method: Method) {
@@ -1605,34 +1660,10 @@ impl Render for Workspace {
         // that is not connected) goes to the workspace, so shortcuts
         // keep working. Overlays own their focus and are left alone.
         let terminal = self.active_window().is_some_and(|w| self.has_pane(&w.focused));
-        if ((self.focus.is_focused(window) && terminal) || window.focused(cx).is_none())
-            && self.switcher.is_none()
-            && self.palette.is_none()
-            && self.picker.is_none()
-            && self.settings.is_none()
-            && self.add_host.is_none()
-            && self.share.is_none()
-            && self.close_confirm.is_none()
-            && self.unsaved.is_none()
-            && !self.appearance_menu.open
-            && !self.background_shown()
-            && !self.launcher.is_open()
-        {
+        if ((self.focus.is_focused(window) && terminal) || window.focused(cx).is_none()) && !self.overlay_owns_focus() {
             cx.defer_in(window, |this, window, cx| {
                 // Re-check: an overlay may have taken focus meanwhile.
-                if (this.focus.is_focused(window) || window.focused(cx).is_none())
-                    && this.switcher.is_none()
-                    && this.palette.is_none()
-                    && this.picker.is_none()
-                    && this.add_host.is_none()
-                    && this.share.is_none()
-                    && this.settings.is_none()
-                    && this.close_confirm.is_none()
-                    && this.unsaved.is_none()
-                    && !this.appearance_menu.open
-                    && !this.background_shown()
-                    && !this.launcher.is_open()
-                {
+                if (this.focus.is_focused(window) || window.focused(cx).is_none()) && !this.overlay_owns_focus() {
                     this.refocus_block(window, cx);
                 }
             });
@@ -1754,6 +1785,22 @@ pub fn bind_number_keys(cx: &mut gpui::App) {
 /// The tab for number key `index` (0-based): ⌘9 is always the last tab.
 fn tab_index(index: usize, tabs: usize) -> usize {
     if index == 8 { tabs.saturating_sub(1) } else { index }
+}
+
+/// Bring Silo window `handle` forward and focus it, then `block` (host,
+/// session, block) in it. Deferred: not inside another window's update.
+pub(crate) fn bring_forward(handle: gpui::AnyWindowHandle, block: Option<(usize, String, String)>, cx: &mut App) {
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |root, window, cx| {
+            window.activate_window();
+            if let Ok(workspace) = root.downcast::<Workspace>()
+                && let Some((host, session, block)) = block
+            {
+                workspace.update(cx, |workspace, cx| workspace.reveal_block(host, Some(session), Some(block), window, cx));
+            }
+        });
+        cx.activate(true);
+    });
 }
 
 /// Whether `handle` is the window whose root is `entity` (a `V`), asked

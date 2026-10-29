@@ -621,14 +621,22 @@ fn reveal(target: &notifications::Target, cx: &mut App) {
     cx.activate(true);
 }
 
+/// What a window shows: its host and session (`None` while unreadable).
+pub(crate) type WindowShows = Option<(usize, Option<String>)>;
+
 /// Which of the windows (front to back: each one's host and shown session,
 /// `None` when unreadable) a notification for `session` on `host` opens in:
 /// the frontmost showing that session, else the frontmost.
-fn reveal_window(windows: &[Option<(usize, Option<String>)>], host: usize, session: Option<&str>) -> Option<usize> {
-    let shows = |w: &Option<(usize, Option<String>)>| {
-        w.as_ref().is_some_and(|(h, s)| *h == host && session.is_none_or(|session| s.as_deref() == Some(session)))
-    };
-    windows.iter().position(shows).or_else(|| (!windows.is_empty()).then_some(0))
+fn reveal_window(windows: &[WindowShows], host: usize, session: Option<&str>) -> Option<usize> {
+    window_showing(windows, host, session).or_else(|| (!windows.is_empty()).then_some(0))
+}
+
+/// The frontmost of the windows (front to back: each one's host and shown
+/// session, `None` when unreadable or the asking window itself) showing
+/// `session` on `host`, or any of that host's sessions when `None`.
+pub(crate) fn window_showing(windows: &[WindowShows], host: usize, session: Option<&str>) -> Option<usize> {
+    let shows = |w: &WindowShows| w.as_ref().is_some_and(|(h, s)| *h == host && session.is_none_or(|session| s.as_deref() == Some(session)));
+    windows.iter().position(shows)
 }
 
 #[cfg(test)]
@@ -646,6 +654,19 @@ mod tests {
         assert_eq!(reveal_window(&windows, 1, None), Some(2), "a host's notification: a window on that host");
         assert_eq!(reveal_window(&[None, w(0, "b")], 0, Some("b")), Some(1));
         assert_eq!(reveal_window(&[], 0, Some("b")), None, "no window: a new one");
+    }
+
+    #[test]
+    fn a_chosen_session_shown_in_another_window_goes_there() {
+        let w = |host, session: &str| Some((host, Some(session.to_owned())));
+        // The asking window (on "silo") is `None`: never itself.
+        let windows = [None, w(0, "home"), w(1, "home"), w(0, "home")];
+        assert_eq!(window_showing(&windows, 0, Some("home")), Some(1), "the frontmost showing it");
+        assert_eq!(window_showing(&windows, 1, Some("home")), Some(2), "same id on another host");
+        assert_eq!(window_showing(&windows, 0, Some("silo")), None, "only the asking window shows it: it switches");
+        assert_eq!(window_showing(&windows, 2, Some("home")), None, "no window on that host");
+        assert_eq!(window_showing(&[None, Some((0, None))], 0, Some("home")), None, "a window with no session yet");
+        assert_eq!(window_showing(&[], 0, Some("home")), None);
     }
 
     #[test]

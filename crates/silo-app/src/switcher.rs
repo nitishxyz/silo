@@ -163,7 +163,7 @@ impl Workspace {
     fn activate(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
         self.close_switcher(window, cx);
         match item {
-            Item::Session { host, id } => self.open_session(host, id, window, cx),
+            Item::Session { host, id } => self.reveal_block(host, Some(id), None, window, cx),
             Item::Create(name) => self.create_session(Some(name), window, cx),
             Item::NewSession => self.create_session(None, window, cx),
             Item::AddHost => self.open_add_host(None, None, window, cx),

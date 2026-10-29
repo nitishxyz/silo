@@ -875,6 +875,20 @@ pub(crate) struct Live<'a> {
     pub grep: Option<&'a Hits<GrepHit>>,
     pub agents: Option<&'a [AgentRow]>,
     pub changes: Option<&'a Changes>,
+    /// The sessions other windows show (host, session id).
+    pub elsewhere: &'a [(usize, String)],
+}
+
+/// Sessions another window shows say so: picking one brings that window
+/// forward.
+fn mark_elsewhere(items: &mut [Item], elsewhere: &[(usize, String)]) {
+    for item in items {
+        if let Target::Session { host, id } = &item.target
+            && elsewhere.iter().any(|(h, i)| h == host && i == id)
+        {
+            item.right = Some(Right::Value("Window".into()));
+        }
+    }
 }
 
 impl Workspace {
@@ -902,6 +916,7 @@ impl Workspace {
             _ => {}
         }
         let mut all = self.finder_sources(scope, snapshot, cx);
+        mark_elsewhere(&mut all, live.elsewhere);
         if scope == Scope::Agents {
             all.extend(live.agents.map(agent_items).unwrap_or_default());
         }
@@ -1503,6 +1518,15 @@ mod tests {
         for query in ["theme", "font size", "a.", "split.", ".com", ""] {
             assert_eq!(address(query), None, "{query}");
         }
+    }
+
+    #[test]
+    fn spaces_another_window_shows_are_marked() {
+        let space = |host, id: &str| Item::new(Target::Session { host, id: id.into() }, Group::Sessions, id, session_key("m", id));
+        let mut items = vec![space(0, "home"), space(1, "home"), space(0, "work"), item("home", Group::Pages, "p")];
+        mark_elsewhere(&mut items, &[(0, "home".into()), (2, "work".into())]);
+        let marked: Vec<bool> = items.iter().map(|i| i.right == Some(Right::Value("Window".into()))).collect();
+        assert_eq!(marked, [true, false, false, false], "same host and id only; never other rows");
     }
 
     #[test]

@@ -219,7 +219,7 @@ impl BlockPane {
         match self {
             Self::Terminal(p) => p.read(cx).focus.clone().focus(window, cx),
             Self::Browser(p) => p.read(cx).focus.clone().focus(window, cx),
-            Self::Agent(p) => p.update(cx, |p, cx| p.focus_composer(window, cx)),
+            Self::Agent(p) => p.update(cx, |p, cx| p.focus_pane(window, cx)),
             Self::Files(p) => p.read(cx).focus.clone().focus(window, cx),
             Self::Changes(p) => p.read(cx).focus.clone().focus(window, cx),
         }
@@ -417,11 +417,58 @@ impl Workspace {
     }
 }
 
+/// What a new session view does to keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Follow {
+    /// Leave focus where it is.
+    Keep,
+    /// Focus the view's focused block.
+    Focus,
+    /// The view predates a focus this client asked for (it still names the block focused before): leave
+    /// focus and wait for the view that has it.
+    Stale,
+}
+
+/// How a view whose tab focuses `server` moves local focus. `applied` is the server focus last applied (or
+/// asked for); `asked` a focus this client sent that no view has shown yet (still in the tab, not long ago)
+/// and the focus before it; `local` whether a block here holds focus; `overlay` whether a window overlay
+/// (⌘P, the switcher, a dialog) owns it: an overlay keeps it, and closing it focuses the tab's block.
+pub(crate) fn follow_focus(server: &str, applied: Option<&str>, asked: Option<(&str, Option<&str>)>, local: bool, overlay: bool) -> Follow {
+    if overlay {
+        Follow::Keep
+    } else if asked.is_some_and(|(asked, before)| asked != server && before == Some(server)) {
+        Follow::Stale
+    } else if applied != Some(server) || !local {
+        Follow::Focus
+    } else {
+        Follow::Keep
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use silo_proto::model::{Lifecycle, TermSize};
 
     use super::*;
+
+    #[test]
+    fn a_view_follows_the_server_focus_unless_an_overlay_or_a_newer_ask_has_it() {
+        // Another client moved focus: it is followed.
+        assert_eq!(follow_focus("b", Some("a"), None, true, false), Follow::Focus);
+        // Unchanged, held here: left alone.
+        assert_eq!(follow_focus("a", Some("a"), None, true, false), Follow::Keep);
+        // Unchanged but nothing here holds focus (it went with a closed pane): taken back.
+        assert_eq!(follow_focus("a", Some("a"), None, false, false), Follow::Focus);
+        // ⌘P (or any window overlay) is open: an agent retitling its session doesn't pull focus out of it.
+        assert_eq!(follow_focus("a", Some("a"), None, false, true), Follow::Keep);
+        assert_eq!(follow_focus("b", Some("a"), None, false, true), Follow::Keep);
+        // The user clicked b; a view sent before the server saw it still says a: b keeps focus.
+        assert_eq!(follow_focus("a", Some("b"), Some(("b", Some("a"))), true, false), Follow::Stale);
+        // The view that has it.
+        assert_eq!(follow_focus("b", Some("b"), Some(("b", Some("a"))), true, false), Follow::Keep);
+        // A newer focus than the ask (a split it made, another client): followed.
+        assert_eq!(follow_focus("c", Some("b"), Some(("b", Some("a"))), true, false), Follow::Focus);
+    }
 
     fn info(id: &str, kind: BlockKind) -> BlockInfo {
         BlockInfo {

@@ -75,6 +75,8 @@ pub struct Palette {
     snapshot: SettingsSnapshot,
     /// Recent picks, newest first.
     recent: Vec<String>,
+    /// The sessions other windows showed when it opened (host, session id).
+    elsewhere: Vec<(usize, String)>,
     _sub: Subscription,
 }
 
@@ -707,6 +709,7 @@ impl Workspace {
             let field = cx.new(|cx| TextField::new(finder::PLACEHOLDER, cx));
             let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.palette_event(event, window, cx));
             let root = self.new_block_folder(window, cx);
+            let elsewhere = self.window_sessions(window, cx).into_iter().filter_map(|(_, s)| s.and_then(|(h, id)| Some((h, id?)))).collect();
             self.palette = Some(Palette {
                 field,
                 query: String::new(),
@@ -725,6 +728,7 @@ impl Workspace {
                 note: None,
                 snapshot: SettingsSnapshot::default(),
                 recent: finder::load_recent(&self.home),
+                elsewhere,
                 _sub: sub,
             });
         }
@@ -817,6 +821,7 @@ impl Workspace {
                     grep: palette.grep.as_ref(),
                     agents: palette.agents.as_deref(),
                     changes: palette.changes.as_ref(),
+                    elsewhere: &palette.elsewhere,
                 };
                 self.finder_items(palette.chip, &palette.query, &palette.snapshot, &palette.recent, &live, cx).into_iter().map(Entry::Item).collect()
             }
@@ -1212,7 +1217,7 @@ impl Workspace {
             },
             Target::Session { host, id } => {
                 self.close_palette(window, cx);
-                self.open_session(host, id, window, cx);
+                self.reveal_block(host, Some(id), None, window, cx);
             }
             Target::Host(index) => {
                 self.close_palette(window, cx);

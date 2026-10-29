@@ -380,6 +380,9 @@ pub struct AgentPane {
     /// The composer column's height as last laid out (0 when hidden), and the one the list was last padded for:
     /// the column floats over the transcript, whose end is padded clear of it.
     composer_h: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The composer's box (the pill and its halo) from the last paint (window coordinates): its popovers hang
+    /// above it, and a press in it leaves the typed ones (slash, `@`) open.
+    composer_box: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     composer_pad: f32,
     /// Something changed below while scrolled up.
     unseen: bool,
@@ -405,6 +408,13 @@ pub struct AgentPane {
     /// The `@` popup.
     mention: mention::Popup,
     selected: usize,
+    /// The composer popovers' list (not the `@` popup's, `mention.scroll`), and whether the next draw scrolls
+    /// the selected row into it (a key moved the selection, or the list opened on it).
+    pick_scroll: gpui::ScrollHandle,
+    reveal_pick: bool,
+    /// The popover a press outside just closed: the click that press starts on its trigger (the header's
+    /// title or history button) doesn't open it again.
+    pressed_out: Option<(Overlay, Instant)>,
     signin: SignIn,
     /// The otto settings, shown instead of the chat (`settings.rs`).
     otto_settings: Option<settings::OttoSettings>,
@@ -550,6 +560,7 @@ impl AgentPane {
             width: std::rc::Rc::default(),
             bounds: std::rc::Rc::default(),
             composer_h: std::rc::Rc::default(),
+            composer_box: std::rc::Rc::default(),
             composer_pad: 0.0,
             // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.
             epoch: Instant::now().checked_sub(Duration::from_secs(86_400)).unwrap_or_else(Instant::now),
@@ -596,6 +607,9 @@ impl AgentPane {
             slash_dismissed: false,
             mention: mention::Popup::default(),
             selected: 0,
+            pick_scroll: gpui::ScrollHandle::new(),
+            reveal_pick: false,
+            pressed_out: None,
             signin: SignIn::default(),
             otto_settings: None,
             status: None,
@@ -788,6 +802,31 @@ impl AgentPane {
         }
         let focus = self.editor.read(cx).focus.clone();
         window.focus(&focus, cx);
+    }
+
+    /// Focus coming to the block (a pane move, an overlay of the window closing): an input of the pane that
+    /// already has it keeps it; else the open popover's filter, the title being edited, or the composer.
+    pub fn focus_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.holds_focus(window, cx) && !self.focus.is_focused(window) {
+            return;
+        }
+        let field = if self.renaming.is_some() {
+            Some(self.rename_field.read(cx).focus.clone())
+        } else if matches!(self.overlay, Some(Overlay::Sessions | Overlay::Projects | Overlay::Models)) {
+            Some(self.filter.read(cx).focus.clone())
+        } else {
+            None
+        };
+        match field {
+            Some(focus) => window.focus(&focus, cx),
+            None => self.focus_composer(window, cx),
+        }
+    }
+
+    /// Keyboard focus is in the pane (itself or any of its inputs). What the pane moves on its own (a dialog
+    /// settling, the composer appearing) waits for this: focus elsewhere (⌘P, another block) is the user's.
+    pub(super) fn holds_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.focus.contains_focused(window, cx)
     }
 
     /// The pane's clock: wall time (ms since the Unix epoch), the clock otto
@@ -1330,6 +1369,7 @@ impl AgentPane {
                 if self.overlay == Some(Overlay::Mention) {
                     self.mention.scroll.scroll_to_item(self.selected);
                 }
+                self.reveal_pick = true;
                 cx.notify();
             }
             EditorEvent::Files(paths) => self.attach_paths(paths.clone(), cx),
@@ -1358,6 +1398,7 @@ impl AgentPane {
                 self.set_overlay(Some(Overlay::Slash), cx);
             }
             self.selected = 0;
+            self.pick_scroll.set_offset(gpui::Point::default());
         } else if self.overlay == Some(Overlay::Slash) {
             self.set_overlay(None, cx);
         }
@@ -2002,11 +2043,16 @@ impl AgentPane {
             self.close_overlay(window, cx);
             return;
         }
+        if self.pressed_out.take().is_some_and(|(o, at)| reopens(o, at.elapsed(), overlay)) {
+            return;
+        }
         self.set_overlay(Some(overlay), cx);
         // The effort menu opens on the current level.
         self.selected =
             if overlay == Overlay::Effort { EFFORTS.iter().position(|e| *e == self.effort()).unwrap_or(0) } else { first_choice(overlay) };
         self.filter.update(cx, |f, cx| f.replace_text("", cx));
+        self.pick_scroll.set_offset(gpui::Point::default());
+        self.reveal_pick = true;
         match overlay {
             Overlay::Sessions => {
                 self.refresh_sessions(cx);
@@ -2051,15 +2097,43 @@ impl AgentPane {
         cx.notify();
     }
 
+    /// A press outside the open popover closes it (as esc would) and leaves focus to what was pressed; only
+    /// focus left on the popover's own filter (pressed on bare chrome) comes back to the composer.
+    pub(super) fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay == Some(Overlay::Slash) {
+            self.slash_dismissed = true;
+        }
+        if self.overlay == Some(Overlay::Mention) {
+            self.mention.dismissed = self.mention.at.as_ref().map(|a| a.0.start);
+        }
+        self.pressed_out = self.overlay.map(|o| (o, Instant::now()));
+        self.set_overlay(None, cx);
+        let filter = self.filter.read(cx).focus.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if filter.is_focused(window) && this.overlay.is_none() {
+                this.focus_composer(window, cx);
+            }
+        });
+    }
+
     fn filter_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(overlay) = self.overlay.filter(|o| matches!(o, Overlay::Sessions | Overlay::Projects | Overlay::Models)) else {
             return;
         };
         let count = self.overlay_count(cx);
         match event {
-            FieldEvent::Changed(_) => self.selected = first_choice(overlay),
-            FieldEvent::Up => self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1)),
-            FieldEvent::Down => self.selected = if count == 0 { 0 } else { (self.selected + 1) % count },
+            FieldEvent::Changed(_) => {
+                self.selected = first_choice(overlay);
+                self.pick_scroll.set_offset(gpui::Point::default());
+            }
+            FieldEvent::Up => {
+                self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1));
+                self.reveal_pick = true;
+            }
+            FieldEvent::Down => {
+                self.selected = if count == 0 { 0 } else { (self.selected + 1) % count };
+                self.reveal_pick = true;
+            }
             FieldEvent::Cancel => return self.close_overlay(window, cx),
             FieldEvent::Submit => return self.activate_choice(self.selected, window, cx),
         }
@@ -2297,6 +2371,14 @@ fn switcher_sessions<'a>(sessions: &'a [SessionInfo], query: &str) -> Vec<&'a Se
 }
 
 /// The row an overlay opens on: the switcher skips its project row.
+/// How long after a press outside closed a popover the click it starts can't open it again.
+const PRESS_TOGGLE: Duration = Duration::from_millis(800);
+
+/// Whether opening `overlay` is that click: the press closed `closed` `since` ago (it was the trigger again).
+fn reopens(closed: Overlay, since: Duration, overlay: Overlay) -> bool {
+    closed == overlay && since < PRESS_TOGGLE
+}
+
 fn first_choice(overlay: Overlay) -> usize {
     usize::from(overlay == Overlay::Sessions)
 }
@@ -2381,6 +2463,15 @@ impl Render for AgentPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_press_that_closed_a_popover_on_its_trigger_does_not_reopen_it() {
+        let soon = Duration::from_millis(120);
+        assert!(reopens(Overlay::Sessions, soon, Overlay::Sessions));
+        // Another trigger opens its own; a later click on the same one opens it again.
+        assert!(!reopens(Overlay::Sessions, soon, Overlay::Models));
+        assert!(!reopens(Overlay::Sessions, PRESS_TOGGLE, Overlay::Sessions));
+    }
 
     #[test]
     fn a_new_session_is_not_pulled_back_to_the_one_it_left() {

@@ -83,20 +83,12 @@ fn open_in_new_window(host: usize, id: String, cx: &mut App) {
 }
 
 impl Workspace {
-    /// The session each other Silo window shows (host, session id). Not
-    /// while drawing: an entity read in a window's draw becomes that
-    /// window's in gpui (its callbacks get that `window`), and the other
-    /// window's own requests then mistake which window is theirs.
+    /// The session each other Silo window shows (host, session id), front
+    /// to back. Not while drawing: an entity read in a window's draw becomes
+    /// that window's in gpui (its callbacks get that `window`), and the
+    /// other window's own requests then mistake which window is theirs.
     fn other_windows(&self, window: &Window, cx: &Context<Self>) -> Vec<(usize, String, AnyWindowHandle)> {
-        cx.windows()
-            .into_iter()
-            .filter(|w| !self.is_own_window(*w, window, cx))
-            .filter_map(|w| {
-                let workspace = w.downcast::<Workspace>()?.read(cx).ok()?;
-                let id = workspace.view.as_ref()?.session.id.clone();
-                Some((workspace.active_host, id, w))
-            })
-            .collect()
+        self.window_sessions(window, cx).into_iter().filter_map(|(w, shown)| shown.and_then(|(host, id)| Some((host, id?, w)))).collect()
     }
 
     pub(crate) fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -169,9 +161,7 @@ impl Workspace {
         match item {
             Item::Session { host, id } => match self.shown(host, &id, window, cx) {
                 Some(Shown::Here) => {}
-                Some(Shown::Elsewhere(handle)) => cx.defer(move |cx| {
-                    let _ = handle.update(cx, |_, window, _| window.activate_window());
-                }),
+                Some(Shown::Elsewhere(handle)) => crate::workspace::bring_forward(handle, None, cx),
                 None => open_in_new_window(host, id, cx),
             },
             Item::Create(name) => self.create_in_new_window(Some(name), window, cx),

@@ -261,7 +261,7 @@ impl crate::workspace::Workspace {
         self.composer_pending = None;
         if std::mem::take(&mut self.otto_settings_pending) {
             pane.update(cx, |pane, cx| pane.open_otto_settings(Entry::Palette, window, cx));
-        } else {
+        } else if !self.overlay_owns_focus() {
             pane.update(cx, |pane, cx| pane.focus_composer(window, cx));
         }
     }

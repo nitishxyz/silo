@@ -555,19 +555,23 @@ impl AgentPane {
     }
 
     /// Per frame: drop a dialog that finished closing, move focus into a new
-    /// dialog, and hand focus to the composer when it appears.
+    /// dialog, and hand focus to the composer when it appears. Only while the
+    /// pane holds focus: these land late (a login finishing, the catalog
+    /// loading), when the user may be typing in ⌘P or another block.
     pub(super) fn settle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
+        let held = self.holds_focus(window, cx);
         if self.signin.dialog.as_ref().is_some_and(|d| d.closing.is_some_and(|at| motion::enter(at, DIALOG_EXIT, now, cx.reduce_motion()).is_none()))
         {
             self.signin.dialog = None;
-            if self.composer_visible() {
+            if held && self.composer_visible() {
                 self.focus_composer(window, cx);
-            } else {
+            } else if held {
                 window.focus(&self.focus, cx);
             }
         }
-        if let Some(dialog) = self.signin.dialog.as_mut().filter(|d| d.focus_pending && d.closing.is_none()) {
+        // Kept pending while focus is elsewhere: it lands when focus comes back to the pane.
+        if let Some(dialog) = self.signin.dialog.as_mut().filter(|d| held && d.focus_pending && d.closing.is_none()) {
             dialog.focus_pending = false;
             let target = match &dialog.step {
                 Step::ApiKey => self.key_field.read(cx).focus_handle(cx),
@@ -577,7 +581,7 @@ impl AgentPane {
             };
             window.focus(&target, cx);
         }
-        if self.composer_visible() && (std::mem::take(&mut self.signin.focus_composer) || self.focus.is_focused(window)) {
+        if self.composer_visible() && ((std::mem::take(&mut self.signin.focus_composer) && held) || self.focus.is_focused(window)) {
             self.focus_composer(window, cx);
         }
     }

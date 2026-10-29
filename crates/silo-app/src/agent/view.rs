@@ -43,6 +43,31 @@ const DETAIL_GAP: f32 = 8.0;
 const DETAIL_H: f32 = 240.0 + 2.0 * DETAIL_GAP;
 /// The composer's text line height.
 const COMPOSER_LINE: f32 = 20.0;
+/// The composer popovers' width (the pickers, slash and `@` lists), their gap above the pill's halo, the room
+/// they keep from the pane's edge, and the least they shrink to in a short pane.
+const POPOVER_W: f32 = 360.0;
+const POPOVER_GAP: f32 = 8.0;
+const POPOVER_MARGIN: f32 = 8.0;
+const POPOVER_MIN_H: f32 = 72.0;
+
+/// The tallest a popover gets: `cap` (its open motion), or the `room` between its anchor and the pane's far
+/// edge less a margin, never below a couple of rows.
+fn popover_max_h(room: Option<f32>, cap: f32) -> f32 {
+    room.map_or(cap, |r| (r - POPOVER_MARGIN).max(POPOVER_MIN_H).min(cap))
+}
+
+/// Whether a press at `at` (window coordinates) closes the open popover. One with a backdrop over the pane
+/// closes on a press beyond the pane (another block, the titlebar, the sidebar; the backdrop takes those on
+/// the pane); a typed one (slash, `@`) on any press but in the composer, where the caret decides.
+fn press_closes(
+    typed: bool,
+    at: gpui::Point<gpui::Pixels>,
+    pane: Option<gpui::Bounds<gpui::Pixels>>,
+    composer: Option<gpui::Bounds<gpui::Pixels>>,
+) -> bool {
+    if typed { !composer.is_some_and(|c| c.contains(&at)) } else { !pane.is_some_and(|p| p.contains(&at)) }
+}
+
 /// Indent of a group's lines under its header.
 const NEST: f32 = 12.0;
 /// A bar's header and row heights (bars above the composer).
@@ -1768,6 +1793,10 @@ impl AgentPane {
                 .filter_map(|o| self.popover(o, window, cx))
                 .collect();
         let fit = self.fit();
+        // The composer's popovers hang right above its pill, over the bars and cards stacked on it.
+        let boxed = self.composer_box.clone();
+        let measure = gpui::canvas(move |b, _, _| boxed.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full();
+        let composer = div().relative().child(self.render_composer(window, cx)).child(measure).children(popovers);
         div()
             .flex_none()
             .w_full()
@@ -1788,9 +1817,8 @@ impl AgentPane {
                     .children(notice)
                     .children(self.render_card(cx))
                     .children(self.render_bars(cx))
-                    .child(self.render_composer(window, cx))
-                    .children(fit.footer.then(|| self.render_footer(fit, cx)))
-                    .children(popovers),
+                    .child(composer)
+                    .children(fit.footer.then(|| self.render_footer(fit, cx))),
             )
             .into_any_element()
     }
@@ -2511,8 +2539,10 @@ impl AgentPane {
     }
 
     /// `which`'s card while open or fading out: the switcher hangs under the
-    /// pane header, the others sit above their trigger. Opens with height +
-    /// opacity and a 6 pt slide from its anchor.
+    /// pane header, the others right above the composer's pill (over the bars
+    /// on it), as tall as the pane leaves room for (their lists scroll). Opens
+    /// with height + opacity and a 6 pt slide from its anchor; a press outside
+    /// closes it (`press_closes`).
     fn popover(&mut self, which: Overlay, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = Instant::now();
         if self.overlay_shown != Some(which) || self.overlay_anim.hidden(now, cx.reduce_motion()) {
@@ -2533,15 +2563,23 @@ impl AgentPane {
             Overlay::Slash => self.render_slash(cx),
             Overlay::Mention => self.render_mention(cx),
         };
+        self.reveal_pick = false;
         let width = match which {
             Overlay::Sessions | Overlay::Projects => 440.0,
-            Overlay::Models => 340.0,
             Overlay::Effort => 260.0,
             Overlay::Usage => super::usage::CARD_W,
-            Overlay::Agents | Overlay::Menu | Overlay::Slash => 320.0,
-            Overlay::Mention => 360.0,
+            Overlay::Models | Overlay::Agents | Overlay::Menu | Overlay::Slash | Overlay::Mention => POPOVER_W,
         };
         let below = matches!(which, Overlay::Sessions | Overlay::Projects);
+        // Room up to the pane's top (above the composer), or down to its bottom (under the header).
+        let pane = self.bounds.get();
+        let room = if below {
+            pane.map(|p| f32::from(p.size.height) - 4.0)
+        } else {
+            pane.zip(self.composer_box.get()).map(|(p, c)| f32::from(c.top() - p.top()) - POPOVER_GAP)
+        };
+        let typed = matches!(which, Overlay::Slash | Overlay::Mention);
+        let composer = self.composer_box.clone();
         let card = div()
             .id("agent-popover")
             .occlude()
@@ -2550,8 +2588,13 @@ impl AgentPane {
             .opacity(t)
             .w(px(width))
             .max_w(relative(1.0))
-            .max_h(px(40.0 + 520.0 * t))
+            .max_h(px(popover_max_h(room, 40.0 + 520.0 * t)))
             .overflow_hidden()
+            .on_mouse_down_out(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                if this.overlay == Some(which) && press_closes(typed, e.position, this.bounds.get(), composer.get()) {
+                    this.dismiss_overlay(window, cx);
+                }
+            }))
             .map(|el| if below { el.p(px(6.0)).continuous(12.0) } else { el.p(px(menu::PAD)).continuous(menu::RADIUS) })
             .bg(theme::overlay_fill())
             .border_1()
@@ -2566,7 +2609,8 @@ impl AgentPane {
             .text_size(px(13.0))
             .flex()
             .flex_col()
-            .child(body);
+            // The body gives way to the room left; its list scrolls.
+            .child(div().min_h_0().flex().flex_col().child(body));
         let anchor = div()
             .absolute()
             .left_0()
@@ -2579,7 +2623,7 @@ impl AgentPane {
                 Overlay::Sessions | Overlay::Projects => el,
                 _ => el.pl(px(pill_input::HALO)),
             })
-            .map(|el| if below { el.top(px(4.0)).px(px(6.0)) } else { el.bottom(relative(1.0)).pb(px(8.0)) })
+            .map(|el| if below { el.top(px(4.0)).px(px(6.0)) } else { el.bottom(relative(1.0)).pb(px(POPOVER_GAP)) })
             .child(card);
         Some(gpui::deferred(anchor).with_priority(1).into_any_element())
     }
@@ -2592,6 +2636,26 @@ impl AgentPane {
                 cx.notify();
             }
         }))
+    }
+
+    /// A composer popover's list: `rows` rows tall at most (all of a short fixed list: `None`), scrolling past
+    /// them or sooner when the pane is short; keys keep the selected row in view (`reveal_row`).
+    fn pick_list(&self, id: &'static str, rows: Option<f32>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when_some(rows, |el, rows| el.max_h(px(menu::max_h(rows))))
+            .overflow_y_scroll()
+            .track_scroll(&self.pick_scroll)
+    }
+
+    /// Row `index` is the list's `child`th child: scrolled into view when selected by a key.
+    fn reveal_row(&self, index: usize, child: usize) {
+        if self.reveal_pick && index == self.selected {
+            self.pick_scroll.scroll_to_item(child);
+        }
     }
 
     fn search_field(&self, window: &Window, cx: &App) -> AnyElement {
@@ -2632,7 +2696,7 @@ impl AgentPane {
         let project_row = self
             .pick_row(project_row, 0, self.selected == 0, cx)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_overlay(Overlay::Projects, window, cx)));
-        let mut list = div().id("agent-sessions").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        let mut list = div().id("agent-sessions").min_h_0().flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
         for (i, (id, title, model, status, updated, from)) in choices.into_iter().enumerate() {
             let i = i + 1;
             let checked = current.as_deref() == Some(id.as_str());
@@ -2721,6 +2785,7 @@ impl AgentPane {
             .pick_row(new, count + 1, self.selected == count + 1, cx)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_session(window, cx)));
         div()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(project_row)
@@ -2746,7 +2811,7 @@ impl AgentPane {
             })
             .collect();
         let count = choices.len();
-        let mut list = div().id("agent-projects").flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
+        let mut list = div().id("agent-projects").min_h_0().flex().flex_col().max_h(px(rows::ROW_H * 7.0)).overflow_y_scroll();
         for (i, (id, name, parent, updated)) in choices.into_iter().enumerate() {
             let checked = current.as_deref() == Some(id.as_str());
             let subtitle = [parent.as_deref(), Some(ago(updated).as_str())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
@@ -2771,7 +2836,7 @@ impl AgentPane {
         let open = self
             .pick_row(open, count, self.selected == count, cx)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(count, window, cx)));
-        div().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(open).into_any_element()
+        div().min_h_0().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(open).into_any_element()
     }
 
     fn render_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2780,13 +2845,16 @@ impl AgentPane {
         let catalog = self.catalog.clone().unwrap_or_default();
         let choices: Vec<(String, String, String)> =
             self.model_choices(cx).into_iter().map(|m| (m.provider.as_str().to_owned(), m.id.clone(), m.name.clone())).collect();
-        let mut list = div().id("agent-models").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
+        let mut list = self.pick_list("agent-models", Some(9.0));
         if choices.is_empty() {
             list = list.child(menu::empty("agent-models-empty", "No matching models"));
         }
         let mut group: Option<String> = None;
+        // The list's children so far: rows under their provider's section.
+        let mut child = 0;
         for (i, (provider, id, name)) in choices.into_iter().enumerate() {
             if group.as_deref() != Some(provider.as_str()) {
+                child += 1;
                 let label = match catalog.subscription(&provider) {
                     Some(plan) if plan != "sub" => format!("{} · {plan}", provider_name(&provider)),
                     Some(_) => format!("{} · subscription", provider_name(&provider)),
@@ -2805,6 +2873,8 @@ impl AgentPane {
                 subtitle,
                 checked.then(rows::check),
             );
+            self.reveal_row(i, child);
+            child += 1;
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
@@ -2812,6 +2882,7 @@ impl AgentPane {
         }
         let focused = self.filter.read(cx).focus.is_focused(window);
         div()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(menu::search(focused, self.filter.clone()))
@@ -2822,7 +2893,7 @@ impl AgentPane {
 
     fn render_agents(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.agent_name();
-        let mut list = div().id("agent-agents").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
+        let mut list = self.pick_list("agent-agents", Some(9.0));
         for (i, (name, description)) in self.agent_choices().into_iter().enumerate() {
             let checked = name == current;
             let subtitle = (!description.is_empty()).then(|| transcript::clip(&description, 120).into());
@@ -2834,12 +2905,14 @@ impl AgentPane {
                 subtitle,
                 checked.then(rows::check),
             );
+            self.reveal_row(i, i);
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
         div()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(list)
@@ -2849,7 +2922,7 @@ impl AgentPane {
 
     fn render_efforts(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.effort();
-        let mut list = div().id("agent-efforts").flex().flex_col();
+        let mut list = self.pick_list("agent-efforts", None);
         for (i, effort) in super::EFFORTS.into_iter().enumerate() {
             let checked = effort == current;
             let row = menu::row(
@@ -2860,16 +2933,24 @@ impl AgentPane {
                 Some(effort_about(effort).into()),
                 checked.then(rows::check),
             );
+            self.reveal_row(i, i);
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
             })));
         }
-        list.when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step"))).into_any_element()
+        div()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(list)
+            .when(self.running && self.updatable().is_some(), |el| el.child(footnote("Applies from the next step")))
+            .into_any_element()
     }
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.mirror().map_or(self.choice.mode, |m| m.info.approval_mode);
-        let mut list = div().id("agent-menu-list").flex().flex_col().child(menu::section("Approvals", None));
+        // Children: the section, two modes, the divider, then the actions.
+        let mut list = self.pick_list("agent-menu-list", None).child(menu::section("Approvals", None));
         for (i, (label, glyph, hint)) in
             [("Auto", "lock-off", "Run tools without asking"), ("Ask", "lock", "Ask before changes")].into_iter().enumerate()
         {
@@ -2882,6 +2963,7 @@ impl AgentPane {
                 Some(hint.into()),
                 checked.then(rows::check),
             );
+            self.reveal_row(i, i + 1);
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
             })));
@@ -2899,6 +2981,7 @@ impl AgentPane {
         {
             let i = i + 2;
             let row = menu::row(id, i == self.selected, Some(menu::lead(glyph, false)), label, None, Some(rows::note(note)));
+            self.reveal_row(i, i + 2);
             list = list.child(self.pick_row(row, i, i == self.selected, cx).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.activate_choice(i, window, cx);
             })));
@@ -2912,7 +2995,7 @@ impl AgentPane {
         if choices.is_empty() {
             return menu::empty("agent-slash-empty", "No matching command").into_any_element();
         }
-        let mut list = div().id("agent-slash").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll();
+        let mut list = self.pick_list("agent-slash", Some(9.0));
         for (i, c) in choices.into_iter().enumerate() {
             let act = c.act;
             let current = matches!(act, super::SlashAct::Mode(m) if mode_label(m) == mode);
@@ -2924,6 +3007,7 @@ impl AgentPane {
                 Some(c.about.into()),
                 current.then(rows::check),
             );
+            self.reveal_row(i, i);
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_slash(act, window, cx))),
@@ -2938,7 +3022,8 @@ impl AgentPane {
         if choices.is_empty() {
             return menu::empty("agent-mention-empty", "No matches").into_any_element();
         }
-        let mut list = div().id("agent-mention").flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll().track_scroll(&self.mention.scroll);
+        let mut list =
+            div().id("agent-mention").min_h_0().flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll().track_scroll(&self.mention.scroll);
         for (i, choice) in choices.into_iter().enumerate() {
             let selected = i == self.selected;
             let (glyph, title, about) = match choice {
@@ -3561,7 +3646,38 @@ fn render_table(
 
 #[cfg(test)]
 mod tests {
-    use super::{DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, Tail, context_fraction, context_label, context_tip, grouped, live_budget, tokens};
+    use super::{
+        DETAIL_GAP, DETAIL_H, Fit, LINE_H, LIVE_LINES, POPOVER_MARGIN, POPOVER_MIN_H, Tail, context_fraction, context_label, context_tip, grouped,
+        live_budget, popover_max_h, press_closes, tokens,
+    };
+
+    #[test]
+    fn a_popover_fits_the_room_above_its_anchor() {
+        // A tall pane: the open motion's cap.
+        assert!((popover_max_h(Some(900.0), 560.0) - 560.0).abs() < f32::EPSILON);
+        // A short one: what is left up to its top, less the margin (scrolling inside).
+        assert!((popover_max_h(Some(200.0), 560.0) - (200.0 - POPOVER_MARGIN)).abs() < f32::EPSILON);
+        // Hardly any room: still a couple of rows; mid-motion it stays under the motion's cap.
+        assert!((popover_max_h(Some(20.0), 560.0) - POPOVER_MIN_H).abs() < f32::EPSILON);
+        assert!((popover_max_h(Some(20.0), 40.0) - 40.0).abs() < f32::EPSILON);
+        // Not painted yet.
+        assert!((popover_max_h(None, 300.0) - 300.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_press_outside_closes_a_popover() {
+        use gpui::{Bounds, point, px, size};
+        let pane = Some(Bounds::new(point(px(100.0), px(50.0)), size(px(600.0), px(800.0))));
+        let composer = Some(Bounds::new(point(px(120.0), px(760.0)), size(px(560.0), px(60.0))));
+        let (on_pane, in_composer, beyond) = (point(px(300.0), px(200.0)), point(px(300.0), px(780.0)), point(px(20.0), px(200.0)));
+        // A picker: the backdrop takes presses on the pane; another block, the titlebar or the sidebar close it here.
+        assert!(!press_closes(false, on_pane, pane, composer));
+        assert!(press_closes(false, beyond, pane, composer));
+        // Slash and `@`: anything but the composer (where the caret decides).
+        assert!(press_closes(true, on_pane, pane, composer));
+        assert!(press_closes(true, beyond, pane, composer));
+        assert!(!press_closes(true, in_composer, pane, composer));
+    }
 
     #[test]
     fn a_cell_is_measured_once() {
