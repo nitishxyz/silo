@@ -37,13 +37,16 @@ async fn start(home: &Path) -> JoinHandle<()> {
     // A crash (`task.abort()`) leaves its socket file, which the restart
     // replaces (unlink, then bind): only a new file that accepts counts,
     // else the check can pass on the old one and the next connect find no
-    // socket at all (macOS CI, once). No client: a hello changes the run.
-    let inode = |path: &Path| std::fs::metadata(path).ok().map(|m| std::os::unix::fs::MetadataExt::ino(&m));
-    let stale = inode(&socket);
+    // socket at all (macOS CI, once). So the old file goes first: any
+    // socket then is the new server's. (Comparing inodes instead failed on
+    // Linux, which reuses a freed inode number at once: the new socket
+    // looked like the old one and the restart never "started".) No client:
+    // a hello changes the run.
+    let _ = std::fs::remove_file(&socket);
     let task = tokio::spawn(async move { silo_server::run(config).await.unwrap() });
     // Up to 10 s: a loaded CI runner took over 3 s to restart it (crash_restores_last_checkpoint, Linux).
     for _ in 0..1000 {
-        if inode(&socket).is_some_and(|ino| Some(ino) != stale) && silo_client::server_running(home).await {
+        if socket.exists() && silo_client::server_running(home).await {
             return task;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
