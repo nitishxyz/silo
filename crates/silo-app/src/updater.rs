@@ -92,8 +92,8 @@ pub enum PillKind {
     Ready,
     /// Outlined, with a spinner.
     Busy,
-    /// Outlined, with a progress line; the percent follows the label in a
-    /// slot as wide as `100%`.
+    /// Outlined, with a spinner and a progress ring; the percent follows
+    /// the ring in a slot as wide as `100%`.
     Progress(u8),
     /// Outlined.
     Blocked,
@@ -104,14 +104,14 @@ pub fn pill(state: &State) -> Option<(String, String, PillKind)> {
     Some(match state {
         State::Idle => return None,
         State::Downloading { version, phase: Phase::Download { done: 0, total: None } } => {
-            (format!("Downloading {version}…"), format!("Downloading Silo {version}"), PillKind::Busy)
+            (format!("Downloading {version}"), format!("Downloading Silo {version}"), PillKind::Busy)
         }
         State::Downloading { version, phase: Phase::Download { done, total: None } } => {
             let mb = update::megabytes(*done);
             (format!("Downloading {version} · {mb} MB"), format!("Downloading Silo {version} ({mb} MB)"), PillKind::Busy)
         }
         State::Downloading { version, phase: Phase::Download { done, total: Some(total) } } => (
-            format!("Downloading {version} ·"),
+            format!("Downloading {version}"),
             format!("Downloading Silo {version} ({} of {} MB)", update::megabytes(*done), update::megabytes(*total)),
             PillKind::Progress(update::percent(*done, *total)),
         ),
@@ -432,9 +432,9 @@ mod tests {
         assert_eq!(pill(&State::Idle), None);
         let downloading = |phase| State::Downloading { version: "0.1.8".into(), phase };
         let started = downloading(Phase::Download { done: 0, total: None });
-        assert_eq!(pill(&started), Some(("Downloading 0.1.8…".into(), "Downloading Silo 0.1.8".into(), PillKind::Busy)));
+        assert_eq!(pill(&started), Some(("Downloading 0.1.8".into(), "Downloading Silo 0.1.8".into(), PillKind::Busy)));
         let sized = downloading(Phase::Download { done: 84_000_000, total: Some(200_000_000) });
-        assert_eq!(pill(&sized), Some(("Downloading 0.1.8 ·".into(), "Downloading Silo 0.1.8 (84 of 200 MB)".into(), PillKind::Progress(42))));
+        assert_eq!(pill(&sized), Some(("Downloading 0.1.8".into(), "Downloading Silo 0.1.8 (84 of 200 MB)".into(), PillKind::Progress(42))));
         let unknown = downloading(Phase::Download { done: 84_000_000, total: None });
         assert_eq!(pill(&unknown), Some(("Downloading 0.1.8 · 84 MB".into(), "Downloading Silo 0.1.8 (84 MB)".into(), PillKind::Busy)));
         let verifying = downloading(Phase::Verify);

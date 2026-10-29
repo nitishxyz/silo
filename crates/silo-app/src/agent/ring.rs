@@ -40,7 +40,7 @@ impl Fill {
 }
 
 /// The 14 pt ring at `fill` (0–1) in `color`.
-pub(super) fn ring(fill: f32, color: u32) -> impl IntoElement {
+pub(crate) fn ring(fill: f32, color: u32) -> impl IntoElement {
     // A `fill` arc clockwise from 12 o'clock, as a stroked polyline.
     fn arc(center: gpui::Point<gpui::Pixels>, radius: f32, fill: f32, width: f32) -> Option<gpui::Path<gpui::Pixels>> {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

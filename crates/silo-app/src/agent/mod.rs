@@ -20,7 +20,7 @@ mod pill_input;
 mod plan;
 mod rename;
 mod reveal;
-mod ring;
+pub(crate) mod ring;
 mod rows;
 mod scroll;
 mod select;

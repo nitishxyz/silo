@@ -727,7 +727,7 @@ impl Workspace {
     }
 
     /// The Update pill: outlined with a spinner while a release downloads
-    /// (a progress line along its bottom once its size is known), is
+    /// (and a progress ring with the percent once its size is known), is
     /// verified or installs, accent-filled once one is staged (a click
     /// installs it and restarts), outlined when this copy of Silo cannot be
     /// replaced.
@@ -755,21 +755,13 @@ impl Workspace {
                     el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
                 }
             })
-            .when(kind == PillKind::Busy, |el| el.child(crate::browser_pane::spinner("update", 12.0, chrome.muted, cx)))
-            .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
-                el.relative().child(
-                    div()
-                        .absolute()
-                        .bottom(px(2.0))
-                        .left(px(11.0))
-                        .right(px(11.0))
-                        .h(px(2.0))
-                        .rounded_full()
-                        .bg(chrome.tint(0.12))
-                        .child(div().h_full().rounded_full().w(gpui::relative(f32::from(percent) / 100.0)).bg(rgb(chrome.accent))),
-                )
+            .when(matches!(kind, PillKind::Busy | PillKind::Progress(_)), |el| {
+                el.child(crate::browser_pane::spinner("update", 12.0, chrome.muted, cx))
             })
             .child(label)
+            .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
+                el.child(crate::agent::ring::ring(f32::from(percent) / 100.0, chrome.accent))
+            })
             // The percent in a slot sized by a hidden `100%`, in tabular
             // figures: the pill keeps its width as the number grows.
             .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
