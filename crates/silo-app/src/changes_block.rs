@@ -352,6 +352,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_revert(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let dialog = self.revert.as_ref()?;
         let card = crate::confirm_card::card("revert-confirm")
             .track_focus(&dialog.focus)

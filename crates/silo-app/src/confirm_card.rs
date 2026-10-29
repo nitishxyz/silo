@@ -5,6 +5,7 @@
 
 use gpui::{AnyElement, App, FontWeight, IntoElement, MouseDownEvent, Stateful, Window, div, prelude::*, px, rgb};
 
+use crate::surface::Glassy as _;
 use crate::{
     theme::{self, Continuous as _},
     workspace::TITLEBAR_HEIGHT,
@@ -12,21 +13,7 @@ use crate::{
 
 /// The card: a column with room for a headline, details and a button row.
 pub(crate) fn card(id: &'static str) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .occlude()
-        .w(px(400.0))
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .p(px(18.0))
-        .continuous(14.0)
-        .bg(theme::overlay_fill())
-        .border_1()
-        .border_color(rgb(theme::border()))
-        .shadow_xl()
-        .font_family(theme::ui_font())
-        .text_size(px(13.0))
+    div().id(id).occlude().w(px(400.0)).flex().flex_col().gap(px(8.0)).p(px(18.0)).glass_sheet(14.0).font_family(theme::ui_font()).text_size(px(13.0))
 }
 
 /// A card's button: `primary` filled with the accent, else a control with

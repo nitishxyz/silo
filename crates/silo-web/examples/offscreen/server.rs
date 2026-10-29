@@ -1,5 +1,6 @@
 //! Tiny HTTP server standing in for a tunnel's local proxy and for a plain origin. It answers every
-//! request (absolute-form proxy requests included) with `html`, a 1x1 PNG for `*favicon*`, or a
+//! request (absolute-form proxy requests included) with `html`, a 1x1 PNG for `*favicon*`, a
+//! second of silent WAV for `*.wav`, an attachment `report.txt` for `/file*`, or a
 //! websocket that sends one `hello` frame. `CONNECT` is accepted and the tunnelled request is
 //! served on the same stream. Request lines are recorded.
 
@@ -96,14 +97,43 @@ fn serve(stream: TcpStream, html: &str, log: &Mutex<Vec<String>>, expected: Opti
                   Content-Length: 0\r\nConnection: close\r\n\r\n",
             );
         }
+        let mut extra = "";
         let (kind, body) = if line.contains("favicon") {
             ("image/png", data_encoding::BASE64.decode(ICON.as_bytes()).unwrap())
+        } else if line.contains(".wav ") {
+            ("audio/wav", wav())
+        } else if line.contains(" /file") {
+            extra = "Content-Disposition: attachment; filename=\"report.txt\"\r\n";
+            ("application/octet-stream", DOWNLOAD.to_vec())
         } else {
             ("text/html", html.as_bytes().to_vec())
         };
-        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         return (&stream).write_all(&[head.as_bytes(), &body].concat());
     }
+}
+
+/// The body of `/file*` downloads.
+pub const DOWNLOAD: &[u8] = b"silo download\n";
+
+/// Two seconds of silent 8 kHz 8-bit mono PCM.
+fn wav() -> Vec<u8> {
+    let samples = 16_000u32;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + samples).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&8000u32.to_le_bytes());
+    out.extend_from_slice(&8000u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&8u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&samples.to_le_bytes());
+    out.resize(out.len() + samples as usize, 0x80);
+    out
 }
 
 /// Completes the upgrade, sends one unmasked text frame `hello`, then holds the socket briefly.

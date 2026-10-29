@@ -187,6 +187,12 @@ fn back_forward(browser: Option<&mut Browser>) -> bool {
     found.load(Ordering::Relaxed)
 }
 
+/// The visible entry's `view-source:` address, when it shows one.
+fn view_source(browser: Option<&mut Browser>) -> Option<String> {
+    let entry = browser?.host()?.visible_navigation_entry()?;
+    Some(CefString::from(&entry.display_url()).to_string()).filter(|shown| shown.starts_with("view-source:"))
+}
+
 wrap_display_handler! {
     pub(crate) struct PageDisplayHandler {
         shared: Arc<Shared>,
@@ -198,10 +204,12 @@ wrap_display_handler! {
                 return;
             }
             if let Some(url) = url {
-                self.shared.committed(&url.to_string());
                 let mut browser = browser;
+                // A `view-source:` page commits its page's URL; the entry keeps what it shows.
+                let url = view_source(browser.as_deref_mut()).filter(|shown| shown.strip_prefix("view-source:") == Some(&url.to_string())).unwrap_or_else(|| url.to_string());
+                self.shared.committed(&url);
                 let back_forward = back_forward(browser.as_deref_mut());
-                self.shared.push(Event::UrlChanged { url: url.to_string(), back_forward });
+                self.shared.push(Event::UrlChanged { url, back_forward });
                 if let Some(security) = security(&self.shared, browser) {
                     self.shared.push(Event::Security(security));
                 }
@@ -219,6 +227,10 @@ wrap_display_handler! {
             let Some(message) = message.map(ToString::to_string) else { return 0 };
             if let Some(color) = message.strip_prefix(self.shared.theme_tag.as_str()) {
                 self.shared.push(Event::ThemeColor(crate::color::parse(color)));
+                return 1;
+            }
+            if let Some(link_text) = message.strip_prefix(self.shared.menu_tag.as_str()) {
+                *lock(&self.shared.menu_report) = Some((std::time::Instant::now(), link_text.to_owned()));
                 return 1;
             }
             let Some(state) = message.strip_prefix(FOCUS_TAG) else { return 0 };
@@ -373,6 +385,7 @@ wrap_load_handler! {
         fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
             let Some(frame) = frame else { return };
             frame.execute_java_script(Some(&CefString::from(FOCUS_SCRIPT)), None, 0);
+            frame.execute_java_script(Some(&CefString::from(crate::menu::menu_script(&self.shared.menu_tag).as_str())), None, 0);
             let main = frame.is_main() != 0;
             if main {
                 // The old page's colour goes with it.
@@ -469,6 +482,7 @@ wrap_life_span_handler! {
             if let Some(menu) = lock(&self.shared.menu).take() {
                 menu.cancel();
             }
+            lock(&self.shared.menu_frame).take();
             self.shared.push(Event::Closed { by_page: !self.shared.closing.load(Ordering::Acquire) });
             crate::runtime::browser_closed();
         }
@@ -485,13 +499,14 @@ wrap_context_menu_handler! {
         fn run_context_menu(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             params: Option<&mut ContextMenuParams>,
             _model: Option<&mut MenuModel>,
             callback: Option<&mut RunContextMenuCallback>,
         ) -> c_int {
             let (Some(params), Some(callback)) = (params, callback) else { return 0 };
-            let menu = crate::menu::ContextMenu::from_params(params);
+            let menu = crate::menu::ContextMenu::from_params(params, self.shared.take_menu_report());
+            *lock(&self.shared.menu_frame) = frame.map(|frame| frame.clone());
             if let Some(previous) = lock(&self.shared.menu).replace(callback.clone()) {
                 previous.cancel();
             }
@@ -664,6 +679,7 @@ wrap_client! {
         permission: PermissionHandler,
         dialogs: JsdialogHandler,
         menu: ContextMenuHandler,
+        downloads: DownloadHandler,
     }
 
     impl Client {
@@ -702,6 +718,10 @@ wrap_client! {
         fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
             Some(self.menu.clone())
         }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(self.downloads.clone())
+        }
     }
 }
 
@@ -715,6 +735,7 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         PagePermissionHandler::new(Arc::clone(shared)),
         AgentDialogs::new(Arc::clone(shared)),
         PageMenuHandler::new(Arc::clone(shared)),
+        crate::download::handler(shared),
     )
 }
 

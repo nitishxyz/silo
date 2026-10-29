@@ -15,6 +15,7 @@ use gpui::{
 use silo_client::transport::{EndpointAddr, PairTicket};
 use silo_proto::control::{InvitePurpose, Method, PairInvite};
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     conn::{Failure, classify},
@@ -55,11 +56,11 @@ pub struct AddHostSheet {
 
 impl AddHostSheet {
     pub fn new(name: Option<String>, replace: Option<usize>, window: &mut Window, cx: &mut Context<Workspace>) -> Self {
-        let name_field = cx.new(|cx| TextField::new("Optional", cx));
+        let name_field = cx.new(|cx| TextField::new("Optional", cx).on_glass());
         if let Some(name) = name {
             name_field.update(cx, |f, cx| f.set_text(name, cx));
         }
-        let ticket = cx.new(|cx| TextField::new("silo1… or a shared link", cx));
+        let ticket = cx.new(|cx| TextField::new("silo1… or a shared link", cx).on_glass());
         let subs = vec![
             cx.subscribe_in(&ticket, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(0, event, window, cx)),
             cx.subscribe_in(&name_field, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(1, event, window, cx)),
@@ -371,6 +372,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_add_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let sheet = self.add_host.as_ref()?;
         let muted = |text: &'static str| div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(text);
         let field = |label: &'static str, input: &Entity<TextField>| {
@@ -476,11 +478,7 @@ impl Workspace {
             .flex_col()
             .gap(px(14.0))
             .p(px(20.0))
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
+            .glass_sheet(14.0)
             .font_family(theme::ui_font())
             .text_size(px(13.0))
             .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).child(title));

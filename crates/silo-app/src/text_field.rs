@@ -33,6 +33,8 @@ pub struct TextField {
     blink_task: Option<Task<()>>,
     /// The colours of the surface behind the field; the theme's if unset.
     palette: Option<crate::adaptive::Chrome>,
+    /// The field sits on a floating surface's glass ([`crate::surface`]).
+    glass: bool,
     /// The modifiers held on the last ↩ (`FieldEvent::Submit`): ⌘P's ⌘↩ / ⌥⌘↩.
     pub submit_mods: gpui::Modifiers,
 }
@@ -81,8 +83,16 @@ impl TextField {
             caret: false,
             blink_task: None,
             palette: None,
+            glass: false,
             submit_mods: gpui::Modifiers::default(),
         }
+    }
+
+    /// The field sits on glass: its placeholder takes the glass's muted ink.
+    #[must_use]
+    pub fn on_glass(mut self) -> Self {
+        self.glass = true;
+        self
     }
 
     pub fn set_palette(&mut self, palette: Option<crate::adaptive::Chrome>, cx: &mut Context<Self>) {
@@ -236,7 +246,11 @@ impl Render for TextField {
         let empty = self.text.is_empty();
         let palette = self.palette.unwrap_or_else(|| {
             let solid = crate::adaptive::Chrome::on(theme::background());
-            theme::veils().map_or(solid, |v| crate::adaptive::Chrome { muted: v.muted, ..solid })
+            if self.glass {
+                crate::adaptive::Chrome { muted: crate::surface::current().muted, ..solid }
+            } else {
+                theme::veils().map_or(solid, |v| crate::adaptive::Chrome { muted: v.muted, ..solid })
+            }
         });
         let caret = self.caret_phase(focused && window.is_window_active() && !self.all, cx).then(|| {
             let caret = div().absolute().top(px(1.0)).bottom(px(1.0)).w(px(1.5)).bg(rgb(palette.accent));

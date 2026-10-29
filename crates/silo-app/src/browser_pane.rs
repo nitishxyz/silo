@@ -4,6 +4,8 @@
 
 use std::time::{Duration, Instant};
 
+mod downloads;
+mod look_up;
 mod menu;
 mod tabs;
 
@@ -20,6 +22,7 @@ pub const REPORT_DEBOUNCE: Duration = Duration::from_millis(250);
 const PINCH_IDLE: Duration = Duration::from_millis(300);
 
 use crate::blocks::Kind;
+use crate::surface::Glassy as _;
 
 /// What fills a block's icon slot (pane header, tab).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,14 +167,25 @@ enum Chord {
     Edit(silo_web::Edit),
     /// ⌘+ (1), ⌘− (-1), ⌘0 (0): page zoom.
     Zoom(i8),
+    SavePage,
+    ViewSource,
+    Inspect,
 }
 
-/// ⌘L / ⌘R / ⌘. / ⌘+ / ⌘− / ⌘0 and ⌘X / ⌘Z / ⇧⌘Z on the page, and ⌘← / ⌘→
-/// unless a page text field has focus (there they move the caret). Nothing
-/// for the address bar. ⌘C / ⌘V / ⌘A are app commands that reach the page too.
+/// ⌘L / ⌘R / ⌘. / ⌘+ / ⌘− / ⌘0 / ⌘S, ⌥⌘U / ⌥⌘I and ⌘X / ⌘Z / ⇧⌘Z on
+/// the page, and ⌘← / ⌘→ unless a page text field has focus (there they move
+/// the caret). Nothing for the address bar. ⌘C / ⌘V / ⌘A are app commands
+/// that reach the page too.
 fn page_chord(key: &str, m: gpui::Modifiers, page_focused: bool, editable: bool) -> Option<Chord> {
-    if !page_focused || !m.platform || m.control || m.alt {
+    if !page_focused || !m.platform || m.control {
         return None;
+    }
+    if m.alt {
+        return match key {
+            "u" if !m.shift => Some(Chord::ViewSource),
+            "i" if !m.shift => Some(Chord::Inspect),
+            _ => None,
+        };
     }
     if m.shift {
         return match key {
@@ -186,6 +200,7 @@ fn page_chord(key: &str, m: gpui::Modifiers, page_focused: bool, editable: bool)
         "=" | "+" => Some(Chord::Zoom(1)),
         "-" => Some(Chord::Zoom(-1)),
         "0" => Some(Chord::Zoom(0)),
+        "s" => Some(Chord::SavePage),
         "x" => Some(Chord::Edit(silo_web::Edit::Cut)),
         "z" => Some(Chord::Edit(silo_web::Edit::Undo)),
         "left" if !editable => Some(Chord::Back),
@@ -233,6 +248,8 @@ pub enum BrowserPaneEvent {
     Backdrop,
     /// The header's settings button: Settings › Browser.
     OpenSettings,
+    /// Open Link in Split: a browser at this URL beside the pane.
+    OpenSplit(String),
 }
 
 impl gpui::EventEmitter<BrowserPaneEvent> for BrowserPane {}
@@ -334,6 +351,10 @@ pub struct BrowserPane {
     adopting: bool,
     /// The page's context menu, while open.
     menu: Option<crate::context_menu::Menu<menu::Action>>,
+    /// Where it opened, in page points.
+    menu_point: (i32, i32),
+    /// The page's downloads, while running or just finished.
+    downloads: Vec<downloads::Download>,
     _subs: Vec<gpui::Subscription>,
     /// Focus subscriptions of the window showing the pane.
     window_subs: Vec<gpui::Subscription>,
@@ -419,6 +440,8 @@ impl BrowserPane {
             committed: false,
             adopting: false,
             menu: None,
+            menu_point: (0, 0),
+            downloads: Vec::new(),
             _subs: subs,
             window_subs: Vec::new(),
         }
@@ -793,7 +816,7 @@ impl BrowserPane {
         self.frames.wake(Instant::now());
         let mut changed = false;
         let mut visits = Vec::new();
-        let (mut tabs, mut menu, mut closed) = (Vec::new(), None, false);
+        let (mut tabs, mut menu, mut closed, mut asked) = (Vec::new(), None, false, Vec::new());
         for event in page.take_events() {
             let Some(state) = self.state.as_mut() else { break };
             match event {
@@ -853,6 +876,8 @@ impl BrowserPane {
                 }
                 silo_web::Event::NewTab(tab) => tabs.push(tab),
                 silo_web::Event::ContextMenu(m) => menu = Some(m),
+                silo_web::Event::DownloadAsked(request) => asked.push(request),
+                silo_web::Event::Download(progress) => self.download_progress(progress, cx),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
                 silo_web::Event::Closed { by_page } => {
@@ -869,6 +894,9 @@ impl BrowserPane {
         }
         for tab in tabs {
             self.open_tab(tab.url, tab.foreground, tab.popup, cx);
+        }
+        for request in asked {
+            self.download_asked(request, cx);
         }
         if let Some(m) = menu {
             self.show_menu(m, cx);
@@ -1124,6 +1152,7 @@ impl BrowserPane {
         if open.is_empty() {
             return page.menu_command(None);
         }
+        self.menu_point = (facts.x, facts.y);
         self.menu = Some(open);
         cx.notify();
     }
@@ -1137,11 +1166,11 @@ impl BrowserPane {
         }
     }
 
-    fn menu_key(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+    fn menu_key(&mut self, key: &str, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(open) = self.menu.as_mut() else { return };
         match open.key(key) {
-            crate::context_menu::Key::Pick(action) => self.menu_pick(Some(action), cx),
-            crate::context_menu::Key::Close => self.menu_pick(None, cx),
+            crate::context_menu::Key::Pick(action) => self.menu_pick(Some(action), window, cx),
+            crate::context_menu::Key::Close => self.menu_pick(None, window, cx),
             crate::context_menu::Key::Stay => {}
         }
         cx.notify();
@@ -1149,7 +1178,7 @@ impl BrowserPane {
 
     /// A row picked (`None`: dismissed): the engine runs its own commands;
     /// the rest are the app's, the engine's menu closing with nothing.
-    fn menu_pick(&mut self, action: Option<menu::Action>, cx: &mut gpui::Context<Self>) {
+    fn menu_pick(&mut self, action: Option<menu::Action>, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         if self.menu.take().is_none() {
             return;
         }
@@ -1164,6 +1193,7 @@ impl BrowserPane {
         };
         match action {
             menu::Action::OpenTab(url) => self.open_tab(url, false, None, cx),
+            menu::Action::OpenSplit(url) => cx.emit(BrowserPaneEvent::OpenSplit(url)),
             menu::Action::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
             menu::Action::CopyImage(url) => {
                 let png = page.image_png(&url);
@@ -1175,15 +1205,55 @@ impl BrowserPane {
                 })
                 .detach();
             }
+            menu::Action::SaveAs(url) => page.save_as(&url, None),
+            menu::Action::SavePage => self.save_page(),
             menu::Action::Search(text) => {
                 let engine = crate::hosts_state::HostsState::global(cx).read(cx).app_state().search_engine;
                 self.open_tab(engine.url(&text), true, None, cx);
             }
+            menu::Action::LookUp(text) => self.look_up(&text, window),
+            menu::Action::Media(action) => page.media(action),
             menu::Action::Back => self.back(),
             menu::Action::Forward => self.forward(),
             menu::Action::Reload => self.reload(),
+            menu::Action::Print => page.print(),
+            menu::Action::ViewSource => self.view_source(cx),
+            menu::Action::Inspect => page.inspect(Some(self.menu_point)),
             menu::Action::Engine(_) => {}
         }
+    }
+
+    /// Save Page As…: the page's HTML, named after its title.
+    fn save_page(&self) {
+        let (Some(page), Some(state)) = (&self.page, &self.state) else { return };
+        if menu::source_of(&state.url).is_none() {
+            return;
+        }
+        let title: String = state.title.chars().map(|c| if "/:\\".contains(c) { '-' } else { c }).collect();
+        let title = title.trim();
+        page.save_as(&state.url, (!title.is_empty()).then(|| format!("{title}.html")).as_deref());
+    }
+
+    /// View Page Source: `view-source:` of the page in a new tab, in front.
+    fn view_source(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(url) = self.state.as_ref().and_then(|s| menu::source_of(&s.url)) {
+            self.open_tab(url, true, None, cx);
+        }
+    }
+
+    /// Inspect (⌥⌘I): DevTools for the page.
+    fn inspect(&self) {
+        if let Some(page) = &self.page {
+            page.inspect(None);
+        }
+    }
+
+    /// Look Up: the system's definition popover for `text` at the menu's point.
+    fn look_up(&self, text: &str, window: &gpui::Window) {
+        let Some(bounds) = self.bounds else { return };
+        #[allow(clippy::cast_precision_loss)]
+        let at = bounds.origin + gpui::point(gpui::px(self.menu_point.0 as f32), gpui::px(self.menu_point.1 as f32));
+        look_up::look_up(text, at, window);
     }
 }
 
@@ -1487,25 +1557,19 @@ impl BrowserPane {
         const SIZE: f32 = 36.0;
         let full = arrow.progress >= 1.0;
         let inset = -SIZE + (SIZE + 16.0) * crate::motion::ease_out(arrow.progress);
-        let (icon, bg) = if full {
-            (crate::theme::accent_on(crate::theme::accent()), rgb(crate::theme::accent()))
-        } else {
-            (crate::theme::foreground(), crate::theme::overlay_fill())
-        };
+        let icon = if full { crate::theme::accent_on(crate::theme::accent()) } else { crate::theme::foreground() };
         let back = arrow.direction == crate::gesture::Direction::Back;
         let chip = div()
             .absolute()
             .top_1_2()
             .mt(px(-SIZE / 2.0))
             .size(px(SIZE))
+            .glass(SIZE / 2.0)
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(bg)
-            .border_1()
-            .border_color(rgb(crate::theme::border()))
-            .shadow_md()
+            .when(full, |el| el.bg(rgb(crate::theme::accent())))
             .opacity(arrow.shown.value(now, reduce))
             .child(crate::assets::icon(if back { "back" } else { "forward" }, 16.0, icon));
         Some(if back { chip.left(px(inset)) } else { chip.right(px(inset)) }.into_any_element())
@@ -1910,8 +1974,8 @@ impl BrowserPane {
     /// Over the page (painted after it), so opaque.
     fn security_popover(&self, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
         use crate::theme;
-        use crate::theme::Continuous as _;
         use gpui::{div, prelude::*, px, rgb};
+        let _glass = crate::surface::enter();
         let url = self.url();
         let info = self.security.as_ref().filter(|i| i.url == url);
         let host = crate::address::shown(url).host;
@@ -1927,11 +1991,7 @@ impl BrowserPane {
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .continuous(10.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(10.0)
             .occlude()
             .font_family(theme::ui_font())
             .text_size(px(12.5))
@@ -2030,10 +2090,10 @@ impl gpui::Render for BrowserPane {
             .flex_1()
             .min_h_0()
             .cursor(cursor_style(self.cursor))
-            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
                 this.input_frames(cx);
                 if this.menu.is_some() {
-                    this.menu_key(&e.keystroke.key, cx);
+                    this.menu_key(&e.keystroke.key, window, cx);
                     cx.stop_propagation()
                 } else if close_on_escape(&mut this.security_open, &e.keystroke.key) {
                     cx.notify();
@@ -2055,9 +2115,9 @@ impl gpui::Render for BrowserPane {
                     this.mouse_move(e.position, e.modifiers);
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, window, cx| {
                 if this.menu.is_some() {
-                    this.menu_pick(None, cx);
+                    this.menu_pick(None, window, cx);
                     cx.notify();
                 }
                 this.wheel(e, cx)
@@ -2128,8 +2188,9 @@ impl gpui::Render for BrowserPane {
                         .child("Can't open the page"),
                 )
             })
-            .children(arrow);
-        let menu = self.menu.as_ref().map(|m| m.render("browser-menu", cx, |this, action, _, cx| this.menu_pick(action, cx)));
+            .children(arrow)
+            .children(self.download_pill(cx));
+        let menu = self.menu.as_ref().map(|m| m.render("browser-menu", cx, |this, action, window, cx| this.menu_pick(action, window, cx)));
         div().flex().flex_col().size_full().min_w_0().min_h_0().child(page).children(menu)
     }
 }
@@ -2168,6 +2229,7 @@ impl crate::workspace::Workspace {
                 BrowserPaneEvent::Activated => this.pane_activated(block),
                 BrowserPaneEvent::Backdrop => {}
                 BrowserPaneEvent::OpenSettings => this.open_settings_section(crate::settings_panel::Section::Browser, window, cx),
+                BrowserPaneEvent::OpenSplit(url) => this.split_browser(block, Some(url.clone())),
             }
             cx.notify();
         });
@@ -2250,6 +2312,9 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
                 Chord::Stop => pane.stop(),
                 Chord::Edit(edit) => pane.edit(edit),
                 Chord::Zoom(step) => pane.zoom(step),
+                Chord::SavePage => pane.save_page(),
+                Chord::ViewSource => pane.view_source(cx),
+                Chord::Inspect => pane.inspect(),
             }
             cx.stop_propagation();
         });
@@ -2435,6 +2500,12 @@ mod tests {
         assert_eq!(page_chord("=", cmd, true, true), Some(Chord::Zoom(1)));
         assert_eq!(page_chord("=", shift, true, false), Some(Chord::Zoom(1)), "⌘+ is ⇧⌘= on US layouts");
         assert_eq!(page_chord("-", cmd, true, false), Some(Chord::Zoom(-1)));
+        assert_eq!(page_chord("s", cmd, true, true), Some(Chord::SavePage));
+        let alt = gpui::Modifiers { alt: true, ..cmd };
+        assert_eq!(page_chord("u", alt, true, false), Some(Chord::ViewSource));
+        assert_eq!(page_chord("i", alt, true, true), Some(Chord::Inspect));
+        assert_eq!(page_chord("i", alt, false, false), None, "the address bar");
+        assert_eq!(page_chord("left", alt, true, false), None, "⌥⌘← moves pane focus");
         assert_eq!(page_chord("0", cmd, true, false), Some(Chord::Zoom(0)));
         assert_eq!(page_chord("0", cmd, false, false), None, "the address bar");
     }

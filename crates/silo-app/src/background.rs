@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Subscription, Window, div, prelude::*, px, rgb};
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -163,6 +164,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_background_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         if !self.background_shown() {
             return None;
         }
@@ -184,11 +186,7 @@ impl Workspace {
                 .p(px(4.0))
                 .flex()
                 .flex_col()
-                .continuous(10.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_lg()
+                .glass(10.0)
                 .occlude()
                 .font_family(theme::ui_font())
                 .text_size(px(12.5))

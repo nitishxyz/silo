@@ -12,6 +12,7 @@ use silo_proto::{
     model::Axis,
 };
 
+use crate::surface::Glassy as _;
 use crate::{status::Status, theme::Continuous as _};
 
 /// Quiet time after the last resize step before ratios go to the server.
@@ -706,7 +707,7 @@ impl Workspace {
         self.settings = None;
         let snapshot = matches!(step, Step::Search | Step::Choice(..) | Step::Number(_)).then(|| self.settings_snapshot(None, cx));
         if self.palette.is_none() {
-            let field = cx.new(|cx| TextField::new(finder::PLACEHOLDER, cx));
+            let field = cx.new(|cx| TextField::new(finder::PLACEHOLDER, cx).on_glass());
             let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.palette_event(event, window, cx));
             let root = self.new_block_folder(window, cx);
             let elsewhere = self.window_sessions(window, cx).into_iter().filter_map(|(_, s)| s.and_then(|(h, id)| Some((h, id?)))).collect();
@@ -1475,6 +1476,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let palette = self.palette.as_ref()?;
         let entries = self.entries(cx);
         let header = match &palette.step {
@@ -1527,11 +1529,7 @@ impl Workspace {
             .w(px(580.0))
             .flex()
             .flex_col()
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
+            .glass_sheet(14.0)
             .overflow_hidden()
             .font_family(theme::ui_font())
             .text_size(px(13.5))

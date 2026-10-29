@@ -22,6 +22,7 @@ use super::{
     rows,
     view::eased,
 };
+use crate::surface::Glassy as _;
 use crate::{
     assets::icon,
     motion,
@@ -1261,6 +1262,7 @@ impl AgentPane {
 
     /// The dialog over the pane: fades in and scales from 0.98.
     pub(super) fn render_signin_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let dialog = self.signin.dialog.as_ref()?;
         let now = Instant::now();
         let t = match dialog.closing {
@@ -1447,11 +1449,7 @@ impl AgentPane {
             .pt(px(18.0))
             .px(px(20.0))
             .pb(px(16.0))
-            .continuous(16.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
+            .glass_sheet(16.0)
             .font_family(theme::ui_font())
             .text_size(px(13.0))
             .opacity(t)

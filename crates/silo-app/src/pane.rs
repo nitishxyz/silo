@@ -27,6 +27,7 @@ use silo_proto::{
 use silo_render::{CellMetrics, CursorPresentation, FrameOptions, FramePreparer, Overlay, Predicted, PreparedFrame, terminal_canvas};
 use silo_vt::{Frame, GridSize, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     clipboard::{self, Contents, Paste, Source},
@@ -1130,6 +1131,7 @@ impl Pane {
     }
 
     fn upload_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let _glass = crate::surface::enter();
         let upload = self.upload.as_ref()?;
         let label = clipboard::upload_label(upload.files, upload.progress.0.load(Ordering::Relaxed), upload.progress.1.load(Ordering::Relaxed));
         Some(
@@ -1144,11 +1146,7 @@ impl Pane {
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .continuous(nested(self.card_corner, 8.0))
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_xl()
+                .glass_sheet(nested(self.card_corner, 8.0))
                 .text_size(px(12.0))
                 .child(label)
                 .child(
@@ -1178,6 +1176,7 @@ impl Pane {
     }
 
     fn paste_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let _glass = crate::surface::enter();
         let lines = self.pending_paste.as_ref()?.lines().count();
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -1207,11 +1206,7 @@ impl Pane {
                 .flex_col()
                 .gap(px(8.0))
                 .p(px(12.0))
-                .continuous(nested(self.card_corner, 8.0))
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_xl()
+                .glass_sheet(nested(self.card_corner, 8.0))
                 .text_size(px(13.0))
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Paste {lines} line{}?", if lines == 1 { "" } else { "s" })))
                 .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child("It may run as commands."))
@@ -1708,10 +1703,7 @@ impl Render for Pane {
                             .top(px(f32::from(row) * metrics.height))
                             .px(px(6.0))
                             .py(px(2.0))
-                            .continuous(4.0)
-                            .bg(theme::overlay_fill())
-                            .border_1()
-                            .border_color(rgb(theme::border()))
+                            .glass(4.0)
                             .text_color(rgb(theme::foreground()))
                             .text_size(px(11.0))
                             .whitespace_nowrap()
@@ -1743,9 +1735,8 @@ impl Render for Pane {
                             .right(px(4.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(nested(card_corner, 4.0))
-                            .bg(theme::overlay_fill())
-                            .text_color(rgb(theme::muted()))
+                            .glass(nested(card_corner, 4.0))
+                            .text_color(rgb(crate::surface::current().muted))
                             .text_size(px(11.0))
                             .child(text),
                     )
@@ -1761,11 +1752,8 @@ impl Render for Pane {
                             .gap(px(8.0))
                             .px(px(8.0))
                             .py(px(3.0))
-                            .continuous(nested(card_corner, 4.0))
-                            .bg(theme::overlay_fill())
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_color(rgb(theme::foreground()).opacity(0.75))
+                            .glass(nested(card_corner, 4.0))
+                            .text_color(rgb(crate::surface::current().muted))
                             .text_size(px(11.0))
                             .child(text)
                             .child(
@@ -1790,9 +1778,8 @@ impl Render for Pane {
                             .gap(px(6.0))
                             .px(px(6.0))
                             .py(px(2.0))
-                            .continuous(4.0)
-                            .bg(theme::overlay_fill())
-                            .text_color(rgb(theme::muted()))
+                            .glass(4.0)
+                            .text_color(rgb(crate::surface::current().muted))
                             .text_size(px(11.0))
                             .child(format!("sized by {owner}"))
                             .when(can_size, |el| {

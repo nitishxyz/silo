@@ -18,6 +18,7 @@ use silo_proto::{
     model::{Layout, SessionInfo, SessionView, WindowInfo},
 };
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     status::Status,
@@ -200,7 +201,7 @@ impl Workspace {
             let Some(view) = &self.view else { return };
             Scope::Session { session_id: view.session.id.clone() }
         };
-        let label = cx.new(|cx| TextField::new("Who it's for (optional)", cx));
+        let label = cx.new(|cx| TextField::new("Who it's for (optional)", cx).on_glass());
         let subs = vec![cx.subscribe_in(&label, window, |this, _, event: &FieldEvent, window, cx| match event {
             FieldEvent::Submit => this.create_link(cx),
             FieldEvent::Cancel => this.close_share_sheet(window, cx),
@@ -357,6 +358,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_share(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let sheet = self.share.as_ref()?;
         let muted = |text: String| div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(text);
         let button = |id: gpui::ElementId, label: &'static str, primary: bool| {
@@ -505,11 +507,7 @@ impl Workspace {
             .flex_col()
             .gap(px(14.0))
             .p(px(20.0))
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
+            .glass_sheet(14.0)
             .font_family(theme::ui_font())
             .text_size(px(13.0))
             .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).child(sheet.title))

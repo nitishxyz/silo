@@ -16,6 +16,7 @@ use silo_proto::{
     model::{SessionSummary, SessionView},
 };
 
+use crate::surface::Glassy as _;
 use crate::{
     hosts_state::HostsState,
     theme::{self, Continuous as _},
@@ -298,6 +299,7 @@ impl Workspace {
 
     /// Offer cards, in the active window only.
     pub(crate) fn render_offers(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         if !window.is_window_active() {
             return None;
         }
@@ -330,11 +332,7 @@ impl Workspace {
                 .flex_col()
                 .gap(px(10.0))
                 .p(px(14.0))
-                .continuous(12.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_xl()
+                .glass_sheet(12.0)
                 .text_size(px(13.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} is running Silo", card.offer.name)))
                 .child(div().text_size(px(12.0)).text_color(rgb(theme::muted())).child(match &card.from {

@@ -13,6 +13,7 @@ use silo_proto::{
     model::{Axis, BlockInfo, Layout, WindowInfo},
 };
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -804,9 +805,7 @@ impl Render for PanePill {
             .gap(px(6.0))
             .h(px(24.0))
             .px(px(10.0))
-            .continuous(radius::CONTROL)
-            .bg(if theme::veils().is_some() { theme::overlay_fill() } else { rgb(theme::background()) })
-            .border_1()
+            .glass(radius::CONTROL)
             .border_color(rgb(theme::accent()))
             .font_family(theme::ui_font())
             .text_size(px(11.5))

@@ -165,13 +165,32 @@ checkpoint file (`generation: None`). Hot upgrade passes it through `handoff.rs`
     (`size`) are reported but a tab ignores them.
   - `window.close()` in a popup: `Closed {by_page: true}` → `block.close`; the opener sees `closed`.
   - No popup blocker: popups without a user gesture open too (at most 8 pending per page).
-- **Context menu:** `run_context_menu` holds CEF's callback and sends `Event::ContextMenu` (link, image,
-  selection, editable + edit flags, misspelled word + suggestions). The pane draws `context_menu.rs` (the Files
-  menu's look; ↑↓ ↩ esc) with rows from `browser_pane/menu.rs`; engine rows answer with
-  `Browser::menu_command` (CEF runs them on the clicked frame), app rows (new tab, copy link/image/address,
-  search, back/forward/reload) cancel it. Copy Image downloads the image as PNG (`Browser::image_png`).
-  No Save Image, View Source or Inspect (no downloads or devtools UI; `view-source:` is not a block URL).
-- Verified by `cargo run -p silo-web --example offscreen -- --popups` (also part of the full run).
+- **Context menu:** `run_context_menu` holds CEF's callback and sends `Event::ContextMenu` (link + its text, media
+  kind/src/state flags for image/video/audio/canvas, selection, editable + edit flags, misspelled word +
+  suggestions, page URL). The link text comes from a per-frame script (`menu.rs` `MENU_SCRIPT`, tagged like the
+  theme reporter) that also keeps the `contextmenu` target for media actions. The pane draws `context_menu.rs`
+  (↑↓ ↩ esc; toggle rows show a ✓ column) with rows from `browser_pane/menu.rs`, grouped like Chrome's:
+  spelling, link (New Tab, Split, Save Link As…, Copy Link Address/Text), image (New Tab, Save As…, Copy Image,
+  Copy Image Address), video/audio (Play/Pause, Mute, Loop ✓, Show Controls ✓, New Tab, Save As…, Copy
+  Address), editable (Undo … Select All by edit flags), selection (Copy, Search, Look Up), the page alone (Back,
+  Forward, Reload, Save Page As…, Print…, View Page Source), Inspect last. Engine rows answer with
+  `Browser::menu_command`; app rows cancel it.
+  - Media actions (`Browser::media`) run JS on the kept target in the menu's frame (no CDP round-trip).
+    No Picture in Picture: CEF reports `CAN_PICTURE_IN_PICTURE` but windowless pages have no PiP window.
+  - Downloads (`download.rs`): `can_download` allows; `on_before_download` → `Event::DownloadAsked`, the pane
+    answers `Browser::download_to` (Downloads, `name (2).ext` like Chrome; Save … As: gpui's `NSSavePanel`).
+    Progress `Event::Download` → a pill at the pane's bottom (Cancel; then Open, Show). Never auto-opened; no
+    Open for installers/scripts (`dangerous`). Chromium sets the quarantine xattr. `Browser::save_as` =
+    `StartDownload` + a marker so the request is Save As.
+  - Print: `BrowserHost::Print` runs the system print panel modally (works windowless).
+  - Inspect (⌥⌘I; Inspect from the menu inspects the clicked element): `ShowDevTools` with a windowed
+    WindowInfo (Chrome style; Alloy is refused for DevTools) in its own NSWindow; its ⌘C/V/X/A/Z and ⌘W are
+    mapped by `inspector.rs` (the app menu doesn't reach that window).
+  - View Page Source (⌥⌘U): `view-source:` of an http(s) page is a block URL (`browser_url`); the entry
+    commits the page's URL, so `on_address_change` reports the entry's `view-source:` display URL.
+  - Look Up: `showDefinitionForAttributedString:atPoint:` on the window's view.
+  - Save Page As… (⌘S): downloads the page's URL (HTML only, re-fetched; no "complete" save).
+- Verified by `cargo run -p silo-web --example offscreen -- --popups` and `-- --menus` (both in the full run).
 - Ported from desktop-platform `web-runtime/session/*` and `webview/{pump,keyboard,input,frame}.rs`.
   DMA-BUF is replaced by IOSurface, and agentkit is dropped.
 

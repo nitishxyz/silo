@@ -20,6 +20,7 @@ use std::time::Instant;
 use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 use silo_proto::control::Method;
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -136,12 +137,9 @@ impl Render for TabDrag {
             .h(px(TAB_HEIGHT))
             .max_w(px(TAB_MAX))
             .px(px(TAB_PAD))
+            .glass(TAB_HEIGHT / 2.0)
             .capsule()
-            .map(|el| match theme::veils() {
-                // A floating pill of the material: veil and hairline.
-                Some(_) => el.bg(theme::overlay_fill()).border_1().border_color(rgb(theme::border())).text_color(rgb(theme::foreground())),
-                None => el.bg(rgb(theme::tab_selected_on(self.chrome.surface))).shadow_md().text_color(rgb(self.chrome.ink)),
-            })
+            .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .text_size(px(12.0))
             .child(icon(self.icon, 12.0, self.chrome.accent))

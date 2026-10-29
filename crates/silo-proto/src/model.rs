@@ -805,10 +805,11 @@ impl BrowserState {
 }
 
 /// Normalize typed input to a URL a browser block may load. Schemes are
-/// limited to `http`, `https`, `ws`, `wss`, `data:` and `about:blank`; any
-/// other (`file:`, `chrome:`, `javascript:`…) gives `None`, as does empty
-/// input. A bare host gets `http://` when server-private (localhost,
-/// loopback, private or link-local IPs) and `https://` otherwise.
+/// limited to `http`, `https`, `ws`, `wss`, `data:`, `about:blank` and
+/// `view-source:` of an `http(s)` URL; any other (`file:`, `chrome:`,
+/// `javascript:`…) gives `None`, as does empty input. A bare host gets
+/// `http://` when server-private (localhost, loopback, private or
+/// link-local IPs) and `https://` otherwise.
 #[must_use]
 pub fn browser_url(input: &str) -> Option<String> {
     let input = input.trim();
@@ -824,6 +825,10 @@ pub fn browser_url(input: &str) -> Option<String> {
                 "http" | "https" | "ws" | "wss" => rest.starts_with("//"),
                 "data" => true,
                 "about" => rest == "blank",
+                "view-source" => browser_url(rest).is_some_and(|page| {
+                    let scheme = page.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+                    page == rest && matches!(scheme.as_deref(), Some("http" | "https"))
+                }),
                 _ => false,
             };
             return allowed.then(|| input.to_owned());
@@ -1034,6 +1039,8 @@ mod tests {
         assert_eq!(browser_url("  "), None);
         assert_eq!(browser_url("WSS://h/s").as_deref(), Some("WSS://h/s"));
         assert_eq!(browser_url("data:text/html,hi").as_deref(), Some("data:text/html,hi"));
+        assert_eq!(browser_url("view-source:https://x/a").as_deref(), Some("view-source:https://x/a"));
+        assert_eq!(browser_url("view-source:http://localhost:3000").as_deref(), Some("view-source:http://localhost:3000"));
         assert_eq!(browser_url("example.com:8080/x").as_deref(), Some("https://example.com:8080/x"));
         for bad in [
             "file:///etc/passwd",
@@ -1043,7 +1050,11 @@ mod tests {
             "javascript:alert(1)",
             "about:config",
             "http:example.com",
-            "view-source:https://x",
+            "view-source:example.com",
+            "view-source:file:///etc/passwd",
+            "view-source:view-source:https://x",
+            "view-source:data:text/html,hi",
+            "view-source:javascript:alert(1)",
         ] {
             assert_eq!(browser_url(bad), None, "{bad}");
         }

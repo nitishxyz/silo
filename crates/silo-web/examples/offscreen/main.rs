@@ -1,9 +1,10 @@
 //! Smoke test: init CEF windowless, load solid-colour pages, wait for accelerated paints and check
 //! the IOSurface centre pixel after input, navigation and tunnel-PAC loads. Re-execs itself inside a dev
-//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen [-- --popups | --pinch | --perf]`
+//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen [-- --popups | --menus | --pinch | --perf]`
 
 mod arrows;
 mod bundle;
+mod menus;
 mod nav;
 mod perf;
 mod pinch;
@@ -172,6 +173,12 @@ fn run() -> Result<()> {
         runtime.shutdown(Duration::from_secs(5))?;
         return result;
     }
+    // `--menus`: only the context menu's engine features (media, downloads, print, DevTools, view-source).
+    if std::env::args().any(|arg| arg == "--menus") {
+        let result = menus::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
 
     if std::env::args().any(|arg| arg == "--perf") {
         let result = perf::run(&runtime);
@@ -216,6 +223,7 @@ fn run() -> Result<()> {
         arrows::run(&runtime, &browser)?;
         nav::run(&runtime, &browser)?;
         popups::run(&runtime)?;
+        menus::run(&runtime)?;
         pinch::run(&runtime)?;
         pump_for(&runtime, Duration::from_secs(2));
         probe.check("after navigation")

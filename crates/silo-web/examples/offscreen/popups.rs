@@ -37,7 +37,7 @@ const GREEN: [u8; 4] = [0, 255, 0, 255];
 const SIZE: (u32, u32) = (400, 300);
 
 /// Pumps until an event of `browser` matches `pick`.
-fn next<T>(runtime: &Runtime, browser: &Browser, what: &str, pick: impl Fn(Event) -> Option<T>) -> Result<T> {
+pub fn next<T>(runtime: &Runtime, browser: &Browser, what: &str, pick: impl Fn(Event) -> Option<T>) -> Result<T> {
     let started = Instant::now();
     loop {
         pump_once(runtime);
@@ -51,13 +51,13 @@ fn next<T>(runtime: &Runtime, browser: &Browser, what: &str, pick: impl Fn(Event
     }
 }
 
-fn click(browser: &Browser, (x, y): (f32, f32), button: MouseButton, mods: Modifiers) {
+pub fn click(browser: &Browser, (x, y): (f32, f32), button: MouseButton, mods: Modifiers) {
     browser.mouse_move(x, y, mods, &[]);
     browser.mouse_button(x, y, button, true, 1, mods);
     browser.mouse_button(x, y, button, false, 1, mods);
 }
 
-fn menu_at(runtime: &Runtime, browser: &Browser, at: (f32, f32), what: &str) -> Result<ContextMenu> {
+pub fn menu_at(runtime: &Runtime, browser: &Browser, at: (f32, f32), what: &str) -> Result<ContextMenu> {
     click(browser, at, MouseButton::Right, Modifiers::default());
     let menu = next(runtime, browser, what, |e| if let Event::ContextMenu(m) = e { Some(m) } else { None })?;
     println!("offscreen: {what}: {menu:?}");
@@ -93,7 +93,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         ensure!(link.link.as_deref() == Some(&*format!("{base}/next")) && !link.editable, "link menu");
         browser.menu_command(None);
         let image = menu_at(runtime, &browser, (150.0, 50.0), "menu on an image")?;
-        ensure!(image.image.as_deref() == Some(&*format!("{base}/favicon.png")), "image menu");
+        ensure!(image.media.as_ref().map(|m| m.src.as_str()) == Some(&*format!("{base}/favicon.png")), "image menu");
         let png = image_png(runtime, &browser, &format!("{base}/favicon.png"))?;
         ensure!(png.starts_with(b"\x89PNG"), "copy image: PNG bytes");
         browser.menu_command(None);

@@ -33,6 +33,9 @@ pub enum Event {
     ContextMenu(crate::menu::ContextMenu),
     /// The connection of the main frame's current entry.
     Security(Security),
+    /// A download needs its path: answer with `Browser::download_to`.
+    DownloadAsked(crate::DownloadRequest),
+    Download(crate::DownloadProgress),
     CursorChanged(Cursor),
     /// IME candidate anchor in view points: `(x, y, w, h)` of the selection's first character.
     ImeBounds {
@@ -111,6 +114,16 @@ pub(crate) struct Shared {
     /// Console prefix of the main frame's theme reports: random, so no
     /// other frame or page script can forge one.
     pub(crate) theme_tag: String,
+    /// The same for the menu script's reports and its media target (`menu.rs`).
+    pub(crate) menu_tag: String,
+    /// The link text the menu script reported for the coming menu, and when.
+    pub(crate) menu_report: Mutex<Option<(Instant, String)>>,
+    /// The frame the last context menu opened in (media actions run there).
+    pub(crate) menu_frame: Mutex<Option<cef::Frame>>,
+    /// Downloads waiting for a path or running, by id.
+    pub(crate) downloads: Mutex<std::collections::HashMap<u32, crate::download::Pending>>,
+    /// URLs `Browser::save_as` started, with the name to suggest.
+    pub(crate) save_as: Mutex<Vec<(String, Option<String>)>>,
     /// The main frame's committed document is blank ([`is_blank`]); true
     /// until the first commit.
     pub(crate) blank: AtomicBool,
@@ -148,9 +161,16 @@ pub fn is_blank(url: &str) -> bool {
 
 /// A fresh random theme tag.
 pub(crate) fn theme_tag() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    format!("\u{1}silo-theme-{:016x}:", std::collections::hash_map::RandomState::new().build_hasher().finish())
+    tag("theme")
 }
+
+fn tag(what: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    format!("\u{1}silo-{what}-{:016x}:", std::collections::hash_map::RandomState::new().build_hasher().finish())
+}
+
+/// How long a menu script report waits for its menu.
+const MENU_REPORT: Duration = Duration::from_secs(1);
 
 /// How long a user input counts as a gesture (Chromium's user activation).
 const GESTURE: Duration = Duration::from_secs(5);
@@ -175,6 +195,11 @@ impl Shared {
             last_input: Mutex::new(None),
             dropped: Mutex::new(None),
             theme_tag: theme_tag(),
+            menu_tag: tag("menu"),
+            menu_report: Mutex::new(None),
+            menu_frame: Mutex::new(None),
+            downloads: Mutex::default(),
+            save_as: Mutex::new(Vec::new()),
             blank: AtomicBool::new(true),
             shown: AtomicBool::new(false),
             queued: Mutex::new(None),
@@ -225,6 +250,11 @@ impl Shared {
     /// Whether the user interacted with the page just now; each input counts once.
     pub(crate) fn take_gesture(&self) -> bool {
         lock(&self.last_input).take().is_some_and(|at| at.elapsed() < GESTURE)
+    }
+
+    /// The link text reported for the menu opening now (empty: none).
+    pub(crate) fn take_menu_report(&self) -> String {
+        lock(&self.menu_report).take().filter(|(at, _)| at.elapsed() < MENU_REPORT).map(|(_, text)| text).unwrap_or_default()
     }
 
     /// Whether a navigation to `url` is the fallback of a file drop just now.

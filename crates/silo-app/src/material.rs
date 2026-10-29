@@ -90,8 +90,8 @@ pub fn seen(color: u32, alpha: f32, theme_bg: u32) -> [u32; 3] {
 const BACKDROP: u32 = 0x0080_8080;
 
 /// The material's look as one opaque colour: a veil of `color` at `alpha`
-/// over a typical blurred desktop. Surfaces over the app's own content use
-/// it, since the window blur cannot blur what the app itself drew.
+/// over a typical blurred desktop. Floating surfaces tint their glass with
+/// it ([`crate::surface`]); panes over panes are it, opaque.
 #[must_use]
 pub fn look(color: u32, alpha: f32) -> u32 {
     over(color, alpha, BACKDROP)

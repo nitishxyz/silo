@@ -844,7 +844,7 @@ impl FilesPane {
             let focus = finder.field.read(cx).focus.clone();
             return focus.focus(window, cx);
         }
-        let field = cx.new(|cx| TextField::new("Find a file by name or path", cx));
+        let field = cx.new(|cx| TextField::new("Find a file by name or path", cx).on_glass());
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.finder_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
         self.finder = Some(Finder { field, found: Vec::new(), selected: 0, truncated: false, generation: 0, _sub: sub });

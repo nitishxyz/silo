@@ -5,6 +5,7 @@ use gpui::{AnyElement, AnyWindowHandle, App, Context, Entity, FontWeight, IntoEl
 use silo_proto::control::{Created, Method, SpawnSpec};
 use silo_proto::model::BlockKind;
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -98,7 +99,7 @@ impl Workspace {
         }
         self.close_palette(window, cx);
         self.close_switcher(window, cx);
-        let field = cx.new(|cx| TextField::new("Open or create a session…", cx));
+        let field = cx.new(|cx| TextField::new("Open or create a session…", cx).on_glass());
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.picker_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
         let others = self.other_windows(window, cx);
@@ -202,6 +203,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let picker = self.picker.as_ref()?;
         let others = &picker.others;
         let mut list = div().flex().flex_col().py(px(4.0));
@@ -292,11 +294,7 @@ impl Workspace {
             .w(px(340.0))
             .max_h(px(max_h))
             .overflow_y_scroll()
-            .continuous(10.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(10.0)
             .font_family(theme::ui_font())
             .text_size(px(12.5))
             .child(search.child(icon("filter", 13.0, theme::muted())).child(picker.field.clone()))

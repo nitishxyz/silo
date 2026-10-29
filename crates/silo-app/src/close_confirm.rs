@@ -341,6 +341,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let dialog = self.close_confirm.as_ref()?;
         let busy = &dialog.busy;
         let button = |id: &'static str, label: &'static str, primary: bool| crate::confirm_card::button(id, label, primary, true).cursor_pointer();

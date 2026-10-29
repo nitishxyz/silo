@@ -10,6 +10,7 @@ use std::{
 
 use gpui::{AnimationExt as _, AnyElement, App, ElementId, FontWeight, IntoElement, div, ease_out_quint, prelude::*, px, rgb};
 
+use crate::surface::Glassy as _;
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -125,27 +126,7 @@ const APPEAR: Duration = Duration::from_millis(180);
 /// The pill along the bottom of the panes, `bottom` above the window's
 /// bottom edge. An overlay: it takes no layout space.
 pub fn pill(status: &Status, bottom: f32, cx: &App) -> AnyElement {
-    let bg = theme::overlay();
-    // The badge sits concentric with the pill's rounded start.
-    let inset = (PILL_HEIGHT - 2.0 - PILL_BADGE) / 2.0;
-    let pill = div()
-        .h(px(PILL_HEIGHT))
-        .max_w(px(560.0))
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .pl(px(inset))
-        .pr(px(12.0))
-        .rounded_full()
-        .bg(rgb(bg))
-        .border_1()
-        .border_color(rgb(theme::border()))
-        .shadow_lg()
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme::ink_on(bg)))
-        .child(badge(status, PILL_BADGE, bg, cx))
-        .child(div().min_w_0().truncate().child(status.text.clone()));
+    let pill = card(status, cx);
     div()
         .absolute()
         .bottom(px(bottom))
@@ -158,6 +139,28 @@ pub fn pill(status: &Status, bottom: f32, cx: &App) -> AnyElement {
             el.bottom(px(bottom - RISE * (1.0 - d))).opacity(d)
         })
         .into_any_element()
+}
+
+/// The pill itself, for an owner that places it (and may add buttons).
+pub fn card(status: &Status, cx: &App) -> gpui::Div {
+    let bg = theme::overlay();
+    // The badge sits concentric with the pill's rounded start.
+    let inset = (PILL_HEIGHT - 2.0 - PILL_BADGE) / 2.0;
+    div()
+        .h(px(PILL_HEIGHT))
+        .max_w(px(560.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .pl(px(inset))
+        .pr(px(12.0))
+        .glass(PILL_HEIGHT / 2.0)
+        .rounded_full()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(theme::ink_on(bg)))
+        .child(badge(status, PILL_BADGE, bg, cx))
+        .child(div().min_w_0().truncate().child(status.text.clone()))
 }
 
 /// The status in the middle of an empty window, on `bg`.

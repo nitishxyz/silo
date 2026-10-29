@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px, rgb};
 
-use crate::theme::Continuous as _;
+use crate::surface::Glassy as _;
 use crate::{radius, theme};
 
 /// Where a live tooltip reads its text.
@@ -52,10 +52,7 @@ impl Render for Tooltip {
                 .mt(px(6.0))
                 .px(px(7.0))
                 .py(px(3.0))
-                .continuous(radius::TOOLTIP)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
+                .glass(radius::TOOLTIP)
                 .font_family(theme::ui_font())
                 .text_size(px(11.5))
                 .text_color(rgb(theme::foreground()))

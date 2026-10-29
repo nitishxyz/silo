@@ -16,6 +16,7 @@ use crate::agent::{
     client,
     editor::{Editor, EditorColors, EditorEvent},
 };
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -429,9 +430,7 @@ impl Render for ToolPill {
             .gap(px(5.0))
             .h(px(22.0))
             .px(px(8.0))
-            .continuous(6.0)
-            .bg(if theme::veils().is_some() { theme::overlay_fill() } else { rgb(theme::background()) })
-            .border_1()
+            .glass(6.0)
             .border_color(rgb(theme::accent()))
             .font_family(mono())
             .text_size(px(11.5))
@@ -1220,6 +1219,7 @@ impl AgentsSettings {
     }
 
     fn menu_list(&self, menu: Menu, cx: &mut Context<Self>) -> AnyElement {
+        let _glass = crate::surface::enter();
         let mut list = div()
             .id(("agents-menu-list", menu as usize))
             .w(px(240.0))
@@ -1229,11 +1229,7 @@ impl AgentsSettings {
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .continuous(9.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(9.0)
             .font_family(theme::ui_font())
             .text_color(rgb(theme::foreground()))
             .occlude()
@@ -1579,6 +1575,7 @@ impl AgentsSettings {
             }));
         let mut root = div().relative().max_w_full().child(element);
         if menu_open {
+            let _glass = crate::surface::enter();
             let mut list = div()
                 .id("agents-chip-menu")
                 .w(px(170.0))
@@ -1586,11 +1583,7 @@ impl AgentsSettings {
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .continuous(9.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_lg()
+                .glass(9.0)
                 .font_family(theme::ui_font())
                 .text_size(px(12.5))
                 .text_color(rgb(theme::foreground()))

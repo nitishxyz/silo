@@ -5,22 +5,41 @@
 
 use gpui::{AnyElement, Context, IntoElement, MouseButton, Pixels, Point, SharedString, Window, anchored, deferred, div, prelude::*, px, rgb};
 
-use crate::theme::{self, Continuous as _};
+use crate::{
+    surface::Glassy as _,
+    theme::{self, Continuous as _},
+};
 
 pub enum Item<A> {
-    Action { label: SharedString, keys: &'static str, enabled: bool, action: A },
+    /// `check`: a toggle row (`Some(on)`), its mark in a leading column.
+    Action {
+        label: SharedString,
+        keys: &'static str,
+        enabled: bool,
+        check: Option<bool>,
+        action: A,
+    },
     Separator,
 }
 
 impl<A> Item<A> {
     pub fn action(label: impl Into<SharedString>, keys: &'static str, action: A) -> Self {
-        Self::Action { label: label.into(), keys, enabled: true, action }
+        Self::Action { label: label.into(), keys, enabled: true, check: None, action }
     }
 
     #[must_use]
     pub fn enabled(mut self, on: bool) -> Self {
         if let Self::Action { enabled, .. } = &mut self {
             *enabled = on;
+        }
+        self
+    }
+
+    /// A toggle row, checked when `on`.
+    #[must_use]
+    pub fn checked(mut self, on: bool) -> Self {
+        if let Self::Action { check, .. } = &mut self {
+            *check = Some(on);
         }
         self
     }
@@ -101,10 +120,13 @@ impl<A: Clone + 'static> Menu<A> {
         cx: &mut Context<V>,
         pick: impl Fn(&mut V, Option<A>, &mut Window, &mut Context<V>) + 'static,
     ) -> AnyElement {
+        let _glass = crate::surface::enter();
         let pick = std::rc::Rc::new(pick);
+        let checks = self.items.iter().any(|item| matches!(item, Item::Action { check: Some(_), .. }));
         let rows = self.items.iter().enumerate().map(|(index, item)| match item {
-            Item::Separator => div().h(px(1.0)).my(px(4.0)).mx(px(6.0)).bg(rgb(theme::border())).into_any_element(),
-            Item::Action { label, keys, enabled, action } => {
+            Item::Separator => div().h(px(1.0)).my(px(4.0)).mx(px(6.0)).bg(crate::surface::hairline()).into_any_element(),
+            Item::Action { label, keys, enabled, check, action } => {
+                let mark = checks.then(|| div().w(px(14.0)).flex_none().child(if *check == Some(true) { "✓" } else { "" }));
                 let row = div()
                     .id((id, index))
                     .flex()
@@ -115,15 +137,15 @@ impl<A: Clone + 'static> Menu<A> {
                     .px(px(10.0))
                     .continuous(5.0)
                     .whitespace_nowrap()
-                    .child(label.clone())
+                    .child(div().flex().items_center().children(mark).child(label.clone()))
                     .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child(*keys))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
                 if *enabled {
                     let (pick, action) = (pick.clone(), action.clone());
                     row.cursor_pointer()
-                        .when(self.selected == Some(index), |el| el.bg(rgb(theme::row_active())))
-                        .hover(|s| s.bg(rgb(theme::row_active())))
+                        .when(self.selected == Some(index), |el| el.bg(theme::row_fill()))
+                        .hover(|s| s.bg(theme::row_fill()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             pick(this, Some(action.clone()), window, cx);
                             cx.notify();
@@ -142,11 +164,7 @@ impl<A: Clone + 'static> Menu<A> {
             .p(px(4.0))
             .flex()
             .flex_col()
-            .continuous(8.0)
-            .bg(rgb(theme::popover()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(8.0)
             .font_family(theme::ui_font())
             .text_size(px(12.5))
             .text_color(rgb(theme::foreground()))

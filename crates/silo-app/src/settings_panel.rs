@@ -10,6 +10,7 @@ use gpui::{
 };
 
 pub use crate::hosts::Density;
+use crate::surface::Glassy as _;
 pub use crate::terminal_prefs::ColorSlot;
 use crate::theme::Continuous as _;
 pub use silo_proto::model::CursorShape;
@@ -659,7 +660,7 @@ const TOOLBAR_H: f32 = 48.0;
 
 impl SettingsPanel {
     pub fn new(snapshot: SettingsSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextField::new("Search", cx));
+        let search = cx.new(|cx| TextField::new("Search", cx).on_glass());
         let mut subscriptions = vec![cx.subscribe(&search, |this, _, event, cx| {
             match event {
                 FieldEvent::Changed(query) => {
@@ -671,14 +672,14 @@ impl SettingsPanel {
             }
             cx.notify();
         })];
-        let font_search = cx.new(|cx| TextField::new("Search fonts", cx));
+        let font_search = cx.new(|cx| TextField::new("Search fonts", cx).on_glass());
         subscriptions.push(cx.subscribe_in(&font_search, window, |this, _, event, window, cx| {
             this.font_search_event(event, window, cx);
         }));
         let color_fields: Vec<_> = ColorSlot::ALL
             .into_iter()
             .map(|slot| {
-                let field = cx.new(|cx| TextField::new("#rrggbb", cx));
+                let field = cx.new(|cx| TextField::new("#rrggbb", cx).on_glass());
                 subscriptions.push(cx.subscribe(&field, move |this, field, event, cx| match event {
                     FieldEvent::Submit => {
                         let text = field.read(cx).text.clone();
@@ -699,7 +700,7 @@ impl SettingsPanel {
                 (slot, field)
             })
             .collect();
-        let scrollback_field = cx.new(|cx| TextField::new("10000", cx));
+        let scrollback_field = cx.new(|cx| TextField::new("10000", cx).on_glass());
         subscriptions.push(cx.subscribe(&scrollback_field, |this, field, event, cx| match event {
             FieldEvent::Submit => match SettingId::Scrollback.parse(&field.read(cx).text) {
                 Ok(event) => {
@@ -1248,6 +1249,7 @@ impl SettingsPanel {
 
         let mut root = div().relative().child(trigger);
         if open {
+            let _glass = crate::surface::enter();
             let mut list = div()
                 .id((id, 1_usize))
                 .w(px(232.0))
@@ -1255,11 +1257,7 @@ impl SettingsPanel {
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .continuous(9.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_lg()
+                .glass(9.0)
                 .font_family(theme::ui_font())
                 .text_color(rgb(theme::foreground()))
                 .occlude()
@@ -1438,6 +1436,7 @@ impl SettingsPanel {
             }
         });
         if open {
+            let _glass = crate::surface::enter();
             let entries = self.font_entries(target, &self.font_query);
             #[allow(clippy::cast_precision_loss)]
             let menu_height = px(36.0 + (entries.len().max(1) as f32 * 26.0 + 8.0).min(264.0));
@@ -1507,11 +1506,7 @@ impl SettingsPanel {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .continuous(9.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_lg()
+                .glass(9.0)
                 .font_family(theme::ui_font())
                 .text_color(rgb(theme::foreground()))
                 .occlude()
@@ -2322,6 +2317,7 @@ fn keycap(shortcut: &str) -> AnyElement {
 
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _glass = crate::surface::enter();
         self.scroll_to_reveal(window, cx);
         // The host clamps the card to the viewport; mirror that here.
         let panel_width = (f32::from(window.viewport_size().width) - 64.0).clamp(420.0, 880.0);
@@ -2377,8 +2373,8 @@ impl Render for SettingsPanel {
             .font_family(theme::ui_font())
             .text_size(px(13.0))
             .text_color(rgb(theme::foreground()))
-            // Frosted, the card's veil is the panel's.
-            .when(theme::veils().is_none(), |el| el.bg(rgb(theme::background())))
+            // On glass (or a veil), the card's fill is the panel's.
+            .when(theme::veils().is_none() && !crate::surface::current().frosted(), |el| el.bg(rgb(theme::background())))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if this.theme_menu_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();

@@ -330,6 +330,63 @@ impl Browser {
         }
         rx
     }
+
+    /// `action` on the video or audio element the last context menu opened on.
+    pub fn media(&self, action: crate::MediaAction) {
+        let Some(frame) = lock(&self.shared.menu_frame).clone() else { return };
+        self.shared.input();
+        let script = crate::menu::media_script(&self.shared.menu_tag, action);
+        frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+    }
+
+    /// Download `url` in this page's profile, the user picking where
+    /// (`Event::DownloadAsked` has `save_as`); `name` overrides the suggested name.
+    pub fn save_as(&self, url: &str, name: Option<&str>) {
+        let Some(host) = self.host() else { return };
+        let mut asked = lock(&self.shared.save_as);
+        // A request CEF never answered (a bad URL) leaves its marker: keep the last few.
+        let excess = asked.len().saturating_sub(7);
+        asked.drain(..excess);
+        asked.push((url.to_owned(), name.map(str::to_owned)));
+        drop(asked);
+        host.start_download(Some(&CefString::from(url)));
+    }
+
+    /// Answer `Event::DownloadAsked`: write download `id` to `path`, or
+    /// cancel it (`None`).
+    pub fn download_to(&self, id: u32, path: Option<&std::path::Path>) {
+        crate::download::answer(&self.shared, id, path);
+    }
+
+    pub fn cancel_download(&self, id: u32) {
+        crate::download::cancel(&self.shared, id);
+    }
+
+    /// The system's print panel for the page.
+    pub fn print(&self) {
+        if let Some(host) = self.host() {
+            host.print();
+        }
+    }
+
+    /// DevTools for the page in a window of its own, inspecting the
+    /// element at `at` (view points) when given.
+    pub fn inspect(&self, at: Option<(i32, i32)>) {
+        if let Some(host) = self.host() {
+            crate::inspector::show(&host, at);
+        }
+    }
+
+    /// Whether the page's DevTools window is open.
+    pub fn inspecting(&self) -> bool {
+        self.host().is_some_and(|host| host.has_dev_tools() != 0)
+    }
+
+    pub fn close_inspector(&self) {
+        if let Some(host) = self.host() {
+            host.close_dev_tools();
+        }
+    }
 }
 
 fn copy_operation() -> DragOperationsMask {

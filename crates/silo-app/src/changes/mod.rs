@@ -645,7 +645,7 @@ impl ChangesPane {
         match scope_of(&pick) {
             Some(scope) => self.set_scope(scope, cx),
             None => {
-                let field = cx.new(|cx| TextField::new("main, main..otto", cx));
+                let field = cx.new(|cx| TextField::new("main, main..otto", cx).on_glass());
                 let sub = cx.subscribe_in(&field, window, |this, field, event: &FieldEvent, window, cx| match event {
                     FieldEvent::Submit => {
                         if let Some((base, head)) = model::parse_range(&field.read(cx).text) {

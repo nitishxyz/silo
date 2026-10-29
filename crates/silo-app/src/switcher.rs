@@ -3,6 +3,7 @@
 //! sessions: a session's background blocks are behind the titlebar's
 //! background button (`background.rs`) and in ⌘P's Blocks.
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -57,7 +58,7 @@ impl Workspace {
         self.close_palette(window, cx);
         // Renaming starts empty, showing the current name; empty keeps it.
         let placeholder = rename.as_ref().map_or_else(|| "Filter or create…".to_owned(), |(_, name)| name.clone());
-        let field = cx.new(|cx| TextField::new(placeholder, cx));
+        let field = cx.new(|cx| TextField::new(placeholder, cx).on_glass());
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.field_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
         self.switcher = Some(Switcher { field, filter: String::new(), selected: 0, renaming: rename.map(|r| r.0), _sub: sub });
@@ -179,6 +180,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_switcher(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let switcher = self.switcher.as_ref()?;
         let current = self.view.as_ref().map(|v| v.session.id.clone());
         let numbered = self.session_rows();
@@ -233,11 +235,7 @@ impl Workspace {
             .w(px(280.0))
             .max_h(px((f32::from(window.viewport_size().height) - TITLEBAR_HEIGHT - 16.0).max(160.0)))
             .overflow_y_scroll()
-            .continuous(10.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(10.0)
             .font_family(theme::ui_font())
             .text_size(px(12.5))
             .child(

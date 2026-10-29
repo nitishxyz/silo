@@ -4,8 +4,8 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, App, BoxShadow, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, MouseButton, SharedString,
-    StrikethroughStyle, StyledText, UnderlineStyle, Window, div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb,
+    AnyElement, App, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, MouseButton, SharedString,
+    StrikethroughStyle, StyledText, UnderlineStyle, Window, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb,
 };
 use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, SessionStatus};
 
@@ -17,6 +17,7 @@ use super::{
     rows::{self, menu},
     transcript::{self, Detail, Group, Line, Row, Status, TodoStatus},
 };
+use crate::surface::Glassy as _;
 use crate::{
     assets::icon,
     motion,
@@ -857,6 +858,7 @@ impl AgentPane {
 
     /// `↓ New activity` while scrolled up and something arrived below; it rises in and sinks away.
     fn render_new_activity(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let reduce = cx.reduce_motion();
         let tail = self.tail();
         let show = tail.pill && !self.rows.is_empty();
@@ -889,11 +891,8 @@ impl AgentPane {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
+                        .glass(13.0)
                         .capsule()
-                        .bg(theme::overlay_fill())
-                        .border_1()
-                        .border_color(rgb(ink(0.12)))
-                        .shadow_sm()
                         .text_size(px(12.0))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::hover_fill()))
@@ -2544,6 +2543,7 @@ impl AgentPane {
     /// with height + opacity and a 6 pt slide from its anchor; a press outside
     /// closes it (`press_closes`).
     fn popover(&mut self, which: Overlay, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let now = Instant::now();
         if self.overlay_shown != Some(which) || self.overlay_anim.hidden(now, cx.reduce_motion()) {
             return None;
@@ -2595,17 +2595,7 @@ impl AgentPane {
                     this.dismiss_overlay(window, cx);
                 }
             }))
-            .map(|el| if below { el.p(px(6.0)).continuous(12.0) } else { el.p(px(menu::PAD)).continuous(menu::RADIUS) })
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(ink(0.12)))
-            .shadow(vec![BoxShadow {
-                color: hsla(0, if theme::is_light() { 0.12 } else { 0.4 }),
-                offset: point(px(0.0), px(8.0)),
-                blur_radius: px(28.0),
-                spread_radius: px(0.0),
-                inset: false,
-            }])
+            .map(|el| if below { el.p(px(6.0)).glass(12.0) } else { el.p(px(menu::PAD)).glass(menu::RADIUS) })
             .text_size(px(13.0))
             .flex()
             .flex_col()

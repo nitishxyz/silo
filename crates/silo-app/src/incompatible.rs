@@ -6,6 +6,7 @@
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
 use silo_client::mismatch::Upgraded;
 
+use crate::surface::Glassy as _;
 use crate::{hosts::HostState, status::Status, theme, theme::Continuous as _, workspace::Workspace};
 
 /// How long the note after an upgrade stays in the status bar.
@@ -21,11 +22,7 @@ fn card() -> gpui::Div {
         .gap(px(12.0))
         .px(px(28.0))
         .py(px(22.0))
-        .continuous(crate::settings_panel::CARD_RADIUS)
-        .bg(theme::overlay_fill())
-        .border_1()
-        .border_color(rgb(theme::border()))
-        .shadow_xl()
+        .glass_sheet(crate::settings_panel::CARD_RADIUS)
         .text_center()
 }
 
@@ -100,6 +97,7 @@ impl Workspace {
     /// Card for a remote host that can't be used as is: not paired (with
     /// Pair again) or another build (nothing to do from here).
     pub(crate) fn render_remote_problem(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let host = self.active_host;
         let (title, detail, pair) = match self.hosts.get(host)?.state {
             HostState::NotPaired => ("Not paired", "This Mac is no longer paired with that machine.", true),
@@ -133,6 +131,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_incompatible(&self, server: &silo_client::IncompatibleServer, cx: &mut Context<Self>) -> AnyElement {
+        let _glass = crate::surface::enter();
         let upgrading = self.upgrading;
         let button = div()
             .id("incompatible-upgrade")

@@ -18,6 +18,7 @@ use super::{
     browser::{DragPreview, DraggedFiles},
     model,
 };
+use crate::surface::Glassy as _;
 use crate::{
     pane_header::{BUTTON, HeaderStyle, keep_press},
     theme::{self, Continuous as _},
@@ -109,11 +110,7 @@ impl gpui::Render for DragPreview {
             .gap(px(6.0))
             .px(px(10.0))
             .py(px(5.0))
-            .continuous(7.0)
-            .bg(rgb(theme::popover()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(7.0)
             .text_size(px(12.5))
             .text_color(rgb(theme::foreground()))
             .child(crate::assets::icon(self.icon, 13.0, theme::muted()))
@@ -638,6 +635,7 @@ impl FilesPane {
 
     /// The context menu (or the + menu), above everything.
     pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let menu = self.browser.menu.as_ref()?;
         let target = menu.target.clone();
         let mut items = Vec::new();
@@ -688,7 +686,7 @@ impl FilesPane {
             }));
         }
         let rows = items.into_iter().map(|item| match item {
-            Item::Separator => div().h(px(1.0)).my(px(4.0)).mx(px(6.0)).bg(rgb(theme::border())).into_any_element(),
+            Item::Separator => div().h(px(1.0)).my(px(4.0)).mx(px(6.0)).bg(crate::surface::hairline()).into_any_element(),
             Item::Action { id, label, keys, run } => div()
                 .id(id)
                 .flex()
@@ -699,7 +697,7 @@ impl FilesPane {
                 .px(px(10.0))
                 .continuous(5.0)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(theme::row_active())))
+                .hover(|s| s.bg(theme::row_fill()))
                 .child(label)
                 .child(muted(keys).text_size(px(11.5)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -717,11 +715,7 @@ impl FilesPane {
             .p(px(4.0))
             .flex()
             .flex_col()
-            .continuous(8.0)
-            .bg(rgb(theme::popover()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(8.0)
             .text_size(px(12.5))
             .text_color(rgb(theme::foreground()))
             .children(rows)
@@ -827,6 +821,7 @@ impl FilesPane {
 
     /// The upload's progress and Cancel, in either view.
     pub(super) fn render_transfer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let transfer = self.browser.transfer.as_ref()?;
         let (sent, total) =
             (transfer.progress.0.load(std::sync::atomic::Ordering::Relaxed), transfer.progress.1.load(std::sync::atomic::Ordering::Relaxed));
@@ -843,11 +838,7 @@ impl FilesPane {
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .continuous(8.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_xl()
+                .glass(8.0)
                 .text_size(px(12.0))
                 .child(format!("{} · {percent}%", transfer.label))
                 .child(

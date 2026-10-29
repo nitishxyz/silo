@@ -10,6 +10,7 @@ use gpui::{
 use silo_proto::model::{BlockInfo, Side};
 
 use super::{ChangesPane, HunkAction, Loaded, model, scope_label, wire::LineKind};
+use crate::surface::Glassy as _;
 use crate::{
     agent::editor::{Editor, EditorColors},
     commands::act,
@@ -1045,6 +1046,7 @@ impl ChangesPane {
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let picker = self.picker.as_ref()?;
         let current = &self.state.scope;
         let rows = picker.rows.iter().enumerate().map(|(i, pick)| {
@@ -1058,7 +1060,7 @@ impl ChangesPane {
                 .items_center()
                 .gap(px(8.0))
                 .continuous(6.0)
-                .when(selected, |el| el.bg(rgb(theme::row_active())))
+                .when(selected, |el| el.bg(theme::row_fill()))
                 .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
                 .cursor_pointer()
                 .child(div().w(px(12.0)).flex_none().children(on.then(|| crate::assets::icon("check", 11.0, theme::accent()))))
@@ -1079,11 +1081,7 @@ impl ChangesPane {
                 .flex()
                 .flex_col()
                 .p(px(4.0))
-                .continuous(10.0)
-                .bg(rgb(theme::popover()))
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_lg()
+                .glass(10.0)
                 .text_size(px(13.0))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .children(rows)

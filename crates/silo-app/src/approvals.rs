@@ -11,6 +11,7 @@ use silo_proto::{
     text::{MAX_APP, MAX_MESSAGE, MAX_TITLE, untrusted},
 };
 
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
     hosts_state::HostsState,
@@ -138,6 +139,7 @@ impl HostsState {
 impl Workspace {
     /// Approval cards, in the key window only.
     pub(crate) fn render_approvals(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         if !window.is_window_active() {
             return None;
         }
@@ -174,11 +176,7 @@ impl Workspace {
                 .flex_col()
                 .gap(px(6.0))
                 .p(px(14.0))
-                .continuous(12.0)
-                .bg(theme::overlay_fill())
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .shadow_xl()
+                .glass_sheet(12.0)
                 .text_size(px(13.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(card.asks()))
                 .child(div().child(card.summary.clone()))

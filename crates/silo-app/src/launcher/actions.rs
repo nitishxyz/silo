@@ -57,7 +57,7 @@ impl Workspace {
         self.close_switcher(window, cx);
         let placeholder =
             if target == Target::Tab { "New tab: kind, address, path, >command, @agent" } else { "New pane: kind, address, path, >command, @agent" };
-        let field = cx.new(|cx| TextField::new(placeholder, cx));
+        let field = cx.new(|cx| TextField::new(placeholder, cx).on_glass());
         let sub = cx.subscribe_in(&field, window, |this, _, event: &FieldEvent, window, cx| this.launcher_event(event, window, cx));
         let focus = field.read(cx).focus.clone();
         let recents = self.launcher_recents(cx);

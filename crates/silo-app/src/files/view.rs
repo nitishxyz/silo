@@ -14,6 +14,7 @@ use super::{
     browser::{DragPreview, DraggedFiles},
     model,
 };
+use crate::surface::Glassy as _;
 use crate::{
     commands::act,
     pane_header::{BUTTON, BlockHeader, HeaderParts, HeaderStyle, button, keep_press, labels},
@@ -443,6 +444,7 @@ impl FilesPane {
     }
 
     fn render_finder(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let finder = self.finder.as_ref()?;
         let rows = finder.found.iter().take(60).enumerate().map(|(i, found)| {
             let selected = i == finder.selected;
@@ -460,7 +462,7 @@ impl FilesPane {
                 .px(px(10.0))
                 .py(px(4.0))
                 .continuous(6.0)
-                .when(selected, |el| el.bg(rgb(theme::row_active())))
+                .when(selected, |el| el.bg(theme::row_fill()))
                 .when(!selected, |el| el.hover(|s| s.bg(theme::hover_fill())))
                 .cursor_pointer()
                 .child(div().flex_none().child(gpui::StyledText::new(name.to_owned()).with_highlights(in_name)))
@@ -495,11 +497,7 @@ impl FilesPane {
                         .mx(px(12.0))
                         .flex()
                         .flex_col()
-                        .continuous(10.0)
-                        .bg(rgb(theme::popover()))
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .shadow_lg()
+                        .glass(10.0)
                         .text_size(px(13.0))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(

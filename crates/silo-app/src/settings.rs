@@ -4,9 +4,9 @@
 //! events with the same code the palette uses, and hosts the panel in a
 //! modal.
 
-use gpui::{AnyElement, Context, Entity, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Entity, IntoElement, Subscription, Window, div, prelude::*, px};
 
-use crate::theme::Continuous as _;
+use crate::surface::Glassy as _;
 use crate::{
     commands::Command,
     fonts,
@@ -653,13 +653,9 @@ impl Workspace {
                         .occlude()
                         .w(px(width))
                         .h(px(height))
-                        .continuous(CARD_RADIUS)
+                        .glass_sheet(CARD_RADIUS)
                         // Clips the panel to the corners inside the border.
                         .rounded_clip()
-                        .bg(if theme::veils().is_some() { theme::overlay_fill() } else { rgb(theme::background()) })
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .shadow_xl()
                         // Clicks inside must not reach the backdrop.
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(modal.panel.clone()),

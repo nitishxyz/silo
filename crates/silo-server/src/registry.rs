@@ -843,7 +843,7 @@ impl Registry {
         }
         if new.kind == BlockKind::Browser {
             let url = browser_url(new.url.unwrap_or("about:blank"))
-                .ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+                .ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank, view-source)"))?;
             let info = BlockInfo { size: TermSize::default(), ..info };
             self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
             return Ok(id);
@@ -1534,8 +1534,8 @@ impl Registry {
     /// subscriber (the owner's engine runs it; viewers follow).
     pub fn browser_command(&mut self, block_id: &str, mut command: BrowserCommand) -> Result<(), RpcError> {
         if let BrowserCommand::Navigate { url } = &mut command {
-            *url =
-                browser_url(url).ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank)"))?;
+            *url = browser_url(url)
+                .ok_or_else(|| RpcError::bad_request("empty url or unsupported scheme (http, https, ws, wss, data, about:blank, view-source)"))?;
         }
         self.browser(block_id)?.command(&command)?;
         self.emit(Event::BrowserCommand { block_id: block_id.to_owned(), command });

@@ -207,6 +207,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_unsaved(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let dialog = self.unsaved.as_ref()?;
         let saving = dialog.saving;
         let button = |id: &'static str, label: &'static str, primary: bool, danger: bool| {

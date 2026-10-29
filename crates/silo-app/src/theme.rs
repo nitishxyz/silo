@@ -448,21 +448,14 @@ pub fn surface() -> u32 {
 pub fn card_outline_on(fill: u32) -> u32 {
     mix(fill, ink_on(fill), if light(fill) { 0.12 } else { 0.10 })
 }
-/// Fill of the current tab on `surface`: a subtle step above the rest.
-#[must_use]
-pub fn tab_selected_on(surface: u32) -> u32 {
-    mix(surface, ink_on(surface), if light(surface) { 0.08 } else { 0.10 })
-}
 /// Overlay that dims inactive panes: the background at this alpha.
 pub const INACTIVE_DIM: f32 = 0.38;
 /// The same overlay over a web page: lighter, since pages are mostly bright.
 pub const INACTIVE_DIM_PAGE: f32 = 0.14;
 
 /// This frame's Frosted colours, set by the workspace; `None` when solid.
-/// Surfaces over the app's own content (palette, menus, sheets, tooltips,
-/// settings, floats) cannot be translucent: the window blur only blurs
-/// what is behind the window. They take the material's look as one opaque
-/// colour, so there is no alpha here.
+/// `overlay` is the window veil's look as one opaque colour: floating
+/// surfaces tint their glass with it ([`crate::surface`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Veils {
     pub overlay: u32,
@@ -483,45 +476,46 @@ pub fn veils() -> Option<Veils> {
     VEILS.get()
 }
 
-/// Ink of the theme foreground at `amount` over a veil.
+/// Ink of the theme foreground at `amount` over a veil or glass.
 fn tint(amount: f32) -> gpui::Rgba {
     gpui::rgb(foreground()).opacity(amount)
 }
 
-/// Fill of surfaces over the app's own content: always opaque.
-#[must_use]
-pub fn overlay_fill() -> gpui::Rgba {
-    gpui::rgb(overlay())
+/// Fills are ink tints: on a veil, or on glass.
+fn tinted() -> bool {
+    veils().is_some() || crate::surface::tinted()
 }
-/// [`overlay_fill`]'s colour.
+
+/// What floating surfaces look like over the theme background, as one
+/// colour (for colours derived from it).
 #[must_use]
 pub fn overlay() -> u32 {
-    veils().map_or_else(popover, |v| v.overlay)
+    crate::surface::current().look(background())
 }
 /// Panels and grouped rows inside a floating surface (never a second veil).
 #[must_use]
 pub fn group_fill() -> gpui::Rgba {
-    if veils().is_some() { tint(0.04) } else { gpui::rgb(popover()) }
+    if tinted() { tint(0.04) } else { gpui::rgb(popover()) }
 }
 /// Buttons, switch tracks, segmented controls.
 #[must_use]
 pub fn control_fill() -> gpui::Rgba {
-    if veils().is_some() { tint(0.10) } else { gpui::rgb(tab_active()) }
+    if tinted() { tint(0.10) } else { gpui::rgb(tab_active()) }
 }
 /// Selected rows, pressed controls.
 #[must_use]
 pub fn row_fill() -> gpui::Rgba {
-    if veils().is_some() { tint(0.14) } else { gpui::rgb(row_active()) }
+    if tinted() { tint(crate::surface::SELECTED) } else { gpui::rgb(row_active()) }
 }
 /// Hovered rows.
 #[must_use]
 pub fn hover_fill() -> gpui::Rgba {
-    if veils().is_some() { tint(0.06) } else { gpui::rgb(tab_hover()) }
+    if tinted() { tint(0.06) } else { gpui::rgb(tab_hover()) }
 }
 /// Text input wells.
 #[must_use]
 pub fn well_fill() -> gpui::Rgba {
-    if veils().is_some() { tint(0.06) } else { gpui::rgb(background()) }
+    if tinted() { tint(0.06) } else { gpui::rgb(background()) }
 }
 
 #[must_use]
@@ -544,9 +538,13 @@ pub fn row_active() -> u32 {
 pub fn border() -> u32 {
     mix(background(), foreground(), 0.13)
 }
-/// Secondary text; frosted, it reads on the overlay veil.
+/// Secondary text; on glass ([`crate::surface::enter`]) it reads whatever
+/// is behind; frosted, on the overlay veil.
 #[must_use]
 pub fn muted() -> u32 {
+    if crate::surface::inside() {
+        return crate::surface::current().muted;
+    }
     veils().map_or_else(|| mix(background(), foreground(), 0.55), |v| v.muted)
 }
 /// The theme's bright blue.
@@ -766,15 +764,6 @@ mod tests {
             assert!(b > 200.0 && r < 20.0 && g < 120.0, "{blue:06x} is a saturated blue");
             assert!(super::contrast(0x00ff_ffff, blue) >= super::TEXT_CONTRAST, "{blue:06x}");
         }
-    }
-
-    #[test]
-    fn overlays_are_opaque_when_frosted() {
-        super::set_veils(Some(super::Veils { overlay: 0x0012_3456, muted: 0x0080_8080 }));
-        let fill = super::overlay_fill();
-        super::set_veils(None);
-        assert!((fill.a - 1.0).abs() < f32::EPSILON);
-        assert_eq!(fill, gpui::rgb(0x0012_3456));
     }
 
     #[test]

@@ -513,7 +513,7 @@ impl AgentPane {
             e.files = true;
             e
         });
-        let filter = cx.new(|cx| TextField::new("Filter", cx));
+        let filter = cx.new(|cx| TextField::new("Filter", cx).on_glass());
         let key_field = cx.new(|cx| pill_input::PillInput::new("Paste an API key", "key", cx).masked(cx));
         let code_field = cx.new(|cx| pill_input::PillInput::new("Paste the code", "key", cx));
         let url_field = cx.new(|cx| pill_input::PillInput::new("Server address", "globe", cx));

@@ -5,11 +5,13 @@ use gpui::{AnyElement, Context, FontWeight, HighlightStyle, IntoElement, StyledT
 use silo_proto::model::Axis;
 
 use super::{Kind, Row, Target, row_hint};
+use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{assets::icon, radius::CardCorners, theme, workspace::Workspace};
 
 impl Workspace {
     pub(crate) fn render_launcher(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _glass = crate::surface::enter();
         let dialog = self.launcher.dialog.as_ref()?;
         let highlight = HighlightStyle { color: Some(rgb(theme::accent()).into()), font_weight: Some(FontWeight::BOLD), ..Default::default() };
         let mut list = div().flex().flex_col().py(px(4.0));
@@ -96,11 +98,7 @@ impl Workspace {
             .w(px(520.0))
             .flex()
             .flex_col()
-            .continuous(14.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_xl()
+            .glass_sheet(14.0)
             .overflow_hidden()
             .font_family(theme::ui_font())
             .text_size(px(13.5))
@@ -178,8 +176,8 @@ impl Workspace {
                 .gap(px(8.0))
                 .px(px(12.0))
                 .py(px(6.0))
+                .glass(15.0)
                 .capsule()
-                .bg(theme::overlay_fill())
                 .font_family(theme::ui_font())
                 .text_size(px(13.0))
                 .text_color(accent)

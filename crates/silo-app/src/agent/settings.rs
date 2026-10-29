@@ -18,6 +18,7 @@ use super::{
     settings_agents::{AgentsSettings, short_error},
     signin::{Kind, READY},
 };
+use crate::surface::Glassy as _;
 use crate::{
     assets::icon,
     controls::{Segmented, Toggle},
@@ -513,6 +514,7 @@ impl DefaultsView {
     }
 
     fn menu_list(&self, menu: Menu, cx: &mut Context<Self>) -> AnyElement {
+        let _glass = crate::surface::enter();
         let mut list = div()
             .id(("otto-defaults-list", menu as usize))
             .w(px(240.0))
@@ -522,11 +524,7 @@ impl DefaultsView {
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .continuous(9.0)
-            .bg(theme::overlay_fill())
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .shadow_lg()
+            .glass(9.0)
             .font_family(theme::ui_font())
             .text_color(rgb(theme::foreground()))
             .occlude()
