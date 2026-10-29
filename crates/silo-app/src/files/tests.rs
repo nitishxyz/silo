@@ -428,3 +428,31 @@ fn the_browser_lists_navigates_and_selects(cx: &mut TestAppContext) {
     });
     draw(cx);
 }
+
+/// ⇧⌘P's finder closes on a press outside it and gives focus back to the
+/// viewer; a press inside it keeps it open.
+#[gpui::test]
+fn the_finder_closes_on_a_press_outside_it(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    cx.update(|window, _| window.activate_window());
+    pane.update_in(cx, |pane, window, cx| pane.open_finder(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| _ = window.draw(cx));
+    let field_focused =
+        |pane: &FilesPane, window: &gpui::Window, cx: &gpui::App| pane.finder.as_ref().is_some_and(|f| f.field.read(cx).focus.is_focused(window));
+    assert!(pane.update_in(cx, |pane, window, cx| field_focused(pane, window, cx)));
+    // Inside: the card is centred 8 pt from the top.
+    let inside = cx.update(|window, _| gpui::point(window.viewport_size().width / 2.0, gpui::px(20.0)));
+    cx.simulate_mouse_down(inside, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(inside, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.finder.is_some()), "a press inside keeps it");
+    // Outside: the bottom-left corner of the pane.
+    let outside = cx.update(|window, _| gpui::point(gpui::px(4.0), window.viewport_size().height - gpui::px(4.0)));
+    cx.simulate_mouse_down(outside, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    pane.update_in(cx, |pane, window, _| {
+        assert!(pane.finder.is_none(), "a press outside closes it");
+        assert!(pane.focus.is_focused(window), "focus back on the viewer");
+    });
+}

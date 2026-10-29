@@ -1033,6 +1033,17 @@ impl FilesPane {
     }
 
     /// Esc: close the finder, find and go-to bars, back to the viewer.
+    /// Close the finder only (a press outside it). Focus goes back to the
+    /// viewer only if the finder's field still has it: a press in another
+    /// pane keeps the focus it gave that pane.
+    pub(crate) fn close_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(finder) = self.finder.take() else { return };
+        if finder.field.read(cx).focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn close_bars(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder = None;
         self.find = None;

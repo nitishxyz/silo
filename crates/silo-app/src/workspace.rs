@@ -1033,11 +1033,17 @@ impl Workspace {
             self.focus_asked
                 .take_if(|(b, before, at)| *b == focused || before.as_ref() != Some(&focused) || !shown.contains(b) || at.elapsed() > FOCUS_ASK_TTL);
             let asked = self.focus_asked.as_ref().map(|(b, before, _)| (b.as_str(), before.as_deref()));
-            let local = self.block_with_focus(window, cx).is_some();
+            let holder = self.block_with_focus(window, cx);
+            let local = holder.is_some();
             let overlay = self.overlay_owns_focus();
             if crate::blocks::follow_focus(&focused, self.server_focus.as_deref(), asked, local, overlay) == crate::blocks::Follow::Focus {
                 self.server_focus = Some(focused.clone());
-                self.focus_block(&focused, window, cx);
+                // Already in that block (its finder, address bar, a popover's
+                // filter): stay there; focusing the block would take it back to
+                // its main view.
+                if holder.as_deref() != Some(focused.as_str()) {
+                    self.focus_block(&focused, window, cx);
+                }
             }
         }
         self.focus_new_browser(window, cx);

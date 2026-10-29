@@ -500,6 +500,8 @@ impl FilesPane {
                         .glass(10.0)
                         .text_size(px(13.0))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        // A press anywhere outside closes it, as the app's other popovers do.
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_finder(window, cx)))
                         .child(
                             div()
                                 .flex()
