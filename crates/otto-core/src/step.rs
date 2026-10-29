@@ -53,15 +53,13 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
         .runtime
         .db(move |s| {
             let mut total = Usage::default();
-            for event in s.events_since(&session_id, 0, usize::MAX)? {
-                if event.turn == turn && event.kind == "usage" {
-                    let usage: Usage = serde_json::from_value(event.payload["usage"].clone())?;
-                    total.input += usage.input;
-                    total.output += usage.output;
-                    total.cache_read += usage.cache_read;
-                    total.cache_write += usage.cache_write;
-                    total.reasoning += usage.reasoning;
-                }
+            for event in s.turn_events(&session_id, turn, &["usage"])? {
+                let usage: Usage = serde_json::from_value(event.payload["usage"].clone())?;
+                total.input += usage.input;
+                total.output += usage.output;
+                total.cache_read += usage.cache_read;
+                total.cache_write += usage.cache_write;
+                total.reasoning += usage.reasoning;
             }
             Ok(total)
         })

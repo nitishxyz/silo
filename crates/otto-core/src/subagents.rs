@@ -328,7 +328,7 @@ pub(crate) fn release_held(s: &mut otto_store::Store, id: &str, handed_back: boo
 /// Text the stop cut off in turn `turn`: what streamed of a reply that never
 /// completed (the stop drops the unfinished item, the journal kept its deltas).
 fn partial(s: &otto_store::Store, id: &str, turn: i64) -> Result<Option<String>> {
-    let events: Vec<_> = s.events_since(id, 0, usize::MAX)?.into_iter().filter(|e| e.turn == turn).collect();
+    let events = s.turn_events(id, turn, &["item.started", "item.done", "text.delta"])?;
     let done = |item: &str| events.iter().any(|e| e.kind == "item.done" && e.payload["item"]["id"] == item);
     let Some(item) = events.iter().rev().filter(|e| e.kind == "item.started").filter_map(|e| e.payload["item_id"].as_str()).next() else {
         return Ok(None);

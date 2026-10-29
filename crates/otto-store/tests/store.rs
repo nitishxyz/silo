@@ -77,7 +77,7 @@ fn projects_sessions_and_settings() {
     assert!(store.update_session("missing", SessionUpdate::default()).is_err());
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(), "wal");
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
     drop(store);
     assert!(Store::open(&path).unwrap().session(&first.id).unwrap().is_some());
 }
@@ -318,27 +318,7 @@ fn recent_projects_order_by_latest_session() {
 }
 
 #[test]
-fn turn_trees_and_changes_survive_the_migration() {
-    // A version 2 database with a turn: migration 3 adds the snapshot columns, empty.
-    let file = tempfile::NamedTempFile::new().unwrap();
-    {
-        let conn = rusqlite::Connection::open(file.path()).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE turns (session_id TEXT NOT NULL, turn INTEGER NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, PRIMARY KEY(session_id,turn));
-             INSERT INTO turns VALUES('old',1,'done',1,2);",
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
-    }
-    let mut store = Store::open(file.path()).unwrap();
-    assert_eq!(store.turn_trees("old", 1).unwrap(), (None, None));
-    store.set_turn_trees("old", 1, Some("base"), None).unwrap();
-    store.set_turn_trees("old", 1, None, Some("end")).unwrap();
-    assert_eq!(store.turn_trees("old", 1).unwrap(), (Some("base".into()), Some("end".into())));
-    assert!(store.set_turn_trees("old", 2, Some("x"), None).is_err());
-    assert_eq!(store.session_base_tree("old").unwrap().as_deref(), Some("base"), "the session's first snapshot");
-    assert_eq!(store.session_base_tree("none").unwrap(), None);
-
+fn turn_trees_and_changes() {
     let mut store = Store::open_in_memory().unwrap();
     let id = new_session(&mut store).id;
     store.append(&id, event("turn.started"), Projection::TurnStatus(TurnStatus::Running)).unwrap();

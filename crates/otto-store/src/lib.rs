@@ -7,6 +7,8 @@
 //! outcome before appending the result item. Recovery must run with actors stopped.
 
 mod coalescer;
+mod migrate;
+mod refs;
 mod schema;
 
 pub use coalescer::Coalescer;
@@ -214,13 +216,20 @@ impl Store {
         if version > schema::MIGRATIONS.last().map_or(0, |m| m.0) {
             return Err(Error::SchemaVersion(version));
         }
+        let stored = version > 0 && tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get::<_, bool>(0))?;
         for &(number, sql) in schema::MIGRATIONS {
             if number > version {
                 tx.execute_batch(sql)?;
+                if number == migrate::STORED_ONCE {
+                    migrate::stored_once(&tx)?;
+                }
                 tx.pragma_update(None, "user_version", number)?;
             }
         }
         tx.commit()?;
+        if stored && version < migrate::STORED_ONCE {
+            migrate::vacuum(&connection)?;
+        }
         Ok(Self { connection })
     }
 
@@ -347,20 +356,28 @@ impl Store {
     /// # Errors
     /// Returns database or decoding errors.
     pub fn events_since(&self, session_id: &str, after_seq: i64, limit: usize) -> Result<Vec<Event>> {
-        let mut stmt = self
-            .connection
-            .prepare("SELECT session_id,seq,turn,step,kind,payload,at FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?")?;
+        self.events_where("seq>?2 ORDER BY seq LIMIT ?3", params![session_id, after_seq, i64::try_from(limit).unwrap_or(i64::MAX)])
+    }
+
+    /// The session's events of turn `turn` and `kinds`, in order.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn turn_events(&self, session_id: &str, turn: i64, kinds: &[&str]) -> Result<Vec<Event>> {
+        self.events_where(
+            "turn=?2 AND kind IN (SELECT value FROM json_each(?3)) ORDER BY seq",
+            params![session_id, turn, serde_json::to_string(kinds)?],
+        )
+    }
+
+    fn events_where(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<Event>> {
+        let conn = &self.connection;
+        let mut stmt = conn.prepare(&format!("SELECT session_id,seq,turn,step,kind,payload,at FROM events WHERE session_id=?1 AND {filter}"))?;
         Ok(stmt
-            .query_map(params![session_id, after_seq, i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
-                Ok(Event {
-                    session_id: r.get(0)?,
-                    seq: r.get(1)?,
-                    turn: r.get(2)?,
-                    step: r.get(3)?,
-                    kind: r.get(4)?,
-                    payload: json_column(r, 5)?,
-                    at: r.get(6)?,
-                })
+            .query_map(params, |r| {
+                let (session_id, seq): (String, i64) = (r.get(0)?, r.get(1)?);
+                let mut payload = json_column(r, 5)?;
+                refs::resolve_event(conn, &session_id, seq, &mut payload)?;
+                Ok(Event { session_id, seq, turn: r.get(2)?, step: r.get(3)?, kind: r.get(4)?, payload, at: r.get(6)? })
             })?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -381,8 +398,9 @@ impl Store {
     /// # Errors
     /// Returns database or decoding errors.
     pub fn items(&self, session_id: &str) -> Result<Vec<Item>> {
-        let mut stmt = self.connection.prepare("SELECT json FROM items WHERE session_id=? ORDER BY seq,item_id")?;
-        Ok(stmt.query_map([session_id], |r| json_column(r, 0))?.collect::<rusqlite::Result<_>>()?)
+        let conn = &self.connection;
+        let mut stmt = conn.prepare("SELECT json FROM items WHERE session_id=? ORDER BY seq,item_id")?;
+        Ok(stmt.query_map([session_id], |r| refs::decode(conn, &r.get::<_, String>(0)?))?.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The session's items newest first with their item sequence, those before
@@ -393,7 +411,7 @@ impl Store {
         let mut stmt = self.connection.prepare("SELECT seq,json FROM items WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC,item_id DESC")?;
         let mut rows = stmt.query(params![session_id, before_seq.unwrap_or(i64::MAX)])?;
         while let Some(row) = rows.next()? {
-            if !visit(row.get(0)?, json_column(row, 1)?) {
+            if !visit(row.get(0)?, refs::decode(&self.connection, &row.get::<_, String>(1)?)?) {
                 break;
             }
         }
@@ -410,7 +428,7 @@ impl Store {
             .prepare("SELECT json FROM items WHERE session_id=?1 AND seq<?2 AND role='assistant' AND json LIKE ?3 ORDER BY seq DESC,item_id DESC")?;
         let mut rows = stmt.query(params![session_id, before_seq, pattern])?;
         while let Some(row) = rows.next()? {
-            let item: Item = json_column(row, 0)?;
+            let item: Item = refs::decode(&self.connection, &row.get::<_, String>(0)?)?;
             if let Some((_, _, input)) = item.tool_calls().filter(|(_, n, _)| *n == name).last() {
                 return Ok(Some(input.clone()));
             }
@@ -431,7 +449,7 @@ impl Store {
     #[allow(clippy::type_complexity)]
     pub fn marks(&self, session_id: &str, kinds: &[&str]) -> Result<Vec<(String, i64, Option<String>, Option<String>)>> {
         let mut stmt = self.connection.prepare(
-            "SELECT kind,at,coalesce(json_extract(payload,'$.item_id'),json_extract(payload,'$.item.id')),json_extract(payload,'$.call_id') FROM events WHERE session_id=? AND kind IN (SELECT value FROM json_each(?)) ORDER BY seq",
+            "SELECT kind,at,coalesce(json_extract(payload,'$.item_id'),json_extract(payload,'$.item.id'),CASE WHEN kind IN ('item.done','item.forked') THEN (SELECT item_id FROM items i WHERE i.session_id=e.session_id AND i.seq=e.seq UNION ALL SELECT item_id FROM item_versions v WHERE v.session_id=e.session_id AND v.seq=e.seq) END),json_extract(payload,'$.call_id') FROM events e WHERE session_id=? AND kind IN (SELECT value FROM json_each(?)) ORDER BY seq",
         )?;
         let kinds = serde_json::to_string(kinds)?;
         Ok(stmt.query_map(params![session_id, kinds], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -494,9 +512,7 @@ impl Store {
         )?;
         Ok(stmt
             .query_map([session_id], |r| {
-                let text: String = r.get(2)?;
-                let changes = serde_json::from_str(&text)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+                let changes = refs::decode(&self.connection, &r.get::<_, String>(2)?)?;
                 Ok((r.get(0)?, r.get(1)?, changes))
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -749,8 +765,8 @@ impl Store {
             },
         )?;
         let items: Vec<Item> = {
-            let mut stmt = tx.prepare("SELECT v.json FROM item_versions v WHERE v.session_id=?1 AND v.seq<=?2 AND v.seq=(SELECT max(w.seq) FROM item_versions w WHERE w.session_id=v.session_id AND w.item_id=v.item_id AND w.seq<=?2) ORDER BY v.seq,v.item_id")?;
-            stmt.query_map(params![id, at_seq], |r| json_column(r, 0))?.collect::<rusqlite::Result<_>>()?
+            let mut stmt = tx.prepare("SELECT json FROM (SELECT seq,item_id,json,row_number() OVER (PARTITION BY item_id ORDER BY seq DESC) AS n FROM (SELECT seq,item_id,json FROM items WHERE session_id=?1 AND seq<=?2 UNION ALL SELECT seq,item_id,json FROM item_versions WHERE session_id=?1 AND seq<=?2)) WHERE n=1 ORDER BY seq,item_id")?;
+            stmt.query_map(params![id, at_seq], |r| refs::decode(&tx, &r.get::<_, String>(0)?))?.collect::<rusqlite::Result<_>>()?
         };
         for item in items {
             append_tx(
@@ -779,23 +795,44 @@ fn append_tx(tx: &Transaction<'_>, id: &str, event: &EventRecord, projection: &P
         .query_row("UPDATE sessions SET last_seq=last_seq+1,updated_at=?2 WHERE id=?1 RETURNING last_seq", params![id, at], |r| r.get(0))
         .optional()?
         .ok_or_else(|| Error::NotFound(id.into()))?;
+    // What the projection stores is not repeated in the event (`refs`).
+    let mut payload = event.payload.clone();
+    let (slot, value) = match projection {
+        Projection::PutItem(item) => ("item", Some(serde_json::to_value(item)?)),
+        Projection::ToolIntent { input, .. } => ("input", Some(input.clone())),
+        Projection::ToolOutcome { output, .. } => ("output", Some(output.clone())),
+        _ => ("", None),
+    };
+    if let Some(value) = &value {
+        if slot == "item" && payload == *value {
+            payload = refs::reference(slot);
+        } else if payload.get(slot) == Some(value) {
+            payload[slot] = refs::reference(slot);
+        }
+    }
+    refs::externalize(tx, &mut payload)?;
     tx.execute(
         "INSERT INTO events VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![id, seq, event.turn, event.step, event.kind, serde_json::to_string(&event.payload)?, at],
+        params![id, seq, event.turn, event.step, event.kind, serde_json::to_string(&payload)?, at],
     )?;
+    let stored = |mut value: Value| -> Result<String> {
+        refs::externalize(tx, &mut value)?;
+        Ok(serde_json::to_string(&value)?)
+    };
     match projection {
         Projection::None => {}
         Projection::PutItem(item) => {
             let role = enum_name(&item.role)?;
-            let json = serde_json::to_string(item)?;
+            let json = stored(value.unwrap_or_default())?;
+            // The version it replaces stays readable by its seq (forks, its event).
+            tx.execute(
+                "INSERT INTO item_versions SELECT session_id,item_id,seq,role,json FROM items WHERE session_id=?1 AND item_id=?2",
+                params![id, item.id],
+            )?;
             tx.execute("INSERT INTO items VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,item_id) DO UPDATE SET seq=excluded.seq,role=excluded.role,json=excluded.json",params![id,item.id,seq,role,json])?;
-            tx.execute("INSERT INTO item_versions VALUES(?1,?2,?3,?4,?5)", params![id, item.id, seq, role, json])?;
         }
         Projection::ToolIntent { call_id, name, input } => {
-            tx.execute(
-                "INSERT INTO tool_calls VALUES(?1,?2,?3,?4,'intent',NULL,?5,NULL)",
-                params![id, call_id, name, serde_json::to_string(input)?, at],
-            )?;
+            tx.execute("INSERT INTO tool_calls VALUES(?1,?2,?3,?4,'intent',NULL,?5,NULL)", params![id, call_id, name, stored(input.clone())?, at])?;
         }
         Projection::ToolOutcome { call_id, status, output } => {
             if !matches!(status, ToolStatus::Done | ToolStatus::Error | ToolStatus::Unknown) {
@@ -803,7 +840,7 @@ fn append_tx(tx: &Transaction<'_>, id: &str, event: &EventRecord, projection: &P
             }
             let count = tx.execute(
                 "UPDATE tool_calls SET status=?3,output=?4,finished_at=?5 WHERE session_id=?1 AND call_id=?2 AND status IN ('intent','running')",
-                params![id, call_id, enum_name(status)?, serde_json::to_string(output)?, at],
+                params![id, call_id, enum_name(status)?, stored(output.clone())?, at],
             )?;
             if count != 1 {
                 return Err(Error::InvalidTransition(format!("call {call_id} is missing or already terminal")));
@@ -819,9 +856,47 @@ fn append_tx(tx: &Transaction<'_>, id: &str, event: &EventRecord, projection: &P
         Projection::TurnStatus(status) => {
             let finished = if *status == TurnStatus::Running { None } else { Some(at) };
             tx.execute("INSERT INTO turns(session_id,turn,status,started_at,finished_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id,turn) DO UPDATE SET status=excluded.status,finished_at=excluded.finished_at",params![id,event.turn,enum_name(status)?,at,finished])?;
+            if finished.is_some() {
+                compact_turn(tx, id, event.turn)?;
+            }
         }
     }
     Ok(seq)
+}
+
+/// Drops the deltas a finished turn streamed that its stored items and calls make redundant (`refs::redundant`):
+/// replay and late joiners read the items; a client resuming inside the turn sees a gap and reloads its view.
+fn compact_turn(tx: &Transaction<'_>, id: &str, turn: i64) -> Result<usize> {
+    let mut rows = Vec::new();
+    {
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT seq,kind,turn,CASE WHEN kind IN ({}) THEN coalesce(json_extract(payload,'$.item_id'),json_extract(payload,'$.call_id')) END FROM events WHERE session_id=? ORDER BY seq DESC",
+            refs::DELTAS.map(|k| format!("'{k}'")).join(",")
+        ))?;
+        let mut cursor = stmt.query([id])?;
+        while let Some(r) = cursor.next()? {
+            let (seq, kind, at_turn, key): (i64, String, i64, Option<String>) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            if kind == "turn.started" && at_turn == turn {
+                break;
+            }
+            rows.push((seq, kind, key));
+        }
+    }
+    rows.reverse();
+    let mut item = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM items WHERE session_id=?1 AND item_id=?2)")?;
+    let mut call = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM tool_calls WHERE session_id=?1 AND call_id=?2)")?;
+    let mut known = std::collections::HashMap::new();
+    let drop = refs::redundant(rows, |kind, key| {
+        *known.entry((kind == "tool.input_delta", key.to_owned())).or_insert_with(|| {
+            let stmt = if kind == "tool.input_delta" { &mut call } else { &mut item };
+            stmt.query_row(params![id, key], |r| r.get(0)).unwrap_or(false)
+        })
+    });
+    let mut delete = tx.prepare_cached("DELETE FROM events WHERE session_id=?1 AND seq=?2")?;
+    for seq in &drop {
+        delete.execute(params![id, seq])?;
+    }
+    Ok(drop.len())
 }
 
 fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
@@ -850,15 +925,12 @@ fn tool_rows(conn: &Connection, session: Option<&str>, unfinished: bool) -> Resu
             let status = serde_json::from_value(Value::String(status))
                 .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
             let output: Option<String> = r.get(5)?;
-            let output = output
-                .map(|s| serde_json::from_str(&s))
-                .transpose()
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e)))?;
+            let output = output.map(|s| refs::decode(conn, &s)).transpose()?;
             Ok(ToolCall {
                 session_id: r.get(0)?,
                 call_id: r.get(1)?,
                 name: r.get(2)?,
-                input: json_column(r, 3)?,
+                input: refs::decode(conn, &r.get::<_, String>(3)?)?,
                 status,
                 output,
                 started_at: r.get(6)?,
@@ -882,16 +954,4 @@ fn now() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connection_durability_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("settings.db")).unwrap();
-        for (pragma, expected) in [("synchronous", 2), ("foreign_keys", 1), ("busy_timeout", 5000)] {
-            let actual: i64 = store.connection.pragma_query_value(None, pragma, |r| r.get(0)).unwrap();
-            assert_eq!(actual, expected, "{pragma}");
-        }
-    }
-}
+mod tests;

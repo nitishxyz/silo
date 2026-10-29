@@ -949,7 +949,13 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   session (`seq`, `turn`, `step`, `kind`, `payload`) is the truth; `items`, `tool_calls` and `usage` are
   projections updated in the same transaction.
 - Streaming deltas are coalesced (for example every 50 ms or 4 KiB) into the log. Clients get every delta live
-  and the coalesced record on replay.
+  and the coalesced record on replay. When a turn finishes, the deltas of items and calls it stored are dropped but
+  the first of each run (it keeps the part timing): replay reads the items; a client resuming inside such a turn
+  sees a sequence gap and reloads its view. Other events can't be updated or deleted (triggers).
+- Stored once (schema 4): base64 media goes to `blobs` (sha256 of its bytes, `blob:sha256:<hex>` in the JSON); an
+  event doesn't repeat its projection (the item an `item.done` puts, a call's input and output are
+  `{"$otto_ref":…}`); `item_versions` keeps only superseded item versions. The store resolves all of it on read.
+  Migration 4 converts an existing database at daemon start in one transaction, then `VACUUM`s.
 - Tool journal: `intent` before executing, `outcome` before the result item, both fsynced. On restart, an intent
   without an outcome becomes a `ToolResult{is_error, "outcome unknown"}` and is never re-run.
 - Turns interrupted by a daemon restart are marked `interrupted`; the user resumes them explicitly.

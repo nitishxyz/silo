@@ -6110,12 +6110,15 @@ dependencies = [
 name = "otto-store"
 version = "0.1.14"
 dependencies = [
+ "base64 0.22.1",
  "otto-llm",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

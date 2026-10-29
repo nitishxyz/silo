@@ -63,4 +63,14 @@ ALTER TABLE turns ADD COLUMN base_tree TEXT;
 ALTER TABLE turns ADD COLUMN end_tree TEXT;
 "#,
     ),
+    // Stored once (`refs`): blobs, item versions only when superseded, events without their projections' copies
+    // and without redundant deltas. `migrate::stored_once` converts the data and rebuilds `events`.
+    (
+        4,
+        r#"
+CREATE TABLE blobs (sha256 TEXT PRIMARY KEY, data BLOB NOT NULL);
+CREATE INDEX items_seq ON items(session_id,seq);
+CREATE INDEX item_versions_seq ON item_versions(session_id,seq);
+"#,
+    ),
 ];
