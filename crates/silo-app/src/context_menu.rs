@@ -138,7 +138,7 @@ impl<A: Clone + 'static> Menu<A> {
                     .gap(px(18.0))
                     .h(px(24.0))
                     .px(px(10.0))
-                    .continuous(crate::radius::concentric(crate::radius::CARD, PAD))
+                    .continuous(crate::radius::CARD - PAD)
                     .whitespace_nowrap()
                     .child(div().flex().items_center().children(mark).child(label.clone()))
                     .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child(*keys))
