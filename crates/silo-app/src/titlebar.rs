@@ -62,6 +62,15 @@ const CLOSE_OVERHANG: f32 = (CLOSE_SIZE - TAB_ICON) / 2.0;
 const CLOSE_GAP: f32 = 4.0;
 /// Gap between the session pill and the first tab.
 const PILL_GAP: f32 = TAB_GAP;
+/// The update pill: its height, its text's side padding, its border, and
+/// with a spinner, the spinner's left padding (inside the border) that puts
+/// it as far from the left as from the top and bottom, and the gap after it
+/// (a tab's icon-to-title gap).
+const UPDATE_HEIGHT: f32 = TAB_HEIGHT - 2.0;
+const UPDATE_PAD: f32 = 11.0;
+const UPDATE_BORDER: f32 = 1.0;
+const UPDATE_ICON_PAD: f32 = (UPDATE_HEIGHT - TAB_ICON) / 2.0 - UPDATE_BORDER;
+const UPDATE_GAP: f32 = 6.0;
 /// Left inset in fullscreen, where there are no traffic lights.
 const FULLSCREEN_INSET: f32 = 10.0;
 /// Width of the edge fade over a side with hidden tabs.
@@ -856,15 +865,20 @@ impl Workspace {
         use crate::updater::PillKind;
         let (label, tooltip, kind) = crate::updater::pill(self.updater.read(cx).state())?;
         let (chrome, ready) = (self.chrome, kind == PillKind::Ready);
+        let busy = matches!(kind, PillKind::Busy | PillKind::Progress(_));
         let pill = div()
             .id("update")
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(5.0))
+            .gap(px(UPDATE_GAP))
             .ml(px(6.0))
-            .h(px(TAB_HEIGHT - 2.0))
-            .px(px(11.0))
+            .h(px(UPDATE_HEIGHT))
+            // With its spinner, the spinner sits as a tab's icon does: as
+            // far from the left as from the top and bottom (the border
+            // counted), so it is concentric with the rounded end.
+            .pl(px(if busy { UPDATE_ICON_PAD } else { UPDATE_PAD }))
+            .pr(px(UPDATE_PAD))
             .capsule()
             .whitespace_nowrap()
             .text_size(px(12.0))
@@ -876,9 +890,7 @@ impl Workspace {
                     el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
                 }
             })
-            .when(matches!(kind, PillKind::Busy | PillKind::Progress(_)), |el| {
-                el.child(crate::browser_pane::spinner("update", 12.0, chrome.muted, cx))
-            })
+            .when(busy, |el| el.child(crate::browser_pane::spinner("update", TAB_ICON, chrome.muted, cx)))
             .child(label)
             .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
                 el.child(crate::agent::ring::ring(f32::from(percent) / 100.0, chrome.accent))
@@ -995,6 +1007,9 @@ mod tests {
         // The close button replaces the icon in place: the same centre.
         assert!((ICON_INSET + TAB_ICON / 2.0 - (CLOSE_INSET + CLOSE_SIZE / 2.0)).abs() < f32::EPSILON);
         assert!((ICON_INSET - CLOSE_OVERHANG - CLOSE_INSET).abs() < f32::EPSILON);
+        // The update pill's spinner: as far from its left edge as from its top and bottom.
+        let spinner_top = (UPDATE_HEIGHT - TAB_ICON) / 2.0;
+        assert!((UPDATE_BORDER + UPDATE_ICON_PAD - spinner_top).abs() < f32::EPSILON, "spinner: left {UPDATE_ICON_PAD} + border, top {spinner_top}");
     }
 
     /// The tab strip's layout (as `render_titlebar` builds it) while a closing tab collapses: the strip
