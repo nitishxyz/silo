@@ -7,7 +7,8 @@
 //!
 //! [`terminals`] runs otto's `shell` commands in parked command blocks next
 //! to the agent block showing the session (docs/OTTO.md §6.2); without silo
-//! or such a block, pipes run them.
+//! or such a block, pipes run them. A job keeps its block and the Silo home
+//! with its call, so a restarted daemon re-attaches while the block lives.
 //!
 //! [`connect`]'s renderer loads pages for otto's `web_fetch`/`web_search`
 //! through silo's `browser_fetch` (a hidden page in the app's off-screen
@@ -90,6 +91,11 @@ impl Shared {
 
     async fn control(&self) -> Option<Control> {
         self.live.lock().await.as_ref().map(|(control, _)| control.clone())
+    }
+
+    /// What a job keeps to re-attach to its block after a restart: the Silo home.
+    fn host(&self) -> String {
+        self.config.home.to_string_lossy().into_owned()
     }
 }
 
@@ -227,19 +233,36 @@ impl Terminals for SiloTerminals {
             .spawn_command(&owner, &shell, command, Some(cwd.to_string_lossy().into_owned()), env)
             .await
             .map_err(|e| ToolError::failed(format!("could not start the command in Silo: {e:#}")))?;
-        Ok(Some(Arc::new(SiloTerminal { tools, block })))
+        Ok(Some(Arc::new(SiloTerminal { tools, block, host: self.shared.host() })))
+    }
+
+    async fn attach(&self, block: &str, host: &str, cx: &ToolCx) -> Option<Arc<dyn Terminal>> {
+        // Another Silo's block ids mean nothing here.
+        if host != self.shared.host() {
+            return None;
+        }
+        let tools = self.shared.tools(&cx.cwd).await.ok()?;
+        let control = self.shared.control().await?;
+        control.call::<BlockView>(Method::BlockView { block_id: block.into() }).await.ok()?;
+        Some(Arc::new(SiloTerminal { tools, block: block.into(), host: host.into() }))
     }
 }
 
 struct SiloTerminal {
     tools: Arc<Tools>,
     block: String,
+    /// The Silo home it runs in.
+    host: String,
 }
 
 #[async_trait]
 impl Terminal for SiloTerminal {
     fn id(&self) -> &str {
         &self.block
+    }
+
+    fn host(&self) -> &str {
+        &self.host
     }
 
     async fn wait(&self, prompt: bool, screen: &mut (dyn for<'s> FnMut(&'s str) + Send)) -> Result<Finished, ToolError> {
@@ -306,6 +329,15 @@ mod tests {
         let request = RenderRequest { url: "https://example.com".into(), ..Default::default() };
         let error = silo.renderer.render(request, &ToolCx::new("c1", home.path())).await.unwrap_err();
         assert!(matches!(&error, RenderError::NoApp(m) if m.contains("silo is not running")), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_job_reattaches_only_to_a_live_block_of_its_silo() {
+        let home = tempfile::tempdir().unwrap();
+        let silo = connect(Config { home: home.path().into(), client_name: "otto test".into(), token: None });
+        let cx = ToolCx::new("c1", home.path());
+        assert!(silo.terminals.attach("b1", "/another/silo", &cx).await.is_none(), "another Silo's block");
+        assert!(silo.terminals.attach("b1", &home.path().to_string_lossy(), &cx).await.is_none(), "no server: the block is gone");
     }
 
     #[tokio::test]

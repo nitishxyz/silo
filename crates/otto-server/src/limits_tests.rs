@@ -55,9 +55,8 @@ async fn wait_count(count: &AtomicUsize, expected: usize) {
 async fn blocked_requests_are_capped_per_connection_and_globally() {
     let f = Fixture::new(vec![]).await;
     let count = Arc::new(AtomicUsize::new(0));
-    let mut config = f.config();
-    config.auth = Arc::new(BlockingAuth(count.clone()));
-    let server = Server::start(config).await.unwrap();
+    let server = Server::start(f.config()).await.unwrap();
+    server.ready(Services { auth: Arc::new(BlockingAuth(count.clone())), ..f.services() }).await.unwrap();
     let healthy = f.connect().await;
     let mut streams = vec![flood(&f).await];
     wait_count(&count, 64).await;

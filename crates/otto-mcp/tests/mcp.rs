@@ -1,6 +1,6 @@
 //! The MCP client against the in-repo stdio fixture server, and MCP tools
 //! inside the otto runtime (offline: scripted model).
-use otto_mcp::Mcp;
+use otto_mcp::{Mcp, Status};
 use otto_tools::{Loading, ProjectSources, Tool, ToolCx, ToolErrorKind};
 use serde_json::json;
 use std::{
@@ -26,7 +26,7 @@ async fn tool(mcp: &Mcp, root: &Path, name: &str) -> Arc<dyn Tool> {
 #[tokio::test]
 async fn stdio_tools_are_namespaced_sanitized_and_callable() {
     let dir = project(0);
-    let mcp = Mcp::new(dir.path().join("user"));
+    let mcp = Mcp::new(dir.path().join("user"), dir.path().join("tokens"));
     let tools = mcp.tools(dir.path()).await;
     let mut names: Vec<_> = tools.iter().map(|t| t.spec().name.clone()).collect();
     names.sort();
@@ -49,7 +49,7 @@ async fn stdio_tools_are_namespaced_sanitized_and_callable() {
 #[tokio::test]
 async fn list_changed_relists_and_crash_restarts() {
     let dir = project(0);
-    let mcp = Mcp::new(dir.path().join("user"));
+    let mcp = Mcp::new(dir.path().join("user"), dir.path().join("tokens"));
     let grow = tool(&mcp, dir.path(), "mcp__fixture__grow").await;
     assert_eq!(grow.call(json!({}), ToolCx::new("c1", dir.path())).await.unwrap().joined_text(), "grown");
     assert!(mcp.tools(dir.path()).await.iter().any(|t| t.spec().name == "mcp__fixture__extra"));
@@ -66,7 +66,7 @@ async fn list_changed_relists_and_crash_restarts() {
 #[tokio::test]
 async fn cancel_reaches_the_server() {
     let dir = project(0);
-    let mcp = Mcp::new(dir.path().join("user"));
+    let mcp = Mcp::new(dir.path().join("user"), dir.path().join("tokens"));
     let slow = tool(&mcp, dir.path(), "mcp__fixture__slow").await;
     let cx = ToolCx::new("c1", dir.path());
     let cancel = cx.cancel.clone();
@@ -87,16 +87,17 @@ async fn many_tools_are_deferred_and_bad_configs_are_skipped() {
     config["mcpServers"]["off"] = json!({"command":FIXTURE,"disabled":true});
     config["mcpServers"]["unset"] = json!({"command":"${OTTO_MCP_TEST_NEVER_SET}"});
     std::fs::write(dir.path().join(".mcp.json"), config.to_string()).unwrap();
-    let mcp = Mcp::new(dir.path().join("user"));
+    let mcp = Mcp::new(dir.path().join("user"), dir.path().join("tokens"));
     let tools = mcp.tools(dir.path()).await;
     assert_eq!(tools.len(), 16);
     assert!(tools.iter().all(|t| t.spec().loading == Loading::Deferred && t.spec().name.starts_with("mcp__fixture__")));
-    let status = mcp.status(dir.path()).await;
-    let state = |name: &str| status.iter().find(|s| s.name == name).unwrap().state.clone();
-    assert_eq!(state("fixture"), "running");
-    assert_eq!(state("off"), "disabled");
-    assert!(state("broken").contains("cannot start"));
-    assert!(state("unset").contains("OTTO_MCP_TEST_NEVER_SET"));
+    let listed = mcp.list(Some(dir.path())).await;
+    let state = |name: &str| listed.iter().find(|s| s.name == name).unwrap().clone();
+    assert_eq!((state("fixture").status, state("fixture").tools), (Status::Connected, 16));
+    assert!(!state("off").enabled && state("fixture").enabled);
+    assert!(matches!(state("broken").status, Status::Error(e) if e.contains("cannot start")));
+    assert!(matches!(state("unset").status, Status::Error(e) if e.contains("OTTO_MCP_TEST_NEVER_SET")));
+    assert!(listed.iter().all(|s| s.scope == otto_mcp::Scope::Project));
     mcp.shutdown().await;
 }
 
@@ -206,7 +207,7 @@ async fn mcp_tools_in_a_session_are_provider_safe_and_load_on_demand() {
     })
     .await
     .unwrap();
-    runtime.add_source(Mcp::new(dir.path().join("user")));
+    runtime.add_source(Mcp::new(dir.path().join("user"), dir.path().join("tokens")));
     let project = runtime.open_project(dir.path()).await.unwrap();
     let session = runtime.create_session(CreateSession { project_id: project.id, cwd: dir.path().into(), ..Default::default() }).await.unwrap();
     assert!(runtime.tools(&session.id).await.unwrap().iter().any(|t| t.name == "mcp__fixture__echo" && t.source == "mcp:fixture"));

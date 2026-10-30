@@ -73,4 +73,17 @@ CREATE INDEX items_seq ON items(session_id,seq);
 CREATE INDEX item_versions_seq ON item_versions(session_id,seq);
 "#,
     ),
+    // Bounded growth (`retention`): undo history kept with its session (content in `blobs`), and blobs that may have
+    // lost their last reference, collected by `retention::collect`. `retention::bounded` seeds every blob.
+    (
+        5,
+        r#"
+CREATE TABLE undo_edits (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), path TEXT NOT NULL,
+ before TEXT, after TEXT, bytes INTEGER NOT NULL, at INTEGER NOT NULL
+);
+CREATE INDEX undo_edits_path ON undo_edits(session_id,path,id);
+CREATE TABLE blob_candidates (sha256 TEXT PRIMARY KEY) WITHOUT ROWID;
+"#,
+    ),
 ];

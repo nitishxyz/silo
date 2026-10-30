@@ -48,11 +48,13 @@ async fn project_root(root: String, cwd: Option<String>) -> String {
     }
 }
 
-pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &Subs) -> Result<Value, RpcError> {
-    let runtime = &state.config.runtime;
+/// What a starting server answers too; the rest fail `starting` until it is ready.
+fn server(state: &State, method: Method) -> Result<Value, RpcError> {
     match method {
-        Method::ServerInfo {} => Ok(json!(state.info)),
-        Method::ServerShutdown {} | Method::Ping {} => Ok(json!({})),
+        Method::ServerInfo {} => Ok(json!(state.info())),
+        // Stopping mid-start would leave the daemon opening its data with nothing to serve.
+        Method::ServerShutdown {} => state.ready().map(|_| json!({})),
+        Method::Ping {} => Ok(json!({})),
         Method::ApiList {} => Ok(json!(
             METHODS
                 .iter()
@@ -60,6 +62,17 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
                 .collect::<Vec<_>>()
         )),
         Method::ApiDescribe { method } => Ok(json!(api::describe(&method).ok_or_else(|| RpcError::method_not_found(&method))?)),
+        _ => Err(state.not_ready()),
+    }
+}
+
+pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &Subs) -> Result<Value, RpcError> {
+    let Ok(ready) = state.ready() else { return server(state, method) };
+    let (runtime, auth) = (&ready.services.runtime, &ready.services.auth);
+    match method {
+        m @ (Method::ServerInfo {} | Method::ServerShutdown {} | Method::Ping {} | Method::ApiList {} | Method::ApiDescribe { .. }) => {
+            server(state, m)
+        }
         Method::ProjectOpen { root, cwd } => Ok(json!(runtime.open_project(project_root(root, cwd).await).await.map_err(core_error)?)),
         Method::ProjectList {} => Ok(json!(runtime.recent_projects().await.map_err(core_error)?)),
         Method::SessionCreate { project_root, project_id, agent, approval_mode, model, provider, title, parent, effort } => {
@@ -106,7 +119,7 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!(runtime.view_window(&session_id, window).await.map_err(core_error)?))
         }
         Method::SessionSubscribe { session_id, after_seq } => {
-            Ok(json!(crate::connection::subscribe(state, session_id, after_seq.unwrap_or(0), sink.clone(), subs).await?))
+            Ok(json!(crate::connection::subscribe(runtime, session_id, after_seq.unwrap_or(0), sink.clone(), subs).await?))
         }
         Method::SessionUnsubscribe { session_id } => {
             if let Some(task) = subs.lock().await.sessions.remove(&session_id) {
@@ -131,14 +144,26 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             runtime.rename(&session_id, title).await.map_err(core_error)?;
             Ok(json!({}))
         }
-        Method::SessionUpdate { session_id, provider, model, agent, effort, reset_effort } => {
+        Method::SessionUpdate { session_id, provider, model, agent, effort, reset_effort, folder } => {
             if [&provider, &model, &agent].into_iter().flatten().any(|v| v.trim().is_empty()) {
                 return Err(RpcError::bad_request("provider, model and agent must not be empty"));
             }
             if reset_effort && effort.is_some() {
                 return Err(RpcError::bad_request("effort and reset_effort are exclusive"));
             }
-            let change = otto_core::Configure { provider, model, agent, effort, reset_effort };
+            // The folder's project as `project.open` finds it; `~` is this host's home.
+            let folder = folder.map(|f| match f.trim().strip_prefix('~') {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{}{rest}", user_home()),
+                _ => f.trim().to_owned(),
+            });
+            if folder.as_ref().is_some_and(|f| !f.starts_with('/')) {
+                return Err(RpcError::bad_request("folder must be absolute or ~/…"));
+            }
+            let project_root = match folder {
+                Some(folder) => Some(project_root(String::new(), Some(folder)).await),
+                None => None,
+            };
+            let change = otto_core::Configure { provider, model, agent, effort, reset_effort, project_root };
             Ok(json!(runtime.configure(&session_id, change).await.map_err(core_error)?))
         }
         Method::SessionArchive { session_id } => {
@@ -192,8 +217,8 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             runtime.answer_question(&session_id, &question_id, answer).await.map_err(core_error)?;
             Ok(json!({}))
         }
-        Method::ModelList { provider } => Ok(json!(state.config.auth.list_models(provider).await?)),
-        Method::AuthStatus {} => Ok(json!(state.config.auth.status().await?)),
+        Method::ModelList { provider } => Ok(json!(auth.list_models(provider).await?)),
+        Method::AuthStatus {} => Ok(json!(auth.status().await?)),
         Method::AuthLogin { provider, mode, api_key, device, base_url, paste } => {
             if provider.is_empty()
                 // Local and custom servers (a `base_url`) may need no key.
@@ -207,15 +232,15 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             if base_url.as_deref().is_some_and(|url| !(url.starts_with("http://") || url.starts_with("https://"))) {
                 return Err(RpcError::bad_request("base_url must start with http:// or https://"));
             }
-            Ok(json!(state.config.auth.login(provider, mode, api_key, device, base_url, paste).await?))
+            Ok(json!(auth.login(provider, mode, api_key, device, base_url, paste).await?))
         }
-        Method::AuthLoginComplete { login_id, code } => Ok(json!(state.config.auth.login_complete(login_id, code).await?)),
+        Method::AuthLoginComplete { login_id, code } => Ok(json!(auth.login_complete(login_id, code).await?)),
         Method::AuthLoginCancel { login_id } => {
-            state.config.auth.login_cancel(login_id).await?;
+            auth.login_cancel(login_id).await?;
             Ok(json!({}))
         }
         Method::AuthLogout { provider } => {
-            state.config.auth.logout(provider).await?;
+            auth.logout(provider).await?;
             Ok(json!({}))
         }
         Method::ToolsList { session_id } => {
@@ -238,19 +263,19 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!(runtime.complete_files(cwd, query, usize::try_from(limit).unwrap_or(usize::MAX)).await.map_err(core_error)?))
         }
         Method::ConfigGet { key } => {
-            let settings = state.settings.lock().await;
+            let settings = ready.settings.lock().await;
             Ok(json!(ConfigValue { value: key.map_or_else(|| settings.clone(), |key| settings.get(key).cloned().unwrap_or(Value::Null)) }))
         }
         Method::ConfigSet { key, value } => {
             if key.is_empty() {
                 return Err(RpcError::bad_request("config key must not be empty"));
             }
-            let mut settings = state.settings.lock().await;
+            let mut settings = ready.settings.lock().await;
             let mut next = settings.clone();
             next.as_object_mut().ok_or_else(|| RpcError::internal("config must be an object"))?.insert(key, value);
             let next_defaults = defaults(&next)?;
             runtime.set_config(next_defaults).map_err(core_error)?;
-            if let Err(error) = save_json(&state.config.home.join("config.json"), &next).await {
+            if let Err(error) = save_json(&state.home.join("config.json"), &next).await {
                 runtime.set_config(defaults(&settings)?).map_err(core_error)?;
                 return Err(error);
             }
@@ -258,6 +283,14 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!({}))
         }
         Method::PlanUsage { provider } => Ok(json!(runtime.plan_usage(provider.as_deref()))),
+        m @ (Method::McpList { .. }
+        | Method::McpAdd { .. }
+        | Method::McpUpdate { .. }
+        | Method::McpRemove { .. }
+        | Method::McpLogin { .. }
+        | Method::McpLoginComplete { .. }
+        | Method::McpLoginCancel { .. }
+        | Method::McpLogout { .. }) => crate::mcp::dispatch(&ready.services.mcp, m).await,
         Method::UsageSummary { since_ms, utc_offset_minutes } => {
             Ok(json!(runtime.usage_summary(since_ms, utc_offset_minutes.unwrap_or(0)).await.map_err(core_error)?))
         }

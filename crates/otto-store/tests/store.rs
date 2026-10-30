@@ -77,7 +77,7 @@ fn projects_sessions_and_settings() {
     assert!(store.update_session("missing", SessionUpdate::default()).is_err());
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(), "wal");
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
     drop(store);
     assert!(Store::open(&path).unwrap().session(&first.id).unwrap().is_some());
 }

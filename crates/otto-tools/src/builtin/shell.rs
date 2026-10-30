@@ -27,6 +27,11 @@ pub trait Terminals: Send + Sync {
     /// Start `command` in `cwd` with `env` for the session calling (`cx`);
     /// `None` when no terminal host serves this call (pipes run it).
     async fn start(&self, command: &str, cwd: &Path, env: &[(&str, &str)], cx: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError>;
+    /// Block `block` of host `host` (a [`Terminal::host`]), started before a restart: its command, watched again,
+    /// when that block is still there. `None` when it is gone or `host` is not this one.
+    async fn attach(&self, _block: &str, _host: &str, _cx: &ToolCx) -> Option<Arc<dyn Terminal>> {
+        None
+    }
 }
 
 /// One command running in a terminal host.
@@ -34,6 +39,11 @@ pub trait Terminals: Send + Sync {
 pub trait Terminal: Send + Sync {
     /// Its block.
     fn id(&self) -> &str;
+    /// The host running it (silo: its home), kept with its job so a restarted
+    /// daemon can re-attach ([`Terminals::attach`]); empty: none can.
+    fn host(&self) -> &str {
+        ""
+    }
     /// Until it exits or, with `prompt`, waits for input; `screen` gets the
     /// screen as it changes.
     async fn wait(&self, prompt: bool, screen: &mut (dyn for<'s> FnMut(&'s str) + Send)) -> Result<Finished, ToolError>;
@@ -290,6 +300,7 @@ impl Tool for Shell {
         if input.get("background").and_then(Value::as_bool).unwrap_or(false) {
             let explicit = input.get("timeout_ms").and_then(Value::as_u64).map(Duration::from_millis);
             let block = terminal.as_ref().map(|t| t.id().to_owned());
+            let host = terminal.as_ref().map_or(String::new(), |t| t.host().to_owned());
             let id = self
                 .spawn_job(command, cx.clone(), terminal.clone(), move |cx, state| async move {
                     match terminal {
@@ -303,7 +314,10 @@ impl Tool for Shell {
             if let Some(block) = block {
                 metadata["block_id"] = json!(block);
             }
-            return Ok(ToolOutput::text(format!("Started {id}{place}; its result arrives as a message when it exits.")).with_metadata(metadata));
+            return Ok(hosted(
+                ToolOutput::text(format!("Started {id}{place}; its result arrives as a message when it exits.")).with_metadata(metadata),
+                &host,
+            ));
         }
         // Until it returns, the user can detach it (`Jobs::detach`): it runs on as a job.
         let detach = Detachable::new(&self.host.jobs, &cx);
@@ -323,10 +337,11 @@ impl Tool for Shell {
                 // An explicit timeout still applies to what is left of it; the default one does not.
                 let left = explicit.map(|t| t.saturating_sub(started.elapsed()));
                 let block = terminal.id().to_owned();
+                let host = terminal.host().to_owned();
                 let id = self
                     .spawn_job(command, cx.clone(), Some(terminal.clone()), move |cx, _| async move { watch(terminal.as_ref(), &cx, left, true).await })
                     .await?;
-                return Ok(detached(&id, Some(&block)));
+                return Ok(hosted(detached(&id, Some(&block)), &host));
             }
             finished = terminal.wait(true, &mut screen) => finished?,
         };
@@ -337,6 +352,7 @@ impl Tool for Shell {
             Finished::Waiting { screen } => {
                 // The user (or terminal_send) answers; the result arrives later.
                 let block = terminal.id().to_owned();
+                let host = terminal.host().to_owned();
                 let id =
                     self.spawn_job(command, cx.clone(), Some(terminal.clone()), move |cx, _| async move {
                         watch(terminal.as_ref(), &cx, None, false).await
@@ -345,7 +361,7 @@ impl Tool for Shell {
                 let text = format!(
                     "waiting_for_input: the command waits for input (job {id}). Answer with terminal_send to block {block}, or ask the user to open it and type; its result arrives as a message when it exits.\n{screen}"
                 );
-                Ok(ToolOutput::text(text).with_metadata(json!({"status":"waiting_for_input","job_id":id,"block_id":block})))
+                Ok(hosted(ToolOutput::text(text).with_metadata(json!({"status":"waiting_for_input","job_id":id,"block_id":block})), &host))
             }
         }
     }
@@ -359,24 +375,76 @@ impl Shell {
         Fut: std::future::Future<Output = Result<ToolOutput, ToolError>> + Send + 'static,
     {
         let id = self.host.jobs.next_id();
+        self.host.spawn(id.clone(), None, command, cx, terminal, work).await?;
+        Ok(id)
+    }
+}
+/// A terminal job started before a restart (from its call: id, block and host in its metadata).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resumed {
+    pub job_id: String,
+    pub command: String,
+    pub block_id: String,
+    pub host: String,
+    /// Unix milliseconds.
+    pub started_at: i64,
+    /// What is left of an explicit timeout.
+    pub timeout: Option<Duration>,
+    /// Report a prompt once (it was not `waiting_for_input` already).
+    pub prompt: bool,
+}
+impl Host {
+    /// Watch `job` again when its block is still there ([`Terminals::attach`]): it is listed again and reports
+    /// through `cx`'s mailbox as usual. `false` when its block is gone or no terminal host runs here.
+    pub async fn resume(&self, job: Resumed, cx: ToolCx) -> Result<bool, ToolError> {
+        let Some(terminals) = &self.terminals else { return Ok(false) };
+        let Some(terminal) = terminals.attach(&job.block_id, &job.host, &cx).await else { return Ok(false) };
+        let (watched, timeout, prompt) = (terminal.clone(), job.timeout, job.prompt);
+        let work = move |cx: ToolCx, _| async move { watch(watched.as_ref(), &cx, timeout, prompt).await };
+        self.spawn(job.job_id, Some(job.started_at), job.command, cx, Some(terminal), work).await?;
+        Ok(true)
+    }
+    /// Register job `id` running `work`, whose result is delivered to the calling session when it ends.
+    async fn spawn<F, Fut>(
+        &self,
+        id: String,
+        started_at: Option<i64>,
+        command: String,
+        cx: ToolCx,
+        terminal: Option<Arc<dyn Terminal>>,
+        work: F,
+    ) -> Result<(), ToolError>
+    where
+        F: FnOnce(ToolCx, Arc<Mutex<JobState>>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<ToolOutput, ToolError>> + Send + 'static,
+    {
         // A job outlives the turn: only `job kill` or its session closing stop it.
         let cancel = CancellationToken::new();
         let block = terminal.as_deref().map(|t| t.id().to_owned());
-        let state = Arc::new(Mutex::new(JobState::new(cancel.clone(), &command, &cx, block.clone())));
-        self.host.jobs.insert(&id, state.clone()).await?;
+        let mut job = JobState::new(cancel.clone(), &command, &cx, block.clone());
+        job.started_at = started_at.unwrap_or(job.started_at);
+        let state = Arc::new(Mutex::new(job));
+        self.jobs.insert(&id, state.clone()).await?;
         let mut cx = cx;
         cx.cancel = cancel;
         cx.progress = None;
         let mailbox = cx.mailbox.clone();
-        let registry = Arc::downgrade(&self.host.jobs);
-        let job_id = id.clone();
+        let registry = Arc::downgrade(&self.jobs);
         tokio::spawn(async move {
             let result = work(cx, state.clone()).await;
-            finish(registry, job_id, &command, block.as_deref(), mailbox.as_deref(), state, result).await;
+            finish(registry, id, &command, block.as_deref(), mailbox.as_deref(), state, result).await;
         });
-        Ok(id)
+        Ok(())
     }
-
+}
+/// `output` with the host its terminal runs in (`metadata.host`), when one can re-attach.
+fn hosted(mut output: ToolOutput, host: &str) -> ToolOutput {
+    if !host.is_empty() {
+        output.metadata["host"] = json!(host);
+    }
+    output
+}
+impl Shell {
     /// A foreground command through pipes. It runs in its own task so that
     /// detaching it leaves it running: the call then returns and the task
     /// reports as a job. Until then a cancelled turn, the timeout, or the call

@@ -1,12 +1,13 @@
 //! Migration 4: existing data stored once (`refs`). One transaction: duplicate item versions go, media and long
 //! strings move into `blobs`, and `events` is rebuilt without its projections' copies and redundant deltas. Then `VACUUM`.
 
-use crate::{Result, refs};
+use crate::{Migration, Result, refs};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 use std::{collections::HashSet, time::Instant};
 
 pub(crate) const STORED_ONCE: i64 = 4;
+pub(crate) const STEPS: u32 = 6;
 
 const EVENTS: &str = "CREATE TABLE events_new (
  session_id TEXT NOT NULL REFERENCES sessions(id), seq INTEGER NOT NULL, turn INTEGER NOT NULL, step INTEGER NOT NULL,
@@ -17,14 +18,17 @@ const EVENTS: &str = "CREATE TABLE events_new (
 const TRIGGERS: &str = "CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events WHEN old.kind NOT IN ('text.delta','reasoning.delta','tool.input_delta') BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;";
 
-pub(crate) fn stored_once(tx: &Transaction<'_>) -> Result<()> {
+pub(crate) fn stored_once(tx: &Transaction<'_>, progress: &dyn Fn(Migration)) -> Result<()> {
     let start = Instant::now();
     let log = |phase: &str| tracing::info!(phase, elapsed_ms = start.elapsed().as_millis(), "store migration");
+    let step = |done| progress(Migration::Step { done, of: STEPS });
     tx.pragma_update(None, "cache_size", -262_144)?;
     log("start");
+    step(0);
     tx.execute("DELETE FROM item_versions WHERE (session_id,item_id,seq) IN (SELECT session_id,item_id,seq FROM items)", [])?;
     log("item versions");
-    for (table, column) in [("items", "json"), ("item_versions", "json"), ("tool_calls", "input"), ("tool_calls", "output")] {
+    step(1);
+    for (done, (table, column)) in (2..).zip([("items", "json"), ("item_versions", "json"), ("tool_calls", "input"), ("tool_calls", "output")]) {
         let mut changed = Vec::new();
         {
             let mut stmt = tx.prepare(&format!("SELECT rowid,{column} FROM {table} WHERE {column} IS NOT NULL"))?;
@@ -45,8 +49,10 @@ pub(crate) fn stored_once(tx: &Transaction<'_>) -> Result<()> {
             update.execute(params![rowid, text])?;
         }
         log(&format!("{table}.{column}"));
+        step(done);
     }
     events(tx, &log)?;
+    step(STEPS);
     tx.pragma_update(None, "cache_size", -2000)?;
     log("done");
     Ok(())
@@ -132,6 +138,7 @@ fn events(tx: &Transaction<'_>, log: &impl Fn(&str)) -> Result<()> {
 /// Gives the space the migration freed back to the file system.
 pub(crate) fn vacuum(connection: &Connection) -> Result<()> {
     let start = Instant::now();
+    tracing::info!("store migration vacuum: start");
     connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
     tracing::info!(elapsed_ms = start.elapsed().as_millis(), "store migration vacuum");
     Ok(())

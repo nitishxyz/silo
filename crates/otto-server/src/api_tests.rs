@@ -7,7 +7,7 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
     std::fs::create_dir_all(f.dir.path().join("agents")).unwrap();
     std::fs::write(f.dir.path().join("agents/custom.md"), "---\nname: custom\ndescription: custom runtime agent\n---\nHelp.").unwrap();
     std::fs::write(f.dir.path().join("config.json"), r#"{"agent":"custom","model":"startup","approval_mode":"ask_all"}"#).unwrap();
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let projects = client.call(Method::ProjectList {}).await.unwrap();
     assert_eq!(projects[0]["id"], project.id);
@@ -74,7 +74,7 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
     assert!(!error.contains("bad_request"), "{error}");
     server.shutdown().await.unwrap();
     f.reopen().await;
-    let restarted = Server::start(f.config()).await.unwrap();
+    let restarted = f.start().await;
     let client = f.connect().await;
     assert_eq!(f.session(&client).await.model, "changed");
     restarted.shutdown().await.unwrap();
@@ -83,7 +83,7 @@ async fn discovery_defaults_and_device_login_use_runtime_and_auth() {
 #[tokio::test]
 async fn agents_and_the_tool_catalog_round_trip_over_the_wire() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let root = f.dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
@@ -136,7 +136,7 @@ async fn agents_and_the_tool_catalog_round_trip_over_the_wire() {
 #[tokio::test]
 async fn session_update_and_recent_projects_over_the_wire() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let created = client
         .session_create(SessionCreateOptions {
@@ -176,7 +176,15 @@ async fn session_update_and_recent_projects_over_the_wire() {
         assert!(matches!(&error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST), "{error}");
     }
     let raw = client
-        .call(Method::SessionUpdate { session_id: created.id.clone(), provider: None, model: None, agent: None, effort: None, reset_effort: false })
+        .call(Method::SessionUpdate {
+            session_id: created.id.clone(),
+            provider: None,
+            model: None,
+            agent: None,
+            effort: None,
+            reset_effort: false,
+            folder: None,
+        })
         .await
         .unwrap();
     assert_eq!(raw["effort"], "high");
@@ -189,9 +197,37 @@ async fn session_update_and_recent_projects_over_the_wire() {
 }
 
 #[tokio::test]
+async fn session_update_moves_a_session_to_a_folders_project() {
+    let f = Fixture::new(vec![]).await;
+    let server = f.start().await;
+    let client = f.connect().await;
+    let created = client
+        .session_create(SessionCreateOptions { project_root: Some(f.dir.path().to_string_lossy().into_owned()), ..Default::default() })
+        .await
+        .unwrap();
+    let repo = f.dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    assert!(std::process::Command::new("git").arg("init").arg("-q").arg(&repo).status().unwrap().success());
+    for folder in ["repo", " ", "~nobody"] {
+        let update = otto_client::SessionUpdate { folder: Some(folder.into()), ..Default::default() };
+        let error = client.session_update(&created.id, update).await.unwrap_err();
+        assert!(matches!(&error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST), "{folder}: {error}");
+    }
+    // A folder in a work tree: its top's project, as `project.open` finds it.
+    let update = otto_client::SessionUpdate { folder: Some(repo.join("sub").to_string_lossy().into_owned()), ..Default::default() };
+    let moved = client.session_update(&created.id, update).await.unwrap();
+    let top = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    assert_eq!(moved.cwd, top);
+    let project = client.project_list().await.unwrap().into_iter().find(|p| p.root == top).unwrap();
+    assert_eq!(moved.project_id, project.id);
+    assert_eq!(client.session_list(Some(project.id), false).await.unwrap()[0].id, created.id);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn fork_replay_and_follower_match_view_without_gaps() {
     let f = Fixture::new(vec![text("parent"), text("child")]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     let parent = SessionFollower::new(client.clone(), &session.id).await.unwrap();
@@ -229,7 +265,7 @@ async fn fork_replay_and_follower_match_view_without_gaps() {
 #[tokio::test]
 async fn a_fork_at_an_item_is_a_top_level_session_and_a_sub_agent_is_not() {
     let f = Fixture::new(vec![text("one"), text("two")]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     assert!(session.forked_from.is_none() && !session.is_subagent());

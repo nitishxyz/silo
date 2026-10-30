@@ -21,6 +21,8 @@ pub trait ModelResolver: Send + Sync {
 }
 /// How often [`ModelResolver::refresh_models`] is asked whether a list is due.
 pub const MODEL_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+/// How often the store's idle-time upkeep runs (`Store::maintain`), skipped while a session works.
+pub const MAINTAIN_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 pub struct RuntimeConfig {
     pub store: Arc<Mutex<Store>>,
     pub models: Arc<dyn ModelResolver>,
@@ -89,6 +91,9 @@ pub struct Configure {
     pub effort: Option<otto_llm::Effort>,
     /// Back to the agent's effort, else the model's default.
     pub reset_effort: bool,
+    /// Move the idle session to the project at this root (absolute, opened as given): its next turn's tools, rules,
+    /// instructions and hooks work there, and the model is told the folder changed.
+    pub project_root: Option<String>,
 }
 /// Each provider's last plan usage, in the state folder.
 const PLANS: &str = "plan_usage.json";
@@ -133,6 +138,8 @@ pub(crate) struct Inner {
     auto_title: std::sync::atomic::AtomicBool,
     /// Each provider's subscription limits as last reported (`<state>/plan_usage.json`).
     plans: Mutex<std::collections::BTreeMap<String, otto_llm::PlanUsage>>,
+    /// Shell jobs a restart left in terminal blocks, re-attached by `deliver_pending`.
+    orphans: Mutex<Vec<crate::recovery::Orphan>>,
 }
 impl Runtime {
     /// Recover interrupted tool calls before accepting any new work.
@@ -153,8 +160,10 @@ impl Runtime {
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
             plans: Mutex::new(plans),
+            orphans: Mutex::new(Vec::new()),
         }));
-        runtime.db(crate::recovery::recover).await?;
+        let orphans = runtime.db(crate::recovery::recover).await?;
+        *runtime.0.orphans.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = orphans;
         let state = runtime.0.config.state_dir.clone();
         runtime
             .db(move |s| {
@@ -167,7 +176,28 @@ impl Runtime {
             })
             .await?;
         runtime.spawn_model_refresh();
+        runtime.spawn_maintenance();
         Ok(runtime)
+    }
+    /// Every [`MAINTAIN_EVERY`] while no session works, the store's upkeep (`Store::maintain`). Ends with the runtime.
+    fn spawn_maintenance(&self) {
+        let inner = Arc::downgrade(&self.0);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + MAINTAIN_EVERY, MAINTAIN_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(runtime) = inner.upgrade().map(Runtime) else { return };
+                if runtime.0.closing.load(std::sync::atomic::Ordering::Relaxed) || runtime.busy() {
+                    continue;
+                }
+                match runtime.db(|s| Ok(s.maintain()?)).await {
+                    Ok(done) if done != otto_store::Maintained::default() => tracing::info!(?done, "store maintained"),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "store upkeep failed"),
+                }
+            }
+        });
     }
     /// Hourly (first right away), refresh due model lists and announce a change (`auth.changed`,
     /// which makes clients reread their model pickers). Ends with the runtime.
@@ -179,8 +209,9 @@ impl Runtime {
             loop {
                 tick.tick().await;
                 let Some(runtime) = inner.upgrade().map(Runtime) else { return };
+                // A shut down runtime may be reopened (`reopen`).
                 if runtime.0.closing.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
+                    continue;
                 }
                 let models = runtime.0.config.models.clone();
                 drop(runtime);
@@ -614,11 +645,18 @@ impl Runtime {
         for reply in replies {
             reply.await.map_err(|_| Error::Closed)?;
         }
-        let sources = std::mem::take(&mut *self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        // Kept: a reopened runtime (`reopen`) starts them again on demand.
+        let sources = self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         for source in sources {
             source.shutdown().await;
         }
         Ok(())
+    }
+    /// Open a runtime that was shut down again: sessions open on demand, and what reached the outbox while it
+    /// was closed (a child's report, a background job's result) is delivered now. How many sessions were woken.
+    pub async fn reopen(&self) -> Result<usize> {
+        self.0.closing.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.deliver_pending().await
     }
     /// Nudge a session that has undelivered outbox entries, opening its actor
     /// if needed. Entries are durable; a failed wake only delays delivery.
@@ -633,13 +671,48 @@ impl Runtime {
     }
     /// Wake every session whose children finished while it was not running
     /// (including before a restart). Call once after registering tools and
-    /// sources; returns how many sessions were woken.
+    /// sources; returns how many sessions were woken. First, shell jobs a
+    /// restart left in terminal blocks are watched again (`resume_jobs`).
     pub async fn deliver_pending(&self) -> Result<usize> {
+        self.resume_jobs().await?;
         let ids = self.db(|s| Ok(s.outbox_pending_sessions()?)).await?;
         for id in &ids {
             self.wake(id.clone()).await?;
         }
         Ok(ids.len())
+    }
+    /// Re-attach the shell jobs a restart left in terminal blocks that are still there (`Terminals::attach`): they
+    /// are listed again and their results arrive through the outbox as usual. The others report stopped.
+    async fn resume_jobs(&self) -> Result<()> {
+        let orphans = std::mem::take(&mut *self.0.orphans.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let host = self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        for crate::recovery::Orphan { session, call_id, job } in orphans {
+            let id = session.clone();
+            let (cwd, root) = self
+                .db(move |s| {
+                    let row = s.session(&id)?.ok_or_else(|| Error::Invalid(format!("unknown session {id}")))?;
+                    let root = s.project(&row.project_id)?.map_or_else(|| row.cwd.clone(), |p| p.root);
+                    Ok((row.cwd, root))
+                })
+                .await?;
+            let mut cx = otto_tools::ToolCx::new(call_id, cwd);
+            cx.project_root = root.into();
+            cx.spill_dir = Some(self.0.config.state_dir.join("outputs").join(&session));
+            cx.attachments = Some(self.attachments_root());
+            cx.sessions = crate::mailbox::lineage(self, &session).await?;
+            cx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: self.clone(), session: session.clone() }));
+            let (job_id, command) = (job.job_id.clone(), job.command.clone());
+            match host.resume(job, cx).await {
+                Ok(true) => tracing::info!(%session, job = %job_id, "shell job re-attached"),
+                resumed => {
+                    if let Err(error) = resumed {
+                        tracing::warn!(%session, job = %job_id, %error, "shell job not re-attached");
+                    }
+                    self.db(move |s| crate::recovery::stopped(s, &session, &job_id, &command)).await?;
+                }
+            }
+        }
+        Ok(())
     }
     /// Withdraw a pending input; see `SessionHandle::queue_remove`.
     pub async fn queue_remove(&self, id: &str, input_id: &str) -> Result<()> {

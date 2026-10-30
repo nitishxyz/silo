@@ -49,14 +49,19 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
   (`agents.get/save/delete`); `tool_catalog(project_root)` lists every grantable tool.
 - `add_source(Arc<dyn otto_tools::ProjectSources>)` adds project-dependent tools
   (MCP via `otto-mcp`), listed again before every model request and granted by
-  pattern (`mcp__*` by default). `shutdown` stops them.
+  pattern (`mcp__*` by default). `shutdown` stops them; a `reopen`ed runtime starts them again on demand.
 - `set_terminals(Arc<dyn otto_tools::builtin::shell::Terminals>)` runs `shell` commands in a terminal host
   (silo's parked command blocks, `otto_silo_tools::silo`); short read-only ones and calls it does not serve use
   pipes. Shell jobs are runtime-wide; a job's result (background, or a command that waited for input) is delivered
   to its session as a system item through the outbox (`{notice}` from the session to itself). Archiving a session
-  stops its jobs.
-- `deliver_pending() -> Result<usize>` wakes sessions with undelivered outbox
-  entries; call it once after registering tools and sources.
+  stops its jobs. A job in a terminal block keeps the block and host in its call's metadata; after a restart
+  `deliver_pending` re-attaches it while the block is still there (`Terminals::attach`), else it reports stopped.
+- `deliver_pending() -> Result<usize>` re-attaches such jobs, then wakes sessions with undelivered outbox
+  entries; call it once after registering tools, terminals and sources.
+- `reopen() -> Result<usize>` opens a runtime that was `shutdown` again and delivers what reached the outbox
+  meanwhile.
+- `undo_edit`'s history is kept in the store with the session (`Store::undo_*`, capped there), so it survives a
+  restart. Every `MAINTAIN_EVERY` (15 min) while no session works, the runtime runs `Store::maintain`.
 - `queue_remove(id, input_id)` and `queue_update(id, input_id, Delivery)` (also on
   `SessionHandle`) withdraw or move a pending input until the model has it.
 - `CreateSession.task` records a delegated child's task; `SessionDefaults.native_compaction`
@@ -225,3 +230,4 @@ approval policy does not gate hook commands. `load_tools` writes `loaded_tools`
 outside the actor journal.
 Call `runtime.shutdown().await` before dropping it to cancel/join actors and
 release store references; do not submit commands concurrently with shutdown.
+Afterwards sessions don't open (a wake is deferred) until `reopen`.

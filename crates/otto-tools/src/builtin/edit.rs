@@ -57,6 +57,6 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
     let old = regular_text(&path).map_err(io)?;
     let new = replace(&old, &input)?;
     atomic_write(&path, &new).map_err(io)?;
-    super::undo_edit::record(&cx, &path, Some(&old), Some(&new));
+    super::undo_edit::record(&cx, &path, Some(&old), Some(&new)).await;
     Ok(ToolOutput::text(format!("Edited {}", path.display())).with_metadata(diff(&path, &old, &new)))
 }

@@ -73,6 +73,33 @@ pub struct ServerHello {
     /// when it names none: a Silo server replaces a daemon of another build.
     #[serde(default)]
     pub build: String,
+    /// Set while the daemon opens its data (a schema migration can take a minute): only `server.*`,
+    /// `ping` and `api.*` answer, the rest fail `starting`; `server.starting` events follow, then `server.ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting: Option<Starting>,
+}
+
+/// What a starting daemon is doing; `step` of `steps` (both 0 when unknown).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Starting {
+    pub phase: StartPhase,
+    #[serde(default)]
+    pub step: u32,
+    #[serde(default)]
+    pub steps: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StartPhase {
+    /// Opening the store.
+    Opening,
+    /// Migrating the store to a new schema.
+    Migrating,
+    /// Giving the space a migration freed back to the file system.
+    Compacting,
+    /// Recovering interrupted turns and loading tools.
+    Loading,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -88,6 +115,9 @@ pub struct ServerInfo {
     /// As in [`ServerHello::build`].
     #[serde(default)]
     pub build: String,
+    /// As in [`ServerHello::starting`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting: Option<Starting>,
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
@@ -152,7 +182,7 @@ pub enum Method {
     SessionFork { session_id: SessionId, at_seq: Option<i64> },
     #[serde(rename = "session.rename")]
     SessionRename { session_id: SessionId, title: String },
-    /// Change the provider, model, agent or effort; given fields only, from the next model request.
+    /// Change the provider, model, agent, effort or folder; given fields only, from the next model request.
     #[serde(rename = "session.update")]
     SessionUpdate {
         session_id: SessionId,
@@ -167,6 +197,10 @@ pub enum Method {
         /// Back to the agent's effort, else the model's default; not with `effort`.
         #[serde(default)]
         reset_effort: bool,
+        /// Move the idle session to this folder's project (its git work tree's top, as `project.open`'s `cwd`;
+        /// absolute or `~/…`) for its next turn: tools, rules and instructions work there; the model is told.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
     },
     #[serde(rename = "session.set_mode")]
     SessionSetMode { session_id: SessionId, approval_mode: crate::model::ApprovalMode },
@@ -298,6 +332,70 @@ pub enum Method {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         utc_offset_minutes: Option<i32>,
     },
+    /// MCP servers configured for `project_root` (only the global ones without it) and their status.
+    /// Enabled servers that have not started start now; `mcp.status` events follow.
+    #[serde(rename = "mcp.list")]
+    McpList {
+        #[serde(default)]
+        project_root: Option<String>,
+    },
+    /// Add a server to the user's `mcp.json` (`global`) or the project's `.mcp.json` (`project`,
+    /// needs `project_root`); a name taken in that scope is refused.
+    #[serde(rename = "mcp.add")]
+    McpAdd {
+        #[serde(default)]
+        project_root: Option<String>,
+        scope: crate::McpScope,
+        name: String,
+        transport: crate::McpTransport,
+        #[serde(default = "enabled")]
+        enabled: bool,
+    },
+    /// Replace a server's transport (its other keys stay) and/or turn it on or off. Turning a project
+    /// server off is remembered in the user's `mcp.json`, leaving the shared `.mcp.json` untouched.
+    #[serde(rename = "mcp.update")]
+    McpUpdate {
+        #[serde(default)]
+        project_root: Option<String>,
+        scope: crate::McpScope,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<crate::McpTransport>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
+    /// Remove a server from its scope's file(s).
+    #[serde(rename = "mcp.remove")]
+    McpRemove {
+        #[serde(default)]
+        project_root: Option<String>,
+        scope: crate::McpScope,
+        name: String,
+    },
+    /// Begin the OAuth sign-in of an HTTP server (as configured for `project_root`); finish with
+    /// `mcp.login_complete`. The tokens are kept in otto's credential store.
+    #[serde(rename = "mcp.login")]
+    McpLogin {
+        #[serde(default)]
+        project_root: Option<String>,
+        name: String,
+    },
+    /// Wait for the browser to finish the sign-in, or finish it with the pasted callback URL (or code).
+    #[serde(rename = "mcp.login_complete")]
+    McpLoginComplete {
+        login_id: String,
+        #[serde(default)]
+        code: Option<String>,
+    },
+    #[serde(rename = "mcp.login_cancel")]
+    McpLoginCancel { login_id: String },
+    /// Forget an HTTP server's tokens; it then needs sign-in again.
+    #[serde(rename = "mcp.logout")]
+    McpLogout {
+        #[serde(default)]
+        project_root: Option<String>,
+        name: String,
+    },
 }
 
 impl std::fmt::Debug for Method {
@@ -305,7 +403,17 @@ impl std::fmt::Debug for Method {
         let mut value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
         match self {
             Self::AuthLogin { api_key: Some(_), .. } => value["params"]["api_key"] = Value::String("[REDACTED]".into()),
-            Self::AuthLoginComplete { code: Some(_), .. } => value["params"]["code"] = Value::String("[REDACTED]".into()),
+            Self::AuthLoginComplete { code: Some(_), .. } | Self::McpLoginComplete { code: Some(_), .. } => {
+                value["params"]["code"] = Value::String("[REDACTED]".into());
+            }
+            // Environment variables and headers often hold tokens.
+            Self::McpAdd { .. } | Self::McpUpdate { .. } => {
+                for key in ["env", "headers"] {
+                    if let Some(map) = value.pointer_mut(&format!("/params/transport/{key}")).and_then(Value::as_object_mut) {
+                        map.values_mut().for_each(|v| *v = Value::String("[REDACTED]".into()));
+                    }
+                }
+            }
             Self::AttachmentPut { data_base64, .. } => value["params"]["data_base64"] = Value::String(format!("[{} bytes]", data_base64.len())),
             _ => {}
         }
@@ -328,7 +436,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.unsubscribe", "Stop receiving this session's events."),
     ("session.fork", "Fork a session at a durable sequence boundary."),
     ("session.rename", "Change a session title."),
-    ("session.update", "Change a session's provider, model, agent or reasoning effort from its next model request."),
+    ("session.update", "Change a session's provider, model, agent, reasoning effort or folder from its next model request."),
     ("session.set_mode", "Change approval mode for subsequent tool calls."),
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),
@@ -362,6 +470,14 @@ pub const METHODS: &[(&str, &str)] = &[
     ("config.set", "Set a configuration key."),
     ("plan.usage", "Subscription limits per provider, as the last response reported them."),
     ("usage.summary", "Every session's tokens and costs (billed and at API prices) since a time, by model and by day."),
+    ("mcp.list", "List MCP servers (global, and a project's) with their status and tool count."),
+    ("mcp.add", "Add an MCP server to the global or project configuration."),
+    ("mcp.update", "Change an MCP server's transport or turn it on or off."),
+    ("mcp.remove", "Remove an MCP server from its configuration."),
+    ("mcp.login", "Begin an MCP server's OAuth sign-in."),
+    ("mcp.login_complete", "Finish an MCP server's sign-in: wait for the browser, or take the pasted callback URL."),
+    ("mcp.login_cancel", "Abandon a pending MCP sign-in."),
+    ("mcp.logout", "Forget an MCP server's OAuth tokens."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -395,6 +511,10 @@ pub struct Empty {}
 
 fn file_limit() -> u32 {
     50
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -482,6 +602,8 @@ impl RpcError {
     pub const AUTH_REQUIRED: &str = "auth_required";
     /// The reply would not fit in a frame (`MAX_FRAME`); the connection stays open.
     pub const TOO_LARGE: &str = "too_large";
+    /// The daemon is still opening its data (`ServerHello::starting`); `data` is its [`Starting`].
+    pub const STARTING: &str = "starting";
 
     #[must_use]
     pub fn new(code: &str, message: impl Into<String>) -> Self {
@@ -519,6 +641,10 @@ impl RpcError {
     #[must_use]
     pub fn incompatible(message: impl Into<String>) -> Self {
         Self::new(Self::INCOMPATIBLE, message)
+    }
+    #[must_use]
+    pub fn starting(starting: &Starting) -> Self {
+        Self::new(Self::STARTING, "otto is starting").with_data(serde_json::to_value(starting).unwrap_or_default())
     }
     #[must_use]
     pub fn too_large(message: impl Into<String>) -> Self {
@@ -644,6 +770,10 @@ pub const EVENTS: &[&str] = &[
     "model.retrying",
     "plan.usage",
     "auth.changed",
+    "server.starting",
+    "server.ready",
+    "mcp.status",
+    "mcp.changed",
 ];
 
 // `session.changed` carries a whole `SessionInfo` (its usage by model); events are built, sent and
@@ -760,6 +890,18 @@ pub enum Event {
     /// The stored sign-ins changed, possibly by another process (global): reread `auth.status`.
     #[serde(rename = "auth.changed")]
     AuthChanged {},
+    /// The daemon's start moved on (global, not journaled): [`ServerHello::starting`].
+    #[serde(rename = "server.starting")]
+    ServerStarting { starting: Starting },
+    /// The daemon finished starting (global): every method answers now.
+    #[serde(rename = "server.ready")]
+    ServerReady {},
+    /// An MCP server's status or tool count changed (global): update `mcp.list`'s row of that name.
+    #[serde(rename = "mcp.status")]
+    McpStatus { name: String, status: crate::McpStatus, tools: u32 },
+    /// MCP servers were added, changed or removed (global): reread `mcp.list`.
+    #[serde(rename = "mcp.changed")]
+    McpChanged {},
 }
 
 impl Event {

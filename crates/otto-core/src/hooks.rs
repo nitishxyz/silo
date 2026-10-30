@@ -90,7 +90,7 @@ async fn configs(root: &Path, user: &Path) -> Result<Vec<Value>> {
 pub(crate) async fn run(cx: &Context, event: &str, target: &str, fields: Value) -> Result<Outcome> {
     let mut outcome = Outcome::default();
     let mode = cx.state(|s| s.policy.mode).await.ok();
-    for config in configs(&cx.root, &cx.runtime.0.config.user_config_dir).await? {
+    for config in configs(&cx.root(), &cx.runtime.0.config.user_config_dir).await? {
         let Some(groups) = config["hooks"].get(event).or_else(|| config["hooks"].get(alias(event))).and_then(Value::as_array) else { continue };
         for group in groups {
             if !matches(group["matcher"].as_str().unwrap_or(""), target) {
@@ -102,7 +102,7 @@ pub(crate) async fn run(cx: &Context, event: &str, target: &str, fields: Value) 
                 }
                 let command = hook["command"].as_str().ok_or_else(|| Error::Invalid("hook command missing".into()))?;
                 let mut payload = json!({
-                    "session_id":cx.row.id,"cwd":cx.row.cwd,"project_root":cx.root,"hook_event_name":event,
+                    "session_id":cx.row.id,"cwd":cx.cwd(),"project_root":cx.root(),"hook_event_name":event,
                     "transcript_path":Value::Null,"permission_mode":mode.map(|m|serde_json::to_value(m).unwrap_or_default()),
                 });
                 if let (Some(payload), Some(fields)) = (payload.as_object_mut(), fields.as_object()) {
@@ -110,11 +110,11 @@ pub(crate) async fn run(cx: &Context, event: &str, target: &str, fields: Value) 
                 }
                 let timeout = hook["timeout"].as_u64().unwrap_or(60).clamp(1, 600);
                 let env = [
-                    ("CLAUDE_PROJECT_DIR", cx.root.to_string_lossy().into_owned()),
-                    ("OTTO_PROJECT_DIR", cx.root.to_string_lossy().into_owned()),
+                    ("CLAUDE_PROJECT_DIR", cx.root().to_string_lossy().into_owned()),
+                    ("OTTO_PROJECT_DIR", cx.root().to_string_lossy().into_owned()),
                     ("OTTO_SESSION_ID", cx.row.id.clone()),
                 ];
-                let (code, stdout, stderr) = match command_output(command, &cx.row.cwd, &env, payload, timeout).await {
+                let (code, stdout, stderr) = match command_output(command, &cx.cwd(), &env, payload, timeout).await {
                     Ok(output) => output,
                     Err(error) => {
                         tracing::warn!(session=%cx.row.id, event, %error, "hook failed");

@@ -229,8 +229,11 @@ fn the_migration_stores_everything_once_and_reads_back_the_same() {
         let mut stmt = conn.prepare("SELECT json FROM items ORDER BY seq,item_id").unwrap();
         stmt.query_map([], |r| Ok(serde_json::from_str(&r.get::<_, String>(0)?).unwrap())).unwrap().collect::<rusqlite::Result<_>>().unwrap()
     };
-    let mut store = Store::open(&path).unwrap();
-    assert_eq!(store.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 4);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let mut store = Store::open_with(&path, &|m| seen.borrow_mut().push(m)).unwrap();
+    let steps = (0..=7).map(|done| Migration::Step { done, of: 7 });
+    assert_eq!(seen.into_inner(), steps.chain([Migration::Compacting]).collect::<Vec<_>>(), "each step is told, compacting last");
+    assert_eq!(store.connection.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 5);
     assert_eq!(store.items("s").unwrap(), items_before);
     let after = store.events_since("s", 0, 100).unwrap();
     let kept: Vec<_> = before.iter().filter(|(seq, ..)| ![5, 8].contains(seq)).cloned().collect();
@@ -244,7 +247,10 @@ fn the_migration_stores_everything_once_and_reads_back_the_same() {
     store.set_turn_trees("s", 1, Some("base"), None).unwrap();
     assert_eq!(store.turn_trees("s", 1).unwrap(), (Some("base".into()), None));
     drop(store);
-    assert_eq!(Store::open(&path).unwrap().events_since("s", 0, 100).unwrap().len(), kept.len(), "it runs once");
+    let seen = std::cell::Cell::new(0);
+    let reopened = Store::open_with(&path, &|_| seen.set(seen.get() + 1)).unwrap();
+    assert_eq!(reopened.events_since("s", 0, 100).unwrap().len(), kept.len(), "it runs once");
+    assert_eq!(seen.get(), 0, "nothing to tell");
 }
 
 #[test]

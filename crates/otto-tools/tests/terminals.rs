@@ -32,12 +32,18 @@ impl Terminals for FakeTerminals {
         self.0.started.lock().unwrap().push(command.into());
         Ok(Some(Arc::new(FakeTerminal(self.0.clone()))))
     }
+    async fn attach(&self, block: &str, host: &str, _: &ToolCx) -> Option<Arc<dyn Terminal>> {
+        (block == "b1" && host == "fake").then(|| Arc::new(FakeTerminal(self.0.clone())) as Arc<dyn Terminal>)
+    }
 }
 
 #[async_trait::async_trait]
 impl Terminal for FakeTerminal {
     fn id(&self) -> &str {
         "b1"
+    }
+    fn host(&self) -> &str {
+        "fake"
     }
     async fn wait(&self, _: bool, screen: &mut (dyn for<'s> FnMut(&'s str) + Send)) -> Result<Finished, ToolError> {
         screen("live");
@@ -208,4 +214,32 @@ async fn a_foreground_command_stops_when_its_call_is_dropped() {
     assert!(tokio::time::timeout(Duration::from_millis(50), shell.call(json!({"command": command}), cx)).await.is_err());
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(!marker.exists(), "the command ran on after its call was dropped");
+}
+
+#[tokio::test]
+async fn a_job_whose_block_lives_on_is_resumed_after_a_restart() {
+    let (shell, _, mail, cx, _dir) = setup(vec![]);
+    let out = shell.call(json!({"command":"cargo build","background":true}), cx.clone()).await.unwrap();
+    assert_eq!((out.metadata["block_id"].clone(), out.metadata["host"].clone()), (json!("b1"), json!("fake")), "kept with the call");
+    // A new process: the same host (its block runs on), new jobs.
+    let fake = Arc::new(Fake { script: Mutex::new(vec![Finished::Exited { code: Some(0), text: "ok".into() }].into()), ..Fake::default() });
+    let jobs = Arc::new(Jobs::default());
+    let host = Host { jobs: jobs.clone(), terminals: Some(Arc::new(FakeTerminals(fake.clone()))) };
+    let job = |block: &str, host: &str| otto_tools::builtin::shell::Resumed {
+        job_id: "job-1".into(),
+        command: "cargo build".into(),
+        block_id: block.into(),
+        host: host.into(),
+        started_at: 7,
+        timeout: None,
+        prompt: true,
+    };
+    assert!(!host.resume(job("gone", "fake"), cx.clone()).await.unwrap(), "its block is gone");
+    assert!(!host.resume(job("b1", "other"), cx.clone()).await.unwrap(), "another host's");
+    assert!(!Host::default().resume(job("b1", "fake"), cx.clone()).await.unwrap(), "no terminal host");
+    while mail.0.lock().unwrap().pop().is_some() {}
+    assert!(host.resume(job("b1", "fake"), cx).await.unwrap());
+    let listed = jobs.list("ses").await;
+    assert_eq!((listed[0].job_id.as_str(), listed[0].block_id.as_deref(), listed[0].started_at), ("job-1", Some("b1"), 7));
+    assert_eq!(delivered(&mail).await, "Background shell job-1 (`cargo build`) in block b1 exited with code 0.\nok");
 }

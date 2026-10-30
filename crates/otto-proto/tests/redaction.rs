@@ -13,8 +13,23 @@ fn debug_redacts_credentials_without_changing_serialization() {
             paste: false,
         },
         Method::AuthLoginComplete { login_id: "login".into(), code: Some("secret-login-code".into()) },
+        Method::McpLoginComplete { login_id: "login".into(), code: Some("secret-mcp-code".into()) },
+        Method::McpAdd {
+            project_root: None,
+            scope: McpScope::Global,
+            name: "web".into(),
+            transport: McpTransport::Http { url: "https://x.test".into(), headers: [("Authorization".into(), "secret-header".into())].into() },
+            enabled: true,
+        },
+        Method::McpUpdate {
+            project_root: None,
+            scope: McpScope::Global,
+            name: "local".into(),
+            transport: Some(McpTransport::Stdio { command: "x".into(), args: vec![], env: [("TOKEN".into(), "secret-env".into())].into() }),
+            enabled: None,
+        },
     ];
-    for (method, secret) in methods.into_iter().zip(["secret-api-key", "secret-login-code"]) {
+    for (method, secret) in methods.into_iter().zip(["secret-api-key", "secret-login-code", "secret-mcp-code", "secret-header", "secret-env"]) {
         assert!(!format!("{method:?}").contains(secret));
         let request = Request { id: 1, method };
         assert!(!format!("{request:?}").contains(secret));

@@ -162,8 +162,10 @@ pub fn main_from(args: Vec<OsString>) -> ExitCode {
 }
 
 async fn main_async(cli: Cli) -> u8 {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env();
     if matches!(&cli.command, Command::Server(args) if args.command.is_none()) {
+        // The daemon's log also tells its start and store migrations (which can take a minute).
+        let filter = filter.unwrap_or_else(|_| "warn,otto_cli::daemon=info,otto_store::migrate=info".into());
         match otto_server::init_logging(&otto_proto::paths::home()) {
             Ok(file) => {
                 let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).try_init();
@@ -174,6 +176,7 @@ async fn main_async(cli: Cli) -> u8 {
             }
         }
     } else {
+        let filter = filter.unwrap_or_else(|_| "warn".into());
         let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(io::stderr).try_init();
     }
     let cancel = CancellationToken::new();

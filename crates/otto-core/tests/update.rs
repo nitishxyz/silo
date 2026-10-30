@@ -362,3 +362,37 @@ async fn recent_projects_order_by_use_and_skip_missing_roots() {
     assert_eq!(f.runtime.list_projects().await.unwrap().len(), 3);
     f.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn moving_an_idle_session_runs_its_next_turn_in_the_new_folder() {
+    let a = Scripted::new("a", false, None, vec![text("one"), call("w", "write", serde_json::json!({"path":"made","content":"ok"})), text("done")]);
+    let f = fixture(vec![a.clone()]).await;
+    std::fs::create_dir(f.dir.path().join("other")).unwrap();
+    std::fs::write(f.dir.path().join("other/AGENTS.md"), "Other folder rules").unwrap();
+    let other = std::fs::canonicalize(f.dir.path().join("other")).unwrap();
+    let s = f.session(CreateSession::default()).await;
+    turn(&f.runtime, &s).await;
+    let to = |root: &str| Configure { project_root: Some(root.into()), ..Default::default() };
+    assert!(f.runtime.configure(&s.id, to(&f.dir.path().join("missing").to_string_lossy())).await.is_err(), "not a folder");
+    let info = f.runtime.configure(&s.id, to(&other.to_string_lossy())).await.unwrap();
+    assert_eq!(info.cwd, other.to_string_lossy());
+    assert_ne!(info.project_id, f.project);
+    assert!(f.runtime.list_sessions(&f.project, false).await.unwrap().is_empty());
+    assert_eq!(f.runtime.list_sessions(&info.project_id, false).await.unwrap()[0].id, s.id);
+    turn(&f.runtime, &s).await;
+    assert_eq!(std::fs::read_to_string(other.join("made")).unwrap(), "ok", "the tools work in the new folder");
+    assert!(!f.dir.path().join("made").exists());
+    let request = &a.requests()[1];
+    let said = |needle: &str, parts: &[String]| parts.iter().any(|t| t.contains(needle));
+    let notes: Vec<String> =
+        request.items.iter().flat_map(|i| &i.parts).filter_map(|p| if let Part::System { text } = p { Some(text.clone()) } else { None }).collect();
+    assert!(said("working folder changed", &notes), "the model is told: {notes:?}");
+    assert!(said("Other folder rules", &request.system), "the new folder's instructions: {:?}", request.system);
+    // The same folder again changes nothing; a busy session can't move.
+    let again = f.runtime.configure(&s.id, to(&other.to_string_lossy())).await.unwrap();
+    assert_eq!(again.project_id, info.project_id);
+    s.prompt(vec![InputPart::Text { text: "wait".into() }], Delivery::Queue).await.unwrap();
+    eventually("busy", async || s.view().await.unwrap().info.status == otto_proto::SessionStatus::Busy).await;
+    assert!(f.runtime.configure(&s.id, to(&f.dir.path().to_string_lossy())).await.is_err(), "busy");
+    f.runtime.shutdown().await.unwrap();
+}

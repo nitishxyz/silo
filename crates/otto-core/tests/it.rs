@@ -5,6 +5,7 @@ mod costs;
 mod harness;
 mod model_errors;
 mod plan_usage;
+mod restart;
 mod runtime;
 mod snapshots;
 mod update;

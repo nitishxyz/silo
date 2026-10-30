@@ -9,10 +9,13 @@
 mod coalescer;
 mod migrate;
 mod refs;
+mod retention;
 mod schema;
+mod undo;
 
 pub use coalescer::Coalescer;
 pub use otto_llm::{event::Usage, types::Item};
+pub use retention::{Maintained, UNDO_IDLE_MS, UNDO_PER_FILE, UNDO_SESSION_BYTES, VACUUM_PAGES};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +23,7 @@ use std::{
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+pub use undo::UndoEdit;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -85,6 +89,8 @@ pub struct SessionUpdate {
     pub status: Option<String>,
     pub archived: Option<bool>,
     pub meta: Option<Value>,
+    /// Moves the session to another project (with `cwd`).
+    pub project_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,21 +199,39 @@ pub struct Store {
     connection: Connection,
 }
 
+/// How a schema migration moves on ([`Store::open_with`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Migration {
+    /// `done` of `of` steps.
+    Step { done: u32, of: u32 },
+    /// Giving the space it freed back to the file system (`VACUUM`), last.
+    Compacting,
+}
+
 impl Store {
     /// # Errors
     /// Returns database, filesystem, or migration errors.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::initialize(Connection::open(path)?)
+        Self::open_with(path, &|_| {})
+    }
+
+    /// [`Store::open`], telling `progress` how a schema migration moves on.
+    /// # Errors
+    /// Returns database, filesystem, or migration errors.
+    pub fn open_with(path: impl AsRef<Path>, progress: &dyn Fn(Migration)) -> Result<Self> {
+        Self::initialize(Connection::open(path)?, progress)
     }
 
     /// # Errors
     /// Returns database or migration errors. In-memory SQLite uses a memory journal.
     pub fn open_in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        Self::initialize(Connection::open_in_memory()?, &|_| {})
     }
 
-    fn initialize(mut connection: Connection) -> Result<Self> {
+    fn initialize(mut connection: Connection, progress: &dyn Fn(Migration)) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
+        // Takes effect in a new database; an existing one gets it from the `VACUUM` below.
+        connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -217,17 +241,35 @@ impl Store {
             return Err(Error::SchemaVersion(version));
         }
         let stored = version > 0 && tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get::<_, bool>(0))?;
+        // The pending migrations' steps are told as one count.
+        let steps = |number| match number {
+            migrate::STORED_ONCE => migrate::STEPS,
+            retention::BOUNDED => retention::STEPS,
+            _ => 0,
+        };
+        let total = schema::MIGRATIONS.iter().filter(|m| m.0 > version).map(|m| steps(m.0)).sum();
+        let mut base = 0;
         for &(number, sql) in schema::MIGRATIONS {
             if number > version {
                 tx.execute_batch(sql)?;
-                if number == migrate::STORED_ONCE {
-                    migrate::stored_once(&tx)?;
+                let told = |m: Migration| match m {
+                    Migration::Step { done, .. } if base == 0 || done > 0 => progress(Migration::Step { done: base + done, of: total }),
+                    Migration::Step { .. } => {}
+                    Migration::Compacting => progress(m),
+                };
+                match number {
+                    migrate::STORED_ONCE => migrate::stored_once(&tx, &told)?,
+                    retention::BOUNDED => retention::bounded(&tx, &told)?,
+                    _ => {}
                 }
+                base += steps(number);
                 tx.pragma_update(None, "user_version", number)?;
             }
         }
         tx.commit()?;
-        if stored && version < migrate::STORED_ONCE {
+        let incremental = connection.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0))? == 2;
+        if (stored && version < migrate::STORED_ONCE) || !incremental {
+            progress(Migration::Compacting);
             migrate::vacuum(&connection)?;
         }
         Ok(Self { connection })
@@ -316,8 +358,8 @@ impl Store {
     /// Returns database errors or `NotFound`.
     pub fn update_session(&mut self, id: &str, update: SessionUpdate) -> Result<()> {
         let meta = update.meta.map(|v| serde_json::to_string(&v)).transpose()?;
-        let count = self.connection.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta),updated_at=?10 WHERE id=?1",
-            params![id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta,now()])?;
+        let count = self.connection.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta),project_id=coalesce(?11,project_id),updated_at=?10 WHERE id=?1",
+            params![id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta,now(),update.project_id])?;
         require_row(count, id)
     }
 
@@ -337,8 +379,8 @@ impl Store {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let seq = append_tx(&tx, session_id, &event, &projection)?;
         let meta = update.meta.map(|v| serde_json::to_string(&v)).transpose()?;
-        tx.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta) WHERE id=?1",
-            params![session_id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta])?;
+        tx.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta),project_id=coalesce(?10,project_id) WHERE id=?1",
+            params![session_id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta,update.project_id])?;
         tx.commit()?;
         Ok(seq)
     }
@@ -699,8 +741,8 @@ impl Store {
         }
         let seq = append_tx(&tx, session_id, &event, &projection)?;
         let meta = update.meta.map(|v| serde_json::to_string(&v)).transpose()?;
-        tx.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta) WHERE id=?1",
-            params![session_id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta])?;
+        tx.execute("UPDATE sessions SET agent=coalesce(?2,agent),model=coalesce(?3,model),provider=coalesce(?4,provider),title=coalesce(?5,title),cwd=coalesce(?6,cwd),status=coalesce(?7,status),archived=coalesce(?8,archived),meta=coalesce(?9,meta),project_id=coalesce(?10,project_id) WHERE id=?1",
+            params![session_id,update.agent,update.model,update.provider,update.title,update.cwd,update.status,update.archived,meta,update.project_id])?;
         tx.execute("UPDATE outbox SET delivered_at=?2 WHERE id=?1", params![outbox_id, now()])?;
         tx.commit()?;
         Ok(seq)
@@ -810,7 +852,10 @@ fn append_tx(tx: &Transaction<'_>, id: &str, event: &EventRecord, projection: &P
             payload[slot] = refs::reference(slot);
         }
     }
-    refs::externalize(tx, &mut payload)?;
+    // Deltas stay inline: compaction drops them, which would orphan their blobs.
+    if !refs::DELTAS.contains(&event.kind.as_str()) {
+        refs::externalize(tx, &mut payload)?;
+    }
     tx.execute(
         "INSERT INTO events VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![id, seq, event.turn, event.step, event.kind, serde_json::to_string(&payload)?, at],
@@ -892,9 +937,11 @@ fn compact_turn(tx: &Transaction<'_>, id: &str, turn: i64) -> Result<usize> {
             stmt.query_row(params![id, key], |r| r.get(0)).unwrap_or(false)
         })
     });
-    let mut delete = tx.prepare_cached("DELETE FROM events WHERE session_id=?1 AND seq=?2")?;
+    // Deltas stored before they stayed inline may hold blobs.
+    let mut delete = tx.prepare_cached("DELETE FROM events WHERE session_id=?1 AND seq=?2 RETURNING payload")?;
     for seq in &drop {
-        delete.execute(params![id, seq])?;
+        let payload: String = delete.query_row(params![id, seq], |r| r.get(0))?;
+        retention::forget(tx, refs::hashes(&payload))?;
     }
     Ok(drop.len())
 }

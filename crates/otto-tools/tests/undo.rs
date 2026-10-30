@@ -73,3 +73,48 @@ async fn edited_since_lists_a_sessions_files_after_a_mark() {
     assert_eq!(undo_edit::edited_since("m1", mark).len(), 1);
     assert!(undo_edit::edited_since("m1", undo_edit::mark()).is_empty());
 }
+
+/// A persisted history (otto's store): what an earlier process kept.
+#[derive(Default)]
+struct Log(std::sync::Mutex<Vec<(String, std::path::PathBuf, undo_edit::Kept)>>);
+#[async_trait::async_trait]
+impl undo_edit::UndoLog for Log {
+    async fn push(&self, session: &str, path: &Path, before: Option<&str>, after: Option<&str>) {
+        let mut log = self.0.lock().unwrap();
+        let kept = undo_edit::Kept { id: i64::try_from(log.len()).unwrap(), before: before.map(Into::into), after: after.map(Into::into) };
+        log.push((session.into(), path.into(), kept));
+    }
+    async fn last(&self, session: &str, path: &Path) -> Result<Option<undo_edit::Kept>, otto_tools::ToolError> {
+        Ok(self.0.lock().unwrap().iter().rev().find(|(s, p, _)| s == session && p == path).map(|e| e.2.clone()))
+    }
+    async fn remove(&self, _: &str, id: i64) -> Result<(), otto_tools::ToolError> {
+        self.0.lock().unwrap().retain(|e| e.2.id != id);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_persisted_history_is_taken_back_without_memory_of_it() {
+    use undo_edit::UndoLog;
+    let d = tempfile::tempdir().unwrap();
+    let file = std::fs::canonicalize(d.path()).unwrap().join("p.txt");
+    let log = std::sync::Arc::new(Log::default());
+    // What an earlier process kept: only the log knows these edits.
+    log.push("persisted", &file, None, Some("one\n")).await;
+    log.push("persisted", &file, Some("one\n"), Some("two\n")).await;
+    std::fs::write(&file, "two\n").unwrap();
+    let with_log = || {
+        let mut cx = cx(d.path(), "persisted");
+        cx.undo = Some(log.clone());
+        cx
+    };
+    let undo = undo_edit::UndoEdit::default();
+    undo.call(json!({"path":"p.txt"}), with_log()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+    undo.call(json!({"path":"p.txt"}), with_log()).await.unwrap();
+    assert!(!file.exists(), "the first edit created it");
+    assert!(undo.call(json!({"path":"p.txt"}), with_log()).await.unwrap_err().to_string().contains("Nothing to undo"));
+    // New edits go to the log too.
+    write::Write::default().call(json!({"path":"p.txt","content":"three\n"}), with_log()).await.unwrap();
+    assert_eq!(log.last("persisted", &file).await.unwrap().unwrap().after.as_deref(), Some("three\n"));
+}

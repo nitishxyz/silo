@@ -97,7 +97,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
             if depth >= MAX_DEPTH {
                 return Err(Error::Invalid("subagent depth limit reached; do the task yourself".into()));
             }
-            let agents = crate::agents::discover(&cx.root, &cx.runtime.0.config.user_config_dir);
+            let agents = crate::agents::discover(&cx.root(), &cx.runtime.0.config.user_config_dir);
             let names = || agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
             let name =
                 input["agent"].as_str().filter(|n| !n.is_empty()).ok_or_else(|| Error::Invalid(format!("agent required; available: {}", names())))?;
@@ -110,7 +110,7 @@ pub(crate) async fn call(cx: &Context, input: Value) -> Result<String> {
                 .runtime
                 .create_session(CreateSession {
                     project_id: cx.row.project_id.clone(),
-                    cwd: cx.row.cwd.clone().into(),
+                    cwd: cx.cwd().into(),
                     parent_id: Some(cx.row.id.clone()),
                     agent: name.into(),
                     provider: inherit.then(|| live.row.provider.clone()),

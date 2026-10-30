@@ -34,7 +34,8 @@ async fn start(home: &Path, script: Option<&Path>) -> Server {
     let mut server = Server(c.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if Connection::connect(home).await.is_ok() {
+        if let Ok(connection) = Connection::connect(home).await {
+            tokio::time::timeout(Duration::from_secs(10), connection.ready(|_| {})).await.unwrap().unwrap();
             return server;
         }
         assert!(server.0.try_wait().unwrap().is_none(), "server exited during startup");
@@ -238,4 +239,46 @@ async fn noninteractive_approval_denial_and_ctrl_c_cancel() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(output(args(home, &["server", "stop"])).await.status.success());
+}
+
+/// The lease and socket come before the store: while it opens (held locked here, as a long
+/// migration would) clients get a starting daemon, and a second start fails without touching it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_opening_its_store_answers_starting_and_a_second_start_leaves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let db = rusqlite::Connection::open(otto_proto::paths::db(home)).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;").unwrap();
+    let mut c = command(home);
+    c.args(["server", "--foreground"]).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut server = Server(c.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let connection = loop {
+        if let Ok(connection) = Connection::connect(home).await {
+            break connection;
+        }
+        assert!(server.0.try_wait().unwrap().is_none(), "server exited during startup");
+        assert!(Instant::now() < deadline, "no socket while the store opens");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(connection.hello().starting.as_ref().map(|s| s.phase), Some(otto_proto::StartPhase::Opening));
+    let error = connection.call(otto_proto::Method::ProjectList {}).await.unwrap_err();
+    assert!(matches!(&error, otto_client::ClientError::Rpc(e) if e.code == otto_proto::RpcError::STARTING), "{error}");
+    let again = Instant::now();
+    let second = output(args(home, &["server", "--foreground"])).await;
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("another otto server owns this home"), "{second:?}");
+    assert!(again.elapsed() < Duration::from_secs(3), "it never waited on the store");
+    db.execute_batch("ROLLBACK").unwrap();
+    drop(db);
+    tokio::time::timeout(Duration::from_secs(10), connection.ready(|_| {})).await.unwrap().unwrap();
+    assert!(connection.call(otto_proto::Method::ProjectList {}).await.is_ok());
+    let log = std::fs::read_to_string(otto_proto::paths::log(home)).unwrap();
+    assert!(log.contains("otto starting") && log.contains("otto ready"), "{log}");
+    assert!(output(args(home, &["server", "stop"])).await.status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "stop timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

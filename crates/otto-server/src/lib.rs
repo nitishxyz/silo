@@ -1,9 +1,10 @@
 //! Local daemon hosting the shared durable runtime.
 mod connection;
 mod dispatch;
+mod mcp;
 
 use otto_core::{ModelResolver, Runtime};
-use otto_proto::{AuthMode, AuthStatus, LoginResult, ModelInfo, RpcError, ServerInfo, paths};
+use otto_proto::{AuthMode, AuthStatus, Event, LoginResult, ModelInfo, RpcError, ServerInfo, StartPhase, Starting, paths};
 use std::{
     fs::{File, OpenOptions},
     future::Future,
@@ -11,12 +12,12 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::UnixListener,
-    sync::{Mutex, watch},
+    sync::{Mutex, broadcast, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -45,12 +46,18 @@ pub trait AuthService: Send + Sync {
 
 pub struct ServerConfig {
     pub home: PathBuf,
-    pub runtime: Arc<Runtime>,
-    pub models: Arc<dyn ModelResolver>,
-    pub auth: Arc<dyn AuthService>,
     pub idle_exit: Option<Duration>,
     /// [`ServerHello::build`](otto_proto::ServerHello::build).
     pub build: String,
+}
+
+/// What serves every method once the daemon has opened its data ([`ServerHandle::ready`]).
+pub struct Services {
+    pub runtime: Arc<Runtime>,
+    pub models: Arc<dyn ModelResolver>,
+    pub auth: Arc<dyn AuthService>,
+    /// MCP servers (`mcp.*`); its status events become global `mcp.status` / `mcp.changed`.
+    pub mcp: Arc<otto_mcp::Mcp>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,14 +73,15 @@ pub enum Error {
 }
 
 pub struct Server;
+/// A bound daemon: it answers `server.*`, `ping` and `api.*` from the start, the rest once [`ServerHandle::ready`].
 pub struct ServerHandle {
-    stop: watch::Sender<bool>,
+    state: Arc<State>,
     task: Option<JoinHandle<Result<(), Error>>>,
     pub info: ServerInfo,
 }
 impl Drop for ServerHandle {
     fn drop(&mut self) {
-        self.stop.send_replace(true);
+        self.state.stop.send_replace(true);
     }
 }
 impl ServerHandle {
@@ -81,7 +89,7 @@ impl ServerHandle {
     /// # Errors
     /// Runtime shutdown or daemon task failure.
     pub async fn shutdown(mut self) -> Result<(), Error> {
-        self.stop.send_replace(true);
+        self.state.stop.send_replace(true);
         self.task.take().expect("server task").await?
     }
     /// Wait for RPC or idle shutdown.
@@ -90,14 +98,59 @@ impl ServerHandle {
     pub async fn serve_forever(mut self) -> Result<(), Error> {
         self.task.take().expect("server task").await?
     }
+    /// What the start is doing now: clients hear `server.starting`.
+    pub fn starting(&self, starting: Starting) {
+        if self.state.ready.get().is_none() {
+            self.state.starting.send_replace(Some(starting));
+        }
+    }
+    /// Serve every method with `services` (and the home's `config.json`): clients hear `server.ready`.
+    /// # Errors
+    /// `config.json` is unreadable or invalid, or the server is ready already.
+    pub async fn ready(&self, services: Services) -> Result<(), Error> {
+        let settings = match tokio::fs::read(self.state.home.join("config.json")).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(e) => return Err(e.into()),
+        };
+        services.runtime.set_config(dispatch::defaults(&settings).map_err(io::Error::other)?)?;
+        let globals = mcp::merge(services.runtime.events(), services.mcp.subscribe());
+        self.state.ready.set(Ready { services, settings: Mutex::new(settings) }).map_err(|_| io::Error::other("the server is ready already"))?;
+        *self.state.globals.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(globals);
+        self.state.starting.send_replace(None);
+        Ok(())
+    }
 }
 
 struct State {
-    config: ServerConfig,
+    home: PathBuf,
+    idle_exit: Option<Duration>,
     info: ServerInfo,
     stop: watch::Sender<bool>,
-    settings: Mutex<serde_json::Value>,
     requests: Arc<tokio::sync::Semaphore>,
+    /// `Some` until [`ServerHandle::ready`] has set `ready`.
+    starting: watch::Sender<Option<Starting>>,
+    ready: OnceLock<Ready>,
+    /// The runtime's events, from `ready` until the accept loop takes them.
+    globals: std::sync::Mutex<Option<broadcast::Receiver<Event>>>,
+}
+struct Ready {
+    services: Services,
+    settings: Mutex<serde_json::Value>,
+}
+impl State {
+    fn info(&self) -> ServerInfo {
+        ServerInfo { starting: self.starting.borrow().clone(), ..self.info.clone() }
+    }
+    fn ready(&self) -> Result<&Ready, RpcError> {
+        self.ready.get().ok_or_else(|| self.not_ready())
+    }
+    fn not_ready(&self) -> RpcError {
+        RpcError::starting(&self.starting.borrow().clone().unwrap_or_else(opening))
+    }
+}
+fn opening() -> Starting {
+    Starting { phase: StartPhase::Opening, step: 0, steps: 0 }
 }
 struct Lease {
     home: PathBuf,
@@ -115,7 +168,8 @@ impl Drop for Lease {
     }
 }
 impl Server {
-    /// Bind the socket and publish readiness before returning.
+    /// Take the home's lease and bind its socket, so a second start fails `AlreadyRunning` before
+    /// touching anything; the server is starting until [`ServerHandle::ready`].
     /// # Errors
     /// Home/lock/socket setup fails or another server holds the lease.
     pub async fn start(config: ServerConfig) -> Result<ServerHandle, Error> {
@@ -138,6 +192,7 @@ impl Server {
             started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(i64::MAX),
             silo_home: paths::silo_home().to_string_lossy().into_owned(),
             build: config.build.clone(),
+            starting: None,
         };
         let metadata = paths::Runtime {
             pid: info.pid,
@@ -147,30 +202,21 @@ impl Server {
             started_at: info.started_at,
             silo_home: info.silo_home.clone().into(),
         };
-        let settings = match tokio::fs::read(config.home.join("config.json")).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => serde_json::json!({}),
-            Err(e) => return Err(e.into()),
-        };
-        config.runtime.set_config(dispatch::defaults(&settings).map_err(io::Error::other)?)?;
         let (stop, _) = watch::channel(false);
         let uid = current_uid();
         let state = Arc::new(State {
-            config,
+            home: config.home,
+            idle_exit: config.idle_exit,
             info: info.clone(),
-            stop: stop.clone(),
-            settings: Mutex::new(settings),
+            stop,
             requests: Arc::new(tokio::sync::Semaphore::new(256)),
+            starting: watch::channel(Some(opening())).0,
+            ready: OnceLock::new(),
+            globals: std::sync::Mutex::new(None),
         });
-        tokio::fs::write(paths::runtime(&state.config.home), serde_json::to_vec(&metadata).map_err(io::Error::from)?).await?;
-        let task = tokio::spawn(run(state, listener, lease, uid));
-        Ok(ServerHandle { stop, task: Some(task), info })
-    }
-    /// Start and wait until shutdown.
-    /// # Errors
-    /// Startup or shutdown fails.
-    pub async fn serve_forever(config: ServerConfig) -> Result<(), Error> {
-        Self::start(config).await?.serve_forever().await
+        tokio::fs::write(paths::runtime(&state.home), serde_json::to_vec(&metadata).map_err(io::Error::from)?).await?;
+        let task = tokio::spawn(run(state.clone(), listener, lease, uid));
+        Ok(ServerHandle { state, task: Some(task), info })
     }
 }
 
@@ -214,11 +260,12 @@ async fn stopped(receiver: &mut watch::Receiver<bool>) {
 }
 async fn run(state: Arc<State>, listener: UnixListener, _lease: Lease, uid: u32) -> Result<(), Error> {
     let mut stop = state.stop.subscribe();
+    let mut starting = state.starting.subscribe();
     let mut clients = JoinSet::new();
     let mut idle_since = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let mut globals = state.config.runtime.events();
-    let (index, _) = tokio::sync::broadcast::channel(256);
+    let mut globals: Option<broadcast::Receiver<Event>> = None;
+    let (index, _) = broadcast::channel(256);
     let mut seq = 0i64;
     loop {
         tokio::select! {
@@ -233,19 +280,31 @@ async fn run(state: Arc<State>, listener: UnixListener, _lease: Lease, uid: u32)
                 Err(error) => { tracing::error!(%error, "accept failed"); state.stop.send_replace(true); break; },
             },
             Some(_) = clients.join_next() => { idle_since = tokio::time::Instant::now(); },
-            event = globals.recv() => {
-                let event = match event {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => otto_proto::Event::SessionsChanged {},
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Ok(()) = starting.changed() => {
+                let event = match starting.borrow_and_update().clone() {
+                    Some(starting) => Event::ServerStarting { starting },
+                    None => {
+                        globals = state.globals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                        Event::ServerReady {}
+                    }
                 };
                 seq += 1;
                 let _ = index.send((seq, event));
             },
-            _ = tick.tick(), if state.config.idle_exit.is_some() => {
-                if !clients.is_empty() || state.config.runtime.busy() {
+            event = async { globals.as_mut().expect("guarded").recv().await }, if globals.is_some() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => Event::SessionsChanged {},
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                seq += 1;
+                let _ = index.send((seq, event));
+            },
+            _ = tick.tick(), if state.idle_exit.is_some() => {
+                // A start (a migration) can outlast the idle time: never stop mid-way.
+                if !clients.is_empty() || state.ready.get().is_none_or(|ready| ready.services.runtime.busy()) {
                     idle_since = tokio::time::Instant::now();
-                } else if idle_since.elapsed() >= state.config.idle_exit.unwrap_or_default() {
+                } else if idle_since.elapsed() >= state.idle_exit.unwrap_or_default() {
                     state.stop.send_replace(true);
                     break;
                 }
@@ -255,7 +314,9 @@ async fn run(state: Arc<State>, listener: UnixListener, _lease: Lease, uid: u32)
     drop(listener);
     state.stop.send_replace(true);
     while clients.join_next().await.is_some() {}
-    state.config.runtime.shutdown().await?;
+    if let Some(ready) = state.ready.get() {
+        ready.services.runtime.shutdown().await?;
+    }
     Ok(())
 }
 

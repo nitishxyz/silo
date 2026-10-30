@@ -293,6 +293,10 @@ impl SessionMirror {
                 | Event::SessionChanged { .. }
                 | Event::PlanUsage { .. }
                 | Event::AuthChanged {}
+                | Event::ServerStarting { .. }
+                | Event::ServerReady {}
+                | Event::McpStatus { .. }
+                | Event::McpChanged {}
                 | Event::QueueChanged { .. }
                 | Event::SubagentChanged { .. }
         ) {
@@ -464,7 +468,13 @@ impl SessionMirror {
                     self.info.plan = Some(usage.clone());
                 }
             }
-            Event::SessionsChanged {} | Event::SubagentChanged { .. } | Event::AuthChanged {} => {}
+            Event::SessionsChanged {}
+            | Event::SubagentChanged { .. }
+            | Event::AuthChanged {}
+            | Event::ServerStarting { .. }
+            | Event::ServerReady {}
+            | Event::McpStatus { .. }
+            | Event::McpChanged {} => {}
         }
     }
     /// Advance past a forward-compatible unknown event without projecting it.

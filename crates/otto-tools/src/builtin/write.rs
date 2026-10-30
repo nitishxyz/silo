@@ -23,6 +23,6 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
     atomic_write(&path, new).map_err(io)?;
-    super::undo_edit::record(&cx, &path, old.as_deref(), Some(new));
+    super::undo_edit::record(&cx, &path, old.as_deref(), Some(new)).await;
     Ok(ToolOutput::text(format!("Wrote {}", path.display())).with_metadata(diff(&path, old.as_deref().unwrap_or_default(), new)))
 }

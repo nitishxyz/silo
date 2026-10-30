@@ -12,24 +12,31 @@ use std::{
 fn absent(error: &ClientError) -> bool {
     matches!(error, ClientError::Io { kind: std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused, .. })
 }
+/// `c` once its daemon is ready, else still starting at `deadline` (a long store migration):
+/// [`Connection::starting`] tells how far it got.
+async fn settled(c: Connection, deadline: tokio::time::Instant) -> Result<Connection> {
+    let _ = tokio::time::timeout_at(deadline, c.ready(|_| {})).await;
+    Ok(c)
+}
 /// Connect or launch `binary_path` with exactly `args`, in a new process group.
 /// The start lock serializes launchers; the server lock prevents duplicate daemons.
 /// # Errors
-/// Connection, lock, spawn, or five-second readiness timeout.
+/// Connection, lock, spawn, or five-second timeout (a daemon still starting by then is returned).
 pub async fn connect_or_start(home: &Path, binary_path: &Path, args: &[&str]) -> Result<Connection> {
     start(home, binary_path, args, &[]).await
 }
 /// Make sure a daemon serves `home`, launching `binary` with `args` and `envs` (plus
-/// `OTTO_SILO_HOME`) in a new process group when none does.
+/// `OTTO_SILO_HOME`) in a new process group when none does. One still starting after
+/// five seconds counts (its clients show its start).
 /// # Errors
-/// Connection, lock, spawn, or five-second readiness timeout.
+/// Connection, lock, spawn, or five-second timeout.
 pub async fn ensure_started(home: &Path, binary: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> Result<()> {
     start(home, binary, args, envs).await.map(drop)
 }
 async fn start(home: &Path, binary_path: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> Result<Connection> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     match Connection::connect(home).await {
-        Ok(c) => return Ok(c),
+        Ok(c) => return settled(c, deadline).await,
         Err(e) if absent(&e) => {}
         Err(e) => return Err(e),
     }
@@ -47,7 +54,7 @@ async fn start(home: &Path, binary_path: &Path, args: &[&str], envs: &[(&str, &O
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     match Connection::connect(home).await {
-        Ok(c) => return Ok(c),
+        Ok(c) => return settled(c, deadline).await,
         Err(e) if absent(&e) => {}
         Err(e) => return Err(e),
     }
@@ -77,7 +84,7 @@ async fn start(home: &Path, binary_path: &Path, args: &[&str], envs: &[(&str, &O
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, Connection::connect(home)).await {
-            Ok(Ok(c)) => return Ok(c),
+            Ok(Ok(c)) => return settled(c, deadline).await,
             Ok(Err(e)) if absent(&e) => {}
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(ClientError::Timeout),

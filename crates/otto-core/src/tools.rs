@@ -32,7 +32,7 @@ pub(crate) fn pattern(pattern: &str, name: &str) -> bool {
 pub(crate) async fn available(cx: &Context) -> Vec<Arc<dyn Tool>> {
     let mut all = cx.runtime.builtins(&cx.live().family());
     all.extend(cx.runtime.extra_tools());
-    all.extend(cx.runtime.source_tools(&cx.root).await);
+    all.extend(cx.runtime.source_tools(&cx.root()).await);
     all
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn session_specs() -> Vec<ToolSpec> {
 }
 
 fn session_tools(cx: &Arc<Context>) -> Vec<Arc<dyn Tool>> {
-    let agents: Vec<_> = crate::agents::discover(&cx.root, &cx.runtime.0.config.user_config_dir).into_iter().map(|a| a.name).collect();
+    let agents: Vec<_> = crate::agents::discover(&cx.root(), &cx.runtime.0.config.user_config_dir).into_iter().map(|a| a.name).collect();
     session_specs()
         .into_iter()
         .map(|mut spec| {
@@ -294,7 +294,7 @@ impl Tool for SessionTool {
             }
             "skill" => {
                 let name = input["name"].as_str().ok_or_else(|| ToolError::invalid("name required"))?;
-                let skill = crate::skills::discover(&self.cx.root, &self.cx.runtime.0.config.user_config_dir)
+                let skill = crate::skills::discover(&self.cx.root(), &self.cx.runtime.0.config.user_config_dir)
                     .into_iter()
                     .find(|s| s.name == name)
                     .ok_or_else(|| ToolError::invalid("unknown skill"))?;

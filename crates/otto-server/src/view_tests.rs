@@ -74,7 +74,7 @@ fn fill(store: &Arc<StdMutex<Store>>, session: &str) -> Vec<String> {
 async fn a_session_larger_than_a_frame_opens_and_pages_back_to_its_start() {
     let mut f = Fixture::new(vec![]).await;
     let store = with_store(&mut f).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     let ids = fill(&store, &session.id);
@@ -128,7 +128,7 @@ async fn a_session_larger_than_a_frame_opens_and_pages_back_to_its_start() {
 async fn an_old_style_view_without_params_gets_the_newest_window_and_limits_hold() {
     let mut f = Fixture::new(vec![]).await;
     let store = with_store(&mut f).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     let ids = fill(&store, &session.id);
@@ -160,7 +160,7 @@ async fn an_old_style_view_without_params_gets_the_newest_window_and_limits_hold
 #[tokio::test]
 async fn a_reply_too_large_for_a_frame_is_an_error_and_the_connection_lives() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let big = "x".repeat(9 * 1024 * 1024);
     client.call(Method::ConfigSet { key: "first".into(), value: json!(big) }).await.unwrap();

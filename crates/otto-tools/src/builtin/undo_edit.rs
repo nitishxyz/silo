@@ -1,5 +1,6 @@
 //! `undo_edit`: the calling session's file edits (`edit`, `multiedit`, `write`,
-//! `apply_patch`), kept in memory newest last and taken back one at a time.
+//! `apply_patch`), taken back one at a time, newest first. With an [`UndoLog`] (`ToolCx::undo`, otto's store) the
+//! history persists and outlives the process; without one it is kept in memory.
 use super::*;
 use crate::ToolOutput;
 use std::{
@@ -69,8 +70,34 @@ fn session(cx: &ToolCx) -> String {
     cx.sessions.first().cloned().unwrap_or_default()
 }
 
+/// Where a session's edit history persists (otto: its store, capped there), so `undo_edit` works after a restart.
+#[async_trait::async_trait]
+pub trait UndoLog: Send + Sync {
+    /// `path` went from `before` to `after` (`None`: absent) by an edit of `session`.
+    async fn push(&self, session: &str, path: &Path, before: Option<&str>, after: Option<&str>);
+    /// `session`'s last edit to `path` still kept.
+    async fn last(&self, session: &str, path: &Path) -> Result<Option<Kept>, ToolError>;
+    /// Forget edit `id` (taken back).
+    async fn remove(&self, session: &str, id: i64) -> Result<(), ToolError>;
+}
+
+/// An edit an [`UndoLog`] keeps: the file before and after it (`None`: absent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    pub id: i64,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
 /// `path` went from `before` to `after` by an edit of `cx`'s session.
-pub(crate) fn record(cx: &ToolCx, path: &Path, before: Option<&str>, after: Option<&str>) {
+pub(crate) async fn record(cx: &ToolCx, path: &Path, before: Option<&str>, after: Option<&str>) {
+    remember(cx, path, before, after);
+    if let Some(log) = &cx.undo {
+        log.push(&session(cx), path, before, after).await;
+    }
+}
+
+fn remember(cx: &ToolCx, path: &Path, before: Option<&str>, after: Option<&str>) {
     let mut all = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
     let changes = all.entry(session(cx)).or_default();
     let mark = MARK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -95,25 +122,45 @@ tool!(UndoEdit, undo_spec(), run);
 
 async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
     let path = path(&input, &cx)?;
+    if let Some(log) = &cx.undo {
+        let kept = log.last(&session(&cx), &path).await?.ok_or_else(|| nothing(&path))?;
+        let current = take_back(&path, kept.after.as_deref(), kept.before.as_deref())?;
+        log.remove(&session(&cx), kept.id).await?;
+        // Taken back edits don't count as changes (`edited_since`).
+        let mut all = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
+        let changes = all.entry(session(&cx)).or_default();
+        if let Some(at) = changes.iter().rposition(|c| c.path == path && c.after == kept.after) {
+            changes.remove(at);
+        }
+        let (old, new) = (current.unwrap_or_default(), kept.before.unwrap_or_default());
+        return Ok(ToolOutput::text(format!("Undid the last edit to {}", path.display())).with_metadata(diff(&path, &old, &new)));
+    }
     let mut all = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
     let changes = all.entry(session(&cx)).or_default();
-    let at = changes
-        .iter()
-        .rposition(|c| c.path == path)
-        .ok_or_else(|| ToolError::invalid(format!("Nothing to undo: this session has no edit to {} left to take back", path.display())))?;
-    let current = match regular_text(&path) {
+    let at = changes.iter().rposition(|c| c.path == path).ok_or_else(|| nothing(&path))?;
+    let current = take_back(&path, changes[at].after.as_deref(), changes[at].before.as_deref())?;
+    let change = changes.remove(at);
+    let (old, new) = (current.unwrap_or_default(), change.before.unwrap_or_default());
+    Ok(ToolOutput::text(format!("Undid the last edit to {}", path.display())).with_metadata(diff(&path, &old, &new)))
+}
+
+fn nothing(path: &Path) -> ToolError {
+    ToolError::invalid(format!("Nothing to undo: this session has no edit to {} left to take back", path.display()))
+}
+
+/// Puts `path` back to `before` when it is still `after`; what it was.
+fn take_back(path: &Path, after: Option<&str>, before: Option<&str>) -> Result<Option<String>, ToolError> {
+    let current = match regular_text(path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(io(e)),
     };
-    if current != changes[at].after {
+    if current.as_deref() != after {
         return Err(ToolError::invalid(format!("{} changed after this session's last edit to it; read it and edit it instead", path.display())));
     }
-    match &changes[at].before {
-        Some(before) => atomic_write(&path, before).map_err(io)?,
-        None => std::fs::remove_file(&path).map_err(io)?,
+    match before {
+        Some(before) => atomic_write(path, before).map_err(io)?,
+        None => std::fs::remove_file(path).map_err(io)?,
     }
-    let change = changes.remove(at);
-    let (old, new) = (current.unwrap_or_default(), change.before.unwrap_or_default());
-    Ok(ToolOutput::text(format!("Undid the last edit to {}", path.display())).with_metadata(diff(&path, &old, &new)))
+    Ok(current)
 }

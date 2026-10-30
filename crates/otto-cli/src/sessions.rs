@@ -51,7 +51,7 @@ pub enum SessionCommand {
     },
     /// Rename a session.
     Rename { id: String, title: String },
-    /// Change the model (`provider/model` or a model of the current provider), agent or reasoning effort.
+    /// Change the model (`provider/model` or a model of the current provider), agent, reasoning effort or folder.
     Update {
         id: String,
         #[arg(long)]
@@ -61,6 +61,9 @@ pub enum SessionCommand {
         /// `default`: back to the agent's effort, else the model's.
         #[arg(long, value_parser = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"])]
         effort: Option<String>,
+        /// Move the idle session to this folder's project for its next turn.
+        #[arg(long)]
+        folder: Option<std::path::PathBuf>,
     },
     /// Archive a session and remove its spilled tool output.
     Archive { id: String },
@@ -95,7 +98,7 @@ pub async fn mutate(command: SessionCommand) -> Result<()> {
     let method = match command {
         SessionCommand::Mode { id, mode } => Method::SessionSetMode { session_id: id, approval_mode: approval_mode(&mode) },
         SessionCommand::Rename { id, title } => Method::SessionRename { session_id: id, title },
-        SessionCommand::Update { id, model, agent, effort } => {
+        SessionCommand::Update { id, model, agent, effort, folder } => {
             let (provider, model) = match model.as_deref().map(|m| m.split_once('/')) {
                 Some(Some((p, m))) => (Some(p.to_owned()), Some(m.to_owned())),
                 Some(None) => (None, model),
@@ -103,7 +106,8 @@ pub async fn mutate(command: SessionCommand) -> Result<()> {
             };
             let reset_effort = effort.as_deref() == Some("default");
             let effort = effort.filter(|_| !reset_effort).map(|e| serde_json::from_value(serde_json::Value::String(e))).transpose()?;
-            Method::SessionUpdate { session_id: id, provider, model, agent, effort, reset_effort }
+            let folder = folder.map(|f| std::path::absolute(f).map(|f| f.to_string_lossy().into_owned())).transpose()?;
+            Method::SessionUpdate { session_id: id, provider, model, agent, effort, reset_effort, folder }
         }
         SessionCommand::Archive { id } => Method::SessionArchive { session_id: id },
         SessionCommand::Fork { id, at_seq } => Method::SessionFork { session_id: id, at_seq },

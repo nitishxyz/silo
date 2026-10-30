@@ -149,7 +149,7 @@ impl Pending {
 }
 pub(crate) struct Context {
     pub runtime: Runtime,
-    /// The session as opened: identity, cwd and parent. Agent, model and meta
+    /// The session as opened: identity and parent. Agent, model, meta and folder
     /// change through `session.update`; read them from [`Context::live`].
     pub row: otto_store::Session,
     live: Mutex<Arc<Live>>,
@@ -159,13 +159,14 @@ pub(crate) struct Context {
     pub steer_wake: tokio::sync::Notify,
     state: mpsc::Sender<StateOp>,
     journal: mpsc::Sender<Journal>,
-    pub root: std::path::PathBuf,
 }
 /// What a model request is built from; a step takes one snapshot.
 pub(crate) struct Live {
     pub row: otto_store::Session,
     pub model: Arc<dyn otto_llm::Model>,
     pub system: Vec<String>,
+    /// The project's root; it and `row.cwd` change when `session.update` moves the session.
+    pub root: std::path::PathBuf,
 }
 impl Live {
     pub fn family(&self) -> String {
@@ -189,7 +190,15 @@ impl Context {
     }
     pub(crate) fn set_row(&self, row: otto_store::Session) {
         let live = self.live();
-        self.set_live(Live { row, model: live.model.clone(), system: live.system.clone() });
+        self.set_live(Live { row, model: live.model.clone(), system: live.system.clone(), root: live.root.clone() });
+    }
+    /// The project's root now (`session.update` can move it between turns).
+    pub fn root(&self) -> std::path::PathBuf {
+        self.live().root.clone()
+    }
+    /// The session's folder now; see [`Context::root`].
+    pub fn cwd(&self) -> String {
+        self.live().row.cwd.clone()
     }
     pub async fn state<T: Send + 'static>(&self, f: impl FnOnce(&mut Pending) -> T + Send + 'static) -> Result<T> {
         let (tx, rx) = oneshot::channel();
@@ -309,8 +318,8 @@ pub(crate) async fn spawn(runtime: Runtime, row: otto_store::Session) -> Result<
     let (deltas, _) = broadcast::channel(4096);
     let busy = Arc::new(Mutex::new(false));
     let handle = SessionHandle { id: row.id.clone(), tx, events: events.clone(), deltas: deltas.clone(), busy: busy.clone() };
-    let live = Mutex::new(Arc::new(Live { row: row.clone(), model, system }));
-    let cx = Arc::new(Context { runtime, row, live, events, deltas, steer_wake: tokio::sync::Notify::new(), state, journal, root });
+    let live = Mutex::new(Arc::new(Live { row: row.clone(), model, system, root }));
+    let cx = Arc::new(Context { runtime, row, live, events, deltas, steer_wake: tokio::sync::Notify::new(), state, journal });
     tokio::spawn(actor(cx, rx, journal_rx, state_rx, pending, busy));
     Ok(handle)
 }
@@ -386,7 +395,10 @@ async fn actor(
                     let result=result.map(|(event,row)|{cx.set_row(row);state.policy.mode=crate::runtime::policy_mode(mode);let _=cx.events.send(event);cx.runtime.changed();});
                     let _=reply.send(result);
                 }
-                Command::Configure(change,reply)=>{let result=configure(&cx,&mut state,turn,change).await;let _=reply.send(result);}
+                Command::Configure(change,reply)=>{
+                    if change.project_root.is_some()&&(active.is_some()||!state.queue.is_empty()){let _=reply.send(Err(Error::Invalid("cannot move a busy session; wait for its turn to end".into())));continue;}
+                    let result=configure(&cx,&mut state,turn,change).await;let _=reply.send(result);
+                }
                 Command::Update(update, untitled, reply)=>{
                     if update.archived==Some(true)&&(active.is_some()||!state.queue.is_empty()){let _=reply.send(Err(Error::Invalid("cannot archive a busy session; cancel and wait first".into())));continue;}
                     let archive=update.archived;
@@ -434,7 +446,7 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
     let agent_changed = agent_name != current.agent;
     let user = &cx.runtime.0.config.user_config_dir;
     let find = || {
-        crate::agents::discover(&cx.root, user)
+        crate::agents::discover(&cx.root(), user)
             .into_iter()
             .find(|a| a.name == agent_name)
             .ok_or_else(|| Error::Invalid(format!("unknown agent {agent_name}")))
@@ -446,6 +458,12 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
         (provider, model, _) => (provider.unwrap_or_else(|| current.provider.clone()), model.unwrap_or_else(|| current.model.clone())),
     };
     let model_changed = provider != current.provider || model_id != current.model;
+    // A move: the folder's project (registered as `project.open` would), unless it is the current one.
+    let moved = match change.project_root {
+        Some(root) if !std::path::Path::new(&root).is_dir() => return Err(Error::Invalid("not a folder".into())),
+        Some(root) => Some(cx.runtime.open_project(&root).await?).filter(|p| std::path::Path::new(&p.root) != live.root),
+        None => None,
+    };
     let models = &cx.runtime.0.config.models;
     let model = if model_changed {
         let listed = models.list();
@@ -479,7 +497,7 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
             if let Some(mode) = agent.approval_mode {
                 meta["approval_mode"] = serde_json::to_value(mode)?;
             }
-            system = crate::prompt::assemble(&cx.root, std::path::Path::new(&current.cwd), user, &agent_name);
+            system = crate::prompt::assemble(&cx.root(), std::path::Path::new(&current.cwd), user, &agent_name);
         }
     }
     if let Some(effort) = change.effort {
@@ -490,11 +508,23 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
         meta["context"] = serde_json::json!(otto_proto::ContextUse { used, window: model.info().caps.context_window });
     }
     let id = cx.row.id.clone();
+    let root = moved.as_ref().map_or_else(|| live.root.clone(), |p| p.root.clone().into());
+    if let Some(project) = &moved {
+        system = crate::prompt::assemble(&root, &root, user, &agent_name);
+        state.policy = otto_tools::policy::Policy::load(&root.join(".otto/rules.json"), &user.join("rules.json"), state.policy.mode)
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        // Earlier calls and their results name the old folder: the model is told it moved.
+        let text = format!("The working folder changed from {} to {}; earlier paths refer to the old one.", current.cwd, project.root);
+        let item = otto_llm::Item::new(crate::id(), otto_llm::Role::System, vec![otto_llm::Part::System { text }]);
+        cx.commit(Event::ItemDone { item: item.clone() }, Projection::PutItem(item), turn, 0).await?;
+    }
     let update = otto_store::SessionUpdate {
         agent: Some(agent_name.clone()),
         provider: Some(provider),
         model: Some(model_id),
         meta: Some(meta),
+        cwd: moved.as_ref().map(|p| p.root.clone()),
+        project_id: moved.as_ref().map(|p| p.id.clone()),
         ..Default::default()
     };
     let (event, row, info) = cx
@@ -505,6 +535,9 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
             row.provider = update.provider.clone().unwrap_or_default();
             row.model = update.model.clone().unwrap_or_default();
             row.meta = update.meta.clone().unwrap_or_default();
+            if let (Some(cwd), Some(project)) = (&update.cwd, &update.project_id) {
+                (row.cwd, row.project_id) = (cwd.clone(), project.clone());
+            }
             let mut info = crate::runtime::info(s, row.clone())?;
             info.last_seq += 1;
             let event = Event::SessionChanged { info: info.clone() };
@@ -515,7 +548,7 @@ async fn configure(cx: &Context, state: &mut Pending, turn: i64, change: crate::
     if agent_changed {
         state.policy.mode = crate::runtime::policy_mode(crate::runtime::approval_mode(&row.meta));
     }
-    cx.set_live(Live { row, model, system });
+    cx.set_live(Live { row, model, system, root });
     let _ = cx.events.send(event);
     cx.runtime.changed();
     Ok(info)

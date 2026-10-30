@@ -67,6 +67,7 @@ struct Inner {
     events: broadcast::Sender<Result<ServerMessage>>,
     shutdown: watch::Sender<bool>,
     hello: ServerHello,
+    starting: watch::Receiver<Option<Starting>>,
     redial: Option<Redial>,
 }
 enum Redial {
@@ -101,6 +102,8 @@ pub struct SessionUpdate {
     pub effort: Option<Effort>,
     /// Back to the agent's effort, else the model's default.
     pub reset_effort: bool,
+    /// Move the idle session to this folder's project (absolute or `~/…`).
+    pub folder: Option<String>,
 }
 
 impl Connection {
@@ -158,6 +161,7 @@ impl Connection {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let p = pending.clone();
         let e = events.clone();
+        let (starts, starting) = watch::channel(hello.starting.clone());
         tokio::spawn(async move {
             let read = async {
                 loop {
@@ -176,6 +180,13 @@ impl Connection {
                             }
                         }
                         event => {
+                            if let ServerMessage::Event { session_id: None, event: global, .. } = &event {
+                                match &**global {
+                                    Event::ServerStarting { starting } => _ = starts.send_replace(Some(starting.clone())),
+                                    Event::ServerReady {} => _ = starts.send_replace(None),
+                                    _ => {}
+                                }
+                            }
                             let _ = e.send(Ok(event));
                         }
                     }
@@ -203,11 +214,30 @@ impl Connection {
             }
             let _ = e.send(Err(error));
         });
-        Ok(Self { inner: Arc::new(Inner { tx, pending, next: AtomicU64::new(1), events, shutdown, hello, redial: None }) })
+        Ok(Self { inner: Arc::new(Inner { tx, pending, next: AtomicU64::new(1), events, shutdown, hello, starting, redial: None }) })
     }
     #[must_use]
     pub fn hello(&self) -> &ServerHello {
         &self.inner.hello
+    }
+    /// What the daemon is doing while it starts ([`ServerHello::starting`], then `server.starting`), `None` once
+    /// it is ready. Closes with the connection.
+    #[must_use]
+    pub fn starting(&self) -> watch::Receiver<Option<Starting>> {
+        self.inner.starting.clone()
+    }
+    /// Wait until the daemon is ready, telling `progress` what it does meanwhile.
+    /// # Errors
+    /// The connection closed first.
+    pub async fn ready(&self, mut progress: impl FnMut(&Starting)) -> Result<()> {
+        let mut starting = self.starting();
+        loop {
+            match &*starting.borrow_and_update() {
+                Some(now) => progress(now),
+                None => return Ok(()),
+            }
+            starting.changed().await.map_err(|_| ClientError::Closed)?;
+        }
     }
     /// Subscribe before issuing session.subscribe; replay can precede its response.
     #[must_use]
@@ -268,8 +298,8 @@ impl Connection {
         .await
     }
     pub async fn session_update(&self, session_id: &str, update: SessionUpdate) -> Result<SessionInfo> {
-        let SessionUpdate { provider, model, agent, effort, reset_effort } = update;
-        self.call_typed(Method::SessionUpdate { session_id: session_id.into(), provider, model, agent, effort, reset_effort }).await
+        let SessionUpdate { provider, model, agent, effort, reset_effort, folder } = update;
+        self.call_typed(Method::SessionUpdate { session_id: session_id.into(), provider, model, agent, effort, reset_effort, folder }).await
     }
     /// A new session with the history through `at_seq` (all of it when `None`); its `forked_from` names this one.
     pub async fn session_fork(&self, session_id: &str, at_seq: Option<i64>) -> Result<SessionInfo> {
@@ -384,6 +414,46 @@ impl Connection {
     /// Every session's usage since `since_ms`, days starting `utc_offset_minutes` east of UTC.
     pub async fn usage_summary(&self, since_ms: i64, utc_offset_minutes: Option<i32>) -> Result<UsageSummary> {
         self.call_typed(Method::UsageSummary { since_ms, utc_offset_minutes }).await
+    }
+    /// MCP servers for `project_root` (global ones only without it), with status and tool count.
+    pub async fn mcp_list(&self, project_root: Option<String>) -> Result<Vec<McpServer>> {
+        self.call_typed(Method::McpList { project_root }).await
+    }
+    pub async fn mcp_add(
+        &self,
+        project_root: Option<String>,
+        scope: McpScope,
+        name: &str,
+        transport: McpTransport,
+        enabled: bool,
+    ) -> Result<McpServer> {
+        self.call_typed(Method::McpAdd { project_root, scope, name: name.into(), transport, enabled }).await
+    }
+    pub async fn mcp_update(
+        &self,
+        project_root: Option<String>,
+        scope: McpScope,
+        name: &str,
+        transport: Option<McpTransport>,
+        enabled: Option<bool>,
+    ) -> Result<McpServer> {
+        self.call_typed(Method::McpUpdate { project_root, scope, name: name.into(), transport, enabled }).await
+    }
+    pub async fn mcp_remove(&self, project_root: Option<String>, scope: McpScope, name: &str) -> Result<Empty> {
+        self.call_typed(Method::McpRemove { project_root, scope, name: name.into() }).await
+    }
+    pub async fn mcp_login(&self, project_root: Option<String>, name: &str) -> Result<McpLoginStarted> {
+        self.call_typed(Method::McpLogin { project_root, name: name.into() }).await
+    }
+    /// Waits for the browser without `code`; otherwise finishes with the pasted callback URL (or code).
+    pub async fn mcp_login_complete(&self, login_id: &str, code: Option<String>) -> Result<McpServer> {
+        self.call_typed(Method::McpLoginComplete { login_id: login_id.into(), code }).await
+    }
+    pub async fn mcp_login_cancel(&self, login_id: &str) -> Result<Empty> {
+        self.call_typed(Method::McpLoginCancel { login_id: login_id.into() }).await
+    }
+    pub async fn mcp_logout(&self, project_root: Option<String>, name: &str) -> Result<Empty> {
+        self.call_typed(Method::McpLogout { project_root, name: name.into() }).await
     }
 }
 struct PendingGuard {

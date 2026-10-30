@@ -3,7 +3,7 @@
 use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
 
-use crate::{control::*, model::*};
+use crate::{control::*, mcp::*, model::*};
 
 /// Description, schemas and example for a known method.
 #[must_use]
@@ -77,6 +77,9 @@ fn result_schema(method: &Method) -> Schema {
         M::PlanUsage { .. } => schema_for!(Vec<ProviderPlan>),
         M::UsageSummary { .. } => schema_for!(UsageSummary),
         M::JobList { .. } => schema_for!(Vec<JobInfo>),
+        M::McpList { .. } => schema_for!(Vec<McpServer>),
+        M::McpAdd { .. } | M::McpUpdate { .. } | M::McpLoginComplete { .. } => schema_for!(McpServer),
+        M::McpLogin { .. } => schema_for!(McpLoginStarted),
         M::ServerShutdown {}
         | M::Ping {}
         | M::SessionUnsubscribe { .. }
@@ -95,6 +98,9 @@ fn result_schema(method: &Method) -> Schema {
         | M::AuthLoginCancel { .. }
         | M::AuthLogout { .. }
         | M::AgentsDelete { .. }
+        | M::McpRemove { .. }
+        | M::McpLoginCancel { .. }
+        | M::McpLogout { .. }
         | M::ConfigSet { .. } => schema_for!(Empty),
     }
 }
@@ -135,6 +141,7 @@ pub fn examples() -> Vec<Method> {
             agent: None,
             effort: Some(otto_llm::Effort::High),
             reset_effort: false,
+            folder: None,
         },
         M::SessionSetMode { session_id: "s1".into(), approval_mode: crate::model::ApprovalMode::AskOnEffects },
         M::SessionArchive { session_id: "s1".into() },
@@ -191,6 +198,26 @@ pub fn examples() -> Vec<Method> {
         M::ConfigSet { key: "model".into(), value: json!("example-model") },
         M::PlanUsage { provider: Some("anthropic".into()) },
         M::UsageSummary { since_ms: 1_798_761_600_000, utc_offset_minutes: Some(330) },
+        M::McpList { project_root: Some("/work/project".into()) },
+        M::McpAdd {
+            project_root: None,
+            scope: McpScope::Global,
+            name: "github".into(),
+            transport: McpTransport::Http { url: "https://api.example.com/mcp".into(), headers: Default::default() },
+            enabled: true,
+        },
+        M::McpUpdate {
+            project_root: Some("/work/project".into()),
+            scope: McpScope::Project,
+            name: "files".into(),
+            transport: None,
+            enabled: Some(false),
+        },
+        M::McpRemove { project_root: None, scope: McpScope::Global, name: "github".into() },
+        M::McpLogin { project_root: Some("/work/project".into()), name: "github".into() },
+        M::McpLoginComplete { login_id: "login1".into(), code: None },
+        M::McpLoginCancel { login_id: "login1".into() },
+        M::McpLogout { project_root: None, name: "github".into() },
     ]
 }
 

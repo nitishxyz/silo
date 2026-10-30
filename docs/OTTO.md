@@ -12,7 +12,7 @@ cross-machine conflicts (§12).
 | O2 server | Daemon with gap-free subscriptions, live deltas, bounded queues, idle exit; client mirror + follower; `otto-silo` CLI | `otto-proto`, `otto-server`, `otto-client`, `otto-cli` |
 | O3 | OpenAI WebSocket with steering and `previous_response_id` continuation, Codex over WebSocket, OpenAI and Anthropic native compaction (Anthropic threshold compaction pauses after its checkpoint, which drops everything before it, and the turn's prompt is re-sent after it; OpenAI's carries the context and continues in the same response), async tools, Anthropic server tools and context editing; Gemini (Interactions API), xAI (Responses), the compat family (OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Ollama, LM Studio, custom) with local model discovery; cross-provider scripted test (§4.7, §4.8). Every provider gets otto's own tools (name, description, JSON schema; GPT's `apply_patch` as our freeform patch tool); provider-predefined client tools (Claude `bash`/`text_editor`, OpenAI `shell`/`apply_patch` types) are not used, and old sessions' calls to them replay as calls to ours (§5) | `otto-llm`, `otto-cli/src/{auth,services}.rs` |
 | O4 harness depth | Durable versioned outbox (delivered once, wakes a closed or restarted parent, interrupted children report), `subagent` delegate/reuse/list/status/message/stop/retry with depth 2 and 4 running children; Claude Code-compatible hooks (9 events, regex matchers, exit 2, `decision`/`permissionDecision`/`continue`), skills, slash commands and agents (`.claude/` dirs read too); MCP client (stdio + streamable HTTP, `.mcp.json`); `load_tools` ranked search and prefix loading; context editing; opt-in native compaction; queue edits (`session.queue_remove`/`queue_update`, pending steers listed in the queue); `auth login` for all 14 providers with `--base-url` (keyless for local and custom endpoints) | `otto-core`, `otto-mcp`, `otto-store`, `otto-proto` |
-| Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
+| Sessions | `session.update` (provider, model, agent, reasoning effort; from the next model request, a new model drops provider-side state; `folder` moves an idle session to another project for its next turn), per-session effort (`Reasoning::Effort` for models with `caps.reasoning`), automatic titles after the first turn (cheapest priced model of the session's provider, never over a set title), plan labels in `auth.status` (Claude profile `organization_type`, ChatGPT `chatgpt_plan_type`), `project.list` most recent first without missing roots | `otto-core`, `otto-llm`, `otto-server`, `otto-proto` |
 | O5 silo toolset | Partly built: `terminal_*` and `browser_*` tools (`silo-tools`), offered to every otto session through `otto-silo-tools`, and to other harnesses through `silo mcp`; parked blocks (`block.spawn`/`park`/`reveal`) and `shell` in parked command blocks with background results delivered to the session (§6.2). Per-subagent grants: `delegate {tools}` narrows a child to a subset of its agent's tools, silo's included (§7.4). Not built: the `service` tunnel target | `silo-proto`, `silo-server`, `silo-tools`, `otto-silo-tools`, `otto-tools`, `silo-cli` |
 | O7 agent block | Built: otto sessions as a native chat block in the app (docs/AGENT_BLOCK.md) | `silo-app/src/agent` |
 | O6, O8 | Not started beyond the `browser_*` tools above | – |
@@ -30,20 +30,23 @@ subscription refresh; the models.dev catalog refresh.
 
 **Known gaps:**
 - Hooks run `type: "command"` handlers only (no prompt/HTTP hooks, no async handlers); `SessionEnd` fires on archive.
-- The MCP client is hand-written (stdio, streamable HTTP without the GET notification stream or OAuth); `rmcp` was
-  not used because builds here are offline. Resources and prompts are not exposed.
+- The MCP client is hand-written (`rmcp` was not used because builds here are offline): no legacy HTTP+SSE
+  transport, no sampling (refused), elicitation always declined, prompts are a `get_prompt` tool rather than slash
+  commands (commands are files only). OAuth is tested against an in-process fake only, not a real provider.
 - Path guards are revalidation, not a sandbox (§5.2 "later").
 - Global index event seqs reset when the daemon restarts.
 - Native tool search (`defer_loading`) is not used.
-- A runtime that was shut down stays closed (outbox wakes cannot reopen actors); a restarted server needs a new one.
 - An agent change in `session.update` keeps the session's model (the agent's `model` applies only at creation).
 - Automatic titles are tried once per session actor; a restarted daemon may try a still-untitled session once more.
   The Claude plan comes from `/api/oauth/profile` at login and refresh (best effort, not verified live); older
   stored credentials report none until their next refresh.
 - O5 shell: every model gets the full `shell` (`command`, `cwd`, `timeout_ms`, `background`). The user can detach a
   running foreground call (`shell.detach`), which then reports like a background one; `job.list` / `job.kill` list and
-  stop a session's jobs. Jobs live in the daemon: after a restart, a job that never reported gets a `was stopped (the otto server
-  restarted)` system item at startup (no turn starts). `waiting_for_input` is a heuristic (`line_prompt`: canonical
+  stop a session's jobs. A job in a Silo command block keeps its block and Silo home in its call's metadata
+  (`block_id`, `host`): after a restart the daemon re-attaches to it while that block is still there (lists it,
+  reports it through the outbox as usual, an explicit timeout counting from its start); a pipe job, or one whose
+  block is gone or belongs to another Silo home, gets a `was stopped (the otto server restarted)` system item (no
+  turn starts). `waiting_for_input` is a heuristic (`line_prompt`: canonical
   tty, cursor ending a non-empty line, 2 s quiet); a prompt that ends with a newline, or a raw-mode one, isn't seen
   and the call runs to its timeout. The agent block recognises job reports by their system text
   (`Background shell <id> …`), since system items carry no metadata.
@@ -522,8 +525,21 @@ pub struct ToolSpec {
   again before every model request, so a changed list reaches the next step and every provider gets the full
   current list.
 - **MCP** (`otto-mcp`): a hand-written JSON-RPC client (protocol `2025-06-18`) for stdio and streamable HTTP servers
-  (POST with JSON or SSE replies, `Mcp-Session-Id`; no GET stream, no OAuth: put tokens in `headers` with
-  `${VAR}`). `rmcp` 3.x exists but needs crates this offline build cannot fetch. Config is Claude Code's
+  (POST with JSON or SSE replies, `Mcp-Session-Id`, the GET notification stream reopened with `Last-Event-ID` after
+  a drop, waiting the server's `retry`; a `405` means none). `rmcp` 3.x exists but needs crates this offline build
+  cannot fetch. OAuth per the MCP authorization spec: a `401` (or `403 insufficient_scope`) without a usable token
+  makes the server `needs sign-in`; `mcp.login` discovers the authorization server (`WWW-Authenticate`
+  `resource_metadata`, else `.well-known/oauth-protected-resource[/path]`, then `oauth-authorization-server` /
+  `openid-configuration`; a server without resource metadata is its own), registers otto dynamically
+  (`token_endpoint_auth_method: none`), and sends the browser there with PKCE S256, `resource` and the scope from
+  the challenge or `scopes_supported`; the redirect comes back to a loopback port. Tokens live in a credential store
+  of their own, `<home>/auth/mcp/auth.json` (`otto_llm::auth::CredentialStore`, key `mcp:<url>`), are refreshed
+  5 minutes before expiry and once after a `401`. A configured `Authorization` header turns OAuth off. Server
+  requests: `ping`, `roots/list` (the projects using the server; `roots.listChanged` is announced),
+  `elicitation/create` declined, `sampling/createMessage` refused (`-1`), others `-32601`. Notifications:
+  `tools|resources|prompts/list_changed` relist at once (a new tool count goes out as `mcp.status`).
+  Resources and prompts are tools: `mcp__<server>__list_resources`, `read_resource {uri}` and `get_prompt {name,
+  arguments}` (its description lists the prompts), read-only, offered when the server declares the capability. Config is Claude Code's
   `{"mcpServers": …}`, merged by name from user `mcp.json`, project `.mcp.json` and `.otto/mcp.json`, with
   `${VAR}`/`${VAR:-default}` expansion, `disabled`, `deferred`, `timeout`, `startupTimeout`. Servers start on the
   first request of a session in their project, relist on `tools/list_changed`, restart after a crash (3 starts a
@@ -553,8 +569,10 @@ pub struct ToolSpec {
 `update_todos`, `ask_user`, `skill`, `load_tools`, `subagent` (delegate/list/message/stop/retry), `wait`; deferred
 (through `load_tools`): `copy_attachment`, `web_search` (§6.3; provider-hosted search stays where it exists),
 `undo_edit {path}` (takes back the session's last `edit`/`multiedit`/`write`/`apply_patch` change to that file, one
-per call, newest first; an in-memory stack per session of 64 changes; granted with the edit tools; refused when the
-session has nothing left to undo there, or when the file changed after that edit).
+per call, newest first; granted with the edit tools; refused when the session has nothing left to undo there, or when
+the file changed after that edit). The history is kept in the store with the session (`undo_edits`, content in
+`blobs`), so it works after a restart: the newest 50 edits per file (`UNDO_PER_FILE`) within 16 MiB per session
+(`UNDO_SESSION_BYTES`), dropped when the session is archived or idle for 30 days (`UNDO_IDLE_MS`).
 
 - **New tools are deferred.** Any tool added from here on is `Loading::Deferred` (in `load_tools`' index with the
   first sentence of its description, loaded by name) unless it is part of the core edit/run loop. Improvements to
@@ -956,6 +974,15 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   event doesn't repeat its projection (the item an `item.done` puts, a call's input and output are
   `{"$otto_ref":…}`); `item_versions` keeps only superseded item versions. The store resolves all of it on read.
   Migration 4 converts an existing database at daemon start in one transaction, then `VACUUM`s.
+- Bounded growth (`retention.rs`, schema 5): deltas stay inline (never blobs), so dropping them orphans nothing; a
+  blob whose last reference may have gone (undo history dropped, an older delta) becomes a candidate and is deleted
+  once no stored JSON or undo edit refers to it, in one transaction. The database is `auto_vacuum=INCREMENTAL`:
+  `Store::maintain` (every 15 min while no session works, `MAINTAIN_EVERY`) drops archived and idle sessions' undo
+  history, collects candidates and gives up to 64 MiB of free pages back (`VACUUM_PAGES`). Migration 5 collects
+  every unreferenced blob once (a step) and an existing database is `VACUUM`ed once to switch modes (`compacting`;
+  ~9 s for 1 GB here). Nothing `session.view` or event replay reads is pruned: items, item versions, tool calls and
+  non-delta events stay, as do media blobs, which make up most of a large store (a 1 GB one here: 0.7 GB of
+  referenced blobs, no orphans).
 - Tool journal: `intent` before executing, `outcome` before the result item, both fsynced. On restart, an intent
   without an outcome becomes a `ToolResult{is_error, "outcome unknown"}` and is never re-run.
 - Turns interrupted by a daemon restart are marked `interrupted`; the user resumes them explicitly.
@@ -979,6 +1006,20 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
   server (falling back to `cwd`), else opens the daemon user's home; a pending `auth.login` reports
   `callback: {port, path}` when the provider redirects the browser to a loopback listener (OpenAI's browser
   login: `{1455, "/auth/callback"}`), so a client on another machine can forward it.
+- MCP settings (additive, `otto_proto::mcp`): `mcp.list {project_root?}` → `[McpServer {name, scope: global|project,
+  transport: {type: stdio, command, args, env} | {type: http, url, headers}, enabled, status: {state: connected |
+  connecting | error {message} | needs_sign_in | disabled}, tools}]` (the user's `mcp.json`, then the project's
+  `.mcp.json`/`.otto/mcp.json`; values as written, `${VAR}` unexpanded; enabled servers that have not started start
+  now). `mcp.add {project_root?, scope, name, transport, enabled = true}` → `McpServer` (global: the user's
+  `mcp.json`; project: `.mcp.json`); `mcp.update {project_root?, scope, name, transport?, enabled?}` → `McpServer`
+  (other keys stay; a global server's `disabled` is written to its file, a project server turned off is listed in
+  the user's `mcp.json` `disabledProjectServers: {root: [name]}` so the shared file stays untouched);
+  `mcp.remove {project_root?, scope, name}`. Sign-in follows `auth.login`: `mcp.login {project_root?, name}` →
+  `McpLoginStarted {login_id, url, callback: {port, path}}` (a remote client forwards `callback.port`), then
+  `mcp.login_complete {login_id, code?}` → `McpServer` waits for the browser (10 minutes) or takes the pasted
+  callback URL (or code); `mcp.login_cancel {login_id}`, `mcp.logout {project_root?, name}`. Global events
+  `mcp.status {name, status, tools}` (a server's status or tool count changed) and `mcp.changed {}` (servers
+  added, changed or removed: reread `mcp.list`). Debug output redacts `env`/`headers` values and pasted codes.
 - Events: `session.changed`, `turn.started/finished`, `item.started`, `text.delta`, `reasoning.delta`,
   `tool.input_start`, `tool.input_delta`, `tool.call`, `tool.progress`, `tool.result`, `approval.requested/resolved`,
   `question.asked`, `usage`, `compaction`, `subagent.changed`, `queue.changed`, `error`.
@@ -1109,6 +1150,16 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
     not stop is the result the error "otto here serves another Silo". At startup nothing is started when no daemon
     runs; the first agent starts it. E.g. the installed app's server replaces a daemon a dev app started in the
     default otto home.
+  - **Starting daemons.** The daemon takes its lease and binds its socket before it opens the store (a schema
+    migration took ~55 s on a 4.7 GB store), so a second start fails "another otto server owns this home" at once.
+    Until ready, `hello`/`server.info` carry `starting {phase: opening|migrating|compacting|loading, step, steps}`,
+    only `server.info`, `ping` and `api.*` answer (the rest, `server.shutdown` too, fail `starting` with that as
+    `data`), global `server.starting` events tell progress and `server.ready` ends it; no idle exit meanwhile.
+    `connect_or_start`/`ensure_started` wait up to their 5 s for ready, then return the starting daemon;
+    `otto_claim` keeps a starting daemon of its own and waits for any other to be ready before replacing it. The
+    agent pane shows "Starting otto…" or "Updating otto's data…" ("Step 3 of 6", "Freeing space") and loads on
+    `server.ready`; the CLI waits, saying "otto is updating its data…". `server.log` (filter
+    `warn,otto_cli::daemon=info,otto_store::migrate=info`) logs "otto starting", each migration phase and "otto ready".
   - The local app reaches its daemon through its own server too: `Connection::connect_dial` with a dial that calls
     `service.socket {name}` (owner only; the service's socket, or `not_found` / `unavailable`) on the app's silo
     server and connects to it. A loopback `silo/tunnel/1` would need the app paired with its own server, so the

@@ -2,6 +2,8 @@
 mod api_tests;
 #[path = "limits_tests.rs"]
 mod limits_tests;
+#[path = "mcp_tests.rs"]
+mod mcp_tests;
 #[path = "view_tests.rs"]
 mod view_tests;
 
@@ -134,14 +136,21 @@ impl Fixture {
         self.runtime = runtime(&self.dir, &self.models).await;
     }
     fn config(&self) -> ServerConfig {
-        ServerConfig {
-            home: self.dir.path().into(),
+        ServerConfig { home: self.dir.path().into(), idle_exit: None, build: "test-build".into() }
+    }
+    fn services(&self) -> Services {
+        Services {
             runtime: self.runtime.clone(),
             models: self.models.clone(),
             auth: Arc::new(NoAuth),
-            idle_exit: None,
-            build: "test-build".into(),
+            mcp: otto_mcp::Mcp::new(self.dir.path().join("mcp-user"), self.dir.path().join("mcp-tokens")),
         }
+    }
+    /// Started and ready.
+    async fn start(&self) -> ServerHandle {
+        let server = Server::start(self.config()).await.unwrap();
+        server.ready(self.services()).await.unwrap();
+        server
     }
     async fn connect(&self) -> Connection {
         Connection::connect(self.dir.path()).await.unwrap()
@@ -185,7 +194,7 @@ async fn finished(follower: &SessionFollower) -> SessionMirror {
 #[tokio::test]
 async fn hello_api_validation_lock_and_shutdown() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     assert!(matches!(Server::start(f.config()).await, Err(Error::AlreadyRunning)));
     let client = f.connect().await;
     assert_eq!(client.hello().protocol, PROTOCOL);
@@ -216,9 +225,48 @@ async fn hello_api_validation_lock_and_shutdown() {
 }
 
 #[tokio::test]
-async fn config_effort_round_trips_and_reaches_new_sessions() {
+async fn a_starting_server_answers_and_reports_its_start_until_ready() {
     let f = Fixture::new(vec![]).await;
     let server = Server::start(f.config()).await.unwrap();
+    // The lease and socket come first: a second start fails before opening anything.
+    assert!(matches!(Server::start(f.config()).await, Err(Error::AlreadyRunning)));
+    let client = f.connect().await;
+    let opening = Starting { phase: StartPhase::Opening, step: 0, steps: 0 };
+    assert_eq!(client.hello().starting, Some(opening.clone()));
+    assert!(client.call(Method::Ping {}).await.is_ok());
+    assert_eq!(client.call_typed::<ServerInfo>(Method::ServerInfo {}).await.unwrap().starting, Some(opening));
+    assert!(client.call(Method::ApiList {}).await.is_ok());
+    for method in [Method::SessionList { project_id: None, include_archived: false }, Method::ServerShutdown {}, Method::AuthStatus {}] {
+        let error = client.call(method).await.unwrap_err();
+        assert!(matches!(&error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::STARTING), "{error}");
+    }
+    let migrating = Starting { phase: StartPhase::Migrating, step: 2, steps: 6 };
+    server.starting(migrating.clone());
+    let mut starting = client.starting();
+    tokio::time::timeout(Duration::from_secs(5), starting.wait_for(|s| s.as_ref() == Some(&migrating))).await.unwrap().unwrap();
+    let error = client.call(Method::ProjectList {}).await.unwrap_err();
+    assert!(matches!(&error, otto_client::ClientError::Rpc(e) if e.data == Some(json!(migrating))), "the error says how far: {error}");
+    let mut seen = Vec::new();
+    {
+        let waiting = client.ready(|s| seen.push(s.phase));
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut waiting).await.is_err(), "not ready yet");
+        server.ready(f.services()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+    }
+    assert_eq!(seen, [StartPhase::Migrating]);
+    // The same connection serves everything now; a new one starts ready.
+    f.session(&client).await;
+    assert_eq!(f.connect().await.hello().starting, None);
+    assert!(server.ready(f.services()).await.is_err(), "once");
+    client.call(Method::ServerShutdown {}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server.serve_forever()).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn config_effort_round_trips_and_reaches_new_sessions() {
+    let f = Fixture::new(vec![]).await;
+    let server = f.start().await;
     let client = f.connect().await;
     client.call(Method::ConfigSet { key: "effort".into(), value: json!("high") }).await.unwrap();
     assert_eq!(client.call(Method::ConfigGet { key: Some("effort".into()) }).await.unwrap()["value"], "high");
@@ -235,7 +283,7 @@ async fn config_effort_round_trips_and_reaches_new_sessions() {
 #[tokio::test]
 async fn hello_carries_home() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     assert_eq!(client.hello().home, std::env::var("HOME").unwrap());
     server.shutdown().await.unwrap();
@@ -244,7 +292,7 @@ async fn hello_carries_home() {
 #[tokio::test]
 async fn pending_login_reports_its_callback() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let login =
         |device| Method::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device, base_url: None, paste: false };
@@ -263,7 +311,7 @@ async fn project_open_resolves_cwd_to_git_root() {
     assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).status().unwrap().success());
     let plain = f.dir.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let open =
         |root: &str, cwd: Option<&std::path::Path>| Method::ProjectOpen { root: root.into(), cwd: cwd.map(|c| c.to_string_lossy().into_owned()) };
@@ -281,7 +329,7 @@ async fn project_open_resolves_cwd_to_git_root() {
 #[tokio::test]
 async fn empty_project_open_is_home() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let project: ProjectInfo = client.call_typed(serde_json::from_value(json!({"method":"project.open","params":{}})).unwrap()).await.unwrap();
     let home = std::fs::canonicalize(std::env::var("HOME").unwrap()).unwrap();
@@ -293,7 +341,7 @@ async fn empty_project_open_is_home() {
 async fn two_clients_follow_tool_round_trip_identically() {
     let f = Fixture::new(vec![call("read", json!({"path":"hello.txt"})), text("answer")]).await;
     std::fs::write(f.dir.path().join("hello.txt"), "world").unwrap();
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let a = f.connect().await;
     let b = f.connect().await;
     let session = f.session(&a).await;
@@ -343,7 +391,7 @@ async fn two_clients_follow_tool_round_trip_identically() {
 #[tokio::test]
 async fn reconnect_mid_turn_replays_exact_contiguous_tail() {
     let f = Fixture::new(vec![text("resumed")]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     let mut mirror = SessionMirror::new(client.session_view(&session.id).await.unwrap());
@@ -389,7 +437,7 @@ async fn reconnect_mid_turn_replays_exact_contiguous_tail() {
 #[tokio::test]
 async fn approval_answer_over_socket() {
     let f = Fixture::new(vec![call("shell", json!({"command":"printf approved"})), text("done")]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     client.call(Method::ConfigSet { key: "approval_mode".into(), value: json!("ask_on_effects") }).await.unwrap();
     let session = f.session(&client).await;
@@ -423,6 +471,7 @@ async fn idle_exit_waits_for_clients_and_busy_turns() {
     let mut config = f.config();
     config.idle_exit = Some(Duration::from_millis(150));
     let server = Server::start(config).await.unwrap();
+    server.ready(f.services()).await.unwrap();
     let client = f.connect().await;
     let session = f.session(&client).await;
     prompt(&client, &session.id).await;
@@ -463,7 +512,7 @@ async fn bounded_queue_overflow_is_client_local() {
 #[tokio::test]
 async fn nonreading_socket_is_closed_without_harming_other_clients() {
     let f = Fixture::new(vec![]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let healthy = f.connect().await;
     healthy.call(Method::ConfigSet { key: "large".into(), value: json!("x".repeat(65536)) }).await.unwrap();
     let mut slow = tokio::net::UnixStream::connect(paths::socket(f.dir.path())).await.unwrap();
@@ -489,7 +538,7 @@ async fn nonreading_socket_is_closed_without_harming_other_clients() {
 #[tokio::test]
 async fn a_detached_shell_call_returns_and_its_job_reports_later() {
     let f = Fixture::new(vec![call("shell", json!({"command":"sleep 0.4; printf finished"})), text("carry on"), text("seen")]).await;
-    let server = Server::start(f.config()).await.unwrap();
+    let server = f.start().await;
     let client = f.connect().await;
     let session = f.session(&client).await;
     let follower = SessionFollower::new(client.clone(), &session.id).await.unwrap();

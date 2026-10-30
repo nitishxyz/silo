@@ -70,7 +70,7 @@ pub(crate) async fn run(cx: Arc<Context>, input: QueuedInput, turn: i64, cancel:
 }
 /// The work tree as the turn starts (`snapshot`), its tree id kept as the turn's `base_tree`.
 async fn turn_snapshot(cx: &Context, turn: i64) -> crate::snapshot::Start {
-    let start = crate::snapshot::start(std::path::Path::new(&cx.row.cwd), cx.runtime.defaults().turn_snapshots).await;
+    let start = crate::snapshot::start(std::path::Path::new(&cx.cwd()), cx.runtime.defaults().turn_snapshots).await;
     if let crate::snapshot::Start::Git { base: Some(base) } = &start {
         let (id, base) = (cx.row.id.clone(), base.clone());
         if let Err(error) = cx.runtime.db(move |s| Ok(s.set_turn_trees(&id, turn, Some(&base), None)?)).await {
@@ -81,7 +81,7 @@ async fn turn_snapshot(cx: &Context, turn: i64) -> crate::snapshot::Start {
 }
 /// The work tree as the turn ends, its tree id kept as the turn's `end_tree`, and what the turn changed.
 async fn turn_changes(cx: &Context, turn: i64, start: &crate::snapshot::Start) -> Option<otto_proto::TurnChanges> {
-    let (end, changes) = crate::snapshot::finish(std::path::Path::new(&cx.row.cwd), &cx.row.id, start).await;
+    let (end, changes) = crate::snapshot::finish(std::path::Path::new(&cx.cwd()), &cx.row.id, start).await;
     if let Some(end) = end {
         let id = cx.row.id.clone();
         if let Err(error) = cx.runtime.db(move |s| Ok(s.set_turn_trees(&id, turn, None, Some(&end))?)).await {
@@ -151,7 +151,7 @@ async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<(Vec<Part>, Vec<Me
             InputPart::Text { .. } | InputPart::Mention { .. } => continue,
             InputPart::Image { mime, data_base64 } => Part::Image(Media { mime, source: MediaSource::Base64 { data: data_base64 }, name: None }),
             InputPart::File { path } => {
-                Part::text(format!("Attached file {path}:\n{}", tokio::fs::read_to_string(std::path::Path::new(&cx.row.cwd).join(&path)).await?))
+                Part::text(format!("Attached file {path}:\n{}", tokio::fs::read_to_string(std::path::Path::new(&cx.cwd()).join(&path)).await?))
             }
             InputPart::Attachment { id } => {
                 parts.extend(attachment(cx, &id).await?);
@@ -169,13 +169,13 @@ fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: 
     if !run.iter().any(|p| matches!(p, InputPart::Mention { .. })) {
         for part in run {
             if let InputPart::Text { text } = part {
-                parts.push(Part::text(crate::commands::expand(&cx.root, user, &text)?));
+                parts.push(Part::text(crate::commands::expand(&cx.root(), user, &text)?));
             }
         }
         return Ok(());
     }
     let base: usize = parts.iter().map(|p| if let Part::Text { text, .. } = p { text.len() } else { 0 }).sum();
-    let agents: Vec<String> = crate::agents::discover(&cx.root, user).into_iter().map(|a| a.name).collect();
+    let agents: Vec<String> = crate::agents::discover(&cx.root(), user).into_iter().map(|a| a.name).collect();
     let mut text = String::new();
     for part in run {
         match part {
@@ -186,14 +186,14 @@ fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: 
                 text.push_str(&target);
                 let found = match kind {
                     MentionKind::Agent => agents.contains(&target),
-                    MentionKind::File => project_path(&cx.row.cwd, &target),
+                    MentionKind::File => project_path(&cx.cwd(), &target),
                 };
                 mentions.push(Mention { kind, range: [start, base + text.len()], missing: !found, target });
             }
             _ => {}
         }
     }
-    parts.push(Part::text(crate::commands::expand(&cx.root, user, &text)?));
+    parts.push(Part::text(crate::commands::expand(&cx.root(), user, &text)?));
     Ok(())
 }
 /// `target` is a file, or a folder when it ends in `/`, inside `cwd`.
@@ -433,7 +433,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         // and providers always get the complete current tool list.
         let mut tools = cx.runtime.builtins(&family);
         tools.extend(cx.runtime.extra_tools());
-        tools.extend(cx.runtime.source_tools(&cx.root).await);
+        tools.extend(cx.runtime.source_tools(&cx.root()).await);
         let session_tools = crate::tools::tools(cx.clone(), &tools, &loaded);
         tools.extend(session_tools);
         let mut defs = Vec::new();
@@ -776,15 +776,16 @@ async fn execute(
 ) -> Result<Part> {
     let original = crate::prepared::public(value);
     let bridge = Arc::new(Bridge { cx: cx.clone(), cancel: cancel.clone(), turn, step });
-    let mut tcx = ToolCx::new(&call_id, &cx.row.cwd);
+    let mut tcx = ToolCx::new(&call_id, cx.cwd());
     tcx.cancel = cancel.clone();
-    tcx.project_root = cx.root.clone();
+    tcx.project_root = cx.root();
     tcx.approver = Some(bridge.clone());
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
     tcx.attachments = Some(cx.runtime.attachments_root());
     tcx.vision = cx.live().model.info().caps.vision;
     tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
     tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
+    tcx.undo = Some(Arc::new(crate::undo::Undo(cx.runtime.clone())));
     let tool = lookup.get(&name).cloned();
     let mut effective = original.clone();
     let mut prepared = None;
@@ -848,7 +849,7 @@ async fn execute(
             ApprovalDecision::Allow => None,
             ApprovalDecision::AlwaysAllow => {
                 let name = name.clone();
-                let path = cx.root.join(".otto/rules.json");
+                let path = cx.root().join(".otto/rules.json");
                 cx.state(move |s| {
                     s.policy.rules.insert(0, Rule { tool: name, pattern: None, decision: RuleDecision::Allow });
                     s.policy.save(&path)

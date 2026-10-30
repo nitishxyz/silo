@@ -1,27 +1,28 @@
 # otto-server
 
 Unix-socket daemon for `otto-core`. No provider or network client is constructed
-here. The embedding CLI supplies a recovered runtime, its model resolver, and an
-`AuthService` implementation.
+here. The embedding CLI supplies a recovered runtime, its model resolver, an
+`AuthService` implementation and its `otto_mcp::Mcp` (the one added to the runtime as a
+tool source; `mcp.*` methods, its events become global `mcp.status` / `mcp.changed`),
+once it has opened its store.
 
 ```rust,ignore
-let handle = Server::start(ServerConfig {
-    home,
-    runtime: Arc::new(runtime),
-    models,
-    auth,
-    idle_exit: Some(Duration::from_secs(60)),
-    build: String::new(),
-}).await?;
+let handle = Server::start(ServerConfig { home, idle_exit: Some(Duration::from_secs(60)), build: String::new() }).await?;
+handle.starting(Starting { phase: StartPhase::Migrating, step: 1, steps: 6 });
+handle.ready(Services { runtime: Arc::new(runtime), models, auth, mcp }).await?;
 handle.serve_forever().await?;
 ```
 
-`Server::start` returns only after binding the private socket and writing
-`runtime.json`. `ServerHandle::shutdown` stops accepting, joins connection tasks,
-shuts down the runtime, and removes the socket and runtime metadata. Dropping the
-handle requests the same cleanup asynchronously; await shutdown when cleanup
-must be complete before returning. `Server::serve_forever(config)` combines start
-and wait. The embedding application owns OS signal handling.
+`Server::start` takes the home's lease, binds the private socket and writes
+`runtime.json` before anything opens the store, so a second start fails
+`AlreadyRunning` at once. Until `ServerHandle::ready` the server is starting:
+hellos carry `starting`, `server.info`, `ping` and `api.*` answer, every other
+method fails `starting`, `server.starting` events tell the progress, and
+`server.ready` follows; it never idle-exits meanwhile. `ServerHandle::shutdown`
+stops accepting, joins connection tasks, shuts down the runtime, and removes the
+socket and runtime metadata. Dropping the handle requests the same cleanup
+asynchronously; await shutdown when cleanup must be complete before returning.
+The embedding application owns OS signal handling.
 
 `init_logging(home) -> io::Result<File>` returns an append-only, mode-0600 log
 sink for the CLI's tracing subscriber. It does not install a global subscriber.
@@ -123,11 +124,14 @@ sessions for the configured duration, using the runtime's nonblocking busy query
   `ask_on_effects`, `ask_all`, and `plan`; SessionInfo includes the current mode.
   Plan agents reject non-plan mode changes with `bad_request`.
 - `session.create {effort?}` sets the session's reasoning effort (`SessionInfo.effort`).
-  `session.update {session_id, provider?, model?, agent?, effort?, reset_effort?}` changes only
+  `session.update {session_id, provider?, model?, agent?, effort?, reset_effort?, folder?}` changes only
   the given fields (`reset_effort`: back to the agent's effort, else the model's),
   journals `session.changed`, emits `sessions.changed` and returns the
   `SessionInfo`. It applies at the next model request (a running turn's next step);
-  unknown agents or models and signed-out providers are `bad_request`.
+  unknown agents or models and signed-out providers are `bad_request`. `folder` (absolute or `~/…`)
+  moves an idle session to that folder's project (its work tree's top, as `project.open {cwd}`): its
+  `cwd`, `project_id`, rules, instructions and tools follow from the next turn, and a system note tells
+  the model; a busy session is refused.
 - `AuthStatus.plan` is the subscription plan label when the sign-in reports one.
 - Fork replay uses core's contiguous journal stream, including `ItemDone` for fork
   records and sequenced error events for undecodable records.

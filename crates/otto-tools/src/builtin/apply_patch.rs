@@ -257,7 +257,7 @@ async fn run(input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
         }
     }
     for (p, new) in &changes {
-        super::undo_edit::record(&cx, p, originals[p].as_deref(), new.as_deref());
+        super::undo_edit::record(&cx, p, originals[p].as_deref(), new.as_deref()).await;
     }
     Ok(ToolOutput::text(format!("Applied patch to {} paths", changes.len())).with_metadata(json!({"files":metadata})))
 }

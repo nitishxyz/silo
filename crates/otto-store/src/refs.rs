@@ -24,14 +24,8 @@ pub(crate) const DELTAS: [&str; 3] = ["text.delta", "reasoning.delta", "tool.inp
 pub(crate) fn externalize(conn: &Connection, value: &mut Value) -> rusqlite::Result<bool> {
     let mut moved = false;
     let mut put = |bytes: &[u8]| -> rusqlite::Result<String> {
-        let hash = Sha256::digest(bytes).iter().fold(String::with_capacity(64), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        });
-        conn.prepare_cached("INSERT INTO blobs VALUES(?1,?2) ON CONFLICT DO NOTHING")?.execute(params![hash, bytes])?;
         moved = true;
-        Ok(hash)
+        self::put(conn, bytes)
     };
     walk(value, &mut |slot, media| {
         let Value::String(text) = slot else { return Ok(true) };
@@ -50,15 +44,38 @@ pub(crate) fn externalize(conn: &Connection, value: &mut Value) -> rusqlite::Res
     Ok(moved)
 }
 
+/// Stores `bytes` once; their hash.
+pub(crate) fn put(conn: &Connection, bytes: &[u8]) -> rusqlite::Result<String> {
+    let hash = Sha256::digest(bytes).iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    conn.prepare_cached("INSERT INTO blobs VALUES(?1,?2) ON CONFLICT DO NOTHING")?.execute(params![hash, bytes])?;
+    Ok(hash)
+}
+
+/// Blob `hash`'s bytes; `None` (logged) when it is missing.
+pub(crate) fn get(conn: &Connection, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+    let bytes = conn.prepare_cached("SELECT data FROM blobs WHERE sha256=?")?.query_row([hash], |r| r.get(0)).optional()?;
+    if bytes.is_none() {
+        tracing::warn!(hash, "missing blob");
+    }
+    Ok(bytes)
+}
+
+/// The blobs stored JSON text refers to, by hash (a hash may repeat).
+pub(crate) fn hashes(text: &str) -> impl Iterator<Item = &str> {
+    [BLOB, "\"$otto_text\":\""].into_iter().flat_map(move |mark| {
+        text.match_indices(mark)
+            .filter_map(move |(at, _)| text.get(at + mark.len()..at + mark.len() + 64))
+            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+    })
+}
+
 /// Puts the blobs `value` refers to back in place. A missing blob leaves its ref.
 pub(crate) fn resolve(conn: &Connection, value: &mut Value) -> rusqlite::Result<()> {
-    let get = |hash: &str| -> rusqlite::Result<Option<Vec<u8>>> {
-        let bytes = conn.prepare_cached("SELECT data FROM blobs WHERE sha256=?")?.query_row([hash], |r| r.get(0)).optional()?;
-        if bytes.is_none() {
-            tracing::warn!(hash, "missing blob");
-        }
-        Ok(bytes)
-    };
+    let get = |hash: &str| self::get(conn, hash);
     walk(value, &mut |slot, media| {
         if let Some(hash) = slot.as_object().filter(|o| o.len() == 1).and_then(|o| o.get(TEXT_KEY)).and_then(Value::as_str) {
             if let Some(text) = get(hash)?.and_then(|b| String::from_utf8(b).ok()) {

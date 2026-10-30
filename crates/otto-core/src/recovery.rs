@@ -2,8 +2,12 @@ use crate::{Result, runtime::record};
 use otto_llm::{Item, Part, ResultPart, Role};
 use otto_proto::Event;
 use otto_store::{Projection, SessionUpdate, Store, ToolStatus};
+use otto_tools::builtin::shell::Resumed;
+use std::time::Duration;
 
-pub(crate) fn recover(store: &mut Store) -> Result<()> {
+/// Recovers the store after a restart; the shell jobs whose blocks may still run them.
+pub(crate) fn recover(store: &mut Store) -> Result<Vec<Orphan>> {
+    let mut orphans = Vec::new();
     let recovered = store.recover_all()?;
     // A child stopped by the restart still reports to its parent (§7.4); the
     // daemon delivers it through `Runtime::deliver_pending`.
@@ -99,15 +103,31 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
             .chain(store.outbox_pending(&session.id)?.into_iter().filter_map(|e| e.payload["notice"].as_str().map(str::to_owned)))
             .collect();
         for call in calls.iter().filter(|c| c.name == "shell" && c.status == ToolStatus::Done) {
-            let Some(job) = call.output.as_ref().and_then(|o| o["metadata"]["job_id"].as_str()) else { continue };
+            let Some(metadata) = call.output.as_ref().map(|o| &o["metadata"]) else { continue };
+            let Some(job) = metadata["job_id"].as_str() else { continue };
             let head = format!("Background shell {job} ");
             if reported.iter().any(|t| t.starts_with(&head)) {
                 continue;
             }
-            let command: String = call.input["command"].as_str().unwrap_or_default().chars().take(120).collect();
-            let text = format!("{head}(`{command}`) was stopped (the otto server restarted).\n");
-            let item = Item::new(crate::id(), Role::System, vec![Part::System { text }]);
-            store.append(&session.id, record(&Event::ItemDone { item: item.clone() }, 0, 0)?, Projection::PutItem(item))?;
+            let command = call.input["command"].as_str().unwrap_or_default();
+            // One in a terminal block may outlive the server: the runtime re-attaches it (`Runtime::deliver_pending`).
+            if let (Some(block), Some(host)) = (metadata["block_id"].as_str(), metadata["host"].as_str()) {
+                let waiting = metadata["status"] == "waiting_for_input";
+                let elapsed = u64::try_from(otto_now() - call.started_at).unwrap_or(0);
+                let timeout = call.input["timeout_ms"].as_u64().filter(|_| !waiting).map(|t| Duration::from_millis(t.saturating_sub(elapsed)));
+                let job = Resumed {
+                    job_id: job.into(),
+                    command: command.into(),
+                    block_id: block.into(),
+                    host: host.into(),
+                    started_at: call.started_at,
+                    timeout,
+                    prompt: !waiting,
+                };
+                orphans.push(Orphan { session: session.id.clone(), call_id: call.call_id.clone(), job });
+                continue;
+            }
+            stopped(store, &session.id, job, command)?;
         }
         if matches!(session.status.as_str(), "busy" | "waiting_approval") {
             store.append_with_session(
@@ -122,8 +142,25 @@ pub(crate) fn recover(store: &mut Store) -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    Ok(orphans)
 }
 fn unknown(id: &str, text: &str) -> Part {
     Part::ToolResult { call_id: id.into(), content: vec![ResultPart::text(text)], is_error: true }
+}
+/// A shell job that never reported, whose terminal block may still run it.
+pub(crate) struct Orphan {
+    pub session: String,
+    pub call_id: String,
+    pub job: Resumed,
+}
+/// Job `job` of `session` ran in a stopped server: it says so, without starting a turn.
+pub(crate) fn stopped(store: &mut Store, session: &str, job: &str, command: &str) -> Result<()> {
+    let command: String = command.chars().take(120).collect();
+    let text = format!("Background shell {job} (`{command}`) was stopped (the otto server restarted).\n");
+    let item = Item::new(crate::id(), Role::System, vec![Part::System { text }]);
+    store.append(session, record(&Event::ItemDone { item: item.clone() }, 0, 0)?, Projection::PutItem(item))?;
+    Ok(())
+}
+fn otto_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(i64::MAX)
 }

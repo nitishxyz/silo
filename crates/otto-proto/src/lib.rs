@@ -8,6 +8,7 @@ pub mod api;
 pub mod clip;
 pub mod control;
 pub mod frame;
+pub mod mcp;
 pub mod model;
 pub mod paths;
 pub mod timing;
@@ -16,6 +17,7 @@ pub use control::*;
 pub use frame::Frame;
 #[cfg(feature = "io")]
 pub use frame::{read_frame, spawn_reader, write_frame};
+pub use mcp::*;
 pub use model::*;
 pub use otto_llm::{Effort, Item, Mention, MentionKind, ModelInfo, Part, Role, StreamEvent, Usage};
 pub use timing::PartTime;

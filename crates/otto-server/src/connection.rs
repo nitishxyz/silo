@@ -101,17 +101,18 @@ pub(crate) async fn serve(state: Arc<State>, mut stream: UnixStream, mut index: 
             write_frame(&mut stream, &Frame::json(kind::CONTROL, &message)?).await?;
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "incompatible protocol"));
         }
-        let info = &state.info;
+        let info = state.info();
         let hello = ServerHello {
             protocol: PROTOCOL,
-            version: info.version.clone(),
-            server_id: info.server_id.clone(),
+            version: info.version,
+            server_id: info.server_id,
             pid: info.pid,
             started_at: info.started_at,
             client_id: uuid::Uuid::new_v4().to_string(),
             home: crate::dispatch::user_home(),
-            silo_home: info.silo_home.clone(),
-            build: info.build.clone(),
+            silo_home: info.silo_home,
+            build: info.build,
+            starting: info.starting,
         };
         write_frame(&mut stream, &Frame::json(kind::HELLO, &hello)?).await
     };
@@ -236,7 +237,7 @@ pub(crate) async fn serve(state: Arc<State>, mut stream: UnixStream, mut index: 
     }
 }
 
-pub(crate) async fn subscribe(state: &State, id: String, after: i64, sink: Sink, subs: &Subs) -> Result<Subscribed, RpcError> {
+pub(crate) async fn subscribe(runtime: &otto_core::Runtime, id: String, after: i64, sink: Sink, subs: &Subs) -> Result<Subscribed, RpcError> {
     if after < 0 {
         return Err(RpcError::bad_request("after_seq must be nonnegative"));
     }
@@ -245,8 +246,8 @@ pub(crate) async fn subscribe(state: &State, id: String, after: i64, sink: Sink,
         old.abort();
         let _ = old.await;
     }
-    let (replay, mut live) = state.config.runtime.subscribe(&id, after).await.map_err(crate::dispatch::core_error)?;
-    let mut deltas = state.config.runtime.session(&id).await.map_err(crate::dispatch::core_error)?.deltas();
+    let (replay, mut live) = runtime.subscribe(&id, after).await.map_err(crate::dispatch::core_error)?;
+    let mut deltas = runtime.session(&id).await.map_err(crate::dispatch::core_error)?.deltas();
     let seq = replay.last().map_or(after, |event| event.0);
     let subscribed = Subscribed { session_id: id.clone(), seq };
     let task_id = id.clone();
