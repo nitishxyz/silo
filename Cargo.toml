@@ -19,6 +19,7 @@ silo-tools = { path = "crates/silo-tools" }
 silo-render = { path = "crates/silo-render" }
 silo-store = { path = "crates/silo-store" }
 silo-transport = { path = "crates/silo-transport" }
+silo-voice = { path = "crates/silo-voice" }
 iroh = { version = "=1.3.0", features = ["unstable-custom-transports"] }
 iroh-mdns-address-lookup = "=0.6.0"
 postcard = { version = "1", default-features = false, features = ["use-std"] }

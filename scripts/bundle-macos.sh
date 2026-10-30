@@ -127,7 +127,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>Web pages in Silo can use your phone or a security key to sign in.</string>
   <key>NSCameraUsageDescription</key><string>Web pages in Silo can ask to use the camera.</string>
-  <key>NSMicrophoneUsageDescription</key><string>Web pages in Silo can ask to use the microphone.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Silo listens while you dictate with the Fn key, on this Mac, and web pages in Silo can ask to use the microphone.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
