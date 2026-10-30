@@ -2,6 +2,7 @@
 name = "silo-pty"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 autotests = false
 rust-version.workspace = true
 

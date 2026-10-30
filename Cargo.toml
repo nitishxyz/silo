@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.18"
 edition = "2024"
 rust-version = "1.90"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 silo-vt = { path = "crates/silo-vt" }
@@ -24,8 +24,8 @@ iroh-mdns-address-lookup = "=0.6.0"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 data-encoding = "2"
 chacha20poly1305 = "0.10"
-gpui = { git = "https://github.com/nitishxyz/zed", rev = "5c1eea09939494e1d58df22ccfb1aba134b14e10", default-features = false, features = ["font-kit"] }
-gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "5c1eea09939494e1d58df22ccfb1aba134b14e10", default-features = false, features = ["font-kit"] }
+gpui = { git = "https://github.com/nitishxyz/zed", rev = "2abb9b72143f05324ff65e5935c61325cbd1d520", default-features = false, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "2abb9b72143f05324ff65e5935c61325cbd1d520", default-features = false, features = ["font-kit"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
