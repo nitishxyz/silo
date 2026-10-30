@@ -67,7 +67,7 @@ impl Workspace {
         let density = self.density();
         let side = self.state.tabs == TabPosition::Side;
         let headers = self.pane_headers().every();
-        let row = |id: &'static str, label: &'static str, checked: bool| {
+        let row = |id: &'static str, label: &str, checked: bool| {
             div()
                 .id(id)
                 .flex()
@@ -79,7 +79,7 @@ impl Workspace {
                 .continuous(crate::radius::MENU_ROW)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover_fill()))
-                .child(div().flex_1().child(label))
+                .child(div().flex_1().child(label.to_owned()))
                 .child(div().size(px(14.0)).flex_none().when(checked, |el| el.child(icon("check", 13.0, theme::accent()))))
         };
         Some(
@@ -125,8 +125,12 @@ impl Workspace {
                 )
                 .child(div().h(px(1.0)).mx(px(4.0)).my(px(4.0)).bg(rgb(theme::border())))
                 .child(
-                    row("appearance-settings", "All Settings…  ⌘,", false)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                    row(
+                        "appearance-settings",
+                        &crate::commands::Command::OpenSettings.hint().map_or_else(|| "All Settings…".to_owned(), |k| format!("All Settings…  {k}")),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
                 )
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.appearance_menu.open = false;

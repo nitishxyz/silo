@@ -439,7 +439,8 @@ fn the_browser_lists_navigates_and_selects(cx: &mut TestAppContext) {
             assert!(pane.browser.preview.is_none());
             assert!(press(pane, "enter", window, cx));
             assert_eq!(pane.browser.rename.as_ref().map(|r| r.path.as_str()), Some("a.md"));
-            pane.browser.menu = Some(super::browser::Menu { at: gpui::point(gpui::px(10.0), gpui::px(10.0)), target: Some("a.md".into()) });
+            pane.browser.menu =
+                Some(super::browser::Menu { at: gpui::point(gpui::px(10.0), gpui::px(10.0)), target: Some("a.md".into()), tree: false });
         });
     });
     draw(cx);

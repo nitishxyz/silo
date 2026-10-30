@@ -7,7 +7,9 @@
 //! the list's groups are [`model`]'s, free of gpui.
 
 pub(crate) mod model;
-mod syntax;
+pub(crate) mod sync;
+mod sync_view;
+pub(crate) mod syntax;
 mod view;
 pub(crate) mod wire;
 
@@ -51,6 +53,8 @@ pub enum ChangesPaneEvent {
     OpenFile { root: String, path: String, line: u32 },
     /// The linked agent's turns are wanted (the scope picker): [`ChangesPane::set_turns`].
     Turns(String),
+    /// Show a link (a pull request) in a browser block.
+    OpenUrl(String),
 }
 
 /// A revert waiting for its confirm.
@@ -154,6 +158,10 @@ pub struct ChangesPane {
     /// Status reads given out; a reply to an older one is dropped.
     generation: u64,
     pub(crate) body_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Push, pull, the pull request and conflicts.
+    pub(crate) sync: sync::SyncState,
+    /// The card it is drawn on (crate::pane_surface).
+    pub(crate) surface: crate::pane_surface::PaneSurface,
     _subs: Vec<Subscription>,
 }
 
@@ -214,6 +222,8 @@ impl ChangesPane {
             turns_of: None,
             generation: 0,
             body_bounds: Rc::default(),
+            sync: sync::SyncState::default(),
+            surface: crate::pane_surface::PaneSurface::default(),
             _subs: subs,
         };
         pane.refresh(cx);
@@ -226,6 +236,15 @@ impl ChangesPane {
         self.control = Some(control);
         self.in_flight = 0;
         self.refresh(cx);
+    }
+
+    /// The card this pane is drawn on, from the workspace.
+    pub(crate) fn set_card(&mut self, card: crate::adaptive::Chrome, cx: &mut Context<Self>) {
+        let surface = crate::pane_surface::PaneSurface(Some(card));
+        if self.surface != surface {
+            self.surface = surface;
+            cx.notify();
+        }
     }
 
     pub fn bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
@@ -347,6 +366,7 @@ impl ChangesPane {
                 self.status_error = None;
                 self.status = Some(status);
                 self.load_diffs(cx);
+                self.load_pr(false, cx);
             }
             Err(error) => self.status_error = Some(crate::files::describe(&error)),
         }
@@ -369,6 +389,7 @@ impl ChangesPane {
         for path in paths {
             self.read_diff(path, cx);
         }
+        self.load_conflict(cx);
     }
 
     fn read_diff(&mut self, path: String, cx: &mut Context<Self>) {

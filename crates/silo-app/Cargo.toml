@@ -14,6 +14,7 @@ silo-client.workspace = true
 silo-proto.workspace = true
 silo-vt.workspace = true
 silo-render.workspace = true
+silo-voice.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
@@ -59,6 +60,9 @@ objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDic
 objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSImageView", "NSPasteboard", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 silo-web.workspace = true
+# PDF previews in the Files block (`files/pdf.rs`): pages drawn with CoreGraphics.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage", "CGPDFDocument", "CGPDFPage", "CGAffineTransform"] }
 raw-window-handle = "0.6"
 # Interface sounds (`sound.rs`): a low-latency output stream mixing
 # synthesized voices, opened on the first sound and released when idle.

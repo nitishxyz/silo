@@ -42,6 +42,7 @@ mod header_tabs;
 mod hosts;
 mod hosts_state;
 mod incompatible;
+mod keymap;
 mod keys;
 mod latency;
 mod launcher;
@@ -54,6 +55,7 @@ mod offers;
 mod palette;
 mod pane;
 mod pane_header;
+mod pane_surface;
 mod permissions;
 mod qr;
 mod radius;
@@ -75,6 +77,7 @@ mod theme;
 mod titlebar;
 mod tooltip;
 mod updater;
+mod voice;
 mod web;
 mod window_picker;
 mod workspace;
@@ -274,8 +277,8 @@ fn main() {
         // System Settings › Accessibility › Display › Reduce motion, read
         // once at launch (toggling it needs an app restart).
         cx.set_reduce_motion(reduce_motion());
-        commands::bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        keymap::install(home.clone(), cx);
+        cx.on_action(|_: &Quit, cx| files_block::request_quit(cx));
         cx.on_action(|_: &HideSilo, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -284,37 +287,6 @@ fn main() {
             async {}
         })
         .detach();
-        cx.set_menus(vec![
-            Menu {
-                name: "Silo".into(),
-                items: vec![
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::action("Check for Updates…", CheckForUpdates),
-                    MenuItem::separator(),
-                    MenuItem::action("Hide Silo", HideSilo),
-                    MenuItem::action("Hide Others", HideOthers),
-                    MenuItem::action("Show All", ShowAll),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Silo", Quit),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "Session".into(),
-                items: vec![
-                    MenuItem::action("New Session", NewSession),
-                    MenuItem::action("New Window…", NewWindow),
-                    MenuItem::action("Command Palette", CommandPalette),
-                    MenuItem::action("Browse Blocks…", BrowseBlocks),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "Window".into(),
-                items: vec![MenuItem::action("Close Window", CloseWindow), MenuItem::action("Cycle Through Windows", CycleWindows)],
-                disabled: false,
-            },
-        ]);
         // The Permissions panel alone does not keep the app open.
         cx.on_window_closed(|cx, _| {
             if !cx.windows().iter().any(|w| w.downcast::<Workspace>().is_some()) {
@@ -354,6 +326,41 @@ fn main() {
         cx.activate(true);
     });
     drop(runtime);
+}
+
+/// The menu bar; set again when the shortcuts change (its key equivalents).
+pub(crate) fn set_menus(cx: &App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "Silo".into(),
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Hide Silo", HideSilo),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
+                MenuItem::action("Quit Silo", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Session".into(),
+            items: vec![
+                MenuItem::action("New Session", NewSession),
+                MenuItem::action("New Window…", NewWindow),
+                MenuItem::action("Command Palette", CommandPalette),
+                MenuItem::action("Browse Blocks…", BrowseBlocks),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Window".into(),
+            items: vec![MenuItem::action("Close Window", CloseWindow), MenuItem::action("Cycle Through Windows", CycleWindows)],
+            disabled: false,
+        },
+    ]);
 }
 
 /// The frontmost Silo window, if any.

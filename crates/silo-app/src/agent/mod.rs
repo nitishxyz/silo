@@ -18,6 +18,7 @@ pub(crate) mod mention;
 mod partial_json;
 mod pill_input;
 mod plan;
+mod relocate;
 mod rename;
 mod reveal;
 pub(crate) mod ring;
@@ -26,6 +27,7 @@ mod scroll;
 mod select;
 pub(crate) mod settings;
 mod settings_agents;
+mod settings_mcp;
 mod signin;
 mod subagents;
 mod transcript;
@@ -79,6 +81,12 @@ pub enum AgentPaneEvent {
     /// The user moved the block to another folder (`agent.set` `cwd`): it shows a new session there.
     Project {
         cwd: String,
+    },
+    /// The shown session moved to another folder (`session.update {folder}`): the block goes along with it.
+    Moved {
+        cwd: String,
+        session_id: String,
+        title: String,
     },
     Status(AgentStatus),
     /// Jump to a silo block named by a tool call; a parked one is revealed as a float.
@@ -245,10 +253,18 @@ impl Update {
 
 enum Conn {
     Connecting,
+    /// otto is opening its data (a migration can take a minute): ready once `server.ready` comes.
+    Starting(otto_proto::Starting),
     Ready,
     Failed(String),
     /// A remote host's otto couldn't be reached (no raw error: [`Failure::copy`]).
     Unreachable(Failure),
+}
+
+/// What [`AgentPane::load`] found: everything, or otto still starting (now, and what follows).
+enum Loaded {
+    Ready(Box<(client::Catalog, ProjectInfo, Vec<SessionInfo>, String)>),
+    Starting(otto_proto::Starting, tokio::sync::watch::Receiver<Option<otto_proto::Starting>>),
 }
 
 /// Why a remote host's otto couldn't be reached, from the tunnel's refusal.
@@ -325,6 +341,8 @@ pub struct AgentPane {
     home: Option<String>,
     /// A folder this pane moved to that the server hasn't echoed yet.
     moving: Option<String>,
+    /// The session the recent projects pick a folder for (`relocate.rs`).
+    relocate: Option<relocate::Relocate>,
     /// The session this pane left for a new one, which the server still
     /// names until the new one is created ([`follows_server`]).
     left: Option<String>,
@@ -341,6 +359,8 @@ pub struct AgentPane {
     sessions: Vec<SessionInfo>,
     follower: Option<std::sync::Arc<SessionFollower>>,
     pump: Option<Task<()>>,
+    /// Follows otto's start while [`Conn::Starting`].
+    start_watch: Option<Task<()>>,
     /// An earlier page is loading (`load_earlier`).
     loading_earlier: bool,
     /// Loading the earlier page failed: the row says so and tries again on a click.
@@ -380,6 +400,8 @@ pub struct AgentPane {
     /// The composer column's height as last laid out (0 when hidden), and the one the list was last padded for:
     /// the column floats over the transcript, whose end is padded clear of it.
     composer_h: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The card the pane sits on (set by the workspace each frame): frosted, the pane paints no fill of its own.
+    surface: crate::pane_surface::PaneSurface,
     /// The composer's box (the pill and its halo) from the last paint (window coordinates): its popovers hang
     /// above it, and a press in it leaves the typed ones (slash, `@`) open.
     composer_box: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -494,6 +516,15 @@ pub struct AgentPane {
 }
 
 impl AgentPane {
+    /// The card this pane is drawn on, from the workspace.
+    pub(crate) fn set_card(&mut self, card: crate::adaptive::Chrome, cx: &mut Context<Self>) {
+        let surface = crate::pane_surface::PaneSurface(Some(card));
+        if self.surface != surface {
+            self.surface = surface;
+            cx.notify();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_id: String,
@@ -554,12 +585,14 @@ impl AgentPane {
             host,
             home: None,
             moving: None,
+            relocate: None,
             left: None,
             git_repo: std::cell::RefCell::new(None),
             rt,
             width: std::rc::Rc::default(),
             bounds: std::rc::Rc::default(),
             composer_h: std::rc::Rc::default(),
+            surface: crate::pane_surface::PaneSurface::default(),
             composer_box: std::rc::Rc::default(),
             composer_pad: 0.0,
             // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.
@@ -571,6 +604,7 @@ impl AgentPane {
             sessions: Vec::new(),
             follower: None,
             pump: None,
+            start_watch: None,
             loading_earlier: false,
             earlier_error: None,
             generation: 0,
@@ -885,11 +919,15 @@ impl AgentPane {
                     return Err((describe(&error), refused));
                 }
             };
+            let now = c.starting().borrow().clone();
+            if let Some(now) = now {
+                return Ok(Loaded::Starting(now, c.starting()));
+            }
             async {
                 let catalog = client::catalog(&c).await?;
                 let project = client::project(&c, cwd.as_deref()).await?;
                 let sessions = c.session_list(Some(project.id.clone()), false).await?;
-                Ok::<_, ClientError>((catalog, project, sessions, c.hello().home.clone()))
+                Ok::<_, ClientError>(Loaded::Ready(Box::new((catalog, project, sessions, c.hello().home.clone()))))
             }
             .await
             .map_err(|e| (describe(&e), None))
@@ -900,7 +938,12 @@ impl AgentPane {
                 match result {
                     // Moved again meanwhile: the newer load wins.
                     _ if this.cwd != asked => {}
-                    Ok((catalog, project, sessions, home)) => {
+                    Ok(Loaded::Starting(now, starting)) => {
+                        this.conn = Conn::Starting(now);
+                        this.await_start(starting, cx);
+                    }
+                    Ok(Loaded::Ready(found)) => {
+                        let (catalog, project, sessions, home) = *found;
                         this.load_tries = 0;
                         let first = !matches!(this.conn, Conn::Ready);
                         this.conn = Conn::Ready;
@@ -940,6 +983,30 @@ impl AgentPane {
             });
         })
         .detach();
+    }
+
+    /// Show how otto's start moves on, then load once it is ready (or gone: loading reconnects).
+    fn await_start(&mut self, mut starting: tokio::sync::watch::Receiver<Option<otto_proto::Starting>>, cx: &mut Context<Self>) {
+        self.start_watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let open = starting.changed().await.is_ok();
+                let now = starting.borrow_and_update().clone().filter(|_| open);
+                let watching = this.update(cx, |this, cx| match now {
+                    Some(now) => {
+                        this.conn = Conn::Starting(now);
+                        cx.notify();
+                        true
+                    }
+                    None => {
+                        this.load(cx);
+                        false
+                    }
+                });
+                if !matches!(watching, Ok(true)) {
+                    return;
+                }
+            }
+        }));
     }
 
     fn reload_catalog(&mut self, cx: &mut Context<Self>) {
@@ -1561,6 +1628,7 @@ impl AgentPane {
     fn overlay_count(&self, cx: &gpui::App) -> usize {
         match self.overlay {
             Some(Overlay::Sessions) => self.session_choices(cx).len() + 2,
+            Some(Overlay::Projects) if self.relocate.as_ref().is_some_and(|r| r.typing) => 1,
             Some(Overlay::Projects) => self.project_choices(cx).len() + 1,
             Some(Overlay::Models) => self.model_choices(cx).len(),
             Some(Overlay::Agents) => self.agent_choices().len(),
@@ -1586,6 +1654,9 @@ impl AgentPane {
             self.overlay_anim.set(false, now, reduce);
         }
         self.overlay = overlay;
+        if overlay != Some(Overlay::Projects) {
+            self.relocate = None;
+        }
         if overlay != Some(Overlay::Sessions) {
             self.switcher_closed();
         }
@@ -2046,6 +2117,7 @@ impl AgentPane {
         if self.pressed_out.take().is_some_and(|(o, at)| reopens(o, at.elapsed(), overlay)) {
             return;
         }
+        self.relocate = None;
         self.set_overlay(Some(overlay), cx);
         // The effort menu opens on the current level.
         self.selected =
@@ -2121,6 +2193,9 @@ impl AgentPane {
             return;
         };
         let count = self.overlay_count(cx);
+        if self.relocate.as_ref().is_some_and(|r| r.typing) && matches!(event, FieldEvent::Submit) {
+            return self.submit_path(window, cx);
+        }
         match event {
             FieldEvent::Changed(_) => {
                 self.selected = first_choice(overlay);
@@ -2153,7 +2228,8 @@ impl AgentPane {
                     None => self.new_session(window, cx),
                 },
             },
-            // Recent projects, then Open folder….
+            // Recent projects, then Open folder… (Choose folder… while moving a session).
+            Some(Overlay::Projects) if self.relocate.is_some() => self.pick_folder(index, window, cx),
             Some(Overlay::Projects) => match self.project_choices(cx).get(index) {
                 Some(p) => {
                     let root = p.root.clone();
@@ -2302,6 +2378,15 @@ impl AgentPane {
         if k.key == "j" && k.modifiers.platform && !k.modifiers.shift && !k.modifiers.alt && !k.modifiers.control {
             self.open_overlay(Overlay::Sessions, window, cx);
             cx.stop_propagation();
+        } else if k.key == "o"
+            && k.modifiers.platform
+            && !k.modifiers.shift
+            && !k.modifiers.alt
+            && !k.modifiers.control
+            && self.overlay == Some(Overlay::Sessions)
+        {
+            self.move_highlighted(window, cx);
+            cx.stop_propagation();
         } else if k.key == "escape" && self.overlay.is_some() {
             self.close_overlay(window, cx);
             cx.stop_propagation();
@@ -2408,12 +2493,27 @@ const FOLLOW_RETRY: Duration = Duration::from_secs(2);
 /// Whether `error` is otto being out of reach for now (worth retrying), not
 /// a refusal such as a deleted session.
 pub(crate) fn unreachable(error: &ClientError) -> bool {
-    // `too_large` is an answer: otto is there, the reply wasn't sent.
+    // `too_large` is an answer: otto is there, the reply wasn't sent. `starting`: it will answer soon.
     matches!(error, ClientError::Io { .. } | ClientError::Closed | ClientError::Timeout)
+        || matches!(error, ClientError::Rpc(e) if e.code == otto_proto::RpcError::STARTING)
 }
 
 /// The text [`describe`] gives an [`unreachable`] error.
 pub(crate) const UNREACHABLE: &str = "Can't reach otto";
+
+/// What the pane says while otto (on `host`, else this Mac's) starts, and how far it got.
+pub(crate) fn starting_copy(starting: &otto_proto::Starting, host: Option<&str>) -> (String, Option<String>) {
+    use otto_proto::StartPhase;
+    let on = host.map(|h| format!(" on {h}")).unwrap_or_default();
+    match starting.phase {
+        StartPhase::Opening | StartPhase::Loading => (format!("Starting otto{on}…"), None),
+        StartPhase::Migrating => {
+            let step = (starting.steps > 0).then(|| format!("Step {} of {}", (starting.step + 1).min(starting.steps), starting.steps));
+            (format!("Updating otto's data{on}…"), step)
+        }
+        StartPhase::Compacting => (format!("Updating otto's data{on}…"), Some("Freeing space".to_owned())),
+    }
+}
 
 /// A short, user-facing reason.
 pub(crate) fn describe(error: &ClientError) -> String {
@@ -2487,6 +2587,19 @@ mod tests {
     }
 
     #[test]
+    fn a_starting_otto_says_what_it_does_without_paths() {
+        use otto_proto::{StartPhase, Starting};
+        let at = |phase, step, steps| Starting { phase, step, steps };
+        assert_eq!(starting_copy(&at(StartPhase::Opening, 0, 0), None), ("Starting otto…".into(), None));
+        assert_eq!(starting_copy(&at(StartPhase::Loading, 0, 0), Some("mini")), ("Starting otto on mini…".into(), None));
+        let migrating = starting_copy(&at(StartPhase::Migrating, 2, 6), None);
+        assert_eq!(migrating, ("Updating otto's data…".into(), Some("Step 3 of 6".into())));
+        assert_eq!(starting_copy(&at(StartPhase::Migrating, 6, 6), None).1.as_deref(), Some("Step 6 of 6"));
+        assert_eq!(starting_copy(&at(StartPhase::Migrating, 0, 0), None).1, None);
+        assert_eq!(starting_copy(&at(StartPhase::Compacting, 0, 0), Some("mini")).0, "Updating otto's data on mini…");
+    }
+
+    #[test]
     fn otto_out_of_reach_is_retried_and_refusals_are_not() {
         let io = |kind| ClientError::Io { kind, message: "x".into() };
         for error in [
@@ -2495,6 +2608,7 @@ mod tests {
             io(std::io::ErrorKind::Other),
             ClientError::Closed,
             ClientError::Timeout,
+            ClientError::Rpc(otto_proto::RpcError::starting(&otto_proto::Starting { phase: otto_proto::StartPhase::Opening, step: 0, steps: 0 })),
         ] {
             assert!(unreachable(&error), "{error:?} is retried");
         }

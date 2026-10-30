@@ -15,6 +15,66 @@ pub enum Material {
     Frosted,
 }
 
+/// Frosted: a colour the window's material is tinted with, as macOS tints
+/// its glass. `None` is the theme's own background.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrostTint {
+    #[default]
+    None,
+    Graphite,
+    Blue,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Green,
+    Teal,
+}
+
+impl FrostTint {
+    pub const ALL: [Self; 9] = [Self::None, Self::Graphite, Self::Blue, Self::Purple, Self::Pink, Self::Red, Self::Orange, Self::Green, Self::Teal];
+    /// How far the theme background moves toward the tint's hue.
+    const STRENGTH: f32 = 0.2;
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Graphite => "Graphite",
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Pink => "Pink",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+        }
+    }
+
+    /// The swatch colour (macOS's accent colours); `None` has none.
+    #[must_use]
+    pub const fn hue(self) -> Option<u32> {
+        match self {
+            Self::None => None,
+            Self::Graphite => Some(0x008c_8c8c),
+            Self::Blue => Some(0x0000_7aff),
+            Self::Purple => Some(0x00af_52de),
+            Self::Pink => Some(0x00ff_2d55),
+            Self::Red => Some(0x00ff_3b30),
+            Self::Orange => Some(0x00ff_9500),
+            Self::Green => Some(0x0034_c759),
+            Self::Teal => Some(0x0030_b0c7),
+        }
+    }
+
+    /// The window surface for a theme background `theme_bg`.
+    #[must_use]
+    pub fn apply(self, theme_bg: u32) -> u32 {
+        self.hue().map_or(theme_bg, |hue| theme::mix(theme_bg, hue, Self::STRENGTH))
+    }
+}
+
 /// Why Frosted cannot render right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
@@ -66,6 +126,12 @@ pub const VEIL: f32 = 0.62;
 /// Explicit terminal cell backgrounds other than the backdrop stay nearly
 /// opaque so a TUI's structure stays crisp.
 pub const CELL_OPAQUE: f32 = 0.9;
+/// Cards are this much denser than the window around them, as a macOS
+/// window's content is over its sidebar: the chrome stays the frost, the
+/// work sits on a calmer surface.
+pub const CARD_DENSER: f32 = 0.12;
+/// ...but never quite opaque.
+pub const CARD_MOST: f32 = 0.92;
 
 /// Composite `color` at `alpha` over `under`.
 #[must_use]
@@ -104,7 +170,7 @@ pub fn look(color: u32, alpha: f32) -> u32 {
 pub fn overlay(window: u32, window_alpha: f32, theme_bg: u32, fg: u32) -> theme::Veils {
     let tinted = look(window, window_alpha);
     let overlay = if theme::contrast(fg, tinted) >= theme::TEXT_CONTRAST { tinted } else { theme_bg };
-    theme::Veils { overlay, muted: theme::toward_ink(overlay, fg, 0.55, theme::TEXT_CONTRAST) }
+    theme::Veils { overlay, glass: window, muted: theme::toward_ink(overlay, fg, 0.55, theme::TEXT_CONTRAST) }
 }
 
 /// Whether some ink, and each of `text`, reads at 4.5:1 on a veil of

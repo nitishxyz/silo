@@ -42,6 +42,8 @@ pub enum SettingId {
     Shortcuts,
     Hosts,
     PairDevice,
+    VoiceTyping,
+    VoiceEngine,
 }
 
 /// How the finder edits a setting.
@@ -261,6 +263,16 @@ pub const SETTINGS: &[Setting] = &[
         Toggle,
         "notifications osc 9 777 program"
     ),
+    setting!(
+        SettingId::VoiceTyping,
+        "Voice typing",
+        "Voice typing",
+        Voice,
+        Some("Voice typing"),
+        Toggle,
+        "voice dictation dictate speech fn globe key hold"
+    ),
+    setting!(SettingId::VoiceEngine, "Voice engine", "Engine", Voice, Some("Engine"), Choice, "voice engine fast multilingual whisper whistle model"),
     setting!(SettingId::Hosts, "Hosts", "Hosts", Hosts, None, Open, "hosts machines remote add remove rename"),
     setting!(
         SettingId::PairDevice,
@@ -361,6 +373,7 @@ impl SettingId {
             Self::ConfirmClose => s.confirm_close,
             Self::Sounds => s.sounds,
             Self::CheckUpdates => s.check_updates,
+            Self::VoiceTyping => s.voice.prefs.on,
             _ => return None,
         })
     }
@@ -382,8 +395,16 @@ impl SettingId {
             Self::ConfirmClose => SettingsEvent::SetConfirmClose(on),
             Self::Sounds => SettingsEvent::SetSounds(on),
             Self::CheckUpdates => SettingsEvent::SetCheckUpdates(on),
+            Self::VoiceTyping => SettingsEvent::Voice(crate::voice::settings::VoiceEvent::SetOn(on)),
             _ => return None,
         })
+    }
+
+    /// Voice typing's preferences with `change` made.
+    fn voice(s: &SettingsSnapshot, change: impl FnOnce(&mut silo_voice::VoicePrefs)) -> SettingsEvent {
+        let mut prefs = s.voice.prefs.clone();
+        change(&mut prefs);
+        SettingsEvent::Voice(crate::voice::settings::VoiceEvent::Set(prefs))
     }
 
     /// Record a toggle's new state in `s` (the app applies it a moment later).
@@ -402,6 +423,7 @@ impl SettingId {
             Self::ConfirmClose => s.confirm_close = on,
             Self::Sounds => s.sounds = on,
             Self::CheckUpdates => s.check_updates = on,
+            Self::VoiceTyping => s.voice.prefs.on = on,
             _ => {}
         }
     }
@@ -425,6 +447,7 @@ impl SettingId {
             Self::FontSize => format!("{} pt", t.font_size),
             Self::CursorShape => label_of(&CURSOR_SHAPES, &t.cursor_shape),
             Self::Scrollback => format!("{} lines", t.scrollback_lines),
+            Self::VoiceEngine => s.voice.prefs.engine.label().to_owned(),
             _ => return None,
         })
     }
@@ -464,6 +487,9 @@ impl SettingId {
                 .collect(),
             Self::InterfaceFont => fonts(&s.ui_font.choices, &s.ui_font.family, SettingsEvent::SetUiFontFamily),
             Self::FontFamily => fonts(&t.font_choices, &t.font_family, SettingsEvent::SetFontFamily),
+            Self::VoiceEngine => {
+                silo_voice::EngineKind::ALL.iter().map(|e| simple(e.label(), Self::voice(s, |p| p.engine = *e), *e == s.voice.prefs.engine)).collect()
+            }
             _ => Vec::new(),
         }
     }

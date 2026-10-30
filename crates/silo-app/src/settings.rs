@@ -87,7 +87,14 @@ impl Workspace {
                 notify: self.host_notifies(index),
             })
             .collect();
-        let shortcuts = Command::ALL.iter().filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? })).collect();
+        let keymap = crate::keymap::current();
+        let shortcuts = Command::ALL
+            .iter()
+            .map(|c| {
+                let keys = keymap.bindings.get(c).cloned().unwrap_or_default();
+                SettingsShortcut { command: *c, label: c.title().to_owned(), custom: keys != crate::keymap::defaults(*c), keys }
+            })
+            .collect();
         let local = self.hosts.first();
         let paused = local.is_some_and(|h| h.paused.load(std::sync::atomic::Ordering::Acquire));
         let connected = local.and_then(|h| h.control.as_ref());
@@ -141,6 +148,7 @@ impl Workspace {
             material: self.material().0,
             material_unavailable: self.material().1.err().map(crate::material::Unavailable::reason),
             tint_with_app: self.tint_with_app(),
+            frost_tint: self.frost_tint(),
             translucent_apps: self.translucent_apps(),
             updates: self.updater.read(cx).enabled(),
             check_updates: self.check_updates(),
@@ -153,9 +161,11 @@ impl Workspace {
             terminal,
             hosts,
             shortcuts,
+            shortcut_problems: keymap.problems,
             server,
             local_host: self.hosts.get(self.active_host).is_some_and(|h| h.info.local),
             permissions: self.permissions.clone(),
+            voice: self.voice_settings(),
             version: env!("CARGO_PKG_VERSION").into(),
             revision: format!("Ghostty {}", short(silo_vt::GHOSTTY_REV)),
             revision_full: silo_vt::GHOSTTY_REV.to_owned(),
@@ -481,6 +491,10 @@ impl Workspace {
                 self.set_tint_with_app(*on, cx);
                 Outcome::default()
             }
+            SettingsEvent::SetFrostTint(tint) => {
+                self.set_frost_tint(*tint, cx);
+                Outcome::default()
+            }
             SettingsEvent::SetTranslucentApps(on) => {
                 self.set_translucent_apps(*on, cx);
                 Outcome::default()
@@ -538,6 +552,8 @@ impl Workspace {
                 crate::permissions::open_automation_settings();
                 Outcome::default()
             }
+            SettingsEvent::Voice(event) => self.apply_voice_event(event, cx),
+            SettingsEvent::Keymap(event) => crate::keymap::apply(event, cx).map_or_else(Outcome::failed, |()| Outcome::default()),
             SettingsEvent::SetUiFontFamily(family) => {
                 self.set_ui_font_family(family.clone(), window, cx);
                 Outcome::default()
@@ -698,7 +714,7 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
-    fn failed(error: impl Into<String>) -> Self {
+    pub(crate) fn failed(error: impl Into<String>) -> Self {
         Self { error: Some(error.into()), notes: Vec::new() }
     }
 
@@ -833,18 +849,6 @@ mod tests {
         assert_eq!(crate::switcher::state_label(&HostState::Unreachable("x".into()), false), Some("offline"));
         assert_eq!(crate::switcher::state_label(&HostState::NotPaired, false), Some("not paired"));
         assert_eq!(crate::switcher::state_label(&HostState::Connected, false), None);
-    }
-
-    #[test]
-    fn every_bound_command_is_listed_as_a_shortcut() {
-        let listed: Vec<String> = Command::ALL
-            .iter()
-            .filter_map(|c| Some(SettingsShortcut { label: c.title().to_owned(), shortcut: c.hint()? }))
-            .map(|s| s.label)
-            .collect();
-        assert!(listed.contains(&"Settings…".to_owned()));
-        assert!(listed.contains(&"Split Right".to_owned()));
-        assert!(!listed.contains(&"Rename Session…".to_owned()), "unbound commands have no shortcut row");
     }
 
     #[test]

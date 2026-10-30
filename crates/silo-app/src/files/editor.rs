@@ -252,7 +252,7 @@ impl FilesPane {
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(5.0))
-                .bg(rgb(theme::mix(theme::background(), theme::warning(), 0.16)))
+                .bg(rgb(theme::warning()).opacity(0.16))
                 .text_size(px(12.0))
                 .child(div().flex_1().min_w_0().text_color(rgb(theme::foreground())).child("Changed on disk."))
                 .child(

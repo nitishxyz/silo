@@ -67,6 +67,21 @@ pub(crate) fn job(diff: &FileDiff) -> Option<Job> {
     Some(Job { lang, old, new, at })
 }
 
+/// One diff line's text, tabs expanded: its syntax colours (`spans`,
+/// readable on `bg`) with the changed words' `word` background over them.
+pub(crate) fn styled(text: &str, spans: Option<&[(Range<usize>, Capture)]>, words: &[Range<usize>], word: gpui::Hsla, bg: u32) -> gpui::StyledText {
+    use crate::files::model::{expand_tabs, to_shown};
+    let mut shown = expand_tabs(text).into_owned();
+    if shown.is_empty() {
+        shown.push(' ');
+    }
+    let map = |r: &Range<usize>| to_shown(text, r.start.min(text.len()))..to_shown(text, r.end.min(text.len()));
+    let spans: Vec<_> =
+        spans.map(|s| crate::syntax::styles(s, bg)).unwrap_or_default().iter().map(|(r, s)| (map(r), *s)).filter(|(r, _)| r.start < r.end).collect();
+    let backs: Vec<(Range<usize>, gpui::Hsla)> = words.iter().map(|r| (map(r), word)).collect();
+    gpui::StyledText::new(shown).with_highlights(crate::files::text::combine(&spans, &backs))
+}
+
 /// What [`Job::run`] gives back, before it is shared on the UI thread.
 pub(crate) struct Coloured(Vec<HunkSyntax>);
 

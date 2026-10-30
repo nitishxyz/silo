@@ -25,6 +25,45 @@ pub(crate) enum AfterUnsaved {
     Close(CloseTarget),
     /// The close as is (its busy check already done).
     Send { host: usize, target: CloseTarget, force: bool },
+    /// Quitting the app: the next window with unsaved tabs asks, then the
+    /// app quits.
+    Quit,
+}
+
+/// The windows whose unsaved tabs were let go (or saved) while quitting.
+#[derive(Default)]
+struct QuitAsked(std::collections::HashSet<gpui::WindowId>);
+
+impl gpui::Global for QuitAsked {}
+
+/// Quit (⌘Q, the menu, the palette): each window with unsaved tabs asks
+/// first, frontmost first; Cancel stops the quit.
+pub(crate) fn request_quit(cx: &mut gpui::App) {
+    let windows: Vec<gpui::WindowHandle<Workspace>> =
+        cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().filter_map(|w| w.downcast::<Workspace>()).collect();
+    let done = cx.default_global::<QuitAsked>().0.clone();
+    for handle in windows.into_iter().filter(|h| !done.contains(&h.window_id())) {
+        let asked = handle
+            .update(cx, |this, window, cx| {
+                let files = this.unsaved_in(&CloseTarget::StopServer, cx);
+                if files.is_empty() {
+                    return false;
+                }
+                window.activate_window();
+                this.open_unsaved(AfterUnsaved::Quit, files, window, cx);
+                true
+            })
+            .unwrap_or(false);
+        if asked {
+            return;
+        }
+    }
+    cx.quit();
+}
+
+/// A quit stopped: every window asks again next time.
+fn quit_stopped(cx: &mut gpui::App) {
+    cx.default_global::<QuitAsked>().0.clear();
 }
 
 /// The open Save / Don't Save / Cancel dialog.
@@ -144,7 +183,10 @@ impl Workspace {
     }
 
     fn dismiss_unsaved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.unsaved.take().is_some() {
+        if let Some(dialog) = self.unsaved.take() {
+            if dialog.after == AfterUnsaved::Quit {
+                quit_stopped(cx);
+            }
             self.refocus_after_unsaved(window, cx);
             cx.notify();
         }
@@ -167,6 +209,10 @@ impl Workspace {
             }
             AfterUnsaved::Close(target) => self.close_checked(target, window, cx),
             AfterUnsaved::Send { host, target, force } => self.send_close(host, target, force, window, cx),
+            AfterUnsaved::Quit => {
+                cx.default_global::<QuitAsked>().0.insert(window.window_handle().window_id());
+                cx.defer(request_quit);
+            }
         }
     }
 
@@ -198,6 +244,8 @@ impl Workspace {
                 this.refocus_after_unsaved(window, cx);
                 if ok {
                     this.proceed(dialog.after, window, cx);
+                } else if dialog.after == AfterUnsaved::Quit {
+                    quit_stopped(cx);
                 }
                 cx.notify();
             });
@@ -285,6 +333,26 @@ impl Workspace {
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
         self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false });
+    }
+
+    /// Open Folder…: the focused Files block re-roots; elsewhere this Mac's
+    /// picker opens a Files tab at the folder (another host's: a Files tab at
+    /// the focused block's folder, re-rooted from its tree).
+    pub(crate) fn open_folder_command(&mut self, block: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = block.as_deref().and_then(|b| self.blocks.files(b)).cloned() {
+            return pane.update(cx, |pane, cx| pane.open_folder(window, cx));
+        }
+        let local = matches!(self.hosts[self.active_host].info.transport, crate::hosts::Transport::Local { .. });
+        let Some(session_id) = self.view.as_ref().map(|v| v.session.id.clone()).filter(|_| local) else { return self.new_files_tab(window, cx) };
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(dir) = paths.into_iter().next().and_then(|p| p.to_str().map(str::to_owned)) else { return };
+            let spawn = SpawnSpec { cwd: Some(dir), command: Vec::new(), size: None };
+            let method = Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None, background: false };
+            let _ = this.update(cx, |this, cx| this.open_files_path(method, cx));
+        })
+        .detach();
     }
 
     /// New Files Pane: a Files block beside `block`, at its folder.

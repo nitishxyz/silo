@@ -258,6 +258,7 @@ impl Workspace {
             Command::NewBrowserTab => self.new_browser_tab(window, cx),
             Command::NewAgentTab => self.new_agent_tab(window, cx),
             Command::NewFilesTab => self.new_files_tab(window, cx),
+            Command::OpenFolder => self.open_folder_command(block, window, cx),
             Command::NewChangesTab => self.new_changes_tab(window, cx),
             Command::NewTabChooser | Command::NewPaneChooser => {
                 self.toggle_launcher(command, window, cx);
@@ -454,7 +455,7 @@ impl Workspace {
             Command::HideSilo => cx.hide(),
             Command::HideOthers => cx.hide_other_apps(),
             Command::ShowAll => cx.unhide_other_apps(),
-            Command::Quit => cx.quit(),
+            Command::Quit => crate::files_block::request_quit(cx),
         }
         cx.notify();
     }
@@ -502,7 +503,9 @@ impl Workspace {
             Command::NewSession => connected,
             Command::NewAgent | Command::NewAgentTab => connected && self.agents_offered(self.active_host) && self.view.is_some(),
             Command::OttoSettings | Command::BrowseBlocks => self.view.is_some(),
-            Command::NewFiles | Command::NewFilesTab => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES),
+            Command::NewFiles | Command::NewFilesTab | Command::OpenFolder => {
+                connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES)
+            }
             Command::BrowseFiles => connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::FILES_OPS),
             Command::NewChanges | Command::NewChangesTab | Command::ReviewChanges => {
                 connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::CHANGES)

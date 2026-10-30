@@ -12,6 +12,7 @@ use std::rc::Rc;
 use super::{
     Content, Drag, FilesPane, browse,
     browser::{DragPreview, DraggedFiles},
+    git::Mark,
     model,
 };
 use crate::surface::Glassy as _;
@@ -28,6 +29,21 @@ const INDENT: f32 = 12.0;
 
 fn hint(text: impl Into<SharedString>) -> gpui::Div {
     div().text_color(rgb(theme::muted())).child(text.into())
+}
+
+/// The colour of a name git marks (ignored ones are dimmed instead).
+fn mark_color(mark: Mark) -> Option<u32> {
+    match mark {
+        Mark::Ignored => None,
+        Mark::Untracked | Mark::Added => Some(theme::success()),
+        Mark::Modified | Mark::Renamed => Some(theme::warning()),
+        Mark::Conflicted => Some(theme::danger()),
+    }
+}
+
+/// A muted line in the middle of the viewer.
+pub(super) fn centered_hint(text: impl Into<SharedString>) -> AnyElement {
+    centered(hint(text))
 }
 
 fn centered(child: impl IntoElement) -> AnyElement {
@@ -56,6 +72,9 @@ impl BlockHeader for FilesPane {
         }
         if active_md {
             actions.push(self.source_switch(style, cx));
+        }
+        if let Some(diff) = self.diff_button(style, cx) {
+            actions.push(diff);
         }
         actions.push(
             keep_press(button("files-find", "search", "Find a File  ⇧⌘P", style.palette.icon, true, style))
@@ -117,6 +136,24 @@ impl FilesPane {
         )
     }
 
+    /// The diff toggle, for a text tab git has changed (host feature
+    /// `files_git`).
+    fn diff_button(&self, style: HeaderStyle, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let active = self.active()?;
+        let shown = self.diffs.contains_key(active);
+        let changed = matches!(self.git.of(active, false), Some(m) if m != super::git::Mark::Ignored);
+        if !shown && !(changed && matches!(self.contents.get(active), Some(Content::Text(_)))) {
+            return None;
+        }
+        let tip = if shown { "Show File" } else { "Show Changes Against HEAD" };
+        Some(
+            keep_press(button("files-diff", "git-diff", tip, style.palette.icon, true, style))
+                .when(shown, |el| el.bg(style.palette.selected()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx)))
+                .into_any_element(),
+        )
+    }
+
     /// Rendered | Source, for a markdown tab.
     fn source_switch(&self, style: HeaderStyle, cx: &mut Context<Self>) -> AnyElement {
         let palette = style.palette;
@@ -155,9 +192,23 @@ impl FilesPane {
 
     fn render_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(path) = self.state.active.clone() else {
-            let hint = if self.state.tree { "Pick a file in the tree, or press ⇧⌘P to find one" } else { "Press ⇧⌘P to find a file" };
+            let hint = match (self.state.tree, self.searches()) {
+                (true, true) => "Pick a file in the tree, press ⇧⌘P to find one or ⇧⌘F to search in files",
+                (true, false) => "Pick a file in the tree, or press ⇧⌘P to find one",
+                (false, true) => "Press ⇧⌘P to find a file, ⇧⌘F to search in files",
+                (false, false) => "Press ⇧⌘P to find a file",
+            };
             return centered(div().flex().flex_col().items_center().gap(px(4.0)).child("No file open").child(hint_text(hint)));
         };
+        if self.diffs.contains_key(&path) {
+            return self.render_diff(&path, window, cx);
+        }
+        if matches!(self.contents.get(&path), Some(Content::Pdf(_))) {
+            return self.render_pdf(&path, window, cx);
+        }
+        if let Some(picture) = self.render_picture(&path, cx) {
+            return picture;
+        }
         let mut content = self.contents.remove(&path);
         let body = match &mut content {
             None | Some(Content::Loading) => centered(hint("Loading…")),
@@ -171,6 +222,7 @@ impl FilesPane {
                     .child(hint_text(error.clone())),
             ),
             Some(Content::Binary { mime, size }) => centered(hint(model::binary_summary(mime, *size))),
+            Some(Content::Pdf(file)) => centered(hint(model::binary_summary("application/pdf", file.size))),
             Some(Content::Image { image, mime, size, dims }) => {
                 let kind = mime.trim_start_matches("image/").trim_end_matches("+xml").to_uppercase();
                 let caption = match dims {
@@ -208,7 +260,14 @@ impl FilesPane {
                     Some(md) => md.render(24.0),
                     None => self.render_text(&path, file, window, cx),
                 };
-                div().size_full().flex().flex_col().children(note).child(div().flex_1().min_h_0().child(main)).into_any_element()
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .children(note)
+                    .child(div().flex_1().min_h_0().child(main))
+                    .on_pinch(cx.listener(|this, e: &gpui::PinchEvent, _, cx| this.pinch(e, cx)))
+                    .into_any_element()
             }
         };
         if let Some(content) = content {
@@ -228,7 +287,7 @@ impl FilesPane {
             .gap(px(10.0))
             .px(px(12.0))
             .py(px(5.0))
-            .bg(rgb(theme::mix(theme::background(), theme::warning(), 0.12)))
+            .bg(rgb(theme::warning()).opacity(0.12))
             .text_size(px(12.0))
             .child(hint(format!("Showing the first {} of {}", model::human_size(shown), model::human_size(size))))
             .when(shown < silo_proto::control::FileRead::MAX_BYTES, |el| {
@@ -283,6 +342,10 @@ impl FilesPane {
         if let Some(goto) = &self.goto {
             out.push(bar().child(hint("Line")).child(goto.field.clone()).child(hint("↩ go · esc")).into_any_element());
         }
+        if let Some(name) = &self.name_bar {
+            let action = if name.ask == super::create::Ask::Root { "↩ open · esc" } else { "↩ create · esc" };
+            out.push(bar().child(hint(name.ask.label(&self.state.root))).child(name.field.clone()).child(hint(action)).into_any_element());
+        }
         if let Some(notice) = &self.notice {
             out.push(
                 bar()
@@ -314,6 +377,8 @@ impl FilesPane {
         // Drags: a row alone (within the block, and out of the window for this Mac's files).
         let template = self.drag_of("", &Rc::new(Vec::new()));
         let (local, ops) = (template.local_root.is_some(), self.ops());
+        let ink_bg = self.surface.color();
+        let marks: Vec<Option<Mark>> = rows.iter().map(|r| self.git.of(&r.path, r.dir)).collect();
         let list = gpui::uniform_list("files-tree", count, move |range, _, _| {
             let rows = &rows;
             range
@@ -337,6 +402,14 @@ impl FilesPane {
                         }
                     });
                     let glyph = crate::assets::icon(if row.dir { "folder" } else { "file-text" }, 13.0, theme::muted());
+                    let mark = marks[ix];
+                    let ink = mark.and_then(mark_color).unwrap_or(if is_active { theme::foreground() } else { theme::ink_on(ink_bg) });
+                    // A file's letter; a folder's dot for what changed in it.
+                    let badge = mark.filter(|m| *m != Mark::Ignored).map(|m| {
+                        let color = mark_color(m).unwrap_or_else(theme::muted);
+                        let badge = div().flex_none().ml_auto().pl(px(6.0)).text_size(px(11.0)).text_color(rgb(color));
+                        if row.dir { badge.child(div().size(px(5.0)).rounded_full().bg(rgb(color))) } else { badge.child(m.letter()) }
+                    });
                     let pane = pane.clone();
                     #[allow(clippy::cast_precision_loss)]
                     let indent = row.depth as f32 * INDENT;
@@ -351,7 +424,7 @@ impl FilesPane {
                         .pr(px(8.0))
                         .when_some(fill, |el, f| el.bg(f))
                         .when(fill.is_none(), |el| el.hover(|s| s.bg(theme::hover_fill())))
-                        .when(row.hidden, |el| el.opacity(0.55))
+                        .when(row.hidden || mark == Some(Mark::Ignored), |el| el.opacity(0.55))
                         .child(div().w(px(10.0)).flex_none().flex().items_center().children(chevron))
                         .child(glyph)
                         .child(
@@ -360,9 +433,10 @@ impl FilesPane {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .when(row.link, |el| el.italic())
-                                .text_color(rgb(if is_active { theme::foreground() } else { theme::ink_on(theme::background()) }))
+                                .text_color(rgb(ink))
                                 .child(row.name.clone()),
                         )
+                        .children(badge)
                         .map(|el| {
                             if !ops {
                                 return el;
@@ -395,6 +469,17 @@ impl FilesPane {
                                 let paths = paths.paths().to_vec();
                                 uploads.update(cx, |this, cx| this.upload_into(paths, to_upload.clone(), cx));
                             })
+                        })
+                        .on_mouse_down(MouseButton::Right, {
+                            let (pane, path) = (pane.clone(), row.path.clone());
+                            move |e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                pane.update(cx, |this, cx| {
+                                    this.tree_selected = Some(path.clone());
+                                    this.browser.menu = Some(super::browser::Menu { at: e.position, target: Some(path.clone()), tree: true });
+                                    cx.notify();
+                                });
+                            }
                         })
                         .on_click(move |e: &ClickEvent, window, cx| {
                             let behind = e.modifiers().platform;
@@ -430,10 +515,19 @@ impl FilesPane {
             .border_l_1()
             // Its top edge meets the block header: a rule there, as on its left.
             .border_t_1()
-            .border_color(rgb(theme::border()))
+            .border_color(theme::divider())
             .track_focus(&self.tree_focus)
             .text_size(px(12.5))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.tree_focus, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.tree_focus, cx);
+                    this.tree_selected = None;
+                    this.browser.menu = Some(super::browser::Menu { at: e.position, target: None, tree: true });
+                    cx.notify();
+                }),
+            )
             // Drops on the tree's background go into the root (files from Finder: uploaded, on hosts that take them).
             .when(self.ops(), |el| {
                 el.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(theme::accent()).opacity(0.06)))
@@ -566,7 +660,17 @@ impl FilesPane {
                 self.find_step(if m.shift { -1 } else { 1 }, cx);
                 true
             }
-            "escape" if self.finder.is_some() || self.find.is_some() || self.goto.is_some() => {
+            // ⇧⌘F: search in the folder's files.
+            "f" if m.platform && m.shift && !m.control && !m.alt && self.searches() => {
+                self.open_search(window, cx);
+                true
+            }
+            // In the tree: ⌥⌘N a new file (⇧⌘N, a new folder, comes as New Session).
+            "n" if m.platform && m.alt && !m.shift && !m.control && self.tree_focus.is_focused(window) && self.writes() => {
+                self.ask_new_file(window, cx);
+                true
+            }
+            "escape" if self.finder.is_some() || self.search.is_some() || self.name_bar.is_some() || self.find.is_some() || self.goto.is_some() => {
                 self.close_bars(window, cx);
                 true
             }
@@ -574,6 +678,14 @@ impl FilesPane {
                 self.save_active(cx);
                 true
             }
+            "=" | "+" | "-" | "0" if m.platform && !m.control && !m.alt => self.zoom_key(
+                match key {
+                    "-" => -1,
+                    "0" => 0,
+                    _ => 1,
+                },
+                cx,
+            ),
             // Editing: movement, deletes, Return, Tab, undo and cut (characters come through the input method).
             _ if self.focus.is_focused(window) && self.editing() => self.edit_key(e, cx),
             "escape" if self.selection.is_some() => {
@@ -598,6 +710,7 @@ fn hint_text(text: impl Into<SharedString>) -> gpui::Div {
 
 impl Render for FilesPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drop_retired(window);
         let browsing = self.browsing();
         let main = if browsing {
             self.render_browser(window, cx)
@@ -607,7 +720,7 @@ impl Render for FilesPane {
             div().size_full().flex().flex_col().children(bars).child(div().flex_1().min_h_0().child(viewer)).into_any_element()
         };
         let tree = (self.state.tree && !browsing).then(|| self.render_tree(window, cx));
-        let finder = self.render_finder(cx);
+        let finder = self.render_finder(cx).or_else(|| self.render_search(cx));
         let overlays: Vec<AnyElement> = [self.render_transfer(cx), self.render_preview(cx), self.render_menu(cx)].into_iter().flatten().collect();
         let body = self.body_bounds.clone();
         let pane = cx.entity().downgrade();
@@ -649,7 +762,7 @@ impl Render for FilesPane {
             .text_color(rgb(theme::foreground()))
             .when(dragging_tree, |el| el.cursor_col_resize())
             .on_action(cx.listener(|this, _: &act::ClosePane, window, cx| {
-                if this.finder.is_some() || this.find.is_some() || this.goto.is_some() {
+                if this.finder.is_some() || this.search.is_some() || this.name_bar.is_some() || this.find.is_some() || this.goto.is_some() {
                     return this.close_bars(window, cx);
                 }
                 if this.browsing() {
@@ -730,6 +843,9 @@ impl Render for FilesPane {
             .on_action(cx.listener(|this, _: &act::NewSession, window, cx| {
                 if this.browsing() && this.browser.focus.contains_focused(window, cx) {
                     return this.new_folder(window, cx);
+                }
+                if this.tree_focus.is_focused(window) && this.ops() {
+                    return this.ask_new_folder(window, cx);
                 }
                 cx.propagate();
             }))

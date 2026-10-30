@@ -16,6 +16,9 @@ use crate::theme::Continuous as _;
 pub use silo_proto::model::CursorShape;
 use silo_proto::permissions::{PermissionId, PermissionStatus, Permissions};
 
+mod keyboard_page;
+mod voice_page;
+
 type TriggerBounds = std::rc::Rc<std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>)>>>;
 
 /// The font menu's anchor and window position: left-aligned under the
@@ -56,11 +59,21 @@ pub struct SettingsHost {
     pub notify: bool,
 }
 
-/// Populate from the command registry, not a separate hard-coded shortcut table.
+/// A command's row in Settings › Keyboard, from the effective keymap.
 #[derive(Clone, Debug)]
 pub struct SettingsShortcut {
+    pub command: crate::commands::Command,
     pub label: String,
-    pub shortcut: String,
+    pub keys: Vec<crate::keymap::Chord>,
+    /// Not the defaults (Reset shows).
+    pub custom: bool,
+}
+
+impl SettingsShortcut {
+    /// The chords as hints, for the search.
+    fn hints(&self) -> String {
+        self.keys.iter().map(crate::keymap::Chord::hint).collect::<Vec<_>>().join(" ")
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -279,6 +292,7 @@ pub struct SettingsSnapshot {
     /// Why Frosted cannot render now (the choice is kept).
     pub material_unavailable: Option<&'static str>,
     pub tint_with_app: bool,
+    pub frost_tint: crate::material::FrostTint,
     pub translucent_apps: bool,
     /// This build updates itself (a release Silo.app in Applications).
     pub updates: bool,
@@ -296,12 +310,16 @@ pub struct SettingsSnapshot {
     pub terminal: TerminalSettings,
     pub hosts: Vec<SettingsHost>,
     pub shortcuts: Vec<SettingsShortcut>,
+    /// What is wrong with `keybindings.json` (unknown ids, bad chords, conflicts).
+    pub shortcut_problems: Vec<String>,
     pub server: SettingsServer,
     /// The window shows this Mac's host: the Permissions page is for it.
     pub local_host: bool,
     /// Silo Server's macOS privacy permissions (`permissions.status`),
     /// or why they can't be read; `None` until first read.
     pub permissions: Option<Result<Permissions, String>>,
+    /// Settings › Voice, and Silo's own microphone permission.
+    pub voice: crate::voice::settings::VoiceSettings,
     pub version: String,
     /// Short form shown in the row; `revision_full` is copied.
     pub revision: String,
@@ -320,6 +338,7 @@ impl Default for SettingsSnapshot {
             material: crate::material::Material::Solid,
             material_unavailable: None,
             tint_with_app: true,
+            frost_tint: crate::material::FrostTint::None,
             translucent_apps: false,
             updates: true,
             check_updates: true,
@@ -332,9 +351,11 @@ impl Default for SettingsSnapshot {
             terminal: TerminalSettings::from_prefs(&TerminalPrefs::default(), terminal_prefs::DEFAULT_FONT.into()),
             hosts: Vec::new(),
             shortcuts: Vec::new(),
+            shortcut_problems: Vec::new(),
             server: SettingsServer::default(),
             local_host: true,
             permissions: None,
+            voice: crate::voice::settings::VoiceSettings::default(),
             version: env!("CARGO_PKG_VERSION").into(),
             revision: "Not supplied".into(),
             revision_full: "Not supplied".into(),
@@ -362,6 +383,7 @@ pub enum SettingsEvent {
     SetMatchRunningApp(bool),
     SetMaterial(crate::material::Material),
     SetTintWithApp(bool),
+    SetFrostTint(crate::material::FrostTint),
     SetTranslucentApps(bool),
     SetCheckUpdates(bool),
     SetConfirmClose(bool),
@@ -406,12 +428,17 @@ pub enum SettingsEvent {
     GrantPermission(PermissionId),
     /// System Settings › Privacy & Security › Automation.
     OpenAutomationSettings,
+    /// Settings › Voice.
+    Voice(crate::voice::settings::VoiceEvent),
+    /// Settings › Keyboard.
+    Keymap(crate::keymap::KeymapEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Section {
     Appearance,
     Keyboard,
+    Voice,
     Notifications,
     Terminal,
     Browser,
@@ -470,9 +497,10 @@ fn sidebar_rows(shown: impl Fn(Section) -> bool) -> Vec<SidebarRow> {
 }
 
 impl Section {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Appearance,
         Self::Keyboard,
+        Self::Voice,
         Self::Notifications,
         Self::Terminal,
         Self::Browser,
@@ -489,7 +517,7 @@ impl Section {
 
     pub(crate) fn group(self) -> Group {
         match self {
-            Self::Appearance | Self::Keyboard | Self::Notifications => Group::General,
+            Self::Appearance | Self::Keyboard | Self::Voice | Self::Notifications => Group::General,
             Self::Terminal => Group::Terminal,
             Self::Browser => Group::Browser,
             Self::Hosts | Self::Server | Self::Permissions => Group::Connections,
@@ -503,6 +531,7 @@ impl Section {
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
             Self::Keyboard => "Keyboard",
+            Self::Voice => "Voice",
             Self::Notifications => "Notifications",
             Self::Hosts => "Hosts",
             Self::Server => "Server",
@@ -517,6 +546,7 @@ impl Section {
             Self::Terminal => "terminal",
             Self::Browser => "globe",
             Self::Keyboard => "settings-keyboard",
+            Self::Voice => "mic",
             Self::Notifications => "settings-bell",
             Self::Hosts => "laptop",
             Self::Server => "settings-hard-drive",
@@ -532,6 +562,7 @@ impl Section {
             Self::Terminal => 0x0014_b8a6,
             Self::Browser => 0x0022_c55e,
             Self::Keyboard => 0x0063_66f1,
+            Self::Voice => 0x00ec_4899,
             Self::Notifications => 0x00ef_4444,
             Self::Hosts => 0x000e_a5e9,
             Self::Server => 0x00f5_9e0b,
@@ -547,6 +578,9 @@ impl Section {
             Self::Terminal => "preview settings file json configuration config edit open reload finder",
             Self::Browser => "browser web pages swipe back forward zoom pinch search engine address bar",
             Self::Keyboard => "shortcuts keys commands bindings",
+            Self::Voice => {
+                "voice typing dictation dictate speech speak talk microphone mic transcribe fn globe key whisper whistle language model download"
+            }
             Self::Notifications => "alerts banners dock badge needs you done error",
             Self::Hosts => "remote local address add remove iroh notifications notify",
             Self::Server => "daemon status version log start stop restart sessions",
@@ -569,7 +603,7 @@ fn section_matches(section: Section, snapshot: &SettingsSnapshot, words: &[&str]
     }
     if section == Section::Keyboard {
         for shortcut in &snapshot.shortcuts {
-            text.push_str(&format!(" {} {}", shortcut.label, shortcut.shortcut));
+            text.push_str(&format!(" {} {}", shortcut.label, shortcut.hints()));
         }
     }
     if section == Section::Hosts {
@@ -647,6 +681,10 @@ pub struct SettingsPanel {
     /// The open theme dropdown (by trigger id) and its highlighted row.
     theme_menu: Option<&'static str>,
     theme_highlight: usize,
+    /// Settings › Voice's open choice menu (language, microphone).
+    voice_menu: Option<crate::context_menu::Menu<SettingsEvent>>,
+    /// Settings › Keyboard's shortcut being recorded.
+    recorder: keyboard_page::Recorder,
     /// Panel-level focus for keyboard navigation of the theme dropdown.
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -741,11 +779,18 @@ impl SettingsPanel {
             field_error: None,
             theme_menu: None,
             theme_highlight: 0,
+            voice_menu: None,
+            recorder: keyboard_page::Recorder::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         this.sync_fields(cx);
         this
+    }
+
+    /// The result line now shown, kept through a refresh that isn't one.
+    pub fn message(&self) -> Option<String> {
+        self.snapshot.message.clone()
     }
 
     pub fn refresh(&mut self, snapshot: SettingsSnapshot, cx: &mut Context<Self>) {
@@ -1048,6 +1093,42 @@ impl SettingsPanel {
                 let _ = panel.update(cx, |_, cx| cx.emit(SettingsEvent::SetMaterial(material)));
             })
             .into_any_element()
+    }
+
+    /// Frosted tints as macOS-style swatches: the theme's own (a disc
+    /// shading from its ink to its background) then the accent colours; the
+    /// chosen one ringed.
+    fn frost_tint_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = self.snapshot.frost_tint;
+        let mut row = div().flex().flex_row().items_center().gap(px(8.0));
+        for tint in crate::material::FrostTint::ALL {
+            let disc = match tint.hue() {
+                Some(hue) => div().size(px(16.0)).rounded_full().bg(rgb(hue)),
+                None => div().size(px(16.0)).rounded_full().bg(gpui::linear_gradient(
+                    135.0,
+                    gpui::linear_color_stop(rgb(theme::foreground()), 0.0),
+                    gpui::linear_color_stop(rgb(theme::background()), 1.0),
+                )),
+            }
+            .border_1()
+            .border_color(rgb(theme::foreground()).opacity(0.18));
+            row = row.child(
+                div()
+                    .id(gpui::ElementId::Name(format!("settings-frost-tint-{}", tint.label()).into()))
+                    .size(px(22.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_2()
+                    .border_color(if tint == chosen { rgb(theme::accent()).opacity(1.0) } else { rgb(theme::accent()).opacity(0.0) })
+                    .cursor_pointer()
+                    .tooltip(crate::tooltip::Tooltip::text(tint.label()))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::SetFrostTint(tint))))
+                    .child(disc),
+            );
+        }
+        row.into_any_element()
     }
 
     fn search_engine_control(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1737,6 +1818,9 @@ impl SettingsPanel {
                 let unavailable = s.material_unavailable.filter(|_| s.material == crate::material::Material::Frosted);
                 let mut material =
                     vec![Self::row(SettingId::WindowMaterial.label(), unavailable.map(Into::into), Some(self.material_control(cx)), narrow)];
+                if s.material == crate::material::Material::Frosted && unavailable.is_none() {
+                    material.push(Self::row("Tint", Some("The colour the frosted glass takes on".into()), Some(self.frost_tint_control(cx)), narrow));
+                }
                 if SettingId::TintWithApp.visible(s) {
                     material.push(Self::row(
                         SettingId::TintWithApp.label(),
@@ -1802,20 +1886,8 @@ impl SettingsPanel {
                 out.push(Self::note("An agent's web search engine is in its Otto settings."));
             }
             Section::Notifications => out.extend(self.notifications_page(cx)),
-            Section::Keyboard => {
-                let show_all = self.query.is_empty() || self.text_matches(&format!("{} {}", section.label(), section.keywords()));
-                let rows: Vec<AnyElement> = s
-                    .shortcuts
-                    .iter()
-                    .filter(|k| show_all || self.text_matches(&format!("{} {}", k.label, k.shortcut)))
-                    .map(|k| Self::row(k.label.clone(), None, Some(keycap(&k.shortcut)), false))
-                    .collect();
-                if rows.is_empty() {
-                    out.push(Self::note("No shortcuts."));
-                } else {
-                    out.push(self.group(None, rows));
-                }
-            }
+            Section::Voice => out.extend(self.voice_page(narrow, cx)),
+            Section::Keyboard => out.extend(self.keyboard_page(cx)),
             Section::Hosts => {
                 let mut rows = Vec::new();
                 for (index, host) in s.hosts.iter().enumerate() {
@@ -2132,6 +2204,7 @@ impl SettingsPanel {
                 narrow,
             )],
         ));
+        out.push(self.microphone_group(narrow, cx));
         if let Some(problem) = problem {
             out.push(div().px(px(4.0)).text_size(px(11.5)).text_color(rgb(theme::warning())).child(problem).into_any_element());
         }
@@ -2455,7 +2528,7 @@ impl Render for SettingsPanel {
                             // Menus are anchored where they opened; close
                             // them rather than leave them stale on scroll.
                             .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, window, cx| {
-                                if this.theme_menu.take().is_some() {
+                                if this.theme_menu.take().is_some() | this.voice_menu.take().is_some() {
                                     cx.notify();
                                 }
                                 this.close_font_menu(window, cx);
@@ -2468,6 +2541,14 @@ impl Render for SettingsPanel {
                             .child(content),
                     ),
             )
+            .children(self.voice_menu.as_ref().map(|menu| {
+                menu.render("settings-voice-menu", cx, |this, pick, _, cx| {
+                    this.voice_menu = None;
+                    if let Some(event) = pick {
+                        cx.emit(event);
+                    }
+                })
+            }))
     }
 }
 
@@ -2529,7 +2610,7 @@ mod tests {
 
     #[test]
     fn sidebar_sections_have_search_terms_and_icons() {
-        assert_eq!(Section::ALL.len(), 9);
+        assert_eq!(Section::ALL.len(), 10);
         assert_eq!(Section::ALL[0], Section::Appearance, "Settings opens on Appearance");
         assert!(!Section::ALL.iter().any(|s| s.label() == "General"));
         assert!(!Section::ALL.iter().any(|s| ["Agents", "Models"].contains(&s.label())), "otto's settings are in the agent pane");
@@ -2543,11 +2624,14 @@ mod tests {
     #[test]
     fn sections_are_grouped_by_what_they_set_with_about_last() {
         use Section as S;
-        let order = [S::Appearance, S::Keyboard, S::Notifications, S::Terminal, S::Browser, S::Hosts, S::Server, S::Permissions, S::About];
+        let order = [S::Appearance, S::Keyboard, S::Voice, S::Notifications, S::Terminal, S::Browser, S::Hosts, S::Server, S::Permissions, S::About];
         assert_eq!(Section::ALL, order);
         let groups: Vec<Group> = Section::ALL.iter().map(|s| s.group()).collect();
         use Group as G;
-        assert_eq!(groups, [G::General, G::General, G::General, G::Terminal, G::Browser, G::Connections, G::Connections, G::Connections, G::About]);
+        assert_eq!(
+            groups,
+            [G::General, G::General, G::General, G::General, G::Terminal, G::Browser, G::Connections, G::Connections, G::Connections, G::About]
+        );
         // Each group's pages are together, so each label shows once.
         let mut seen: Vec<Group> = Vec::new();
         for g in groups {

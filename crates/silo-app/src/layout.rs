@@ -407,7 +407,7 @@ impl Workspace {
             .flex_col()
             .size_full()
             .bg(palette.fill())
-            .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(fill_color))))
+            .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(theme::card_outline(fill_color)))
             .rounded_clip()
             .when(mode != HeaderMode::Hidden, |el| {
                 el.child(
@@ -764,9 +764,7 @@ impl Workspace {
                                 .flex()
                                 .flex_col()
                                 .bg(palette.fill())
-                                .when(comfortable, |el| {
-                                    el.continuous_corners(corners).border_1().border_color(rgb(theme::card_outline_on(ghost.fill)))
-                                })
+                                .when(comfortable, |el| el.continuous_corners(corners).border_1().border_color(theme::card_outline(ghost.fill)))
                                 .rounded_clip()
                                 .when(!ghost.float, |el| el.opacity(alpha))
                                 .children(header)
@@ -906,7 +904,7 @@ fn can_swap(dragged: &DraggedPane, window: &str, target: &str) -> bool {
 /// A card's outline, for content clipped to the card's shape but drawn at
 /// another size. `fill`: the card's colour.
 fn card_outline(corners: CardCorners, fill: u32) -> gpui::Div {
-    div().absolute().inset_0().border_1().border_color(rgb(theme::card_outline_on(fill))).continuous_corners(corners)
+    div().absolute().inset_0().border_1().border_color(theme::card_outline(fill)).continuous_corners(corners)
 }
 
 /// The window veil over a card slot outside the card's continuous corners,

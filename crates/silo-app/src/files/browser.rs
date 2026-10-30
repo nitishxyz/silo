@@ -61,6 +61,8 @@ pub(crate) struct Rename {
 pub(crate) struct Menu {
     pub at: gpui::Point<gpui::Pixels>,
     pub target: Option<String>,
+    /// Opened on the tree (its own items).
+    pub tree: bool,
 }
 
 /// Quick Look (Space).

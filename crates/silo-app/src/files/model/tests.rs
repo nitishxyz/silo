@@ -168,6 +168,7 @@ fn content_kinds_sizes_and_marks() {
     assert_eq!(shown_as("README.md", "text/markdown", true), Shown::Markdown);
     assert_eq!(shown_as("main.rs", "text/plain", true), Shown::Text);
     assert_eq!(shown_as("a.zip", "application/zip", false), Shown::Binary);
+    assert_eq!(shown_as("paper.pdf", "application/pdf", false), Shown::Pdf);
     assert_eq!(human_size(812), "812 B");
     assert_eq!(human_size(3_200_000), "3.2 MB");
     assert_eq!(human_size(14_000_000), "14 MB");

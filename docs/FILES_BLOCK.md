@@ -50,12 +50,19 @@ rights to change its state.
 |---|---|---|
 | `files.list` | `path` (dir) | entries: `name, kind (file/dir/symlink), size, mtime` |
 | `files.read` | `path`, `max_bytes?` (default 2 MiB) | `text` (UTF-8) or `binary` (`mime`, `size`), `truncated`, `mtime`, `size`, and `sha256` for text read whole |
-| `files.read_image` | `path` | bytes plus `mime`, for png, jpeg, gif, webp and svg, up to 20 MiB |
+| `files.read_image` | `path` | bytes plus `mime`, for png, jpeg, gif, webp, svg and pdf, up to 11 MiB (`FileImage::MAX_BYTES`: the base64 fits a frame) |
 | `files.find` | `query`, `limit` | fuzzy-matched paths under root; skips `.git`, `target`, `node_modules` and `.gitignore`d paths |
 | `files.set` | partial `FilesState` (open, active, tree, expanded, scroll, highlights) | the updated state, broadcast as `block.changed` |
 | `files.root` | `path` | re-root the block (interact rights) |
 | `files.write` | `path`, `text`, `base?` (`mtime`, `size`, `sha256?`), `force?` | `path`, `mtime`, `size`, `sha256` of the file written (interact rights) |
 | `files.create` | `path`, `text?` | as `files.write`; a new file, its folder must exist (interact rights) |
+| `files.git` | | `repo`, `files: [{path, status}]` (changed against `HEAD` and untracked), `ignored` (a folder ignored whole once), `truncated` (over 20 000 paths) |
+| `files.diff` | `path`, `context?` | the file against `HEAD`: a `FileDiff`, as `changes.diff` gives |
+
+**Git** (feature `files_git`; older servers answer `method_not_found` and the app shows no marks and no diff):
+`silo-server/src/files/git.rs` runs the Changes block's own code (`changes::status::porcelain`, `names` with the
+working scope's diff args, `changes::diff::diff`) in the repo holding the root (`changes::find_root`), limited to the
+root and with paths made relative to it; ignored paths come from `git ls-files --others --ignored --directory`.
 
 **Writing** (feature `files_write`; older servers answer `method_not_found` and the app keeps their files read-only):
 - `files.write` replaces an existing regular file atomically: the text goes to a temporary file in the same folder
@@ -68,7 +75,7 @@ rights to change its state.
 - A file without write permission (or in a folder that can't be written, which the rename needs) is refused with
   `read_only` and says so ("src/x.rs is read-only"). Over 8 MiB (`FileWritten::MAX_BYTES`, so the request fits in a
   frame) is `too_large`. Folders and special files are `bad_request`; a missing file is `not_found`.
-- `files.create` refuses a taken path with `exists` (a dangling link counts). The app doesn't use it yet.
+- `files.create` refuses a taken path with `exists` (a dangling link counts). The tree's New File… uses it.
 
 **Events:** `files.changed { block_id, paths }`. The server watches the root (FSEvents on macOS, inotify on Linux,
 through the `notify` crate), debounced to 150 ms, and sends changed paths relative to the root. Clients re-read
@@ -133,7 +140,18 @@ dialog).
     drawn as 4 columns; lines are drawn up to 4000 characters. Long lines scroll sideways.
   - Markdown: rendered with the agent pane's renderer (`agent::MarkdownView`: tables, task lists, highlighted code),
     or its source. Rendered markdown has no text selection; switch to Source to select and copy.
-  - Images: fitted (never upscaled), with their type, pixel size and file size under them.
+  - Images: fitted (never upscaled) at zoom 1, with their type, pixel size and file size under them (and the zoom
+    when not 100%).
+  - PDFs (`files.read_image`'s bytes; `files/pdf.rs`): the pages down the view, the widest filling it at zoom 1, drawn
+    with CoreGraphics off the UI thread as bitmaps at the display's pixels for the current zoom (pages in view and
+    half a view around; the old bitmap scaled until the new one is ready; at most 32 Mpx a page), "PDF · 12 pages ·
+    3.2 MB" under them. Not macOS: shown as a binary.
+  - Zoom (`files/zoom.rs`, `preview.rs`): a trackpad pinch or ⌘+ / ⌘- / ⌘0 scales a picture or PDF (25%–800%)
+    around the pointer (the view's centre for keys), scrolling both ways; on text and diffs it changes the font size
+    (60%–300%, kept for the block's text tabs, the top line kept).
+  - Diff (the header's diff toggle, on text tabs git marks; `files/diff.rs`): the tab against `HEAD` with the Changes
+    block's unified rows (`changes::model::rows`, folds that open on a click, word changes), in the viewer's font.
+    Syntax colours from `changes::syntax` (worked out off the UI thread; kept while the diff is unchanged).
   - Binary files: a summary line, "binary · 3.2 MB · application/zip".
   - Truncated files (over 2 MiB): "Showing the first 2.1 MB of 14 MB" and a Load button, which reads up to
     `FileRead::MAX_BYTES` (12 MiB: a reply must fit in a frame).
@@ -144,6 +162,12 @@ dialog).
   - Click opens a file in a tab and shows it. ⌘-click opens it without showing it. Click a folder to open or
     close it.
   - Hidden files are dimmed, links are in italics. `.git` is never shown.
+  - Git marks (`files.git`, asked again 0.4 s after `files.changed` and when the block gets focus): a modified or
+    renamed file's name in the warning colour with `M` / `R`, added `A` and untracked `U` in the success colour, a
+    conflict `!` in the danger colour; a folder takes its strongest descendant's colour and a dot; ignored paths (and
+    everything in an ignored folder) are dimmed.
+  - Right-click: New File… (⌥⌘N in the tree), New Folder… (⇧⌘N in the tree), in the row's folder (a file's folder),
+    and Open Folder…. A name bar over the viewer takes the name (`a/b.rs` too); a new file opens in a tab.
   - Arrow keys navigate (once the tree has focus), → / ← expand and collapse (or move into / up to the parent),
     ↩ opens.
 
@@ -182,6 +206,8 @@ Markdown edits in Source; Rendered stays read-only and shows the edited text. Im
 | ⌘⇧E | Toggle the tree |
 | ⌘F | Find in the file (smart case; ↩ / ↓ next, ↑ previous, ⌘G / ⇧⌘G too, esc closes) |
 | ⌘L | Go to line (`12` or `12:5`) |
+| ⇧⌘F | Search in files (host feature `search`): `search.grep` over the root, the matches by file, ↑ ↓ and ↩ or a click open the file with the line 5 lines from the top |
+| ⌘+ ⌘- ⌘0 | Zoom a picture or PDF; text's font size |
 | ⌘C / ⌘A | Copy the selection / select all |
 | ↑ ↓ ← → / PgUp PgDn / Home End | Scroll the viewer (read-only tabs) |
 | ⌘S | Save the tab (editable tabs; any mode, Rendered markdown too) |
@@ -218,7 +244,15 @@ open files are dropped and get the dot, and listed folders whose entries changed
 - Typing a path in the launcher (`/…`, `~`, `~/…`) opens Files rooted at that folder. A file opens at its folder with
   the file shown (the server says it's not a folder, and the app tries again with its parent).
 - The palette commands "New Files Pane" and "New Files Tab" (host feature `files`).
-- Not built yet: "Open Folder…", `silo files [path]`, drag to reorder tabs, `files.root` from the app.
+- "Open Folder…" (palette, and the tree's menu): the focused Files block re-roots (`files.root`) at a folder from
+  this Mac's picker, or, on another host, one typed in a path bar (absolute, `~/…` or under the root); refused while
+  a tab has unsaved edits. With another block focused: this Mac's picker opens a Files tab there (another host: a
+  Files tab at the focused block's folder).
+- `silo files [path] [-l line]` (`silo-cli`): `files_show` from the CLI: beside the terminal's block in Silo
+  (`SILO_BLOCK`), reusing a Files block in its tab whose root holds the path, else a tab of the `files` session.
+- Quitting (⌘Q, the menu, the palette) asks about unsaved tabs, window by window (frontmost first): Save / Don't
+  Save / Cancel, Cancel stopping the quit. Edits stashed for another session's blocks (not shown) are not asked about.
+- Not built yet: drag to reorder tabs.
 
 ## 5. otto
 
@@ -236,7 +270,7 @@ otto-silo-tools. It is a deferred tool (loaded on demand, like the browser tools
 **Live edits** (built): when otto edits a file that a Files tab has open, `files.changed` brings the change and the
 tab follows the reload rules of §4 Editing (a clean tab shows it as it lands; one with edits shows the bar).
 
-**Later:** a diff view against `HEAD`.
+The diff view against `HEAD` is built (the header's toggle, §4).
 
 ## 6. Order of work
 
@@ -251,12 +285,12 @@ tab follows the reload rules of §4 Editing (a clean tab shows it as it lands; o
    captures for a small sample per language). Switch the agent pane's code blocks to it.
 3. **Files block view:** header tabs, the tree on the right, the viewer, the finder, keys, and the launcher kind.
    (Built.)
-4. **The CLI `silo files` command and the otto tool** (built as `files_show`, with highlights; the CLI is not).
+4. **The CLI `silo files` command and the otto tool** (built as `files_show`, with highlights; the CLI on 2026-10-31).
 
 5. **Editing** (built): `files.write` / `files.create` (feature `files_write`) and the editor in the viewer (§4).
 
-**Later:** diffs, PDF preview, a git status column in the tree, search across files, creating files from the app
-(`files.create` is there), and asking about unsaved tabs when the app quits.
+6. **Built on 2026-10-31:** PDF preview, zoom, git marks in the tree, the diff against `HEAD`, search in files, Open
+   Folder…, new files and folders from the tree, asking about unsaved tabs on quit, and `silo files`.
 
 ## 7. Open questions
 

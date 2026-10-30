@@ -9,13 +9,20 @@
 pub(crate) mod browse;
 mod browser;
 mod browser_view;
+mod create;
+mod diff;
 pub(crate) mod edit;
 mod editor;
+mod git;
 pub(crate) mod model;
+mod pdf;
+mod preview;
+mod search;
 #[cfg(test)]
 mod tests;
 pub(crate) mod text;
 mod view;
+pub(crate) mod zoom;
 
 use std::{
     cell::Cell,
@@ -71,6 +78,7 @@ pub(crate) enum Content {
     Failed(String),
     Text(Box<TextFile>),
     Image { image: Arc<gpui::Image>, mime: String, size: u64, dims: Option<(u32, u32)> },
+    Pdf(Box<preview::PdfFile>),
     Binary { mime: String, size: u64 },
 }
 
@@ -188,11 +196,33 @@ pub struct FilesPane {
     pub(crate) find: Option<Find>,
     pub(crate) goto: Option<Goto>,
     pub(crate) finder: Option<Finder>,
+    /// Search in files (⇧⌘F).
+    pub(crate) search: Option<search::Search>,
+    /// The new file / new folder / open folder bar.
+    pub(crate) name_bar: Option<create::NameBar>,
     /// The viewer's text area (window coordinates), from the last paint.
     pub(crate) text_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// The body's bounds, from the last paint.
     pub(crate) body_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     pub(crate) metrics: Cell<text::Metrics>,
+    /// Each picture's and PDF's zoom and scroll.
+    pub(crate) zoomed: HashMap<String, preview::Zoomed>,
+    /// Text's font-size factor (pinch, ⌘+ ⌘- ⌘0), and the top line to keep
+    /// once the new size is measured.
+    pub(crate) text_zoom: f32,
+    pub(crate) keep_top: Option<(String, u64)>,
+    /// The picture or PDF view's bounds, from the last paint.
+    pub(crate) preview_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// PDF bitmaps no longer drawn, freed at the next render.
+    retired: Vec<Arc<gpui::RenderImage>>,
+    /// Git's marks for the tree (`files.git`), asked again as files change.
+    pub(crate) git: git::Marks,
+    /// The card this pane is drawn on (`pane_surface.rs`): its colour, and
+    /// whether the window is frosted (no fill of our own then).
+    pub(crate) surface: crate::pane_surface::PaneSurface,
+    git_refresh: Option<Task<()>>,
+    /// Tabs shown as their diff against `HEAD`.
+    pub(crate) diffs: HashMap<String, diff::DiffView>,
     autoscroll: Option<Task<()>>,
     pub(crate) autoscroll_speed: f32,
     pub(crate) notice: Option<String>,
@@ -225,7 +255,11 @@ impl FilesPane {
         let tree_focus = cx.focus_handle();
         let state = info.as_ref().and_then(|i| i.files.as_deref().cloned()).unwrap_or_else(|| FilesState::new(String::new()));
         // The tree, the bars and the finder are inside `focus`'s element: focus anywhere in the block.
-        let subs = vec![cx.on_focus_in(&focus, window, |_, _, cx| cx.emit(FilesPaneEvent::Activated))];
+        // Focus coming in also asks git again: a commit elsewhere changes no file here.
+        let subs = vec![cx.on_focus_in(&focus, window, |this, _, cx| {
+            this.refresh_git(cx);
+            cx.emit(FilesPaneEvent::Activated);
+        })];
         let mut pane = Self {
             block_id,
             rt,
@@ -253,9 +287,20 @@ impl FilesPane {
             find: None,
             goto: None,
             finder: None,
+            search: None,
+            name_bar: None,
             text_bounds: Rc::default(),
             body_bounds: Rc::default(),
             metrics: Cell::new(text::Metrics::default()),
+            zoomed: HashMap::new(),
+            text_zoom: 1.0,
+            keep_top: None,
+            preview_bounds: Rc::default(),
+            retired: Vec::new(),
+            git: git::Marks::default(),
+            surface: crate::pane_surface::PaneSurface::default(),
+            git_refresh: None,
+            diffs: HashMap::new(),
             autoscroll: None,
             autoscroll_speed: 0.0,
             notice: None,
@@ -306,7 +351,11 @@ impl FilesPane {
         if state.root != self.state.root {
             self.listings.clear();
             self.list_errors.clear();
-            self.contents.clear();
+            let contents: Vec<Content> = self.contents.drain().map(|(_, c)| c).collect();
+            contents.into_iter().for_each(|c| self.retire(c));
+            self.zoomed.clear();
+            self.diffs.clear();
+            self.git = git::Marks::default();
             self.changed.clear();
             self.scrolls.clear();
             self.applied.clear();
@@ -359,8 +408,15 @@ impl FilesPane {
 
     /// Drop what belongs to tabs no longer open.
     fn forget_closed(&mut self) {
+        let closed: Vec<String> = self.contents.keys().filter(|p| !self.state.open.contains(p)).cloned().collect();
+        for path in closed {
+            if let Some(content) = self.contents.remove(&path) {
+                self.retire(content);
+            }
+        }
         let open: HashSet<&String> = self.state.open.iter().collect();
-        self.contents.retain(|p, _| open.contains(p));
+        self.zoomed.retain(|p, _| open.contains(p));
+        self.diffs.retain(|p, _| open.contains(p));
         self.changed.retain(|p| open.contains(p));
         self.scrolls.retain(|p, _| open.contains(p));
         self.applied.retain(|p, _| open.contains(p));
@@ -377,6 +433,7 @@ impl FilesPane {
         if let Some(active) = self.state.active.clone() {
             self.read(active, None, cx);
         }
+        self.refresh_git(cx);
     }
 
     /// The folders shown: the root, expanded folders and the browser's.
@@ -471,7 +528,7 @@ impl FilesPane {
                 Ok(read) => {
                     let text = read.text.clone().filter(|_| read.kind == ContentKind::Text);
                     match model::shown_as(&path, &read.mime, text.is_some()) {
-                        Shown::Image => return this.read_image(path, cx),
+                        Shown::Image | Shown::Pdf => return this.read_image(path, cx),
                         Shown::Binary => {
                             this.contents.insert(path, Content::Binary { mime: read.mime, size: read.size });
                         }
@@ -535,6 +592,7 @@ impl FilesPane {
                 let bytes = data_encoding::BASE64.decode(image.data_base64.as_bytes())?;
                 Ok((image.mime, image.size, bytes))
             }) {
+                Ok((mime, size, bytes)) if mime == "application/pdf" => return this.open_pdf(path, bytes, size, cx),
                 Ok((mime, size, bytes)) => match gpui::ImageFormat::from_mime_type(&mime) {
                     Some(format) => {
                         let dims = image_dims(&bytes);
@@ -589,12 +647,24 @@ impl FilesPane {
                 let all = matches!(self.contents.get(&path), Some(Content::Text(t)) if !t.truncated && t.size > FileRead::DEFAULT_BYTES);
                 self.read(path, all.then_some(FileRead::MAX_BYTES), cx);
             } else {
-                self.contents.remove(&path);
+                if let Some(content) = self.contents.remove(&path) {
+                    self.retire(content);
+                }
                 self.changed.insert(path);
             }
         }
+        self.refresh_git(cx);
         cx.emit(FilesPaneEvent::Header);
         cx.notify();
+    }
+
+    /// The card this pane is drawn on, from the workspace.
+    pub(crate) fn set_card(&mut self, card: crate::adaptive::Chrome, cx: &mut Context<Self>) {
+        let surface = crate::pane_surface::PaneSurface(Some(card));
+        if self.surface != surface {
+            self.surface = surface;
+            cx.notify();
+        }
     }
 
     // ------------------------------------------------------------ tabs
@@ -905,6 +975,7 @@ impl FilesPane {
     // ------------------------------------------------------------ bars
 
     pub(crate) fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
         if let Some(finder) = &self.finder {
             let focus = finder.field.read(cx).focus.clone();
             return focus.focus(window, cx);
@@ -1102,6 +1173,8 @@ impl FilesPane {
 
     pub(crate) fn close_bars(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder = None;
+        self.search = None;
+        self.name_bar = None;
         self.find = None;
         self.goto = None;
         window.focus(&self.focus, cx);

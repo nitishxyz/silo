@@ -37,6 +37,7 @@ icons!(
     "spinner",
     "lock",
     "lock-off",
+    "mic",
     "info",
     "info-mark",
     "alert",

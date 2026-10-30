@@ -48,10 +48,14 @@ pub enum Sound {
     Attention,
     /// Something failed: dup-dup falling a fourth, low.
     Error,
+    /// Voice typing listens: one soft dup rising into a held, higher one.
+    ListenStart,
+    /// Voice typing stops listening: the same, falling.
+    ListenStop,
 }
 
 impl Sound {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Select,
         Self::Pop,
         Self::Open,
@@ -65,6 +69,8 @@ impl Sound {
         Self::Success,
         Self::Attention,
         Self::Error,
+        Self::ListenStart,
+        Self::ListenStop,
     ];
 
     fn index(self) -> usize {
@@ -210,6 +216,8 @@ fn notes(sound: Sound) -> Vec<Note> {
         Sound::Success => vec![dup(C4, 0.0, 0.18), note(E4, 0.09, 0.16, 0.06).scoop(1.3)],
         Sound::Attention => vec![dup(D4, 0.0, 0.18), dup(D4, 0.12, 0.18)],
         Sound::Error => vec![dup(A3, 0.0, 0.22), note(E3, 0.09, 0.24, 0.05).scoop(1.3)],
+        Sound::ListenStart => vec![note(G3, 0.0, 0.14, 0.03).scoop(0.85), note(D4, 0.06, 0.13, 0.05).scoop(0.9)],
+        Sound::ListenStop => vec![note(D4, 0.0, 0.12, 0.03).scoop(1.15), note(G3, 0.06, 0.15, 0.05).scoop(1.2)],
     }
 }
 

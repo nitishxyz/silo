@@ -277,7 +277,7 @@ impl FilesPane {
             )
             .child(self.tool("files-new", "plus", "New Folder ⇧⌘N, New File", true).on_click(cx.listener(|this, e: &gpui::ClickEvent, _, cx| {
                 let at = e.position();
-                this.browser.menu = Some(super::browser::Menu { at, target: None });
+                this.browser.menu = Some(super::browser::Menu { at, target: None, tree: false });
                 cx.notify();
             })))
             .child(search)
@@ -463,7 +463,7 @@ impl FilesPane {
                                 if !this.browser.picked.contains(&row_right.path) {
                                     this.browse_click(ix, false, false, window, cx);
                                 }
-                                this.browser.menu = Some(super::browser::Menu { at: e.position, target: Some(row_right.path.clone()) });
+                                this.browser.menu = Some(super::browser::Menu { at: e.position, target: Some(row_right.path.clone()), tree: false });
                                 cx.notify();
                             });
                         });
@@ -597,7 +597,7 @@ impl FilesPane {
                         MouseButton::Right,
                         cx.listener(|this, e: &MouseDownEvent, window, cx| {
                             this.browser.picked.clear();
-                            this.browser.menu = Some(super::browser::Menu { at: e.position, target: None });
+                            this.browser.menu = Some(super::browser::Menu { at: e.position, target: None, tree: false });
                             window.focus(&this.browser.focus, cx);
                             cx.notify();
                         }),
@@ -639,7 +639,18 @@ impl FilesPane {
         let menu = self.browser.menu.as_ref()?;
         let target = menu.target.clone();
         let mut items = Vec::new();
-        if let Some(target) = target {
+        if menu.tree {
+            if self.writes() {
+                items.push(action("tree-new-file", "New File…", "⌥⌘N", |this, window, cx| this.ask_new_file(window, cx)));
+            }
+            if self.ops() {
+                items.push(action("tree-new-folder", "New Folder…", "⇧⌘N", |this, window, cx| this.ask_new_folder(window, cx)));
+            }
+            if self.writes() || self.ops() {
+                items.push(Item::Separator);
+            }
+            items.push(action("tree-open-folder", "Open Folder…", "", |this, window, cx| this.open_folder(window, cx)));
+        } else if let Some(target) = target {
             let picked = self.browser.picked.paths.len();
             let one = picked <= 1;
             items.push(action("open", "Open", "⌘↓", |this, window, cx| this.open_selected(window, cx)));
@@ -742,6 +753,7 @@ impl FilesPane {
                     .child(muted(mime.clone())),
             ),
             Content::Binary { mime, size } => centered(muted(model::binary_summary(mime, *size))),
+            Content::Pdf(file) => centered(muted(model::binary_summary("application/pdf", file.size))),
             Content::Image { image, .. } => div()
                 .size_full()
                 .p(px(12.0))

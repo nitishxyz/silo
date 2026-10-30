@@ -173,6 +173,8 @@ pub struct Workspace {
     /// records were marked seen (see `seen_tick`).
     seen: Option<SeenWatch>,
     _seen: Task<()>,
+    /// Voice typing (Fn), its pill and its dictation.
+    pub(crate) voice: crate::voice::Voice,
 }
 
 /// A focused block with done/error records being watched for 1 s.
@@ -218,7 +220,13 @@ impl Workspace {
         // A closed window's browsers run on off screen.
         cx.on_release(|this, cx| _ = this.hand_back_browsers(cx)).detach();
         let hosts_changed = cx.observe(&shared, |this, _, cx| {
+            let before = this.state.clone();
             this.sync_hosts(cx);
+            // A setting lands here a beat after Settings asked for it: show it now, not on the next click.
+            if this.state != before {
+                let message = this.settings.as_ref().and_then(|m| m.panel.read(cx).message());
+                this.refresh_settings(message, cx);
+            }
             cx.notify();
         });
         let host_events = cx.subscribe_in(&shared, window, |this, _, event: &HostEvent, window, cx| this.host_event(event, window, cx));
@@ -264,7 +272,9 @@ impl Workspace {
                 }
             }
         });
+        let voice = crate::voice::Voice::new(window, cx);
         let mut this = Self {
+            voice,
             rt,
             home: home.clone(),
             shared,
@@ -653,6 +663,7 @@ impl Workspace {
             // No files view yet (docs/FILES_BLOCK.md §6 step 3).
             ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
             ConnEvent::Event(Event::ChangesChanged { block_id }) => self.changes_changed(block_id, cx),
+            ConnEvent::Event(Event::ChangesProgress { block_id, text, .. }) => self.changes_progress(block_id, text.clone(), cx),
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some(pane) = self.blocks.browser(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
@@ -1454,7 +1465,21 @@ impl Workspace {
 
     /// The fill of block `id`'s card: its backdrop, else the theme's.
     pub(crate) fn card_fill(&self, id: &str, cx: &gpui::App) -> u32 {
-        self.backdrop(id, cx).unwrap_or_else(theme::background)
+        self.backdrop(id, cx).unwrap_or_else(|| self.base_fill())
+    }
+
+    /// The window and cards with no app colour: the theme background,
+    /// tinted when frosted.
+    pub(crate) fn base_fill(&self) -> u32 {
+        if self.frosted() { self.state.frost_tint.apply(theme::background()) } else { theme::background() }
+    }
+
+    pub(crate) fn frost_tint(&self) -> crate::material::FrostTint {
+        self.state.frost_tint
+    }
+
+    pub(crate) fn set_frost_tint(&mut self, tint: crate::material::FrostTint, cx: &mut Context<Self>) {
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.frost_tint = tint, cx));
     }
 
     /// The material the user chose and why Frosted cannot render, if so.
@@ -1507,10 +1532,14 @@ impl Workspace {
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.check_updates = on, cx));
     }
 
-    /// The colours of a card filled with `fill`: when frosted, a veil at
-    /// the window's one alpha, so card and window are one material.
+    /// The colours of a card filled with `fill`: when frosted, a veil a step
+    /// denser than the window ([`crate::material::CARD_DENSER`]).
     pub(crate) fn card_chrome(&self, fill: u32) -> crate::adaptive::Chrome {
-        if self.frosted() { crate::adaptive::Chrome::veiled(fill, self.chrome.alpha) } else { crate::adaptive::Chrome::on(fill) }
+        if self.frosted() {
+            crate::adaptive::Chrome::veiled(fill, (self.chrome.alpha + crate::material::CARD_DENSER).min(crate::material::CARD_MOST))
+        } else {
+            crate::adaptive::Chrome::on(fill)
+        }
     }
 
     /// How block `id`'s terminal paints cell backgrounds on its card of
@@ -1542,10 +1571,11 @@ impl Workspace {
     /// when its pane fills the window) and derive this frame's chrome.
     fn step_chrome(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) {
         let theme_bg = theme::background();
+        let base = self.base_fill();
         let backdrop = self.focused_block(window, cx).and_then(|id| self.backdrop(&id, cx));
-        let target = crate::adaptive::chrome_target(theme_bg, backdrop);
-        if self.blend_theme != theme_bg {
-            self.blend_theme = theme_bg;
+        let target = crate::adaptive::chrome_target(base, backdrop);
+        if self.blend_theme != base {
+            self.blend_theme = base;
             self.blend = crate::adaptive::Blend::new(target);
         }
         let (surface, moving) = self.blend.step(target, now, !cx.reduce_motion());
@@ -1734,6 +1764,7 @@ impl Render for Workspace {
         let close_confirm = self.render_close_confirm(cx);
         let unsaved = self.render_unsaved(cx);
         let revert = self.render_revert(cx);
+        let voice = self.render_voice(window, cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1746,6 +1777,8 @@ impl Render for Workspace {
             .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .map(|el| crate::commands::handle_actions(el, cx))
+            .on_modifiers_changed(cx.listener(Self::voice_modifiers))
+            .capture_key_down(cx.listener(Self::voice_key))
             .on_action(cx.listener(|this, _: &SelectWindow1, window, cx| this.number_key(0, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow2, window, cx| this.number_key(1, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow3, window, cx| this.number_key(2, window, cx)))
@@ -1781,6 +1814,7 @@ impl Render for Workspace {
             .children(close_confirm)
             .children(unsaved)
             .children(revert)
+            .children(voice)
     }
 }
 

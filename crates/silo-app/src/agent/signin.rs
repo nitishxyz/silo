@@ -1079,7 +1079,7 @@ impl AgentPane {
         for (i, status) in shown.into_iter().enumerate() {
             list = list.child(self.render_provider(i, status, cx));
             if i + 1 < count {
-                list = list.child(div().w_full().h(px(1.0)).bg(rgb(ink(0.08))));
+                list = list.child(div().w_full().h(px(1.0)).bg(theme::divider()));
             }
         }
         let general = self.signin.error.as_ref().filter(|(p, _)| p.is_empty()).map(|(_, e)| e.clone());

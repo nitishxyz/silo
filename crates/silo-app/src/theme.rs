@@ -448,17 +448,34 @@ pub fn surface() -> u32 {
 pub fn card_outline_on(fill: u32) -> u32 {
     mix(fill, ink_on(fill), if light(fill) { 0.12 } else { 0.10 })
 }
+/// A card's outline as painted: frosted, a translucent ink (an opaque line
+/// in the card's colour glows against the veil, which the blur shows darker or
+/// lighter than it); solid, [`card_outline_on`].
+#[must_use]
+pub fn card_outline(fill: u32) -> gpui::Rgba {
+    if veils().is_some() { divider() } else { gpui::rgb(card_outline_on(fill)) }
+}
+
+/// A hairline between rows: frosted, translucent ink so it reads as a line
+/// on any backdrop; solid, a step from the background.
+#[must_use]
+pub fn divider() -> gpui::Rgba {
+    if veils().is_some() { if is_light() { gpui::rgb(0).opacity(0.1) } else { gpui::rgb(0x00ff_ffff).opacity(0.09) } } else { gpui::rgb(border()) }
+}
 /// Overlay that dims inactive panes: the background at this alpha.
 pub const INACTIVE_DIM: f32 = 0.38;
 /// The same overlay over a web page: lighter, since pages are mostly bright.
 pub const INACTIVE_DIM_PAGE: f32 = 0.14;
 
 /// This frame's Frosted colours, set by the workspace; `None` when solid.
-/// `overlay` is the window veil's look as one opaque colour: floating
-/// surfaces tint their glass with it ([`crate::surface`]).
+/// `overlay` is the window veil's look as one opaque colour, for panes
+/// over panes; `glass` tints floating surfaces ([`crate::surface`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Veils {
     pub overlay: u32,
+    /// The window surface itself: glass over a frosted window is tinted
+    /// with it, so floating surfaces are the window's material, denser.
+    pub glass: u32,
     /// Secondary text on it.
     pub muted: u32,
 }

@@ -663,6 +663,7 @@ pub enum Shown {
     Text,
     Markdown,
     Image,
+    Pdf,
     Binary,
 }
 
@@ -674,6 +675,9 @@ pub const IMAGES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/web
 pub fn shown_as(path: &str, mime: &str, text: bool) -> Shown {
     if IMAGES.contains(&mime) {
         return Shown::Image;
+    }
+    if mime == "application/pdf" {
+        return Shown::Pdf;
     }
     if !text {
         return Shown::Binary;

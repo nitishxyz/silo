@@ -152,7 +152,7 @@ impl FilesPane {
     /// The font measures for this window, kept for hit-testing.
     pub(crate) fn measure(&self, window: &Window) -> Metrics {
         let (_, family, size) = theme::summary();
-        let size = size.clamp(11.0, 16.0);
+        let size = (size.clamp(11.0, 16.0) * self.text_zoom).clamp(7.0, 48.0);
         let font = gpui::font(SharedString::from(family));
         let id = window.text_system().resolve_font(&font);
         let cell = window.text_system().advance(id, px(size), 'm').map_or(size * 0.6, |a| f32::from(a.width));
@@ -168,7 +168,7 @@ impl FilesPane {
         let family = SharedString::from(family);
         let doc = file.doc.clone();
         let handle = self.scroll_handle(path);
-        if let Some(top) = self.wanted_top(path) {
+        if let Some(top) = self.wanted_top(path).or_else(|| self.keep_top.take_if(|(p, _)| p == path).map(|(_, top)| top)) {
             #[allow(clippy::cast_possible_truncation)]
             handle.scroll_to_item_strict(top as usize, ScrollStrategy::Top);
         }
@@ -195,7 +195,8 @@ impl FilesPane {
         let (caret_color, ink) = (rgb(theme::accent()), rgb(theme::foreground()).into());
         let find: Vec<(usize, Range<usize>)> = self.find.as_ref().map(|f| f.matches.clone()).unwrap_or_default();
         let current = self.find.as_ref().and_then(|f| f.current).map(|i| find[i].clone());
-        let bg = theme::background();
+        let surface = self.surface;
+        let bg = surface.color();
         let (find_bg, current_bg) = (alpha(theme::warning(), 0.28), alpha(theme::warning(), 0.6));
         let row_doc = doc.clone();
         let rows = gpui::uniform_list(gpui::ElementId::Name(format!("files-text-{path}").into()), lines, move |range, _, _| {
@@ -360,7 +361,10 @@ impl FilesPane {
             .children(tints)
             .child(rows)
             .child(
+                // Over the text only once it scrolls sideways: then the card's bar (frosted, glass), else bare so
+                // it is one surface with the text.
                 div()
+                    .when(ox < -0.5, |el| surface.bar(el))
                     .absolute()
                     .top_0()
                     .left_0()

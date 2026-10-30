@@ -1026,6 +1026,16 @@ impl Pane {
         }
     }
 
+    /// Voice typing's text, as a paste (bracketed when the program asks);
+    /// false with no terminal to type into.
+    pub(crate) fn type_text(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        if self.mirror.terminal().is_none() {
+            return false;
+        }
+        self.paste_text(text, cx);
+        true
+    }
+
     fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(vt) = self.mirror.terminal() else {
             return;

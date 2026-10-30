@@ -102,6 +102,7 @@ impl Workspace {
                 ChangesPaneEvent::AskCommit { link } => this.ask_commit(block, link.clone(), cx),
                 ChangesPaneEvent::OpenFile { root, path, line } => this.open_change_in_files(block, root.clone(), path.clone(), *line, cx),
                 ChangesPaneEvent::Turns(session) => this.load_turns(block, session.clone(), cx),
+                ChangesPaneEvent::OpenUrl(url) => this.split_browser(block, Some(url.clone())),
             }
             cx.notify();
         });
@@ -112,6 +113,13 @@ impl Workspace {
     pub(crate) fn changes_changed(&mut self, block: &str, cx: &mut Context<Self>) {
         if let Some(pane) = self.blocks.changes(block) {
             pane.update(cx, |pane, cx| pane.changes_changed(cx));
+        }
+    }
+
+    /// `changes.progress`: a push, pull or fetch of one of this window's Changes blocks.
+    pub(crate) fn changes_progress(&mut self, block: &str, text: String, cx: &mut Context<Self>) {
+        if let Some(pane) = self.blocks.changes(block) {
+            pane.update(cx, |pane, cx| pane.progress(text, cx));
         }
     }
 

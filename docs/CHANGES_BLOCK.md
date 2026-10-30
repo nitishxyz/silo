@@ -246,6 +246,45 @@ and 3 (comments, Send review, `changes_show`, Ask agent) follow in the same agen
 
 ## 8. Open questions
 
-- Conflicts: show both sides and "Mark resolved" (`git add`), or only list them for now? (Listed only, first.)
-- Pushing and pull requests: out of scope here; a later Push button and a `gh pr create` flow.
 - Large monorepos: status over 2,000 files is truncated; a per-folder scope may be needed.
+
+## 9. Push, pull requests, conflicts (built 2026-10-31)
+
+Feature `changes_sync` (`compat::feature::CHANGES_SYNC`); an older server answers `method_not_found` and the app
+hides the sync row, the banner and the conflict view.
+
+| Method | Params | Result | Access |
+|---|---|---|---|
+| `changes.push` | — | `ChangesPushed { remote, branch, set_upstream, up_to_date }` | owner, approval |
+| `changes.pull` / `changes.fetch` | — | `ChangesStatus` | interact |
+| `changes.pr` | — | `ChangesPr { gh: ready\|missing\|signed_out\|not_github, pr?, bases, title, body }` | view |
+| `changes.pr_create` | `title, body, base?, draft` | `PullRequest { number, url, title, state, draft, base }` | owner, approval |
+| `changes.conflict` | `path` | `ConflictFile { path, regions: [ConflictRegion], whole }` | view |
+| `changes.resolve` | `path, take?: ours\|theirs\|both, regions?` | `ChangesStatus` | interact |
+| `changes.continue` / `changes.abort` | — | `ChangesStatus` | interact |
+
+- `ChangesStatus` gains `op?: merge|rebase|cherry_pick|revert` (from the git dir) and `remote?` (where Push goes:
+  the branch's push remote, `remote.pushDefault`, its upstream's, else the only remote or `origin`).
+- **Push:** `git push --progress --porcelain <remote> refs/heads/<b>:<dest>`, `--set-upstream` when the branch has
+  none (dest: the upstream's ref, else the same name). Pull is `git pull --no-edit` (`--no-rebase` unless
+  `pull.rebase`/`pull.ff` is set); stopping on conflicts is no error (the status shows `op`). 5 min timeouts.
+  Progress: stderr lines (also `\r` updates), at most one per 120 ms, as `changes.progress { block_id, op, text }`.
+- **No prompts:** `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, ssh `BatchMode=yes` unless the user set
+  `GIT_SSH(_COMMAND)` or `core.sshCommand`. Failures are explained ("Couldn't sign in to origin: run git push once
+  in a terminal…", "The remote has commits this branch lacks: pull first", "Couldn't reach origin…"); git's own
+  words are in the error's `data.output`.
+- **gh:** found on `PATH`, else `/opt/homebrew/bin`, `/usr/local/bin`; `GH_PROMPT_DISABLED=1`. `changes.pr` runs
+  `gh pr view --json`; bases are the remote's branches, its `HEAD` first; title and body come from the commits
+  since that base (one commit: its message; more: the branch's name and a list). `pr_create` pushes first when the
+  branch has no upstream or is ahead, then `gh pr create --body-file -`.
+- **Conflicts:** regions parsed from the work tree's markers (`diff3` bases too); ids hash the region (a repeat is
+  `<id>-2`), so a stale one is `conflict`. Regions take a side by rewriting the file (line breaks kept); a whole
+  side is `git checkout --ours/--theirs` (or `git rm` when that side deleted it) and `git add`; Mark resolved is
+  `git add`, refused while markers are left. Continue runs `<op> --continue` with `GIT_EDITOR=true`, refused while
+  files are unmerged.
+- **App:** a sync row over the footer (branch, ↑↓, Fetch or Pull ↓N, Push ↑N, PR #N ↗ or Create PR), a banner
+  over a stopped op (Abort, Continue), the conflict view for an open conflicted file (each region's ours/base/theirs
+  with Ours/Theirs/Both; Take all ours/theirs, Mark resolved), and a Create PR card (base, title, description,
+  Draft); a created or existing pull request opens in a browser block beside it.
+- The `silo` CLI reaches them through `silo do changes.push --block-id …` (generated from `api.describe`); agents
+  in panes are asked for approval for push and pr_create.

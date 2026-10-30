@@ -364,6 +364,9 @@ pub struct AppState {
     #[serde(default)]
     pub material: crate::material::Material,
     /// Frosted: the running app's colour tints the veils.
+    /// Frosted: the colour the window's material is tinted with.
+    #[serde(default)]
+    pub frost_tint: crate::material::FrostTint,
     #[serde(default = "yes")]
     pub tint_with_app: bool,
     /// Frosted: an app's own backdrop is veiled too, not just the default.
@@ -389,6 +392,9 @@ pub struct AppState {
     /// Hosts ([`HostInfo::key`]) whose notifications are off.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quiet_hosts: Vec<String>,
+    /// Settings › Voice.
+    #[serde(default)]
+    pub voice: silo_voice::VoicePrefs,
 }
 
 impl Default for AppState {
@@ -402,6 +408,7 @@ impl Default for AppState {
             ui_font_family: String::new(),
             match_running_app: true,
             material: crate::material::Material::Solid,
+            frost_tint: crate::material::FrostTint::None,
             tint_with_app: true,
             translucent_apps: false,
             check_updates: true,
@@ -411,6 +418,7 @@ impl Default for AppState {
             recent_pages: Vec::new(),
             notifications: NotifyPrefs::default(),
             quiet_hosts: Vec::new(),
+            voice: silo_voice::VoicePrefs::default(),
         }
     }
 }
@@ -554,6 +562,7 @@ pub(crate) mod tests {
             ui_font_family: String::new(),
             match_running_app: false,
             material: crate::material::Material::Frosted,
+            frost_tint: crate::material::FrostTint::Teal,
             tint_with_app: false,
             translucent_apps: true,
             check_updates: false,
@@ -563,6 +572,7 @@ pub(crate) mod tests {
             recent_pages: Vec::new(),
             notifications: NotifyPrefs { done: false, ..NotifyPrefs::default() },
             quiet_hosts: vec!["local".into()],
+            voice: silo_voice::VoicePrefs::default(),
         };
         save_state(&dir, &state);
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
@@ -573,6 +583,7 @@ pub(crate) mod tests {
         assert_eq!(back.tabs, TabPosition::Side);
         assert!((back.tab_sidebar_width - 260.0).abs() < f32::EPSILON);
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
+        assert_eq!(back.frost_tint, crate::material::FrostTint::Teal);
         assert!(!back.check_updates);
         assert!(!back.confirm_close);
         assert!(!back.sounds);

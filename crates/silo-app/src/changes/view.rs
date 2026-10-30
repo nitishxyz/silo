@@ -2,19 +2,18 @@
 //! summary and file tabs, totals, the list toggle), the diff (rows from
 //! [`model::rows`]), the file list, the comment bar and the commit footer.
 
-use std::ops::Range;
-
 use gpui::{
     AnyElement, ClickEvent, Context, Hsla, IntoElement, KeyDownEvent, MouseButton, Render, SharedString, StyledText, Window, div, prelude::*, px, rgb,
 };
 use silo_proto::model::{BlockInfo, Side};
 
 use super::{ChangesPane, HunkAction, Loaded, model, scope_label, wire::LineKind};
+use crate::pane_surface::PaneSurface;
 use crate::surface::Glassy as _;
 use crate::{
     agent::editor::{Editor, EditorColors},
     commands::act,
-    files::model::{expand_tabs, tab_labels, to_shown},
+    files::model::tab_labels,
     pane_header::{BUTTON, BlockHeader, HeaderParts, HeaderStyle, button, keep_press, labels},
     theme::{self, Continuous as _},
 };
@@ -69,31 +68,48 @@ fn centered(child: impl IntoElement) -> AnyElement {
     div().size_full().flex().flex_col().items_center().justify_center().gap(px(6.0)).p(px(24.0)).child(child).into_any_element()
 }
 
+/// A row tint: `eff` is the colour it makes on the card (syntax contrast
+/// reads it), `paint` what is painted (frosted: see-through over the veil).
+#[derive(Clone, Copy)]
+pub(super) struct Tint {
+    pub(super) eff: u32,
+    pub(super) paint: Hsla,
+}
+
+impl Tint {
+    pub(super) fn new(surface: PaneSurface, color: u32, t: f32) -> Self {
+        let eff = theme::mix(surface.color(), color, t);
+        Self { eff, paint: if surface.frosted() { alpha(color, t) } else { rgb(eff).into() } }
+    }
+}
+
 /// The tints: an added line's, a removed line's, and their changed words'.
 #[derive(Clone, Copy)]
 struct Tints {
-    added: u32,
-    removed: u32,
+    added: Tint,
+    removed: Tint,
     added_word: Hsla,
     removed_word: Hsla,
-    empty: u32,
-    hunk: u32,
+    empty: Tint,
+    hunk: Tint,
+    /// The card's colour, under untinted lines.
+    card: u32,
 }
 
 impl Tints {
-    fn now() -> Self {
-        let bg = theme::background();
+    fn now(surface: PaneSurface) -> Self {
         Self {
-            added: theme::mix(bg, theme::success(), 0.12),
-            removed: theme::mix(bg, theme::danger(), 0.12),
+            added: Tint::new(surface, theme::success(), 0.12),
+            removed: Tint::new(surface, theme::danger(), 0.12),
             added_word: alpha(theme::success(), 0.32),
             removed_word: alpha(theme::danger(), 0.32),
-            empty: theme::mix(bg, theme::muted(), 0.05),
-            hunk: theme::mix(bg, theme::accent(), 0.07),
+            empty: Tint::new(surface, theme::muted(), 0.05),
+            hunk: Tint::new(surface, theme::accent(), 0.07),
+            card: surface.color(),
         }
     }
 
-    fn line(self, kind: LineKind) -> Option<u32> {
+    fn line(self, kind: LineKind) -> Option<Tint> {
         match kind {
             LineKind::Added => Some(self.added),
             LineKind::Removed => Some(self.removed),
@@ -299,6 +315,9 @@ impl ChangesPane {
                     .child(hint("An agent's turns still show here once it has some.").text_size(px(12.0))),
             );
         }
+        if let Some(path) = self.active_conflicted().map(str::to_owned) {
+            return self.render_conflict(&path, cx);
+        }
         if let Some(active) = &self.state.active
             && let Some(error) = self.diff_errors.get(active)
         {
@@ -360,7 +379,7 @@ impl ChangesPane {
 
     fn render_row(&mut self, ix: usize, m: Metrics, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.shown.rows.get(ix).cloned() else { return div().into_any_element() };
-        let tints = Tints::now();
+        let tints = Tints::now(self.surface);
         let numbers = m.numbers;
         let hunk_of = match &row {
             model::Row::Hunk { file, hunk }
@@ -388,7 +407,7 @@ impl ChangesPane {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .bg(rgb(tints.empty))
+                .bg(tints.empty.paint)
                 .text_size(px(m.size - 1.5))
                 .text_color(rgb(theme::muted()))
                 .cursor_pointer()
@@ -544,7 +563,7 @@ impl ChangesPane {
             .gap(px(8.0))
             .pl(px(PAD))
             .pr(px(8.0))
-            .bg(rgb(tints.hunk))
+            .bg(tints.hunk.paint)
             .when(current, |el| el.border_l_2().border_color(rgb(theme::accent())))
             .child(
                 div()
@@ -567,26 +586,9 @@ impl ChangesPane {
 
     /// One line's text: syntax colours with the changed words' backgrounds over them.
     fn styled(loaded: &Loaded, hunk: usize, at: usize, word: Hsla, bg: u32) -> StyledText {
-        let line = &loaded.diff.hunks[hunk].lines[at];
-        let src = line.text.as_str();
-        let mut shown = expand_tabs(src).into_owned();
-        if shown.is_empty() {
-            shown.push(' ');
-        }
-        let map = |r: &Range<usize>| to_shown(src, r.start.min(src.len()))..to_shown(src, r.end.min(src.len()));
-        let spans: Vec<_> = loaded
-            .syntax
-            .as_ref()
-            .and_then(|s| s.get(hunk)?.get(at).cloned())
-            .map(|spans| crate::syntax::styles(&spans, bg))
-            .unwrap_or_default()
-            .iter()
-            .map(|(r, s)| (map(r), *s))
-            .filter(|(r, _)| r.start < r.end)
-            .collect();
-        let backs: Vec<(Range<usize>, Hsla)> =
-            loaded.words.get(hunk).and_then(|h| h.get(at)).map(|w| w.iter().map(|r| (map(r), word)).collect()).unwrap_or_default();
-        StyledText::new(shown).with_highlights(crate::files::text::combine(&spans, &backs))
+        let spans = loaded.syntax.as_ref().and_then(|s| s.get(hunk)?.get(at)).map(Vec::as_slice);
+        let words = loaded.words.get(hunk).and_then(|h| h.get(at)).map_or(&[][..], Vec::as_slice);
+        super::syntax::styled(&loaded.diff.hunks[hunk].lines[at].text, spans, words, word, bg)
     }
 
     /// A line number cell: a click picks the line (⇧ extends), ⌘-click opens it in Files.
@@ -637,7 +639,7 @@ impl ChangesPane {
             _ => (Side::New, line.new),
         };
         let picked = n.is_some_and(|n| self.selection.as_ref().is_some_and(|s| s.contains(&path, side, n)));
-        let bg = tints.line(line.kind).unwrap_or_else(theme::background);
+        let bg = tints.line(line.kind).map_or(tints.card, |t| t.eff);
         let word = if line.kind == LineKind::Removed { tints.removed_word } else { tints.added_word };
         let sign = match line.kind {
             LineKind::Added => "+",
@@ -651,7 +653,7 @@ impl ChangesPane {
             .flex()
             .flex_row()
             .whitespace_nowrap()
-            .when_some(tints.line(line.kind), |el, c| el.bg(rgb(c)))
+            .when_some(tints.line(line.kind), |el, c| el.bg(c.paint))
             .when(picked, |el| el.bg(alpha(theme::selection(), 0.55)))
             .child(self.number(("changes-old", ix), &path, Side::Old, line.old.filter(|_| line.kind != LineKind::Added), numbers, cx))
             .child(self.number(("changes-new", ix), &path, Side::New, line.new.filter(|_| line.kind != LineKind::Removed), numbers, cx))
@@ -682,13 +684,13 @@ impl ChangesPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(loaded) = self.shown.files.get(file) else { return div().into_any_element() };
-        let Some(at) = at else { return div().h(px(m.line)).w_full().bg(rgb(tints.empty)).into_any_element() };
+        let Some(at) = at else { return div().h(px(m.line)).w_full().bg(tints.empty.paint).into_any_element() };
         let line = &loaded.diff.hunks[hunk].lines[at];
         let path = loaded.diff.path.clone();
         let n = if side == Side::Old { line.old } else { line.new };
         let picked = n.is_some_and(|n| self.selection.as_ref().is_some_and(|s| s.contains(&path, side, n)));
         let tint = tints.line(line.kind);
-        let bg = tint.unwrap_or_else(theme::background);
+        let bg = tint.map_or(tints.card, |t| t.eff);
         let word = if line.kind == LineKind::Removed { tints.removed_word } else { tints.added_word };
         let sign = match line.kind {
             LineKind::Added => "+",
@@ -703,7 +705,7 @@ impl ChangesPane {
             .flex()
             .flex_row()
             .whitespace_nowrap()
-            .when_some(tint, |el, c| el.bg(rgb(c)))
+            .when_some(tint, |el, c| el.bg(c.paint))
             .when(picked, |el| el.bg(alpha(theme::selection(), 0.55)))
             .child(self.number((id, ix), &path, side, n, numbers, cx))
             .child(div().flex_none().w(px(m.cell + 6.0)).text_color(rgb(theme::muted())).child(sign))
@@ -918,7 +920,7 @@ impl ChangesPane {
                 .py(px(6.0))
                 .border_b_1()
                 .border_color(rgb(theme::border()))
-                .bg(rgb(theme::mix(theme::background(), if error { theme::danger() } else { theme::success() }, 0.12)))
+                .bg(Tint::new(self.surface, if error { theme::danger() } else { theme::success() }, 0.12).paint)
                 .text_size(px(12.5))
                 .child(div().flex_1().min_w_0().whitespace_normal().child(text))
                 .child(
@@ -968,8 +970,10 @@ impl ChangesPane {
     fn render_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let commits = self.commits();
         let comments = self.state.comments.len();
+        let sync = self.render_sync_row(cx);
         if !commits && comments == 0 {
-            return None;
+            return sync
+                .map(|row| div().flex_none().px(px(10.0)).py(px(6.0)).border_t_1().border_color(rgb(theme::border())).child(row).into_any_element());
         }
         let busy = self.busy;
         let pill = |id: &'static str, label: SharedString, primary: bool| {
@@ -1042,7 +1046,20 @@ impl ChangesPane {
                         .on_click(cx.listener(|this, _, _, cx| this.send_review(cx))),
                 );
         }
-        Some(div().flex_none().px(px(10.0)).py(px(8.0)).border_t_1().border_color(rgb(theme::border())).child(row).into_any_element())
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .border_t_1()
+                .border_color(rgb(theme::border()))
+                .children(sync)
+                .child(row)
+                .into_any_element(),
+        )
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1171,19 +1188,23 @@ impl ChangesPane {
 impl Render for ChangesPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let notice = self.render_notice(cx);
+        let banner = self.render_op_banner(cx);
         let body = self.render_body(window, cx);
         let list = self.state.list.then(|| self.render_list(cx));
         let composing = self.render_composing();
         let footer = self.render_footer(cx);
         let picker = self.render_picker(cx);
+        let pr_form = self.render_pr_form(cx);
         let bounds = self.body_bounds.clone();
         let probe = gpui::canvas(move |b, _, _| b, move |b, _, _, _| bounds.set(Some(b))).absolute().top_0().left_0().size_full();
+        let surface = self.surface;
         div()
             .id("changes-pane")
             .key_context("ChangesPane")
             .track_focus(&self.focus)
             .relative()
             .size_full()
+            .map(|el| surface.fill(el))
             .flex()
             .flex_col()
             .text_size(px(13.0))
@@ -1197,6 +1218,9 @@ impl Render for ChangesPane {
                 }
             }))
             .on_action(cx.listener(|this, _: &act::ClosePane, window, cx| {
+                if this.sync.form.is_some() {
+                    return this.close_pr_form(window, cx);
+                }
                 if this.picker.is_some() || this.composing.is_some() {
                     this.picker = None;
                     this.composing = None;
@@ -1222,10 +1246,12 @@ impl Render for ChangesPane {
                 }),
             )
             .children(notice)
+            .children(banner)
             .child(div().flex_1().min_h_0().flex().flex_row().child(div().flex_1().min_w_0().h_full().child(body)).children(list))
             .children(composing)
             .children(footer)
             .children(picker)
+            .children(pr_form)
             .child(probe)
     }
 }

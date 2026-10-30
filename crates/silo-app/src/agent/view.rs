@@ -646,7 +646,7 @@ impl AgentPane {
             }
         }
         self.scroll.set_inset(pad);
-        let bg = theme::background();
+        let surface = self.surface;
         let width = self.width.clone();
         let bounds = self.bounds.clone();
         // The pane's width, for what fits (a change lays out again), and its bounds.
@@ -674,7 +674,7 @@ impl AgentPane {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(bg))
+            .map(|el| surface.fill(el))
             .font_family(theme::ui_font())
             .text_size(px(TEXT))
             .text_color(rgb(theme::foreground()))
@@ -709,16 +709,17 @@ impl AgentPane {
                 .size_full();
                 // What scrolls under it fades out above the column (as a live group's top does); only the
                 // column takes the pointer.
+                // Frosted, what scrolls under the column is frosted glass and the fade eases into it.
                 let fade = div().h(px(COMPOSER_FADE)).bg(linear_gradient(
                     180.0,
-                    linear_color_stop(hsla(bg, 0.0), 0.0),
-                    linear_color_stop(hsla(bg, 1.0), 1.0),
+                    linear_color_stop(surface.at(0.0), 0.0),
+                    linear_color_stop(surface.at(1.0), 1.0),
                 ));
                 let column = div()
                     .id("agent-composer-column")
                     .occlude()
                     .relative()
-                    .bg(rgb(bg))
+                    .map(|el| surface.bar(el))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -808,6 +809,10 @@ impl AgentPane {
                 return (1, centered(empty_state(text, None).into_any_element()));
             }
             Conn::Connecting => return (1, centered(empty_state(format!("Connecting to {otto}…"), None).into_any_element())),
+            Conn::Starting(starting) => {
+                let (text, detail) = super::starting_copy(starting, self.host.as_deref());
+                return (1, centered(empty_state(text, detail).into_any_element()));
+            }
             Conn::Failed(error) => {
                 let state = empty_state(format!("Can't reach {otto}"), Some(error.clone())).child(retry(cx));
                 return (2, centered(state.into_any_element()));
@@ -1429,13 +1434,13 @@ impl AgentPane {
         let alpha = if !g.live && transcript::thought(g) { (1.0 - 3.0 * fold).max(0.0) } else { 1.0 - fold };
         let scroller =
             self.scroll.scroller(&id, div().id(gpui::ElementId::Name(id.clone().into())).max_h(px(max * (1.0 - fold))).flex().flex_col(), false);
-        let bg = theme::background();
+        let surface = self.surface;
         let edge = |top: bool| {
             let (a, b) = if top { (1.0, 0.0) } else { (0.0, 1.0) };
             div().absolute().left_0().right_0().h(px(28.0)).map(|el| if top { el.top_0() } else { el.bottom_0() }).bg(linear_gradient(
                 180.0,
-                linear_color_stop(hsla(bg, a), 0.0),
-                linear_color_stop(hsla(bg, b), 1.0),
+                linear_color_stop(surface.at(a), 0.0),
+                linear_color_stop(surface.at(b), 1.0),
             ))
         };
         let window_el = div()
@@ -1583,6 +1588,7 @@ impl AgentPane {
         } else if let Some(s) = self.streams.get_mut(&key) {
             s.live = false;
         }
+        let surface = self.surface;
         let reduce = cx.reduce_motion();
         let stream = self.streams.get_mut(&key).map(|s| {
             let natural = s.measured.get().min(STREAM_H);
@@ -1604,13 +1610,12 @@ impl AgentPane {
                 .text_color(rgb(muted))
                 .child(s.text.clone())
                 .child(gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
-            let bg = theme::background();
             let over = s.measured.get() > STREAM_H;
             let el = div().relative().h(px(h)).overflow_hidden().flex().flex_col().justify_end().opacity(0.8 * fade).child(body).when(over, |el| {
                 el.child(div().absolute().top_0().left_0().right_0().h(px(18.0)).bg(linear_gradient(
                     180.0,
-                    linear_color_stop(hsla(bg, 1.0), 0.0),
-                    linear_color_stop(hsla(bg, 0.0), 1.0),
+                    linear_color_stop(surface.at(1.0), 0.0),
+                    linear_color_stop(surface.at(0.0), 1.0),
                 )))
             });
             (el, !s.live && !moving)
@@ -2751,7 +2756,19 @@ impl AgentPane {
                         this.start_rename(rename_id.clone(), true, window, cx);
                     }))
             });
-            let trailing = div().flex().items_center().gap(px(2.0)).children(pencil).children(checked.then(rows::check)).into_any_element();
+            let move_id = id.clone();
+            let mover = (!editing).then(|| {
+                icon_button(gpui::ElementId::Name(format!("session-move-{id}").into()), "folder", 12.0, 22.0, theme::muted())
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .tooltip(Tooltip::text("Move to folder  ⌘O"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.start_move(move_id.clone(), window, cx);
+                    }))
+            });
+            let trailing =
+                div().flex().items_center().gap(px(2.0)).children(mover).children(pencil).children(checked.then(rows::check)).into_any_element();
             let row = rows::row(
                 gpui::ElementId::Name(format!("session-{id}").into()),
                 i == self.selected,
@@ -2789,6 +2806,22 @@ impl AgentPane {
 
     /// Recent otto projects by folder name, then Open folder…; picking one moves the block there.
     fn render_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Moving a session: its new folder (another host's typed as a path).
+        let moving = self.relocate.as_ref().map(|r| r.typing);
+        let heading = moving.map(|_| menu::section("Move session to", None));
+        if moving == Some(true) {
+            let row = rows::row("agent-move-path", true, Some(rows::lead("folder", false)), "Move here", None, None);
+            let row = self.pick_row(row, 0, true, cx).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.submit_path(window, cx)));
+            return div()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(heading)
+                .child(self.search_field(window, cx))
+                .child(rows::divider())
+                .child(row)
+                .into_any_element();
+        }
         let current = self.project.as_ref().map(|p| p.id.clone());
         let names: std::collections::HashMap<String, (String, Option<String>)> =
             self.projects.iter().map(|p| p.id.clone()).zip(super::project_names(self.projects.iter().map(|p| p.root.as_str()))).collect();
@@ -2822,11 +2855,21 @@ impl AgentPane {
             let empty = if self.filter.read(cx).text.trim().is_empty() { "No recent projects" } else { "No matching projects" };
             list = list.child(rows::row("agent-projects-empty", false, None, div().text_color(rgb(theme::muted())).child(empty), None, None));
         }
-        let open = rows::row("agent-open-folder", self.selected == count, Some(rows::lead("plus", false)), "Open folder…", None, None);
+        let label = if moving.is_some() { "Choose folder…" } else { "Open folder…" };
+        let open = rows::row("agent-open-folder", self.selected == count, Some(rows::lead("plus", false)), label, None, None);
         let open = self
             .pick_row(open, count, self.selected == count, cx)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(count, window, cx)));
-        div().min_h_0().flex().flex_col().child(self.search_field(window, cx)).child(list).child(rows::divider()).child(open).into_any_element()
+        div()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .children(heading)
+            .child(self.search_field(window, cx))
+            .child(list)
+            .child(rows::divider())
+            .child(open)
+            .into_any_element()
     }
 
     fn render_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

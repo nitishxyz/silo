@@ -174,7 +174,9 @@ impl BlockPane {
                 p.set_palette(card.palette, cx);
                 p.set_corners(card.page_corners, cx);
             }),
-            Self::Agent(_) | Self::Files(_) | Self::Changes(_) => {}
+            Self::Agent(p) => p.update(cx, |p, cx| p.set_card(card.palette, cx)),
+            Self::Files(p) => p.update(cx, |p, cx| p.set_card(card.palette, cx)),
+            Self::Changes(p) => p.update(cx, |p, cx| p.set_card(card.palette, cx)),
         }
     }
 

@@ -441,11 +441,11 @@ impl Render for ToolPill {
     }
 }
 
-fn mono() -> SharedString {
+pub(super) fn mono() -> SharedString {
     theme::summary().1.into()
 }
 
-fn hsla(c: u32, alpha: f32) -> Hsla {
+pub(super) fn hsla(c: u32, alpha: f32) -> Hsla {
     let mut h: Hsla = rgb(c).into();
     h.a *= alpha;
     h
@@ -845,7 +845,7 @@ impl AgentsSettings {
 
     // ---- building blocks ----
 
-    fn button(id: impl Into<gpui::ElementId>, label: &'static str, primary: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn button(id: impl Into<gpui::ElementId>, label: &'static str, primary: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
         let (bg, fg) = if primary && enabled { (rgb(theme::accent()), 0x00ff_ffff) } else { (theme::control_fill(), theme::foreground()) };
         div()
             .id(id)
@@ -867,11 +867,11 @@ impl AgentsSettings {
             .child(label)
     }
 
-    fn danger_button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn danger_button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful<gpui::Div> {
         Self::button(id, label, false, true).bg(rgb(theme::danger())).text_color(rgb(0x00ff_ffff)).border_0()
     }
 
-    fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, tip: &'static str) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn icon_button(id: impl Into<gpui::ElementId>, glyph: &'static str, tip: &'static str) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .flex_none()
@@ -886,7 +886,7 @@ impl AgentsSettings {
             .child(icon(glyph, 13.0, theme::muted()))
     }
 
-    fn badge(text: impl Into<SharedString>) -> AnyElement {
+    pub(super) fn badge(text: impl Into<SharedString>) -> AnyElement {
         div()
             .flex_none()
             .h(px(17.0))
@@ -935,7 +935,7 @@ impl AgentsSettings {
             .into_any_element()
     }
 
-    fn row(title: &'static str, control: AnyElement) -> AnyElement {
+    pub(super) fn row(title: &'static str, control: AnyElement) -> AnyElement {
         div()
             .w_full()
             .min_h(px(44.0))
@@ -950,7 +950,7 @@ impl AgentsSettings {
             .into_any_element()
     }
 
-    fn field_box(field: &Entity<TextField>, width: f32) -> AnyElement {
+    pub(super) fn field_box(field: &Entity<TextField>, width: f32) -> AnyElement {
         div()
             .w(px(width))
             .max_w_full()

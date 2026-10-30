@@ -43,6 +43,8 @@ fn status(files: Vec<ChangedFile>) -> ChangesStatus {
         totals: ChangesTotals { files: u32::try_from(files.len()).unwrap(), added: 4, removed: 2 },
         files,
         truncated: false,
+        op: None,
+        remote: Some("origin".into()),
     }
 }
 

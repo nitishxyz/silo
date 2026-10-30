@@ -5,9 +5,9 @@
 //! with a hairline border, a soft shadow and continuous corners.
 //!
 //! The tint's alpha is the least at which the theme's text reads at 4.5:1
-//! whatever is behind (black, white or the theme background, plain or under
+//! whatever is behind (black, a blurred page at its brightest or the theme background, plain or under
 //! a selected row) and a muted step of it does too (3:1 on a selected row). In a Frosted window the
-//! transparent parts behind are already veiled, so opaque black and white
+//! transparent parts behind are already veiled, so opaque black and the brightest grey
 //! stay the extremes. Without backdrop support or with Reduce transparency
 //! on, surfaces are opaque and unblurred.
 //!
@@ -23,13 +23,18 @@ use crate::{
     theme::{self, Continuous},
 };
 
-/// Gaussian radius of the blur, in points (a macOS menu's).
-pub const BLUR: f32 = 20.0;
+/// Gaussian radius of the blur, in points: heavy enough that text behind
+/// dissolves into colour, as in a macOS menu or sidebar.
+pub const BLUR: f32 = 36.0;
 /// Saturation of the blurred backdrop, so colour behind shows through the
 /// tint as vivid as in a native menu.
-pub const SATURATION: f32 = 1.8;
+pub const SATURATION: f32 = 2.0;
 /// The least tint alpha: below it the surface reads as a hole.
-pub const FLOOR: f32 = 0.72;
+pub const FLOOR: f32 = 0.55;
+/// The brightest a blurred backdrop gets, as a grey: under the blur a
+/// page's text and edges average out, and even a white page stays legible
+/// behind it (the tint darkens it further).
+pub const BRIGHTEST: u32 = 0x00a8_a8a8;
 /// Secondary text must read at most this far from the tint toward the ink,
 /// so it stays a distinct step from primary text.
 pub const MUTED_REACH: f32 = 0.85;
@@ -72,7 +77,7 @@ pub fn backdrop_supported() -> bool {
 /// The extremes glass of `tint` at `alpha` can show: over the theme
 /// background, black and white; then each under a selected row.
 fn backdrops(tint: u32, alpha: f32, theme_bg: u32, fg: u32) -> [u32; 6] {
-    let plain = [theme_bg, 0, 0x00ff_ffff].map(|b| material::over(tint, alpha, b));
+    let plain = [theme_bg, 0, BRIGHTEST].map(|b| material::over(tint, alpha, b));
     let selected = plain.map(|b| theme::mix(b, fg, SELECTED));
     [plain[0], plain[1], plain[2], selected[0], selected[1], selected[2]]
 }
@@ -131,7 +136,7 @@ pub fn set_available(available: bool) {
 /// when frosted) per [`glass`].
 #[must_use]
 pub fn current() -> Glass {
-    let key = (theme::veils().map_or_else(theme::popover, |v| v.overlay), theme::background(), theme::foreground(), AVAILABLE.get());
+    let key = (theme::veils().map_or_else(theme::popover, |v| v.glass), theme::background(), theme::foreground(), AVAILABLE.get());
     if let Some((k, g)) = CACHE.get()
         && k == key
     {
@@ -179,17 +184,29 @@ fn shadows(sheet: bool) -> Vec<BoxShadow> {
         spread_radius: px(0.0),
         inset: false,
     };
+    // A 0.5 pt dark ring outside the light hairline, as a macOS menu's edge.
+    let ring = BoxShadow {
+        color: hsla(0.0, 0.0, 0.0, if light { 0.1 } else { 0.55 }),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.5),
+        inset: false,
+    };
     if sheet {
-        vec![shadow(18.0, 48.0, 0.45, 0.2), shadow(2.0, 6.0, 0.24, 0.08)]
+        vec![ring, shadow(18.0, 48.0, 0.45, 0.2), shadow(2.0, 6.0, 0.24, 0.08)]
     } else {
-        vec![shadow(8.0, 24.0, 0.36, 0.14), shadow(1.0, 3.0, 0.24, 0.08)]
+        vec![ring, shadow(8.0, 24.0, 0.36, 0.14), shadow(1.0, 3.0, 0.24, 0.08)]
     }
 }
 
 /// Borders and separators on glass: an ink tint, else the theme border.
 #[must_use]
 pub fn hairline() -> gpui::Rgba {
-    if current().frosted() { rgb(theme::foreground()).opacity(if theme::is_light() { 0.12 } else { 0.16 }) } else { rgb(theme::border()) }
+    if current().frosted() {
+        if theme::is_light() { rgb(theme::foreground()).opacity(0.12) } else { rgb(0x00ff_ffff).opacity(0.15) }
+    } else {
+        rgb(theme::border())
+    }
 }
 
 fn surface<E: Styled>(el: E, radius: f32, sheet: bool) -> E {
@@ -245,6 +262,7 @@ mod tests {
         backdrops.extend([0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0x00ff_ff00, 0x00ff_00ff, 0x0000_ffff, 0x003a_6ea5]);
         backdrops
             .iter()
+            .filter(|&&b| theme::relative_luminance(b) <= theme::relative_luminance(BRIGHTEST))
             .map(|&b| material::over(g.tint, g.alpha, b))
             .map(|c| if selected { theme::mix(c, fg, SELECTED) } else { c })
             .map(|c| theme::contrast(text, c))
@@ -360,7 +378,7 @@ mod tests {
         assert_eq!(frosted.backdrop_blur, Some(px(BLUR)));
         assert_eq!(frosted.backdrop_saturation, Some(SATURATION));
         assert_eq!(frosted.corner_smoothing, Some(theme::CORNER_SMOOTHING));
-        assert_eq!(frosted.box_shadow.as_ref().map(Vec::len), Some(2));
+        assert_eq!(frosted.box_shadow.as_ref().map(Vec::len), Some(3));
         set_available(false);
         let solid = style(gpui::div().glass_sheet(14.0));
         assert_eq!(solid.backdrop_blur, None);

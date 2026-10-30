@@ -1,7 +1,8 @@
 //! Otto settings, inside the agent pane (`docs/AGENT_BLOCK.md` §9): the
 //! pane's own otto (`connection(&self.target)`), shown like the Providers
 //! screen. Tabs: Providers (the sign-in list), Models (defaults for new
-//! sessions), Agents (the agent editor) and Search; more go in [`Tab::ALL`].
+//! sessions), Agents (the agent editor), MCP (the servers) and Search; more go
+//! in [`Tab::ALL`].
 
 use std::future::Future;
 
@@ -16,6 +17,7 @@ use serde_json::Value;
 use super::{
     AgentPane, client,
     settings_agents::{AgentsSettings, short_error},
+    settings_mcp::McpSettings,
     signin::{Kind, READY},
 };
 use crate::surface::Glassy as _;
@@ -31,17 +33,19 @@ pub(crate) enum Tab {
     Providers,
     Models,
     Agents,
+    Mcp,
     Search,
 }
 
 impl Tab {
-    pub(crate) const ALL: [Self; 4] = [Self::Providers, Self::Models, Self::Agents, Self::Search];
+    pub(crate) const ALL: [Self; 5] = [Self::Providers, Self::Models, Self::Agents, Self::Mcp, Self::Search];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Providers => "Providers",
             Self::Models => "Models",
             Self::Agents => "Agents",
+            Self::Mcp => "MCP",
             Self::Search => "Search",
         }
     }
@@ -199,6 +203,7 @@ pub(super) struct OttoSettings {
     unsure: Option<Entry>,
     defaults: Entity<DefaultsView>,
     agents: Entity<AgentsSettings>,
+    mcp: Entity<McpSettings>,
 }
 
 impl AgentPane {
@@ -208,8 +213,9 @@ impl AgentPane {
         if self.otto_settings.is_none() {
             let (rt, target) = (self.rt.clone(), self.target.clone());
             let defaults = cx.new(|cx| DefaultsView::new(rt.clone(), target.clone(), cx));
-            let agents = cx.new(|_| AgentsSettings::new(rt, target, self.cwd.clone()));
-            self.otto_settings = Some(OttoSettings { tab, unsure: None, defaults, agents });
+            let agents = cx.new(|_| AgentsSettings::new(rt.clone(), target.clone(), self.cwd.clone()));
+            let mcp = cx.new(|_| McpSettings::new(rt, target, self.cwd.clone()));
+            self.otto_settings = Some(OttoSettings { tab, unsure: None, defaults, agents, mcp });
         }
         if let Some(open) = &mut self.otto_settings {
             open.unsure = self.catalog.is_none().then_some(entry);
@@ -241,6 +247,9 @@ impl AgentPane {
         if open.tab == Tab::Agents && tab != Tab::Agents && !open.agents.update(cx, |a, cx| a.may_leave(cx)) {
             return;
         }
+        if open.tab == Tab::Mcp && tab != Tab::Mcp && !open.mcp.update(cx, |m, cx| m.may_leave(cx)) {
+            return;
+        }
         open.tab = tab;
         cx.notify();
     }
@@ -248,7 +257,7 @@ impl AgentPane {
     /// Back to the chat (an agent with unsaved changes asks first).
     pub(super) fn close_otto_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = &self.otto_settings else { return };
-        if !open.agents.update(cx, |a, cx| a.may_leave(cx)) {
+        if !open.agents.update(cx, |a, cx| a.may_leave(cx)) || !open.mcp.update(cx, |m, cx| m.may_leave(cx)) {
             return;
         }
         self.otto_settings = None;
@@ -259,8 +268,11 @@ impl AgentPane {
     /// Esc: the agent editor's first, else back to the chat.
     pub(super) fn otto_settings_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(open) = &self.otto_settings else { return false };
-        let agents = open.agents.clone();
+        let (agents, mcp) = (open.agents.clone(), open.mcp.clone());
         if open.tab == Tab::Agents && agents.update(cx, |a, cx| a.escape(cx)) {
+            return true;
+        }
+        if open.tab == Tab::Mcp && mcp.update(cx, |m, cx| m.escape(cx)) {
             return true;
         }
         if let Some(open) = &self.otto_settings {
@@ -272,7 +284,7 @@ impl AgentPane {
 
     pub(super) fn render_otto_settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(open) = &self.otto_settings else { return div().into_any_element() };
-        let (tab, defaults, agents) = (open.tab, open.defaults.clone(), open.agents.clone());
+        let (tab, defaults, agents, mcp) = (open.tab, open.defaults.clone(), open.agents.clone(), open.mcp.clone());
         let muted = theme::muted();
         let back = div().flex().ml(px(-8.0)).mb(px(10.0)).child(
             self.button("otto-settings-back", Kind::Quiet, "", 0.0, READY, cx, |this, window, cx| this.close_otto_settings(window, cx))
@@ -307,6 +319,7 @@ impl AgentPane {
                 defaults.into_any_element()
             }
             Tab::Agents => agents.into_any_element(),
+            Tab::Mcp => mcp.into_any_element(),
         };
         let column = div()
             .w_full()
@@ -662,7 +675,7 @@ mod tests {
     #[test]
     fn tabs_in_order() {
         let labels: Vec<_> = Tab::ALL.iter().map(|t| t.label()).collect();
-        assert_eq!(labels, ["Providers", "Models", "Agents", "Search"]);
+        assert_eq!(labels, ["Providers", "Models", "Agents", "MCP", "Search"]);
     }
 
     #[test]

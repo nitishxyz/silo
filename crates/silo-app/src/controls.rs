@@ -230,7 +230,7 @@ pub struct Segmented {
 impl Segmented {
     pub fn new(id: impl Into<ElementId>, segments: impl IntoIterator<Item = impl Into<SharedString>>, selected: usize) -> Self {
         let segments: Vec<SharedString> = segments.into_iter().map(Into::into).collect();
-        debug_assert!((2..=3).contains(&segments.len()), "a segmented control holds 2 to 3 segments");
+        debug_assert!((2..=4).contains(&segments.len()), "a segmented control holds 2 to 4 segments");
         Self { id: id.into(), segments, selected, segment_width: 84.0, on_select: None, unavailable: None }
     }
 

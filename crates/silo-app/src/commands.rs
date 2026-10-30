@@ -1,9 +1,10 @@
-//! Central command registry: every app command has one GPUI action, one
-//! (optional) key binding and palette metadata. Key bindings, the action
-//! handlers on the workspace and the ⌘P palette are all generated from this
-//! table, so the shortcuts shown in the palette are the real ones.
+//! Central command registry: every app command has one GPUI action, a
+//! stable id, default key bindings and palette metadata. The action
+//! handlers on the workspace and the ⌘P palette are generated from this
+//! table; the effective bindings (defaults plus `keybindings.json`) are
+//! `keymap.rs`'s, so the shortcuts shown everywhere are the real ones.
 
-use gpui::{App, Context, Div, KeyBinding, Stateful, prelude::*};
+use gpui::{Context, Div, Stateful, prelude::*};
 
 use crate::workspace::Workspace;
 
@@ -22,6 +23,17 @@ macro_rules! commands {
 
         impl Command {
             pub const ALL: &[Command] = &[$(Command::$variant),*];
+
+            /// The stable id `keybindings.json` names it by.
+            #[must_use]
+            pub fn id(self) -> &'static str {
+                match self { $(Command::$variant => stringify!($variant)),* }
+            }
+
+            #[must_use]
+            pub fn from_id(id: &str) -> Option<Self> {
+                match id { $(stringify!($variant) => Some(Command::$variant),)* _ => None }
+            }
 
             #[must_use]
             pub fn title(self) -> &'static str {
@@ -42,9 +54,9 @@ macro_rules! commands {
                 }
             }
 
-            /// Key bindings; the first is shown as the hint.
+            /// Default key bindings ([`crate::keymap::Chord`] syntax); the first is the hint.
             #[must_use]
-            pub fn keys(self) -> &'static [&'static str] {
+            pub fn default_keys(self) -> &'static [&'static str] {
                 match self { $(Command::$variant => &[$($key),*]),* }
             }
 
@@ -82,8 +94,8 @@ commands! {
     NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"], "Choose a terminal, browser, agent, address or >command";
     CloseTab => "Close Tab", "Tabs", [];
     RenameTab => "Rename Tab…", "Tabs", [];
-    NextTab => "Next Tab", "Tabs", ["cmd-}", "cmd-shift-]"];
-    PreviousTab => "Previous Tab", "Tabs", ["cmd-{", "cmd-shift-["];
+    NextTab => "Next Tab", "Tabs", ["cmd-}"];
+    PreviousTab => "Previous Tab", "Tabs", ["cmd-{"];
     // Panes
     NewPane => "New Pane", "Panes", ["cmd-enter"], "Beside the focused pane, along its longer side";
     SplitRight => "Split Right", "Panes", ["cmd-d"];
@@ -116,6 +128,7 @@ commands! {
     // Files
     NewFiles => "New Files Pane", "Files", ["cmd-shift-e"], "The focused block's folder, beside it";
     BrowseFiles => "Browse Files", "Files", [], "The focused block's folder as a Finder-like list, beside it";
+    OpenFolder => "Open Folder…", "Files", [], "In the focused Files block, or a new Files tab";
     // Changes
     NewChanges => "New Changes Pane", "Changes", [], "The focused block's repo, beside it";
     ReviewChanges => "Review Changes", "Changes", ["cmd-shift-g"], "This session's Changes block, or a new one beside the focused pane";
@@ -205,6 +218,7 @@ impl Command {
             | Self::NewChanges
             | Self::ReviewChanges => Method("block.split"),
             Self::OttoSettings => Method("app.settings_open"),
+            Self::OpenFolder => Method("files.root"),
             Self::ClosePane => Method("block.close"),
             Self::FocusNextPane | Self::FocusPreviousPane => Method("block.focus_step"),
             Self::FocusPaneLeft | Self::FocusPaneRight | Self::FocusPaneUp | Self::FocusPaneDown => Method("block.focus_dir"),
@@ -256,17 +270,17 @@ impl Command {
     #[must_use]
     pub fn feature(self) -> Option<&'static str> {
         match self {
-            Self::NewFiles | Self::NewFilesTab => Some(silo_proto::compat::feature::FILES),
+            Self::NewFiles | Self::NewFilesTab | Self::OpenFolder => Some(silo_proto::compat::feature::FILES),
             Self::BrowseFiles => Some(silo_proto::compat::feature::FILES_OPS),
             Self::NewChanges | Self::NewChangesTab | Self::ReviewChanges => Some(silo_proto::compat::feature::CHANGES),
             _ => None,
         }
     }
 
-    /// The shortcut hint in macOS notation, e.g. `⇧⌘N`.
+    /// The effective shortcut in macOS notation, e.g. `⇧⌘N`.
     #[must_use]
     pub fn hint(self) -> Option<String> {
-        self.keys().first().map(|k| key_hint(k))
+        crate::keymap::bindings(self).first().map(crate::keymap::Chord::hint)
     }
 
     /// Commands that need confirmation in the palette.
@@ -274,70 +288,6 @@ impl Command {
     pub fn destructive(self) -> bool {
         matches!(self, Self::CloseSession | Self::RestartServer | Self::StopServer)
     }
-}
-
-/// `cmd-shift-n` → `⇧⌘N`, `cmd-}` → `⇧⌘]`, `cmd-alt-left` → `⌥⌘←`.
-#[must_use]
-pub fn key_hint(binding: &str) -> String {
-    let parts: Vec<&str> = binding.split('-').collect();
-    let (mods, key) = match parts.split_last() {
-        // `cmd--` style bindings (a literal minus) are not used here.
-        Some((key, mods)) => (mods, *key),
-        None => return binding.to_owned(),
-    };
-    let (mut ctrl, mut alt, mut shift, mut cmd) = (false, false, false, false);
-    for m in mods {
-        match *m {
-            "ctrl" => ctrl = true,
-            "alt" => alt = true,
-            "shift" => shift = true,
-            "cmd" => cmd = true,
-            _ => {}
-        }
-    }
-    let key = match key {
-        "}" => {
-            shift = true;
-            "]".to_owned()
-        }
-        "{" => {
-            shift = true;
-            "[".to_owned()
-        }
-        "enter" => "↩".into(),
-        "left" => "←".into(),
-        "right" => "→".into(),
-        "up" => "↑".into(),
-        "down" => "↓".into(),
-        "escape" => "⎋".into(),
-        "tab" => "⇥".into(),
-        "space" => "Space".into(),
-        "backspace" => "⌫".into(),
-        k => k.to_uppercase(),
-    };
-    let mut out = String::new();
-    for (on, glyph) in [(ctrl, "⌃"), (alt, "⌥"), (shift, "⇧"), (cmd, "⌘")] {
-        if on {
-            out.push_str(glyph);
-        }
-    }
-    out.push_str(&key);
-    out
-}
-
-/// Install every command's key bindings (plus ⌘1–9, handled separately).
-pub fn bind_keys(cx: &mut App) {
-    let mut bindings = Vec::new();
-    for command in Command::ALL {
-        for key in command.keys() {
-            match KeyBinding::load(key, command.action(), None, false, None, &gpui::DummyKeyboardMapper) {
-                Ok(binding) => bindings.push(binding),
-                Err(error) => tracing::warn!("bad key binding {key:?}: {error:?}"),
-            }
-        }
-    }
-    cx.bind_keys(bindings);
-    crate::workspace::bind_number_keys(cx);
 }
 
 /// Fuzzy subsequence match. Returns a score (higher is better) and the
@@ -390,10 +340,6 @@ mod tests {
 
     #[test]
     fn hints_use_mac_glyphs() {
-        assert_eq!(key_hint("cmd-shift-n"), "⇧⌘N");
-        assert_eq!(key_hint("cmd-}"), "⇧⌘]");
-        assert_eq!(key_hint("cmd-alt-left"), "⌥⌘←");
-        assert_eq!(key_hint("cmd-shift-enter"), "⇧⌘↩");
         assert_eq!(Command::NewSession.hint().as_deref(), Some("⇧⌘N"));
         assert_eq!(Command::RenameSession.hint(), None);
         assert_eq!(Command::SwitchSession.hint().as_deref(), Some("⌘K"));
@@ -411,10 +357,10 @@ mod tests {
         assert_eq!(Command::NewPaneChooser.hint().as_deref(), Some("⌃⌘↩"));
         // ⌃⌘D is macOS Look Up: no chooser takes it (or ⌃⇧⌘D).
         for c in Command::ALL {
-            assert!(!c.keys().iter().any(|k| *k == "ctrl-cmd-d" || *k == "ctrl-cmd-shift-d"), "{c:?}");
+            assert!(!c.default_keys().iter().any(|k| *k == "ctrl-cmd-d" || *k == "ctrl-cmd-shift-d"), "{c:?}");
         }
         let choosers: Vec<_> =
-            Command::ALL.iter().filter(|c| c.title().ends_with('…') && c.keys().iter().any(|k| k.starts_with("ctrl-cmd-"))).collect();
+            Command::ALL.iter().filter(|c| c.title().ends_with('…') && c.default_keys().iter().any(|k| k.starts_with("ctrl-cmd-"))).collect();
         assert_eq!(choosers, [&Command::NewTabChooser, &Command::NewPaneChooser], "exactly two chooser chords");
         assert_eq!(Command::SplitRight.hint().as_deref(), Some("⌘D"), "instant splits keep their keys");
         assert_eq!(Command::SplitDown.hint().as_deref(), Some("⇧⌘D"));
@@ -429,13 +375,13 @@ mod tests {
 
     #[test]
     fn browse_blocks_has_a_free_plain_chord() {
-        assert_eq!(Command::BrowseBlocks.keys(), ["cmd-shift-b"]);
+        assert_eq!(Command::BrowseBlocks.default_keys(), ["cmd-shift-b"]);
         // macOS keeps these for itself (Look Up, Dock hiding, emoji).
         for taken in ["ctrl-cmd-d", "cmd-alt-d", "ctrl-cmd-space"] {
-            assert!(!Command::BrowseBlocks.keys().contains(&taken));
+            assert!(!Command::BrowseBlocks.default_keys().contains(&taken));
         }
         let others = Command::ALL.iter().filter(|c| **c != Command::BrowseBlocks);
-        assert!(others.flat_map(|c| c.keys()).all(|k| *k != "cmd-shift-b"), "no other command has ⇧⌘B");
+        assert!(others.flat_map(|c| c.default_keys()).all(|k| *k != "cmd-shift-b"), "no other command has ⇧⌘B");
     }
 
     #[test]
@@ -453,7 +399,7 @@ mod tests {
     fn bindings_are_unique() {
         let mut seen = std::collections::HashMap::new();
         for c in Command::ALL {
-            for k in c.keys() {
+            for k in c.default_keys() {
                 if let Some(other) = seen.insert(*k, *c) {
                     panic!("{k} bound to {other:?} and {c:?}");
                 }

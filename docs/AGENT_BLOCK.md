@@ -559,7 +559,7 @@ Silo's Settings are for this Mac only; otto's are a view inside the agent pane (
 the chat's place like the first-run sign-in, talking only to the pane's own otto (`connection(&self.target)`).
 It uses the pane's full width at the pane's side padding (descriptions stop at 560). Title `Otto`, or
 `Otto on <host>` for a remote host's; `‹ Back` or Esc returns to the chat (the agent editor takes
-Esc first). Tabs (`settings::Tab::ALL`, a row of pills; MCP, skills and tools go there later):
+Esc first). Tabs (`settings::Tab::ALL`, a row of pills; skills and tools go there later):
 - **Providers:** the sign-in list and dialogs of §4b (`provider_list`, shared with the first-run screen); API key
   (or Connect, or a signed-in row's action) in the rightmost column straight down the list, Sign in to its left.
 - **Models:** otto's defaults for new sessions (`config.get` on open, `config.set` on every change; errors inline,
@@ -569,6 +569,7 @@ Esc first). Tabs (`settings::Tab::ALL`, a row of pills; MCP, skills and tools go
   new sessions." A saved change reloads the pickers of every agent pane on the same otto (`client::OttoChanged`).
 - **Agents:** the agent list and editor below (`agent/settings_agents.rs`) on the pane's project; a save or delete
   reloads the pickers of every agent pane on the same otto.
+- **MCP:** the pane's otto's MCP servers for its project (`agent/settings_mcp.rs`), below.
 - **Search:** `search_engine` (DuckDuckGo, Bing, Google).
 
 Entry points (`settings::entry_tab`): the header gear, `/settings` and the palette's `Otto Settings` open Models
@@ -599,6 +600,24 @@ named by folder only.
   tool, or use defaults`, otto's reason without paths). Leaving with changes (back, another tab, Back to the chat)
   asks `Discard your changes?`; asking again discards. Esc closes a menu, then leaves the editor.
 
+The **MCP** tab (`agent/settings_mcp.rs`) lists once it shows (`mcp.list {project_root}`, which starts enabled
+servers), on the pane's project, and follows `mcp.status` (that row's status and tool count) and `mcp.changed`
+(list again; also after a reconnect).
+- **List:** status dot, name, scope badge (`Global`, `Project`), then one muted line: the command's name and its
+  plain arguments (words with `/` dropped, an `@scope/pkg` kept) or the URL's host · `Connected` | `Connecting…` |
+  `Error · <reason, no paths>` (full reason as tooltip) | `Needs sign-in` | `Off` · `N tools`. Actions: `Sign in`
+  (enabled `needs_sign_in` servers), an on/off Toggle (`mcp.update {enabled}`), edit (`pencil`, or click the name),
+  remove (`close`, confirmed inline). `Add` opens a blank editor.
+- **Editor:** Name, `Saved in` (`Global` | `Project · <folder>`), Type (`Command` | `HTTP`); Command + Arguments
+  (shell-style words) + Environment (`KEY=value` lines), or URL + Headers (`Name: value` lines). Save: `mcp.add`
+  (new), `mcp.update {transport}`, or for a rename / scope change `mcp.add` there then `mcp.remove` here; then back to
+  the list. Problems inline (`Name the server`, `That name is taken`, `Enter a command`, `Close the quote in the
+  arguments`, …). A saved HTTP server has `Sign out` (`mcp.logout`). Unsaved changes ask like the agent editor.
+- **Sign in:** `mcp.login`, then the URL opens in the browser and `mcp.login_complete` waits; the row says `Finish
+  signing in in the browser` with Cancel (`mcp.login_cancel`; closing the settings cancels too). For a remote otto
+  its `callback.port` is forwarded here first (`CallbackForward`, as for providers); if that can't listen, the row
+  asks to paste the address the browser ended on (`mcp.login_complete {code}`).
+
 ## 5. Session switcher
 
 Click the title or `history` in the pane header, `/sessions`, or ⌘J with the agent block focused. A popover under the
@@ -612,6 +631,15 @@ The project row (⏎ or click) swaps the popover for the recent projects (`proje
 name, the parent folder's name only when two share a name, `2h`, check on the current one; `Open folder…` last (the
 native folder picker). Picking one moves the block there (`agent.set {cwd}`): it shows that project's sessions and a
 new session, in every window. Paths are never shown.
+
+A session moves to another folder from the switcher: a row's `folder` button (on hover, "Move to folder ⌘O") or ⌘O
+(the highlighted session, else the shown one) opens the recent projects under `Move session to`, `Choose folder…`
+last (this Mac's picker; another host's otto takes a typed path, `~/…` its home, resolved there). otto moves the idle
+session (`session.update {folder}`: the folder's work tree top becomes its project and `cwd`; rules, instructions and
+tools follow from its next turn, and a system note tells the model the folder changed; a busy session is refused,
+`Wait for the turn to end to move the session`). The conversation stays; a block showing it goes along at once (one
+`agent.set {session_id, cwd}`), so the switcher lists the new project's sessions; moving another session just drops it
+from the list.
 
 Model, agent and brain picks apply to the shown session with `session.update` (from its next model request; the
 pickers say `Applies from the next step` while a turn runs), shown at once and confirmed by `session.changed`; a

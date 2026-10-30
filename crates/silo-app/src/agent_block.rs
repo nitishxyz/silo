@@ -147,6 +147,10 @@ impl crate::workspace::Workspace {
                 AgentPaneEvent::Project { cwd } => {
                     this.call(Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
                 }
+                AgentPaneEvent::Moved { cwd, session_id, title } => {
+                    let (session_id, title, cwd) = (Some(session_id.clone()), Some(title.clone()), Some(cwd.clone()));
+                    this.call(Method::AgentSet { block_id: block, session_id, title, cwd });
+                }
                 AgentPaneEvent::Status(status) => {
                     this.call(report(block, *status));
                     // A finished turn may have changed files: Changes blocks reviewing it list its turns again.
