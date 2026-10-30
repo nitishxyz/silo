@@ -1624,6 +1624,9 @@ impl Workspace {
     pub(crate) fn select_window(&mut self, index: usize) {
         let Some(view) = &self.view else { return };
         if let Some(w) = view.session.windows.get(index) {
+            if w.id != view.session.active_window {
+                crate::sound::play(crate::sound::Sound::Select);
+            }
             self.call(Method::WindowSelect { session_id: view.session.id.clone(), window_id: w.id.clone() });
         }
     }

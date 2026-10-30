@@ -125,6 +125,7 @@ impl HostsState {
                 }
             });
             let state = hosts::load_state(&home);
+            crate::sound::set_enabled(state.sounds);
             crate::theme::apply_ui_font(&state.ui_font_family, cx);
             let offers = crate::offers::Offers::default();
             let (clicks_tx, mut clicks) = tokio::sync::mpsc::unbounded_channel();
@@ -222,6 +223,7 @@ impl HostsState {
         change(&mut state);
         if state != self.state {
             hosts::save_state(&self.home, &state);
+            crate::sound::set_enabled(state.sounds);
             self.state = state;
             cx.notify();
         }
@@ -411,6 +413,7 @@ impl HostsState {
                 let seen = seen(cx, host, session_id, block_id);
                 let notify = notifications::wanted(&self.state.notifications, host_on, *reason, seen);
                 tracing::debug!(host = name, block = block_id, ?reason, ?seen, host_on, notify, "attention");
+                let mut notified = false;
                 if notify {
                     let note = notifications::attention_note(&name, &key, session_id, session_name, block_id, block_title, *reason, title, body);
                     let now = std::time::Instant::now();
@@ -419,15 +422,31 @@ impl HostsState {
                     } else {
                         self.delivered.insert(note.id.clone(), now);
                         notifications::deliver(note);
+                        notified = true;
                     }
+                }
+                // A quiet host is quiet here too.
+                let frontmost = host_on && cx.active_window().is_some();
+                if let Some(sound) = crate::sound::for_attention(*reason, frontmost, notified) {
+                    crate::sound::play(sound);
                 }
             }
             ConnEvent::Event(Event::ApprovalRequested { id, summary, caller, expires_in_ms, .. }) => {
                 self.approvals.requested(host, id, summary, caller, *expires_in_ms, std::time::Instant::now());
                 let info = &self.entries[host].info;
                 let key = info.key();
+                let quiet = self.state.quiet_hosts.contains(&key);
+                let frontmost = cx.active_window().is_some();
+                // The card in Silo, or its notification elsewhere.
+                if let Some(sound) = crate::sound::for_attention(
+                    silo_proto::control::AttentionReason::Blocked,
+                    frontmost && !quiet,
+                    !frontmost && self.state.notifications.on && !quiet,
+                ) {
+                    crate::sound::play(sound);
+                }
                 // The card is in the key window; away from Silo, say so.
-                if cx.active_window().is_none() && self.state.notifications.on && !self.state.quiet_hosts.contains(&key) {
+                if !frontmost && self.state.notifications.on && !quiet {
                     let card = self.approvals.cards.last().expect("just added");
                     let note = notifications::Note {
                         id: notifications::approval_identifier(&key, id),

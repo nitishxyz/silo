@@ -44,6 +44,7 @@ impl Workspace {
         if self.switcher.is_some() {
             self.close_switcher(window, cx);
         } else {
+            crate::sound::play(crate::sound::Sound::Pop);
             self.open_switcher(None, window, cx);
         }
     }

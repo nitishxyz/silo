@@ -64,6 +64,7 @@ mod settings;
 mod settings_panel;
 mod settings_table;
 mod share;
+mod sound;
 mod status;
 mod surface;
 mod switcher;

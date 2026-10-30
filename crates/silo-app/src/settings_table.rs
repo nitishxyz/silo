@@ -30,6 +30,7 @@ pub enum SettingId {
     Scrollback,
     RestoreDefaults,
     ConfirmClose,
+    Sounds,
     SearchEngine,
     CheckUpdates,
     Notifications,
@@ -134,6 +135,15 @@ pub const SETTINGS: &[Setting] = &[
         Some("Font"),
         Choice,
         "ui interface font family typeface system automatic"
+    ),
+    setting!(
+        SettingId::Sounds,
+        "Interface sounds",
+        "Interface sounds",
+        Appearance,
+        Some("Sounds"),
+        Toggle,
+        "sound sounds audio effects chime click feedback mute quiet volume"
     ),
     setting!(SettingId::FontFamily, "Terminal font", "Family", Terminal, Some("Font"), Choice, "font family nerd automatic typeface monospace"),
     setting!(SettingId::FontSize, "Font size", "Size", Terminal, Some("Font"), Number, "font size zoom bigger smaller points"),
@@ -349,6 +359,7 @@ impl SettingId {
             Self::TranslucentApps => s.translucent_apps,
             Self::CursorBlink => s.terminal.cursor_blink,
             Self::ConfirmClose => s.confirm_close,
+            Self::Sounds => s.sounds,
             Self::CheckUpdates => s.check_updates,
             _ => return None,
         })
@@ -369,6 +380,7 @@ impl SettingId {
             Self::TranslucentApps => SettingsEvent::SetTranslucentApps(on),
             Self::CursorBlink => SettingsEvent::SetCursorBlink(on),
             Self::ConfirmClose => SettingsEvent::SetConfirmClose(on),
+            Self::Sounds => SettingsEvent::SetSounds(on),
             Self::CheckUpdates => SettingsEvent::SetCheckUpdates(on),
             _ => return None,
         })
@@ -388,6 +400,7 @@ impl SettingId {
             Self::TranslucentApps => s.translucent_apps = on,
             Self::CursorBlink => s.terminal.cursor_blink = on,
             Self::ConfirmClose => s.confirm_close = on,
+            Self::Sounds => s.sounds = on,
             Self::CheckUpdates => s.check_updates = on,
             _ => {}
         }

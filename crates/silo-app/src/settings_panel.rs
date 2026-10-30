@@ -285,6 +285,8 @@ pub struct SettingsSnapshot {
     pub check_updates: bool,
     /// Ask before a close that would end running programs.
     pub confirm_close: bool,
+    /// Soft interface sounds.
+    pub sounds: bool,
     /// What the address bar searches with.
     pub search_engine: crate::search::SearchEngine,
     pub notify: crate::hosts::NotifyPrefs,
@@ -322,6 +324,7 @@ impl Default for SettingsSnapshot {
             updates: true,
             check_updates: true,
             confirm_close: true,
+            sounds: true,
             search_engine: crate::search::SearchEngine::default(),
             notify: crate::hosts::NotifyPrefs::default(),
             notify_denied: false,
@@ -362,6 +365,7 @@ pub enum SettingsEvent {
     SetTranslucentApps(bool),
     SetCheckUpdates(bool),
     SetConfirmClose(bool),
+    SetSounds(bool),
     SetNotify(crate::hosts::NotifyField, bool),
     /// A host's notifications on this device (host id, on).
     SetHostNotify(String, bool),
@@ -1763,6 +1767,15 @@ impl SettingsPanel {
                         s.ui_font.font_status().map(Into::into),
                         Some(self.font_dropdown(FontTarget::Ui, cx)),
                         narrow,
+                    )],
+                ));
+                out.push(self.group(
+                    Some("Sounds"),
+                    vec![Self::row(
+                        SettingId::Sounds.label(),
+                        Some("Soft cues for tabs, panes and switches, and when a program finishes or needs you".into()),
+                        Some(Self::switch("settings-sounds", "Interface sounds", s.sounds, SettingsEvent::SetSounds, cx)),
+                        false,
                     )],
                 ));
             }

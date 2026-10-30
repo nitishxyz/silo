@@ -191,6 +191,7 @@ impl RenderOnce for Toggle {
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.84))
                     .on_click(move |_, window, cx| {
+                        crate::sound::play(crate::sound::Sound::toggle(!on));
                         if let Some(h) = &click {
                             h(!on, window, cx);
                         }
@@ -203,6 +204,7 @@ impl RenderOnce for Toggle {
                     .on_key_down(move |event, window, cx| {
                         if is_activation_key(&event.keystroke.key) {
                             cx.stop_propagation();
+                            crate::sound::play(crate::sound::Sound::toggle(!on));
                             if let Some(h) = &handler {
                                 h(!on, window, cx);
                             }
@@ -336,6 +338,7 @@ impl RenderOnce for Segmented {
                     .when(!is_selected && !off, |s| s.hover(|s| s.text_color(rgb(theme::foreground()))))
                     .on_click(move |_, window, cx| {
                         if let (false, false, Some(h)) = (is_selected, off, &click) {
+                            crate::sound::play(crate::sound::Sound::Select);
                             h(index, window, cx);
                         }
                     })
@@ -358,6 +361,7 @@ impl RenderOnce for Segmented {
                             cx.stop_propagation();
                             focus_keys[target].focus(window, cx);
                             if let (true, Some(h)) = (target != selected && Some(target) != blocked, &keys) {
+                                crate::sound::play(crate::sound::Sound::Select);
                                 h(target, window, cx);
                             }
                         }

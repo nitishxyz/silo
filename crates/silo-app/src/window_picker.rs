@@ -97,6 +97,7 @@ impl Workspace {
             self.close_picker(window, cx);
             return;
         }
+        crate::sound::play(crate::sound::Sound::Pop);
         self.close_palette(window, cx);
         self.close_switcher(window, cx);
         let field = cx.new(|cx| TextField::new("Open or create a session…", cx).on_glass());

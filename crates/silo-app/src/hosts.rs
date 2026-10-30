@@ -375,6 +375,9 @@ pub struct AppState {
     /// Ask before a close that would end running programs.
     #[serde(default = "yes")]
     pub confirm_close: bool,
+    /// Soft interface sounds (`sound.rs`).
+    #[serde(default = "yes")]
+    pub sounds: bool,
     /// What the address bar searches with when the text is not an address.
     #[serde(default)]
     pub search_engine: crate::search::SearchEngine,
@@ -403,6 +406,7 @@ impl Default for AppState {
             translucent_apps: false,
             check_updates: true,
             confirm_close: true,
+            sounds: true,
             search_engine: crate::search::SearchEngine::default(),
             recent_pages: Vec::new(),
             notifications: NotifyPrefs::default(),
@@ -537,6 +541,7 @@ pub(crate) mod tests {
         assert_eq!((old.material, old.tint_with_app, old.translucent_apps), (crate::material::Material::Solid, true, false));
         assert!(old.check_updates, "updates are checked unless turned off");
         assert!(old.confirm_close, "closing running programs asks unless turned off");
+        assert!(old.sounds, "interface sounds are on unless turned off");
         assert_eq!(old.search_engine, crate::search::SearchEngine::Google, "pages search with Google unless set");
         let dir = std::env::temp_dir().join(format!("silo-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -553,6 +558,7 @@ pub(crate) mod tests {
             translucent_apps: true,
             check_updates: false,
             confirm_close: false,
+            sounds: false,
             search_engine: crate::search::SearchEngine::Kagi,
             recent_pages: Vec::new(),
             notifications: NotifyPrefs { done: false, ..NotifyPrefs::default() },
@@ -569,6 +575,7 @@ pub(crate) mod tests {
         assert_eq!((back.material, back.tint_with_app, back.translucent_apps), (crate::material::Material::Frosted, false, true));
         assert!(!back.check_updates);
         assert!(!back.confirm_close);
+        assert!(!back.sounds);
         assert_eq!((back.notifications.done, back.notifications.blocked), (false, true));
         assert_eq!(back.quiet_hosts, ["local"]);
         assert_eq!(old.notifications, NotifyPrefs::default(), "notifications are on unless turned off");

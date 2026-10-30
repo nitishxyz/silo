@@ -594,6 +594,7 @@ impl FilesPane {
         self.file_op(method, "Couldn't create a folder", cx, move |this, done, cx| {
             this.relist_touched(done, cx);
             if let Some(made) = done.done.first() {
+                this.sound(crate::sound::Sound::Open);
                 let path = made.to.clone();
                 this.select_paths(std::slice::from_ref(&path));
                 this.browser.rename_next = Some(path);
@@ -612,6 +613,7 @@ impl FilesPane {
         self.request(method, cx, move |this, result: anyhow::Result<FileWritten>, cx| {
             match result {
                 Ok(written) => {
+                    this.sound(crate::sound::Sound::Open);
                     let dir = model::parent(&written.path).to_owned();
                     if this.listings.contains_key(&dir) {
                         this.list(dir, cx);
@@ -667,7 +669,8 @@ impl FilesPane {
         self.file_op(method, "Couldn't rename", cx, |this, done, cx| {
             this.relist_touched(done, cx);
             let to: Vec<String> = done.done.iter().map(|m| m.to.clone()).collect();
-            // An open tab follows its file.
+            // An open tab follows its file (quietly: nothing opened or closed).
+            this.quiet = true;
             for moved in &done.done {
                 if this.state.open.contains(&moved.from) {
                     let was_active = this.active() == Some(moved.from.as_str());
@@ -675,6 +678,7 @@ impl FilesPane {
                     this.open(&moved.to, was_active, cx);
                 }
             }
+            this.quiet = false;
             this.select_paths(&to);
         });
     }
@@ -689,6 +693,9 @@ impl FilesPane {
         self.file_op(method, "Couldn't move to the Trash", cx, |this, done, cx| {
             this.relist_touched(done, cx);
             let n = done.done.len();
+            if n > 0 {
+                this.sound(crate::sound::Sound::Close);
+            }
             if n > 0 && done.failed.is_empty() {
                 this.notice = Some(if n == 1 {
                     format!("Moved \u{201c}{}\u{201d} to the Trash", model::name(&done.done[0].from))
@@ -723,8 +730,11 @@ impl FilesPane {
         }
         let params = FilesTransferParams { block_id: self.block_id.clone(), from, to_dir, replace: false };
         let (method, what) = if copy { (Method::FilesCopy(params), "Couldn't copy") } else { (Method::FilesMove(params), "Couldn't move") };
-        self.file_op(method, what, cx, |this, done, cx| {
+        self.file_op(method, what, cx, move |this, done, cx| {
             this.relist_touched(done, cx);
+            if !done.done.is_empty() {
+                this.sound(if copy { crate::sound::Sound::Open } else { crate::sound::Sound::Drop });
+            }
             let shown = this.state.browse.clone();
             let landed: Vec<String> = done.done.iter().filter(|m| model::parent(&m.to) == shown).map(|m| m.to.clone()).collect();
             if !landed.is_empty() {

@@ -75,6 +75,9 @@ fn tree_keys_move_open_and_close() {
     assert_eq!(tree_key(&open, Some(0), "left"), Some(TreeMove::Toggle("src".into(), false)));
     assert_eq!(collapse(&s(&["src", "src/a", "srcx", "src/a/b"]), "src"), s(&["srcx"]));
     assert_eq!(reveal(&s(&["docs"]), "src/files/mod.rs"), s(&["docs", "src", "src/files"]));
+    // Over the cap, the longest-open folders not above the file make way.
+    assert_eq!(reveal_within(&s(&["docs", "lib", "src"]), "src/files/mod.rs", 3), s(&["lib", "src", "src/files"]));
+    assert_eq!(reveal_within(&s(&["a", "b"]), "a/b/c/d.rs", 2), s(&["a", "a/b", "a/b/c"]), "never the folders above it");
 }
 
 #[test]

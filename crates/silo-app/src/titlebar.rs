@@ -692,9 +692,11 @@ impl Workspace {
     pub(crate) fn drop_tab(&mut self, window_id: &str, drop: TabDrop, cx: &mut Context<Self>) {
         match drop {
             TabDrop::Insert { target, after } => {
+                crate::sound::play(crate::sound::Sound::Drop);
                 self.move_tab(window_id, target, after, cx);
             }
             TabDrop::Merge { target } => {
+                crate::sound::play(crate::sound::Sound::Merge);
                 self.merge_tab(window_id, target, cx);
             }
         }

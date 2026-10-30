@@ -594,6 +594,9 @@ impl ChangesPane {
     // ------------------------------------------------------------ tabs, scope, layout
 
     pub(crate) fn open(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.state.active.as_deref() != Some(path) {
+            crate::sound::play(crate::sound::Sound::Select);
+        }
         self.current = None;
         self.set(ChangesSetParams { active: Some(path.to_owned()), ..ChangesSetParams::default() }, cx);
     }
@@ -604,6 +607,7 @@ impl ChangesPane {
     }
 
     pub(crate) fn close(&mut self, path: &str, cx: &mut Context<Self>) {
+        crate::sound::play(crate::sound::Sound::Close);
         let open: Vec<String> = self.state.open.iter().filter(|p| *p != path).cloned().collect();
         let active = if self.state.active.as_deref() == Some(path) {
             let at = self.state.open.iter().position(|p| p == path).unwrap_or(0);

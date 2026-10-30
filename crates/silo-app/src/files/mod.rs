@@ -179,6 +179,10 @@ pub struct FilesPane {
     pub(crate) tree_width: f32,
     pub(crate) tree_selected: Option<String>,
     pub(crate) tree_scroll: UniformListScrollHandle,
+    /// The shown file, to scroll the tree to once its row is listed.
+    pub(crate) tree_reveal: Option<String>,
+    /// Tab and folder changes make no sound (a rename re-opening its tab).
+    pub(crate) quiet: bool,
     pub(crate) selection: Option<Selection>,
     pub(crate) drag: Option<Drag>,
     pub(crate) find: Option<Find>,
@@ -242,6 +246,8 @@ impl FilesPane {
             tree_width: TREE_WIDTH,
             tree_selected: None,
             tree_scroll: UniformListScrollHandle::new(),
+            tree_reveal: None,
+            quiet: false,
             selection: None,
             drag: None,
             find: None,
@@ -264,6 +270,7 @@ impl FilesPane {
         // Unsaved tabs kept while the block was out of view (another session shown).
         pane.unstash(cx);
         pane.load_all(cx);
+        pane.reveal_active(cx);
         pane
     }
 
@@ -304,8 +311,10 @@ impl FilesPane {
             self.scrolls.clear();
             self.applied.clear();
             self.selection = None;
+            self.tree_selected = None;
             self.state = state;
             self.load_all(cx);
+            self.reveal_active(cx);
         } else {
             // A tab closed elsewhere (another window, a client) stays open here while it holds edits.
             let mut state = state;
@@ -319,6 +328,7 @@ impl FilesPane {
             if active_changed {
                 self.unpark_selection();
                 self.refind(cx);
+                self.reveal_active(cx);
             }
             if !kept.is_empty() {
                 let open = self.state.open.clone();
@@ -596,7 +606,8 @@ impl FilesPane {
     /// Show `path`, opening a tab for it; `show: false` opens it behind.
     pub fn open(&mut self, path: &str, show: bool, cx: &mut Context<Self>) {
         let mut open = self.state.open.clone();
-        if !open.iter().any(|p| p == path) {
+        let new = !open.iter().any(|p| p == path);
+        if new {
             if open.len() >= FilesState::OPEN_MAX {
                 self.notice = Some(format!("At most {} tabs: close some first", FilesState::OPEN_MAX));
                 return cx.notify();
@@ -604,6 +615,12 @@ impl FilesPane {
             open.push(path.to_owned());
         }
         self.save_scroll_now(cx);
+        let switched = show && self.state.active.as_deref() != Some(path);
+        if new {
+            self.sound(crate::sound::Sound::Open);
+        } else if switched {
+            self.sound(crate::sound::Sound::Select);
+        }
         self.state.open.clone_from(&open);
         if show && self.state.active.as_deref() != Some(path) {
             self.park_selection();
@@ -616,6 +633,9 @@ impl FilesPane {
         }
         let params = FilesSetParams { open: Some(open), active: show.then(|| path.to_owned()), ..FilesSetParams::default() };
         self.set(params, cx);
+        if show {
+            self.reveal_in_tree(path, cx);
+        }
         self.load_needed(cx);
         cx.emit(FilesPaneEvent::Header);
         cx.notify();
@@ -636,6 +656,7 @@ impl FilesPane {
         if open == self.state.open {
             return;
         }
+        self.sound(crate::sound::Sound::Close);
         if self.active() == Some(path) {
             self.selection = None;
         }
@@ -653,6 +674,9 @@ impl FilesPane {
         }
         let params = FilesSetParams { open: Some(open), active: Some(active.unwrap_or_default()), ..FilesSetParams::default() };
         self.set(params, cx);
+        if shown_changed {
+            self.reveal_active(cx);
+        }
         self.load_needed(cx);
         cx.emit(FilesPaneEvent::Header);
         cx.notify();
@@ -684,6 +708,46 @@ impl FilesPane {
 
     // ------------------------------------------------------------ tree
 
+    /// Play `sound` unless this change is [`Self::quiet`].
+    pub(crate) fn sound(&self, sound: crate::sound::Sound) {
+        if !self.quiet {
+            crate::sound::play(sound);
+        }
+    }
+
+    /// [`Self::reveal_in_tree`] for the shown tab, if any.
+    fn reveal_active(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.state.active.clone() {
+            self.reveal_in_tree(&active, cx);
+        }
+    }
+
+    /// Show `path` in the tree: the folders above it open (listed if they
+    /// are not), its row selected and scrolled into view once listed.
+    fn reveal_in_tree(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.tree_selected = Some(path.to_owned());
+        self.tree_reveal = Some(path.to_owned());
+        let expanded = model::reveal_within(&self.state.expanded, path, FilesState::EXPANDED_MAX);
+        if expanded != self.state.expanded {
+            let unlisted: Vec<String> = expanded.iter().filter(|d| !self.listings.contains_key(*d)).cloned().collect();
+            for dir in unlisted {
+                self.list(dir, cx);
+            }
+            self.state.expanded.clone_from(&expanded);
+            self.browser.dirty();
+            self.set(FilesSetParams { expanded: Some(expanded), ..FilesSetParams::default() }, cx);
+        }
+        cx.notify();
+    }
+
+    /// The tree row a reveal waits for, once it is listed (taken: the
+    /// scroll happens once).
+    pub(crate) fn take_tree_reveal(&mut self, rows: &[model::TreeRow]) -> Option<usize> {
+        let at = rows.iter().position(|r| Some(&r.path) == self.tree_reveal.as_ref())?;
+        self.tree_reveal = None;
+        Some(at)
+    }
+
     pub(crate) fn tree_rows(&self) -> Vec<model::TreeRow> {
         let expanded: HashSet<String> = self.state.expanded.iter().cloned().collect();
         model::tree_rows(&self.listings, &expanded)
@@ -705,6 +769,7 @@ impl FilesPane {
         if expanded == self.state.expanded {
             return;
         }
+        self.sound(if open { crate::sound::Sound::Expand } else { crate::sound::Sound::Collapse });
         self.state.expanded.clone_from(&expanded);
         self.browser.dirty();
         self.set(FilesSetParams { expanded: Some(expanded), ..FilesSetParams::default() }, cx);
@@ -903,17 +968,8 @@ impl FilesPane {
         if self.state.view == silo_proto::model::FilesView::Browse {
             self.set_view(silo_proto::model::FilesView::Edit, window, cx);
         }
+        // Opening reveals it in the tree.
         self.open(&path, true, cx);
-        self.tree_selected = Some(path.clone());
-        let expanded = model::reveal(&self.state.expanded, &path);
-        if expanded != self.state.expanded {
-            let unlisted: Vec<String> = expanded.iter().filter(|d| !self.listings.contains_key(*d)).cloned().collect();
-            for dir in unlisted {
-                self.list(dir, cx);
-            }
-            self.state.expanded.clone_from(&expanded);
-            self.set(FilesSetParams { expanded: Some(expanded), ..FilesSetParams::default() }, cx);
-        }
         window.focus(&self.focus, cx);
     }
 

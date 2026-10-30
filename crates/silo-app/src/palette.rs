@@ -225,6 +225,9 @@ impl Workspace {
             self.flash(Status::info(note), cx);
             return;
         }
+        if let Some(sound) = command_sound(command) {
+            crate::sound::play(sound);
+        }
         match command {
             Command::NewSession => {
                 self.close_switcher(window, cx);
@@ -536,6 +539,10 @@ impl Workspace {
 
     /// A status that clears itself after `shown`.
     pub(crate) fn flash_for(&mut self, status: Status, shown: std::time::Duration, cx: &mut Context<Self>) {
+        // A failure the user just caused is heard; info stays silent.
+        if status.kind == crate::status::StatusKind::Error {
+            crate::sound::play(crate::sound::Sound::Error);
+        }
         self.status = Some(status.clone());
         self.flashing = Some(status.clone());
         cx.notify();
@@ -685,6 +692,7 @@ impl Workspace {
         if self.palette.is_some() {
             self.close_palette(window, cx);
         } else {
+            crate::sound::play(crate::sound::Sound::Pop);
             self.open_palette_step(Step::Search, String::new(), window, cx);
         }
     }
@@ -1197,6 +1205,7 @@ impl Workspace {
                 Kind::Toggle => {
                     let on = self.palette.as_ref().and_then(|p| id.on(&p.snapshot));
                     if let Some((on, event)) = on.and_then(|on| Some((!on, id.toggled(!on)?))) {
+                        crate::sound::play(crate::sound::Sound::toggle(on));
                         let outcome = self.apply_settings_event(&event, window, cx).unwrap_or_default();
                         if let Some(palette) = self.palette.as_mut() {
                             // The row's value shows the flip.
@@ -1594,9 +1603,45 @@ impl Workspace {
     }
 }
 
+/// The sound a command makes as it runs: something new opens with a
+/// rising pair, a session step is a tap. Tab steps sound in
+/// [`Workspace::select_window`], closes once they are sent.
+fn command_sound(command: Command) -> Option<crate::sound::Sound> {
+    use crate::sound::Sound;
+    Some(match command {
+        Command::NewSession
+        | Command::NewTab
+        | Command::NewTerminalTab
+        | Command::NewBrowserTab
+        | Command::NewAgentTab
+        | Command::NewFilesTab
+        | Command::NewChangesTab
+        | Command::NewPane
+        | Command::SplitRight
+        | Command::SplitDown
+        | Command::NewBrowser
+        | Command::NewAgent
+        | Command::NewFiles
+        | Command::NewChanges => Sound::Open,
+        Command::NextSession | Command::PreviousSession => Sound::Select,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_things_open_with_a_sound_and_editing_stays_silent() {
+        use crate::sound::Sound;
+        assert_eq!(command_sound(Command::NewTab), Some(Sound::Open));
+        assert_eq!(command_sound(Command::SplitRight), Some(Sound::Open));
+        assert_eq!(command_sound(Command::NextSession), Some(Sound::Select));
+        for quiet in [Command::Copy, Command::Paste, Command::SelectAll, Command::ClearScrollback, Command::FocusNextPane, Command::GrowPane] {
+            assert_eq!(command_sound(quiet), None, "{quiet:?}");
+        }
+    }
 
     #[test]
     fn rename_fields_show_the_current_name() {

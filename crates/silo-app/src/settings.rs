@@ -145,6 +145,7 @@ impl Workspace {
             updates: self.updater.read(cx).enabled(),
             check_updates: self.check_updates(),
             confirm_close: self.confirm_close(),
+            sounds: self.state.sounds,
             search_engine: self.state.search_engine,
             notify: self.notify_prefs(),
             notify_denied: crate::notifications::denied(),
@@ -279,6 +280,7 @@ impl Workspace {
         }
         self.appearance_menu.open = false;
         if self.settings.is_none() {
+            crate::sound::play(crate::sound::Sound::Pop);
             // Fonts may have been installed or removed since launch.
             theme::refresh_fonts(cx);
             theme::apply_font(cx);
@@ -489,6 +491,17 @@ impl Workspace {
             }
             SettingsEvent::SetConfirmClose(on) => {
                 self.set_confirm_close(*on, cx);
+                Outcome::default()
+            }
+            SettingsEvent::SetSounds(on) => {
+                let on = *on;
+                tracing::debug!(on, "sounds");
+                // Turning them on says so (the switch itself was silent).
+                if on && !crate::sound::enabled() {
+                    crate::sound::set_enabled(true);
+                    crate::sound::play(crate::sound::Sound::ToggleOn);
+                }
+                self.shared.update(cx, |shared, cx| shared.update_state(|s| s.sounds = on, cx));
                 Outcome::default()
             }
             SettingsEvent::SetSearchEngine(engine) => {

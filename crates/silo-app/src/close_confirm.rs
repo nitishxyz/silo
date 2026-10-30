@@ -177,6 +177,7 @@ impl Workspace {
                 .and_then(|v| v.session.windows.iter().map(crate::floats::window_blocks).find(|blocks| blocks.contains(block)))
                 .is_some_and(|blocks| blocks.len() == 1);
             if pane_close(self.block_info(block), alone) == PaneClose::Park {
+                crate::sound::play(crate::sound::Sound::Close);
                 return self.call(Method::BlockPark { block_id: block.clone() });
             }
         }
@@ -231,7 +232,7 @@ impl Workspace {
         match target {
             CloseTarget::RestartServer => self.status = Some(Status::progress("Restarting server…")),
             CloseTarget::StopServer => self.status = Some(Status::progress("Stopping server…")),
-            _ => {}
+            CloseTarget::Pane(_) | CloseTarget::Tab(_) | CloseTarget::Session { .. } => crate::sound::play(crate::sound::Sound::Close),
         }
         let method = target.method(force);
         let task = self.rt.spawn(async move {

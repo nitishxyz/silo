@@ -55,6 +55,7 @@ impl Workspace {
         let same = if target == Target::Tab { self.same_kind_now(window, cx) } else { Kind::Terminal };
         // One dialog at a time.
         self.close_switcher(window, cx);
+        crate::sound::play(crate::sound::Sound::Pop);
         let placeholder =
             if target == Target::Tab { "New tab: kind, address, path, >command, @agent" } else { "New pane: kind, address, path, >command, @agent" };
         let field = cx.new(|cx| TextField::new(placeholder, cx).on_glass());

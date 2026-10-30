@@ -301,6 +301,9 @@ impl FilesPane {
 
     fn render_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.tree_rows();
+        if let Some(at) = self.take_tree_reveal(&rows) {
+            self.tree_scroll.scroll_to_item(at, gpui::ScrollStrategy::Nearest);
+        }
         let focused = self.tree_focus.is_focused(window);
         let selected = self.tree_selected.clone();
         let active = self.state.active.clone();

@@ -187,6 +187,19 @@ pub fn reveal(expanded: &[String], file: &str) -> Vec<String> {
     out
 }
 
+/// [`reveal`], keeping at most `max` expanded folders: the longest-open
+/// ones that are not above `file` make way.
+#[must_use]
+pub fn reveal_within(expanded: &[String], file: &str, max: usize) -> Vec<String> {
+    let mut out = reveal(expanded, file);
+    let above = |dir: &str| file.starts_with(&format!("{dir}/"));
+    while out.len() > max {
+        let Some(oldest) = out.iter().position(|d| !above(d)) else { break };
+        out.remove(oldest);
+    }
+    out
+}
+
 // ---------------------------------------------------------------- changes
 
 /// What `files.changed` calls for: open files to read again, and listed

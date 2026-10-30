@@ -59,6 +59,9 @@ objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDr
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 silo-web.workspace = true
 raw-window-handle = "0.6"
+# Interface sounds (`sound.rs`): a low-latency output stream mixing
+# synthesized voices, opened on the first sound and released when idle.
+cpal = "0.16"
 
 [features]
 # Compile Metal shaders at runtime: works with only the Command Line Tools.

@@ -349,6 +349,32 @@ fn press(pane: &mut FilesPane, k: &str, window: &mut gpui::Window, cx: &mut gpui
 }
 
 #[gpui::test]
+fn the_shown_file_is_revealed_in_the_tree(cx: &mut TestAppContext) {
+    let (pane, cx, _rt) = pane(cx);
+    pane.update(cx, |pane, cx| {
+        // Opening the block: its shown file's folder is open, its row selected.
+        assert_eq!(pane.state.expanded, ["src"]);
+        assert_eq!(pane.tree_selected.as_deref(), Some("src/main.rs"));
+        pane.listings.insert(String::new(), vec![entry("src", true, 0), entry("docs", true, 0), entry("README.md", false, 1)]);
+        pane.listings.insert("src".into(), vec![entry("main.rs", false, 5), entry("ui", true, 0)]);
+        pane.listings.insert("src/ui".into(), vec![entry("view.rs", false, 5)]);
+        // A file deep down: every folder above it opens, and its row is scrolled to once.
+        pane.open("src/ui/view.rs", true, cx);
+        assert_eq!(pane.state.expanded, ["src", "src/ui"]);
+        assert_eq!(pane.tree_selected.as_deref(), Some("src/ui/view.rs"));
+        let rows = pane.tree_rows();
+        let at = pane.take_tree_reveal(&rows);
+        assert_eq!(at.map(|i| rows[i].path.as_str()), Some("src/ui/view.rs"));
+        assert_eq!(pane.take_tree_reveal(&rows), None, "scrolled to once");
+        // Opening behind (⌘-click) leaves the tree alone; closing the shown tab reveals the next.
+        pane.open("README.md", false, cx);
+        assert_eq!(pane.tree_selected.as_deref(), Some("src/ui/view.rs"));
+        pane.close_now("src/ui/view.rs", cx);
+        assert_eq!(pane.tree_selected.as_deref(), pane.active());
+    });
+}
+
+#[gpui::test]
 fn the_browser_lists_navigates_and_selects(cx: &mut TestAppContext) {
     use silo_proto::model::FilesView;
     let (pane, cx, _rt) = pane(cx);
@@ -359,6 +385,9 @@ fn the_browser_lists_navigates_and_selects(cx: &mut TestAppContext) {
             pane.listings
                 .insert(String::new(), vec![entry("src", true, 0), entry("b.txt", false, 10), entry("a.md", false, 20), entry(".env", false, 1)]);
             pane.listings.insert("src".into(), vec![entry("main.rs", false, 5), entry("lib.rs", false, 7)]);
+            // The shown src/main.rs was revealed (src expanded): start folded.
+            assert_eq!(pane.state.expanded, ["src"]);
+            pane.set_expanded("src", false, cx);
             pane.set_view(FilesView::Browse, window, cx);
             assert!(pane.browsing());
             let rows = pane.browse_rows();
