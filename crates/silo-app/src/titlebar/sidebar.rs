@@ -129,7 +129,9 @@ impl Workspace {
             // Room for the insertion bar before the first tab.
             .py(px(ROW_GAP))
             .overflow_y_scroll()
-            .track_scroll(scroll);
+            .track_scroll(scroll)
+            // Scrolled by hand: stop pulling the active tab back into view.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.tab_follow.set(false)));
         let mut ghosts: Vec<&TabGhost> = self.motion.tab_ghosts.iter().collect();
         ghosts.sort_by_key(|g| g.index);
         let mut ghosts = ghosts.into_iter().peekable();
@@ -180,7 +182,7 @@ impl Workspace {
         let to_end = move |this: &mut Self, ev: &DragMoveEvent<TabDrag>, cx: &mut Context<Self>| {
             if ev.bounds.contains(&ev.event.position) {
                 let id = ev.drag(cx).window_id.clone();
-                this.set_tab_drop(&id, Some((last, true)), cx);
+                this.set_tab_drop(&id, Some(super::TabDrop::Insert { target: last, after: true }), cx);
             }
         };
         let open = self.launcher.is_open_for_tab();
@@ -238,8 +240,8 @@ impl Workspace {
                     }
                 }))
                 .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
-                    if let Some((target, after)) = this.tab_drop.take() {
-                        this.move_tab(&drag.window_id, target, after, cx);
+                    if let Some(drop) = this.tab_drop.take() {
+                        this.drop_tab(&drag.window_id, drop, cx);
                     }
                     cx.notify();
                 }))
@@ -331,7 +333,13 @@ impl Workspace {
             .filter(|&c| chrome.shows(c));
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: self.tab_icon(w), offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, in the gap.
-        let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
+        let drop = self.tab_drop.filter(|d| d.target() == index && self.tab_dragging.is_some());
+        let insert = match drop {
+            Some(super::TabDrop::Insert { after, .. }) => Some(after),
+            _ => None,
+        };
+        // Dropped here, the dragged tab's blocks join this one: outlined.
+        let merging = matches!(drop, Some(super::TabDrop::Merge { .. }));
         let workspace = cx.entity().downgrade();
         let window_id = w.id.clone();
         let group = format!("side-tab-{}", w.id);
@@ -349,6 +357,7 @@ impl Workspace {
             .continuous(crate::radius::MENU_ROW)
             .when(several && selected, |el| el.bg(chrome.selected()))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
+            .when(merging, |el| el.bg(hover).border_1().border_color(rgb(chrome.accent)))
             .child(self.block_icon_view(&w.focused, "side-tab", 13.0, if primary { chrome.accent } else { chrome.icon }, cx))
             .child(div().ml(px(8.0)).flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
             .when_some(self.window_mark(w), |el, mark| {
@@ -431,9 +440,10 @@ impl Workspace {
             })
             .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
                 if ev.bounds.contains(&ev.event.position) {
-                    let after = ev.event.position.y > ev.bounds.center().y;
+                    let (b, at) = (ev.bounds, ev.event.position.y);
+                    let drop = super::tab_drop_at(index, f32::from(b.top()), f32::from(b.bottom()), f32::from(at), this.merges_tabs());
                     let id = ev.drag(cx).window_id.clone();
-                    this.set_tab_drop(&id, Some((index, after)), cx);
+                    this.set_tab_drop(&id, Some(drop), cx);
                 }
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {

@@ -511,6 +511,58 @@ async fn block_swap_and_window_move_body() {
     let view = next_view(&mut events, &sid).await;
     let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
     assert_eq!(order, [created.window_id.clone(), other.window_id.clone(), third.window_id.clone()]);
+
+    // window.merge: `third` goes beside `other` (split, 50/50), floats come
+    // along, `third` closes, focus lands on its block, `other` is active; the
+    // shells keep running (same blocks, no restart).
+    let third_pid = view.blocks.iter().find(|b| b.id == third.block_id).and_then(|b| b.pid);
+    let float_rect = silo_proto::model::FloatRect { x: 0.1, y: 0.1, w: 0.5, h: 0.5 };
+    let floated: Created = call(
+        &control,
+        Method::BlockSplit {
+            block_id: third.block_id.clone(),
+            axis: Axis::Horizontal,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+        },
+    )
+    .await;
+    next_view(&mut events, &sid).await;
+    call_value(&control, Method::BlockFloat { block_id: floated.block_id.clone(), rect: Some(float_rect) }).await;
+    next_view(&mut events, &sid).await;
+    call_value(&control, Method::BlockFocus { block_id: third.block_id.clone() }).await;
+    next_view(&mut events, &sid).await;
+    call_value(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: third.window_id.clone(), axis: Axis::Horizontal }).await;
+    let view = next_view(&mut events, &sid).await;
+    let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
+    assert_eq!(order, [created.window_id.clone(), other.window_id.clone()]);
+    assert_eq!(view.session.active_window, other.window_id);
+    let merged = &view.session.windows[1];
+    assert_eq!(merged.layout.blocks(), [other.block_id.clone(), third.block_id.clone()]);
+    assert!(matches!(&merged.layout, silo_proto::model::Layout::Split { axis: Axis::Horizontal, ratio, .. } if (*ratio - 0.5).abs() < 1e-6));
+    assert_eq!(merged.floats.len(), 1);
+    assert_eq!(merged.floats[0].id, floated.block_id);
+    assert_eq!(merged.floats[0].rect, float_rect);
+    assert_eq!(merged.focused, third.block_id);
+    let moved = view.blocks.iter().find(|b| b.id == third.block_id).expect("the moved block is still in the session");
+    assert_eq!(moved.pid, third_pid);
+    assert!(moved.exited.is_none());
+
+    // Into itself, from another session, or unknown: refused, nothing changes.
+    let err =
+        call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: other.window_id.clone(), axis: Axis::Vertical }).await;
+    assert!(err.to_string().contains("itself"), "{err}");
+    let elsewhere: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
+    let err =
+        call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: elsewhere.window_id.clone(), axis: Axis::Vertical })
+            .await;
+    assert!(err.to_string().contains("different sessions"), "{err}");
+    let err = call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: "wmissing".into(), axis: Axis::Vertical }).await;
+    assert!(err.to_string().contains("not_found"), "{err}");
+    let unchanged: SessionView = call(&control, Method::SessionView { session_id: sid.clone() }).await;
+    assert_eq!(unchanged.session.revision, view.session.revision);
     call_value(&control, Method::ServerShutdown { force: false }).await;
 }
 

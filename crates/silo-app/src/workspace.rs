@@ -119,6 +119,13 @@ pub struct Workspace {
     /// scroll-into-view of the active tab (window id, frames left).
     pub(crate) tab_last_active: std::cell::RefCell<Option<(hosts::TabPosition, String)>>,
     pub(crate) tab_reveal: std::cell::RefCell<Option<(String, u16)>>,
+    /// The tab strip keeps the active tab in view as its layout changes (a
+    /// hovered tab growing its close button, titles loading, the strip
+    /// narrowing), until the user scrolls it; a newly active tab resumes it.
+    pub(crate) tab_follow: std::cell::Cell<bool>,
+    /// The active tab's span, its strip's length and scroll range when last
+    /// checked: a change asks for one more frame to check the new layout.
+    pub(crate) tab_seen: std::cell::Cell<Option<[f32; 4]>>,
     /// Side tabs: the sidebar's scrolling list, the height left below it
     /// last frame (as `tab_room`), whether this window hides the sidebar,
     /// and, while its edge is dragged, where on it the press was and its
@@ -127,8 +134,8 @@ pub struct Workspace {
     pub(crate) sidebar_room: std::rc::Rc<std::cell::Cell<f32>>,
     pub(crate) sidebar_hidden: bool,
     pub(crate) sidebar_resize: Option<(f32, f32)>,
-    /// Tab under a dragged tab and whether the drop lands after it.
-    pub(crate) tab_drop: Option<(usize, bool)>,
+    /// Where a dragged tab would drop: between tabs, or onto one to merge.
+    pub(crate) tab_drop: Option<crate::titlebar::TabDrop>,
     /// The tab being dragged (window id), while its drag lasts.
     pub(crate) tab_dragging: Option<String>,
     pub(crate) float_drag: Option<crate::floats::FloatDrag>,
@@ -301,6 +308,8 @@ impl Workspace {
             tab_room: std::rc::Rc::default(),
             tab_last_active: std::cell::RefCell::new(None),
             tab_reveal: std::cell::RefCell::new(None),
+            tab_follow: std::cell::Cell::new(true),
+            tab_seen: std::cell::Cell::new(None),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_room: std::rc::Rc::default(),
             sidebar_hidden: false,

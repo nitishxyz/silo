@@ -313,9 +313,12 @@ pub fn need(method: &Method) -> Need {
         M::WindowSelect { .. } | M::WindowStep { .. } | M::UiOpenSession { .. } => rights(Session(SESSION), Interact),
 
         M::SessionRename { .. } | M::SessionClose { .. } | M::WindowCreate { .. } => rights(Session(SESSION), Control),
-        M::WindowClose { .. } | M::WindowRename { .. } | M::WindowMove { .. } | M::LayoutRatio { .. } | M::LayoutEqualize { .. } => {
-            rights(Window(WINDOW), Control)
-        }
+        M::WindowClose { .. }
+        | M::WindowRename { .. }
+        | M::WindowMove { .. }
+        | M::WindowMerge { .. }
+        | M::LayoutRatio { .. }
+        | M::LayoutEqualize { .. } => rights(Window(WINDOW), Control),
         M::BlockSplit { .. }
         | M::BlockSpawn { .. }
         | M::BlockPark { .. }

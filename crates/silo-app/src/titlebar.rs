@@ -44,16 +44,21 @@ const TAB_HEIGHT: f32 = 26.0;
 const TAB_GAP: f32 = 4.0;
 /// Longest tab, title ellipsized beyond it.
 const TAB_MAX: f32 = 190.0;
-/// Leading and trailing padding inside a tab pill.
+/// Trailing padding inside a tab pill.
 const TAB_PAD: f32 = 10.0;
+/// The tab's icon, and its inset from the pill's left edge: the same as
+/// from its top and bottom, so it sits centred in the pill's rounded end.
+const TAB_ICON: f32 = 12.0;
+const ICON_INSET: f32 = (TAB_HEIGHT - TAB_ICON) / 2.0;
 /// A shown close button sits at the pill's left end this far from its
 /// left, top and bottom edges alike, so it is concentric with the pill's
 /// rounded end.
 const CLOSE_INSET: f32 = 4.0;
-/// Close button diameter (the pill's height less the inset above and below)
-/// and its space before the icon; both collapse to zero when the tab is not
-/// hovered.
+/// Close button diameter: the pill's height less the inset above and below.
 const CLOSE_SIZE: f32 = TAB_HEIGHT - 2.0 * CLOSE_INSET;
+/// How far the close button reaches past the icon it replaces on each side.
+const CLOSE_OVERHANG: f32 = (CLOSE_SIZE - TAB_ICON) / 2.0;
+/// The side tabs' space before their close button.
 const CLOSE_GAP: f32 = 4.0;
 /// Gap between the session pill and the first tab.
 const PILL_GAP: f32 = TAB_GAP;
@@ -119,6 +124,45 @@ pub fn drop_index(from: usize, target: usize, after: bool) -> Option<usize> {
     (to != from).then_some(to)
 }
 
+/// Where a dragged tab would land: between tabs, or onto one to merge into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabDrop {
+    /// Reorder: before or after the tab at `target`.
+    Insert { target: usize, after: bool },
+    /// Move all of the dragged tab's blocks into the tab at `target`.
+    Merge { target: usize },
+}
+
+impl TabDrop {
+    pub(crate) fn target(self) -> usize {
+        match self {
+            Self::Insert { target, .. } | Self::Merge { target } => target,
+        }
+    }
+}
+
+/// The drop for a pointer at `at` along a tab spanning `start..end` on the
+/// strip's axis: its middle half merges (when `merge` is offered), its ends
+/// reorder before or after it.
+#[must_use]
+pub(crate) fn tab_drop_at(target: usize, start: f32, end: f32, at: f32, merge: bool) -> TabDrop {
+    let quarter = (end - start) / 4.0;
+    if merge && at > start + quarter && at < end - quarter {
+        return TabDrop::Merge { target };
+    }
+    TabDrop::Insert { target, after: at > (start + end) / 2.0 }
+}
+
+/// Whether `drop` changes anything for the tab at `from`: not a reorder to
+/// its own place, not a merge into itself.
+#[must_use]
+pub(crate) fn tab_drop_does_something(from: usize, drop: TabDrop) -> bool {
+    match drop {
+        TabDrop::Insert { target, after } => drop_index(from, target, after).is_some(),
+        TabDrop::Merge { target } => target != from,
+    }
+}
+
 /// A tab being dragged; also renders the pill that follows the pointer.
 #[derive(Clone)]
 struct TabDrag {
@@ -139,13 +183,14 @@ impl Render for TabDrag {
             .items_center()
             .h(px(TAB_HEIGHT))
             .max_w(px(TAB_MAX))
-            .px(px(TAB_PAD))
+            .pl(px(ICON_INSET))
+            .pr(px(TAB_PAD))
             .glass(TAB_HEIGHT / 2.0)
             .capsule()
             .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .text_size(px(12.0))
-            .child(icon(self.icon, 12.0, self.chrome.accent))
+            .child(icon(self.icon, TAB_ICON, self.chrome.accent))
             .child(div().ml(px(6.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()));
         div().pl(self.offset.x + px(10.0)).pt(self.offset.y + px(10.0)).child(pill)
     }
@@ -293,7 +338,9 @@ impl Workspace {
             .min_w_0()
             .flex_shrink(1.0)
             .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll);
+            .track_scroll(&self.tab_scroll)
+            // Scrolled by hand: stop pulling the active tab back into view.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.tab_follow.set(false)));
         let mut ghosts: Vec<&TabGhost> = self.motion.tab_ghosts.iter().collect();
         ghosts.sort_by_key(|g| g.index);
         let mut ghosts = ghosts.into_iter().peekable();
@@ -361,7 +408,7 @@ impl Workspace {
             .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
                 if ev.bounds.contains(&ev.event.position) {
                     let id = ev.drag(cx).window_id.clone();
-                    this.set_tab_drop(&id, Some((last, true)), cx);
+                    this.set_tab_drop(&id, Some(TabDrop::Insert { target: last, after: true }), cx);
                 }
             }));
         let drop_zone = div()
@@ -378,8 +425,8 @@ impl Workspace {
                 }
             }))
             .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
-                if let Some((target, after)) = this.tab_drop.take() {
-                    this.move_tab(&drag.window_id, target, after, cx);
+                if let Some(drop) = this.tab_drop.take() {
+                    this.drop_tab(&drag.window_id, drop, cx);
                 }
                 cx.notify();
             }));
@@ -387,12 +434,16 @@ impl Workspace {
     }
 
     /// Scroll the active tab into view once it changes, or the tabs move
-    /// between the titlebar and the sidebar.
+    /// between the titlebar and the sidebar; while following
+    /// ([`Workspace::tab_follow`]), check it again on every frame.
     fn note_active_tab(&self, position: TabPosition, active_id: &str) {
         let key = Some((position, active_id.to_owned()));
         if *self.tab_last_active.borrow() != key {
             *self.tab_last_active.borrow_mut() = key;
+            self.tab_follow.set(true);
             *self.tab_reveal.borrow_mut() = Some((active_id.to_owned(), REVEAL_FRAMES));
+        } else if self.tab_follow.get() && self.tab_reveal.borrow().is_none() {
+            *self.tab_reveal.borrow_mut() = Some((active_id.to_owned(), 1));
         }
     }
 
@@ -438,6 +489,12 @@ impl Workspace {
                 if (next - from).abs() > 0.01 {
                     scroll.set_offset(if vertical { gpui::point(offset.x, px(next)) } else { gpui::point(px(next), offset.y) });
                 }
+                // The layout moved since the last check (a tab growing or
+                // shrinking): one more frame checks where it settles.
+                let seen = [along(item.origin) - along(viewport.origin) - from, extent(item.size), extent(viewport.size), along(scroll.max_offset())];
+                if self.tab_seen.replace(Some(seen)) != Some(seen) {
+                    window.request_animation_frame();
+                }
                 entering || (target - next).abs() > 0.01
             }
             // Not laid out yet (a brand-new tab): try next frame.
@@ -475,7 +532,13 @@ impl Workspace {
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
-        let insert = self.tab_drop.filter(|&(target, _)| target == index && self.tab_dragging.is_some()).map(|(_, after)| after);
+        let drop = self.tab_drop.filter(|d| d.target() == index && self.tab_dragging.is_some());
+        let insert = match drop {
+            Some(TabDrop::Insert { after, .. }) => Some(after),
+            _ => None,
+        };
+        // Dropped here, the dragged tab's blocks join this one: outlined.
+        let merging = matches!(drop, Some(TabDrop::Merge { .. }));
         let workspace = cx.entity().downgrade();
         let window_id = w.id.clone();
         let group = format!("tab-{}", w.id);
@@ -490,37 +553,50 @@ impl Workspace {
             .items_center()
             .h(px(TAB_HEIGHT))
             .min_w_0()
-            // Balanced padding at rest. A shown close button takes the
-            // leading padding down to `CLOSE_INSET`, so it sits in the
-            // pill's left end.
-            .pl(px(TAB_PAD - (TAB_PAD - CLOSE_INSET) * close))
+            // The icon sits `ICON_INSET` from the left, top and bottom alike.
+            .pl(px(ICON_INSET))
             .pr(px(TAB_PAD))
             .capsule()
             .when(several && selected, |el| el.bg(fill))
             .when(!selected, |el| el.group_hover(group.clone(), |s| s.bg(hover)))
-            // Zero width unless this tab is hovered; grows and fades in.
-            .when(close > 0.0, |el| {
-                el.child(
-                    div().flex().flex_none().justify_end().w(px((CLOSE_SIZE + CLOSE_GAP) * close)).overflow_hidden().opacity(close).child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("close-{}", w.id).into()))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(CLOSE_SIZE))
-                            .mr(px(CLOSE_GAP))
-                            .flex_none()
-                            .capsule()
-                            .hover(|s| s.bg(hover))
-                            .child(icon("close", 12.0, chrome.icon))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close(crate::close_confirm::CloseTarget::Tab(window_id.clone()), window, cx);
-                            })),
-                    ),
-                )
-            })
-            .child(self.block_icon_view(&w.focused, "tab", 12.0, if primary { chrome.accent } else { chrome.icon }, cx))
+            .when(merging, |el| el.bg(hover).border_1().border_color(rgb(chrome.accent)))
+            // Hovered, the close button takes the icon's place, centred on it
+            // (`CLOSE_INSET` from the pill's left, top and bottom): the tab
+            // keeps its width, so hovering never shifts the strip.
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .size(px(TAB_ICON))
+                    .child(div().size_full().opacity(1.0 - close).child(self.block_icon_view(
+                        &w.focused,
+                        "tab",
+                        TAB_ICON,
+                        if primary { chrome.accent } else { chrome.icon },
+                        cx,
+                    )))
+                    .when(close > 0.0, |el| {
+                        el.child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("close-{}", w.id).into()))
+                                .absolute()
+                                .top(px(-CLOSE_OVERHANG))
+                                .left(px(-CLOSE_OVERHANG))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(CLOSE_SIZE))
+                                .capsule()
+                                .opacity(close)
+                                .hover(|s| s.bg(hover))
+                                .child(icon("close", 12.0, chrome.icon))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close(crate::close_confirm::CloseTarget::Tab(window_id.clone()), window, cx);
+                                })),
+                        )
+                    }),
+            )
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
             .when_some(self.window_mark(w), |el, mark| {
                 let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
@@ -583,9 +659,10 @@ impl Workspace {
             })
             .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
                 if ev.bounds.contains(&ev.event.position) {
-                    let after = ev.event.position.x > ev.bounds.center().x;
+                    let (b, at) = (ev.bounds, ev.event.position.x);
+                    let drop = tab_drop_at(index, f32::from(b.left()), f32::from(b.right()), f32::from(at), this.merges_tabs());
                     let id = ev.drag(cx).window_id.clone();
-                    this.set_tab_drop(&id, Some((index, after)), cx);
+                    this.set_tab_drop(&id, Some(drop), cx);
                 }
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -596,14 +673,52 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Record where a drag of `window_id` would drop; a no-op spot clears it.
-    fn set_tab_drop(&mut self, window_id: &str, drop: Option<(usize, bool)>, cx: &mut Context<Self>) {
+    /// Record where a drag of `window_id` would drop; a no-op spot (its own
+    /// place, or onto itself) clears it.
+    pub(crate) fn set_tab_drop(&mut self, window_id: &str, drop: Option<TabDrop>, cx: &mut Context<Self>) {
         let from = self.view.as_ref().and_then(|v| v.session.windows.iter().position(|w| w.id == window_id));
-        let drop = drop.filter(|&(target, after)| from.is_some_and(|from| drop_index(from, target, after).is_some()));
+        let drop = drop.filter(|&drop| from.is_some_and(|from| tab_drop_does_something(from, drop)));
         if self.tab_drop != drop {
             self.tab_drop = drop;
             cx.notify();
         }
+    }
+
+    /// Whether this host can merge tabs (`window.merge`).
+    pub(crate) fn merges_tabs(&self) -> bool {
+        self.host_supports(silo_proto::compat::feature::WINDOW_MERGE)
+    }
+
+    pub(crate) fn drop_tab(&mut self, window_id: &str, drop: TabDrop, cx: &mut Context<Self>) {
+        match drop {
+            TabDrop::Insert { target, after } => {
+                self.move_tab(window_id, target, after, cx);
+            }
+            TabDrop::Merge { target } => {
+                self.merge_tab(window_id, target, cx);
+            }
+        }
+    }
+
+    /// Move every block of tab `window_id` into the tab at `target`, beside
+    /// its layout along the target's longer side. The server applies it (its
+    /// `session.changed` follows at once); a failure is flashed.
+    fn merge_tab(&mut self, window_id: &str, target: usize, cx: &mut Context<Self>) {
+        let Some(into) = self.view.as_ref().and_then(|v| v.session.windows.get(target)).map(|w| w.id.clone()) else {
+            return;
+        };
+        if into == window_id {
+            return;
+        }
+        let axis = self.merge_axis();
+        let method = Method::WindowMerge { window_id: into, source: window_id.to_owned(), axis };
+        self.call_optimistic(method, "Couldn't merge tabs", |_| {}, cx);
+    }
+
+    /// Side by side when the pane area is wider than tall, else stacked.
+    fn merge_axis(&self) -> silo_proto::model::Axis {
+        let area = self.motion.measured.area.get();
+        if area.is_some_and(|b| b.size.height > b.size.width) { silo_proto::model::Axis::Vertical } else { silo_proto::model::Axis::Horizontal }
     }
 
     /// Move a tab locally for an instant drop, then on the server, whose
@@ -851,10 +966,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_close_button_is_as_far_from_the_pills_left_top_and_bottom() {
+    fn a_tabs_middle_merges_and_its_ends_reorder() {
+        // A tab from 100 to 200: quarters at 125 and 175.
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 110.0, true), TabDrop::Insert { target: 3, after: false });
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 130.0, true), TabDrop::Merge { target: 3 });
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 170.0, true), TabDrop::Merge { target: 3 });
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 190.0, true), TabDrop::Insert { target: 3, after: true });
+        // A host without window.merge: the whole tab reorders, by halves.
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 140.0, false), TabDrop::Insert { target: 3, after: false });
+        assert_eq!(tab_drop_at(3, 100.0, 200.0, 160.0, false), TabDrop::Insert { target: 3, after: true });
+        // Onto itself, or back to its own place: nothing to do.
+        assert!(!tab_drop_does_something(3, TabDrop::Merge { target: 3 }));
+        assert!(tab_drop_does_something(3, TabDrop::Merge { target: 1 }));
+        assert!(!tab_drop_does_something(3, TabDrop::Insert { target: 3, after: true }));
+        assert!(!tab_drop_does_something(3, TabDrop::Insert { target: 4, after: false }));
+        assert!(tab_drop_does_something(3, TabDrop::Insert { target: 1, after: false }));
+    }
+
+    #[test]
+    fn the_close_button_and_the_icon_are_as_far_from_the_pills_left_as_from_its_top_and_bottom() {
         let top = (TAB_HEIGHT - CLOSE_SIZE) / 2.0;
         assert!((top - CLOSE_INSET).abs() < f32::EPSILON, "top and bottom {top}, left {CLOSE_INSET}");
         const { assert!(CLOSE_SIZE >= 16.0, "still a comfortable target") };
+        let icon_top = (TAB_HEIGHT - TAB_ICON) / 2.0;
+        assert!((icon_top - ICON_INSET).abs() < f32::EPSILON, "icon: top and bottom {icon_top}, left {ICON_INSET}");
+        // The close button replaces the icon in place: the same centre.
+        assert!((ICON_INSET + TAB_ICON / 2.0 - (CLOSE_INSET + CLOSE_SIZE / 2.0)).abs() < f32::EPSILON);
+        assert!((ICON_INSET - CLOSE_OVERHANG - CLOSE_INSET).abs() < f32::EPSILON);
     }
 
     /// The tab strip's layout (as `render_titlebar` builds it) while a closing tab collapses: the strip

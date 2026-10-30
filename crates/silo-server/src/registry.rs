@@ -1262,6 +1262,37 @@ impl Registry {
         Ok(())
     }
 
+    /// Move every block of window `source` into window `target` of the same
+    /// session and close `source`: its layout becomes the second side of a
+    /// split with the target's along `axis` (arrangement and ratios kept),
+    /// its floats are added on top, and the block it had focused takes
+    /// focus. The target becomes the active window. No block restarts.
+    pub fn merge_window(&mut self, target: &str, source: &str, axis: Axis) -> Result<(), RpcError> {
+        if target == source {
+            return Err(RpcError::bad_request("cannot merge a window into itself"));
+        }
+        let (si, ti) = self.locate_window(target)?;
+        let (source_si, wi) = self.locate_window(source)?;
+        if source_si != si {
+            return Err(RpcError::bad_request("windows of different sessions cannot merge"));
+        }
+        let session = &mut self.sessions[si];
+        let moved = session.windows.remove(wi);
+        let ti = if wi < ti { ti - 1 } else { ti };
+        let window = &mut session.windows[ti];
+        let layout = std::mem::replace(&mut window.layout, Layout::Unknown);
+        window.layout = Layout::Split { axis, ratio: 0.5, first: Box::new(layout), second: Box::new(moved.layout) };
+        window.floats.extend(moved.floats);
+        window.zoomed = false;
+        // Its focus history after the target's, the block it had focused in front.
+        window.history.extend(moved.history.into_iter().filter(|b| b != &moved.focused));
+        window.focus(&moved.focused);
+        session.active_window = target.to_owned();
+        self.session_changed(si);
+        self.sessions_changed();
+        Ok(())
+    }
+
     pub fn rename_session(&mut self, session_id: &str, name: String) -> Result<(), RpcError> {
         if name.is_empty() {
             return Err(RpcError::bad_request("empty name"));

@@ -72,6 +72,9 @@ pub mod feature {
     /// ([`crate::kind::DOWNLOAD_HELLO`]). Older servers answer
     /// `method_not_found`; the app hides the browser there.
     pub const FILES_OPS: &str = "files_ops";
+    /// `window.merge`: one tab's blocks move into another's layout. Older
+    /// servers answer `method_not_found`; the app only reorders there.
+    pub const WINDOW_MERGE: &str = "window_merge";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -92,6 +95,7 @@ pub const FEATURES: &[&str] = &[
     feature::SEARCH,
     feature::PERMISSIONS,
     feature::FILES_OPS,
+    feature::WINDOW_MERGE,
 ];
 
 /// Features this build's server supports that a client advertises only

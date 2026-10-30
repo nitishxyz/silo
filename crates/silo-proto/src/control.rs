@@ -374,6 +374,14 @@ pub enum Method {
     WindowRename { window_id: WindowId, name: Option<String> },
     #[serde(rename = "window.move")]
     WindowMove { window_id: WindowId, index: usize },
+    /// Move every block of window `source` into window `window_id` (both in
+    /// one session) and close `source`: its layout goes beside the target's
+    /// as one split along `axis` (second, right or below), keeping its
+    /// arrangement and ratios; its floats come along; focus goes to the
+    /// block `source` had focused. No block restarts. Feature
+    /// `window_merge`; older servers answer `method_not_found`.
+    #[serde(rename = "window.merge")]
+    WindowMerge { window_id: WindowId, source: WindowId, axis: Axis },
 
     /// One block's metadata and status.
     #[serde(rename = "block.view")]
@@ -924,6 +932,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("window.close", "Close a window and its blocks."),
     ("window.rename", "Set or clear a window's name."),
     ("window.move", "Move a window to a new index."),
+    ("window.merge", "Move every block of one window into another of its session and close it."),
     ("block.view", "One block's metadata and status."),
     ("block.split", "Split a block, starting a new terminal, browser, agent or files block next to it."),
     ("block.spawn", "Start a parked terminal or command block owned by a block."),

@@ -14291,6 +14291,42 @@
         "type": "object"
       }
     },
+    "window.merge": {
+      "params": {
+        "$defs": {
+          "Axis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "axis": {
+            "$ref": "#/$defs/Axis"
+          },
+          "source": {
+            "type": "string"
+          },
+          "window_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "window_id",
+          "source",
+          "axis"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "window.move": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

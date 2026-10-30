@@ -557,6 +557,10 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().move_window(&window_id, index)?;
             Ok(json!({}))
         }
+        Method::WindowMerge { window_id, source, axis } => {
+            server.registry.lock().unwrap().merge_window(&window_id, &source, axis)?;
+            Ok(json!({}))
+        }
         Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref() };
             to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
