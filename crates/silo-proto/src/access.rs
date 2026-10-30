@@ -246,7 +246,9 @@ pub fn need(method: &Method) -> Need {
         | M::FilesRead(_)
         | M::FilesReadImage(_)
         | M::FilesFind(_)
-        | M::FilesSearch(_) => rights(Block(BLOCK), View),
+        | M::FilesSearch(_)
+        | M::FilesGit(_)
+        | M::FilesDiff(_) => rights(Block(BLOCK), View),
         M::FilesSet(_)
         | M::FilesRoot(_)
         | M::FilesWrite(_)
@@ -256,11 +258,21 @@ pub fn need(method: &Method) -> Need {
         | M::FilesCopy(_)
         | M::FilesMove(_)
         | M::FilesTrash(_) => rights(Block(BLOCK), Interact),
-        M::ChangesStatus(_) | M::ChangesDiff(_) => rights(Block(BLOCK), View),
+        M::ChangesStatus(_) | M::ChangesDiff(_) | M::ChangesPr(_) | M::ChangesConflict(_) => rights(Block(BLOCK), View),
         M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => rights(Folder("root"), View),
-        M::ChangesSet(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) | M::ChangesCommit(_) | M::ChangesRoot(_) => {
-            rights(Block(BLOCK), Interact)
-        }
+        M::ChangesSet(_)
+        | M::ChangesStage(_)
+        | M::ChangesUnstage(_)
+        | M::ChangesRevert(_)
+        | M::ChangesCommit(_)
+        | M::ChangesRoot(_)
+        | M::ChangesPull(_)
+        | M::ChangesFetch(_)
+        | M::ChangesResolve(_)
+        | M::ChangesContinue(_)
+        | M::ChangesAbort(_) => rights(Block(BLOCK), Interact),
+        // They publish the user's work under the user's accounts.
+        M::ChangesPush(_) | M::ChangesPrCreate(_) => approved(Owner),
         M::BlockReport(_)
         | M::BlockNotify(_)
         | M::BrowserClick(_)
@@ -477,6 +489,22 @@ mod tests {
             assert_eq!(need(&method), rights(Target::Block("block_id"), Rights::Interact), "{method:?}");
         }
         assert_eq!(need(&read), rights(Target::Block("block_id"), Rights::View));
+    }
+
+    #[test]
+    fn publishing_changes_is_an_approved_owner_action() {
+        use crate::changes::{ChangesPrCreateParams, ChangesPushParams, ChangesStatusParams};
+        let b = || ChangesStatusParams { block_id: "b".into() };
+        let push = Method::ChangesPush(ChangesPushParams { block_id: "b".into() });
+        let pr =
+            Method::ChangesPrCreate(ChangesPrCreateParams { block_id: "b".into(), title: "t".into(), body: String::new(), base: None, draft: false });
+        for method in [push, pr] {
+            assert_eq!(need(&method), approved(Rights::Owner), "{method:?}");
+        }
+        for method in [Method::ChangesPull(b()), Method::ChangesFetch(b()), Method::ChangesContinue(b()), Method::ChangesAbort(b())] {
+            assert_eq!(need(&method), rights(Target::Block("block_id"), Rights::Interact), "{method:?}");
+        }
+        assert_eq!(need(&Method::ChangesPr(b())), rights(Target::Block("block_id"), Rights::View));
     }
 
     #[test]

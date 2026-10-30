@@ -2,6 +2,7 @@
 
 mod browser;
 mod changes;
+mod changes_sync;
 mod close_guard;
 mod compat;
 mod dock;

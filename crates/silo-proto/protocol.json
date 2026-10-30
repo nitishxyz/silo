@@ -1491,6 +1491,15 @@
         ],
         "type": "string"
       },
+      "SyncOp": {
+        "enum": [
+          "push",
+          "pull",
+          "fetch",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "TermSize": {
         "properties": {
           "cell_height": {
@@ -2195,6 +2204,38 @@
           },
           "event": {
             "const": "changes.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              },
+              "op": {
+                "$ref": "#/$defs/SyncOp"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_id",
+              "op",
+              "text"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "changes.progress",
             "type": "string"
           }
         },
@@ -7427,6 +7468,190 @@
         "type": "object"
       }
     },
+    "changes.abort": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
     "changes.commit": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7463,6 +7688,282 @@
           "summary"
         ],
         "title": "ChangesCommitted",
+        "type": "object"
+      }
+    },
+    "changes.conflict": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ConflictRegion": {
+            "properties": {
+              "base": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ours": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ours_label": {
+                "default": "",
+                "type": "string"
+              },
+              "theirs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "theirs_label": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "line",
+              "ours",
+              "theirs"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "regions": {
+            "items": {
+              "$ref": "#/$defs/ConflictRegion"
+            },
+            "type": "array"
+          },
+          "whole": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "regions"
+        ],
+        "title": "ConflictFile",
+        "type": "object"
+      }
+    },
+    "changes.continue": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
         "type": "object"
       }
     },
@@ -7640,6 +8141,815 @@
         "type": "object"
       }
     },
+    "changes.fetch": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
+    "changes.pr": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "GhState": {
+            "oneOf": [
+              {
+                "enum": [
+                  "ready",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "missing",
+                "type": "string"
+              },
+              {
+                "const": "signed_out",
+                "type": "string"
+              },
+              {
+                "const": "not_github",
+                "type": "string"
+              }
+            ]
+          },
+          "PullRequest": {
+            "properties": {
+              "base": {
+                "type": "string"
+              },
+              "draft": {
+                "default": false,
+                "type": "boolean"
+              },
+              "number": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url",
+              "title",
+              "state",
+              "base"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "bases": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "body": {
+            "default": "",
+            "type": "string"
+          },
+          "gh": {
+            "$ref": "#/$defs/GhState"
+          },
+          "pr": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PullRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gh"
+        ],
+        "title": "ChangesPr",
+        "type": "object"
+      }
+    },
+    "changes.pr_create": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "body": {
+            "default": "",
+            "type": "string"
+          },
+          "draft": {
+            "default": false,
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "base": {
+            "type": "string"
+          },
+          "draft": {
+            "default": false,
+            "type": "boolean"
+          },
+          "number": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "url",
+          "title",
+          "state",
+          "base"
+        ],
+        "title": "PullRequest",
+        "type": "object"
+      }
+    },
+    "changes.pull": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
+    "changes.push": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "remote": {
+            "type": "string"
+          },
+          "set_upstream": {
+            "default": false,
+            "type": "boolean"
+          },
+          "up_to_date": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "remote",
+          "branch"
+        ],
+        "title": "ChangesPushed",
+        "type": "object"
+      }
+    },
+    "changes.resolve": {
+      "params": {
+        "$defs": {
+          "Take": {
+            "oneOf": [
+              {
+                "enum": [
+                  "ours",
+                  "theirs",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "both",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "regions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "take": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Take"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangedFile": {
+            "properties": {
+              "added": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "default": false,
+                "type": "boolean"
+              },
+              "old_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "removed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "staged": {
+                "default": false,
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              },
+              "unstaged": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ChangesTotals": {
+            "properties": {
+              "added": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "files": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "added",
+              "removed"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ahead": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "behind": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "totals": {
+            "$ref": "#/$defs/ChangesTotals"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "repo",
+          "files",
+          "totals"
+        ],
+        "title": "ChangesStatus",
+        "type": "object"
+      }
+    },
     "changes.revert": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7751,6 +9061,16 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7780,6 +9100,22 @@
             "type": "array"
           },
           "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
             "type": [
               "string",
               "null"
@@ -8737,6 +10073,16 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8766,6 +10112,22 @@
             "type": "array"
           },
           "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
             "type": [
               "string",
               "null"
@@ -8895,6 +10257,16 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8924,6 +10296,22 @@
             "type": "array"
           },
           "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
             "type": [
               "string",
               "null"
@@ -9066,6 +10454,16 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "RepoOp": {
+            "enum": [
+              "merge",
+              "rebase",
+              "cherry_pick",
+              "revert",
+              "unknown"
+            ],
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9095,6 +10493,22 @@
             "type": "array"
           },
           "head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepoOp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote": {
             "type": [
               "string",
               "null"
@@ -9455,6 +10869,180 @@
         "type": "object"
       }
     },
+    "files.diff": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "context": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "DiffLine": {
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LineKind"
+              },
+              "new": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "old": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "Hunk": {
+            "properties": {
+              "header": {
+                "default": "",
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "lines": {
+                "items": {
+                  "$ref": "#/$defs/DiffLine"
+                },
+                "type": "array"
+              },
+              "new_lines": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "new_start": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "old_lines": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "old_start": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "old_start",
+              "old_lines",
+              "new_start",
+              "new_lines",
+              "lines"
+            ],
+            "type": "object"
+          },
+          "LineKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "context",
+                  "added",
+                  "removed",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "no_newline",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "binary": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hunks": {
+            "items": {
+              "$ref": "#/$defs/Hunk"
+            },
+            "type": "array"
+          },
+          "old_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/FileStatus"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "status",
+          "hunks"
+        ],
+        "title": "FileDiff",
+        "type": "object"
+      }
+    },
     "files.find": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9499,6 +11087,82 @@
           "paths"
         ],
         "title": "FileFound",
+        "type": "object"
+      }
+    },
+    "files.git": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FileGitMark": {
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/FileStatus"
+              }
+            },
+            "required": [
+              "path",
+              "status"
+            ],
+            "type": "object"
+          },
+          "FileStatus": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "untracked",
+              "conflicted",
+              "type_changed",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/$defs/FileGitMark"
+            },
+            "type": "array"
+          },
+          "ignored": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "repo": {
+            "type": "boolean"
+          },
+          "truncated": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repo",
+          "files"
+        ],
+        "title": "FilesGit",
         "type": "object"
       }
     },

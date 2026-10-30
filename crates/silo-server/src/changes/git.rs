@@ -15,9 +15,14 @@ use silo_proto::control::RpcError;
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// `git commit`: its hooks may run formatters and tests.
 pub const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Push, pull and fetch: the network, and hooks.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(300);
 /// Most bytes kept from a command's stdout unless asked for more.
 pub const STDOUT_MAX: usize = 64 * 1024 * 1024;
 const STDERR_MAX: usize = 64 * 1024;
+
+/// What [`Git::on_line`] calls.
+type LineFn = Box<dyn FnMut(&str) + Send>;
 
 /// A command to run.
 pub struct Git<'a> {
@@ -27,6 +32,10 @@ pub struct Git<'a> {
     timeout: Duration,
     stdout_max: usize,
     stdin: Option<Vec<u8>>,
+    program: &'a str,
+    env: Vec<(&'static str, String)>,
+    /// Called with each line (or `\r` update) of stderr as it comes.
+    on_line: Option<LineFn>,
 }
 
 pub struct Output {
@@ -58,6 +67,9 @@ impl<'a> Git<'a> {
             timeout: TIMEOUT,
             stdout_max: STDOUT_MAX,
             stdin: None,
+            program: "git",
+            env: Vec::new(),
+            on_line: None,
         }
     }
 
@@ -84,17 +96,41 @@ impl<'a> Git<'a> {
         self
     }
 
+    /// Run `program` (`gh`, by its path) instead of git, with git's
+    /// environment rules.
+    #[must_use]
+    pub fn program(mut self, program: &'a str) -> Self {
+        self.program = program;
+        self
+    }
+
+    #[must_use]
+    pub fn env(mut self, key: &'static str, value: impl Into<String>) -> Self {
+        self.env.push((key, value.into()));
+        self
+    }
+
+    /// Hand stderr's lines to `f` as they come (git's `--progress`).
+    #[must_use]
+    pub fn on_line(mut self, f: impl FnMut(&str) + Send + 'static) -> Self {
+        self.on_line = Some(Box::new(f));
+        self
+    }
+
     /// Run it, whatever its exit code.
     ///
     /// # Errors
     /// `git` cannot start (`git`), or took longer than its timeout
     /// (`timeout`).
     pub fn output(self) -> Result<Output, RpcError> {
-        let mut command = Command::new("git");
+        let mut command = Command::new(self.program);
+        command.current_dir(self.root);
+        if self.program == "git" {
+            command.args(["-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.pager=cat"]);
+        }
         command
-            .current_dir(self.root)
-            .args(["-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.pager=cat"])
             .args(&self.args)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_PAGER", "cat")
             .env_remove("GIT_DIR")
@@ -108,7 +144,7 @@ impl<'a> Git<'a> {
             // Reads are parsed: git's own words, whatever the locale.
             command.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
         }
-        let mut child = command.spawn().map_err(|e| RpcError::new(RpcError::GIT, format!("git could not start: {e}")))?;
+        let mut child = command.spawn().map_err(|e| RpcError::new(RpcError::GIT, format!("{} could not start: {e}", self.program)))?;
         if let (Some(bytes), Some(mut pipe)) = (self.stdin, child.stdin.take()) {
             std::thread::spawn(move || {
                 let _ = pipe.write_all(&bytes);
@@ -116,7 +152,13 @@ impl<'a> Git<'a> {
         }
         let max = self.stdout_max;
         let stdout = child.stdout.take().map(|pipe| std::thread::spawn(move || capped(pipe, max)));
-        let stderr = child.stderr.take().map(|pipe| std::thread::spawn(move || capped(pipe, STDERR_MAX)));
+        let on_line = self.on_line;
+        let stderr = child.stderr.take().map(|pipe| {
+            std::thread::spawn(move || match on_line {
+                Some(f) => lines(pipe, STDERR_MAX, f),
+                None => capped(pipe, STDERR_MAX),
+            })
+        });
         let deadline = Instant::now() + self.timeout;
         let status = loop {
             match child.try_wait() {
@@ -125,7 +167,7 @@ impl<'a> Git<'a> {
                     let _ = child.kill();
                     let _ = child.wait();
                     let what = self.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
-                    return Err(RpcError::new(RpcError::TIMEOUT, format!("git {what} took longer than {} s", self.timeout.as_secs())));
+                    return Err(RpcError::new(RpcError::TIMEOUT, format!("{} {what} took longer than {} s", self.program, self.timeout.as_secs())));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(2)),
                 Err(e) => return Err(RpcError::internal(format!("git: {e}"))),
@@ -177,6 +219,39 @@ fn capped(mut pipe: impl Read, max: usize) -> (Vec<u8>, bool) {
             }
         }
     }
+}
+
+/// Like [`capped`], handing each line (split at `\n` or `\r`) to `f`.
+fn lines(mut pipe: impl Read, max: usize, mut f: LineFn) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut line = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match pipe.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                let text = String::from_utf8_lossy(&line);
+                if !text.trim().is_empty() {
+                    f(text.trim());
+                }
+                // Kept: whole lines, not `\r` progress updates.
+                if b == b'\n' && out.len() + line.len() < max {
+                    out.extend_from_slice(&line);
+                    out.push(b'\n');
+                }
+                line.clear();
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    if !line.is_empty() && out.len() + line.len() < max {
+        out.extend_from_slice(&line);
+    }
+    (out, false)
 }
 
 /// Split NUL-terminated `-z` output into fields.

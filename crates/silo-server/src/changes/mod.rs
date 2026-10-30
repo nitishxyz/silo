@@ -4,9 +4,12 @@
 //! command line in the block's root (the repo's top level) and watches the
 //! repo, sending `changes.changed`.
 
+pub mod conflict;
 pub mod diff;
 pub mod git;
+pub mod pr;
 pub mod status;
+pub mod sync;
 pub mod watch;
 pub mod write;
 
@@ -14,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use silo_proto::{
-    control::{ChangesSetParams, Method, RpcError},
+    changes::SyncOp,
+    control::{ChangesSetParams, Event, Method, RpcError},
     model::{AgentLink, BlockInfo, BlockKind, ChangeMark, ChangesScope, ChangesState, ReviewComment, TermSize},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -264,6 +268,54 @@ fn reply(value: &impl serde::Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(RpcError::internal)
 }
 
+/// [`blocking`] for a push, pull or fetch: what git says on the way is
+/// sent as `changes.progress` of `block_id`.
+async fn with_progress<T: Send + 'static>(
+    server: &Server,
+    block_id: &str,
+    op: SyncOp,
+    f: impl FnOnce(sync::Progress) -> Result<T, RpcError> + Send + 'static,
+) -> Result<T, RpcError> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut task = tokio::task::spawn_blocking(move || f(tx));
+    loop {
+        tokio::select! {
+            Some(text) = rx.recv() => server.registry.lock().unwrap().emit(Event::ChangesProgress { block_id: block_id.to_owned(), op, text }),
+            done = &mut task => return done.map_err(RpcError::internal)?,
+        }
+    }
+}
+
+/// Like [`view_of`]; `bad_request` outside the work tree's scopes, where
+/// conflicts are resolved.
+fn on_work_tree(server: &Server, block_id: &str) -> Result<(PathBuf, ChangesScope), RpcError> {
+    let (root, scope, _) = view_of(server, block_id)?;
+    if !matches!(scope, ChangesScope::Working | ChangesScope::Staged | ChangesScope::Unstaged) {
+        return Err(RpcError::bad_request("pick Working, Staged or Unstaged to resolve conflicts"));
+    }
+    Ok((root, scope))
+}
+
+/// A pull or fetch, then the status.
+async fn sync_status(server: &Server, block_id: &str, op: SyncOp) -> Result<Value, RpcError> {
+    let (root, scope, _) = view_of(server, block_id)?;
+    let run = move |tx| {
+        if op == SyncOp::Pull {
+            sync::pull(&root, Some(tx))?
+        } else {
+            sync::fetch(&root, Some(tx))?
+        }
+        status::status(&root, &scope)
+    };
+    reply(&with_progress(server, block_id, op, run).await?)
+}
+
+/// `f` (continue or abort), then the status.
+async fn op_status(server: &Server, block_id: &str, f: fn(&Path) -> Result<(), RpcError>) -> Result<Value, RpcError> {
+    let (root, scope, _) = view_of(server, block_id)?;
+    reply(&blocking(move || f(&root).and_then(|()| status::status(&root, &scope))).await?)
+}
+
 pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> {
     match method {
         Method::ChangesStatus(p) => {
@@ -310,6 +362,35 @@ pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> 
             let root = blocking(move || paths::new_root(Some(&current), &path).map(|dir| find_root(&dir))).await?;
             reply(&server.registry.lock().unwrap().changes_root(&p.block_id, &root)?)
         }
+        Method::ChangesPush(p) => {
+            let (root, _, _) = view_of(server, &p.block_id)?;
+            reply(&with_progress(server, &p.block_id, SyncOp::Push, move |tx| sync::push(&root, Some(tx))).await?)
+        }
+        Method::ChangesPull(p) => sync_status(server, &p.block_id, SyncOp::Pull).await,
+        Method::ChangesFetch(p) => sync_status(server, &p.block_id, SyncOp::Fetch).await,
+        Method::ChangesPr(p) => {
+            let (root, _, _) = view_of(server, &p.block_id)?;
+            reply(&blocking(move || pr::info(&root)).await?)
+        }
+        Method::ChangesPrCreate(p) => {
+            let (root, _, _) = view_of(server, &p.block_id)?;
+            let block = p.block_id.clone();
+            reply(&with_progress(server, &block, SyncOp::Push, move |tx| pr::create(&root, &p, Some(tx))).await?)
+        }
+        Method::ChangesConflict(p) => {
+            let (root, _, _) = view_of(server, &p.block_id)?;
+            reply(&blocking(move || Ok(conflict::conflict(&root, &check_path(&root, &p.path)?))).await?)
+        }
+        Method::ChangesResolve(p) => {
+            let (root, scope) = on_work_tree(server, &p.block_id)?;
+            let run = move || {
+                conflict::resolve(&root, &check_path(&root, &p.path)?, p.take, p.regions.as_deref())?;
+                status::status(&root, &scope)
+            };
+            reply(&blocking(run).await?)
+        }
+        Method::ChangesContinue(p) => op_status(server, &p.block_id, sync::resume).await,
+        Method::ChangesAbort(p) => op_status(server, &p.block_id, sync::abort).await,
         other => Err(RpcError::method_not_found(&silo_proto::api::method_name(&other))),
     }
 }

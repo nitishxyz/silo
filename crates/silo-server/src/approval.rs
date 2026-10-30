@@ -372,6 +372,10 @@ fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> St
         Method::GrantRevoke { id } => format!("Revoke grant {id}"),
         Method::AppHostsAdd { .. } => "Add a host to Silo".into(),
         Method::AppHostsRemove { host, .. } => format!("Remove the host {host} from Silo"),
+        Method::ChangesPush(_) => "Push a branch to its remote".into(),
+        Method::ChangesPrCreate(p) => {
+            format!("Push a branch and open the pull request \u{201c}{}\u{201d}", p.title.trim().chars().take(80).collect::<String>())
+        }
         other => format!("Run {}", silo_proto::api::method_name(other)),
     }
 }

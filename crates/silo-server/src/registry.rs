@@ -246,6 +246,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::BlockStatus { .. } | Event::BlockAttention { .. } | Event::CommandFinished { .. } => Some(feature::STATUS),
         Event::FilesChanged { .. } => Some(feature::FILES),
         Event::ChangesChanged { .. } => Some(feature::CHANGES),
+        Event::ChangesProgress { .. } => Some(feature::CHANGES_SYNC),
         Event::SessionsChanged { .. }
         | Event::SessionChanged { .. }
         | Event::SessionClosed { .. }
@@ -511,7 +512,8 @@ impl Registry {
             Event::BlockBell { block_id }
             | Event::BrowserCommand { block_id, .. }
             | Event::FilesChanged { block_id, .. }
-            | Event::ChangesChanged { block_id } => block(block_id),
+            | Event::ChangesChanged { block_id }
+            | Event::ChangesProgress { block_id, .. } => block(block_id),
             Event::BlockStatus { status } => block(&status.block_id),
             Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
             // Sent with `emit_clients` to their recipients only.

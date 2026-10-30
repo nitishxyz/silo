@@ -192,6 +192,9 @@ async fn split_lists_reads_and_finds() {
     std::fs::write(root.join("logo.svg"), "<svg/>").unwrap();
     let svg: FileImage = control.call(Method::FilesReadImage(FilesReadImageParams { block_id: id.into(), path: "logo.svg".into() })).await.unwrap();
     assert_eq!(svg.mime, "image/svg+xml");
+    std::fs::write(root.join("doc.pdf"), "%PDF-1.4\n%%EOF\n").unwrap();
+    let pdf: FileImage = control.call(Method::FilesReadImage(FilesReadImageParams { block_id: id.into(), path: "doc.pdf".into() })).await.unwrap();
+    assert_eq!((pdf.mime.as_str(), pdf.size), ("application/pdf", 15));
     let error = control.call_value(Method::FilesReadImage(FilesReadImageParams { block_id: id.into(), path: "a.txt".into() })).await.unwrap_err();
     assert_eq!(code(&error), "bad_request");
 
@@ -810,4 +813,54 @@ async fn uploads_land_in_a_folder_and_downloads_round_trip() {
 
     stop(control, task).await;
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+#[tokio::test]
+async fn git_marks_and_diffs_follow_the_changes_block() {
+    use silo_proto::control::{FileDiff, FileStatus, FilesDiffParams, FilesGit, FilesGitParams};
+    let (home, root) = temp("git");
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    let git = |args: &[&str]| {
+        let out =
+            std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&root).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "a.txt", ".gitignore", "src/main.rs", "src/model.rs"]);
+    git(&["commit", "-qm", "one"]);
+    std::fs::write(root.join("src/main.rs"), "fn main() { println!(); }\n").unwrap();
+    std::fs::write(root.join("src/new.rs"), "new\n").unwrap();
+    git(&["add", "src/new.rs"]);
+    std::fs::write(root.join("src/u.rs"), "u\n").unwrap();
+    let task = start(&home).await;
+    let (control, _events) = connect(&home).await;
+    let marks = |id: String| {
+        let control = control.clone();
+        async move { control.call::<FilesGit>(Method::FilesGit(FilesGitParams { block_id: id })).await.unwrap() }
+    };
+    let whole = files(&control, &root).await;
+    let all = marks(whole.block_id.clone()).await;
+    let status = |g: &FilesGit, p: &str| g.files.iter().find(|m| m.path == p).map(|m| m.status);
+    assert!(all.repo);
+    assert_eq!(status(&all, "src/main.rs"), Some(FileStatus::Modified));
+    assert_eq!(status(&all, "src/new.rs"), Some(FileStatus::Added));
+    assert_eq!(status(&all, "src/u.rs"), Some(FileStatus::Untracked));
+    assert_eq!(status(&all, "a.txt"), None);
+    assert!(all.ignored.contains(&"ignored".to_owned()) && all.ignored.contains(&"debug.log".to_owned()), "{:?}", all.ignored);
+
+    // Rooted in a subfolder: its paths, nothing from outside it.
+    let sub = files(&control, &root.join("src")).await;
+    let src = marks(sub.block_id.clone()).await;
+    assert_eq!(status(&src, "main.rs"), Some(FileStatus::Modified));
+    assert!(src.files.iter().all(|m| !m.path.contains("..") && !m.path.starts_with("src/")) && src.ignored.is_empty());
+    let diff: FileDiff =
+        control.call(Method::FilesDiff(FilesDiffParams { block_id: sub.block_id.clone(), path: "main.rs".into(), context: None })).await.unwrap();
+    assert_eq!((diff.path.as_str(), diff.status, diff.hunks.len()), ("main.rs", FileStatus::Modified, 1));
+    let error = control.call_value(Method::FilesDiff(FilesDiffParams { block_id: sub.block_id, path: "../a.txt".into(), context: None })).await;
+    assert!(error.is_err());
+
+    // Outside a repo: nothing.
+    let plain = files(&control, Path::new("/tmp")).await;
+    assert!(!marks(plain.block_id).await.repo);
+    stop(control, task).await;
 }

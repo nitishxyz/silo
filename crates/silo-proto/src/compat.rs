@@ -57,6 +57,12 @@ pub mod feature {
     /// `changes.changed` (docs/CHANGES_BLOCK.md). Older servers answer
     /// `method_not_found`; the app hides Changes there.
     pub const CHANGES: &str = "changes";
+    /// Changes blocks push, pull, fetch, open pull requests (`gh`) and
+    /// resolve conflicts: `changes.push`, `pull`, `fetch`, `pr`,
+    /// `pr_create`, `conflict`, `resolve`, `continue`, `abort`, and
+    /// `changes.progress`. Older servers answer `method_not_found`; the app
+    /// hides those actions there.
+    pub const CHANGES_SYNC: &str = "changes_sync";
     /// `search.files`, `search.grep` and `search.opened` (docs/FINDER.md
     /// §2). Older servers answer `method_not_found`; the app hides its
     /// Files and Grep categories there.
@@ -72,6 +78,10 @@ pub mod feature {
     /// ([`crate::kind::DOWNLOAD_HELLO`]). Older servers answer
     /// `method_not_found`; the app hides the browser there.
     pub const FILES_OPS: &str = "files_ops";
+    /// Files blocks show git's view: `files.git` (marks in the tree) and
+    /// `files.diff` (a file against `HEAD`). Older servers answer
+    /// `method_not_found`; the app shows no marks and no diff there.
+    pub const FILES_GIT: &str = "files_git";
     /// `window.merge`: one tab's blocks move into another's layout. Older
     /// servers answer `method_not_found`; the app only reorders there.
     pub const WINDOW_MERGE: &str = "window_merge";
@@ -92,10 +102,12 @@ pub const FEATURES: &[&str] = &[
     feature::DOCK_SIDES,
     feature::FILES_WRITE,
     feature::CHANGES,
+    feature::CHANGES_SYNC,
     feature::SEARCH,
     feature::PERMISSIONS,
     feature::FILES_OPS,
     feature::WINDOW_MERGE,
+    feature::FILES_GIT,
 ];
 
 /// Features this build's server supports that a client advertises only

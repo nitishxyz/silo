@@ -249,6 +249,16 @@ enum Command {
     },
     /// Float a block (or a session's focused block) over its window.
     Float { target: String },
+    /// Open a Files block at a folder, or showing a file: beside this block
+    /// inside Silo (reusing one in its tab whose folder holds the path), else
+    /// as a tab of the `files` session.
+    Files {
+        /// A folder or file (default: the current directory).
+        path: Option<PathBuf>,
+        /// Scroll the file to this line (1-based).
+        #[arg(short, long)]
+        line: Option<u64>,
+    },
     /// Close a session and its processes.
     Kill {
         target: String,
@@ -672,6 +682,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Hosts { .. }
                 | Command::Clipboard { .. }
                 | Command::Permissions { .. }
+                | Command::Files { .. }
         )
     {
         bail!("--host is not supported for this command");
@@ -875,6 +886,19 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             let capture: Capture = control.call(Method::TerminalCapture { block_id: block, history }).await?;
             let mut out = std::io::stdout().lock();
             writeln!(out, "{}", capture.text)?;
+            Ok(0)
+        }
+        Command::Files { path, line } => {
+            let (control, events, _net) = connect(host).await?;
+            let cwd = std::env::current_dir()?;
+            let path = path.unwrap_or_else(|| cwd.clone());
+            let cx = silo_tools::Context { default_session: "files".into(), cwd: Some(cwd), ..silo_tools::Context::default() };
+            let tools = silo_tools::Tools::new(control, events, cx);
+            let mut input = serde_json::json!({ "path": path });
+            if let Some(line) = line {
+                input["line"] = line.into();
+            }
+            tools.call("files_show", input, tokio_util::sync::CancellationToken::new()).await?;
             Ok(0)
         }
         Command::Float { target } => {
@@ -1530,7 +1554,8 @@ async fn otto_socket(silo_home: &std::path::Path, home: &std::path::Path) -> any
 /// Make the daemon in otto `home`, if any, this server's (at server start and
 /// before each `otto` service call): one serving another or an unknown
 /// (pre-`silo_home`) Silo home is stopped, and so is an older one serving this
-/// home, even when busy, so an upgrade moves otto along with the server.
+/// home, even when busy, so an upgrade moves otto along with the server; one
+/// still starting is waited for first (a start, or a second daemon, never races it).
 /// otto's recovery ends the turns it stopped as interrupted (sub-agents report
 /// that to their parents); a new prompt continues them. Whether a daemon to
 /// keep runs.
@@ -1547,6 +1572,11 @@ async fn otto_claim(silo_home: &std::path::Path, home: &std::path::Path) -> anyh
     // build) can speak another terminal format or protocol than this server.
     if ours && !older(&version, env!("CARGO_PKG_VERSION")) && otto.hello().build == silo_proto::BUILD {
         return Ok(true);
+    }
+    // Never stopped mid-start (a store migration can take a minute): replaced once ready.
+    if otto.starting().borrow().is_some() {
+        tracing::warn!(%version, "waiting for a starting otto daemon before replacing it");
+        otto.ready(|_| {}).await?;
     }
     if ours {
         let sessions = otto
@@ -1763,6 +1793,7 @@ mod tests {
         silo_home: &str,
         busy: bool,
         stops: bool,
+        starting: bool,
     ) -> (PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         use otto_proto::{Frame, Method, Request, ServerMessage, kind, read_frame, write_frame};
         let home = std::env::temp_dir().join(format!("silo-otto-{name}-{}", std::process::id()));
@@ -1788,8 +1819,18 @@ mod tests {
                     home: String::new(),
                     silo_home: silo_home.clone(),
                     build: build.clone(),
+                    starting: starting.then_some(otto_proto::Starting { phase: otto_proto::StartPhase::Migrating, step: 1, steps: 6 }),
                 };
                 let _ = write_frame(&mut stream, &Frame::json(kind::HELLO, &hello).unwrap()).await;
+                if starting {
+                    // A start takes a while; nothing may be asked of it before `server.ready` (else it hangs up).
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if stream.try_read(&mut [0; 1]).is_ok() {
+                        return;
+                    }
+                    let ready = ServerMessage::Event { seq: 1, session_id: None, event: Box::new(otto_proto::Event::ServerReady {}) };
+                    let _ = write_frame(&mut stream, &Frame::json(kind::CONTROL, &ready).unwrap()).await;
+                }
                 while let Ok(Some(frame)) = read_frame(&mut stream).await {
                     let Ok(request) = frame.parse::<Request>() else { continue };
                     let result = match request.method {
@@ -1819,7 +1860,7 @@ mod tests {
     /// Whether `otto_claim` keeps the daemon, whether it asked it to stop,
     /// and its error.
     async fn claim(name: &str, version: &str, build: &str, serves: &str, busy: bool, stops: bool) -> (Option<bool>, bool, String) {
-        let (home, asked) = fake_otto(name, version, build, serves, busy, stops).await;
+        let (home, asked) = fake_otto(name, version, build, serves, busy, stops, false).await;
         let result = otto_claim(std::path::Path::new("/here/silo"), &home).await;
         std::fs::remove_dir_all(&home).unwrap();
         let error = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
@@ -1842,6 +1883,19 @@ mod tests {
         assert_eq!(claim("old-idle", "0.0.1", build, "/here/silo", false, true).await, (Some(false), true, String::new()));
         assert_eq!(claim("rebuilt", current, "0000000000000000", "/here/silo", true, true).await, (Some(false), true, String::new()));
         assert_eq!(claim("no-build", current, "", "/here/silo", false, true).await, (Some(false), true, String::new()));
+    }
+
+    /// A starting daemon (a store migration) is kept when it is ours; another is replaced only once ready.
+    #[tokio::test]
+    async fn otto_claim_waits_for_a_starting_daemon() {
+        let (current, build) = (env!("CARGO_PKG_VERSION"), silo_proto::BUILD);
+        for (name, serves, kept) in [("starting-ours", "/here/silo", true), ("starting-other", "/elsewhere/silo", false)] {
+            let (home, asked) = fake_otto(name, current, build, serves, false, true, true).await;
+            let result = otto_claim(std::path::Path::new("/here/silo"), &home).await;
+            std::fs::remove_dir_all(&home).unwrap();
+            assert_eq!(result.ok(), Some(kept), "{name}");
+            assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), !kept, "{name}");
+        }
     }
 
     /// A daemon of another Silo that does not stop is refused, never reused.
@@ -1920,6 +1974,9 @@ mod tests {
     #[test]
     fn float_and_describe_commands() {
         assert!(matches!(Cli::parse_from(["silo", "float", "b1"]).command, Some(Command::Float { target }) if target == "b1"));
+        assert!(matches!(Cli::parse_from(["silo", "files"]).command, Some(Command::Files { path: None, line: None })));
+        let files = Cli::parse_from(["silo", "files", "src/main.rs", "-l", "12"]).command;
+        assert!(matches!(files, Some(Command::Files { path: Some(p), line: Some(12) }) if p == std::path::Path::new("src/main.rs")));
         let cli = Cli::parse_from(["silo", "api", "describe", "ping"]);
         assert!(matches!(cli.command, Some(Command::Api { command: ApiCommand::Describe { method } }) if method == "ping"));
     }

@@ -191,6 +191,25 @@ pub struct ChangesStatus {
     /// More than [`ChangesStatus::MAX_FILES`] files; the rest are left out.
     #[serde(default)]
     pub truncated: bool,
+    /// What git is in the middle of (a merge stopped on conflicts, say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<RepoOp>,
+    /// The remote `changes.push` goes to: the upstream's, else the only
+    /// remote (or `origin`). Feature [`crate::compat::feature::CHANGES_SYNC`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+}
+
+/// An operation stopped part way, for `changes.continue` / `changes.abort`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoOp {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    #[serde(other)]
+    Unknown,
 }
 
 impl ChangesStatus {
@@ -256,4 +275,165 @@ pub struct FileDiff {
 
 impl FileDiff {
     pub const MAX_BYTES: usize = 1024 * 1024;
+}
+
+/// `changes.push`: push the checked-out branch to its upstream; a branch
+/// without one goes to [`ChangesStatus::remote`] under its own name and
+/// gets it as its upstream. Progress comes as `changes.progress`.
+/// Feature [`crate::compat::feature::CHANGES_SYNC`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesPushParams {
+    pub block_id: BlockId,
+}
+
+/// `changes.push`'s result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesPushed {
+    pub remote: String,
+    pub branch: String,
+    /// The branch had no upstream; it has now.
+    #[serde(default)]
+    pub set_upstream: bool,
+    /// Nothing was new on the remote's side.
+    #[serde(default)]
+    pub up_to_date: bool,
+}
+
+/// `changes.progress`: what a running push, pull or fetch says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncOp {
+    Push,
+    Pull,
+    Fetch,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether `gh` can open pull requests here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GhState {
+    Ready,
+    /// `gh` isn't installed.
+    Missing,
+    /// `gh auth login` is needed.
+    SignedOut,
+    /// No remote of the repo is on GitHub.
+    NotGithub,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A pull request, as `gh pr view` has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    /// `open`, `closed` or `merged`.
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    /// The branch it merges into.
+    pub base: String,
+}
+
+/// `changes.pr`: the checked-out branch's pull request, or what a new one
+/// would start with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesPr {
+    pub gh: GhState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PullRequest>,
+    /// Branches it may merge into, the default first.
+    #[serde(default)]
+    pub bases: Vec<String>,
+    /// From the branch's commits since the default base.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// `changes.pr_create`: open a pull request of the checked-out branch with
+/// `gh pr create`, pushing it first when the remote lacks commits.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesPrCreateParams {
+    pub block_id: BlockId,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    /// The branch it merges into; omitted: the repo's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+}
+
+/// `changes.conflict`: a conflicted file's conflicts, from its markers.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesConflictParams {
+    pub block_id: BlockId,
+    pub path: String,
+}
+
+/// One `<<<<<<< … >>>>>>>` region.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConflictRegion {
+    /// Stable while the region's lines are: `changes.resolve` names it.
+    pub id: String,
+    /// 1-based line of its `<<<<<<<` in the work tree file.
+    pub line: u32,
+    /// Ours: the checked-out side (`HEAD`).
+    pub ours: Vec<String>,
+    /// The common ancestor's lines (`merge.conflictStyle diff3`/`zdiff3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Vec<String>>,
+    /// Theirs: the side coming in.
+    pub theirs: Vec<String>,
+    /// What git named each side (`HEAD`, a branch, a commit).
+    #[serde(default)]
+    pub ours_label: String,
+    #[serde(default)]
+    pub theirs_label: String,
+}
+
+/// `changes.conflict`'s result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConflictFile {
+    pub path: String,
+    /// In the file's order; empty once every region is resolved.
+    pub regions: Vec<ConflictRegion>,
+    /// Binary, or deleted on one side: only a whole side can be taken.
+    #[serde(default)]
+    pub whole: bool,
+}
+
+/// Which side a resolution takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Take {
+    Ours,
+    Theirs,
+    /// Ours, then theirs.
+    Both,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `changes.resolve`: with `take` and `regions`, rewrite those regions of
+/// the file as that side (a region gone is
+/// [`crate::control::RpcError::CONFLICT`]); with `take` alone, the whole
+/// file becomes that side and is marked resolved; neither: mark it
+/// resolved as it is (`git add`).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChangesResolveParams {
+    pub block_id: BlockId,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take: Option<Take>,
+    /// Region ids from `changes.conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regions: Option<Vec<String>>,
 }

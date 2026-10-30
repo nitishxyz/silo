@@ -43,7 +43,7 @@ impl Watch {
 }
 
 /// The repo's git directory (canonical), if `root` is in one.
-fn git_dir(root: &Path) -> Option<PathBuf> {
+pub(super) fn git_dir(root: &Path) -> Option<PathBuf> {
     let out = Git::read(root, ["rev-parse", "--absolute-git-dir"]).run().ok()?;
     PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).canonicalize().ok()
 }

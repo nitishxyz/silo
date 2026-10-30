@@ -258,6 +258,10 @@ pub enum Method {
     FilesTrash(FilesTrashParams),
     #[serde(rename = "files.search")]
     FilesSearch(FilesSearchParams),
+    #[serde(rename = "files.git")]
+    FilesGit(FilesGitParams),
+    #[serde(rename = "files.diff")]
+    FilesDiff(FilesDiffParams),
     #[serde(rename = "changes.status")]
     ChangesStatus(ChangesStatusParams),
     #[serde(rename = "changes.diff")]
@@ -274,6 +278,24 @@ pub enum Method {
     ChangesCommit(ChangesCommitParams),
     #[serde(rename = "changes.root")]
     ChangesRoot(ChangesRootParams),
+    #[serde(rename = "changes.push")]
+    ChangesPush(ChangesPushParams),
+    #[serde(rename = "changes.pull")]
+    ChangesPull(ChangesStatusParams),
+    #[serde(rename = "changes.fetch")]
+    ChangesFetch(ChangesStatusParams),
+    #[serde(rename = "changes.pr")]
+    ChangesPr(ChangesStatusParams),
+    #[serde(rename = "changes.pr_create")]
+    ChangesPrCreate(ChangesPrCreateParams),
+    #[serde(rename = "changes.conflict")]
+    ChangesConflict(ChangesConflictParams),
+    #[serde(rename = "changes.resolve")]
+    ChangesResolve(ChangesResolveParams),
+    #[serde(rename = "changes.continue")]
+    ChangesContinue(ChangesStatusParams),
+    #[serde(rename = "changes.abort")]
+    ChangesAbort(ChangesStatusParams),
     #[serde(rename = "search.files")]
     SearchFiles(SearchFilesParams),
     #[serde(rename = "search.grep")]
@@ -902,6 +924,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("files.move", "Move items of a files block into one of its folders (taken names get the next free one)."),
     ("files.trash", "Move items of a files block to the host's Trash."),
     ("files.search", "Find items of a files block whose name contains a query, under one folder."),
+    ("files.git", "Git marks of a files block's root: changed, untracked, conflicted and ignored paths."),
+    ("files.diff", "One file's diff against HEAD in a files block's repo."),
     ("changes.status", "The changed files of a changes block's scope, with the branch and line counts."),
     ("changes.diff", "One file's diff hunks in a changes block's scope."),
     ("changes.set", "Change a changes block's scope, tabs, layout, review comments, agent or marks."),
@@ -910,6 +934,15 @@ pub const METHODS: &[(&str, &str)] = &[
     ("changes.revert", "Discard a file's work tree changes, or some hunks of them (untracked files go to the Trash)."),
     ("changes.commit", "Commit the staged changes of a changes block's repo, running its hooks."),
     ("changes.root", "Review the git repo holding another folder in a changes block."),
+    ("changes.push", "Push a changes block's branch, setting its upstream on the first push; progress comes as changes.progress."),
+    ("changes.pull", "Pull the upstream into a changes block's branch (a merge or rebase may stop on conflicts)."),
+    ("changes.fetch", "Fetch a changes block's remote, so the status counts commits behind."),
+    ("changes.pr", "The branch's GitHub pull request (through gh), or a title, body and bases for a new one."),
+    ("changes.pr_create", "Open a GitHub pull request of a changes block's branch with gh, pushing it first."),
+    ("changes.conflict", "A conflicted file's conflict regions, both sides of each."),
+    ("changes.resolve", "Take a side of some conflict regions or a whole file, or mark a conflicted file resolved."),
+    ("changes.continue", "Continue the merge, rebase, cherry-pick or revert stopped in a changes block's repo."),
+    ("changes.abort", "Abort the merge, rebase, cherry-pick or revert stopped in a changes block's repo."),
     ("search.files", "Fuzzy-find files under a folder (fff query syntax: globs, !excludes, git:modified), frecency-ranked."),
     ("search.grep", "Search the text of the files under a folder (plain, regex or fuzzy), within a time budget."),
     ("search.opened", "Record that a file under a folder was opened, so it ranks higher in later searches."),
@@ -1203,6 +1236,7 @@ pub const EVENTS: &[&str] = &[
     "session.watchers",
     "files.changed",
     "changes.changed",
+    "changes.progress",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1285,6 +1319,10 @@ pub enum Event {
     /// debounced: re-read its status and the open file.
     #[serde(rename = "changes.changed")]
     ChangesChanged { block_id: BlockId },
+    /// A push, pull or fetch of a changes block said something (git's
+    /// progress, a line at a time, throttled).
+    #[serde(rename = "changes.progress")]
+    ChangesProgress { block_id: BlockId, op: SyncOp, text: String },
 }
 
 /// Who made a call: a client's label and, for a process in one of this

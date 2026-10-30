@@ -1,4 +1,4 @@
-//! `files.list`, `files.read` and `files.read_image`: blocking reads, run
+//! `files.list`, `files.read` and `files.read_image` (images and PDFs): blocking reads, run
 //! off the registry lock.
 
 use std::{fs::Metadata, io::Read, path::Path, time::UNIX_EPOCH};
@@ -194,9 +194,9 @@ pub fn read(root: &Path, rel: &str, max_bytes: Option<u64>) -> Result<FileRead, 
     Ok(FileRead { path: rel, kind, text, mime: mime.to_owned(), size: meta.len(), mtime: mtime(&meta), truncated, sha256 })
 }
 
-/// An image's bytes, base64.
+/// An image's (or a PDF's) bytes, base64.
 pub fn read_image(root: &Path, rel: &str) -> Result<FileImage, RpcError> {
-    const IMAGES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
+    const IMAGES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "application/pdf"];
     let (rel, file, meta) = open(root, rel)?;
     if meta.len() > FileImage::MAX_BYTES {
         return Err(RpcError::new("too_large", format!("{rel} is over {} MiB", FileImage::MAX_BYTES >> 20)));
@@ -207,7 +207,7 @@ pub fn read_image(root: &Path, rel: &str) -> Result<FileImage, RpcError> {
         return Err(RpcError::new("too_large", format!("{rel} is over {} MiB", FileImage::MAX_BYTES >> 20)));
     }
     let mime = mime_by_magic(&bytes).or_else(|| mime_by_name(&rel)).filter(|m| IMAGES.contains(m));
-    let mime = mime.ok_or_else(|| RpcError::bad_request(format!("{rel} is not a png, jpeg, gif, webp or svg image")))?;
+    let mime = mime.ok_or_else(|| RpcError::bad_request(format!("{rel} is not a png, jpeg, gif, webp or svg image, or a pdf")))?;
     let data_base64 = data_encoding::BASE64.encode(&bytes);
     Ok(FileImage { path: rel, mime: mime.to_owned(), size: bytes.len() as u64, mtime: mtime(&meta), data_base64 })
 }

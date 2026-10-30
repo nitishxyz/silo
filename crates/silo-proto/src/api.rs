@@ -124,7 +124,21 @@ fn result_schema(method: &Method) -> Schema {
         M::FilesWrite(_) | M::FilesCreate(_) => schema_for!(FileWritten),
         M::FilesMkdir(_) | M::FilesRename(_) | M::FilesCopy(_) | M::FilesMove(_) | M::FilesTrash(_) => schema_for!(FilesDone),
         M::FilesSearch(_) => schema_for!(FileSearch),
-        M::ChangesStatus(_) | M::ChangesStage(_) | M::ChangesUnstage(_) | M::ChangesRevert(_) => schema_for!(ChangesStatus),
+        M::FilesGit(_) => schema_for!(FilesGit),
+        M::FilesDiff(_) => schema_for!(FileDiff),
+        M::ChangesStatus(_)
+        | M::ChangesStage(_)
+        | M::ChangesUnstage(_)
+        | M::ChangesRevert(_)
+        | M::ChangesPull(_)
+        | M::ChangesFetch(_)
+        | M::ChangesResolve(_)
+        | M::ChangesContinue(_)
+        | M::ChangesAbort(_) => schema_for!(ChangesStatus),
+        M::ChangesPush(_) => schema_for!(ChangesPushed),
+        M::ChangesPr(_) => schema_for!(ChangesPr),
+        M::ChangesPrCreate(_) => schema_for!(PullRequest),
+        M::ChangesConflict(_) => schema_for!(ConflictFile),
         M::ChangesDiff(_) => schema_for!(FileDiff),
         M::ChangesSet(_) | M::ChangesRoot(_) => schema_for!(ChangesState),
         M::ChangesCommit(_) => schema_for!(ChangesCommitted),
@@ -319,6 +333,8 @@ pub fn examples() -> Vec<Method> {
             ignored: false,
             hidden: false,
         }),
+        M::FilesGit(FilesGitParams { block_id: b() }),
+        M::FilesDiff(FilesDiffParams { block_id: b(), path: "src/main.rs".into(), context: Some(3) }),
         M::ChangesStatus(ChangesStatusParams { block_id: b() }),
         M::ChangesDiff(ChangesDiffParams { block_id: b(), path: "src/main.rs".into(), context: Some(3) }),
         M::ChangesSet(ChangesSetParams {
@@ -334,6 +350,26 @@ pub fn examples() -> Vec<Method> {
         M::ChangesRevert(ChangesHunksParams { block_id: b(), path: "src/main.rs".into(), hunks: Some(vec!["3f9a1c0d5e7b2a46".into()]) }),
         M::ChangesCommit(ChangesCommitParams { block_id: b(), message: "Fix the lockfile".into(), amend: false }),
         M::ChangesRoot(ChangesRootParams { block_id: b(), path: "~/src/silo".into() }),
+        M::ChangesPush(ChangesPushParams { block_id: b() }),
+        M::ChangesPull(ChangesStatusParams { block_id: b() }),
+        M::ChangesFetch(ChangesStatusParams { block_id: b() }),
+        M::ChangesPr(ChangesStatusParams { block_id: b() }),
+        M::ChangesPrCreate(ChangesPrCreateParams {
+            block_id: b(),
+            title: "Fix the lockfile".into(),
+            body: "- Fix the lockfile".into(),
+            base: Some("main".into()),
+            draft: false,
+        }),
+        M::ChangesConflict(ChangesConflictParams { block_id: b(), path: "src/main.rs".into() }),
+        M::ChangesResolve(ChangesResolveParams {
+            block_id: b(),
+            path: "src/main.rs".into(),
+            take: Some(Take::Theirs),
+            regions: Some(vec!["9c1d2e3f4a5b6c7d".into()]),
+        }),
+        M::ChangesContinue(ChangesStatusParams { block_id: b() }),
+        M::ChangesAbort(ChangesStatusParams { block_id: b() }),
         M::SearchFiles(SearchFilesParams { root: "~/src/silo".into(), query: "main.rs !test".into(), limit: Some(20) }),
         M::SearchGrep(SearchGrepParams { root: "~/src/silo".into(), query: "fn main".into(), mode: Some(SearchGrepMode::Plain), limit: None }),
         M::SearchOpened(SearchOpenedParams { root: "~/src/silo".into(), path: "src/main.rs".into() }),

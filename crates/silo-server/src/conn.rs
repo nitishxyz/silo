@@ -806,7 +806,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::FilesCopy(_)
         | Method::FilesMove(_)
         | Method::FilesTrash(_)
-        | Method::FilesSearch(_) => crate::files::handle(server, method).await,
+        | Method::FilesSearch(_)
+        | Method::FilesGit(_)
+        | Method::FilesDiff(_) => crate::files::handle(server, method).await,
         Method::ChangesStatus(_)
         | Method::ChangesDiff(_)
         | Method::ChangesSet(_)
@@ -814,7 +816,16 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::ChangesUnstage(_)
         | Method::ChangesRevert(_)
         | Method::ChangesCommit(_)
-        | Method::ChangesRoot(_) => crate::changes::handle(server, method).await,
+        | Method::ChangesRoot(_)
+        | Method::ChangesPush(_)
+        | Method::ChangesPull(_)
+        | Method::ChangesFetch(_)
+        | Method::ChangesPr(_)
+        | Method::ChangesPrCreate(_)
+        | Method::ChangesConflict(_)
+        | Method::ChangesResolve(_)
+        | Method::ChangesContinue(_)
+        | Method::ChangesAbort(_) => crate::changes::handle(server, method).await,
         Method::SearchFiles(_) | Method::SearchGrep(_) | Method::SearchOpened(_) => crate::search::handle(server, &ctx.principal, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }

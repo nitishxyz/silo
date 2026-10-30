@@ -285,6 +285,8 @@ pub fn status(root: &Path, scope: &ChangesScope) -> Result<ChangesStatus, RpcErr
             files: Vec::new(),
             totals: ChangesTotals::default(),
             truncated: false,
+            op: None,
+            remote: None,
         });
     };
     let args = diff_args(root, scope)?;
@@ -333,6 +335,7 @@ pub fn status(root: &Path, scope: &ChangesScope) -> Result<ChangesStatus, RpcErr
         Some(_) => Git::read(root, ["rev-parse", "--short", "HEAD"]).run().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()),
         None => None,
     };
+    let remote = super::sync::Remotes::read(root).push_remote(porcelain.branch.as_deref());
     Ok(ChangesStatus {
         repo: true,
         branch: porcelain.branch,
@@ -343,6 +346,8 @@ pub fn status(root: &Path, scope: &ChangesScope) -> Result<ChangesStatus, RpcErr
         files,
         totals,
         truncated,
+        op: super::sync::op_of(root),
+        remote,
     })
 }
 

@@ -4,6 +4,7 @@
 //! folders shown. Unsaved edits live in the app only.
 
 pub mod find;
+pub mod git;
 pub mod ops;
 pub mod paths;
 pub mod read;
@@ -301,6 +302,14 @@ pub async fn handle(server: &Server, method: Method) -> Result<Value, RpcError> 
         Method::FilesSearch(p) => {
             let root = root_of(server, &p.block_id)?;
             reply(&blocking(move || find::search(&root, &p)).await?)
+        }
+        Method::FilesGit(p) => {
+            let root = root_of(server, &p.block_id)?;
+            reply(&blocking(move || git::git(&root)).await?)
+        }
+        Method::FilesDiff(p) => {
+            let root = root_of(server, &p.block_id)?;
+            reply(&blocking(move || git::diff(&root, &p.path, p.context)).await?)
         }
         Method::FilesSet(p) => reply(&server.registry.lock().unwrap().files_set(p)?),
         Method::FilesRoot(p) => {

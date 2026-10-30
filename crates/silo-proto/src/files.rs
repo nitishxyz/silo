@@ -31,7 +31,7 @@ pub struct FilesReadParams {
     pub max_bytes: Option<u64>,
 }
 
-/// `files.read_image`: an image's bytes.
+/// `files.read_image`: an image's (or a PDF's) bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FilesReadImageParams {
     pub block_id: BlockId,
@@ -259,8 +259,8 @@ impl FileRead {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FileImage {
     pub path: String,
-    /// `image/png`, `image/jpeg`, `image/gif`, `image/webp` or
-    /// `image/svg+xml`.
+    /// `image/png`, `image/jpeg`, `image/gif`, `image/webp`,
+    /// `image/svg+xml` or `application/pdf`.
     pub mime: String,
     pub size: u64,
     pub mtime: u64,
@@ -269,7 +269,7 @@ pub struct FileImage {
 }
 
 impl FileImage {
-    /// Largest image sent: its base64 must fit in a frame
+    /// Largest image or PDF sent: its base64 must fit in a frame
     /// ([`crate::MAX_FRAME`]).
     pub const MAX_BYTES: u64 = 11 * 1024 * 1024;
 }
@@ -432,4 +432,52 @@ pub struct FileSearch {
 impl FileSearch {
     pub const DEFAULT_LIMIT: u32 = 500;
     pub const MAX_LIMIT: u32 = 5000;
+}
+
+/// `files.git`: git's view of the files under the root (feature
+/// [`crate::compat::feature::FILES_GIT`]): what changed against `HEAD`,
+/// what is untracked and what is ignored, as the Changes block sees it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesGitParams {
+    pub block_id: BlockId,
+}
+
+/// A changed file under the root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileGitMark {
+    /// Relative to the root.
+    pub path: String,
+    pub status: crate::changes::FileStatus,
+}
+
+/// `files.git`'s result.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FilesGit {
+    /// The root is in a git work tree; nothing else is set when not.
+    pub repo: bool,
+    /// Changed and untracked files, by path.
+    pub files: Vec<FileGitMark>,
+    /// Ignored files and folders (a folder ignored whole is listed once),
+    /// relative to the root.
+    #[serde(default)]
+    pub ignored: Vec<String>,
+    /// More than [`FilesGit::MAX_PATHS`] paths: the rest left out.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl FilesGit {
+    pub const MAX_PATHS: usize = 20_000;
+}
+
+/// `files.diff`: a file under the root against `HEAD` (feature
+/// [`crate::compat::feature::FILES_GIT`]); answers a
+/// [`crate::changes::FileDiff`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FilesDiffParams {
+    pub block_id: BlockId,
+    pub path: String,
+    /// Lines of context around changes (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
 }
