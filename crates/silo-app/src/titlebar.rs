@@ -533,11 +533,6 @@ impl Workspace {
         let title = self.window_title(w, cx);
         let glyph = self.tab_icon(w);
         let chrome = self.chrome;
-        // The colour of the app running in another tab, where it shows.
-        let swatch = (!selected)
-            .then(|| self.backdrop(&w.focused, cx).or_else(|| crate::floats::window_blocks(w).iter().find_map(|b| self.backdrop(b, cx))))
-            .flatten()
-            .filter(|&c| chrome.shows(c));
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
@@ -610,8 +605,7 @@ impl Workspace {
             .when_some(self.window_mark(w), |el, mark| {
                 let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
                 el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
-            })
-            .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))));
+            });
         let entering = appear < 1.0;
         div()
             .id(gpui::ElementId::Name(group.clone().into()))

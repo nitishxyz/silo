@@ -326,11 +326,6 @@ impl Workspace {
         let close = self.motion.close_button(&w.id, now);
         let title = self.window_title(w, cx);
         let chrome = self.chrome;
-        // The colour of the app running in another tab, where it shows.
-        let swatch = (!selected)
-            .then(|| self.backdrop(&w.focused, cx).or_else(|| crate::floats::window_blocks(w).iter().find_map(|b| self.backdrop(b, cx))))
-            .flatten()
-            .filter(|&c| chrome.shows(c));
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: self.tab_icon(w), offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, in the gap.
         let drop = self.tab_drop.filter(|d| d.target() == index && self.tab_dragging.is_some());
@@ -364,7 +359,6 @@ impl Workspace {
                 let glyph = crate::block_status::glyph(mark, &format!("side-tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
                 el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
             })
-            .when_some(swatch, |el, color| el.child(div().flex_none().ml(px(6.0)).size(px(7.0)).capsule().bg(rgb(color))))
             // Zero width unless this tab is hovered; grows and fades in.
             .when(close > 0.0, |el| {
                 el.child(

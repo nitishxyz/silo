@@ -249,12 +249,6 @@ impl Chrome {
     pub fn hover(&self) -> gpui::Rgba {
         self.tint(if theme::light(self.surface) { 0.06 } else { 0.07 })
     }
-
-    /// Whether a swatch of `color` shows on this chrome.
-    #[must_use]
-    pub fn shows(&self, color: u32) -> bool {
-        theme::contrast(color, crate::material::over(self.surface, self.alpha, theme::background())) >= 1.3
-    }
 }
 
 /// The chrome's target: the focused block's backdrop, whether or not it
@@ -449,9 +443,6 @@ mod tests {
             };
             assert!(between(looks, crate::material::look(surface, veiled.alpha), floating.surface), "{looks:06x}");
         }
-        let c = Chrome::on(0x0028_2c34);
-        assert!(!c.shows(0x002a_2e36), "a swatch like the strip is not shown");
-        assert!(c.shows(0x00f4_ecd8));
     }
 
     /// A mirror of a block whose server terminal runs another theme than
