@@ -54,7 +54,7 @@ tree-sitter-yaml.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSURL", "NSValue"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSURL", "NSValue", "NSTimer", "block2"] }
 # The permission helper (`permissions.rs`): its drag tile, window chrome,
 # System Settings and screens.
 objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSImageView", "NSPasteboard", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }

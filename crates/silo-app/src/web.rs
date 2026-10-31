@@ -12,7 +12,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -30,6 +30,66 @@ const TICK: Duration = Duration::from_millis(33);
 static DUE: Mutex<Option<Instant>> = Mutex::new(None);
 /// Wakes the pump loop when CEF asks for work.
 static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// When anything last pumped (ms since [`epoch`]).
+static PUMPED: AtomicU64 = AtomicU64::new(0);
+/// The pump loop hasn't pumped for this long while CEF waits or pages
+/// exist: the run-loop watchdog pumps instead.
+const STALL: Duration = Duration::from_millis(250);
+
+fn epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn mark_pumped(now: Instant) {
+    PUMPED.store(now.duration_since(epoch()).as_millis() as u64, Ordering::Relaxed);
+}
+
+/// Since anything last pumped.
+fn since_pumped(now: Instant) -> Duration {
+    now.duration_since(epoch()).saturating_sub(Duration::from_millis(PUMPED.load(Ordering::Relaxed)))
+}
+
+/// Whether the watchdog must pump: CEF's due time or the page tick passed
+/// [`STALL`] ago without a pump.
+fn stalled(due: Option<Instant>, since: Duration, pages: bool, now: Instant) -> bool {
+    since >= STALL && (pages || due.is_some_and(|d| now.saturating_duration_since(d) >= STALL))
+}
+
+/// A main-run-loop timer (common modes, so menus and live resizes too)
+/// that pumps CEF itself when the pump loop stalls: the loop is a gpui
+/// task, and the app once stopped running it while windows kept drawing,
+/// so no page opened or loaded until Silo restarted. Logged when it
+/// steps in, and when the loop resumes.
+fn start_watchdog() {
+    use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
+    let stepped_in = std::cell::Cell::new(false);
+    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
+        let now = Instant::now();
+        let due = *DUE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let since = since_pumped(now);
+        if !stalled(due, since, Runtime::live_browsers() > 0, now) {
+            if stepped_in.replace(false) {
+                tracing::info!("browser engine: the pump loop runs again");
+            }
+            return;
+        }
+        let Some(runtime) = ENGINE.with_borrow(Clone::clone) else { return };
+        if !stepped_in.replace(true) {
+            tracing::warn!(stalled_ms = since.as_millis(), "browser engine: the pump loop stalled; the watchdog pumps");
+        }
+        take_due(now);
+        mark_pumped(now);
+        runtime.pump();
+        runtime.drive_pages();
+    });
+    // SAFETY: on the main thread; the run loop keeps the timer.
+    unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(TICK.as_secs_f64(), true, &block);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    }
+}
 
 struct Live {
     browser: Rc<Browser>,
@@ -87,6 +147,8 @@ pub fn runtime(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Runtime>> {
     let runtime = Rc::new(Runtime::init(config)?);
     tracing::info!("browser engine started");
     ENGINE.set(Some(runtime.clone()));
+    mark_pumped(Instant::now());
+    start_watchdog();
     cx.spawn(async move |cx| {
         let (mut last, mut driven) = (Instant::now(), Instant::now());
         loop {
@@ -110,6 +172,7 @@ pub fn runtime(home: &Path, cx: &mut App) -> anyhow::Result<Rc<Runtime>> {
             let Some(runtime) = ENGINE.with_borrow(Clone::clone) else { return };
             take_due(now);
             last = now;
+            mark_pumped(now);
             runtime.pump();
             // On the tick only: shown pages get theirs on their window's refreshes.
             if now - driven >= TICK {
@@ -246,6 +309,18 @@ impl<W: Copy + PartialEq> Frames<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_watchdog_pumps_only_when_the_loop_stalls() {
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        assert!(!stalled(None, ms(10_000), false, now), "nothing to do: no pump");
+        assert!(!stalled(None, ms(100), true, now), "pumped lately");
+        assert!(stalled(None, ms(300), true, now), "pages, and nothing pumped");
+        assert!(!stalled(Some(now + ms(5_000)), ms(10_000), false, now), "CEF's work isn't due");
+        assert!(!stalled(Some(now - ms(100)), ms(10_000), false, now), "due only just now: the loop gets its chance");
+        assert!(stalled(Some(now - ms(300)), ms(10_000), false, now));
+    }
 
     #[test]
     fn the_pump_waits_for_cef_or_the_tick() {
