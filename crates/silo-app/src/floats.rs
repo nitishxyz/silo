@@ -412,6 +412,7 @@ impl Workspace {
         let float = self.float_id(id).unwrap_or_else(|| id.to_owned());
         let block = float.clone();
         let (press, pressed) = (self.float_press.clone(), self.float_press.clone());
+        let measured = self.motion.measured.floats.clone();
         let fill = workspace.clone();
         // gpui measures the offset where the drag starts, past its threshold:
         // measured from the press instead, the float doesn't jump.
@@ -423,7 +424,12 @@ impl Workspace {
         })
         .on_drag(Dragged, move |_, offset, window, cx| {
             let press = pressed.get();
-            let offset = offset - (window.mouse_position() - press) + gpui::point(px(inset), px(inset));
+            // The press inside the float as drawn (a pane's header in a split float sits inside its margin,
+            // and away from its corner); else inside the handle, `inset` into the float.
+            let offset = match measured.borrow().get(&block) {
+                Some(bounds) => press - bounds.origin,
+                None => offset - (window.mouse_position() - press) + gpui::point(px(inset), px(inset)),
+            };
             let drag = FloatDrag { block: block.clone(), grab, offset, press, start: rect, rect, dock: None };
             _ = workspace.update(cx, |this, _| this.float_drag = Some(drag));
             let workspace = workspace.clone();
