@@ -305,8 +305,13 @@ pub struct BrowserPane {
     /// No page to show: Silo's empty state instead of the engine's surface,
     /// kept until a real page has painted.
     empty: bool,
-    /// The recent page ↓/↑ picked from the address bar.
+    /// The row ↓/↑ picked from the address bar: a suggestion while they
+    /// show, else a recent page of the empty state.
     selected: Option<usize>,
+    /// The pages suggested for the address being typed.
+    suggestions: Vec<crate::browser_home::RecentPage>,
+    /// The page the address bar's inline completion opens.
+    inline: Option<String>,
     /// What the engine shows or is loading.
     engine_url: String,
     /// The decoded favicon of `state.favicon`.
@@ -423,6 +428,8 @@ impl BrowserPane {
             error: None,
             empty: false,
             selected: None,
+            suggestions: Vec::new(),
+            inline: None,
             engine_url: String::new(),
             favicon_image: None,
             security: None,
@@ -461,6 +468,7 @@ impl BrowserPane {
             cx.subscribe_in(&self.address, window, |this, _, event, window, cx| this.address_event(event, window, cx)),
             cx.on_blur(&address_focus, window, |this, _, cx| {
                 this.editing = false;
+                this.end_suggestions(cx);
                 this.sync_address(cx);
             }),
             cx.on_focus(&address_focus, window, |this, _, cx| {
@@ -735,10 +743,59 @@ impl BrowserPane {
         });
     }
 
-    fn open_recent(&mut self, index: usize, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
-        let Some(page) = self.recents(cx).into_iter().nth(index) else { return };
+    /// The rows ↓/↑ move through: the suggestions while they show, else
+    /// the empty state's recent pages.
+    fn rows(&self, cx: &gpui::App) -> Vec<crate::browser_home::RecentPage> {
+        if self.suggesting() {
+            self.suggestions.clone()
+        } else if self.empty {
+            self.recents(cx)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The suggestions list shows under the address bar.
+    fn suggesting(&self) -> bool {
+        self.editing && !self.suggestions.is_empty()
+    }
+
+    /// Suggest pages for `typed`, completing it inline when it was typed.
+    fn suggest(&mut self, typed: &str, cx: &mut gpui::Context<Self>) {
         self.selected = None;
-        self.navigate(&page.url);
+        self.inline = None;
+        if !self.editing {
+            return self.end_suggestions(cx);
+        }
+        let pages = &crate::hosts_state::HostsState::global(cx).read(cx).app_state().recent_pages;
+        self.suggestions = crate::browser_home::suggest(pages, self.host_key(), typed);
+        let completion = if self.address.read(cx).typed { crate::browser_home::complete(&self.suggestions, typed) } else { None };
+        let suffix = completion.as_ref().map(|c| c.suffix.clone()).unwrap_or_default();
+        self.inline = completion.map(|c| c.url);
+        self.address.update(cx, |field, cx| field.set_completion(suffix, cx));
+        cx.notify();
+    }
+
+    /// No suggestions or inline completion.
+    fn end_suggestions(&mut self, cx: &mut gpui::Context<Self>) {
+        self.inline = None;
+        if !self.suggestions.is_empty() {
+            self.suggestions.clear();
+            self.selected = None;
+        }
+        self.address.update(cx, |field, cx| field.set_completion("", cx));
+        cx.notify();
+    }
+
+    fn open_recent(&mut self, index: usize, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let Some(page) = self.rows(cx).into_iter().nth(index) else { return };
+        self.open_suggested(&page.url, window, cx);
+    }
+
+    fn open_suggested(&mut self, url: &str, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        self.selected = None;
+        self.end_suggestions(cx);
+        self.navigate(url);
         self.focus.focus(window, cx);
     }
 }
@@ -1119,8 +1176,11 @@ impl BrowserPane {
         use crate::text_field::FieldEvent;
         match event {
             FieldEvent::Submit => {
-                if let Some(index) = self.selected.filter(|_| self.empty) {
+                if let Some(index) = self.selected.filter(|&i| i < self.rows(cx).len()) {
                     return self.open_recent(index, window, cx);
+                }
+                if let Some(url) = self.inline.clone().filter(|_| !self.address.read(cx).completion().is_empty()) {
+                    return self.open_suggested(&url, window, cx);
                 }
                 let text = self.address.read(cx).text.clone();
                 if text.trim().is_empty() {
@@ -1129,6 +1189,7 @@ impl BrowserPane {
                     }
                     return;
                 }
+                self.end_suggestions(cx);
                 self.go_to(&text, cx);
                 self.focus.focus(window, cx);
             }
@@ -1137,20 +1198,28 @@ impl BrowserPane {
                     return cx.notify();
                 }
                 self.selected = None;
+                self.end_suggestions(cx);
                 self.focus.focus(window, cx);
                 self.sync_address(cx);
             }
-            FieldEvent::Up | FieldEvent::Down if self.empty => {
+            FieldEvent::Up | FieldEvent::Down => {
+                let rows = self.rows(cx).len();
+                if rows == 0 {
+                    return;
+                }
                 let delta = if matches!(event, FieldEvent::Up) { -1 } else { 1 };
-                self.selected = crate::browser_home::select(self.selected, self.recents(cx).len(), delta);
+                self.selected = crate::browser_home::select(self.selected, rows, delta);
+                // A picked row is what ↩ opens: the inline completion goes.
+                if self.selected.is_some() && self.suggesting() {
+                    self.inline = None;
+                    self.address.update(cx, |field, cx| field.set_completion("", cx));
+                }
                 cx.notify();
             }
-            FieldEvent::Changed(_) => {
-                if self.selected.take().is_some() {
-                    cx.notify();
-                }
+            FieldEvent::Changed(text) => {
+                let text = text.clone();
+                self.suggest(&text, cx);
             }
-            FieldEvent::Up | FieldEvent::Down => {}
         }
     }
 }
@@ -1870,6 +1939,7 @@ impl BrowserPane {
         crate::pane_header::keep_press(
             div()
                 .flex()
+                .relative()
                 .items_center()
                 .gap(px(6.0))
                 .flex_1()
@@ -1880,7 +1950,72 @@ impl BrowserPane {
         .child(self.security_indicator(cx))
         .child(self.address_text(cx))
         .children(self.zoom_pill(cx))
+        .children(self.suggestions_popover(cx))
         .into_any_element()
+    }
+
+    /// The pages suggested for the typed address, under the address bar.
+    /// Over the page (painted after it), so opaque.
+    fn suggestions_popover(&self, cx: &mut gpui::Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::theme;
+        use crate::theme::Continuous as _;
+        use gpui::{div, prelude::*, px, rgb};
+        if !self.suggesting() {
+            return None;
+        }
+        let _glass = crate::surface::enter();
+        let rows = self.suggestions.iter().enumerate().map(|(i, page)| {
+            let title = if page.title.trim().is_empty() { display_url(&page.url) } else { page.title.clone() };
+            let url = page.url.clone();
+            div()
+                .id(("browser-suggestion", i))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(26.0))
+                .px(px(8.0))
+                .continuous(crate::radius::CARD - 4.0)
+                .cursor_pointer()
+                .when(self.selected == Some(i), |el| el.bg(theme::row_fill()))
+                .hover(|s| s.bg(theme::row_fill()))
+                // On press: the field's blur would take the list first.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_suggested(&url, window, cx);
+                    }),
+                )
+                .child(crate::assets::icon("globe", 12.0, theme::muted()))
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(gpui::relative(0.5))
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::muted()))
+                        .child(display_url(&page.url)),
+                )
+        });
+        let card = div()
+            .id("browser-suggestions")
+            .absolute()
+            .top(gpui::relative(1.0))
+            .mt(px(4.0))
+            .left_0()
+            .right_0()
+            .min_w(px(280.0))
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .glass(crate::radius::CARD)
+            .occlude()
+            .font_family(theme::ui_font())
+            .text_size(px(12.5))
+            .text_color(rgb(theme::foreground()))
+            .children(rows);
+        Some(gpui::deferred(card).with_priority(1).into_any_element())
     }
 
     fn url(&self) -> &str {
@@ -2042,7 +2177,7 @@ impl BrowserPane {
                     .px(px(8.0))
                     .continuous(crate::radius::CONTROL)
                     .cursor_pointer()
-                    .when(self.selected == Some(i), |el| el.bg(palette.selected()))
+                    .when(self.selected == Some(i) && !self.suggesting(), |el| el.bg(palette.selected()))
                     .hover(|s| s.bg(palette.hover()))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_recent(i, window, cx)))
                     .child(crate::assets::icon("globe", 12.0, palette.icon))

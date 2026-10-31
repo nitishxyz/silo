@@ -4,6 +4,10 @@
 //! no partial selection); typing, Backspace or Paste then replace it.
 //! The caret is overlaid (it never shifts the text or placeholder) and
 //! blinks while the field is focused in the active window.
+//!
+//! An owner may show an inline completion after the text (the address
+//! bar's): drawn selected, it goes with any edit; → or End accepts it,
+//! Backspace drops only it.
 
 use std::time::Instant;
 
@@ -37,6 +41,11 @@ pub struct TextField {
     glass: bool,
     /// The modifiers held on the last ↩ (`FieldEvent::Submit`): ⌘P's ⌘↩ / ⌥⌘↩.
     pub submit_mods: gpui::Modifiers,
+    /// The last `Changed` came from typing a character (not a paste,
+    /// deletion or accepted completion).
+    pub typed: bool,
+    /// Shown after the text, selected, until an edit; not part of `text`.
+    completion: String,
 }
 
 /// One edit of the field's text.
@@ -85,7 +94,32 @@ impl TextField {
             palette: None,
             glass: false,
             submit_mods: gpui::Modifiers::default(),
+            typed: false,
+            completion: String::new(),
         }
+    }
+
+    /// Show `completion` after the text (empty: none). No `Changed`.
+    pub fn set_completion(&mut self, completion: impl Into<String>, cx: &mut Context<Self>) {
+        let completion = completion.into();
+        if self.completion != completion {
+            self.completion = completion;
+            cx.notify();
+        }
+    }
+
+    /// The inline completion shown, empty if none.
+    pub fn completion(&self) -> &str {
+        &self.completion
+    }
+
+    /// Make the completion part of the text.
+    fn accept_completion(&mut self, cx: &mut Context<Self>) {
+        let completion = std::mem::take(&mut self.completion);
+        self.text.push_str(&completion);
+        self.typed = false;
+        cx.emit(FieldEvent::Changed(self.text.clone()));
+        cx.notify();
     }
 
     /// The field sits on glass: its placeholder takes the glass's muted ink.
@@ -111,6 +145,7 @@ impl TextField {
     pub fn replace_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
         self.all = false;
+        self.completion.clear();
         self.blink.reset();
         cx.notify();
     }
@@ -118,6 +153,8 @@ impl TextField {
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
         self.all = false;
+        self.completion.clear();
+        self.typed = false;
         self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
         cx.notify();
@@ -125,11 +162,19 @@ impl TextField {
 
     /// Select the whole text (as ⌘A does).
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.completion.clear();
         self.all = !self.text.is_empty();
         cx.notify();
     }
 
     fn edit(&mut self, edit: Edit<'_>, cx: &mut Context<Self>) {
+        self.edit_as(edit, false, cx);
+    }
+
+    /// Apply `edit`, `typed` if it is a typed character.
+    fn edit_as(&mut self, edit: Edit<'_>, typed: bool, cx: &mut Context<Self>) {
+        self.completion.clear();
+        self.typed = typed;
         apply(&mut self.text, &mut self.all, edit);
         self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
@@ -188,6 +233,23 @@ impl TextField {
         if !(m.platform || m.control) {
             self.all = false;
         }
+        if !self.completion.is_empty() {
+            match k.key.as_str() {
+                "right" | "end" if !m.shift => {
+                    self.accept_completion(cx);
+                    return true;
+                }
+                // Backspace takes back the completion, nothing typed.
+                "backspace" if !(m.platform || m.alt || m.control) => {
+                    self.completion.clear();
+                    self.typed = false;
+                    cx.emit(FieldEvent::Changed(self.text.clone()));
+                    cx.notify();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match k.key.as_str() {
             "enter" => {
                 self.submit_mods = m;
@@ -229,7 +291,7 @@ impl TextField {
                 Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
                     self.all = selected;
                     let text = text.to_owned();
-                    self.edit(Edit::Insert(&text), cx);
+                    self.edit_as(Edit::Insert(&text), true, cx);
                     return true;
                 }
                 _ => return false,
@@ -252,12 +314,20 @@ impl Render for TextField {
                 theme::veils().map_or(solid, |v| crate::adaptive::Chrome { muted: v.muted, ..solid })
             }
         });
-        let caret = self.caret_phase(focused && window.is_window_active() && !self.all, cx).then(|| {
+        let completing = !self.completion.is_empty() && !self.all && !empty;
+        let caret = self.caret_phase(focused && window.is_window_active() && !self.all && !completing, cx).then(|| {
             let caret = div().absolute().top(px(1.0)).bottom(px(1.0)).w(px(1.5)).bg(rgb(palette.accent));
             if empty { caret.left_0() } else { caret.right(px(-2.0)) }
         });
         let content = if empty {
             div().text_color(rgb(palette.muted)).child(self.placeholder.clone())
+        } else if completing {
+            div()
+                .flex()
+                .flex_row()
+                .text_color(rgb(palette.ink))
+                .child(self.text.clone())
+                .child(div().continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)).child(self.completion.clone()))
         } else {
             div()
                 .text_color(rgb(palette.ink))
@@ -282,6 +352,9 @@ impl Render for TextField {
             }))
             // Handled here, the chords never reach the terminal behind.
             .on_action(cx.listener(|this, _: &crate::commands::act::SelectAll, _, cx| {
+                if !this.completion.is_empty() {
+                    this.accept_completion(cx);
+                }
                 this.all = !this.text.is_empty();
                 cx.notify();
             }))

@@ -1,12 +1,15 @@
 //! A browser block without a page: Silo's empty state and the recent
-//! pages it offers, remembered per host across blocks and launches.
+//! pages it offers, remembered per host across blocks and launches. The
+//! address bar completes what is typed from the same pages.
 
 use serde::{Deserialize, Serialize};
 
 /// Recent pages kept, over all hosts.
-pub const KEPT: usize = 50;
+pub const KEPT: usize = 200;
 /// Recent pages an empty block lists.
 pub const LISTED: usize = 6;
+/// Pages the address bar suggests while typing.
+pub const SUGGESTED: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentPage {
@@ -42,6 +45,79 @@ pub fn retitle(list: &mut [RecentPage], host: &str, url: &str, title: &str) {
 #[must_use]
 pub fn listed(list: &[RecentPage], host: &str) -> Vec<RecentPage> {
     list.iter().filter(|p| p.host == host).take(LISTED).cloned().collect()
+}
+
+/// `s` starts with `prefix`, ASCII case aside.
+fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// The ways `url` may be typed, shortest first: without scheme and
+/// `www.`, without scheme, and (only when `typed` has a `:`) whole.
+fn forms<'a>(url: &'a str, typed: &str) -> impl Iterator<Item = &'a str> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let bare = rest.strip_prefix("www.").unwrap_or(rest);
+    let whole = typed.contains(':').then_some(url);
+    [Some(bare), (bare != rest).then_some(rest), whole].into_iter().flatten()
+}
+
+/// The pages on `host` typing `typed` suggests, best first: those whose
+/// address starts with it, then those whose address or title holds each
+/// of its words; newest first within each.
+#[must_use]
+pub fn suggest(list: &[RecentPage], host: &str, typed: &str) -> Vec<RecentPage> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Vec::new();
+    }
+    let words: Vec<String> = typed.split_whitespace().map(str::to_lowercase).collect();
+    let (mut prefixed, mut holding) = (Vec::new(), Vec::new());
+    for page in list.iter().filter(|p| p.host == host) {
+        if forms(&page.url, typed).any(|f| starts_with_ci(f, typed)) {
+            prefixed.push(page);
+        } else {
+            let (url, title) = (page.url.to_lowercase(), page.title.to_lowercase());
+            if words.iter().all(|w| url.contains(w.as_str()) || title.contains(w.as_str())) {
+                holding.push(page);
+            }
+        }
+    }
+    prefixed.into_iter().chain(holding).take(SUGGESTED).cloned().collect()
+}
+
+/// What the address bar adds after the typed text, selected, and the page
+/// accepting it opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Completion {
+    pub suffix: String,
+    pub url: String,
+}
+
+/// The inline completion of `typed` from `pages` (best first): the rest of
+/// the first matching page's host while `typed` is within it (opening that
+/// host's root), else the rest of its address. Nothing once `typed` is a
+/// whole host or address, or holds a space (a search).
+#[must_use]
+pub fn complete(pages: &[RecentPage], typed: &str) -> Option<Completion> {
+    if typed.is_empty() || typed.contains(char::is_whitespace) {
+        return None;
+    }
+    pages.iter().find_map(|page| {
+        let form = forms(&page.url, typed).find(|f| starts_with_ci(f, typed))?;
+        let after_scheme = form.find("://").map_or(0, |i| i + 3);
+        let host_end = after_scheme + form[after_scheme..].find(['/', '?', '#']).unwrap_or(form.len() - after_scheme);
+        if typed.len() < host_end {
+            let url_scheme = page.url.find("://").map_or(0, |i| i + 3);
+            let authority = url_scheme + page.url[url_scheme..].find(['/', '?', '#']).unwrap_or(page.url.len() - url_scheme);
+            return Some(Completion { suffix: form[typed.len()..host_end].to_owned(), url: format!("{}/", &page.url[..authority]) });
+        }
+        if typed.len() == host_end {
+            return None;
+        }
+        let full = form.strip_suffix('/').unwrap_or(form);
+        let suffix = full.get(typed.len()..).filter(|s| !s.is_empty())?;
+        Some(Completion { suffix: suffix.to_owned(), url: page.url.clone() })
+    })
 }
 
 /// ↓ (`1`) / ↑ (`-1`) from the address bar (`None`) through `len` rows:
@@ -101,6 +177,48 @@ mod tests {
         assert!(local.iter().all(|p| p.host == "local"));
         assert_eq!(local[0].url, format!("http://p{}/", KEPT + 4));
         assert_eq!(local[1].url, format!("http://p{}/", KEPT + 2));
+    }
+
+    fn page(url: &str, title: &str) -> RecentPage {
+        RecentPage { host: "local".into(), url: url.into(), title: title.into() }
+    }
+
+    #[test]
+    fn suggestions_prefer_address_prefixes() {
+        let list = vec![
+            page("https://docs.rs/gpui", "gpui - Rust"),
+            page("https://www.github.com/nitishxyz/term", "term"),
+            page("https://news.ycombinator.com/", "Hacker News"),
+            page("https://gist.github.com/", "Gists"),
+            RecentPage { host: "remote".into(), url: "https://github.io/".into(), title: String::new() },
+        ];
+        let urls = |typed| suggest(&list, "local", typed).into_iter().map(|p| p.url).collect::<Vec<_>>();
+        assert_eq!(urls("gi"), ["https://www.github.com/nitishxyz/term", "https://gist.github.com/"]);
+        assert_eq!(urls("GitHub"), ["https://www.github.com/nitishxyz/term", "https://gist.github.com/"], "then any match");
+        assert_eq!(urls("www.git"), ["https://www.github.com/nitishxyz/term"]);
+        assert_eq!(urls("hacker news"), ["https://news.ycombinator.com/"], "titles, every word");
+        assert_eq!(urls("rust"), ["https://docs.rs/gpui"]);
+        assert!(urls("  ").is_empty());
+        assert!(urls("github.io").is_empty(), "other hosts' pages");
+    }
+
+    #[test]
+    fn inline_completion_finishes_the_host_then_the_address() {
+        let pages = [page("https://www.github.com/nitishxyz/term", ""), page("http://localhost:5173/app/", "")];
+        let c = |typed| complete(&pages, typed).map(|c| (c.suffix, c.url));
+        assert_eq!(c("git"), Some(("hub.com".into(), "https://www.github.com/".into())));
+        assert_eq!(c("GiT"), Some(("hub.com".into(), "https://www.github.com/".into())), "typed case stays");
+        assert_eq!(c("www.g"), Some(("ithub.com".into(), "https://www.github.com/".into())));
+        assert_eq!(c("github.com"), None, "a whole host");
+        assert_eq!(c("github.com/n"), Some(("itishxyz/term".into(), "https://www.github.com/nitishxyz/term".into())));
+        assert_eq!(c("github.com/nitishxyz/term"), None);
+        assert_eq!(c("local"), Some(("host:5173".into(), "http://localhost:5173/".into())), "the page's scheme");
+        assert_eq!(c("localhost:5173/a"), Some(("pp".into(), "http://localhost:5173/app/".into())), "no trailing slash");
+        assert_eq!(c("https://gi"), None, "the scheme form is www's");
+        assert_eq!(c("https://www.gi"), Some(("thub.com".into(), "https://www.github.com/".into())));
+        assert_eq!(c("git hub"), None, "a search");
+        assert_eq!(c(""), None);
+        assert_eq!(complete(&[page("https://é.fr/", "")], "é"), Some(Completion { suffix: ".fr".into(), url: "https://é.fr/".into() }));
     }
 
     #[test]
