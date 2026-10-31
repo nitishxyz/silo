@@ -156,6 +156,9 @@ pub struct Workspace {
     /// theme background it started from, and this frame's chrome colours.
     blend: crate::adaptive::Blend,
     blend_theme: u32,
+    /// The tiled block the window last took its colour from: a float in
+    /// focus leaves the colour to the panes beneath it.
+    tinted_by: Option<String>,
     pub(crate) chrome: crate::adaptive::Chrome,
     /// System › Reduce transparency, kept current by `_transparency`.
     reduce_transparency: bool,
@@ -341,6 +344,7 @@ impl Workspace {
             titlebar_move: false,
             blend: crate::adaptive::Blend::new(theme::background()),
             blend_theme: theme::background(),
+            tinted_by: None,
             chrome: crate::adaptive::Chrome::on(theme::background()),
             reduce_transparency,
             _transparency: transparency,
@@ -1581,7 +1585,14 @@ impl Workspace {
     fn step_chrome(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) {
         let theme_bg = theme::background();
         let base = self.base_fill();
-        let backdrop = self.focused_block(window, cx).and_then(|id| self.backdrop(&id, cx));
+        // The focused tiled block's backdrop; with a float in focus, the
+        // tiled block focused last (its panes show around the float).
+        let tiled = self.active_window().map(|w| w.layout.blocks()).unwrap_or_default();
+        if let Some(id) = self.focused_block(window, cx).filter(|id| tiled.contains(id)) {
+            self.tinted_by = Some(id);
+        }
+        let source = self.tinted_by.clone().filter(|id| tiled.contains(id)).or_else(|| tiled.first().cloned());
+        let backdrop = source.and_then(|id| self.backdrop(&id, cx));
         let target = crate::adaptive::chrome_target(base, backdrop);
         if self.blend_theme != base {
             self.blend_theme = base;
