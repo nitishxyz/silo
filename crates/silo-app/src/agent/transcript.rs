@@ -546,7 +546,8 @@ impl Times {
 /// Live tool calls not yet part of an item, in first-seen order.
 fn pending_tools<'a>(items: &[Item], tools: &'a HashMap<String, ToolState>) -> Vec<(&'a String, &'a ToolState)> {
     let called: HashSet<&str> = items.iter().flat_map(Item::tool_calls).map(|(id, _, _)| id).collect();
-    tools.iter().filter(|(id, _)| !called.contains(id.as_str())).collect()
+    // One with its result belongs to an item not loaded (an older page): it isn't pending.
+    tools.iter().filter(|(id, t)| !called.contains(id.as_str()) && t.output.is_none()).collect()
 }
 
 /// A call the model is still writing (`ToolStatus::Input`): its name and its input as far as it arrived. The

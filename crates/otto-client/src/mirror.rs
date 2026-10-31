@@ -141,6 +141,14 @@ impl SessionMirror {
             live: Vec::new(),
         }
     }
+    /// Forget calls the model began writing that no loaded item holds and that never ran (`ToolStatus::Input`):
+    /// left by a request that failed and was retried, or a turn that ended, they would otherwise show as
+    /// running at the end of the transcript, then as failed.
+    fn drop_abandoned_inputs(&mut self) {
+        let items = &self.items;
+        self.tools.retain(|id, t| t.status != ToolStatus::Input || items.iter().any(|i| i.tool_calls().any(|(c, _, _)| c == id)));
+    }
+
     /// Put a page of older items (`session.view` with `before_seq: oldest_seq`)
     /// before the loaded ones; items already loaded are skipped. Returns how
     /// many were added. A page from an older server (every item, no
@@ -329,6 +337,10 @@ impl SessionMirror {
                 self.turn = Some((*turn, *status));
                 self.turn_started_at = None;
                 self.info.status = if *status == TurnStatus::Error { SessionStatus::Error } else { SessionStatus::Idle };
+                // A turn that finished well wrote every call it ran; one stopped or failed shows what it cut off.
+                if *status == TurnStatus::Done {
+                    self.drop_abandoned_inputs();
+                }
             }
             Event::ItemStarted { item_id, role } => {
                 if !self.indices.contains_key(item_id) {
@@ -341,6 +353,11 @@ impl SessionMirror {
                     self.compactions.retain(|c| c.id != item.id);
                 }
                 self.put(item.clone());
+                // A finished reply holds every call its step made: one still being written outside it belonged
+                // to an attempt that was dropped (a retried request).
+                if item.role == Role::Assistant {
+                    self.drop_abandoned_inputs();
+                }
             }
             Event::TextDelta { item_id, .. } | Event::ReasoningDelta { item_id, .. } => {
                 if let Some(i) = self.indices.get(item_id) {
@@ -423,6 +440,8 @@ impl SessionMirror {
                     max_attempts: *max_attempts,
                     at_ms: *at_ms,
                 });
+                // The failed request's calls never ran; the retry writes its own.
+                self.drop_abandoned_inputs();
             }
             Event::CompactionStarted { id, trigger } => {
                 self.compactions.retain(|c| c.id != *id);

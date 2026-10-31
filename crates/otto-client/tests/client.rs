@@ -702,3 +702,23 @@ fn mirror_folds_api_equivalent_costs_by_model() {
     let turn = m.turn_usage.iter().find(|t| t.turn == 3).unwrap();
     assert_eq!((turn.api_cost_usd, turn.by_model[0].api_cost_usd), (None, None), "never $0");
 }
+
+#[test]
+fn calls_a_dropped_request_began_never_linger() {
+    // The model began a call, the request failed and was retried: the retry's reply holds other calls.
+    let mut mirror = SessionMirror::new(view(0));
+    let assistant: Role = serde_json::from_value(json!("assistant")).unwrap();
+    mirror.apply(1, &Event::TurnStarted { turn: 1 });
+    mirror.apply(2, &Event::ItemStarted { item_id: "i".into(), role: assistant });
+    mirror.apply(3, &Event::ToolInputStart { call_id: "lost".into(), name: "subagent".into() });
+    mirror.apply(4, &Event::ToolInputDelta { call_id: "lost".into(), delta: r#"{"action":"delegate","agent":"build""#.into() });
+    mirror.apply(5, &Event::ToolInputStart { call_id: "kept".into(), name: "shell".into() });
+    let done: Item = serde_json::from_value(json!({"id":"i","role":"assistant","parts":[{"type":"tool_call","call_id":"kept","name":"shell","input":{}}]})).unwrap();
+    mirror.apply(6, &Event::ItemDone { item: done });
+    assert!(!mirror.tools.contains_key("lost"), "dropped with its request");
+    assert!(mirror.tools.contains_key("kept"), "its reply holds it");
+    // One still being written when the turn ends never ran either.
+    mirror.apply(7, &Event::ToolInputStart { call_id: "late".into(), name: "read".into() });
+    mirror.apply(8, &Event::TurnFinished { turn: 1, status: TurnStatus::Done, changes: None, usage: Usage::default() });
+    assert!(!mirror.tools.contains_key("late"));
+}
