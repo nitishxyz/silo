@@ -215,15 +215,29 @@ impl Workspace {
                 let measure = gpui::canvas(move |b, _, _| _ = floats.borrow_mut().insert(measured, b), |_, (), _, _| {}).absolute().inset_0();
                 // The frame: one blur under every card and gap (Frosted),
                 // or the gaps' opaque fill (Solid), clipped to its corners.
-                let frame = div()
-                    .absolute()
-                    .inset_0()
-                    .continuous(radius::CARD)
-                    .shadow_lg()
-                    .when(frosted, |el| el.backdrop_blur(px(crate::surface::BLUR)).backdrop_saturation(crate::surface::SATURATION))
-                    .when(several && !frosted, |el| el.bg(chrome.fill()))
-                    .rounded_clip()
-                    .child(body);
+                // Several panes sit inside it the same gap from its edges
+                // as from each other, its corners concentric with theirs;
+                // Frosted, the margin is tinted as the gaps are (once).
+                let pad = if several { crate::layout::GAP } else { 0.0 };
+                let margin = |el: gpui::Div| match tiling.veil.filter(|_| several) {
+                    Some(veil) => el.child(div().absolute().top_0().left_0().right_0().h(px(pad)).bg(veil))
+                        .child(div().absolute().bottom_0().left_0().right_0().h(px(pad)).bg(veil))
+                        .child(div().absolute().top(px(pad)).bottom(px(pad)).left_0().w(px(pad)).bg(veil))
+                        .child(div().absolute().top(px(pad)).bottom(px(pad)).right_0().w(px(pad)).bg(veil)),
+                    None => el,
+                };
+                let frame = margin(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .continuous(radius::CARD + pad)
+                        .shadow_lg()
+                        .when(frosted, |el| el.backdrop_blur(px(crate::surface::BLUR)).backdrop_saturation(crate::surface::SATURATION))
+                        .when(several && !frosted, |el| el.bg(chrome.fill()))
+                        .when(several, |el| el.border_1().border_color(theme::card_outline(chrome.surface)))
+                        .rounded_clip(),
+                )
+                .child(div().absolute().inset(px(pad)).child(body));
                 let single = (!several).then(|| id.clone());
                 div()
                     .id(gpui::ElementId::Name(format!("float-{id}").into()))

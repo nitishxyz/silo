@@ -30,7 +30,7 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// Comfortable: margin around the cards and gap between them. Card radii
 /// come from [`radius`].
 const OUTER: f32 = 8.0;
-const GAP: f32 = 6.0;
+pub(crate) const GAP: f32 = 6.0;
 /// Pointer target of a divider, centred on it.
 const DIVIDER_HIT: f32 = 6.0;
 
