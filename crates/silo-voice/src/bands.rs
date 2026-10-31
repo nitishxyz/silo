@@ -185,22 +185,105 @@ pub fn bar_opacity(bar: usize) -> f32 {
     1.0 - 0.6 * (from_middle(bar) / edge).powf(1.4)
 }
 
-/// While transcribing: the bars, `collapse` (0..=1) of the way down to a
-/// low line, with a soft highlight sweeping across them.
+/// The timeline's opacity: newest (right) full, fading toward the oldest.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
-pub fn shimmer(last: &[f32; BARS], collapse: f32, t: f32, reduce_motion: bool) -> [f32; BARS] {
+pub fn age_opacity(bar: usize) -> f32 {
+    0.25 + 0.75 * (bar as f32 / (BARS - 1) as f32).powf(0.7)
+}
+
+/// While recording: the voice's loudness as a timeline that scrolls from
+/// right to left, the newest sample entering at the right edge every
+/// [`STEP`] seconds (rising quickly, falling softly).
+#[derive(Clone, Debug)]
+pub struct History {
+    values: [f32; BARS],
+    level: f32,
+    next: f32,
+}
+
+/// Seconds between timeline samples.
+pub const STEP: f32 = 0.055;
+const FLOOR: f32 = 0.0;
+/// Loudness below this is the room, not a voice.
+const GATE: f32 = 0.1;
+
+impl Default for History {
+    fn default() -> Self {
+        Self { values: [FLOOR; BARS], level: FLOOR, next: 0.0 }
+    }
+}
+
+impl History {
+    /// Feed the latest band `levels` at `t` seconds; true when it scrolled.
+    pub fn step(&mut self, levels: &[f32; BANDS], t: f32) -> bool {
+        if t < self.next {
+            return false;
+        }
+        self.next = t + STEP;
+        // Room noise stays at the floor: only a voice above it lifts the bars.
+        let target = ((loudness(levels) - GATE) / (1.0 - GATE)).max(0.0);
+        let rate = if target > self.level { 0.62 } else { 0.28 };
+        self.level += (target - self.level) * rate;
+        self.values.rotate_left(1);
+        self.values[BARS - 1] = shaped(self.level);
+        true
+    }
+
+    /// The timeline's bars, oldest at the left; a quiet one breathes softly.
+    #[must_use]
+    pub fn heights(&self, t: f32, reduce_motion: bool) -> [f32; BARS] {
+        std::array::from_fn(|bar| self.values[bar].max(idle(bar, t, reduce_motion) * 0.3).clamp(0.0, 1.0))
+    }
+}
+
+/// How loud the voice is from its bands: the loudest few, so a voiced
+/// sound reads full however its energy spreads.
+#[must_use]
+pub fn loudness(levels: &[f32; BANDS]) -> f32 {
+    let mut sorted = *levels;
+    sorted.sort_by(|a, b| b.total_cmp(a));
+    (sorted[0] + sorted[1] + sorted[2]) / 3.0
+}
+
+fn shaped(level: f32) -> f32 {
+    (level.max(0.0).powf(0.82) * 0.9).clamp(FLOOR, 0.96)
+}
+
+/// While transcribing: the recorded timeline settles low and a bright
+/// crest sweeps over it left to right and back (`collapse` 0..=1 is how far
+/// along that handoff is). Reduced motion: no crest.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn sweep(last: &[f32; BARS], collapse: f32, t: f32, reduce_motion: bool) -> [f32; BARS] {
     let c = collapse.clamp(0.0, 1.0);
     std::array::from_fn(|bar| {
-        let line = if reduce_motion {
-            0.12
-        } else {
-            let phase = (t * 1.1).fract() * (BARS as f32 + 6.0) - 3.0;
-            0.10 + 0.12 * (-(bar as f32 - phase).powi(2) / 4.0).exp()
-        };
-        last[bar] * (1.0 - c) + line * c
+        let settled = ((last[bar] * 0.55).max(0.08) + wave(bar, t, reduce_motion)).min(1.0);
+        last[bar] * (1.0 - c) + settled * c
     })
 }
+
+/// One bar of the sweeping wave at `t` seconds: a crest that travels to
+/// the far end and back every [`SWEEP`] seconds, eased at the turns, with a
+/// low ripple trailing it.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn wave(bar: usize, t: f32, reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        return 0.04;
+    }
+    let span = (BARS - 1) as f32;
+    // Triangle 0 → 1 → 0, eased (a cosine) so the crest slows where it turns.
+    let along = 0.5 - 0.5 * (std::f32::consts::TAU * t / SWEEP).cos();
+    let crest = along * span;
+    let d = bar as f32 - crest;
+    let peak = (-(d * d) / 6.0).exp();
+    let ripple = 0.5 + 0.5 * (d * 0.9 - t * 7.0).sin();
+    0.6 * peak + 0.08 * ripple * (-(d * d) / 40.0).exp()
+}
+
+/// One sweep there and back, seconds.
+pub const SWEEP: f32 = 1.6;
 
 #[cfg(test)]
 mod tests {
@@ -283,12 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn transcribing_collapses_into_a_shimmer() {
-        let last = [0.8; BARS];
-        assert_eq!(shimmer(&last, 0.0, 0.3, false), last);
-        let done = shimmer(&last, 1.0, 0.3, false);
-        assert!(done.iter().all(|h| *h < 0.25), "{done:?}");
-        assert!(shimmer(&last, 1.0, 0.3, false) != shimmer(&last, 1.0, 0.6, false), "it sweeps");
-        assert_eq!(shimmer(&last, 1.0, 0.3, true), shimmer(&last, 1.0, 0.6, true));
+    fn the_wave_sweeps_there_and_back() {
+        let peak = |t: f32| (0..BARS).max_by(|&a, &b| wave(a, t, false).total_cmp(&wave(b, t, false))).unwrap();
+        assert_eq!(peak(0.0), 0, "starts at the left");
+        assert_eq!(peak(SWEEP / 2.0), BARS - 1, "the right end halfway");
+        assert_eq!(peak(SWEEP), 0, "back at the left");
+        assert!((0..BARS).all(|b| (0.0..=1.0).contains(&wave(b, 0.3, false))));
+        assert!((0..BARS).all(|b| (wave(b, 0.7, true) - 0.04).abs() < 1e-6), "still when motion is reduced");
+        let last = [0.9; BARS];
+        assert_eq!(sweep(&last, 0.0, 0.4, false), last, "starts from the last heights");
+    }
+
+    #[test]
+    fn the_timeline_scrolls_right_to_left() {
+        let mut h = History::default();
+        let loud = [0.9; BANDS];
+        assert!(h.step(&loud, 0.0));
+        assert!(!h.step(&loud, STEP / 2.0), "one sample a step");
+        let after = h.heights(0.0, true);
+        assert!(after[BARS - 1] > 0.4 && after[0] < 0.2, "the newest is at the right: {after:?}");
+        for i in 1..=5 {
+            h.step(&[0.0; BANDS], i as f32 * STEP);
+        }
+        let later = h.heights(0.0, true);
+        assert!(later[BARS - 6] > 0.4, "the loud sample moved left: {later:?}");
+        assert!(later[BARS - 1] < later[BARS - 6], "and quiet follows it");
     }
 }

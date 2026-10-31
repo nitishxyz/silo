@@ -35,6 +35,8 @@ pub struct VoiceSettings {
     pub microphones: Vec<String>,
     /// macOS's "Press 🌐 key to" does something else.
     pub fn_conflict: bool,
+    /// Modifier Keys maps 🌐 Globe to No Action: Fn never reaches Silo.
+    pub globe_disabled: bool,
     pub mic: MicAccess,
 }
 
@@ -79,6 +81,23 @@ pub fn fn_conflict(value: Option<&str>) -> bool {
     value.map(str::trim) != Some("0")
 }
 
+/// Keyboard › Modifier Keys maps 🌐 Globe to No Action on some keyboard:
+/// macOS then drops the key before any app sees it. `prefs` is
+/// `defaults -currentHost read -g`.
+#[must_use]
+pub fn globe_disabled(prefs: &str) -> bool {
+    // Each mapping is a { Dst; Src; } entry: Globe (usage page 0xFF, usage 3) → No Action (0x7_0000_0000).
+    prefs.split('{').any(|entry| entry.contains("= 1095216660483;") && entry.contains("= 30064771072;"))
+}
+
+fn read_globe_disabled() -> bool {
+    std::process::Command::new("/usr/bin/defaults")
+        .args(["-currentHost", "read", "-g"])
+        .output()
+        .ok()
+        .is_some_and(|out| globe_disabled(&String::from_utf8_lossy(&out.stdout)))
+}
+
 fn read_fn_usage() -> Option<String> {
     let out = std::process::Command::new("/usr/bin/defaults").args(["read", "com.apple.HIToolbox", "AppleFnUsageType"]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -108,6 +127,7 @@ impl Workspace {
     pub(crate) fn voice_settings(&self) -> VoiceSettings {
         static MICS: Cached<Vec<String>> = Cached::new();
         static FN: Cached<bool> = Cached::new();
+        static GLOBE: Cached<bool> = Cached::new();
         // Listing input devices makes macOS ask for the microphone, so only once it's allowed:
         // the first ask comes from using voice typing (or Settings' Allow), never from a listing.
         let mic = mic_access();
@@ -124,7 +144,14 @@ impl Workspace {
                 fetch: fetch::fetch(kind),
             })
             .collect();
-        VoiceSettings { prefs: self.state.voice.clone(), engines, microphones, fn_conflict: FN.get(|| fn_conflict(read_fn_usage().as_deref())), mic }
+        VoiceSettings {
+            prefs: self.state.voice.clone(),
+            engines,
+            microphones,
+            fn_conflict: FN.get(|| fn_conflict(read_fn_usage().as_deref())),
+            globe_disabled: GLOBE.get(read_globe_disabled),
+            mic,
+        }
     }
 
     pub(crate) fn apply_voice_event(&mut self, event: &VoiceEvent, cx: &mut Context<Self>) -> Outcome {
@@ -193,5 +220,16 @@ mod tests {
         assert!(super::fn_conflict(Some("2")), "emoji");
         assert!(super::fn_conflict(Some("1")), "input source");
         assert!(super::fn_conflict(None), "the system's default");
+    }
+}
+
+#[cfg(test)]
+mod globe_tests {
+    #[test]
+    fn globe_mapped_to_no_action_is_found() {
+        let off = "\"com.apple.keyboard.modifiermapping.0-0-0\" = (\n {\n HIDKeyboardModifierMappingDst = 30064771300;\n HIDKeyboardModifierMappingSrc = 30064771129;\n },\n {\n HIDKeyboardModifierMappingDst = 30064771072;\n HIDKeyboardModifierMappingSrc = 1095216660483;\n }\n );";
+        assert!(super::globe_disabled(off));
+        let caps_only = "{\n HIDKeyboardModifierMappingDst = 30064771072;\n HIDKeyboardModifierMappingSrc = 30064771129;\n }";
+        assert!(!super::globe_disabled(caps_only), "Caps Lock to No Action is not the Globe key");
     }
 }

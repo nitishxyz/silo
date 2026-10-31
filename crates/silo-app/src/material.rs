@@ -34,8 +34,9 @@ pub enum FrostTint {
 
 impl FrostTint {
     pub const ALL: [Self; 9] = [Self::None, Self::Graphite, Self::Blue, Self::Purple, Self::Pink, Self::Red, Self::Orange, Self::Green, Self::Teal];
-    /// How far the theme background moves toward the tint's hue.
-    const STRENGTH: f32 = 0.2;
+    /// How far the theme background moves toward the tint's hue: a hint of
+    /// colour, as macOS's wallpaper tinting is, never the window's character.
+    const STRENGTH: f32 = 0.07;
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -331,5 +332,26 @@ mod tests {
         let dark = readable_alpha(0x0016_1719, VEIL, 0x0016_1719, &[0x00d6_d8dc]);
         assert!(dark > 0.75 && dark < 0.9, "{dark}");
         assert!(readable_alpha(0x0028_2c34, VEIL, 0x0028_2c34, &[0x00ab_b2bf]) > 0.95);
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    /// A tint is a hint: on the default dark and light backgrounds every
+    /// channel moves only a little, and None leaves the theme as it is.
+    #[test]
+    fn tints_stay_subtle() {
+        for bg in [0x0016_1719, 0x00fa_fafa, 0] {
+            assert_eq!(FrostTint::None.apply(bg), bg);
+            for tint in FrostTint::ALL {
+                let c = tint.apply(bg);
+                for shift in [16, 8, 0] {
+                    let d = ((c >> shift) & 0xff).abs_diff((bg >> shift) & 0xff);
+                    assert!(d <= 18, "{tint:?} on {bg:06x}: {c:06x}");
+                }
+            }
+        }
     }
 }

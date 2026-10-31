@@ -719,7 +719,33 @@ impl Render for FilesPane {
             let viewer = self.render_viewer(window, cx);
             div().size_full().flex().flex_col().children(bars).child(div().flex_1().min_h_0().child(viewer)).into_any_element()
         };
-        let tree = (self.state.tree && !browsing).then(|| self.render_tree(window, cx));
+        // Shown and hidden, the tree slides: its own width in a slot that eases open, kept at the slot's left
+        // edge so it travels in from the block's right.
+        let now = std::time::Instant::now();
+        let reduce = cx.reduce_motion();
+        let want = self.state.tree && !browsing;
+        let shown = self.tree_shown.get_or_insert_with(|| crate::motion::Toggle::new(want, crate::motion::UI));
+        if reduce {
+            *shown = crate::motion::Toggle::new(want, crate::motion::UI);
+        } else {
+            shown.set(want, now, false);
+        }
+        let (t, moving) = (shown.value(now, false), shown.moving(now, false));
+        if moving {
+            window.request_animation_frame();
+        }
+        let tree = (t > 0.0 && !browsing).then(|| {
+            let panel = self.render_tree(window, cx);
+            let width = self.tree_width;
+            div()
+                .relative()
+                .flex_none()
+                .w(px(width * t))
+                .h_full()
+                .overflow_hidden()
+                .child(div().absolute().top_0().left_0().w(px(width)).h_full().child(panel))
+                .into_any_element()
+        });
         let finder = self.render_finder(cx).or_else(|| self.render_search(cx));
         let overlays: Vec<AnyElement> = [self.render_transfer(cx), self.render_preview(cx), self.render_menu(cx)].into_iter().flatten().collect();
         let body = self.body_bounds.clone();

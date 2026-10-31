@@ -402,6 +402,8 @@ pub struct AgentPane {
     composer_h: std::rc::Rc<std::cell::Cell<f32>>,
     /// The card the pane sits on (set by the workspace each frame): frosted, the pane paints no fill of its own.
     surface: crate::pane_surface::PaneSurface,
+    /// The next redraw of a running turn ([`view`]'s `ambient`), while one is due.
+    ambient_tick: Option<gpui::Task<()>>,
     /// The composer's box (the pill and its halo) from the last paint (window coordinates): its popovers hang
     /// above it, and a press in it leaves the typed ones (slash, `@`) open.
     composer_box: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -593,6 +595,7 @@ impl AgentPane {
             bounds: std::rc::Rc::default(),
             composer_h: std::rc::Rc::default(),
             surface: crate::pane_surface::PaneSurface::default(),
+            ambient_tick: None,
             composer_box: std::rc::Rc::default(),
             composer_pad: 0.0,
             // A day back, so what started before the pane opened (a turn, a call) still has a time on its clock.

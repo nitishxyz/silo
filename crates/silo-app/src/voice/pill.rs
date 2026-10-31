@@ -1,6 +1,7 @@
 //! The voice pill: a small frosted pill near the bottom of the focused pane,
 //! with voice-driven bars, a lock while hands-free, live words, then
-//! "Transcribing…" as the bars collapse into a shimmer, and a fade.
+//! the bars easing into a wave that sweeps left to right and back while it
+//! transcribes (or polishes), and a fade.
 
 use std::time::{Duration, Instant};
 
@@ -10,11 +11,11 @@ use silo_voice::bands::{self, BARS};
 use super::{LEAVE, Stage};
 use crate::{assets::icon, surface::Glassy as _, theme, workspace::Workspace};
 
-const HEIGHT: f32 = 34.0;
-const BAR_W: f32 = 3.0;
+const HEIGHT: f32 = 30.0;
+const BAR_W: f32 = 2.5;
 const BAR_GAP: f32 = 2.5;
-const BAR_MIN: f32 = 3.0;
-const BAR_MAX: f32 = 22.0;
+const BAR_MIN: f32 = 2.5;
+const BAR_MAX: f32 = 18.0;
 /// Above the pane's bottom edge.
 const LIFT: f32 = 18.0;
 const APPEAR: Duration = Duration::from_millis(180);
@@ -46,10 +47,10 @@ impl Workspace {
         let live = self.voice.live.as_mut()?;
         window.request_animation_frame();
         let (heights, fade) = match live.stage {
-            Stage::Recording => (bands::bar_heights(&live.levels, t, reduce), 1.0),
+            Stage::Recording => (live.history.heights(t, reduce), 1.0),
             Stage::Finishing(since) => {
                 let frozen = *live.frozen.get_or_insert(live.heights);
-                (bands::shimmer(&frozen, ease_out(progress(since, COLLAPSE)), t, reduce), 1.0)
+                (bands::sweep(&frozen, ease_out(progress(since, COLLAPSE)), since.elapsed().as_secs_f32(), reduce), 1.0)
             }
             Stage::Leaving(since) => (live.heights, 1.0 - ease_out(progress(since, LEAVE))),
         };
@@ -59,8 +60,12 @@ impl Workspace {
         let ink = theme::ink_on(bg);
         let muted = theme::muted_on(bg);
         let accent = theme::accent();
+        let finishing = matches!(live.stage, Stage::Finishing(_));
         let bars = div().flex().items_center().gap(px(BAR_GAP)).h(px(BAR_MAX)).children((0..BARS).map(|bar| {
-            div().w(px(BAR_W)).h(px(BAR_MIN + heights[bar] * (BAR_MAX - BAR_MIN))).rounded_full().bg(tint(accent, bands::bar_opacity(bar)))
+            // The sweeping crest is the brightest part of the wave.
+            // The timeline fades in from its oldest (left) end; the sweeping crest is the brightest.
+            let alpha = if finishing { 0.3 + 0.7 * heights[bar].clamp(0.0, 1.0) } else { bands::age_opacity(bar) };
+            div().w(px(BAR_W)).h(px(BAR_MIN + heights[bar] * (BAR_MAX - BAR_MIN))).rounded_full().bg(tint(accent, alpha))
         }));
         let words: Option<(String, u32)> = match live.stage {
             _ if live.waiting => Some((
@@ -74,8 +79,6 @@ impl Workspace {
                 muted,
             )),
             Stage::Recording if !live.partial.is_empty() => Some((live.partial.clone(), muted)),
-            Stage::Finishing(_) if live.polishing => Some(("Polishing…".into(), muted)),
-            Stage::Finishing(_) => Some(("Transcribing…".into(), muted)),
             _ => None,
         };
         let hands_free = live.hands_free && live.stage == Stage::Recording;

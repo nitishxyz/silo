@@ -56,9 +56,17 @@ impl Render for SidebarGrab {
 }
 
 impl Workspace {
-    /// The sidebar's width while side tabs show in this window.
+    /// The room the sidebar takes while side tabs show in this window: its
+    /// width, less while it slides in or out.
     pub(crate) fn tab_sidebar_width(&self, window: &Window) -> Option<f32> {
-        (self.state.tabs == TabPosition::Side && !self.sidebar_hidden && self.view.is_some()).then(|| {
+        let full = self.tab_sidebar_full(window)?;
+        let shown = self.sidebar_shown.value(Instant::now(), false);
+        (shown > 0.0).then_some(full * shown)
+    }
+
+    /// The sidebar's own width (as it is when fully shown).
+    fn tab_sidebar_full(&self, window: &Window) -> Option<f32> {
+        (self.state.tabs == TabPosition::Side && self.view.is_some()).then(|| {
             let width = self.sidebar_resize.map_or(self.state.tab_sidebar_width, |(_, w)| w);
             sidebar_width(width, f32::from(window.viewport_size().width))
         })
@@ -68,6 +76,7 @@ impl Workspace {
         tracing::debug!(?tabs, "tab position");
         // Choosing Side again shows a sidebar hidden here.
         self.sidebar_hidden = false;
+        self.sidebar_shown = crate::motion::Toggle::new(true, crate::motion::UI);
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.tabs = tabs, cx));
         cx.notify();
     }
@@ -99,8 +108,14 @@ impl Workspace {
             .tooltip(crate::tooltip::Tooltip::text(label))
             .child(icon("sidebar-left", 15.0, self.chrome.icon))
             .map(claim_press)
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 this.sidebar_hidden = !this.sidebar_hidden;
+                if cx.reduce_motion() {
+                    this.sidebar_shown = crate::motion::Toggle::new(!this.sidebar_hidden, crate::motion::UI);
+                } else {
+                    this.sidebar_shown.set(!this.sidebar_hidden, Instant::now(), false);
+                }
+                window.refresh();
                 cx.notify();
             }))
             .into_any_element()
@@ -108,7 +123,11 @@ impl Workspace {
 
     /// The sidebar of side tabs, when this window shows it.
     pub(crate) fn render_tab_sidebar(&self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let width = self.tab_sidebar_width(window)?;
+        let slot = self.tab_sidebar_width(window)?;
+        let width = self.tab_sidebar_full(window)?;
+        if self.sidebar_shown.moving(now, false) {
+            window.request_animation_frame();
+        }
         let view = self.view.as_ref()?;
         let several = view.session.windows.len() > 1;
         let active_index = view.session.windows.iter().position(|w| w.id == view.session.active_window);
@@ -217,42 +236,52 @@ impl Workspace {
             .w_full()
             .child(canvas(move |b, _, _| room.set(f32::from(b.size.height)), |_, (), _, _| {}).absolute().inset_0())
             .on_drag_move(cx.listener(move |this, ev, _, cx| to_end(this, ev, cx)));
+        // Shown and hidden, it slides: its own width inside a slot that eases open, kept at the slot's right
+        // edge so it travels in from the window's left.
+        let sidebar = div()
+            .id("tab-sidebar")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(width))
+            .h_full()
+            .when(self.frosted(), |el| el.bg(chrome.fill()))
+            // Compact: the same hairline as the pane dividers.
+            .when(self.density() == Density::Compact, |el| el.border_r_1().border_color(rgb(theme::border())))
+            .font_family(theme::ui_font())
+            .text_size(px(12.5))
+            .child(list)
+            .child(spacer)
+            .child(self.render_sidebar_edge(width, cx))
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    this.set_tab_drop("", None, cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
+                if let Some(drop) = this.tab_drop.take() {
+                    this.drop_tab(&drag.window_id, drop, cx);
+                }
+                cx.notify();
+            }))
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<SidebarGrab>, window, cx| {
+                let Some((grab, old)) = this.sidebar_resize else { return };
+                let new = sidebar_width(f32::from(ev.event.position.x - ev.bounds.left()) - grab, f32::from(window.viewport_size().width));
+                if (new - old).abs() > 0.1 {
+                    this.sidebar_resize = Some((grab, new));
+                    cx.notify();
+                }
+            }));
         Some(
             div()
-                .id("tab-sidebar")
+                .id("tab-sidebar-slot")
                 .relative()
-                .flex()
-                .flex_col()
                 .flex_none()
-                .w(px(width))
+                .w(px(slot))
                 .h_full()
-                .when(self.frosted(), |el| el.bg(chrome.fill()))
-                // Compact: the same hairline as the pane dividers.
-                .when(self.density() == Density::Compact, |el| el.border_r_1().border_color(rgb(theme::border())))
-                .font_family(theme::ui_font())
-                .text_size(px(12.5))
-                .child(list)
-                .child(spacer)
-                .child(self.render_sidebar_edge(width, cx))
-                .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<TabDrag>, _, cx| {
-                    if !ev.bounds.contains(&ev.event.position) {
-                        this.set_tab_drop("", None, cx);
-                    }
-                }))
-                .on_drop(cx.listener(|this, drag: &TabDrag, _, cx| {
-                    if let Some(drop) = this.tab_drop.take() {
-                        this.drop_tab(&drag.window_id, drop, cx);
-                    }
-                    cx.notify();
-                }))
-                .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<SidebarGrab>, window, cx| {
-                    let Some((grab, old)) = this.sidebar_resize else { return };
-                    let new = sidebar_width(f32::from(ev.event.position.x - ev.bounds.left()) - grab, f32::from(window.viewport_size().width));
-                    if (new - old).abs() > 0.1 {
-                        this.sidebar_resize = Some((grab, new));
-                        cx.notify();
-                    }
-                }))
+                .overflow_hidden()
+                .child(sidebar.absolute().top_0().right_0())
                 .into_any_element(),
         )
     }

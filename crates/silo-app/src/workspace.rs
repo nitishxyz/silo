@@ -133,6 +133,8 @@ pub struct Workspace {
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     pub(crate) sidebar_room: std::rc::Rc<std::cell::Cell<f32>>,
     pub(crate) sidebar_hidden: bool,
+    /// The sidebar sliding in and out as it's shown and hidden.
+    pub(crate) sidebar_shown: crate::motion::Toggle,
     pub(crate) sidebar_resize: Option<(f32, f32)>,
     /// Where a dragged tab would drop: between tabs, or onto one to merge.
     pub(crate) tab_drop: Option<crate::titlebar::TabDrop>,
@@ -323,6 +325,7 @@ impl Workspace {
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_room: std::rc::Rc::default(),
             sidebar_hidden: false,
+            sidebar_shown: crate::motion::Toggle::new(true, crate::motion::UI),
             sidebar_resize: None,
             tab_drop: None,
             tab_dragging: None,
@@ -1777,7 +1780,6 @@ impl Render for Workspace {
             .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .map(|el| crate::commands::handle_actions(el, cx))
-            .on_modifiers_changed(cx.listener(Self::voice_modifiers))
             .capture_key_down(cx.listener(Self::voice_key))
             .on_action(cx.listener(|this, _: &SelectWindow1, window, cx| this.number_key(0, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow2, window, cx| this.number_key(1, window, cx)))

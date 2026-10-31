@@ -185,6 +185,8 @@ pub struct FilesPane {
     applied: HashMap<String, u64>,
     save_scroll: Option<Task<()>>,
     pub(crate) tree_width: f32,
+    /// The tree sliding in and out as it's shown and hidden (from the first frame on).
+    pub(crate) tree_shown: Option<crate::motion::Toggle>,
     pub(crate) tree_selected: Option<String>,
     pub(crate) tree_scroll: UniformListScrollHandle,
     /// The shown file, to scroll the tree to once its row is listed.
@@ -278,6 +280,7 @@ impl FilesPane {
             applied: HashMap::new(),
             save_scroll: None,
             tree_width: TREE_WIDTH,
+            tree_shown: None,
             tree_selected: None,
             tree_scroll: UniformListScrollHandle::new(),
             tree_reveal: None,

@@ -4,15 +4,16 @@
 //! downloads ([`fetch`]).
 
 pub(crate) mod fetch;
+mod fn_key;
 mod insert;
 mod pill;
 pub(crate) mod settings;
 
 use std::time::{Duration, Instant};
 
-use gpui::{Context, KeyDownEvent, ModifiersChangedEvent, Task, Window};
+use gpui::{Context, KeyDownEvent, Task, Window};
 use silo_voice::{
-    bands::{BANDS, BARS},
+    bands::{self, BANDS, BARS},
     engine::Options,
     session::{Config, Phase, Session},
     trigger::{Action, Input, Trigger},
@@ -40,6 +41,8 @@ struct Live {
     frozen: Option<[f32; BARS]>,
     started: Instant,
     levels: [f32; BANDS],
+    /// The loudness timeline scrolling right to left.
+    history: bands::History,
     partial: String,
     waiting: bool,
     /// The text is with the agent's model (Polish with AI).
@@ -53,6 +56,7 @@ pub(crate) struct Voice {
     live: Option<Live>,
     ticker: Option<Task<()>>,
     _activation: Option<gpui::Subscription>,
+    _fn_key: Option<Task<()>>,
 }
 
 /// The pill fades out over this.
@@ -65,7 +69,29 @@ impl Voice {
                 this.voice_input(Input::Blur, window, cx);
             }
         });
-        Self { trigger: Trigger::default(), epoch: Instant::now(), live: None, ticker: None, _activation: Some(activation) }
+        // Fn from the app-wide monitor, acted on by the window in front.
+        let mut fn_states = fn_key::subscribe();
+        let fn_key = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let state = match fn_states.recv().await {
+                    Ok(state) => {
+                        tracing::debug!(?state, "voice: modifiers");
+                        state
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let alive = this.update_in(cx, |this, window, cx| {
+                    if window.is_window_active() {
+                        this.voice_input(Input::Modifiers { function: state.function, others: state.others }, window, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+        Self { trigger: Trigger::default(), epoch: Instant::now(), live: None, ticker: None, _activation: Some(activation), _fn_key: Some(fn_key) }
     }
 
     /// Recording or finishing: Esc belongs to it.
@@ -75,15 +101,6 @@ impl Voice {
 }
 
 impl Workspace {
-    /// Fn and the other modifiers, from the window's root.
-    pub(crate) fn voice_modifiers(&mut self, event: &ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let m = event.modifiers;
-        if m.function {
-            tracing::debug!("voice: fn down");
-        }
-        self.voice_input(Input::Modifiers { function: m.function, others: m.control || m.alt || m.shift || m.platform }, window, cx);
-    }
-
     /// Every key down, before the focused block sees it; Esc stops there
     /// while dictating.
     pub(crate) fn voice_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -178,6 +195,7 @@ impl Workspace {
             frozen: None,
             started: Instant::now(),
             levels: [0.0; BANDS],
+            history: bands::History::default(),
             partial: String::new(),
             waiting: false,
             polishing: false,
@@ -210,6 +228,7 @@ impl Workspace {
         let snapshot = live.session.snapshot();
         let now = Instant::now();
         live.levels = snapshot.levels;
+        live.history.step(&live.levels, live.started.elapsed().as_secs_f32());
         live.partial = snapshot.partial;
         live.waiting = snapshot.phase == Phase::WaitingForModel;
         if let Stage::Leaving(since) = live.stage {

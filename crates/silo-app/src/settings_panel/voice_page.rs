@@ -109,6 +109,14 @@ impl SettingsPanel {
             Some(self.voice_toggle("settings-voice-on", "Voice typing", prefs.on, |p, on| p.on = on, cx)),
             false,
         )];
+        if prefs.on && v.globe_disabled {
+            typing.push(Self::row(
+                "The 🌐 key is turned off",
+                Some("Set Keyboard › Modifier Keys › 🌐 Globe key back to Globe".into()),
+                Some(Self::emit_button("settings-voice-globe", "Open Keyboard Settings", SettingsEvent::Voice(VoiceEvent::OpenKeyboardSettings), cx)),
+                narrow,
+            ));
+        }
         if prefs.on && v.fn_conflict {
             typing.push(Self::row(
                 "macOS uses the 🌐 key",

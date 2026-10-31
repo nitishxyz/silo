@@ -28,7 +28,7 @@ use crate::{
 pub const BLUR: f32 = 36.0;
 /// Saturation of the blurred backdrop, so colour behind shows through the
 /// tint as vivid as in a native menu.
-pub const SATURATION: f32 = 2.0;
+pub const SATURATION: f32 = 1.7;
 /// The least tint alpha: below it the surface reads as a hole.
 pub const FLOOR: f32 = 0.55;
 /// The brightest a blurred backdrop gets, as a grey: under the blur a

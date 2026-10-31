@@ -31,6 +31,8 @@ const COMPACTION_H: f32 = 160.0;
 const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
 /// The fade above the composer column, where the transcript scrolls out under it.
+/// How often a running turn redraws (shimmers, timers): about 30 fps.
+const AMBIENT: std::time::Duration = std::time::Duration::from_millis(33);
 const COMPOSER_FADE: f32 = 56.0;
 /// The shade where the fade meets the column; the column carries it on to full at its bottom, so the
 /// whole run reads as one even ramp rather than a band with a soft top.
@@ -557,14 +559,21 @@ impl AgentPane {
     }
 
     /// Something moves this frame (shimmer, entries, folds, fades).
+    /// Something moves that must be smooth: entries, folds, the composer growing.
     fn animating(&self, now: Instant, cx: &App) -> bool {
         let reduce = cx.reduce_motion();
-        self.running
-            || self.awaiting()
-            || self.editor.read(cx).growing(now, reduce)
-            || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live) || matches!(r, Row::Compaction(c) if c.running()))
+        self.editor.read(cx).growing(now, reduce)
             || self.entered.values().any(|at| motion::enter(*at, ENTER, now, reduce).is_some())
             || self.fold_at.values().any(|at| now < *at || motion::enter(*at, FOLD, now, reduce).is_some())
+    }
+
+    /// A turn runs (shimmers, timers, live groups): it moves for minutes or hours, so it draws at
+    /// [`AMBIENT`] rather than every display frame, leaving the main thread to everything else (a long
+    /// transcript lays out each frame; at 120 Hz that starved the browser engine and app requests).
+    fn ambient(&self) -> bool {
+        self.running
+            || self.awaiting()
+            || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live) || matches!(r, Row::Compaction(c) if c.running()))
     }
 
     pub(super) fn render_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -577,6 +586,14 @@ impl AgentPane {
         }
         if self.animating(now, cx) && !cx.reduce_motion() {
             window.request_animation_frame();
+        } else if self.ambient() && self.ambient_tick.is_none() {
+            self.ambient_tick = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(AMBIENT).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.ambient_tick = None;
+                    cx.notify();
+                });
+            }));
         }
         // Folding groups change height every frame; a finished fold is measured once more. Live groups too:
         // their window opens as lines arrive and streaming reasoning glides; and streaming text, whose height glides.
@@ -1402,7 +1419,11 @@ impl AgentPane {
         // An entering line opens to its height as it arrives: the window grows by that much, so the header and
         // older lines stay put while it opens (once full, they slide up together). Arrivals in a row add up.
         // The top fade comes in with the line that fills the window, while the window follows its newest line.
-        let top_fade = if self.live_pins.get(&key).is_some_and(|p| !p.pinned) { 0.0 } else { (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0) };
+        let top_fade = if self.live_pins.get(&key).is_some_and(|p| !p.pinned) {
+            0.0
+        } else {
+            (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0)
+        };
         let lines: Vec<AnyElement> = shown
             .iter()
             .enumerate()
