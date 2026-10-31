@@ -36,7 +36,7 @@ const AMBIENT: std::time::Duration = std::time::Duration::from_millis(33);
 const COMPOSER_FADE: f32 = 56.0;
 /// The shade where the fade meets the column; the column carries it on to full at its bottom, so the
 /// whole run reads as one even ramp rather than a band with a soft top.
-const COMPOSER_MID: f32 = 0.7;
+const COMPOSER_MID: f32 = 0.85;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
 /// Streaming reasoning's window: four of its lines and the gap below.
@@ -739,7 +739,7 @@ impl AgentPane {
                     .id("agent-composer-column")
                     .occlude()
                     .relative()
-                    .bg(linear_gradient(180.0, linear_color_stop(surface.ramp(COMPOSER_MID), 0.0), linear_color_stop(surface.at(1.0), 1.0)))
+                    .bg(linear_gradient(180.0, linear_color_stop(surface.ramp(COMPOSER_MID), 0.0), linear_color_stop(surface.ramp(1.0), 1.0)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {

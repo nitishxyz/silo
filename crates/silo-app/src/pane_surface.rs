@@ -16,7 +16,7 @@ use crate::adaptive::Chrome;
 /// that text scrolled under it is gone.
 pub const BAR_VEIL: f32 = 0.55;
 /// The densest a frosted [`PaneSurface::ramp`] gets.
-pub const RAMP_MOST: f32 = 0.92;
+pub const RAMP_MOST: f32 = 0.97;
 
 /// The card a pane sits on, as last set by the workspace (`None` before the
 /// first frame: the theme's, solid).
