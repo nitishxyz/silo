@@ -396,6 +396,16 @@ pub enum Method {
         project_root: Option<String>,
         name: String,
     },
+    /// Tidy dictated text with one short call to the cheapest model of the default provider: punctuation,
+    /// casing, the vocabulary's spellings and, by `style`, lists; never new content.
+    #[serde(rename = "text.polish")]
+    TextPolish {
+        text: String,
+        #[serde(default)]
+        vocabulary: Vec<String>,
+        #[serde(default)]
+        style: TextStyle,
+    },
 }
 
 impl std::fmt::Debug for Method {
@@ -478,6 +488,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("mcp.login_complete", "Finish an MCP server's sign-in: wait for the browser, or take the pasted callback URL."),
     ("mcp.login_cancel", "Abandon a pending MCP sign-in."),
     ("mcp.logout", "Forget an MCP server's OAuth tokens."),
+    ("text.polish", "Tidy dictated text: punctuation, casing, vocabulary and lists; never new content."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -581,6 +592,24 @@ pub struct LoginCallback {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigValue {
     pub value: Value,
+}
+
+/// Where polished text goes (`text.polish`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TextStyle {
+    /// One line (a terminal): no line breaks.
+    Line,
+    /// Paragraphs, no lists.
+    #[default]
+    Prose,
+    /// Paragraphs and Markdown lists.
+    Markdown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolishedText {
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

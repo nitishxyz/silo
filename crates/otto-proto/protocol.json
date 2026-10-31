@@ -2677,6 +2677,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2993,6 +3009,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -3396,6 +3428,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3738,6 +3786,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -4147,6 +4211,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4467,6 +4547,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -4791,6 +4887,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5111,6 +5223,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -5461,6 +5589,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -5955,6 +6099,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6261,6 +6421,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -6642,6 +6818,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6948,6 +7140,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -7321,6 +7529,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7656,6 +7880,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7971,6 +8211,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8279,6 +8535,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -8621,6 +8893,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8931,6 +9219,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -9280,6 +9584,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -9772,6 +10092,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10249,6 +10585,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10601,6 +10953,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10907,6 +11275,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -11387,6 +11771,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11700,6 +12100,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -12020,6 +12436,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -12517,6 +12949,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -13060,6 +13508,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -13358,6 +13822,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -13732,6 +14212,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14060,6 +14556,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -14399,6 +14911,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14713,6 +15241,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -15109,6 +15653,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15407,6 +15967,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -15719,6 +16295,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16028,6 +16620,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16334,6 +16942,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -17020,6 +17644,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17653,6 +18293,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17959,6 +18615,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -18598,6 +19270,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18926,6 +19614,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -19236,6 +19940,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -19556,6 +20276,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -19869,6 +20605,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -20179,6 +20931,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -20511,6 +21279,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -20817,6 +21601,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -21485,6 +22285,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -23169,6 +23985,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -23482,6 +24314,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -23519,6 +24367,350 @@
         },
         "title": "Array_of_SkillInfo",
         "type": "array"
+      }
+    },
+    "text.polish": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "style": {
+            "$ref": "#/$defs/TextStyle",
+            "default": "prose"
+          },
+          "text": {
+            "type": "string"
+          },
+          "vocabulary": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "PolishedText",
+        "type": "object"
       }
     },
     "tools.catalog": {
@@ -23808,6 +25000,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]
@@ -24155,6 +25363,22 @@
                 "type": "string"
               }
             ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -24492,6 +25716,22 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
                 "type": "string"
               }
             ]

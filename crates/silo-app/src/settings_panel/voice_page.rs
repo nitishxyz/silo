@@ -1,7 +1,10 @@
 //! Settings › Voice, and the microphone row of Settings › Permissions.
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
-use silo_voice::{EngineKind, Target, VoicePrefs, prefs::language_name};
+use silo_voice::{
+    EngineKind, Target, VoicePrefs,
+    prefs::{FormatLists, language_name},
+};
 
 use super::{ButtonKind, SettingsEvent, SettingsPanel};
 use crate::{
@@ -123,15 +126,15 @@ impl SettingsPanel {
 
         let panel = cx.entity().downgrade();
         let engine_prefs = prefs.clone();
-        let engine =
-            Segmented::new("settings-voice-engine", EngineKind::ALL.map(EngineKind::label), usize::from(prefs.engine == EngineKind::Multilingual))
-                .segment_width(96.0)
-                .on_select(move |index, _, cx| {
-                    let mut prefs = engine_prefs.clone();
-                    prefs.engine = EngineKind::ALL.get(index).copied().unwrap_or_default();
-                    let _ = panel.update(cx, |_, cx| cx.emit(set(prefs)));
-                })
-                .into_any_element();
+        let selected = EngineKind::ALL.iter().position(|e| *e == prefs.engine).unwrap_or_default();
+        let engine = Segmented::new("settings-voice-engine", EngineKind::ALL.map(EngineKind::label), selected)
+            .segment_width(96.0)
+            .on_select(move |index, _, cx| {
+                let mut prefs = engine_prefs.clone();
+                prefs.engine = EngineKind::ALL.get(index).copied().unwrap_or_default();
+                let _ = panel.update(cx, |_, cx| cx.emit(set(prefs)));
+            })
+            .into_any_element();
         let mut engines = vec![Self::row(SettingId::VoiceEngine.label(), None, Some(engine), narrow)];
         engines.extend(v.engines.iter().enumerate().map(|(i, row)| self.voice_engine_row(row, i, narrow, cx)));
         out.push(self.group(Some("Engine"), engines));
@@ -164,6 +167,33 @@ impl SettingsPanel {
             ],
         ));
 
+        out.extend(self.voice_words(narrow, cx));
+
+        let lists = FormatLists::TARGETS
+            .into_iter()
+            .enumerate()
+            .map(|(i, target)| {
+                let panel = cx.entity().downgrade();
+                let prefs = prefs.clone();
+                let toggle = Toggle::new(("settings-voice-lists", i), target.label(), prefs.format_lists.get(target)).on_toggle(move |on, _, cx| {
+                    let mut prefs = prefs.clone();
+                    prefs.format_lists.set(target, on);
+                    let _ = panel.update(cx, |_, cx| cx.emit(set(prefs)));
+                });
+                Self::row(target.label(), None, Some(toggle.into_any_element()), false)
+            })
+            .collect();
+        out.push(self.group(Some("Format lists"), lists));
+        out.push(self.group(
+            Some("Polish"),
+            vec![Self::row(
+                "Polish with AI",
+                Some("Sends the text, never audio, to your agent's model provider to fix punctuation, spelling and lists".into()),
+                Some(self.voice_toggle("settings-voice-polish", "Polish with AI", prefs.polish, |p, on| p.polish = on, cx)),
+                narrow,
+            )],
+        ));
+
         let enter = Target::ALL
             .into_iter()
             .enumerate()
@@ -187,6 +217,9 @@ impl SettingsPanel {
                 Some(self.voice_toggle("settings-voice-sounds", "Start and stop sounds", prefs.sounds, |p, on| p.sounds = on, cx)),
                 false,
             )],
+        ));
+        out.push(Self::note(
+            "Say “new line”, “new paragraph”, “bullet”, “numbered list”, “period”, “comma”, “question mark” or “scratch that”. Terminals get one line.",
         ));
         out.push(Self::note("Speech is transcribed on this Mac; audio never leaves it."));
         out
@@ -223,5 +256,6 @@ mod tests {
         assert_eq!(model_status(&row(false, Some(Fetch::Running { done: 50, total: Some(200) }))), "Downloading… 25%");
         assert_eq!(model_status(&row(false, Some(Fetch::Failed("Offline.".into())))), "Offline.");
         assert_eq!(model_status(&EngineRow { available: false, ..row(false, None) }), "Not available on this Mac");
+        assert_eq!(model_status(&EngineRow { kind: EngineKind::Balanced, ..row(false, None) }), "190 MB · downloads on first use");
     }
 }

@@ -31,7 +31,10 @@ const COMPACTION_H: f32 = 160.0;
 const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
 /// The fade above the composer column, where the transcript scrolls out under it.
-const COMPOSER_FADE: f32 = 28.0;
+const COMPOSER_FADE: f32 = 56.0;
+/// The shade where the fade meets the column; the column carries it on to full at its bottom, so the
+/// whole run reads as one even ramp rather than a band with a soft top.
+const COMPOSER_MID: f32 = 0.7;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
 /// Streaming reasoning's window: four of its lines and the gap below.
@@ -709,17 +712,17 @@ impl AgentPane {
                 .size_full();
                 // What scrolls under it fades out above the column (as a live group's top does); only the
                 // column takes the pointer.
-                // Frosted, what scrolls under the column is frosted glass and the fade eases into it.
+                // One even ramp from clear above the fade to the full shade at the column's bottom.
                 let fade = div().h(px(COMPOSER_FADE)).bg(linear_gradient(
                     180.0,
                     linear_color_stop(surface.at(0.0), 0.0),
-                    linear_color_stop(surface.at(1.0), 1.0),
+                    linear_color_stop(surface.ramp(COMPOSER_MID), 1.0),
                 ));
                 let column = div()
                     .id("agent-composer-column")
                     .occlude()
                     .relative()
-                    .map(|el| surface.bar(el))
+                    .bg(linear_gradient(180.0, linear_color_stop(surface.ramp(COMPOSER_MID), 0.0), linear_color_stop(surface.at(1.0), 1.0)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -1398,6 +1401,8 @@ impl AgentPane {
             .collect();
         // An entering line opens to its height as it arrives: the window grows by that much, so the header and
         // older lines stay put while it opens (once full, they slide up together). Arrivals in a row add up.
+        // The top fade comes in with the line that fills the window, while the window follows its newest line.
+        let top_fade = if self.live_pins.get(&key).is_some_and(|p| !p.pinned) { 0.0 } else { (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0) };
         let lines: Vec<AnyElement> = shown
             .iter()
             .enumerate()
@@ -1405,12 +1410,14 @@ impl AgentPane {
                 // The two newest lines are bright; one pushed past them dims as the newcomer arrives.
                 let below: f32 = arrived[i + 1..].iter().sum();
                 let dim = 1.0 - 0.45 * (below - 1.0).clamp(0.0, 1.0);
+                // The top of the window fades the lines themselves (no wash over them, which shows as a band on
+                // glass and on themes far from the backdrop): the topmost shown line at 35%, the next eased in.
+                let edge = (LIVE_LINES - 1.0 - below).clamp(0.0, 1.0);
+                let dim = dim * (1.0 - top_fade * 0.65 * (1.0 - edge));
                 let line = self.render_line(&key, l, g.live && i + 1 == n, dim, now, window, cx);
                 div().flex_none().when(arrived[i] < 1.0, |el| el.max_h(px(LINE_H * arrived[i])).overflow_hidden()).child(line).into_any_element()
             })
             .collect();
-        // The top fade comes in with the line that fills the window.
-        let fade = (arrived.iter().sum::<f32>() - (LIVE_LINES - 1.0)).clamp(0.0, 1.0);
         // An open detail gets its own room in the window, as drawn (its box scrolls on its own): the window grows
         // and shrinks with it, so a pinned window keeps its overflow and nothing jumps.
         let max = {
@@ -1435,12 +1442,12 @@ impl AgentPane {
         let scroller =
             self.scroll.scroller(&id, div().id(gpui::ElementId::Name(id.clone().into())).max_h(px(max * (1.0 - fold))).flex().flex_col(), false);
         let surface = self.surface;
-        let edge = |top: bool| {
-            let (a, b) = if top { (1.0, 0.0) } else { (0.0, 1.0) };
-            div().absolute().left_0().right_0().h(px(28.0)).map(|el| if top { el.top_0() } else { el.bottom_0() }).bg(linear_gradient(
+        // Scrolled up in it, solid: a fade over the bottom says more is below (frosted, a wash would show as a band).
+        let more_below = || {
+            div().absolute().left_0().right_0().bottom_0().h(px(28.0)).bg(linear_gradient(
                 180.0,
-                linear_color_stop(surface.at(a), 0.0),
-                linear_color_stop(surface.at(b), 1.0),
+                linear_color_stop(surface.at(0.0), 0.0),
+                linear_color_stop(surface.at(1.0), 1.0),
             ))
         };
         let window_el = div()
@@ -1448,8 +1455,7 @@ impl AgentPane {
             .pl(px(NEST))
             .opacity(alpha)
             .child(scroller.child(div().flex_none().flex().flex_col().children(lines)))
-            .when(f32::from(window.line_height()) > 0.0 && fade > 0.0, |el| el.child(edge(true).opacity(fade)))
-            .when(below, |el| el.child(edge(false)));
+            .when(below && !surface.frosted(), |el| el.child(more_below()));
         column.child(window_el).into_any_element()
     }
 

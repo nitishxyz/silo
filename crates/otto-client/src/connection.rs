@@ -455,6 +455,10 @@ impl Connection {
     pub async fn mcp_logout(&self, project_root: Option<String>, name: &str) -> Result<Empty> {
         self.call_typed(Method::McpLogout { project_root, name: name.into() }).await
     }
+    /// Dictated `text` tidied by a small model, spelling `vocabulary` as given.
+    pub async fn text_polish(&self, text: String, vocabulary: Vec<String>, style: TextStyle) -> Result<String> {
+        Ok(self.call_typed::<PolishedText>(Method::TextPolish { text, vocabulary, style }).await?.text)
+    }
 }
 struct PendingGuard {
     id: u64,

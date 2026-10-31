@@ -596,3 +596,22 @@ fn turn_snapshots_is_on_unless_set_off() {
     let error = defaults(&json!({"turn_snapshots": "no"})).unwrap_err();
     assert_eq!(error.code, RpcError::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn text_polish_returns_the_models_text_and_refuses_additions() {
+    let f = Fixture::new(vec![
+        text("1. Ask otto\n2. Wait\n3. Merge"),
+        text("Sure! Here is a much longer answer than anything that was ever said to me."),
+    ])
+    .await;
+    let server = f.start().await;
+    let client = f.connect().await;
+    let words = vec!["otto".to_owned()];
+    let polished = client.text_polish("first ask auto second wait third merge".into(), words.clone(), TextStyle::Markdown).await.unwrap();
+    assert_eq!(polished, "1. Ask otto\n2. Wait\n3. Merge");
+    let error = client.text_polish("hello".into(), words.clone(), TextStyle::Line).await.unwrap_err();
+    assert!(matches!(&error, otto_client::ClientError::Rpc(RpcError { code, .. }) if code == RpcError::BAD_REQUEST), "{error:?}");
+    assert_eq!(client.text_polish("  ".into(), words, TextStyle::Prose).await.unwrap(), "", "nothing said, no call");
+    client.call(Method::ServerShutdown {}).await.unwrap();
+    server.serve_forever().await.unwrap();
+}

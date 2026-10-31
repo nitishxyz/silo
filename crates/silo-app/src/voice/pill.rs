@@ -74,6 +74,7 @@ impl Workspace {
                 muted,
             )),
             Stage::Recording if !live.partial.is_empty() => Some((live.partial.clone(), muted)),
+            Stage::Finishing(_) if live.polishing => Some(("Polishing…".into(), muted)),
             Stage::Finishing(_) => Some(("Transcribing…".into(), muted)),
             _ => None,
         };

@@ -15,6 +15,8 @@ use crate::adaptive::Chrome;
 /// Over scrolling content, frosted: the tint over its own blur, enough
 /// that text scrolled under it is gone.
 pub const BAR_VEIL: f32 = 0.55;
+/// The densest a frosted [`PaneSurface::ramp`] gets.
+pub const RAMP_MOST: f32 = 0.92;
 
 /// The card a pane sits on, as last set by the workspace (`None` before the
 /// first frame: the theme's, solid).
@@ -53,6 +55,18 @@ impl PaneSurface {
         let (color, alpha) = self.shade();
         let mut c: Hsla = rgb(color).into();
         c.a = alpha * t.clamp(0.0, 1.0);
+        c
+    }
+
+    /// A long fade over scrolling content with no blur under it (the agent's composer area): at `t`, up
+    /// to nearly opaque even when frosted, so text under its bottom is gone.
+    #[must_use]
+    pub fn ramp(self, t: f32) -> Hsla {
+        let mut c: Hsla = rgb(self.color()).into();
+        c.a = RAMP_MOST * t.clamp(0.0, 1.0);
+        if !self.frosted() {
+            c.a = t.clamp(0.0, 1.0);
+        }
         c
     }
 

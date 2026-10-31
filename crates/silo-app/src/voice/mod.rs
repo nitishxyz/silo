@@ -42,6 +42,8 @@ struct Live {
     levels: [f32; BANDS],
     partial: String,
     waiting: bool,
+    /// The text is with the agent's model (Polish with AI).
+    polishing: bool,
 }
 
 /// A window's voice typing.
@@ -76,6 +78,9 @@ impl Workspace {
     /// Fn and the other modifiers, from the window's root.
     pub(crate) fn voice_modifiers(&mut self, event: &ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
         let m = event.modifiers;
+        if m.function {
+            tracing::debug!("voice: fn down");
+        }
         self.voice_input(Input::Modifiers { function: m.function, others: m.control || m.alt || m.shift || m.platform }, window, cx);
     }
 
@@ -102,7 +107,11 @@ impl Workspace {
             return;
         }
         let now = self.voice.epoch.elapsed();
-        match self.voice.trigger.input(input, now) {
+        let action = self.voice.trigger.input(input, now);
+        if let Some(action) = action {
+            tracing::info!(?action, "voice");
+        }
+        match action {
             Some(Action::StartHold) => self.voice_start(false, window, cx),
             Some(Action::StartHandsFree) => self.voice_start(true, window, cx),
             Some(Action::Stop) => self.voice_stop(false, cx),
@@ -135,12 +144,14 @@ impl Workspace {
             return;
         }
         if !silo_voice::engine::available(engine) {
+            tracing::info!(?engine, "voice: engine unavailable");
             self.voice.trigger.reset();
             self.flash(Status::error(format!("{} voice typing isn't available on this Mac", engine.label())), cx);
             return;
         }
         #[cfg(target_os = "macos")]
         if silo_voice::permission::access() == silo_voice::permission::Access::Denied {
+            tracing::info!("voice: microphone denied");
             self.voice.trigger.reset();
             self.flash(Status::warning("Silo can't use the microphone; allow it in Settings › Permissions"), cx);
             return;
@@ -149,12 +160,13 @@ impl Workspace {
         #[cfg(target_os = "macos")]
         if silo_voice::permission::access() == silo_voice::permission::Access::NotAsked {
             self.voice.trigger.reset();
+            tracing::info!("voice: asking for the microphone");
             silo_voice::permission::request(|_| {});
             return;
         }
         let model = engine.model();
         fetch::start(self.home.clone(), engine, &self.rt);
-        let options = Options { language: engine.language(&prefs.language), keywords: self.voice_hints(window, cx) };
+        let options = Options { language: engine.language(&prefs.language), keywords: prefs.keywords(self.voice_hints(window, cx)) };
         let session =
             Session::start(Config { engine, model: model.path(&self.home), model_bytes: model.bytes, options, microphone: prefs.microphone.clone() });
         self.voice.live = Some(Live {
@@ -168,6 +180,7 @@ impl Workspace {
             levels: [0.0; BANDS],
             partial: String::new(),
             waiting: false,
+            polishing: false,
         });
         if prefs.sounds {
             sound::play(sound::Sound::ListenStart);
@@ -213,11 +226,13 @@ impl Workspace {
                 self.voice.trigger.reset();
             }
             Phase::WaitingForModel | Phase::Transcribing => {}
+            Phase::Done(_) if live.polishing => {}
             Phase::Done(text) => {
-                live.stage = Stage::Leaving(now);
                 self.voice.trigger.reset();
-                if !text.is_empty() {
-                    self.voice_insert(text, window, cx);
+                if text.is_empty() {
+                    live.stage = Stage::Leaving(now);
+                } else {
+                    self.voice_deliver(&text, window, cx);
                 }
             }
             Phase::Failed(error) => {

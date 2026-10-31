@@ -23,6 +23,15 @@ pub const WHISTLE: Model = Model {
     bytes: 16_919_407,
 };
 
+/// Whisper small (OpenAI, MIT), 5-bit, in whisper.cpp's format.
+pub const WHISPER_SMALL: Model = Model {
+    engine: EngineKind::Balanced,
+    file: "ggml-small-q5_1.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin",
+    sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
+    bytes: 190_085_487,
+};
+
 /// Whisper large-v3 turbo (OpenAI, MIT), 5-bit, in whisper.cpp's format.
 pub const WHISPER_TURBO: Model = Model {
     engine: EngineKind::Multilingual,
@@ -99,13 +108,13 @@ mod tests {
 
     #[test]
     fn models_are_pinned_and_sized() {
-        for model in [&WHISTLE, &WHISPER_TURBO] {
+        for model in [&WHISTLE, &WHISPER_SMALL, &WHISPER_TURBO] {
             assert_eq!(model.sha256.len(), 64);
             assert!(model.url.starts_with("https://huggingface.co/") && model.url.ends_with(model.file));
             assert!(!model.url.contains("/main/"), "a pinned revision");
             assert_eq!(model.engine.model().file, model.file);
         }
-        assert_eq!((WHISTLE.size(), WHISPER_TURBO.size()), ("17 MB".to_owned(), "574 MB".to_owned()));
+        assert_eq!([WHISTLE.size(), WHISPER_SMALL.size(), WHISPER_TURBO.size()], ["17 MB", "190 MB", "574 MB"]);
     }
 
     #[test]

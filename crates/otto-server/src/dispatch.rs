@@ -294,6 +294,9 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         Method::UsageSummary { since_ms, utc_offset_minutes } => {
             Ok(json!(runtime.usage_summary(since_ms, utc_offset_minutes.unwrap_or(0)).await.map_err(core_error)?))
         }
+        Method::TextPolish { text, vocabulary, style } => {
+            Ok(json!(otto_proto::PolishedText { text: runtime.polish(&text, &vocabulary, style).await.map_err(core_error)? }))
+        }
     }
 }
 pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcError> {

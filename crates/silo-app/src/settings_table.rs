@@ -270,9 +270,17 @@ pub const SETTINGS: &[Setting] = &[
         Voice,
         Some("Voice typing"),
         Toggle,
-        "voice dictation dictate speech fn globe key hold"
+        "voice dictation dictate speech fn globe key hold vocabulary words replacements lists polish"
     ),
-    setting!(SettingId::VoiceEngine, "Voice engine", "Engine", Voice, Some("Engine"), Choice, "voice engine fast multilingual whisper whistle model"),
+    setting!(
+        SettingId::VoiceEngine,
+        "Voice engine",
+        "Engine",
+        Voice,
+        Some("Engine"),
+        Choice,
+        "voice engine fast balanced multilingual whisper whistle model"
+    ),
     setting!(SettingId::Hosts, "Hosts", "Hosts", Hosts, None, Open, "hosts machines remote add remove rename"),
     setting!(
         SettingId::PairDevice,

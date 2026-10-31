@@ -80,6 +80,7 @@ fn result_schema(method: &Method) -> Schema {
         M::McpList { .. } => schema_for!(Vec<McpServer>),
         M::McpAdd { .. } | M::McpUpdate { .. } | M::McpLoginComplete { .. } => schema_for!(McpServer),
         M::McpLogin { .. } => schema_for!(McpLoginStarted),
+        M::TextPolish { .. } => schema_for!(PolishedText),
         M::ServerShutdown {}
         | M::Ping {}
         | M::SessionUnsubscribe { .. }
@@ -218,6 +219,7 @@ pub fn examples() -> Vec<Method> {
         M::McpLoginComplete { login_id: "login1".into(), code: None },
         M::McpLoginCancel { login_id: "login1".into() },
         M::McpLogout { project_root: None, name: "github".into() },
+        M::TextPolish { text: "first open the file second run auto".into(), vocabulary: vec!["otto".into()], style: TextStyle::Markdown },
     ]
 }
 

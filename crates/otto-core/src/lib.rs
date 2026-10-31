@@ -8,6 +8,7 @@ mod deltas;
 mod hooks;
 mod legacy;
 mod mailbox;
+mod polish;
 mod prepared;
 mod prompt;
 mod recovery;

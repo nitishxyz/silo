@@ -1,13 +1,26 @@
 //! Voice typing's one way into the focused block: where the text goes,
-//! typing it there through that block's own input path, and the keyword
-//! hints its content suggests.
+//! formatting it for there (and polishing it, when asked), typing it
+//! through that block's own input path, and the keyword hints its content
+//! suggests.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use gpui::{Context, Entity, Keystroke, Window};
-use silo_voice::{Target, hints};
+use otto_proto::TextStyle;
+use silo_voice::{
+    Target, hints,
+    prefs::BUILT_IN_VOCABULARY,
+    style::{self, Style},
+};
 
+use super::Stage;
 use crate::{blocks::BlockPane, browser_pane::BrowserPane, pane::Pane, workspace::Workspace};
+
+/// Polished text arrives within this, or the text as it is goes.
+const POLISH_WAIT: Duration = Duration::from_secs(2);
 
 /// Where dictated text goes.
 enum Dest {
@@ -47,11 +60,70 @@ impl Workspace {
         }
     }
 
-    /// Type `text` into whatever has focus, then Return if that kind of
-    /// target is set to. Done once the current update is over: typing goes
-    /// through the window's key dispatch, which reaches this workspace too.
-    pub(crate) fn voice_insert(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// A transcript to the focused block: replacements, spoken commands and
+    /// lists as that block takes them, polished first when asked (falling
+    /// back to that within [`POLISH_WAIT`]).
+    pub(crate) fn voice_deliver(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let prefs = &self.state.voice;
         let dest = self.voice_dest(window, cx);
+        let target = dest.target();
+        let vocabulary = prefs.vocabulary.iter().cloned().chain(BUILT_IN_VOCABULARY.map(str::to_owned)).collect();
+        let style = Style { multiline: target != Target::Terminal, lists: prefs.format_lists.get(target), vocabulary };
+        let plain = style::format(text, &prefs.replacements, &style);
+        let local = self.hosts.iter().position(|h| h.info.local);
+        let otto = local.filter(|_| prefs.polish && !plain.is_empty()).and_then(|host| self.agent_target(host));
+        let Some(live) = self.voice.live.as_mut() else { return };
+        let Some(otto) = otto else {
+            live.stage = Stage::Leaving(Instant::now());
+            return self.voice_type(dest, plain, window, cx);
+        };
+        live.polishing = true;
+        let kind = match (style.multiline, style.lists) {
+            (false, _) => TextStyle::Line,
+            (true, false) => TextStyle::Prose,
+            (true, true) => TextStyle::Markdown,
+        };
+        let (words, rules, send) = (prefs.keywords(Vec::new()), prefs.replacements.clone(), plain.clone());
+        let task = self.rt.spawn(async move {
+            let call = async {
+                let c = crate::agent::client::connection(&otto).await.map_err(|e| e.to_string())?;
+                c.text_polish(send, words, kind).await.map_err(|e| e.to_string())
+            };
+            tokio::time::timeout(POLISH_WAIT, call).await.map_err(|_| "timed out".to_owned())?
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let polished = match task.await {
+                Ok(Ok(text)) if !text.trim().is_empty() => Some(text),
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => {
+                    tracing::debug!("voice: polish: {error}");
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!("voice: polish: {error}");
+                    None
+                }
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                // Cancelled meanwhile (Esc).
+                let Some(live) = this.voice.live.as_mut().filter(|l| l.polishing && matches!(l.stage, Stage::Finishing(_))) else { return };
+                live.polishing = false;
+                live.stage = Stage::Leaving(Instant::now());
+                let text = polished.map_or(plain, |text| {
+                    let text = style::replace(text.trim(), &rules);
+                    if kind == TextStyle::Line { silo_voice::engine::tidy(&text) } else { text }
+                });
+                this.voice_type(dest, text, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Type `text` into `dest`, then Return if that kind of target is set
+    /// to. Done once the current update is over: typing goes through the
+    /// window's key dispatch, which reaches this workspace too.
+    fn voice_type(&mut self, dest: Dest, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let enter = self.state.voice.enter_after.get(dest.target());
         let this = cx.entity().downgrade();
         window.defer(cx, move |window, cx| {

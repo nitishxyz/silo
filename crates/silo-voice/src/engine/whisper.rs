@@ -12,19 +12,42 @@ pub struct Whisper {
 }
 
 impl Whisper {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
+    pub fn load(path: &Path, kind: crate::EngineKind) -> anyhow::Result<Self> {
         static HOOKS: std::sync::Once = std::sync::Once::new();
         // whisper.cpp's own logging into tracing, not stderr.
         HOOKS.call_once(whisper_rs::install_logging_hooks);
         let path = path.to_str().ok_or_else(|| anyhow!("model path is not UTF-8"))?;
-        let context = WhisperContext::new_with_params(path, WhisperContextParameters::default()).context("load the Multilingual model")?;
+        let context =
+            WhisperContext::new_with_params(path, WhisperContextParameters::default()).with_context(|| format!("load the {} model", kind.label()))?;
         Ok(Self { context })
     }
 }
 
-/// Keywords as the prompt Whisper continues from: it favours their spelling.
+/// The prompt's length at most: whisper.cpp keeps a prompt's last 223
+/// tokens (half its text context), about 4 characters each.
+const PROMPT_CHARS: usize = 600;
+
+/// Keywords as the text Whisper continues from (its `initial_prompt`): it
+/// favours their spelling and the prompt's style (punctuated, cased). Too
+/// long, the first ones go: the most telling come last.
 fn prompt(keywords: &[String]) -> String {
-    keywords.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect::<Vec<_>>().join(", ")
+    let mut words: Vec<&str> = Vec::new();
+    let mut chars = 0;
+    for word in keywords.iter().rev().map(|k| k.trim()).filter(|k| !k.is_empty() && !k.contains('\0')) {
+        if words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+            continue;
+        }
+        chars += word.chars().count() + 2;
+        if chars > PROMPT_CHARS {
+            break;
+        }
+        words.push(word);
+    }
+    if words.is_empty() {
+        return String::new();
+    }
+    words.reverse();
+    format!("{}.", words.join(", "))
 }
 
 impl Engine for Whisper {
@@ -54,5 +77,20 @@ impl Engine for Whisper {
             text.push_str(&segment.to_str_lossy().unwrap_or_default());
         }
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_keeps_the_last_words_and_no_nul() {
+        let words = |w: &[&str]| w.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(prompt(&words(&["term", " ", "Silo", "otto", "silo", "nul\0"])), "term, otto, silo.");
+        assert_eq!(prompt(&[]), "");
+        let many: Vec<String> = (0..200).map(|i| format!("word{i}")).collect();
+        let p = prompt(&many);
+        assert!(p.chars().count() <= PROMPT_CHARS + 1 && p.ends_with("word199."), "{p}");
     }
 }

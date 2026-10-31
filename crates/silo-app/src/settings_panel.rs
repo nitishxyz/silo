@@ -18,6 +18,7 @@ use silo_proto::permissions::{PermissionId, PermissionStatus, Permissions};
 
 mod keyboard_page;
 mod voice_page;
+mod voice_words;
 
 type TriggerBounds = std::rc::Rc<std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>)>>>;
 
@@ -683,6 +684,8 @@ pub struct SettingsPanel {
     theme_highlight: usize,
     /// Settings › Voice's open choice menu (language, microphone).
     voice_menu: Option<crate::context_menu::Menu<SettingsEvent>>,
+    /// Settings › Voice's vocabulary and replacement fields.
+    voice_fields: voice_words::VoiceFields,
     /// Settings › Keyboard's shortcut being recorded.
     recorder: keyboard_page::Recorder,
     /// Panel-level focus for keyboard navigation of the theme dropdown.
@@ -757,6 +760,7 @@ impl SettingsPanel {
             FieldEvent::Cancel => this.sync_fields(cx),
             _ => {}
         }));
+        let voice_fields = voice_words::VoiceFields::new(&mut subscriptions, window, cx);
         let mut this = Self {
             snapshot,
             selected: Section::Appearance,
@@ -780,6 +784,7 @@ impl SettingsPanel {
             theme_menu: None,
             theme_highlight: 0,
             voice_menu: None,
+            voice_fields,
             recorder: keyboard_page::Recorder::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,

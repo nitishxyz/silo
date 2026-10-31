@@ -62,7 +62,7 @@ pub fn load(kind: EngineKind, path: &std::path::Path) -> anyhow::Result<Box<dyn 
         #[cfg(whistle)]
         EngineKind::Fast => Ok(Box::new(whistle::Whistle::load(path)?)),
         #[cfg(target_os = "macos")]
-        EngineKind::Multilingual => Ok(Box::new(whisper::Whisper::load(path)?)),
+        EngineKind::Balanced | EngineKind::Multilingual => Ok(Box::new(whisper::Whisper::load(path, kind)?)),
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!("{} voice typing isn't available on this Mac", kind.label()),
     }
@@ -73,7 +73,7 @@ pub fn load(kind: EngineKind, path: &std::path::Path) -> anyhow::Result<Box<dyn 
 pub const fn available(kind: EngineKind) -> bool {
     match kind {
         EngineKind::Fast => cfg!(whistle),
-        EngineKind::Multilingual => cfg!(target_os = "macos"),
+        EngineKind::Balanced | EngineKind::Multilingual => cfg!(target_os = "macos"),
     }
 }
 

@@ -72,3 +72,9 @@ fn fast_hears_speech() {
 fn multilingual_hears_speech() {
     hears(EngineKind::Multilingual);
 }
+
+#[test]
+#[ignore = "downloads a 190 MB model"]
+fn balanced_hears_speech() {
+    hears(EngineKind::Balanced);
+}

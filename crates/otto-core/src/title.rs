@@ -17,7 +17,7 @@ pub(crate) async fn name(cx: &Context) -> Result<()> {
         text.push_str(&format!("\n\nAssistant:\n{}", bounded(&reply, 500)));
     }
     let live = cx.live();
-    let (model, id) = small(cx, &live.row.provider).unwrap_or_else(|| (live.model.clone(), live.row.model.clone()));
+    let (model, id) = small(&cx.runtime, &live.row.provider).unwrap_or_else(|| (live.model.clone(), live.row.model.clone()));
     let request = Request { model: id, system: vec![PROMPT.into()], items: vec![Item::user_text(crate::id(), text)], ..Default::default() };
     let call = async {
         let mut stream = model.stream(request, CallCx::default()).await?;
@@ -36,8 +36,8 @@ pub(crate) async fn name(cx: &Context) -> Result<()> {
 }
 
 /// The provider's cheapest priced model the resolver lists.
-fn small(cx: &Context, provider: &str) -> Option<(Arc<dyn Model>, String)> {
-    let models = &cx.runtime.0.config.models;
+pub(crate) fn small(runtime: &crate::Runtime, provider: &str) -> Option<(Arc<dyn Model>, String)> {
+    let models = &runtime.0.config.models;
     let (_, id) = models
         .list()
         .into_iter()
