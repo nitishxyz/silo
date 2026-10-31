@@ -457,7 +457,11 @@ impl Workspace {
         // A float of several panes: its gaps' glass, as the window veil.
         let veil = match floating {
             false => (settled && frosted).then(|| slot_veil(corners, self.chrome.fill())),
-            true => several.then(|| self.float_id(id).map(|f| self.float_chrome(self.card_fill(&f, cx)))).flatten().filter(|c| c.alpha < 1.0).map(|c| slot_veil(corners, c.fill())),
+            true => several
+                .then(|| self.float_id(id).map(|f| self.float_chrome(self.card_fill(&f, cx))))
+                .flatten()
+                .filter(|c| c.alpha < 1.0)
+                .map(|c| slot_veil(corners, c.fill())),
         };
         div()
             .relative()
@@ -594,13 +598,9 @@ impl Workspace {
                         .when(floating && float_panes, |el| el.child(button("minimize", "minimize", "Minimize  ⇧⌘M").on_click(minimize)))
                         .when(!floating, |el| {
                             el.child(
-                                    button(
-                                        "zoom",
-                                        if zoomed { "unzoom" } else { "zoom" },
-                                        if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" },
-                                    )
+                                button("zoom", if zoomed { "unzoom" } else { "zoom" }, if zoomed { "Restore Pane  ⇧⌘↩" } else { "Zoom Pane  ⇧⌘↩" })
                                     .on_click(zoom),
-                                )
+                            )
                         })
                         .child(button("close", "close", "Close Pane  ⌘W").on_click(close)),
                 )

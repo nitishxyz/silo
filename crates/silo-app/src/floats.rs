@@ -220,7 +220,8 @@ impl Workspace {
                 // Frosted, the margin is tinted as the gaps are (once).
                 let pad = if several { crate::layout::GAP } else { 0.0 };
                 let margin = |el: gpui::Div| match tiling.veil.filter(|_| several) {
-                    Some(veil) => el.child(div().absolute().top_0().left_0().right_0().h(px(pad)).bg(veil))
+                    Some(veil) => el
+                        .child(div().absolute().top_0().left_0().right_0().h(px(pad)).bg(veil))
                         .child(div().absolute().bottom_0().left_0().right_0().h(px(pad)).bg(veil))
                         .child(div().absolute().top(px(pad)).bottom(px(pad)).left_0().w(px(pad)).bg(veil))
                         .child(div().absolute().top(px(pad)).bottom(px(pad)).right_0().w(px(pad)).bg(veil)),
@@ -314,62 +315,66 @@ impl Workspace {
         };
         let width = MINI + offset(count - 1);
         let palette = self.float_chrome(self.chrome.surface);
-        let buttons = minimized.into_iter().enumerate().rev().map(|(i, f)| {
-            let id = f.id.clone();
-            let panes = f.blocks().len();
-            let fill = self.card_fill(&id, cx);
-            let title = self.header_label(&id, fill, cx);
-            let label = if panes > 1 { format!("{title} + {}", panes - 1) } else { title };
-            let fade = if i == 0 { 1.0 } else { (1.0 - 0.25 * i as f32).max(0.0) + (1.0 - (1.0 - 0.25 * i as f32).max(0.0)) * open };
-            let scale = 1.0 - (1.0 - open) * (0.08 * i as f32).min(0.24);
-            let size = MINI * scale;
-            let status = self.render_status_mark(&id, palette, cx);
-            let glyph = self.block_icon_view(&id, "minimized", 15.0, palette.icon, cx);
-            div()
-                .id(gpui::ElementId::Name(format!("minimized-{id}").into()))
-                .absolute()
-                .right(px(offset(i) + (MINI - size) / 2.0))
-                .bottom(px((MINI - size) / 2.0))
-                .size(px(size))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(fade)
-                .bg(palette.fill())
-                .when(palette.alpha < 1.0, |el| el.backdrop_blur(px(crate::surface::BLUR)).backdrop_saturation(crate::surface::SATURATION))
-                .border_1()
-                .border_color(theme::card_outline(fill))
-                .shadow_md()
-                .cursor_pointer()
-                .hover(|s| s.bg(palette.selected()))
-                .tooltip(crate::tooltip::Tooltip::text(label))
-                .child(glyph)
-                .children(status.map(|s| div().absolute().top(px(-2.0)).right(px(-2.0)).child(s)))
-                .children((panes > 1).then(|| {
-                    div()
-                        .absolute()
-                        .bottom(px(-3.0))
-                        .right(px(-3.0))
-                        .min_w(px(15.0))
-                        .h(px(15.0))
-                        .px(px(3.0))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgb(palette.accent))
-                        .text_color(rgb(theme::ink_on(palette.accent)))
-                        .text_size(px(9.5))
-                        .font_family(theme::ui_font())
-                        .child(panes.to_string())
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.minimize_float(&id, false, cx);
-                }))
-        })
-        .collect::<Vec<_>>();
+        let buttons = minimized
+            .into_iter()
+            .enumerate()
+            .rev()
+            .map(|(i, f)| {
+                let id = f.id.clone();
+                let panes = f.blocks().len();
+                let fill = self.card_fill(&id, cx);
+                let title = self.header_label(&id, fill, cx);
+                let label = if panes > 1 { format!("{title} + {}", panes - 1) } else { title };
+                let fade = if i == 0 { 1.0 } else { (1.0 - 0.25 * i as f32).max(0.0) + (1.0 - (1.0 - 0.25 * i as f32).max(0.0)) * open };
+                let scale = 1.0 - (1.0 - open) * (0.08 * i as f32).min(0.24);
+                let size = MINI * scale;
+                let status = self.render_status_mark(&id, palette, cx);
+                let glyph = self.block_icon_view(&id, "minimized", 15.0, palette.icon, cx);
+                div()
+                    .id(gpui::ElementId::Name(format!("minimized-{id}").into()))
+                    .absolute()
+                    .right(px(offset(i) + (MINI - size) / 2.0))
+                    .bottom(px((MINI - size) / 2.0))
+                    .size(px(size))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(fade)
+                    .bg(palette.fill())
+                    .when(palette.alpha < 1.0, |el| el.backdrop_blur(px(crate::surface::BLUR)).backdrop_saturation(crate::surface::SATURATION))
+                    .border_1()
+                    .border_color(theme::card_outline(fill))
+                    .shadow_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(palette.selected()))
+                    .tooltip(crate::tooltip::Tooltip::text(label))
+                    .child(glyph)
+                    .children(status.map(|s| div().absolute().top(px(-2.0)).right(px(-2.0)).child(s)))
+                    .children((panes > 1).then(|| {
+                        div()
+                            .absolute()
+                            .bottom(px(-3.0))
+                            .right(px(-3.0))
+                            .min_w(px(15.0))
+                            .h(px(15.0))
+                            .px(px(3.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(palette.accent))
+                            .text_color(rgb(theme::ink_on(palette.accent)))
+                            .text_size(px(9.5))
+                            .font_family(theme::ui_font())
+                            .child(panes.to_string())
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.minimize_float(&id, false, cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
         Some(
             div()
                 .id("minimized-floats")

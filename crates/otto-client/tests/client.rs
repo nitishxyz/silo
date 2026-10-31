@@ -713,7 +713,9 @@ fn calls_a_dropped_request_began_never_linger() {
     mirror.apply(3, &Event::ToolInputStart { call_id: "lost".into(), name: "subagent".into() });
     mirror.apply(4, &Event::ToolInputDelta { call_id: "lost".into(), delta: r#"{"action":"delegate","agent":"build""#.into() });
     mirror.apply(5, &Event::ToolInputStart { call_id: "kept".into(), name: "shell".into() });
-    let done: Item = serde_json::from_value(json!({"id":"i","role":"assistant","parts":[{"type":"tool_call","call_id":"kept","name":"shell","input":{}}]})).unwrap();
+    let done: Item =
+        serde_json::from_value(json!({"id":"i","role":"assistant","parts":[{"type":"tool_call","call_id":"kept","name":"shell","input":{}}]}))
+            .unwrap();
     mirror.apply(6, &Event::ItemDone { item: done });
     assert!(!mirror.tools.contains_key("lost"), "dropped with its request");
     assert!(mirror.tools.contains_key("kept"), "its reply holds it");
