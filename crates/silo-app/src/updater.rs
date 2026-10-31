@@ -92,8 +92,8 @@ pub enum PillKind {
     Ready,
     /// Outlined, with a spinner.
     Busy,
-    /// Outlined, with a spinner and a progress ring; the percent follows
-    /// the ring in a slot as wide as `100%`.
+    /// Outlined, with a progress ring in the spinner's place and the
+    /// percent after the label.
     Progress(u8),
     /// Outlined.
     Blocked,

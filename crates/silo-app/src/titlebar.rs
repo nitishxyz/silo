@@ -884,23 +884,26 @@ impl Workspace {
                     el.border_1().border_color(chrome.tint(0.18)).text_color(rgb(chrome.muted))
                 }
             })
-            .when(busy, |el| el.child(crate::browser_pane::spinner("update", TAB_ICON, chrome.muted, cx)))
-            .child(label)
-            .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
-                el.child(crate::agent::ring::ring(f32::from(percent) / 100.0, chrome.accent))
+            // The download's progress ring takes the spinner's place once
+            // its size is known, its percent right after the label.
+            .map(|el| match kind {
+                PillKind::Progress(percent) => el.child(
+                    div()
+                        .flex_none()
+                        .size(px(TAB_ICON))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(crate::agent::ring::ring(f32::from(percent) / 100.0, chrome.accent)),
+                ),
+                _ if busy => el.child(crate::browser_pane::spinner("update", TAB_ICON, chrome.muted, cx)),
+                _ => el,
             })
-            // The percent in a slot sized by a hidden `100%`, in tabular
-            // figures: the pill keeps its width as the number grows.
+            .child(label)
+            // Tabular figures: the number doesn't jitter as it grows.
             .when_some(if let PillKind::Progress(percent) = kind { Some(percent) } else { None }, |el, percent| {
                 let figures = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
-                el.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .font_features(figures)
-                        .child(div().invisible().child("100%"))
-                        .child(div().absolute().top_0().right_0().child(format!("{percent}%"))),
-                )
+                el.child(div().flex_none().font_features(figures).text_color(rgb(chrome.secondary)).child(format!("{percent}%")))
             })
             .tooltip(crate::tooltip::Tooltip::below(tooltip, TITLEBAR_HEIGHT))
             .map(claim_press);
