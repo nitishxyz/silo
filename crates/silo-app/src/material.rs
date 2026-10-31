@@ -170,8 +170,12 @@ pub fn look(color: u32, alpha: f32) -> u32 {
 #[must_use]
 pub fn overlay(window: u32, window_alpha: f32, theme_bg: u32, fg: u32) -> theme::Veils {
     let tinted = look(window, window_alpha);
-    let overlay = if theme::contrast(fg, tinted) >= theme::TEXT_CONTRAST { tinted } else { theme_bg };
-    theme::Veils { overlay, glass: window, muted: theme::toward_ink(overlay, fg, 0.55, theme::TEXT_CONTRAST) }
+    let reads = theme::contrast(fg, tinted) >= theme::TEXT_CONTRAST;
+    let overlay = if reads { tinted } else { theme_bg };
+    // Glass takes the window's colour only where the theme's text reads on it: a dark page tinting a light
+    // theme's window would leave no alpha at which the text reads, and the glass would go opaque.
+    let glass = if reads { window } else { theme_bg };
+    theme::Veils { overlay, glass, muted: theme::toward_ink(overlay, fg, 0.55, theme::TEXT_CONTRAST) }
 }
 
 /// Whether some ink, and each of `text`, reads at 4.5:1 on a veil of
@@ -307,6 +311,8 @@ mod tests {
                 let v = overlay(window, VEIL, theme_bg, fg);
                 assert!(theme::contrast(fg, v.overlay) >= theme::TEXT_CONTRAST, "fg on {:06x}", v.overlay);
                 assert!(theme::contrast(v.muted, v.overlay) >= theme::TEXT_CONTRAST, "muted on {:06x}", v.overlay);
+                // Glass of that colour still frosts: some alpha reads.
+                assert!(crate::surface::glass(v.glass, theme_bg, fg, true).frosted(), "glass {:06x} on {theme_bg:06x}", v.glass);
             }
         }
         assert_eq!(seen(0x0012_3456, 0.0, 0x0028_2c34), [0x0028_2c34, 0, 0x00ff_ffff]);
