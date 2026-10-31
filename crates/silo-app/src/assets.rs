@@ -93,7 +93,8 @@ icons!(
     "layers",
     "git-diff",
     "git-branch",
-    "message-square"
+    "message-square",
+    "minimize"
 );
 
 #[cfg(test)]

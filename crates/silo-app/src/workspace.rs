@@ -75,7 +75,7 @@ pub struct Workspace {
     /// Every block's pane, of every kind (`blocks.rs`).
     pub(crate) blocks: crate::blocks::Blocks,
     /// The server's focused block of the active window, as last applied.
-    server_focus: Option<String>,
+    pub(crate) server_focus: Option<String>,
     /// A block focus this client sent (a click, a pane move) and when, until a view shows it: views sent
     /// before the server saw it don't pull focus back (`blocks::follow_focus`).
     focus_asked: Option<(String, Option<String>, Instant)>,
@@ -146,6 +146,10 @@ pub struct Workspace {
     /// Where the last press on a float's grab landed: a drag starts past
     /// gpui's threshold, and the float keeps the point first pressed.
     pub(crate) float_press: std::rc::Rc<std::cell::Cell<gpui::Point<gpui::Pixels>>>,
+    /// Floats filling the body (double-clicked header): the rect each had.
+    pub(crate) float_restore: HashMap<String, silo_proto::model::FloatRect>,
+    /// The minimized floats' stack: fanned out (hovered) or not, since when.
+    pub(crate) minimized_fan: (bool, Instant),
     /// A press on empty titlebar space that moves the window once dragged.
     pub(crate) titlebar_move: bool,
     /// The window surface easing toward the focused block's backdrop, the
@@ -332,6 +336,8 @@ impl Workspace {
             float_drag: None,
             pane_drop: None,
             float_press: std::rc::Rc::default(),
+            float_restore: HashMap::new(),
+            minimized_fan: (false, Instant::now()),
             titlebar_move: false,
             blend: crate::adaptive::Blend::new(theme::background()),
             blend_theme: theme::background(),
@@ -1316,8 +1322,7 @@ impl Workspace {
         let mut order: Vec<String> = from.map(str::to_owned).into_iter().collect();
         for w in windows {
             order.push(w.focused.clone());
-            order.extend(w.layout.blocks());
-            order.extend(w.floats.iter().map(|f| f.id.clone()));
+            order.extend(w.blocks());
         }
         order.extend(view.session.parked.iter().map(|p| p.id.clone()));
         let candidates: Vec<(String, bool)> = order
@@ -1386,7 +1391,8 @@ impl Workspace {
         let Some(w) = view.session.windows.iter().find(|w| crate::floats::window_blocks(w).contains(&block)) else {
             return;
         };
-        let float = w.floats.iter().find(|f| f.id == block).map(|f| f.rect);
+        // A float splits in place where the host can; else the window's first tiled block does.
+        let float = w.float_of(&block).map(|f| f.rect).filter(|_| !self.host_supports(silo_proto::compat::feature::FLOAT_PANES));
         let Some(anchor) = (if float.is_some() { w.layout.blocks().into_iter().next() } else { Some(block.clone()) }) else {
             return;
         };
@@ -1644,11 +1650,17 @@ impl Workspace {
         let Some(active) = self.active_window() else {
             return;
         };
-        let blocks = crate::floats::window_blocks(active);
+        // Through a float's panes when focus is in one with several (a
+        // float is a window of its own), else every shown block.
+        let focused = self.focused_block(window, cx);
+        let blocks = match focused.as_deref().and_then(|b| active.float_of(b)).map(silo_proto::model::Float::blocks) {
+            Some(blocks) if blocks.len() > 1 => blocks,
+            _ => crate::floats::shown_blocks(active),
+        };
         if blocks.is_empty() {
             return;
         }
-        let current = self.focused_block(window, cx).and_then(|b| blocks.iter().position(|x| *x == b)).unwrap_or(0);
+        let current = focused.and_then(|b| blocks.iter().position(|x| *x == b)).unwrap_or(0);
         #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
         let next = (current as isize + step).rem_euclid(blocks.len() as isize) as usize;
         self.focus_block(&blocks[next], window, cx);

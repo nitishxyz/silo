@@ -340,6 +340,7 @@ pub fn need(method: &Method) -> Need {
         | M::BlockSwap { .. }
         | M::BlockFloat { .. }
         | M::BlockMove { .. }
+        | M::BlockMinimize { .. }
         | M::LayoutGrow { .. }
         | M::LayoutEdge { .. }
         | M::TerminalClear { .. }

@@ -210,7 +210,7 @@ mod tests {
     fn floating_a_block_keeps_its_checkpoint() {
         let mut floated = view(&["a"]);
         let rect = silo_proto::model::FloatRect { x: 0.1, y: 0.1, w: 0.5, h: 0.5 };
-        floated.session.windows[0].floats.push(silo_proto::model::Float { id: "b".into(), rect });
+        floated.session.windows[0].floats.push(silo_proto::model::Float::new("b", rect));
         assert_eq!(live_blocks(&floated), vec!["a".to_owned(), "b".to_owned()]);
         assert!(closed_blocks(&view(&["a", "b"]), &floated).is_empty());
     }

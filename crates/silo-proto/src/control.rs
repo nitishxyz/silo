@@ -497,8 +497,20 @@ pub enum Method {
     /// first) and honour `Dock.before`; older ones dock floats only.
     #[serde(rename = "block.move")]
     BlockMove { block_id: BlockId, rect: Option<FloatRect>, dock: Option<Dock> },
+    /// Minimize (or restore) the float holding `block_id` (feature
+    /// `float_panes`). Focusing one of its blocks restores it too.
+    #[serde(rename = "block.minimize")]
+    BlockMinimize { block_id: BlockId, minimized: bool },
+    /// `float`: a block of the float whose split it is (feature
+    /// `float_panes`); absent: the window's layout.
     #[serde(rename = "layout.ratio")]
-    LayoutRatio { window_id: WindowId, path: Vec<usize>, ratio: f32 },
+    LayoutRatio {
+        window_id: WindowId,
+        path: Vec<usize>,
+        ratio: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        float: Option<BlockId>,
+    },
     /// Grow (negative: shrink) the split `block_id` sits in by `delta`.
     #[serde(rename = "layout.grow")]
     LayoutGrow { block_id: BlockId, delta: f32 },
@@ -979,7 +991,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("block.swap", "Swap two blocks' positions within the same window layout."),
     ("block.float", "Float a tiled block above its window's layout."),
     ("block.move", "Move and raise a float (rect), or dock a float or tiled block on any side of another tiled block of its window (dock)."),
-    ("layout.ratio", "Change the ratio of a split in a window layout."),
+    ("block.minimize", "Minimize or restore the float holding a block."),
+    ("layout.ratio", "Change the ratio of a split in a window or float layout."),
     ("layout.grow", "Grow or shrink the split a block sits in."),
     ("layout.edge", "Move a block's edge in a direction."),
     ("layout.equalize", "Give every split of a window equal space."),

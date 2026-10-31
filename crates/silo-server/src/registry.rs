@@ -81,10 +81,10 @@ impl Window {
         self.history.insert(0, block.to_owned());
     }
 
-    /// Tiled blocks in reading order, then floats back to front.
+    /// Tiled blocks in reading order, then each float's, back to front.
     pub fn blocks(&self) -> Vec<BlockId> {
         let mut blocks = self.layout.blocks();
-        blocks.extend(self.floats.iter().map(|f| f.id.clone()));
+        blocks.extend(self.floats.iter().flat_map(Float::blocks));
         blocks
     }
 
@@ -92,9 +92,30 @@ impl Window {
         self.layout.contains(block) || self.floating(block).is_some()
     }
 
-    /// Index of `block` in `floats`.
+    /// Index in `floats` of the float holding `block`.
     pub fn floating(&self, block: &str) -> Option<usize> {
-        self.floats.iter().position(|f| f.id == block)
+        self.floats.iter().position(|f| f.contains(block))
+    }
+
+    /// In the window and not in a minimized float.
+    pub fn shown(&self, block: &str) -> bool {
+        self.layout.contains(block) || self.floating(block).is_some_and(|i| !self.floats[i].minimized)
+    }
+
+    /// The layout holding `block`: its float's, else the window's.
+    pub fn layout_of(&self, block: &str) -> Option<Layout> {
+        match self.floating(block) {
+            Some(i) => Some(self.floats[i].layout()),
+            None => self.layout.contains(block).then(|| self.layout.clone()),
+        }
+    }
+
+    /// Raise the float at `index` to the top, shown; its new index.
+    fn raise(&mut self, index: usize) -> usize {
+        let mut float = self.floats.remove(index);
+        float.minimized = false;
+        self.floats.push(float);
+        self.floats.len() - 1
     }
 }
 
@@ -934,12 +955,13 @@ impl Registry {
                 }
             }
         }
-        let float = || window.floats.iter().rev().find_map(|f| size(&Layout::block(&f.id), self));
+        let float = || window.floats.iter().rev().find_map(|f| size(&f.layout(), self));
         size(&window.layout, self).or_else(float).unwrap_or(TermSize::new(80, 24))
     }
 
+    /// Split `block_id` in its layout: the window's, or its float's.
     pub fn split(&mut self, block_id: &str, axis: Axis, new: &New<'_>) -> Result<Created, RpcError> {
-        let (si, wi) = self.locate_tiled(block_id)?;
+        let (si, wi) = self.locate(block_id)?;
         let sid = self.sessions[si].id.clone();
         let base = self.block_info(block_id).map(|i| i.size).filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(TermSize::new(80, 24));
         let fallback = match axis {
@@ -960,9 +982,17 @@ impl Registry {
             changes.link(AgentLink { otto_session, block_id: Some(block_id.to_owned()) });
         }
         let window = &mut self.sessions[si].windows[wi];
-        window.layout.split(block_id, new.clone(), axis);
+        match window.floating(block_id) {
+            Some(i) => {
+                let i = window.raise(i);
+                window.floats[i].edit(|l| l.split(block_id, new.clone(), axis));
+            }
+            None => {
+                window.layout.split(block_id, new.clone(), axis);
+                window.zoomed = false;
+            }
+        }
         window.focus(&new);
-        window.zoomed = false;
         let window_id = window.id.clone();
         self.session_changed(si);
         Ok(Created { session_id: sid, window_id, block_id: new })
@@ -1062,7 +1092,7 @@ impl Registry {
             .unwrap_or(0);
         let window = &mut session.windows[wi];
         match reveal {
-            Reveal::Float => window.floats.push(Float { id: block_id.to_owned(), rect: FloatRect::default() }),
+            Reveal::Float => window.floats.push(Float::new(block_id, FloatRect::default())),
             Reveal::Split => {
                 let tiled = window.layout.blocks();
                 let target = owner
@@ -1135,9 +1165,9 @@ impl Registry {
         let session = &mut self.sessions[si];
         let window = &mut session.windows[wi];
         let mut changed = window.focused != block_id || session.active_window != window.id;
-        if let Some(i) = window.floating(block_id).filter(|&i| i + 1 != window.floats.len()) {
-            let float = window.floats.remove(i);
-            window.floats.push(float);
+        // Focus raises its float, and restores it if minimized.
+        if let Some(i) = window.floating(block_id).filter(|&i| i + 1 != window.floats.len() || window.floats[i].minimized) {
+            window.raise(i);
             changed = true;
         }
         window.focus(block_id);
@@ -1157,18 +1187,27 @@ impl Registry {
         Ok(())
     }
 
-    /// Exchange the positions of two blocks of one window. Ratios stay, so
-    /// each block's grid changes only if the two slots differ in size.
+    /// Exchange the positions of two blocks of one layout (a window's or a
+    /// float's). Ratios stay, so each block's grid changes only if the two
+    /// slots differ in size.
     pub fn swap(&mut self, block_id: &str, other_block_id: &str) -> Result<(), RpcError> {
-        let (si, wi) = self.locate_tiled(block_id)?;
-        let other = self.locate_tiled(other_block_id)?;
+        let (si, wi) = self.locate(block_id)?;
+        let other = self.locate(other_block_id)?;
         if other != (si, wi) {
             return Err(RpcError::bad_request(format!("blocks {block_id} and {other_block_id} are in different windows")));
         }
         if block_id == other_block_id {
             return Err(RpcError::bad_request("cannot swap a block with itself"));
         }
-        self.sessions[si].windows[wi].layout.swap(block_id, other_block_id);
+        let window = &mut self.sessions[si].windows[wi];
+        let swapped = match (window.floating(block_id), window.floating(other_block_id)) {
+            (None, None) => window.layout.swap(block_id, other_block_id),
+            (Some(a), Some(b)) if a == b => window.floats[a].edit(|l| l.swap(block_id, other_block_id)),
+            _ => false,
+        };
+        if !swapped {
+            return Err(RpcError::bad_request(format!("blocks {block_id} and {other_block_id} are in different layouts")));
+        }
         self.session_changed(si);
         Ok(())
     }
@@ -1183,7 +1222,7 @@ impl Registry {
         }
         let layout = std::mem::replace(&mut window.layout, Layout::block(""));
         window.layout = layout.remove(block_id).expect("a split keeps a leaf");
-        window.floats.push(Float { id: block_id.to_owned(), rect: rect.unwrap_or_default().clamped() });
+        window.floats.push(Float::new(block_id, rect.unwrap_or_default().clamped()));
         window.focus(block_id);
         window.zoomed = false;
         self.session_changed(si);
@@ -1201,8 +1240,8 @@ impl Registry {
         match (rect, dock) {
             (Some(rect), None) => {
                 let index = floating.ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not floating")))?;
-                window.floats.remove(index);
-                window.floats.push(Float { id: block_id.to_owned(), rect: rect.clamped() });
+                let index = window.raise(index);
+                window.floats[index].rect = rect.clamped();
             }
             (None, Some(Dock { target, axis, before })) => {
                 if target == block_id {
@@ -1211,9 +1250,10 @@ impl Registry {
                 if !window.layout.contains(&target) {
                     return Err(RpcError::bad_request(format!("block {target} is not tiled in this window")));
                 }
+                // A float docks with all its panes, arranged as they were.
                 if let Some(index) = floating {
-                    window.floats.remove(index);
-                    window.layout.split_at(&target, block_id.to_owned(), axis, before);
+                    let float = window.floats.remove(index);
+                    window.layout.insert_at(&target, float.layout(), axis, before);
                 } else if !window.layout.dock(block_id, &target, axis, before) {
                     return Err(RpcError::bad_request(format!("block {block_id} is not tiled in this window")));
                 }
@@ -1226,9 +1266,19 @@ impl Registry {
         Ok(())
     }
 
-    pub fn set_ratio(&mut self, window_id: &str, path: &[usize], ratio: f32) -> Result<(), RpcError> {
+    /// Set a split's ratio in window `window_id`'s layout, or (`float`: one
+    /// of its blocks) that float's.
+    pub fn set_ratio(&mut self, window_id: &str, float: Option<&str>, path: &[usize], ratio: f32) -> Result<(), RpcError> {
         let (si, wi) = self.locate_window(window_id)?;
-        if !self.sessions[si].windows[wi].layout.set_ratio(path, ratio) {
+        let window = &mut self.sessions[si].windows[wi];
+        let set = match float {
+            None => window.layout.set_ratio(path, ratio),
+            Some(block) => {
+                let index = window.floating(block).ok_or_else(|| RpcError::bad_request(format!("block {block} is not floating here")))?;
+                window.floats[index].edit(|l| l.set_ratio(path, ratio))
+            }
+        };
+        if !set {
             return Err(RpcError::bad_request("path does not name a split"));
         }
         self.session_changed(si);
@@ -1260,6 +1310,33 @@ impl Registry {
         let window = windows.remove(wi);
         let index = index.min(windows.len());
         windows.insert(index, window);
+        self.session_changed(si);
+        Ok(())
+    }
+
+    /// Minimize the float holding `block_id`, or show it again (raised and
+    /// focused). Minimizing moves focus to the most recent shown block.
+    pub fn minimize(&mut self, block_id: &str, minimized: bool) -> Result<(), RpcError> {
+        let (si, wi) = self.locate(block_id)?;
+        let window = &mut self.sessions[si].windows[wi];
+        let index = window.floating(block_id).ok_or_else(|| RpcError::bad_request(format!("block {block_id} is not floating")))?;
+        if window.floats[index].minimized == minimized {
+            return Ok(());
+        }
+        if minimized {
+            window.floats[index].minimized = true;
+            if !window.shown(&window.focused) {
+                let next = window.history.iter().find(|b| window.shown(b)).cloned().or_else(|| window.layout.blocks().into_iter().next());
+                if let Some(next) = next {
+                    window.focus(&next);
+                }
+            }
+        } else {
+            let index = window.raise(index);
+            let blocks = window.floats[index].blocks();
+            let next = window.history.iter().find(|b| blocks.contains(b)).cloned().unwrap_or_else(|| blocks[0].clone());
+            window.focus(&next);
+        }
         self.session_changed(si);
         Ok(())
     }
@@ -1395,9 +1472,11 @@ impl Registry {
     /// remaining block, else the block taking over the closed one's space.
     fn detach(&mut self, si: usize, wi: usize, block_id: &str) {
         let window = &mut self.sessions[si].windows[wi];
-        let sibling = sibling(&window.layout, block_id);
+        let sibling = window.layout_of(block_id).and_then(|l| sibling(&l, block_id));
         if let Some(i) = window.floating(block_id) {
-            window.floats.remove(i);
+            if !window.floats[i].remove(block_id) {
+                window.floats.remove(i);
+            }
         } else {
             let layout = std::mem::replace(&mut window.layout, Layout::block(""));
             match (layout.remove(block_id), window.floats.pop()) {
@@ -1405,7 +1484,7 @@ impl Registry {
                     window.layout = layout;
                     window.floats.extend(float);
                 }
-                (None, Some(float)) => window.layout = Layout::block(float.id),
+                (None, Some(float)) => window.layout = float.layout(),
                 (None, None) => return self.drop_window(si, wi),
             }
         }
@@ -1415,10 +1494,10 @@ impl Registry {
             let next = window
                 .history
                 .iter()
-                .find(|b| window.contains(b))
+                .find(|b| window.shown(b))
                 .cloned()
                 .or(sibling)
-                .or_else(|| window.floats.last().map(|f| f.id.clone()))
+                .or_else(|| window.floats.iter().rev().find(|f| !f.minimized).map(|f| f.id.clone()))
                 .unwrap_or_else(|| tiled[0].clone());
             window.focus(&next);
         }
@@ -1793,7 +1872,7 @@ mod tests {
         assert_eq!(view.session.revision, 2);
         let w = &view.session.windows[0];
         assert_eq!((w.layout.blocks(), w.focused.as_str()), (vec!["a".to_owned(), "c".to_owned()], "b"));
-        assert_eq!(w.floats, [Float { id: "b".into(), rect: FloatRect::default() }]);
+        assert_eq!(w.floats, [Float::new("b", FloatRect::default())]);
 
         let rect = FloatRect { x: 0.9, y: 0.0, w: 0.5, h: 0.01 };
         reg.move_block("b", Some(rect), None).unwrap();
@@ -1814,6 +1893,55 @@ mod tests {
         assert_eq!(w.layout.blocks(), ["a", "b", "c"]);
         assert!(w.floats.is_empty());
         assert_eq!((w.focused.as_str(), view.session.revision), ("b", 4));
+    }
+
+    /// A float of several panes: swaps, ratios, minimize, docking and
+    /// closing stay inside it, its id following its blocks.
+    #[test]
+    fn floats_hold_panes() {
+        let (mut reg, mut rx) = registry();
+        reg.float("b", None).unwrap();
+        changed(&mut rx);
+        // b | c, floating (as a split inside it would leave it).
+        reg.float("c", None).unwrap();
+        changed(&mut rx);
+        let w = &mut reg.sessions[0].windows[0];
+        w.floats.pop();
+        w.floats[0].edit(|l| l.split("b", "c".into(), Axis::Horizontal));
+        assert_eq!((w.blocks(), w.floats[0].id.as_str()), (vec!["a".to_owned(), "b".into(), "c".into()], "b"));
+        assert_eq!(w.layout_of("c").unwrap().blocks(), ["b", "c"]);
+
+        reg.swap("b", "c").unwrap();
+        assert_eq!(changed(&mut rx).session.windows[0].floats[0].layout().blocks(), ["c", "b"]);
+        assert_eq!(reg.swap("a", "b").unwrap_err().code, "bad_request", "different layouts");
+        reg.set_ratio("w1", Some("b"), &[], 0.25).unwrap();
+        let float = changed(&mut rx).session.windows[0].floats[0].clone();
+        assert!(matches!(float.layout, Some(Layout::Split { ratio, .. }) if ratio == 0.25));
+        assert_eq!(reg.set_ratio("w1", Some("a"), &[], 0.5).unwrap_err().code, "bad_request", "a is tiled");
+
+        // Minimized: focus leaves it; focusing a block shows it again.
+        reg.focus("b").unwrap();
+        changed(&mut rx);
+        reg.minimize("c", true).unwrap();
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert!(w.floats[0].minimized);
+        assert_eq!(w.focused, "a");
+        reg.focus("c").unwrap();
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert!(!w.floats[0].minimized && w.focused == "c");
+
+        // Closing its named block renames it; the last pane ends it.
+        reg.remove_block("b");
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert_eq!((w.floats[0].id.as_str(), w.floats[0].layout.is_none(), w.focused.as_str()), ("c", true, "c"));
+
+        // Docking brings every pane, arranged as they were.
+        let w = &mut reg.sessions[0].windows[0];
+        w.floats[0].edit(|l| l.split("c", "x".into(), Axis::Vertical));
+        reg.move_block("x", None, Some(Dock { target: "a".into(), axis: Axis::Horizontal, before: false })).unwrap();
+        let w = changed(&mut rx).session.windows[0].clone();
+        assert!(w.floats.is_empty());
+        assert_eq!(w.layout.blocks(), ["a", "c", "x"]);
     }
 
     fn tiled_layout(reg: &Registry) -> &Layout {
@@ -1896,8 +2024,6 @@ mod tests {
         assert_eq!(reg.float("b", None).unwrap_err().code, "bad_request", "already floating");
         assert_eq!(reg.zoom("b", true).unwrap_err().code, "bad_request");
         assert_eq!(reg.swap("a", "b").unwrap_err().code, "bad_request");
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Terminal, url: None, agent: None };
-        assert_eq!(reg.split("b", Axis::Vertical, &new).unwrap_err().code, "bad_request");
         assert_eq!(reg.sessions[0].blocks(), ["a", "b", "c", "d", "e"], "floats count as session blocks");
         changed(&mut rx);
         changed(&mut rx);

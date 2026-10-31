@@ -22,10 +22,12 @@ const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60
 /// How often a search is asked again while the server is still indexing.
 const SEARCH_REPOLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// A split ratio applied locally, not yet sent; `shape` is its window's
-/// layout when set, so the path only applies to that same tree.
+/// A split ratio applied locally, not yet sent; `shape` is its layout
+/// (the window's, or `float`'s: a block of that float) when set, so the
+/// path only applies to that same tree.
 pub(crate) struct PendingRatio {
     window_id: String,
+    float: Option<String>,
     path: Vec<usize>,
     ratio: f32,
     shape: silo_proto::model::Layout,
@@ -33,7 +35,23 @@ pub(crate) struct PendingRatio {
 
 impl PendingRatio {
     fn fits(&self, windows: &[silo_proto::model::WindowInfo]) -> bool {
-        windows.iter().any(|w| w.id == self.window_id && layout_ops::same_shape(&w.layout, &self.shape))
+        windows.iter().any(|w| w.id == self.window_id && layout_in(w, self.float.as_deref()).is_some_and(|l| layout_ops::same_shape(&l, &self.shape)))
+    }
+}
+
+/// The layout of window `w` (`float`: of the float holding that block).
+pub(crate) fn layout_in(w: &silo_proto::model::WindowInfo, float: Option<&str>) -> Option<silo_proto::model::Layout> {
+    match float {
+        None => Some(w.layout.clone()),
+        Some(block) => w.float_of(block).map(silo_proto::model::Float::layout),
+    }
+}
+
+/// Set a split's ratio in [`layout_in`]`(w, float)`.
+fn set_ratio_in(w: &mut silo_proto::model::WindowInfo, float: Option<&str>, path: &[usize], ratio: f32) -> bool {
+    match float {
+        None => w.layout.set_ratio(path, ratio),
+        Some(block) => w.floats.iter_mut().find(|f| f.contains(block)).is_some_and(|f| f.edit(|l| l.set_ratio(path, ratio))),
     }
 }
 use crate::{
@@ -304,6 +322,7 @@ impl Workspace {
             Command::FocusPaneDown => self.focus_direction(Direction::Down, window, cx),
             Command::ZoomPane => self.toggle_zoom(window, cx),
             Command::FloatPane => self.float_block(window, cx),
+            Command::MinimizeFloat => self.minimize_focused_float(window, cx),
             Command::DockPane => self.dock_block(window, cx),
             Command::NewBrowser => {
                 if let Some(block) = block {
@@ -468,7 +487,8 @@ impl Workspace {
         // Remote servers are never started, stopped or upgraded from here.
         let local = host.is_some_and(|h| h.info.local);
         let tabs = self.view.as_ref().map_or(0, |v| v.session.windows.len());
-        let panes = self.active_window().map_or(0, |w| w.layout.blocks().len());
+        // In the focused block's layout: a float's panes, else the window's.
+        let panes = self.active_window().and_then(|w| w.layout_of(&w.focused)).map_or(0, |l| l.blocks().len());
         if command.feature().is_some_and(|f| !self.host_supports(f)) {
             return false;
         }
@@ -490,14 +510,15 @@ impl Workspace {
             | Command::MovePaneEdgeRight
             | Command::MovePaneEdgeUp
             | Command::MovePaneEdgeDown
-            | Command::EqualizePanes
-            | Command::ZoomPane => panes > 1,
+            | Command::EqualizePanes => panes > 1,
+            // Floats don't zoom.
+            Command::ZoomPane => panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
             Command::RemoveHost => self.hosts.iter().any(|h| !h.info.local && !h.removed),
             Command::RenameHost => host.is_some_and(|h| !h.info.local && !h.removed),
             Command::ShareSession | Command::SharePane => connected && self.view.is_some() && !host.is_some_and(|h| h.info.transport.is_shared()),
             // On the server's focused block: tiled with a sibling, or floating.
-            Command::FloatPane => connected && panes > 1 && self.active_window().is_some_and(|w| w.layout.contains(&w.focused)),
-            Command::DockPane => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
+            Command::FloatPane => connected && self.active_window().is_some_and(|w| w.layout.contains(&w.focused) && w.layout.blocks().len() > 1),
+            Command::DockPane | Command::MinimizeFloat => connected && self.active_window().is_some_and(|w| crate::floats::is_float(w, &w.focused)),
             Command::CommandPalette => false,
             Command::CheckForUpdates => true,
             Command::NewSession => connected,
@@ -613,7 +634,8 @@ impl Workspace {
         let Some(current) = self.focused_block(window, cx) else { return };
         let rect = |b: gpui::Bounds<gpui::Pixels>| (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()));
         let Some(from) = self.block_bounds(&current, cx).map(rect) else { return };
-        let Some(layout) = self.active_window().map(|w| w.layout.clone()) else { return };
+        // Within the float it is in: a float is a window of its own.
+        let Some(layout) = self.active_window().and_then(|w| w.layout_of(&current)) else { return };
         let mut ids = Vec::new();
         let mut rects = Vec::new();
         for id in layout.blocks() {
@@ -631,7 +653,8 @@ impl Workspace {
         }
     }
 
-    /// Resize splits of the active, unzoomed window around the focused pane.
+    /// Resize splits around the focused pane: in its float, else in the
+    /// active, unzoomed window.
     fn resize_focused(
         &mut self,
         changes: impl FnOnce(&silo_proto::model::Layout, &str) -> Vec<layout_ops::RatioChange>,
@@ -639,21 +662,29 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(focused) = self.focused_block(window, cx) else { return };
-        let Some(w) = self.active_window().filter(|w| !w.zoomed) else { return };
+        let Some(w) = self.active_window() else { return };
+        let float = w.float_of(&focused).map(|f| f.id.clone());
+        if w.zoomed && float.is_none() {
+            return;
+        }
         let window_id = w.id.clone();
-        let changes = changes(&w.layout, &focused);
-        self.set_ratios(&window_id, changes, cx);
+        let Some(layout) = layout_in(w, float.as_deref()) else { return };
+        let changes = changes(&layout, &focused);
+        self.set_ratios(&window_id, float.as_deref(), changes, cx);
     }
 
     /// Apply split ratios locally at once; the server gets them once
     /// resizing pauses, so held keys resize the PTYs only at the end.
-    pub(crate) fn set_ratios(&mut self, window_id: &str, changes: Vec<layout_ops::RatioChange>, cx: &mut Context<Self>) {
+    /// `float`: a block of the float whose splits these are.
+    pub(crate) fn set_ratios(&mut self, window_id: &str, float: Option<&str>, changes: Vec<layout_ops::RatioChange>, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else { return };
         let Some(w) = view.session.windows.iter_mut().find(|w| w.id == window_id) else { return };
         for (path, ratio) in changes {
-            if w.layout.set_ratio(&path, ratio) {
-                self.pending_ratios.retain(|p| !(p.window_id == window_id && p.path == path));
-                self.pending_ratios.push(PendingRatio { window_id: window_id.to_owned(), path, ratio, shape: w.layout.clone() });
+            if set_ratio_in(w, float, &path, ratio) {
+                let shape = layout_in(w, float).expect("set");
+                let same = |p: &PendingRatio| p.window_id == window_id && p.float.as_deref() == float && p.path == path;
+                self.pending_ratios.retain(|p| !same(p));
+                self.pending_ratios.push(PendingRatio { window_id: window_id.to_owned(), float: float.map(str::to_owned), path, ratio, shape });
             }
         }
         self.ratio_flush = Some(cx.spawn(async move |this, cx| {
@@ -667,8 +698,8 @@ impl Workspace {
         self.ratio_flush = None;
         let windows = self.view.as_ref().map(|v| v.session.windows.as_slice()).unwrap_or_default();
         let pending: Vec<_> = std::mem::take(&mut self.pending_ratios).into_iter().filter(|p| p.fits(windows)).collect();
-        for PendingRatio { window_id, path, ratio, .. } in pending {
-            self.call_optimistic(Method::LayoutRatio { window_id, path, ratio }, "Couldn't resize panes", |_| {}, cx);
+        for PendingRatio { window_id, float, path, ratio, .. } in pending {
+            self.call_optimistic(Method::LayoutRatio { window_id, path, ratio, float }, "Couldn't resize panes", |_| {}, cx);
         }
     }
 
@@ -678,7 +709,7 @@ impl Workspace {
         self.pending_ratios.retain(|p| p.fits(&view.session.windows));
         for p in &self.pending_ratios {
             if let Some(w) = view.session.windows.iter_mut().find(|w| w.id == p.window_id) {
-                w.layout.set_ratio(&p.path, p.ratio);
+                set_ratio_in(w, p.float.as_deref(), &p.path, p.ratio);
             }
         }
         view

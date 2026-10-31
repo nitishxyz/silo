@@ -199,15 +199,30 @@ impl Layout {
     /// Replace leaf `target` with an even split of it and `new`; `before`
     /// puts `new` first (left or above), else second (right or below).
     pub fn split_at(&mut self, target: &str, new: BlockId, axis: Axis, before: bool) -> bool {
+        self.insert_at(target, Self::block(new), axis, before)
+    }
+
+    /// Replace leaf `target` with an even split of it and the tree `new`
+    /// (a float's panes docking); `before` puts `new` first.
+    pub fn insert_at(&mut self, target: &str, new: Layout, axis: Axis, before: bool) -> bool {
+        if !self.contains(target) {
+            return false;
+        }
         match self {
-            Self::Block { id } if id == target => {
-                let (old, new) = (Box::new(Self::block(id.clone())), Box::new(Self::block(new)));
+            Self::Block { id } => {
+                let (old, new) = (Box::new(Self::block(id.clone())), Box::new(new));
                 let (first, second) = if before { (new, old) } else { (old, new) };
                 *self = Self::Split { axis, ratio: 0.5, first, second };
                 true
             }
-            Self::Block { .. } | Self::Unknown => false,
-            Self::Split { first, second, .. } => first.split_at(target, new.clone(), axis, before) || second.split_at(target, new, axis, before),
+            Self::Unknown => false,
+            Self::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.insert_at(target, new, axis, before)
+                } else {
+                    second.insert_at(target, new, axis, before)
+                }
+            }
         }
     }
 
@@ -298,11 +313,105 @@ pub struct WindowInfo {
     pub floats: Vec<Float>,
 }
 
-/// A block floating above a window's layout; the block id is the float id.
+impl WindowInfo {
+    /// Every block: tiled in reading order, then each float's, back to front.
+    #[must_use]
+    pub fn blocks(&self) -> Vec<BlockId> {
+        let mut blocks = self.layout.blocks();
+        blocks.extend(self.floats.iter().flat_map(Float::blocks));
+        blocks
+    }
+
+    /// The float `block` is in.
+    #[must_use]
+    pub fn float_of(&self, block: &str) -> Option<&Float> {
+        self.floats.iter().find(|f| f.contains(block))
+    }
+
+    /// The layout `block` is tiled in: its float's, else the window's.
+    #[must_use]
+    pub fn layout_of(&self, block: &str) -> Option<Layout> {
+        match self.float_of(block) {
+            Some(f) => Some(f.layout()),
+            None => self.layout.contains(block).then(|| self.layout.clone()),
+        }
+    }
+}
+
+/// Panes floating above a window's layout, as a window of their own: one
+/// block, or (servers with feature `float_panes`) a split `layout` of
+/// several. `id` names the float: one of its blocks (older peers see that
+/// one alone). A `minimized` float shows as a button until focused.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Float {
     pub id: BlockId,
     pub rect: FloatRect,
+    /// Its panes when there are several; absent: `id` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub minimized: bool,
+}
+
+impl Float {
+    /// Block `id` alone at `rect`.
+    #[must_use]
+    pub fn new(id: impl Into<BlockId>, rect: FloatRect) -> Self {
+        Self { id: id.into(), rect, layout: None, minimized: false }
+    }
+
+    /// Its panes' layout.
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        self.layout.clone().unwrap_or_else(|| Layout::block(self.id.clone()))
+    }
+
+    /// Its blocks in reading order.
+    #[must_use]
+    pub fn blocks(&self) -> Vec<BlockId> {
+        self.layout.as_ref().map_or_else(|| vec![self.id.clone()], Layout::blocks)
+    }
+
+    #[must_use]
+    pub fn contains(&self, block: &str) -> bool {
+        self.layout.as_ref().map_or(self.id == block, |l| l.contains(block))
+    }
+
+    /// Change its layout with `f`. The id stays while its block remains,
+    /// else it becomes the first block; a single pane drops the layout.
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut Layout) -> R) -> R {
+        let mut layout = self.layout();
+        let out = f(&mut layout);
+        self.set_layout(layout);
+        out
+    }
+
+    /// Replace its layout (see [`Self::edit`]).
+    pub fn set_layout(&mut self, layout: Layout) {
+        if !layout.contains(&self.id)
+            && let Some(first) = layout.blocks().into_iter().next()
+        {
+            self.id = first;
+        }
+        self.layout = match layout {
+            Layout::Block { id } => {
+                self.id = id;
+                None
+            }
+            other => Some(other),
+        };
+    }
+
+    /// Take `block` out; false when it was the last (the float is gone).
+    pub fn remove(&mut self, block: &str) -> bool {
+        match self.layout().remove(block) {
+            Some(rest) => {
+                self.set_layout(rest);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Fractions of the window body, 0..1.

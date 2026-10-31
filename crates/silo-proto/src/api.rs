@@ -203,6 +203,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::BlockPark { .. }
         | M::BlockReveal { .. }
         | M::BlockMove { .. }
+        | M::BlockMinimize { .. }
         | M::LayoutRatio { .. }
         | M::LayoutGrow { .. }
         | M::LayoutEdge { .. }
@@ -420,7 +421,8 @@ pub fn examples() -> Vec<Method> {
         M::BlockSwap { block_id: b(), other_block_id: "b5e6f7a8b".into() },
         M::BlockFloat { block_id: b(), rect: Some(FloatRect::default()) },
         M::BlockMove { block_id: b(), rect: None, dock: Some(Dock { target: "b5e6f7a8b".into(), axis: Axis::Vertical, before: true }) },
-        M::LayoutRatio { window_id: w(), path: vec![1], ratio: 0.4 },
+        M::BlockMinimize { block_id: b(), minimized: true },
+        M::LayoutRatio { window_id: w(), path: vec![1], ratio: 0.4, float: None },
         M::LayoutGrow { block_id: b(), delta: 0.05 },
         M::LayoutEdge { block_id: b(), direction: Direction::Right },
         M::LayoutEqualize { window_id: w() },

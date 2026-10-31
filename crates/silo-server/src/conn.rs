@@ -609,8 +609,12 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().move_block(&block_id, rect, dock)?;
             Ok(json!({}))
         }
-        Method::LayoutRatio { window_id, path, ratio } => {
-            server.registry.lock().unwrap().set_ratio(&window_id, &path, ratio)?;
+        Method::LayoutRatio { window_id, path, ratio, float } => {
+            server.registry.lock().unwrap().set_ratio(&window_id, float.as_deref(), &path, ratio)?;
+            Ok(json!({}))
+        }
+        Method::BlockMinimize { block_id, minimized } => {
+            server.registry.lock().unwrap().minimize(&block_id, minimized)?;
             Ok(json!({}))
         }
         Method::TerminalSend { block_id, text } => {

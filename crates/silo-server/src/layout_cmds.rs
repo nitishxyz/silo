@@ -113,9 +113,15 @@ fn window_step(reg: &mut Registry, session: &str, delta: i32) -> Result<(), RpcE
     reg.select_window(&sid, &window)
 }
 
+/// Steps through a float's panes when it has several (a float is a
+/// window of its own), else the window's shown blocks.
 fn focus_step(reg: &mut Registry, block: &str, delta: i32) -> Result<(), RpcError> {
     let (si, wi) = locate(reg, block)?;
-    let blocks = reg.sessions[si].windows[wi].blocks();
+    let window = &reg.sessions[si].windows[wi];
+    let blocks = match window.floating(block).map(|i| window.floats[i].blocks()) {
+        Some(blocks) if blocks.len() > 1 => blocks,
+        _ => window.blocks().into_iter().filter(|b| window.shown(b)).collect(),
+    };
     let current = blocks.iter().position(|b| b == block).unwrap_or(0);
     let next = blocks[layout_ops::step(blocks.len(), current, delta)].clone();
     reg.focus(&next)
@@ -123,7 +129,8 @@ fn focus_step(reg: &mut Registry, block: &str, delta: i32) -> Result<(), RpcErro
 
 fn focus_dir(reg: &mut Registry, block: &str, direction: Direction) -> Result<(), RpcError> {
     let (si, wi) = locate(reg, block)?;
-    let next: Option<BlockId> = layout_ops::neighbour_in(&reg.sessions[si].windows[wi].layout, block, direction);
+    let layout = reg.sessions[si].windows[wi].layout_of(block).unwrap_or(silo_proto::model::Layout::Unknown);
+    let next: Option<BlockId> = layout_ops::neighbour_in(&layout, block, direction);
     match next {
         Some(next) => reg.focus(&next),
         None => Ok(()),
@@ -135,11 +142,16 @@ fn focus_dir(reg: &mut Registry, block: &str, direction: Direction) -> Result<()
 fn resize(reg: &mut Registry, block: &str, changes: impl FnOnce(&silo_proto::model::Layout) -> Vec<RatioChange>) -> Result<(), RpcError> {
     let (si, wi) = locate(reg, block)?;
     let window = &reg.sessions[si].windows[wi];
-    if window.zoomed {
+    let float = window.floating(block).map(|_| block.to_owned());
+    if window.zoomed && float.is_none() {
         return Ok(());
     }
     let id = window.id.clone();
-    apply(reg, &id, changes(&window.layout))
+    let layout = window.layout_of(block).unwrap_or(silo_proto::model::Layout::Unknown);
+    for (path, ratio) in changes(&layout) {
+        reg.set_ratio(&id, float.as_deref(), &path, ratio)?;
+    }
+    Ok(())
 }
 
 fn equalize(reg: &mut Registry, window: &str) -> Result<(), RpcError> {
@@ -155,7 +167,7 @@ fn equalize(reg: &mut Registry, window: &str) -> Result<(), RpcError> {
 
 fn apply(reg: &mut Registry, window: &str, changes: Vec<RatioChange>) -> Result<(), RpcError> {
     for (path, ratio) in changes {
-        reg.set_ratio(window, &path, ratio)?;
+        reg.set_ratio(window, None, &path, ratio)?;
     }
     Ok(())
 }
@@ -180,7 +192,7 @@ mod tests {
         };
         let layout = Layout::Split { axis: Axis::Horizontal, ratio: 0.5, first: Box::new(column("a", "c")), second: Box::new(column("b", "d")) };
         let mut w = Window { layout, ..Window::new("w".into(), "a") };
-        w.floats.push(silo_proto::model::Float { id: "f".into(), rect: Default::default() });
+        w.floats.push(silo_proto::model::Float::new("f", Default::default()));
         reg.sessions.push(Session {
             id: "s".into(),
             name: "work".into(),

@@ -105,13 +105,15 @@ async fn changes_show_opens_the_agents_own_block() {
     let shown = show(&tools, &agent.block_id, json!({"scope": "staged"})).await;
     assert_eq!(shown["scope"], json!({"kind": "staged"}));
 
-    // A floating agent whose block is gone: a new tab in its own session.
+    // A floating agent whose block is gone: beside it in its float (a
+    // float is a window of its own).
     control.call_value(Method::BlockClose { block_id: block.clone(), force: true }).await.unwrap();
     control.call_value(Method::BlockFloat { block_id: agent.block_id.clone(), rect: None }).await.unwrap();
     let shown = show(&tools, &agent.block_id, json!({"scope": "working"})).await;
     assert_eq!(shown["created"].as_bool(), Some(true));
     let view: SessionView = control.call(Method::SessionView { session_id: main.session_id.clone() }).await.unwrap();
-    assert_eq!(view.session.windows.len(), 2, "a tab in the agent's session: {view:?}");
+    let new = shown["block_id"].as_str().unwrap();
+    assert!(view.session.windows[0].float_of(&agent.block_id).is_some_and(|f| f.contains(new)), "in the agent's float: {view:?}");
     assert_eq!(changes_blocks(&control, &main.session_id).await.len(), 1);
     assert!(changes_blocks(&control, &agents.session_id).await.is_empty());
 

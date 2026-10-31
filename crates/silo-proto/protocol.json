@@ -832,6 +832,19 @@
           "id": {
             "type": "string"
           },
+          "layout": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Layout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "minimized": {
+            "type": "boolean"
+          },
           "rect": {
             "$ref": "#/$defs/FloatRect"
           }
@@ -4354,6 +4367,29 @@
         "required": [
           "block_id",
           "delta"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "block.minimize": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "minimized": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "block_id",
+          "minimized"
         ],
         "type": "object"
       },
@@ -13078,6 +13114,12 @@
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "float": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "path": {
             "items": {
               "format": "uint",
@@ -14814,6 +14856,19 @@
             "properties": {
               "id": {
                 "type": "string"
+              },
+              "layout": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Layout"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "minimized": {
+                "type": "boolean"
               },
               "rect": {
                 "$ref": "#/$defs/FloatRect"

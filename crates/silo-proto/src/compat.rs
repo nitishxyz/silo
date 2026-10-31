@@ -85,6 +85,12 @@ pub mod feature {
     /// `window.merge`: one tab's blocks move into another's layout. Older
     /// servers answer `method_not_found`; the app only reorders there.
     pub const WINDOW_MERGE: &str = "window_merge";
+    /// Floats hold split layouts (`Float.layout`): `block.split` and the
+    /// focus, swap and resize methods work inside a float, `layout.ratio`
+    /// takes `float`, `block.move` moves and docks a float's panes
+    /// together, and `block.minimize` (`Float.minimized`). Older servers
+    /// refuse splitting a float; the app offers no split there.
+    pub const FLOAT_PANES: &str = "float_panes";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -108,6 +114,7 @@ pub const FEATURES: &[&str] = &[
     feature::FILES_OPS,
     feature::WINDOW_MERGE,
     feature::FILES_GIT,
+    feature::FLOAT_PANES,
 ];
 
 /// Features this build's server supports that a client advertises only

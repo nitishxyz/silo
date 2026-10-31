@@ -118,6 +118,7 @@ commands! {
     ZoomPane => "Zoom Pane", "Panes", ["cmd-shift-enter"], "Toggle";
     FloatPane => "Float Pane", "Panes", [], "Lift it above the layout";
     DockPane => "Dock Pane", "Panes", [], "Put it back in the layout";
+    MinimizeFloat => "Minimize Float", "Panes", ["cmd-shift-m"], "Tuck the focused float into the corner";
     BrowseBlocks => "Browse Blocks…", "Panes", ["cmd-shift-b"], "Every block of this session, background ones too";
     // Browser
     NewBrowser => "New Browser", "Browser", [];
@@ -228,6 +229,7 @@ impl Command {
             Self::ZoomPane => Method("block.zoom"),
             Self::FloatPane => Method("block.float"),
             Self::DockPane => Method("block.move"),
+            Self::MinimizeFloat => Method("block.minimize"),
             Self::OpenUrl => Method("browser.navigate"),
             Self::AddHost => Method("app.hosts_add"),
             Self::RenameHost => Method("app.hosts_rename"),
@@ -272,6 +274,7 @@ impl Command {
         match self {
             Self::NewFiles | Self::NewFilesTab | Self::OpenFolder => Some(silo_proto::compat::feature::FILES),
             Self::BrowseFiles => Some(silo_proto::compat::feature::FILES_OPS),
+            Self::MinimizeFloat => Some(silo_proto::compat::feature::FLOAT_PANES),
             Self::NewChanges | Self::NewChangesTab | Self::ReviewChanges => Some(silo_proto::compat::feature::CHANGES),
             _ => None,
         }

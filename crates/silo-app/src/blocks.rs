@@ -407,11 +407,11 @@ impl Workspace {
         self.block_pane(block).is_some()
     }
 
-    /// Where a block is on screen. A tiled block of any kind has the cell
-    /// the layout measured for it; a float falls back to its pane's
-    /// content bounds.
+    /// Where a block is on screen: the cell measured for it (tiled or in a
+    /// float), else its pane's content bounds.
     pub(crate) fn block_bounds(&self, block: &str, cx: &App) -> Option<gpui::Bounds<gpui::Pixels>> {
-        let tiled = self.active_window().is_some_and(|w| w.layout.contains(block));
+        // Tiled, or in a float: both lay their cells out.
+        let tiled = self.active_window().is_some_and(|w| crate::floats::shown_blocks(w).iter().any(|b| b == block));
         if let Some(cell) = tiled.then(|| self.motion.measured.cells.borrow().get(block).copied()).flatten() {
             return Some(cell);
         }

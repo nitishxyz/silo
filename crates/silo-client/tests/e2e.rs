@@ -468,7 +468,7 @@ async fn block_swap_and_window_move_body() {
     )
     .await;
     let (b, c) = (b.block_id, c.block_id);
-    call_value(&control, Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3 }).await;
+    call_value(&control, Method::LayoutRatio { window_id: created.window_id.clone(), path: vec![], ratio: 0.3, float: None }).await;
     call_value(&control, Method::BlockFocus { block_id: a.clone() }).await;
     let before: SessionView = call(&control, Method::SessionView { session_id: sid.clone() }).await;
     while next_view(&mut events, &sid).await.session.revision < before.session.revision {}

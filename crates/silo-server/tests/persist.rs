@@ -464,7 +464,7 @@ async fn floats_survive_restart() {
     let rect = FloatRect { x: 0.1, y: 0.2, w: 0.5, h: 0.4 };
     control.call_value(Method::BlockFloat { block_id: split.block_id.clone(), rect: Some(rect) }).await.unwrap();
     let before = view(&control, &main.session_id).await;
-    assert_eq!(before.session.windows[0].floats, [Float { id: split.block_id.clone(), rect }]);
+    assert_eq!(before.session.windows[0].floats, [Float::new(split.block_id.clone(), rect)]);
     assert_eq!(before.session.windows[0].layout.blocks(), [main.block_id.as_str()]);
     shutdown(control, task).await;
 

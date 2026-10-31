@@ -37,7 +37,7 @@ const DIVIDER_HIT: f32 = 6.0;
 /// Which window edges a pane card lies along, and the window's corner
 /// radius when its corners are visible behind the cards.
 #[derive(Clone, Copy)]
-struct Placement {
+pub(crate) struct Placement {
     window: Option<f32>,
     left: bool,
     right: bool,
@@ -45,6 +45,9 @@ struct Placement {
 }
 
 impl Placement {
+    /// A float's cards: in no window corner.
+    pub(crate) const FLOAT: Self = Self { window: None, left: true, right: true, bottom: true };
+
     fn corners(self) -> CardCorners {
         CardCorners::for_card(self.window, OUTER, self.left, self.right, self.bottom)
     }
@@ -56,6 +59,15 @@ impl Placement {
             Axis::Vertical => (Self { bottom: false, ..self }, self),
         }
     }
+}
+
+/// Which layout [`Workspace::render_layout`] draws: the window's, or
+/// (`float`: its id) a float's, whose cards always sit apart and whose
+/// gaps `veil` fills (Frosted) instead of the window veil.
+#[derive(Clone, Default)]
+pub(crate) struct Tiling {
+    pub(crate) float: Option<String>,
+    pub(crate) veil: Option<gpui::Rgba>,
 }
 
 impl Workspace {
@@ -81,13 +93,14 @@ impl Workspace {
             if self.motion.zoom_state(now).is_some_and(|(extent, _)| extent >= 1.0) {
                 div().size_full().into_any_element()
             } else {
-                self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, now, cx)
+                self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, None, place, &Tiling::default(), now, cx)
             }
         } else if w.zoomed {
-            self.render_layout(&Layout::block(w.focused.clone()), &[], Some(&w.focused), false, true, None, place, now, cx)
+            self.render_layout(&Layout::block(w.focused.clone()), &[], Some(&w.focused), false, true, None, place, &Tiling::default(), now, cx)
         } else {
             let focused = self.focused_block(window, cx);
-            self.render_layout(&w.layout, &[], focused.as_deref(), w.layout.blocks().len() > 1, false, swap_window(w), place, now, cx)
+            let multiple = w.layout.blocks().len() > 1;
+            self.render_layout(&w.layout, &[], focused.as_deref(), multiple, false, swap_window(w), place, &Tiling::default(), now, cx)
         };
         let zoom = zoom.map(|(block, rect, area)| self.render_zoom(block, w.zoomed, rect, area, place, now, cx));
         let area = self.motion.measured.area.clone();
@@ -168,7 +181,7 @@ impl Workspace {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_layout(
+    pub(crate) fn render_layout(
         &self,
         layout: &Layout,
         path: &[usize],
@@ -177,6 +190,7 @@ impl Workspace {
         zoomed: bool,
         swap: Option<&str>,
         place: Placement,
+        tiling: &Tiling,
         now: Instant,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -220,45 +234,52 @@ impl Workspace {
                 let ratio = ratio.clamp(0.05, 0.95);
                 let (place_a, place_b) = place.split(*axis);
                 let child = |i: usize| [path, &[i]].concat();
-                let a = self.render_layout(first, &child(0), focused, multiple, zoomed, swap, place_a, now, cx);
-                let b = self.render_layout(second, &child(1), focused, multiple, zoomed, swap, place_b, now, cx);
-                // Compact: a neutral hairline. Comfortable: empty space.
+                let a = self.render_layout(first, &child(0), focused, multiple, zoomed, swap, place_a, tiling, now, cx);
+                let b = self.render_layout(second, &child(1), focused, multiple, zoomed, swap, place_b, tiling, now, cx);
+                // Compact: a neutral hairline. Comfortable, and in a float:
+                // empty space.
                 let (size, fill) = match self.density() {
-                    Density::Compact => (1.0, Some(theme::border())),
-                    Density::Comfortable => (GAP, None),
+                    Density::Compact if tiling.float.is_none() => (1.0, Some(theme::border())),
+                    _ => (GAP, None),
                 };
+                let float = tiling.float.clone();
                 // Drag a divider to resize its split; double-click it to even
                 // the split out. Its hit area is wider than a Compact hairline
                 // and overlays both panes.
                 let split = path.to_vec();
-                let dragging = self.divider_drag.as_ref().is_some_and(|d| d.path == path);
+                let dragging = self.divider_drag.as_ref().is_some_and(|d| d.path == path && d.float == float);
+                let veil = match (&tiling.float, tiling.veil) {
+                    (Some(_), veil) => veil,
+                    (None, _) => self.frosted().then(|| self.chrome.fill()),
+                };
                 let divider = div()
                     .flex_none()
                     .when_some(fill, |el, c| el.bg(rgb(c)))
-                    .when(fill.is_none() && self.frosted(), |el| el.bg(self.chrome.fill()))
+                    .when_some(veil.filter(|_| fill.is_none()), |el, veil| el.bg(veil))
                     .when(dragging, |el| el.child(div().size_full().bg(rgb(theme::accent()).opacity(0.35))));
                 let horizontal = *axis == Axis::Horizontal;
                 let along = move |p: gpui::Point<gpui::Pixels>| f32::from(if horizontal { p.x } else { p.y });
                 let hit = div()
-                    .id(gpui::ElementId::Name(format!("divider-{split:?}").into()))
+                    .id(gpui::ElementId::Name(format!("divider-{float:?}-{split:?}").into()))
                     .absolute()
                     .occlude()
                     .cursor(if horizontal { gpui::CursorStyle::ResizeLeftRight } else { gpui::CursorStyle::ResizeUpDown })
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener({
-                            let split = split.clone();
+                            let (split, float) = (split.clone(), float.clone());
                             move |this, e: &gpui::MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 let Some(w) = this.active_window() else { return };
                                 let window_id = w.id.clone();
                                 if e.click_count == 2 {
-                                    let change = layout_ops::even_split(&w.layout, &split);
+                                    let Some(layout) = crate::palette::layout_in(w, float.as_deref()) else { return };
+                                    let change = layout_ops::even_split(&layout, &split);
                                     this.divider_drag = None;
-                                    this.set_ratios(&window_id, change.into_iter().collect(), cx);
+                                    this.set_ratios(&window_id, float.as_deref(), change.into_iter().collect(), cx);
                                 } else {
-                                    this.divider_drag =
-                                        Some(DividerDrag { window_id, path: split.clone(), start_ratio: ratio, start: along(e.position) });
+                                    let (path, float) = (split.clone(), float.clone());
+                                    this.divider_drag = Some(DividerDrag { window_id, float, path, start_ratio: ratio, start: along(e.position) });
                                 }
                             }
                         }),
@@ -268,13 +289,14 @@ impl Workspace {
                 // The split's own container maps the drag to its ratio.
                 let container = div().relative().size_full().min_w_0().min_h_0().flex().on_drag_move(cx.listener(
                     move |this, e: &gpui::DragMoveEvent<DividerGrab>, _, cx| {
-                        let Some(d) = this.divider_drag.as_ref().filter(|d| d.path == split) else { return };
+                        let Some(d) = this.divider_drag.as_ref().filter(|d| d.path == split && d.float == float) else { return };
                         let extent = f32::from(if horizontal { e.bounds.size.width } else { e.bounds.size.height });
                         let new = dragged_ratio(d.start_ratio, along(e.event.position) - d.start, extent, size);
                         let window_id = d.window_id.clone();
-                        let old = this.active_window().filter(|w| w.id == window_id).and_then(|w| layout_ops::split_ratio(&w.layout, &split));
+                        let layout = this.active_window().filter(|w| w.id == window_id).and_then(|w| crate::palette::layout_in(w, float.as_deref()));
+                        let old = layout.and_then(|l| layout_ops::split_ratio(&l, &split));
                         if let Some(c) = old.and_then(|(_, old)| layout_ops::change(&split, old, new)) {
-                            this.set_ratios(&window_id, vec![c], cx);
+                            this.set_ratios(&window_id, float.as_deref(), vec![c], cx);
                         }
                     },
                 ));
@@ -315,14 +337,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Floats are always cards, so they read as floating.
-        let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
+        let float = self.active_window().and_then(|w| w.float_of(id));
+        let floating = float.is_some();
+        let several = float.is_some_and(|f| f.layout.is_some());
         let comfortable = floating || self.density() == Density::Comfortable;
         let frosted = self.frosted();
         let mode = self.header_mode(id);
         // Corners just inside the 1px outline, for overlays (wash, drop
         // outline, docks) and the page that fill the card's rounded clip.
         let fill = corners.inset(1.0);
-        let docks = if floating { Vec::new() } else { self.dock_zones(id, fill, cx) };
+        let docks = if floating { None } else { self.dock_ghost(id, comfortable, fill) };
         let entering = self
             .motion
             .pane_enter
@@ -342,12 +366,13 @@ impl Workspace {
             },
         };
         let fill_color = self.card_fill(id, cx);
-        // A float, or the pane zooming over its siblings, sits over the
-        // app's own content, which the window blur does not reach: opaque.
-        // A zoom is a veil in its slot and when whole, opaque in between.
+        // The pane zooming over its siblings sits over the app's own
+        // content, which the window blur does not reach: opaque. A zoom is
+        // a veil in its slot and when whole, opaque in between. A float
+        // blurs what is beneath it itself: glass (`float_chrome`).
         let zoom = self.motion.zoom_frame(now).filter(|(block, ..)| *block == id).and(self.motion.zoom_state(now));
         let palette = match zoom {
-            _ if floating => self.card_chrome(fill_color).floating(),
+            _ if floating => self.float_chrome(fill_color),
             Some((_, cover)) => self.card_chrome(fill_color).toward_floating(cover),
             None => self.card_chrome(fill_color),
         };
@@ -429,7 +454,11 @@ impl Workspace {
         // the card's veil without overlapping it. Not while zooming over
         // other panes: its own rounded clip shapes it there.
         let settled = comfortable && entering.is_none() && zoom.is_none();
-        let veil = (settled && frosted && !floating).then(|| slot_veil(corners, self.chrome.fill()));
+        // A float of several panes: its gaps' glass, as the window veil.
+        let veil = match floating {
+            false => (settled && frosted).then(|| slot_veil(corners, self.chrome.fill())),
+            true => several.then(|| self.float_id(id).map(|f| self.float_chrome(self.card_fill(&f, cx)))).flatten().filter(|c| c.alpha < 1.0).map(|c| slot_veil(corners, c.fill())),
+        };
         div()
             .relative()
             .size_full()
@@ -490,6 +519,9 @@ impl Workspace {
         };
         let focus_block = block.clone();
         let floating = self.active_window().is_some_and(|w| crate::floats::is_float(w, id));
+        // In a float: split there where the host can, minimize; no zoom.
+        let float_panes = self.host_supports(feature::FLOAT_PANES);
+        let minimize = on(|this, b, cx| this.minimize_float(&b, true, cx));
         let status = if full { self.render_status_mark(id, palette, cx) } else { None };
         // The block's own progress (a page loading) takes the status line's place.
         let progress = match parts.progress {
@@ -555,11 +587,13 @@ impl Workspace {
                         .items_center()
                         .when(!active, |el| el.opacity(0.0).group_hover(card_group(id), |s| s.opacity(1.0)))
                         .children(parts.actions)
-                        // A float can't be split or zoomed: Close only.
-                        .when(!floating, |el| {
+                        .when(!floating || float_panes, |el| {
                             el.child(button("split-right", "split-right", "Split Right  ⌘D").on_click(split_right))
                                 .child(button("split-down", "split-down", "Split Down  ⇧⌘D").on_click(split_down))
-                                .child(
+                        })
+                        .when(floating && float_panes, |el| el.child(button("minimize", "minimize", "Minimize  ⇧⌘M").on_click(minimize)))
+                        .when(!floating, |el| {
+                            el.child(
                                     button(
                                         "zoom",
                                         if zoomed { "unzoom" } else { "zoom" },
@@ -833,6 +867,7 @@ pub(crate) enum PaneDrop {
 }
 
 impl PaneDrop {
+    #[cfg(test)]
     pub(crate) const SIDES: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
 
     /// The split docking makes: its axis and whether the docked pane comes
@@ -878,7 +913,7 @@ pub(crate) fn drop_zone(at: gpui::Point<gpui::Pixels>, bounds: gpui::Bounds<gpui
 /// outline throughout: the whole card for a swap, else the half the pane
 /// docks into (Comfortable: a rounded card just inside the target's;
 /// Compact: flush). `fill`: the target's corners inside its outline.
-fn drop_ghost(zone: PaneDrop, comfortable: bool, fill: CardCorners) -> gpui::Div {
+pub(crate) fn drop_ghost(zone: PaneDrop, comfortable: bool, fill: CardCorners) -> gpui::Div {
     let inset = px(if comfortable && zone != PaneDrop::Swap { GHOST_INSET } else { 0.0 });
     let ghost = div().absolute().bg(rgb(theme::accent()).opacity(0.08)).border_2().border_color(rgb(theme::accent()));
     let ghost = match zone {
@@ -1004,6 +1039,8 @@ const MIN_PANE: f32 = 60.0;
 #[derive(Clone)]
 pub(crate) struct DividerDrag {
     window_id: String,
+    /// The float whose split it is, else the window's.
+    float: Option<String>,
     path: Vec<usize>,
     start_ratio: f32,
     start: f32,

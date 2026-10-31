@@ -95,7 +95,7 @@ fn expired(card: &OfferCard, now: Instant) -> bool {
 /// "session › tab" of the window holding `block` in `view`: the tab's name,
 /// else the block's title.
 pub fn source_label(view: &SessionView, block: &str) -> Option<String> {
-    let window = view.session.windows.iter().find(|w| w.layout.contains(block) || w.floats.iter().any(|f| f.id == block))?;
+    let window = view.session.windows.iter().find(|w| w.blocks().iter().any(|b| b == block))?;
     let tab = window.name.clone().filter(|n| !n.is_empty()).or_else(|| view.blocks.iter().find(|b| b.id == block).map(|b| b.title.clone()));
     Some(match tab.filter(|t| !t.is_empty()) {
         Some(tab) => format!("{} › {tab}", view.session.name),
