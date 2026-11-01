@@ -693,9 +693,10 @@ impl Pane {
             use crate::text_field::FieldEvent;
             match event {
                 FieldEvent::Changed(text) => this.search_for(text, cx),
+                // ↩ goes on up from the newest match at the bottom, ⇧↩ back down.
                 FieldEvent::Submit => {
-                    let previous = field.read(cx).submit_mods.shift;
-                    this.find_step(previous, cx);
+                    let down = field.read(cx).submit_mods.shift;
+                    this.find_step(!down, cx);
                 }
                 FieldEvent::Up => this.find_step(true, cx),
                 FieldEvent::Down => this.find_step(false, cx),
@@ -737,10 +738,11 @@ impl Pane {
         cx.notify();
     }
 
-    /// The next older (or, `previous`, newer) match, scrolled into view.
-    fn find_step(&mut self, previous: bool, cx: &mut Context<Self>) {
+    /// The match above (`up`: older) or below (newer), scrolled into view.
+    fn find_step(&mut self, up: bool, cx: &mut Context<Self>) {
         let Some(vt) = self.mirror.terminal() else { return };
-        if vt.search_select(previous).is_ok() {
+        // Ghostty's order is newest first: its "next" is the one above.
+        if vt.search_select(!up).is_ok() {
             self.generation += 1;
             cx.notify();
         }
@@ -829,8 +831,8 @@ impl Pane {
                 .child(div().flex_none().mr(px(4.0)).child(crate::assets::icon("search", 11.0, muted)))
                 .child(div().flex_1().min_w_0().child(find.field.clone()))
                 .child(div().flex_none().mx(px(4.0)).text_size(px(11.0)).text_color(rgb(muted)).child(count))
-                .child(button("find-previous", "chevron-up", "Previous  ⇧⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))))
-                .child(button("find-next", "chevron-down", "Next  ⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))))
+                .child(button("find-previous", "chevron-up", "Up  ↩ ⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))))
+                .child(button("find-next", "chevron-down", "Down  ⇧↩ ⇧⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))))
                 .child(button("find-close", "close", "Close  esc").on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))))
                 .into_any_element(),
         )
@@ -1075,7 +1077,7 @@ impl Pane {
                     return true;
                 }
                 "g" if self.find.is_some() => {
-                    self.find_step(m.shift, cx);
+                    self.find_step(!m.shift, cx);
                     return true;
                 }
                 _ => {}
