@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, Window, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, IntoElement, TextRun, Window, div, prelude::*, px, rgb, rgba};
 use silo_voice::bands::{self, BARS};
 
 use super::{LEAVE, Stage};
@@ -20,6 +20,60 @@ const BAR_MAX: f32 = 18.0;
 const LIFT: f32 = 18.0;
 const APPEAR: Duration = Duration::from_millis(180);
 const COLLAPSE: Duration = Duration::from_millis(320);
+/// The pill's widest, and what it gives the bars, lock and padding.
+const MAX_W: f32 = 460.0;
+/// Between the bars and the words.
+const GAP: f32 = 8.0;
+const TEXT_SIZE: f32 = 12.0;
+/// The words' width and scroll ease to their targets with this time constant.
+const EASE: f32 = 0.09;
+
+/// The live words as drawn: the box widens and the text slides left as they grow, rather than jumping.
+#[derive(Default)]
+pub(super) struct Words {
+    text: String,
+    /// The text's laid out width.
+    width: f32,
+    /// The box's width (the words' share, without the gap), eased.
+    view: f32,
+    /// How far the text is slid left in it, eased.
+    scroll: f32,
+    at: Option<Instant>,
+}
+
+impl Words {
+    /// Takes `text` (measured by `measure` when it changes; none: the words are going) and steps the motion
+    /// toward a box `cap` wide at most showing the text's end.
+    fn step(&mut self, text: Option<&str>, measure: impl FnOnce(&str) -> f32, cap: f32, reduce: bool) {
+        let now = Instant::now();
+        match text {
+            Some(text) if text != self.text => {
+                let width = measure(text);
+                // A revision (not more words after the old ones) keeps what shows of the end where it is.
+                if !text.starts_with(self.text.as_str()) {
+                    self.scroll = (self.scroll + width - self.width).max(0.0);
+                }
+                (self.text, self.width) = (text.to_owned(), width);
+            }
+            _ => {}
+        }
+        let view_to = if text.is_some() { self.width.min(cap.max(0.0)) } else { 0.0 };
+        let scroll_to = if text.is_some() { (self.width - view_to).max(0.0) } else { self.scroll };
+        let dt = self.at.map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+        self.at = Some(now);
+        let k = if reduce { 1.0 } else { 1.0 - (-dt / EASE).exp() };
+        let ease = |from: f32, to: f32| if (to - from).abs() < 0.25 { to } else { from + (to - from) * k };
+        self.view = ease(self.view, view_to);
+        self.scroll = ease(self.scroll, scroll_to).clamp(0.0, (self.width - self.view).max(0.0));
+        if text.is_none() && self.view == 0.0 {
+            *self = Self::default();
+        }
+    }
+
+    fn shown(&self) -> bool {
+        self.view > 0.0
+    }
+}
 
 fn ease_out(x: f32) -> f32 {
     1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
@@ -82,30 +136,49 @@ impl Workspace {
             _ => None,
         };
         let hands_free = live.hands_free && live.stage == Stage::Recording;
+        // The words' room: the pill's widest less its padding, bars, lock and gap (and within the pane).
+        #[allow(clippy::cast_precision_loss)]
+        let bars_w = BARS as f32 * BAR_W + (BARS as f32 - 1.0) * BAR_GAP;
+        let fixed = 28.0 + bars_w + GAP + if hands_free { 11.0 + GAP } else { 0.0 };
+        let room = area.map_or(MAX_W, |b| f32::from(b.size.width) - 2.0 * LIFT).min(MAX_W);
+        let mut font = window.text_style().font();
+        font.weight = FontWeight::MEDIUM;
+        let color = words.as_ref().map_or(muted, |(_, c)| *c);
+        let measure = |text: &str| {
+            let run = TextRun { len: text.len(), font: font.clone(), color: rgb(color).into(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_owned().into(), px(TEXT_SIZE), &[run], None).width()).ceil()
+        };
+        live.words.step(words.as_ref().map(|(t, _)| t.as_str()), measure, room - fixed, reduce);
+        let w = &live.words;
+        let words_el = w.shown().then(|| {
+            let text = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-w.scroll))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .font(font.clone())
+                .text_color(rgb(color))
+                .child(w.text.clone());
+            // The gap rides with the words, so the pill closes up evenly when they go.
+            div().flex_none().h_full().w(px(w.view + GAP)).pl(px(GAP)).overflow_hidden().child(div().relative().size_full().overflow_hidden().child(text))
+        });
         let pill = div()
             .id("voice-pill")
             .h(px(HEIGHT))
-            .max_w(px(460.0))
             .flex()
             .items_center()
-            .gap(px(8.0))
             .px(px(14.0))
             .glass(HEIGHT / 2.0)
             .rounded_full()
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SIZE))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(ink))
-            .when(hands_free, |el| el.child(icon("lock", 11.0, muted)))
+            .when(hands_free, |el| el.child(div().mr(px(GAP)).child(icon("lock", 11.0, muted))))
             .child(bars)
-            .children(words.map(|(text, color)| {
-                // The latest words stay in view: long text keeps its end.
-                let shown: String = if text.chars().count() > 60 {
-                    format!("…{}", text.chars().rev().take(58).collect::<Vec<_>>().into_iter().rev().collect::<String>())
-                } else {
-                    text
-                };
-                div().min_w_0().truncate().text_color(rgb(color)).child(shown)
-            }))
+            .children(words_el)
             .when(hands_free, |el| el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.voice_stop(false, cx))));
         let rise = 6.0 * (1.0 - appear);
         let place = div().absolute().flex().justify_center().items_end().opacity(appear * fade);
@@ -114,5 +187,32 @@ impl Workspace {
             None => place.inset_0().pb(px(LIFT - rise)),
         };
         Some(place.child(pill).into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Words;
+
+    #[test]
+    fn words_ease_toward_the_text_and_keep_its_end() {
+        let mut w = Words::default();
+        let measure = |t: &str| t.len() as f32 * 10.0;
+        // Reduced motion snaps: fits, so no scroll.
+        w.step(Some("hello"), measure, 100.0, true);
+        assert_eq!((w.view, w.scroll), (50.0, 0.0));
+        // Past the cap: the box stops at it and the text slides to its end.
+        w.step(Some("hello there world"), measure, 100.0, true);
+        assert_eq!((w.view, w.scroll), (100.0, 70.0));
+        // Animated: the first step (no time yet) holds, then it moves part way, never past the target.
+        let mut w = Words::default();
+        w.step(Some("hello"), measure, 100.0, false);
+        assert_eq!(w.view, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        w.step(Some("hello"), measure, 100.0, false);
+        assert!(w.view > 0.0 && w.view < 50.0, "{}", w.view);
+        // Gone: it closes to nothing, then resets.
+        w.step(None, measure, 100.0, true);
+        assert!(!w.shown() && w.text.is_empty());
     }
 }

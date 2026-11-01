@@ -40,7 +40,9 @@ const COMPOSER_MID: f32 = 0.85;
 /// Lines visible in a live group before older ones scroll away.
 const LIVE_LINES: f32 = 6.0;
 /// Streaming reasoning's window: four of its lines and the gap below.
-const STREAM_H: f32 = 4.0 * 18.0 + 4.0;
+const STREAM_H: f32 = 4.0 * STREAM_LINE + 4.0;
+/// Streaming reasoning's line height.
+const STREAM_LINE: f32 = 18.0;
 const TEXT: f32 = 13.5;
 /// Space above and below an open `›` detail: the box sits between its row and the next with equal room, so the
 /// row after it keeps its rhythm instead of reading as attached to the box.
@@ -89,6 +91,21 @@ pub(super) struct Stream {
     live: bool,
     height: motion::Glide,
     measured: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Where each wrapped line starts (bytes into `text`), as last laid out: the top lines fade themselves.
+    starts: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+/// Where each visual line of a laid out text starts (bytes into it).
+fn line_starts(layout: &gpui::TextLayout) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for line in &layout.line_layouts() {
+        let un = &line.unwrapped_layout;
+        out.push(at);
+        out.extend(line.wrap_boundaries.iter().map(|b| at + un.runs[b.run_ix].glyphs[b.glyph_ix].index));
+        at += line.len() + 1;
+    }
+    out
 }
 
 /// Tabular figures: ticking durations keep their width.
@@ -1611,12 +1628,12 @@ impl AgentPane {
                 live: true,
                 height: motion::Glide::new(motion::UI),
                 measured: std::rc::Rc::default(),
+                starts: std::rc::Rc::default(),
             });
             (s.text, s.live) = (text, true);
         } else if let Some(s) = self.streams.get_mut(&key) {
             s.live = false;
         }
-        let surface = self.surface;
         let reduce = cx.reduce_motion();
         let stream = self.streams.get_mut(&key).map(|s| {
             let natural = s.measured.get().min(STREAM_H);
@@ -1628,24 +1645,61 @@ impl AgentPane {
             }
             let fade = if s.live { 1.0 } else { (h / natural.max(1.0)).clamp(0.0, 1.0) };
             let measured = s.measured.clone();
+            // Past the window, the lines leaving at its top fade themselves (a wash over them shows as a band on
+            // glass and on themes far from the backdrop): the one at the top edge at 35%, coming in as it overflows.
+            let full = s.measured.get();
+            let ramp = ((full - STREAM_H) / STREAM_LINE).clamp(0.0, 1.0);
+            let mut highlights = Vec::new();
+            if ramp > 0.0 {
+                let starts = s.starts.borrow();
+                let len = s.text.len();
+                let bound = |mut at: usize| {
+                    at = at.min(len);
+                    while !s.text.is_char_boundary(at) {
+                        at += 1;
+                    }
+                    at
+                };
+                for (k, start) in starts.iter().enumerate() {
+                    // The line's top in the window (the body sits at its bottom).
+                    #[allow(clippy::cast_precision_loss)]
+                    let y = h - full + k as f32 * STREAM_LINE;
+                    if y >= STREAM_LINE {
+                        break;
+                    }
+                    let raw = (0.35 + 0.65 * y / STREAM_LINE).clamp(0.0, 1.0);
+                    let alpha = 1.0 - ramp * (1.0 - raw);
+                    let (a, b) = (bound(*start), bound(starts.get(k + 1).copied().unwrap_or(len)));
+                    if a < b && alpha < 1.0 {
+                        highlights.push((a..b, HighlightStyle { fade_out: Some(1.0 - alpha), ..Default::default() }));
+                    }
+                }
+            }
+            let styled = StyledText::new(s.text.clone()).with_highlights(highlights);
+            let (layout, starts) = (styled.layout().clone(), s.starts.clone());
             let body = div()
                 .flex_none()
                 .relative()
                 .pl(px(24.0))
                 .pb(px(4.0))
                 .text_size(px(12.0))
-                .line_height(px(18.0))
+                .line_height(px(STREAM_LINE))
                 .text_color(rgb(muted))
-                .child(s.text.clone())
-                .child(gpui::canvas(move |b, _, _| measured.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
-            let over = s.measured.get() > STREAM_H;
-            let el = div().relative().h(px(h)).overflow_hidden().flex().flex_col().justify_end().opacity(0.8 * fade).child(body).when(over, |el| {
-                el.child(div().absolute().top_0().left_0().right_0().h(px(18.0)).bg(linear_gradient(
-                    180.0,
-                    linear_color_stop(surface.at(1.0), 0.0),
-                    linear_color_stop(surface.at(0.0), 1.0),
-                )))
-            });
+                .child(styled)
+                .child(
+                    gpui::canvas(
+                        move |b, _, _| {
+                            measured.set(f32::from(b.size.height));
+                            *starts.borrow_mut() = line_starts(&layout);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                );
+            let el = div().relative().h(px(h)).overflow_hidden().flex().flex_col().justify_end().opacity(0.8 * fade).child(body);
             (el, !s.live && !moving)
         });
         let stream = match stream {

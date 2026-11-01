@@ -44,6 +44,8 @@ struct Live {
     /// The loudness timeline scrolling right to left.
     history: bands::History,
     partial: String,
+    /// The words as drawn: their box's width and scroll ease to the text.
+    words: pill::Words,
     waiting: bool,
     /// The text is with the agent's model (Polish with AI).
     polishing: bool,
@@ -197,6 +199,7 @@ impl Workspace {
             levels: [0.0; BANDS],
             history: bands::History::default(),
             partial: String::new(),
+            words: pill::Words::default(),
             waiting: false,
             polishing: false,
         });
