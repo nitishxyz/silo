@@ -249,6 +249,18 @@ impl Chrome {
     pub fn hover(&self) -> gpui::Rgba {
         self.tint(if theme::light(self.surface) { 0.06 } else { 0.07 })
     }
+
+    /// Compact's hairlines (under the titlebar, beside the side tabs, between panes): the theme's border
+    /// on its own background, else an ink tint of whatever the chrome took on (a dark theme's border on a
+    /// page's light colour read as a heavy black rule).
+    #[must_use]
+    pub fn hairline(&self) -> gpui::Rgba {
+        if self.alpha >= 1.0 && self.surface == theme::background() {
+            gpui::rgb(theme::border())
+        } else {
+            self.tint(if theme::light(self.surface) { 0.12 } else { 0.15 })
+        }
+    }
 }
 
 /// The chrome's target: the focused block's backdrop, whether or not it

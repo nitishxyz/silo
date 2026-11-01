@@ -249,7 +249,7 @@ impl Workspace {
             .pl(px(inset))
             .pr(px(10.0))
             // Compact: the same hairline as the pane dividers, closing the grid.
-            .when(compact, |el| el.border_b_1().border_color(rgb(theme::border())))
+            .when(compact, |el| el.border_b_1().border_color(self.chrome.hairline()))
             // The app owns titlebar dragging: a press on empty space moves
             // the window once dragged, and a double click zooms it.
             // Controls stop the press, so it never reaches here.

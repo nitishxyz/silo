@@ -241,7 +241,7 @@ impl Workspace {
                 // Compact: a neutral hairline. Comfortable, and in a float:
                 // empty space.
                 let (size, fill) = match self.density() {
-                    Density::Compact if tiling.float.is_none() => (1.0, Some(theme::border())),
+                    Density::Compact if tiling.float.is_none() => (1.0, Some(self.chrome.hairline())),
                     _ => (GAP, None),
                 };
                 let float = tiling.float.clone();
@@ -256,7 +256,7 @@ impl Workspace {
                 };
                 let divider = div()
                     .flex_none()
-                    .when_some(fill, |el, c| el.bg(rgb(c)))
+                    .when_some(fill, |el, c| el.bg(c))
                     .when_some(veil.filter(|_| fill.is_none()), |el, veil| el.bg(veil))
                     .when(dragging, |el| el.child(div().size_full().bg(rgb(theme::accent()).opacity(0.35))));
                 let horizontal = *axis == Axis::Horizontal;

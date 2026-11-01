@@ -257,7 +257,7 @@ impl Workspace {
             .h_full()
             .when(self.frosted(), |el| el.bg(chrome.fill()))
             // Compact: the same hairline as the pane dividers.
-            .when(self.density() == Density::Compact, |el| el.border_r_1().border_color(rgb(theme::border())))
+            .when(self.density() == Density::Compact, |el| el.border_r_1().border_color(chrome.hairline()))
             .font_family(theme::ui_font())
             .text_size(px(12.5))
             .child(list)
