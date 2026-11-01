@@ -66,6 +66,10 @@ pub enum PaneEvent {
     OpenLink { url: String, external: bool },
 }
 
+/// The find bar's height and its round buttons' size.
+const FIND_HEIGHT: f32 = 26.0;
+const FIND_BUTTON: f32 = 20.0;
+
 /// The find bar over a terminal: its field and the search's tick task.
 struct Find {
     field: Entity<crate::text_field::TextField>,
@@ -684,7 +688,7 @@ impl Pane {
             window.focus(&handle, cx);
             return;
         }
-        let field = cx.new(|cx| crate::text_field::TextField::new("Find", cx));
+        let field = cx.new(|cx| crate::text_field::TextField::new("Find", cx).on_glass());
         let events = cx.subscribe_in(&field, window, |this, field, event, window, cx| {
             use crate::text_field::FieldEvent;
             match event {
@@ -778,46 +782,53 @@ impl Pane {
         let typed = !find.field.read(cx).text.is_empty();
         let count = match search {
             _ if !typed => String::new(),
-            Some(s) if s.total == 0 => "No results".into(),
+            Some(s) if s.total == 0 => "0".into(),
             Some(s) => match s.selected {
-                Some(i) => format!("{} of {}", i + 1, s.total),
+                Some(i) => format!("{}/{}", i + 1, s.total),
                 None => format!("{}", s.total),
             },
             None => String::new(),
         };
+        // Content on glass: its muted ink and fills.
+        let _glass = crate::surface::enter();
+        let muted = crate::surface::current().muted;
         let button = |id: &'static str, icon: &'static str, tip: &'static str| {
             div()
                 .id(id)
-                .size(px(20.0))
+                .flex_none()
+                .size(px(FIND_BUTTON))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.0))
+                .rounded_full()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::row_fill()))
                 .tooltip(crate::tooltip::Tooltip::text(tip))
-                .child(crate::assets::icon(icon, 12.0, crate::surface::current().muted))
+                .child(crate::assets::icon(icon, 11.0, muted))
         };
         Some(
             div()
                 .id("terminal-find")
                 .absolute()
-                .top(px(4.0))
-                .right(px(4.0))
-                .w(px(300.0))
-                .h(px(30.0))
+                .top(px(6.0))
+                .right(px(6.0))
+                .w(px(232.0))
+                .h(px(FIND_HEIGHT))
                 .pl(px(10.0))
-                .pr(px(4.0))
+                .pr(px((FIND_HEIGHT - FIND_BUTTON) / 2.0))
                 .flex()
                 .items_center()
-                .gap(px(4.0))
-                .glass(nested(self.card_corner, 4.0))
+                .gap(px(2.0))
+                // A capsule of glass: always blurred where the renderer can.
+                .glass(FIND_HEIGHT / 2.0)
+                .rounded_full()
                 .occlude()
                 .font_family(theme::ui_font())
-                .text_size(px(12.5))
+                .text_size(px(12.0))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_none().mr(px(4.0)).child(crate::assets::icon("search", 11.0, muted)))
                 .child(div().flex_1().min_w_0().child(find.field.clone()))
-                .child(div().flex_none().text_size(px(11.5)).text_color(rgb(crate::surface::current().muted)).child(count))
+                .child(div().flex_none().mx(px(4.0)).text_size(px(11.0)).text_color(rgb(muted)).child(count))
                 .child(button("find-previous", "chevron-up", "Previous  ⇧⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))))
                 .child(button("find-next", "chevron-down", "Next  ⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))))
                 .child(button("find-close", "close", "Close  esc").on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))))
