@@ -100,7 +100,9 @@ impl Workspace {
         } else {
             let focused = self.focused_block(window, cx);
             let multiple = w.layout.blocks().len() > 1;
-            self.render_layout(&w.layout, &[], focused.as_deref(), multiple, false, swap_window(w), place, &Tiling::default(), now, cx)
+            // A lone pane drags too where it can move to another tab.
+            let swap = swap_window(w).or_else(|| (self.moves_blocks() && !w.zoomed).then_some(w.id.as_str()));
+            self.render_layout(&w.layout, &[], focused.as_deref(), multiple, false, swap, place, &Tiling::default(), now, cx)
         };
         let zoom = zoom.map(|(block, rect, area)| self.render_zoom(block, w.zoomed, rect, area, place, now, cx));
         let area = self.motion.measured.area.clone();
@@ -394,7 +396,7 @@ impl Workspace {
         // Drop target for a pane dragged by its header: its edge bands dock
         // the dragged pane on that side, the middle swaps the two (only
         // swaps on hosts without `dock_sides`). A ghost shows where it goes.
-        let drop = swap.map(|window_id| {
+        let drop = swap.filter(|_| self.tab_dragging.is_none()).map(|window_id| {
             let (window_id, target) = (window_id.to_owned(), id.to_owned());
             let check = (window_id.clone(), target.clone());
             let hover = check.clone();
@@ -425,6 +427,35 @@ impl Workspace {
                 }))
                 .children(ghost)
         });
+        // A tab dragged over a tiled pane of the tab shown: its blocks go
+        // on the side of this pane the pointer is nearest (`tab_moves`).
+        let active_window = self.active_window().map(|w| w.id.clone());
+        let tab_drop =
+            self.tab_dragging.as_ref().filter(|source| !floating && self.moves_blocks() && active_window.as_ref().is_some_and(|a| a != *source)).map(
+                |_| {
+                    let (target, hover) = (id.to_owned(), id.to_owned());
+                    let ghost = self.pane_drop.as_ref().filter(|(t, _)| t == id).map(|&(_, zone)| drop_ghost(zone, comfortable, fill));
+                    div()
+                        .id(gpui::ElementId::Name(format!("tab-drop-{id}").into()))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<crate::titlebar::TabDrag>, _, cx| {
+                            let zone = ev.bounds.contains(&ev.event.position).then(|| nearest_side(ev.event.position, ev.bounds));
+                            this.set_pane_drop(&hover, zone, cx);
+                        }))
+                        .on_drop(cx.listener(move |this, d: &crate::titlebar::TabDrag, _, cx| {
+                            let zone = this.pane_drop.take().filter(|(t, _)| *t == target).and_then(|(_, zone)| zone.dock());
+                            this.tab_drop = None;
+                            cx.notify();
+                            if let Some((axis, before)) = zone {
+                                this.merge_tab_beside(&d.window_id, &target, axis, before, cx);
+                            }
+                        }))
+                        .children(ghost)
+                },
+            );
         let card = div()
             .group(card_group(id))
             .relative()
@@ -445,6 +476,7 @@ impl Workspace {
             .child(content)
             .children(wash)
             .children(drop)
+            .children(tab_drop)
             .children(docks);
         let card: AnyElement = match entering {
             Some((dx, dy)) => div().absolute().left(relative(dx)).top(relative(dy)).size_full().child(card).into_any_element(),
@@ -616,13 +648,20 @@ impl Workspace {
                 let workspace = cx.entity().downgrade();
                 el.on_drag(d, move |d, offset, _, cx| {
                     let workspace = workspace.clone();
+                    let block = d.block_id.clone();
+                    _ = workspace.update(cx, |this, cx| {
+                        this.block_dragging = Some(block);
+                        this.tab_drop = None;
+                        cx.notify();
+                    });
                     // The drop preview lives exactly as long as the drag.
                     cx.new(|cx| {
                         cx.on_release(move |_, cx| {
                             _ = workspace.update(cx, |this, cx| {
-                                if this.pane_drop.take().is_some() {
-                                    cx.notify();
-                                }
+                                this.block_dragging = None;
+                                this.tab_drop = None;
+                                this.pane_drop = None;
+                                cx.notify();
                             });
                         })
                         .detach();
@@ -814,8 +853,8 @@ impl Workspace {
 /// A pane being dragged by its header to swap places with another.
 #[derive(Clone)]
 pub(crate) struct DraggedPane {
-    window_id: String,
-    block_id: String,
+    pub(crate) window_id: String,
+    pub(crate) block_id: String,
     label: gpui::SharedString,
     icon: &'static str,
 }
@@ -907,6 +946,20 @@ pub(crate) fn drop_zone(at: gpui::Point<gpui::Pixels>, bounds: gpui::Bounds<gpui
         .filter(|&(depth, _)| (0.0..1.0).contains(&depth))
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map_or(PaneDrop::Swap, |(_, side)| side)
+}
+
+/// The side of pane `bounds` the pointer at `at` is nearest, relative to
+/// its size: where a dragged tab's blocks go (a tab never swaps).
+pub(crate) fn nearest_side(at: gpui::Point<gpui::Pixels>, bounds: gpui::Bounds<gpui::Pixels>) -> PaneDrop {
+    let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    if w <= 0.0 || h <= 0.0 {
+        return PaneDrop::Right;
+    }
+    let (x, y) = (f32::from(at.x - bounds.origin.x) / w, f32::from(at.y - bounds.origin.y) / h);
+    [(x, PaneDrop::Left), (1.0 - x, PaneDrop::Right), (y, PaneDrop::Top), (1.0 - y, PaneDrop::Bottom)]
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(PaneDrop::Right, |(_, side)| side)
 }
 
 /// The ghost of a pane drop on its target, the same tint and accent
@@ -1168,6 +1221,17 @@ mod tests {
         assert_eq!(at(-5.0, 100.0), PaneDrop::Swap);
         assert_eq!(drop_zone(gpui::point(px(105.0), px(100.0)), pane, false), PaneDrop::Swap);
         assert_eq!(drop_zone(gpui::point(px(0.0), px(0.0)), gpui::Bounds::default(), true), PaneDrop::Swap);
+    }
+
+    #[test]
+    fn a_dragged_tab_takes_the_nearest_side_never_a_swap() {
+        let pane = gpui::Bounds::new(gpui::point(px(100.0), px(50.0)), gpui::size(px(400.0), px(200.0)));
+        let at = |x: f32, y: f32| nearest_side(gpui::point(px(100.0 + x), px(50.0 + y)), pane);
+        assert_eq!(at(150.0, 100.0), PaneDrop::Left, "37% across, 50% down");
+        assert_eq!(at(260.0, 100.0), PaneDrop::Right);
+        assert_eq!(at(200.0, 40.0), PaneDrop::Top);
+        assert_eq!(at(200.0, 170.0), PaneDrop::Bottom);
+        assert_eq!(nearest_side(gpui::point(px(0.0), px(0.0)), gpui::Bounds::default()), PaneDrop::Right);
     }
 
     #[test]

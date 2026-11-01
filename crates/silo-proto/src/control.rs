@@ -403,7 +403,35 @@ pub enum Method {
     /// block `source` had focused. No block restarts. Feature
     /// `window_merge`; older servers answer `method_not_found`.
     #[serde(rename = "window.merge")]
-    WindowMerge { window_id: WindowId, source: WindowId, axis: Axis },
+    WindowMerge {
+        window_id: WindowId,
+        source: WindowId,
+        axis: Axis,
+        /// Feature `tab_moves`: put `source`'s layout on a side of this
+        /// tiled block of `window_id` instead (its `axis` and `before`
+        /// win). Older servers ignore it and merge along `axis`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Dock>,
+    },
+
+    /// Move block `block_id` (tiled or a float's pane) out of its window:
+    /// into window `window_id` of the same session, beside its layout
+    /// along `axis` (default: side by side), or (no `window_id`) into a new
+    /// window of its own at `index` (default: after its window). The
+    /// destination becomes active, the block focused; it does not restart.
+    /// A window left empty closes (a block alone in its window moving to
+    /// a new one only moves the window). Feature `tab_moves`; older
+    /// servers answer `method_not_found`.
+    #[serde(rename = "block.to_window")]
+    BlockToWindow {
+        block_id: BlockId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<WindowId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<Axis>,
+    },
 
     /// One block's metadata and status.
     #[serde(rename = "block.view")]
@@ -978,6 +1006,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("window.rename", "Set or clear a window's name."),
     ("window.move", "Move a window to a new index."),
     ("window.merge", "Move every block of one window into another of its session and close it."),
+    ("block.to_window", "Move a block into another window of its session, or into a new window of its own."),
     ("block.view", "One block's metadata and status."),
     ("block.split", "Split a block, starting a new terminal, browser, agent or files block next to it."),
     ("block.spawn", "Start a parked terminal or command block owned by a block."),

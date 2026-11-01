@@ -188,7 +188,8 @@ fn result_schema(method: &Method) -> Schema {
         | M::WindowClose { .. }
         | M::WindowRename { .. }
         | M::WindowMove { .. }
-        | M::WindowMerge { .. } => {
+        | M::WindowMerge { .. }
+        | M::BlockToWindow { .. } => {
             schema_for!(Empty)
         }
         M::BlockClose { .. }
@@ -399,7 +400,8 @@ pub fn examples() -> Vec<Method> {
         M::WindowClose { window_id: w(), force: false },
         M::WindowRename { window_id: w(), name: Some("logs".into()) },
         M::WindowMove { window_id: w(), index: 0 },
-        M::WindowMerge { window_id: w(), source: "w9f8e7d6c".into(), axis: Axis::Horizontal },
+        M::WindowMerge { window_id: w(), source: "w9f8e7d6c".into(), axis: Axis::Horizontal, at: None },
+        M::BlockToWindow { block_id: b(), window_id: None, index: Some(1), axis: None },
         M::BlockView { block_id: b() },
         M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
         M::BlockSpawn {

@@ -91,6 +91,11 @@ pub mod feature {
     /// together, and `block.minimize` (`Float.minimized`). Older servers
     /// refuse splitting a float; the app offers no split there.
     pub const FLOAT_PANES: &str = "float_panes";
+    /// Moving blocks between tabs: `block.to_window` (a block into another
+    /// tab, or a new one of its own) and `window.merge`'s `at` (a tab's
+    /// blocks beside one block). Older servers answer `method_not_found`
+    /// and ignore `at`; the app offers neither drop there.
+    pub const TAB_MOVES: &str = "tab_moves";
     /// The server tunnels to its otto daemon (`TunnelOpen.service`
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
@@ -115,6 +120,7 @@ pub const FEATURES: &[&str] = &[
     feature::WINDOW_MERGE,
     feature::FILES_GIT,
     feature::FLOAT_PANES,
+    feature::TAB_MOVES,
 ];
 
 /// Features this build's server supports that a client advertises only

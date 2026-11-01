@@ -1346,7 +1346,7 @@ impl Registry {
     /// split with the target's along `axis` (arrangement and ratios kept),
     /// its floats are added on top, and the block it had focused takes
     /// focus. The target becomes the active window. No block restarts.
-    pub fn merge_window(&mut self, target: &str, source: &str, axis: Axis) -> Result<(), RpcError> {
+    pub fn merge_window(&mut self, target: &str, source: &str, axis: Axis, at: Option<Dock>) -> Result<(), RpcError> {
         if target == source {
             return Err(RpcError::bad_request("cannot merge a window into itself"));
         }
@@ -1355,18 +1355,83 @@ impl Registry {
         if source_si != si {
             return Err(RpcError::bad_request("windows of different sessions cannot merge"));
         }
+        if let Some(at) = &at
+            && !self.sessions[si].windows[ti].layout.contains(&at.target)
+        {
+            return Err(RpcError::bad_request(format!("block {} is not tiled in window {target}", at.target)));
+        }
         let session = &mut self.sessions[si];
         let moved = session.windows.remove(wi);
         let ti = if wi < ti { ti - 1 } else { ti };
         let window = &mut session.windows[ti];
-        let layout = std::mem::replace(&mut window.layout, Layout::Unknown);
-        window.layout = Layout::Split { axis, ratio: 0.5, first: Box::new(layout), second: Box::new(moved.layout) };
+        match at {
+            Some(Dock { target, axis, before }) => {
+                window.layout.insert_at(&target, moved.layout, axis, before);
+            }
+            None => {
+                let layout = std::mem::replace(&mut window.layout, Layout::Unknown);
+                window.layout = Layout::Split { axis, ratio: 0.5, first: Box::new(layout), second: Box::new(moved.layout) };
+            }
+        }
         window.floats.extend(moved.floats);
         window.zoomed = false;
         // Its focus history after the target's, the block it had focused in front.
         window.history.extend(moved.history.into_iter().filter(|b| b != &moved.focused));
         window.focus(&moved.focused);
         session.active_window = target.to_owned();
+        self.session_changed(si);
+        self.sessions_changed();
+        Ok(())
+    }
+
+    /// Move `block_id` out of its window: beside the layout of window
+    /// `into` (same session) along `axis`, or into a new window of its own
+    /// at `index` (default: right after its window). The destination
+    /// becomes active with the block focused; an emptied window closes.
+    pub fn block_to_window(&mut self, block_id: &str, into: Option<&str>, index: Option<usize>, axis: Option<Axis>) -> Result<(), RpcError> {
+        let (si, wi) = self.locate(block_id)?;
+        let source = self.sessions[si].windows[wi].id.clone();
+        let window_id = match into {
+            Some(into) => {
+                let (ti_si, _) = self.locate_window(into)?;
+                if ti_si != si {
+                    return Err(RpcError::bad_request("windows of different sessions cannot share blocks"));
+                }
+                if into == source {
+                    return Err(RpcError::bad_request(format!("block {block_id} is already in window {into}")));
+                }
+                self.detach(si, wi, block_id);
+                let (si, ti) = self.locate_window(into)?;
+                let window = &mut self.sessions[si].windows[ti];
+                let layout = std::mem::replace(&mut window.layout, Layout::Unknown);
+                let axis = axis.unwrap_or(Axis::Horizontal);
+                window.layout = Layout::Split { axis, ratio: 0.5, first: Box::new(layout), second: Box::new(Layout::block(block_id)) };
+                into.to_owned()
+            }
+            None => {
+                let index = index.unwrap_or(wi + 1);
+                if self.sessions[si].windows[wi].blocks().len() == 1 {
+                    // Alone in its window: the window itself moves.
+                    let windows = &mut self.sessions[si].windows;
+                    let window = windows.remove(wi);
+                    let to = if index > wi { index - 1 } else { index };
+                    windows.insert(to.min(windows.len()), window);
+                    source
+                } else {
+                    self.detach(si, wi, block_id);
+                    let window_id = self.fresh_id('w');
+                    let windows = &mut self.sessions[si].windows;
+                    windows.insert(index.min(windows.len()), Window::new(window_id.clone(), block_id));
+                    window_id
+                }
+            }
+        };
+        let (si, ti) = self.locate_window(&window_id)?;
+        let session = &mut self.sessions[si];
+        let window = &mut session.windows[ti];
+        window.zoomed = false;
+        window.focus(block_id);
+        session.active_window = window_id;
         self.session_changed(si);
         self.sessions_changed();
         Ok(())

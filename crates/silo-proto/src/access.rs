@@ -341,6 +341,7 @@ pub fn need(method: &Method) -> Need {
         | M::BlockFloat { .. }
         | M::BlockMove { .. }
         | M::BlockMinimize { .. }
+        | M::BlockToWindow { .. }
         | M::LayoutGrow { .. }
         | M::LayoutEdge { .. }
         | M::TerminalClear { .. }

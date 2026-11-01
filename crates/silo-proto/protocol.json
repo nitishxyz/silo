@@ -5048,6 +5048,58 @@
         "type": "object"
       }
     },
+    "block.to_window": {
+      "params": {
+        "$defs": {
+          "Axis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "axis": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Axis"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "index": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "window_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
     "block.view": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16019,10 +16071,38 @@
               "vertical"
             ],
             "type": "string"
+          },
+          "Dock": {
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/Axis"
+              },
+              "before": {
+                "type": "boolean"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "axis"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Dock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "axis": {
             "$ref": "#/$defs/Axis"
           },

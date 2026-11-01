@@ -20,6 +20,7 @@ use std::time::Instant;
 use gpui::{AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 use silo_proto::control::Method;
 
+use crate::layout::DraggedPane;
 use crate::surface::Glassy as _;
 use crate::theme::Continuous as _;
 use crate::{
@@ -174,8 +175,8 @@ pub(crate) fn tab_drop_does_something(from: usize, drop: TabDrop) -> bool {
 
 /// A tab being dragged; also renders the pill that follows the pointer.
 #[derive(Clone)]
-struct TabDrag {
-    window_id: String,
+pub(crate) struct TabDrag {
+    pub(crate) window_id: String,
     title: String,
     icon: &'static str,
     /// Grab point within the tab; the preview pads it away so the pill
@@ -419,6 +420,12 @@ impl Workspace {
                     let id = ev.drag(cx).window_id.clone();
                     this.set_tab_drop(&id, Some(TabDrop::Insert { target: last, after: true }), cx);
                 }
+            }))
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedPane>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let d = ev.drag(cx).clone();
+                    this.set_pane_tab_drop(&d, Some(TabDrop::Insert { target: last, after: true }), cx);
+                }
             }));
         let drop_zone = div()
             .flex()
@@ -438,7 +445,14 @@ impl Workspace {
                     this.drop_tab(&drag.window_id, drop, cx);
                 }
                 cx.notify();
-            }));
+            }))
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<DraggedPane>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    let d = ev.drag(cx).clone();
+                    this.set_pane_tab_drop(&d, None, cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, d: &DraggedPane, _, cx| this.drop_pane_on_tabs(d, cx)));
         drop_zone.into_any_element()
     }
 
@@ -536,7 +550,7 @@ impl Workspace {
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: glyph, offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, centred in
         // the gap to the neighbour.
-        let drop = self.tab_drop.filter(|d| d.target() == index && self.tab_dragging.is_some());
+        let drop = self.tab_drop.filter(|d| d.target() == index && self.dragging_onto_tabs());
         let insert = match drop {
             Some(TabDrop::Insert { after, .. }) => Some(after),
             _ => None,
@@ -653,6 +667,7 @@ impl Workspace {
                         _ = workspace.update(cx, |this, cx| {
                             this.tab_dragging = None;
                             this.tab_drop = None;
+                            this.pane_drop = None;
                             cx.notify();
                         });
                     })
@@ -666,6 +681,14 @@ impl Workspace {
                     let drop = tab_drop_at(index, f32::from(b.left()), f32::from(b.right()), f32::from(at), this.merges_tabs());
                     let id = ev.drag(cx).window_id.clone();
                     this.set_tab_drop(&id, Some(drop), cx);
+                }
+            }))
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedPane>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let (b, at) = (ev.bounds, ev.event.position.x);
+                    let drop = tab_drop_at(index, f32::from(b.left()), f32::from(b.right()), f32::from(at), true);
+                    let d = ev.drag(cx).clone();
+                    this.set_pane_tab_drop(&d, Some(drop), cx);
                 }
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -692,6 +715,64 @@ impl Workspace {
         self.host_supports(silo_proto::compat::feature::WINDOW_MERGE)
     }
 
+    /// Whether this host moves blocks between tabs (`block.to_window`,
+    /// `window.merge` beside a block).
+    pub(crate) fn moves_blocks(&self) -> bool {
+        self.host_supports(silo_proto::compat::feature::TAB_MOVES)
+    }
+
+    /// A tab, or a pane by its header, is being dragged (over the tabs).
+    pub(crate) fn dragging_onto_tabs(&self) -> bool {
+        self.tab_dragging.is_some() || self.block_dragging.is_some()
+    }
+
+    /// Record where pane `d`, dragged over the tabs, would drop: between
+    /// tabs (a new tab of its own) or onto one (into it). A no-op spot, or
+    /// a host without `tab_moves`, clears it.
+    pub(crate) fn set_pane_tab_drop(&mut self, d: &DraggedPane, drop: Option<TabDrop>, cx: &mut Context<Self>) {
+        let drop = drop.filter(|&drop| self.moves_blocks() && self.pane_drop_moves(d, drop));
+        if self.tab_drop != drop {
+            self.tab_drop = drop;
+            cx.notify();
+        }
+    }
+
+    /// Whether dropping pane `d` at `drop` on the tabs changes anything: not
+    /// into its own tab, and a lone pane's tab not to its own place.
+    fn pane_drop_moves(&self, d: &DraggedPane, drop: TabDrop) -> bool {
+        let Some(windows) = self.view.as_ref().map(|v| &v.session.windows) else { return false };
+        let Some(from) = windows.iter().position(|w| w.id == d.window_id) else { return false };
+        let alone = windows[from].blocks().len() == 1;
+        match drop {
+            TabDrop::Insert { .. } if alone => tab_drop_does_something(from, drop),
+            TabDrop::Insert { .. } => true,
+            TabDrop::Merge { target } => target != from,
+        }
+    }
+
+    /// Drop pane `d` where [`Self::set_pane_tab_drop`] recorded: into a new
+    /// tab there, or beside the layout of the tab it is over. The server
+    /// moves it (no restart); its `session.changed` follows at once.
+    pub(crate) fn drop_pane_on_tabs(&mut self, d: &DraggedPane, cx: &mut Context<Self>) {
+        let Some(drop) = self.tab_drop.take() else { return };
+        cx.notify();
+        if !self.moves_blocks() || !self.pane_drop_moves(d, drop) {
+            return;
+        }
+        let method = match drop {
+            TabDrop::Insert { target, after } => {
+                crate::sound::play(crate::sound::Sound::Drop);
+                Method::BlockToWindow { block_id: d.block_id.clone(), window_id: None, index: Some(target + usize::from(after)), axis: None }
+            }
+            TabDrop::Merge { target } => {
+                let Some(into) = self.view.as_ref().and_then(|v| v.session.windows.get(target)).map(|w| w.id.clone()) else { return };
+                crate::sound::play(crate::sound::Sound::Merge);
+                Method::BlockToWindow { block_id: d.block_id.clone(), window_id: Some(into), index: None, axis: Some(self.merge_axis()) }
+            }
+        };
+        self.call_optimistic(method, "Couldn't move pane", |_| {}, cx);
+    }
+
     pub(crate) fn drop_tab(&mut self, window_id: &str, drop: TabDrop, cx: &mut Context<Self>) {
         match drop {
             TabDrop::Insert { target, after } => {
@@ -716,7 +797,20 @@ impl Workspace {
             return;
         }
         let axis = self.merge_axis();
-        let method = Method::WindowMerge { window_id: into, source: window_id.to_owned(), axis };
+        let method = Method::WindowMerge { window_id: into, source: window_id.to_owned(), axis, at: None };
+        self.call_optimistic(method, "Couldn't merge tabs", |_| {}, cx);
+    }
+
+    /// Move every block of tab `source` into the active tab, on a side of
+    /// its tiled block `target` (along `axis`, first when `before`).
+    pub(crate) fn merge_tab_beside(&mut self, source: &str, target: &str, axis: silo_proto::model::Axis, before: bool, cx: &mut Context<Self>) {
+        let Some(into) = self.view.as_ref().map(|v| v.session.active_window.clone()) else { return };
+        if into == source || !self.moves_blocks() {
+            return;
+        }
+        crate::sound::play(crate::sound::Sound::Merge);
+        let at = silo_proto::control::Dock { target: target.to_owned(), axis, before };
+        let method = Method::WindowMerge { window_id: into, source: source.to_owned(), axis, at: Some(at) };
         self.call_optimistic(method, "Couldn't merge tabs", |_| {}, cx);
     }
 

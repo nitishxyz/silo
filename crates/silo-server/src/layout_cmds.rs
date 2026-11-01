@@ -273,6 +273,48 @@ mod tests {
     }
 
     #[test]
+    fn a_block_moves_to_another_tab_or_a_new_one() {
+        use silo_proto::control::Dock;
+        // Into `x`, beside its layout; `w` keeps the rest, `x` is active.
+        let mut reg = registry();
+        reg.block_to_window("b", Some("x"), None, Some(Axis::Vertical)).unwrap();
+        let x = window(&reg, "x");
+        assert_eq!(x.layout.blocks(), ["e", "b"]);
+        assert!(matches!(x.layout, Layout::Split { axis: Axis::Vertical, .. }));
+        assert_eq!((x.focused.as_str(), reg.sessions[0].active_window.as_str()), ("b", "x"));
+        assert_eq!(window(&reg, "w").layout.blocks(), ["a", "c", "d"]);
+        assert_eq!(reg.block_to_window("b", Some("x"), None, None).unwrap_err().code, "bad_request", "already there");
+
+        // A float's pane to a new tab, placed at index 0.
+        let mut reg = registry();
+        reg.block_to_window("f", None, Some(0), None).unwrap();
+        let windows = &reg.sessions[0].windows;
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].layout.blocks(), ["f"]);
+        assert_eq!(reg.sessions[0].active_window, windows[0].id);
+        assert!(window(&reg, "w").floats.is_empty());
+
+        // Alone in its tab: the tab itself moves; into another, it closes.
+        let mut reg = registry();
+        reg.block_to_window("e", None, Some(0), None).unwrap();
+        let order: Vec<_> = reg.sessions[0].windows.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(order, ["x", "w"]);
+        reg.block_to_window("e", Some("w"), None, None).unwrap();
+        assert_eq!(reg.sessions[0].windows.len(), 1);
+        assert_eq!(window(&reg, "w").layout.blocks(), ["a", "c", "b", "d", "e"]);
+
+        // A tab merged beside one block.
+        let mut reg = registry();
+        reg.merge_window("w", "x", Axis::Horizontal, Some(Dock { target: "c".into(), axis: Axis::Horizontal, before: true })).unwrap();
+        assert_eq!(window(&reg, "w").layout.blocks(), ["a", "e", "c", "b", "d"]);
+        assert_eq!(reg.sessions[0].windows.len(), 1);
+        let mut reg = registry();
+        let off = Some(Dock { target: "f".into(), axis: Axis::Horizontal, before: false });
+        assert_eq!(reg.merge_window("w", "x", Axis::Horizontal, off).unwrap_err().code, "bad_request", "floats are no target");
+        assert_eq!(reg.sessions[0].windows.len(), 2);
+    }
+
+    #[test]
     fn the_log_tail_is_its_last_lines() {
         let dir = std::env::temp_dir().join(format!("silo-log-tail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

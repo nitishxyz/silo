@@ -557,8 +557,12 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().move_window(&window_id, index)?;
             Ok(json!({}))
         }
-        Method::WindowMerge { window_id, source, axis } => {
-            server.registry.lock().unwrap().merge_window(&window_id, &source, axis)?;
+        Method::WindowMerge { window_id, source, axis, at } => {
+            server.registry.lock().unwrap().merge_window(&window_id, &source, axis, at)?;
+            Ok(json!({}))
+        }
+        Method::BlockToWindow { block_id, window_id, index, axis } => {
+            server.registry.lock().unwrap().block_to_window(&block_id, window_id.as_deref(), index, axis)?;
             Ok(json!({}))
         }
         Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {

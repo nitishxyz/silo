@@ -11,6 +11,7 @@ use std::time::Instant;
 use gpui::{AnyElement, Context, DragMoveEvent, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 
 use super::{CLOSE_GAP, CLOSE_SIZE, FADE_WIDTH, PILL_HEIGHT, TabDrag, claim_press, edge_fades};
+use crate::layout::DraggedPane;
 use crate::theme::Continuous as _;
 use crate::{
     assets::icon,
@@ -204,6 +205,12 @@ impl Workspace {
                 this.set_tab_drop(&id, Some(super::TabDrop::Insert { target: last, after: true }), cx);
             }
         };
+        let pane_to_end = move |this: &mut Self, ev: &DragMoveEvent<DraggedPane>, cx: &mut Context<Self>| {
+            if ev.bounds.contains(&ev.event.position) {
+                let d = ev.drag(cx).clone();
+                this.set_pane_tab_drop(&d, Some(super::TabDrop::Insert { target: last, after: true }), cx);
+            }
+        };
         let open = self.launcher.is_open_for_tab();
         let chrome = self.chrome;
         list = list.child(
@@ -225,6 +232,7 @@ impl Workspace {
                 .child(icon("plus", 13.0, chrome.icon))
                 .child("New Tab")
                 .on_drag_move(cx.listener(move |this, ev, _, cx| to_end(this, ev, cx)))
+                .on_drag_move(cx.listener(move |this, ev, _, cx| pane_to_end(this, ev, cx)))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_launcher(crate::commands::Command::NewTabChooser, window, cx))),
         );
         // The space below the list means "move to the end", as after the
@@ -235,7 +243,8 @@ impl Workspace {
             .flex_1()
             .w_full()
             .child(canvas(move |b, _, _| room.set(f32::from(b.size.height)), |_, (), _, _| {}).absolute().inset_0())
-            .on_drag_move(cx.listener(move |this, ev, _, cx| to_end(this, ev, cx)));
+            .on_drag_move(cx.listener(move |this, ev, _, cx| to_end(this, ev, cx)))
+            .on_drag_move(cx.listener(move |this, ev, _, cx| pane_to_end(this, ev, cx)));
         // Shown and hidden, it slides: its own width inside a slot that eases open, kept at the slot's right
         // edge so it travels in from the window's left.
         let sidebar = div()
@@ -265,6 +274,13 @@ impl Workspace {
                 }
                 cx.notify();
             }))
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<DraggedPane>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    let d = ev.drag(cx).clone();
+                    this.set_pane_tab_drop(&d, None, cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, d: &DraggedPane, _, cx| this.drop_pane_on_tabs(d, cx)))
             .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<SidebarGrab>, window, cx| {
                 let Some((grab, old)) = this.sidebar_resize else { return };
                 let new = sidebar_width(f32::from(ev.event.position.x - ev.bounds.left()) - grab, f32::from(window.viewport_size().width));
@@ -357,7 +373,7 @@ impl Workspace {
         let chrome = self.chrome;
         let drag = TabDrag { window_id: w.id.clone(), title: title.clone(), icon: self.tab_icon(w), offset: gpui::Point::default(), chrome };
         // Insertion bar on the side a dragged tab would drop, in the gap.
-        let drop = self.tab_drop.filter(|d| d.target() == index && self.tab_dragging.is_some());
+        let drop = self.tab_drop.filter(|d| d.target() == index && self.dragging_onto_tabs());
         let insert = match drop {
             Some(super::TabDrop::Insert { after, .. }) => Some(after),
             _ => None,
@@ -454,6 +470,7 @@ impl Workspace {
                         _ = workspace.update(cx, |this, cx| {
                             this.tab_dragging = None;
                             this.tab_drop = None;
+                            this.pane_drop = None;
                             cx.notify();
                         });
                     })
@@ -467,6 +484,14 @@ impl Workspace {
                     let drop = super::tab_drop_at(index, f32::from(b.top()), f32::from(b.bottom()), f32::from(at), this.merges_tabs());
                     let id = ev.drag(cx).window_id.clone();
                     this.set_tab_drop(&id, Some(drop), cx);
+                }
+            }))
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedPane>, _, cx| {
+                if ev.bounds.contains(&ev.event.position) {
+                    let (b, at) = (ev.bounds, ev.event.position.y);
+                    let drop = super::tab_drop_at(index, f32::from(b.top()), f32::from(b.bottom()), f32::from(at), true);
+                    let d = ev.drag(cx).clone();
+                    this.set_pane_tab_drop(&d, Some(drop), cx);
                 }
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {

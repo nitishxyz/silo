@@ -534,7 +534,11 @@ async fn block_swap_and_window_move_body() {
     next_view(&mut events, &sid).await;
     call_value(&control, Method::BlockFocus { block_id: third.block_id.clone() }).await;
     next_view(&mut events, &sid).await;
-    call_value(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: third.window_id.clone(), axis: Axis::Horizontal }).await;
+    call_value(
+        &control,
+        Method::WindowMerge { window_id: other.window_id.clone(), source: third.window_id.clone(), axis: Axis::Horizontal, at: None },
+    )
+    .await;
     let view = next_view(&mut events, &sid).await;
     let order: Vec<_> = view.session.windows.iter().map(|w| w.id.clone()).collect();
     assert_eq!(order, [created.window_id.clone(), other.window_id.clone()]);
@@ -551,15 +555,22 @@ async fn block_swap_and_window_move_body() {
     assert!(moved.exited.is_none());
 
     // Into itself, from another session, or unknown: refused, nothing changes.
-    let err =
-        call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: other.window_id.clone(), axis: Axis::Vertical }).await;
+    let err = call_err(
+        &control,
+        Method::WindowMerge { window_id: other.window_id.clone(), source: other.window_id.clone(), axis: Axis::Vertical, at: None },
+    )
+    .await;
     assert!(err.to_string().contains("itself"), "{err}");
     let elsewhere: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
-    let err =
-        call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: elsewhere.window_id.clone(), axis: Axis::Vertical })
-            .await;
+    let err = call_err(
+        &control,
+        Method::WindowMerge { window_id: other.window_id.clone(), source: elsewhere.window_id.clone(), axis: Axis::Vertical, at: None },
+    )
+    .await;
     assert!(err.to_string().contains("different sessions"), "{err}");
-    let err = call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: "wmissing".into(), axis: Axis::Vertical }).await;
+    let err =
+        call_err(&control, Method::WindowMerge { window_id: other.window_id.clone(), source: "wmissing".into(), axis: Axis::Vertical, at: None })
+            .await;
     assert!(err.to_string().contains("not_found"), "{err}");
     let unchanged: SessionView = call(&control, Method::SessionView { session_id: sid.clone() }).await;
     assert_eq!(unchanged.session.revision, view.session.revision);

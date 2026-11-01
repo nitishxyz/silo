@@ -140,6 +140,9 @@ pub struct Workspace {
     pub(crate) tab_drop: Option<crate::titlebar::TabDrop>,
     /// The tab being dragged (window id), while its drag lasts.
     pub(crate) tab_dragging: Option<String>,
+    /// The pane being dragged by its header (block id), while its drag
+    /// lasts: the tabs then take it as a drop too (feature `tab_moves`).
+    pub(crate) block_dragging: Option<String>,
     pub(crate) float_drag: Option<crate::floats::FloatDrag>,
     /// The pane a dragged pane hovers and where on it the drop lands.
     pub(crate) pane_drop: Option<(String, crate::layout::PaneDrop)>,
@@ -336,6 +339,7 @@ impl Workspace {
             sidebar_resize: None,
             tab_drop: None,
             tab_dragging: None,
+            block_dragging: None,
             float_drag: None,
             pane_drop: None,
             float_press: std::rc::Rc::default(),
