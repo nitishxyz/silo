@@ -1620,8 +1620,8 @@ impl Workspace {
             crate::adaptive::Chrome::on(surface)
         };
         // Floating surfaces drawn after this (this window's overlays) use
-        // the same material, as glass where the backdrop can be blurred.
-        crate::surface::set_available(crate::material::availability(crate::surface::backdrop_supported(), self.reduce_transparency).is_ok());
+        // the same material: glass in a Frosted window where the backdrop can be blurred, opaque in a Solid one.
+        crate::surface::set_available(self.frosted() && crate::surface::backdrop_supported());
         theme::set_veils((self.chrome.alpha < 1.0).then(|| crate::material::overlay(surface, self.chrome.alpha, theme_bg, theme::foreground())));
     }
 

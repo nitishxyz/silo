@@ -31,10 +31,17 @@ pub const BLUR: f32 = 36.0;
 pub const SATURATION: f32 = 1.7;
 /// The least tint alpha: below it the surface reads as a hole.
 pub const FLOOR: f32 = 0.55;
-/// The brightest a blurred backdrop gets, as a grey: under the blur a
-/// page's text and edges average out, and even a white page stays legible
-/// behind it (the tint darkens it further).
-pub const BRIGHTEST: u32 = 0x00a8_a8a8;
+/// The brightest a blurred backdrop gets: a white page stays white under the
+/// blur (a lighter assumption left dark glass a muddy mid-grey over one).
+pub const BRIGHTEST: u32 = 0x00ff_ffff;
+/// Primary text on glass over its plain backdrops: well past the 4.5:1
+/// floor, so the glass keeps its theme's lightness (dark smoke stays dark
+/// over a white page, as a macOS menu does) rather than going as clear as
+/// legibility barely allows. A theme whose own text is softer asks
+/// [`KEEP`] of its contrast instead (never under 4.5:1).
+pub const GLASS_CONTRAST: f32 = 7.0;
+/// The share of the theme's own text contrast glass keeps, when that's under [`GLASS_CONTRAST`].
+pub const KEEP: f32 = 0.9;
 /// Secondary text must read at most this far from the tint toward the ink,
 /// so it stays a distinct step from primary text.
 pub const MUTED_REACH: f32 = 0.85;
@@ -86,9 +93,21 @@ fn backdrops(tint: u32, alpha: f32, theme_bg: u32, fg: u32) -> [u32; 6] {
 /// (so it also reads on everything between them).
 #[must_use]
 pub fn reads_over(text: u32, bgs: &[u32]) -> bool {
+    reads_at(text, bgs, theme::TEXT_CONTRAST)
+}
+
+/// `text` reads at `min` on every one of `bgs`, all on the same side of it.
+fn reads_at(text: u32, bgs: &[u32], min: f32) -> bool {
     let l = theme::relative_luminance(text);
     let side = |b: &u32| theme::relative_luminance(*b) > l;
-    bgs.iter().all(|&b| theme::contrast(text, b) >= theme::TEXT_CONTRAST) && (bgs.iter().all(side) || !bgs.iter().any(side))
+    bgs.iter().all(|&b| theme::contrast(text, b) >= min) && (bgs.iter().all(side) || !bgs.iter().any(side))
+}
+
+/// The tint at `alpha` is dense enough: primary text at [`GLASS_CONTRAST`] on the plain backdrops and
+/// 4.5:1 under a selected row, and the muted reach at 4.5:1 on the plain ones.
+fn dense_enough(fg: u32, reach: u32, bgs: &[u32; 6], tint: u32) -> bool {
+    let target = GLASS_CONTRAST.min(KEEP * theme::contrast(fg, tint)).max(theme::TEXT_CONTRAST);
+    reads_at(fg, &bgs[..3], target) && reads_over(fg, bgs) && reads_over(reach, &bgs[..3])
 }
 
 /// Glass of `tint` for text `fg` over a window of theme background
@@ -106,7 +125,7 @@ pub fn glass(tint: u32, theme_bg: u32, fg: u32, available: bool) -> Glass {
         .take_while(|&a| a < 1.0)
         .find_map(|alpha| {
             let bgs = backdrops(tint, alpha, theme_bg, fg);
-            (reads_over(fg, &bgs) && reads_over(reach, &bgs[..3])).then(|| Glass { tint, alpha, muted: muted_over(tint, fg, &bgs) })
+            dense_enough(fg, reach, &bgs, tint).then(|| Glass { tint, alpha, muted: muted_over(tint, fg, &bgs) })
         })
         .unwrap_or(opaque)
 }
@@ -295,7 +314,7 @@ mod tests {
             let reach = theme::mix(g.tint, fg, MUTED_REACH);
             if g.frosted() && g.alpha > FLOOR {
                 let bgs = backdrops(g.tint, g.alpha - 0.01, bg, fg);
-                assert!(!(reads_over(fg, &bgs) && reads_over(reach, &bgs[..3])), "{bg:06x}: {} is not the least", g.alpha);
+                assert!(!dense_enough(fg, reach, &bgs, g.tint), "{bg:06x}: {} is not the least", g.alpha);
             }
         }
         // The default dark and light themes: a dense smoke over a white
