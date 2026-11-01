@@ -145,7 +145,14 @@ impl Workspace {
         font.weight = FontWeight::MEDIUM;
         let color = words.as_ref().map_or(muted, |(_, c)| *c);
         let measure = |text: &str| {
-            let run = TextRun { len: text.len(), font: font.clone(), color: rgb(color).into(), background_color: None, underline: None, strikethrough: None };
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: rgb(color).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
             f32::from(window.text_system().shape_line(text.to_owned().into(), px(TEXT_SIZE), &[run], None).width()).ceil()
         };
         live.words.step(words.as_ref().map(|(t, _)| t.as_str()), measure, room - fixed, reduce);
@@ -163,7 +170,13 @@ impl Workspace {
                 .text_color(rgb(color))
                 .child(w.text.clone());
             // The gap rides with the words, so the pill closes up evenly when they go.
-            div().flex_none().h_full().w(px(w.view + GAP)).pl(px(GAP)).overflow_hidden().child(div().relative().size_full().overflow_hidden().child(text))
+            div()
+                .flex_none()
+                .h_full()
+                .w(px(w.view + GAP))
+                .pl(px(GAP))
+                .overflow_hidden()
+                .child(div().relative().size_full().overflow_hidden().child(text))
         });
         let pill = div()
             .id("voice-pill")
