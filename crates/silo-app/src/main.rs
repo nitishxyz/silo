@@ -71,6 +71,7 @@ mod status;
 mod surface;
 mod switcher;
 mod syntax;
+mod terminal_links;
 mod terminal_prefs;
 mod text_field;
 mod theme;

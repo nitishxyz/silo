@@ -991,6 +991,14 @@ impl Workspace {
                 cx.notify();
             }
             PaneEvent::Backdrop => cx.notify(),
+            PaneEvent::OpenLink { url, external } => {
+                if *external {
+                    cx.open_url(url);
+                } else {
+                    let block = pane.read(cx).block_id.clone();
+                    this.open_page_beside_block(&block, url.clone(), cx);
+                }
+            }
         });
         self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Terminal(pane), subscription);
     }

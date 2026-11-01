@@ -1319,6 +1319,15 @@ impl Workspace {
         self.call(Method::BlockSplit { block_id: block, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None });
     }
 
+    /// A browser on `url` split beside `block` (a terminal's ⌘-clicked
+    /// link): on the block's host, so a remote `localhost` is that host's.
+    pub(crate) fn open_page_beside_block(&mut self, block: &str, url: String, cx: &mut Context<Self>) {
+        let spawn = silo_proto::control::SpawnSpec { cwd: self.cwd_of(block, cx), command: Vec::new(), size: None };
+        let axis = self.auto_axis(block);
+        let block_id = block.to_owned();
+        self.call(Method::BlockSplit { block_id, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None });
+    }
+
     /// A new tab holding a browser on `url`.
     pub(crate) fn open_page_tab(&mut self, url: String) {
         let Some(view) = &self.view else { return };

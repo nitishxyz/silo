@@ -61,6 +61,17 @@ pub enum PaneEvent {
     Notice(crate::status::Status),
     /// The program's backdrop colour changed.
     Backdrop,
+    /// ⌘-click on a link: open it in a browser beside the pane, or
+    /// (`external`: ⇧⌘-click, or not a web page) the Mac's default app.
+    OpenLink { url: String, external: bool },
+}
+
+/// The find bar over a terminal: its field and the search's tick task.
+struct Find {
+    field: Entity<crate::text_field::TextField>,
+    _events: gpui::Subscription,
+    /// Steps the search while it hasn't caught up.
+    task: Option<Task<()>>,
 }
 
 /// Files on their way to the block's (remote) host.
@@ -201,6 +212,12 @@ pub struct Pane {
     last_command: Option<u64>,
     /// The failed command whose tick the pointer is over, and its row.
     hovered_command: Option<(u64, u16)>,
+    /// The link under the pointer while ⌘ is held: underlined, ⌘-click opens it.
+    link: Option<(silo_vt::Span, String)>,
+    /// Where the pointer last was over the pane, for ⌘ pressed without moving.
+    pointer_at: Option<Point<Pixels>>,
+    /// The find bar (⌘F), while open.
+    find: Option<Find>,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -310,6 +327,9 @@ impl Pane {
             failed: std::collections::BTreeMap::new(),
             last_command: None,
             hovered_command: None,
+            link: None,
+            pointer_at: None,
+            find: None,
         };
         pane.saved = pane.dirty();
         pane.connect(cx);
@@ -617,6 +637,194 @@ impl Pane {
         }
     }
 
+    /// The viewport cell under `position`, if over the grid.
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
+        let (bounds, metrics) = (self.content_bounds?, self.metrics?);
+        if !bounds.contains(&position) {
+            return None;
+        }
+        let column = f32::from(position.x - bounds.left()) / metrics.width.max(1.0);
+        let row = f32::from(position.y - bounds.top()) / metrics.height.max(1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some((row as u16, column as u16))
+    }
+
+    /// Underline the link under the pointer while ⌘ is held.
+    fn hover_link(&mut self, position: Option<Point<Pixels>>, command: bool, cx: &mut Context<Self>) {
+        let link = position
+            .filter(|_| command)
+            .and_then(|p| self.cell_at(p))
+            .and_then(|(row, column)| crate::terminal_links::link_at(self.last_frame.as_deref()?, row, column));
+        if link != self.link {
+            self.link = link;
+            cx.notify();
+        }
+    }
+
+    /// ⌘-click at `position` on a link: open it. Whether one was there.
+    fn click_link(&mut self, position: Point<Pixels>, modifiers: gpui::Modifiers, cx: &mut Context<Self>) -> bool {
+        if !modifiers.platform {
+            return false;
+        }
+        self.hover_link(Some(position), true, cx);
+        let Some((_, url)) = self.link.clone() else { return false };
+        let web = url.starts_with("http://") || url.starts_with("https://");
+        cx.emit(PaneEvent::OpenLink { url, external: modifiers.shift || !web });
+        true
+    }
+
+    // ---- find ----
+
+    /// ⌘F: open the find bar (or select its text again), with the search it held.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(find) = &self.find {
+            let field = find.field.clone();
+            field.update(cx, |f, cx| f.select_all(cx));
+            let handle = field.read(cx).focus.clone();
+            window.focus(&handle, cx);
+            return;
+        }
+        let field = cx.new(|cx| crate::text_field::TextField::new("Find", cx));
+        let events = cx.subscribe_in(&field, window, |this, field, event, window, cx| {
+            use crate::text_field::FieldEvent;
+            match event {
+                FieldEvent::Changed(text) => this.search_for(text, cx),
+                FieldEvent::Submit => {
+                    let previous = field.read(cx).submit_mods.shift;
+                    this.find_step(previous, cx);
+                }
+                FieldEvent::Up => this.find_step(true, cx),
+                FieldEvent::Down => this.find_step(false, cx),
+                FieldEvent::Cancel => this.close_find(window, cx),
+            }
+        });
+        let handle = field.read(cx).focus.clone();
+        window.focus(&handle, cx);
+        self.find = Some(Find { field, _events: events, task: None });
+        cx.notify();
+    }
+
+    /// Close the find bar, ending its search, and type in the terminal again.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_none() {
+            return;
+        }
+        if let Some(vt) = self.mirror.terminal() {
+            let _ = vt.search("");
+        }
+        self.generation += 1;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Search the scrollback for `text`, selecting the newest match.
+    fn search_for(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(vt) = self.mirror.terminal() else { return };
+        if vt.search(text).is_err() {
+            return;
+        }
+        if !text.is_empty() {
+            // Most scrollbacks are searched at once; a long one goes on in `search_tick`.
+            let _ = vt.search_step(4096);
+            let _ = vt.search_select(false);
+        }
+        self.generation += 1;
+        self.search_tick(cx);
+        cx.notify();
+    }
+
+    /// The next older (or, `previous`, newer) match, scrolled into view.
+    fn find_step(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let Some(vt) = self.mirror.terminal() else { return };
+        if vt.search_select(previous).is_ok() {
+            self.generation += 1;
+            cx.notify();
+        }
+    }
+
+    /// Keep stepping a search that hasn't caught up with the scrollback.
+    fn search_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else { return };
+        if find.task.is_some() {
+            return;
+        }
+        find.task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+                let running = this
+                    .update(cx, |pane, cx| {
+                        let status = pane.mirror.terminal().and_then(|vt| vt.search_step(4096).ok());
+                        pane.generation += 1;
+                        cx.notify();
+                        status == Some(silo_vt::SearchStatus::Running)
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |pane, _| {
+                if let Some(find) = pane.find.as_mut() {
+                    find.task = None;
+                }
+            });
+        }));
+    }
+
+    /// The find bar: field, `3 of 12`, previous, next and close.
+    fn render_find(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let find = self.find.as_ref()?;
+        let search = self.last_frame.as_ref().and_then(|f| f.search.clone());
+        let typed = !find.field.read(cx).text.is_empty();
+        let count = match search {
+            _ if !typed => String::new(),
+            Some(s) if s.total == 0 => "No results".into(),
+            Some(s) => match s.selected {
+                Some(i) => format!("{} of {}", i + 1, s.total),
+                None => format!("{}", s.total),
+            },
+            None => String::new(),
+        };
+        let button = |id: &'static str, icon: &'static str, tip: &'static str| {
+            div()
+                .id(id)
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::row_fill()))
+                .tooltip(crate::tooltip::Tooltip::text(tip))
+                .child(crate::assets::icon(icon, 12.0, crate::surface::current().muted))
+        };
+        Some(
+            div()
+                .id("terminal-find")
+                .absolute()
+                .top(px(4.0))
+                .right(px(4.0))
+                .w(px(300.0))
+                .h(px(30.0))
+                .pl(px(10.0))
+                .pr(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .glass(nested(self.card_corner, 4.0))
+                .occlude()
+                .font_family(theme::ui_font())
+                .text_size(px(12.5))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_1().min_w_0().child(find.field.clone()))
+                .child(div().flex_none().text_size(px(11.5)).text_color(rgb(crate::surface::current().muted)).child(count))
+                .child(button("find-previous", "chevron-up", "Previous  ⇧⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))))
+                .child(button("find-next", "chevron-down", "Next  ⌘G").on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))))
+                .child(button("find-close", "close", "Close  esc").on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))))
+                .into_any_element(),
+        )
+    }
+
     fn reset_mirror(&mut self) {
         self.mirror = Mirror::new();
         self.mirror.set_local_config(theme::terminal_config());
@@ -847,6 +1055,21 @@ impl Pane {
     // ---- keyboard ----
 
     fn route_key(&mut self, key: &Keystroke, release: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // ⌘F finds in the scrollback, ⌘G and ⇧⌘G step through the matches.
+        let m = key.modifiers;
+        if !release && m.platform && !m.control && !m.alt {
+            match key.key.as_str() {
+                "f" if !m.shift => {
+                    self.open_find(window, cx);
+                    return true;
+                }
+                "g" if self.find.is_some() => {
+                    self.find_step(m.shift, cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         // Command chords belong to the app (bindings run before this),
         // except the few line-editing ones the terminal handles.
         if key.modifiers.platform
@@ -1602,8 +1825,11 @@ impl Render for Pane {
             predicted_foreground: rgb(self.mirror.render_config().map_or_else(theme::foreground, |c| c.foreground)),
             failed: failed.iter().map(|&(_, row)| row).collect(),
             failed_color: rgb(theme::danger()),
-            ..Overlay::default()
+            link: self.link.as_ref().map(|(span, _)| *span),
+            matches: self.last_frame.as_ref().and_then(|f| f.search.as_ref()).map(|s| s.viewport.clone()).unwrap_or_default(),
+            match_color: rgb(theme::accent()).opacity(0.28),
         };
+        let find = self.render_find(cx);
         let trace = self.trace.clone().zip(self.prepared.clone()).map(|(t, p)| (t, p, overlay.predicted.clone()));
         let entity = cx.entity();
         let mut element = div()
@@ -1641,6 +1867,8 @@ impl Render for Pane {
                     this.end_drag();
                 }
                 this.hover_gutter(event.position, cx);
+                this.pointer_at = Some(event.position);
+                this.hover_link(Some(event.position), event.modifiers.platform && !this.dragging, cx);
                 let tracking = this.last_frame.as_ref().is_some_and(|f| f.mouse_tracking);
                 if this.dragging || tracking {
                     this.pointer(event.position, MouseAction::Motion, mouse_button(event.pressed_button), event.modifiers, window.scale_factor(), cx);
@@ -1648,12 +1876,26 @@ impl Render for Pane {
             }))
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
                 this.scroll_wheel(event, window.scale_factor(), cx);
-            }));
+                this.hover_link(this.pointer_at, event.modifiers.platform, cx);
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered {
+                    this.pointer_at = None;
+                    this.hover_link(None, false, cx);
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                this.hover_link(this.pointer_at, event.modifiers.platform, cx);
+            }))
+            .when(self.link.is_some(), |el| el.cursor_pointer());
         for button in [gpui::MouseButton::Left, gpui::MouseButton::Right, gpui::MouseButton::Middle] {
             element = element
                 .on_mouse_down(
                     button,
                     cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                        if event.button == gpui::MouseButton::Left && this.click_link(event.position, event.modifiers, cx) {
+                            return;
+                        }
                         this.focus.focus(window, cx);
                         if event.button == gpui::MouseButton::Left {
                             this.dragging = true;
@@ -1721,6 +1963,7 @@ impl Render for Pane {
                     )
                 })
                 .when_some(trace, |el, (trace, prepared, predicted)| el.child(crate::latency::paint_probe(trace, prepared, predicted)))
+                .children(find)
                 .child(input_canvas(entity, metrics))
                 .child(
                     div()
