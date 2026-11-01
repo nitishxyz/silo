@@ -14,17 +14,18 @@ use crate::{
 impl BlockHeader for AgentPane {
     fn header(&mut self, style: HeaderStyle, info: Option<&BlockInfo>, cx: &mut Context<Self>) -> HeaderParts {
         let host = self.host.clone();
+        let project = self.project_root();
         let Some(title) = self.header_title() else {
             // Sign-in and Providers: the block's name.
             let name = info.map(|i| i.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent".into());
-            return named(name, host.as_deref(), style);
+            return named(name, None, host.as_deref(), style);
         };
         if self.is_subagent() {
-            return named(title, host.as_deref(), style);
+            return named(title, project.as_deref(), host.as_deref(), style);
         }
         let middle = match self.header_rename(style, cx) {
             Some(field) => field,
-            None => session_title(&title, host.as_deref(), style, cx),
+            None => session_title(&title, project.as_deref(), host.as_deref(), style, cx),
         };
         let mut parts = HeaderParts::new(middle, title);
         let reviewable = self.reviewable();
@@ -57,9 +58,11 @@ pub(crate) fn actions(subagent: bool) -> &'static [Action] {
     if subagent { &[] } else { &[Action::Changes, Action::History, Action::NewSession, Action::Settings] }
 }
 
-/// A plain name; a remote host's agent names its host after it.
-fn named(name: String, host: Option<&str>, style: HeaderStyle) -> HeaderParts {
-    let Some(host) = host else { return labels(name, None, style) };
+/// A plain name, then the project it works in; a remote host's agent names its host after it.
+fn named(name: String, project: Option<&str>, host: Option<&str>, style: HeaderStyle) -> HeaderParts {
+    if project.is_none() && host.is_none() {
+        return labels(name, None, style);
+    }
     let middle = div()
         .flex()
         .flex_row()
@@ -70,13 +73,41 @@ fn named(name: String, host: Option<&str>, style: HeaderStyle) -> HeaderParts {
         .overflow_hidden()
         .whitespace_nowrap()
         .child(div().min_w_0().overflow_hidden().text_ellipsis().text_color(rgb(style.ink())).child(name.clone()))
-        .child(host_label(host, style));
+        .children(project.map(|p| project_label(p, style)))
+        .children(host.map(|h| host_label(h, style)));
     HeaderParts::new(middle.into_any_element(), name)
+}
+
+/// The project folder the session works in, after its title: a folder and
+/// its name, muted; the full path in its tooltip.
+fn project_label(root: &str, style: HeaderStyle) -> AnyElement {
+    div()
+        .id("agent-header-project")
+        .flex()
+        .flex_shrink(1.0)
+        .min_w(px(40.0))
+        .items_center()
+        .gap(px(4.0))
+        .max_w(px(180.0))
+        .whitespace_nowrap()
+        .text_color(rgb(style.palette.muted))
+        .child(crate::assets::icon("folder", 11.0, style.palette.muted))
+        .child(div().min_w_0().overflow_hidden().text_ellipsis().child(super::project_name(root)))
+        .tooltip(crate::tooltip::Tooltip::text(tilde(root)))
+        .into_any_element()
+}
+
+/// `path` with the home folder as `~`.
+fn tilde(path: &str) -> String {
+    match std::env::var("HOME").ok().filter(|h| !h.is_empty()).and_then(|h| path.strip_prefix(h.as_str()).map(str::to_owned)) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
 }
 
 /// The session's title; opens the switcher, a double-click renames it in place. Its hover fill reaches past the
 /// text, which keeps its place.
-fn session_title(title: &str, host: Option<&str>, style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
+fn session_title(title: &str, project: Option<&str>, host: Option<&str>, style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
     let palette = style.palette;
     let button = div()
         .id("agent-header-title")
@@ -110,6 +141,7 @@ fn session_title(title: &str, host: Option<&str>, style: HeaderStyle, cx: &mut C
         .min_w_0()
         .ml(px(-5.0))
         .child(keep_press(button))
+        .children(project.map(|p| project_label(p, style)))
         .children(host.map(|h| host_label(h, style)))
         .into_any_element()
 }
@@ -147,5 +179,15 @@ mod tests {
         assert_eq!(actions(false), [Action::Changes, Action::History, Action::NewSession, Action::Settings]);
         assert!(actions(true).is_empty());
         assert!(crate::assets::has_icon("settings") && crate::assets::has_icon("git-diff"));
+    }
+
+    #[test]
+    fn the_project_path_shows_home_as_a_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(tilde(&format!("{home}/dev/silo")), "~/dev/silo");
+        assert_eq!(tilde(&home), "~");
+        assert_eq!(tilde(&format!("{home}x/a")), format!("{home}x/a"), "only the folder itself");
+        assert_eq!(tilde("/srv/app"), "/srv/app");
+        assert!(crate::assets::has_icon("folder"));
     }
 }

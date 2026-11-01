@@ -339,9 +339,10 @@ pub(super) fn context_fraction(context: otto_proto::ContextUse) -> Option<f32> {
     ring::fraction(context.used, context.window)
 }
 
-/// The footer's label (the used count, `48k`) and the level it's tinted by; `None` without a known window.
+/// The footer's label (the used count, `48k`) and the level it's tinted by; `None` without a known window
+/// or before anything is used (no `0`).
 pub(super) fn context_label(context: otto_proto::ContextUse) -> Option<(String, ring::Fill)> {
-    context_fraction(context).map(|f| (tokens(context.used), ring::Fill::of(f)))
+    context_fraction(context).filter(|_| context.used > 0).map(|f| (tokens(context.used), ring::Fill::of(f)))
 }
 
 /// The label's tooltip: the context use, then the session's totals and cost.
@@ -3876,6 +3877,7 @@ mod tests {
         assert_eq!(context_label(ContextUse { used: 170_000, window: 200_000 }), Some(("170k".into(), Fill::Warn)));
         assert_eq!(context_label(ContextUse { used: 195_000, window: 200_000 }), Some(("195k".into(), Fill::Full)));
         assert_eq!(context_label(ContextUse { used: 48_213, window: 0 }), None);
+        assert_eq!(context_label(ContextUse { used: 0, window: 200_000 }), None, "blank until something is used");
         let usage = otto_proto::UsageTotals {
             usage: otto_llm::Usage { input: 1_200_000, output: 84_000, cache_read: 800_000, cache_write: 100_000, reasoning: 0 },
             cost_usd: 0.31,

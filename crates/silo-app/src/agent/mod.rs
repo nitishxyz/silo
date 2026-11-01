@@ -780,6 +780,17 @@ impl AgentPane {
         })
     }
 
+    /// The folder the shown session works in (the header's project label):
+    /// the session's own, else the pane's project or folder.
+    pub fn project_root(&self) -> Option<String> {
+        self.mirror()
+            .map(|m| m.info.cwd.clone())
+            .filter(|c| !c.is_empty())
+            .or_else(|| self.project.as_ref().map(|p| p.root.clone()))
+            .or_else(|| self.cwd.clone())
+            .filter(|c| !c.is_empty())
+    }
+
     /// The header's title / History button.
     pub fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_overlay(Overlay::Sessions, window, cx);
