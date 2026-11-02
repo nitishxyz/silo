@@ -91,6 +91,8 @@ xcrun stapler validate "$mnt/Silo.app"
 spctl -a -vv "$mnt/Silo.app"
 server="Silo.app/Contents/Helpers/Silo Server.app"
 codesign --verify --strict "$mnt/$server"
-codesign -dv "$mnt/$server" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.server'
-codesign -dv "$mnt/Silo.app/Contents/Helpers/Silo Menu Bar.app" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.menubar'
+# Captured first: `grep -q` stops reading early, and codesign's SIGPIPE would fail the pipeline (pipefail).
+identifier() { local info; info=$(codesign -dv "$1" 2>&1); grep -qx "Identifier=$2" <<< "$info"; }
+identifier "$mnt/$server" xyz.nitish.silo.server
+identifier "$mnt/Silo.app/Contents/Helpers/Silo Menu Bar.app" xyz.nitish.silo.menubar
 echo "done: $dmg ($(du -h "$dmg" | cut -f1))"
