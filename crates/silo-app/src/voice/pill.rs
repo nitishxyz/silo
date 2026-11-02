@@ -25,8 +25,30 @@ const MAX_W: f32 = 460.0;
 /// Between the bars and the words.
 const GAP: f32 = 8.0;
 const TEXT_SIZE: f32 = 12.0;
-/// The words' width and scroll ease to their targets with this time constant.
-const EASE: f32 = 0.09;
+/// The words' width and scroll follow their targets as a critically damped spring of this smoothing time.
+/// Live words arrive in bursts about a second apart (`silo_voice`'s `LIVE_EVERY`): a quick ease raced
+/// to each burst and then sat still, a stepping motion. This spreads a burst over most of the wait, and
+/// keeps its speed when the next comes, so the words flow.
+const SMOOTH: f32 = 0.3;
+/// A frame longer than this (a hitch) moves as if it were this long, rather than leaping.
+const MAX_DT: f32 = 1.0 / 30.0;
+
+/// One step of a critically damped spring from `x` (speed `v`) toward `to` over `dt` (the game-dev
+/// `SmoothDamp`): the speed carries over when the target moves, so motion never restarts from rest.
+fn follow(x: f32, v: &mut f32, to: f32, dt: f32) -> f32 {
+    let omega = 2.0 / SMOOTH;
+    let k = omega * dt;
+    let decay = 1.0 / (1.0 + k + 0.48 * k * k + 0.235 * k * k * k);
+    let change = x - to;
+    let temp = (*v + omega * change) * dt;
+    *v = (*v - omega * temp) * decay;
+    let out = to + (change + temp) * decay;
+    if (out - to).abs() < 0.25 && v.abs() < 2.0 {
+        *v = 0.0;
+        return to;
+    }
+    out
+}
 
 /// The live words as drawn: the box widens and the text slides left as they grow, rather than jumping.
 #[derive(Default)]
@@ -38,6 +60,9 @@ pub(super) struct Words {
     view: f32,
     /// How far the text is slid left in it, eased.
     scroll: f32,
+    /// Their speeds (points a second).
+    view_v: f32,
+    scroll_v: f32,
     at: Option<Instant>,
 }
 
@@ -59,13 +84,20 @@ impl Words {
         }
         let view_to = if text.is_some() { self.width.min(cap.max(0.0)) } else { 0.0 };
         let scroll_to = if text.is_some() { (self.width - view_to).max(0.0) } else { self.scroll };
-        let dt = self.at.map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+        let dt = self.at.map_or(0.0, |at| now.duration_since(at).as_secs_f32()).min(MAX_DT);
         self.at = Some(now);
-        let k = if reduce { 1.0 } else { 1.0 - (-dt / EASE).exp() };
-        let ease = |from: f32, to: f32| if (to - from).abs() < 0.25 { to } else { from + (to - from) * k };
-        self.view = ease(self.view, view_to);
-        self.scroll = ease(self.scroll, scroll_to).clamp(0.0, (self.width - self.view).max(0.0));
-        if text.is_none() && self.view == 0.0 {
+        if reduce {
+            (self.view, self.scroll, self.view_v, self.scroll_v) = (view_to, scroll_to, 0.0, 0.0);
+        } else if dt > 0.0 {
+            self.view = follow(self.view, &mut self.view_v, view_to, dt).max(0.0);
+            self.scroll = follow(self.scroll, &mut self.scroll_v, scroll_to, dt);
+        }
+        let max = (self.width - self.view).max(0.0);
+        if !(0.0..=max).contains(&self.scroll) {
+            self.scroll = self.scroll.clamp(0.0, max);
+            self.scroll_v = 0.0;
+        }
+        if text.is_none() && self.view <= 0.0 {
             *self = Self::default();
         }
     }
@@ -227,5 +259,25 @@ mod tests {
         // Gone: it closes to nothing, then resets.
         w.step(None, measure, 100.0, true);
         assert!(!w.shown() && w.text.is_empty());
+    }
+
+    #[test]
+    fn the_follow_keeps_its_speed_when_the_target_moves_on() {
+        let (mut x, mut v) = (0.0, 0.0);
+        for _ in 0..20 {
+            x = super::follow(x, &mut v, 100.0, 1.0 / 60.0);
+        }
+        assert!(x > 0.0 && x < 100.0 && v > 0.0, "under way: {x} at {v}");
+        // More words: it doesn't stop and restart, it carries on at about its speed.
+        let before = v;
+        x = super::follow(x, &mut v, 200.0, 1.0 / 60.0);
+        assert!(v >= before * 0.9, "{before} → {v}");
+        // It settles exactly, without overshooting from rest.
+        for _ in 0..600 {
+            let last = x;
+            x = super::follow(x, &mut v, 200.0, 1.0 / 60.0);
+            assert!(x >= last && x <= 200.0, "{last} → {x}");
+        }
+        assert_eq!((x, v), (200.0, 0.0));
     }
 }
