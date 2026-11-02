@@ -7,6 +7,31 @@ pub const MAX_EDGE: u32 = 1568;
 /// Encoded bytes per image; base64 keeps it under the 5 MB providers allow.
 pub const MAX_BYTES: usize = 3_700_000;
 pub const QUALITY: u8 = 85;
+/// The longest edge an image in a request may have: Anthropic refuses a whole request with many images
+/// when one is over its many-image limit (2000 px), and every later turn of the session with it. Tools
+/// (browser screenshots, MCP servers, `read` with a large `max_edge`) can return bigger ones.
+pub const REQUEST_EDGE: u32 = 2000;
+
+/// An image's base64 `data` made to fit [`REQUEST_EDGE`] (downscaled to [`MAX_EDGE`]): its mime and new
+/// data, or `None` when it already fits or isn't an image this can read (sent as it is).
+#[must_use]
+pub fn fit_base64(data: &str) -> Option<(&'static str, String)> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let data = data.trim();
+    // The header is enough to know it fits (every request checks each image): its first 96 KiB, then all of it.
+    let head = data.get(..data.len().min(128 * 1024) / 4 * 4).and_then(|h| engine.decode(h).ok()).and_then(|b| describe(&b));
+    let bytes = match head {
+        Some(((w, h), _)) if w.max(h) <= REQUEST_EDGE => return None,
+        _ => engine.decode(data).ok()?,
+    };
+    let ((w, h), _) = describe(&bytes)?;
+    if w.max(h) <= REQUEST_EDGE {
+        return None;
+    }
+    let prepared = prepare(&bytes, MAX_EDGE, QUALITY).ok()?;
+    Some((prepared.mime, engine.encode(&prepared.bytes)))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {

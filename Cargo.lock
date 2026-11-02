@@ -6143,6 +6143,7 @@ name = "otto-core"
 version = "0.1.24"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "image",
  "jsonschema",

@@ -186,6 +186,8 @@ pub(crate) fn delta(cx: &Context, id: &str, text: String) {
 
 /// Ask the provider to compact `items`; its checkpoint replaces them, stored as item `id`.
 async fn compact_native(cx: &Context, live: &Live, cancel: &CancellationToken, turn: i64, id: &str, items: Vec<Item>) -> Result<String> {
+    // Every image within the providers' limits, as for a step (an oversized one fails this too).
+    let items = tokio::task::spawn_blocking(move || crate::step::fitted(items)).await.map_err(|e| Error::Invalid(e.to_string()))?;
     let request = Request {
         model: live.row.model.clone(),
         system: live.system.clone(),

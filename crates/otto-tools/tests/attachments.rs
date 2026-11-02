@@ -174,3 +174,19 @@ async fn read_sends_images_downscaled_pdfs_as_documents_and_attachments() {
     let prepared = Policy::default().prepare(Read::default().spec(), &json!({"attachment_id":a.id}), &cx(project.path(), root.path())).unwrap();
     assert!(prepared.input.get("path").is_none());
 }
+
+#[test]
+fn oversized_images_are_fit_for_a_request_and_others_left_alone() {
+    use base64::Engine as _;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    // A retina screenshot (over the many-image limit) comes back at MAX_EDGE.
+    let (mime, data) = images::fit_base64(&b64(&png(3456, 2234))).expect("downscaled");
+    let sent = image::load_from_memory(&base64::engine::general_purpose::STANDARD.decode(data).unwrap()).unwrap();
+    assert_eq!((sent.width(), mime), (images::MAX_EDGE, "image/png"));
+    // A noisy one whose header is past nothing special: the same, from its full data.
+    assert!(images::fit_base64(&b64(&noise(2100, 900))).is_some());
+    // Within the limit, or not an image: sent as is.
+    assert!(images::fit_base64(&b64(&png(2000, 1200))).is_none());
+    assert!(images::fit_base64(&b64(b"not an image")).is_none());
+    assert!(images::fit_base64("%%%").is_none());
+}

@@ -253,6 +253,54 @@ async fn attachment(cx: &Context, id: &str) -> Result<Vec<Part>> {
     }
     Ok(parts)
 }
+/// `items` with every image within [`otto_tools::images::REQUEST_EDGE`]: a session that took a bigger
+/// one before tools were bounded (a retina browser screenshot) works again rather than failing each request.
+/// Downscaled ones are remembered by their data, so a session's old image is reworked once, not every step.
+pub(crate) fn fitted(mut items: Vec<Item>) -> Vec<Item> {
+    use std::{
+        collections::HashMap,
+        hash::{Hash as _, Hasher as _},
+        sync::Mutex,
+    };
+    type Fits = HashMap<u64, Option<(&'static str, String)>>;
+    static DONE: std::sync::LazyLock<Mutex<Fits>> = std::sync::LazyLock::new(Mutex::default);
+    let fit = |m: &mut Media| {
+        let MediaSource::Base64 { data } = &mut m.source else { return };
+        if data.is_empty() {
+            return;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut hasher);
+        let key = hasher.finish();
+        let known = DONE.lock().ok().and_then(|d| d.get(&key).cloned());
+        let result = known.unwrap_or_else(|| {
+            let r = otto_tools::images::fit_base64(data);
+            if let Ok(mut done) = DONE.lock() {
+                if done.len() >= 64 {
+                    done.clear();
+                }
+                done.insert(key, r.clone());
+            }
+            r
+        });
+        if let Some((mime, new)) = result {
+            mime.clone_into(&mut m.mime);
+            *data = new;
+        }
+    };
+    for part in items.iter_mut().flat_map(|i| i.parts.iter_mut()) {
+        match part {
+            Part::Image(m) => fit(m),
+            Part::ToolResult { content, .. } => content.iter_mut().for_each(|c| {
+                if let ResultPart::Image(m) = c {
+                    fit(m);
+                }
+            }),
+            _ => {}
+        }
+    }
+    items
+}
 /// What a model sees of `items`: one without vision gets a line in place of each image (an
 /// attachment's note still says what it is, so `copy_attachment` works).
 pub(crate) fn visible(mut items: Vec<Item>, vision: bool) -> Vec<Item> {
@@ -480,6 +528,7 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             input(&cx, queued, turn, step).await?;
         }
         let items = visible(noted(crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window)), live.model.info().caps.vision);
+        let items = tokio::task::spawn_blocking(move || fitted(items)).await.map_err(|e| Error::Invalid(e.to_string()))?;
         let compaction = crate::compaction::threshold(&live, &items);
         let mut provider = ProviderOptions::default();
         let caps = &live.model.info().caps;
@@ -888,6 +937,12 @@ async fn execute(
     for part in output.content {
         match part {
             otto_tools::OutputPart::Image { mime, data_base64 } => {
+                // Within every provider's limits, as stored too (an oversized one fails each later request).
+                let fitted = {
+                    let data = data_base64.clone();
+                    tokio::task::spawn_blocking(move || otto_tools::images::fit_base64(&data)).await.ok().flatten()
+                };
+                let (mime, data_base64) = fitted.map_or((mime, data_base64), |(m, d)| (m.to_owned(), d));
                 content.push(ResultPart::Image(Media { mime: mime.clone(), source: MediaSource::Base64 { data: data_base64.clone() }, name: None }));
                 limited.content.push(otto_tools::OutputPart::Image { mime, data_base64 });
             }
@@ -932,4 +987,45 @@ async fn execute(
     )
     .await?;
     Ok(Part::ToolResult { call_id, content, is_error: output.is_error })
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn png(w: u32, h: u32) -> String {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(w, h).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    }
+
+    fn edge(m: &Media) -> u32 {
+        let MediaSource::Base64 { data } = &m.source else { panic!() };
+        let img = image::load_from_memory(&base64::engine::general_purpose::STANDARD.decode(data).unwrap()).unwrap();
+        img.width().max(img.height())
+    }
+
+    /// A session holding a too-big screenshot from before tools were bounded works again: it's sent fitted.
+    #[test]
+    fn a_sessions_oversized_images_are_sent_fitted() {
+        let image = |data: String| Media { mime: "image/png".into(), source: MediaSource::Base64 { data }, name: None };
+        let items = vec![
+            Item::new("u", otto_llm::Role::User, vec![Part::Image(image(png(3024, 1964))), Part::Image(image(png(800, 600)))]),
+            Item::new(
+                "t",
+                otto_llm::Role::Tool,
+                vec![Part::ToolResult { call_id: "c".into(), content: vec![ResultPart::Image(image(png(4000, 2500)))], is_error: false }],
+            ),
+        ];
+        let small = png(800, 600);
+        let out = fitted(items);
+        let Part::Image(big) = &out[0].parts[0] else { panic!() };
+        let Part::Image(kept) = &out[0].parts[1] else { panic!() };
+        assert_eq!(edge(big), otto_tools::images::MAX_EDGE);
+        assert_eq!(kept.source, MediaSource::Base64 { data: small }, "one within the limit is untouched");
+        let Part::ToolResult { content, .. } = &out[1].parts[0] else { panic!() };
+        let ResultPart::Image(shot) = &content[0] else { panic!() };
+        assert_eq!(edge(shot), otto_tools::images::MAX_EDGE);
+    }
 }

@@ -25,6 +25,7 @@ regex = "1"
 [dev-dependencies]
 tempfile.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+base64.workspace = true
 otto-silo-tools.workspace = true
 
 # One binary for the files in tests/it.rs (one link instead of one
