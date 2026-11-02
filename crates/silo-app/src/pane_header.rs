@@ -181,22 +181,6 @@ pub fn fallback(info: Option<&BlockInfo>, style: HeaderStyle) -> HeaderParts {
     }
 }
 
-/// The remote host a block runs on, after its name: a globe and the host, muted.
-#[must_use]
-pub fn host_label(host: &str, style: HeaderStyle) -> AnyElement {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(3.0))
-        .max_w(px(160.0))
-        .whitespace_nowrap()
-        .text_color(rgb(style.palette.muted))
-        .child(crate::assets::icon("globe", 11.0, style.palette.muted))
-        .child(div().min_w_0().overflow_hidden().text_ellipsis().child(host.to_owned()))
-        .into_any_element()
-}
-
 impl BlockHeader for crate::pane::Pane {
     fn header(&mut self, style: HeaderStyle, info: Option<&BlockInfo>, _: &mut Context<Self>) -> HeaderParts {
         let (name, cwd) = crate::layout::header_labels(self.info.as_ref().or(info));

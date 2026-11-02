@@ -7,25 +7,24 @@ use silo_proto::model::BlockInfo;
 
 use super::AgentPane;
 use crate::{
-    pane_header::{BUTTON, BlockHeader, HeaderParts, HeaderStyle, button, host_label, keep_press, labels},
+    pane_header::{BUTTON, BlockHeader, HeaderParts, HeaderStyle, button, keep_press, labels},
     theme::Continuous as _,
 };
 
 impl BlockHeader for AgentPane {
     fn header(&mut self, style: HeaderStyle, info: Option<&BlockInfo>, cx: &mut Context<Self>) -> HeaderParts {
-        let host = self.host.clone();
         let project = self.project_root();
         let Some(title) = self.header_title() else {
             // Sign-in and Providers: the block's name.
             let name = info.map(|i| i.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent".into());
-            return named(name, None, host.as_deref(), style);
+            return named(name, None, style);
         };
         if self.is_subagent() {
-            return named(title, project.as_deref(), host.as_deref(), style);
+            return named(title, project.as_deref(), style);
         }
         let middle = match self.header_rename(style, cx) {
             Some(field) => field,
-            None => session_title(&title, project.as_deref(), host.as_deref(), style, cx),
+            None => session_title(&title, project.as_deref(), style, cx),
         };
         let mut parts = HeaderParts::new(middle, title);
         let reviewable = self.reviewable();
@@ -58,11 +57,11 @@ pub(crate) fn actions(subagent: bool) -> &'static [Action] {
     if subagent { &[] } else { &[Action::Changes, Action::History, Action::NewSession, Action::Settings] }
 }
 
-/// A plain name, then the project it works in; a remote host's agent names its host after it.
-fn named(name: String, project: Option<&str>, host: Option<&str>, style: HeaderStyle) -> HeaderParts {
-    if project.is_none() && host.is_none() {
+/// A plain name, then the project it works in (the machine is in the tab bar, not repeated here).
+fn named(name: String, project: Option<&str>, style: HeaderStyle) -> HeaderParts {
+    let Some(project) = project else {
         return labels(name, None, style);
-    }
+    };
     let middle = div()
         .flex()
         .flex_row()
@@ -73,8 +72,7 @@ fn named(name: String, project: Option<&str>, host: Option<&str>, style: HeaderS
         .overflow_hidden()
         .whitespace_nowrap()
         .child(div().min_w_0().overflow_hidden().text_ellipsis().text_color(rgb(style.ink())).child(name.clone()))
-        .children(project.map(|p| project_label(p, style)))
-        .children(host.map(|h| host_label(h, style)));
+        .child(project_label(project, style));
     HeaderParts::new(middle.into_any_element(), name)
 }
 
@@ -107,7 +105,7 @@ fn tilde(path: &str) -> String {
 
 /// The session's title; opens the switcher, a double-click renames it in place. Its hover fill reaches past the
 /// text, which keeps its place.
-fn session_title(title: &str, project: Option<&str>, host: Option<&str>, style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
+fn session_title(title: &str, project: Option<&str>, style: HeaderStyle, cx: &mut Context<AgentPane>) -> AnyElement {
     let palette = style.palette;
     let button = div()
         .id("agent-header-title")
@@ -142,7 +140,6 @@ fn session_title(title: &str, project: Option<&str>, host: Option<&str>, style: 
         .ml(px(-5.0))
         .child(keep_press(button))
         .children(project.map(|p| project_label(p, style)))
-        .children(host.map(|h| host_label(h, style)))
         .into_any_element()
 }
 
