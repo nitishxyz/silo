@@ -197,6 +197,13 @@ impl Editor {
         self.set_content(text, Vec::new(), cx);
     }
 
+    /// Select the whole text (as ⌘A does).
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection = 0..self.text.len();
+        self.reversed = false;
+        cx.notify();
+    }
+
     /// The text with its chips (a draft put back).
     pub fn set_content(&mut self, text: impl Into<String>, chips: Vec<Chip>, cx: &mut Context<Self>) {
         self.text = text.into();

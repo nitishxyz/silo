@@ -2813,13 +2813,23 @@ impl AgentPane {
                     .flex()
                     .items_center()
                     .min_w_0()
+                    .w_full()
                     .h(px(22.0))
                     .px(px(5.0))
                     .ml(px(-6.0))
                     .continuous(6.0)
                     .border_1()
                     .border_color(rgb(ink(0.35)))
-                    .child(self.rename_field.clone())
+                    .child(super::rename::rename_input(
+                        &self.rename_field,
+                        super::editor::EditorColors {
+                            text: rgb(theme::foreground()).into(),
+                            placeholder: rgb(theme::muted()).into(),
+                            caret: rgb(theme::accent()).into(),
+                            selection: super::rename::selection(),
+                        },
+                        cx,
+                    ))
                     // A click in the field stays there (it doesn't pick the row).
                     .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
                     .into_any_element()

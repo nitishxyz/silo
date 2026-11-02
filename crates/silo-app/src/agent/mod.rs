@@ -417,7 +417,7 @@ pub struct AgentPane {
     /// A local or custom provider's address (the connect dialog).
     url_field: Entity<pill_input::PillInput>,
     /// The title field of a rename (`rename.rs`), and the rename it serves.
-    rename_field: Entity<TextField>,
+    rename_field: Entity<Editor>,
     renaming: Option<rename::Renaming>,
     /// A title saved and not yet confirmed by otto's `session.changed` (shown meanwhile).
     retitled: Option<(String, String)>,
@@ -550,7 +550,11 @@ impl AgentPane {
         let key_field = cx.new(|cx| pill_input::PillInput::new("Paste an API key", "key", cx).masked(cx));
         let code_field = cx.new(|cx| pill_input::PillInput::new("Paste the code", "key", cx));
         let url_field = cx.new(|cx| pill_input::PillInput::new("Server address", "globe", cx));
-        let rename_field = cx.new(|cx| TextField::new("Session title", cx));
+        let rename_field = cx.new(|cx| {
+            let mut e = Editor::new("Session title", cx);
+            e.single_line = true;
+            e
+        });
         let rename_focus = rename_field.read(cx).focus.clone();
         let subscriptions = vec![
             cx.observe(&editor, |_, _, cx| cx.notify()),
@@ -559,7 +563,7 @@ impl AgentPane {
             cx.subscribe(&code_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe(&url_field, |this, _, event: &pill_input::PillInputEvent, cx| this.dialog_field_event(event, cx)),
             cx.subscribe_in(&filter, window, |this, _, event: &FieldEvent, window, cx| this.filter_event(event, window, cx)),
-            cx.subscribe_in(&rename_field, window, |this, _, event: &FieldEvent, window, cx| this.rename_event(event, window, cx)),
+            cx.subscribe_in(&rename_field, window, |this, _, event: &EditorEvent, window, cx| this.rename_event(event, window, cx)),
             cx.on_blur(&rename_focus, window, |this, _, cx| this.rename_blurred(cx)),
             cx.observe_global::<client::AuthChanged>(Self::reload_catalog),
             cx.observe_global::<client::OttoChanged>(|this, cx| {

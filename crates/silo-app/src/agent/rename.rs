@@ -2,13 +2,13 @@
 //! (double-click it, the `⋮` menu's Rename…, `/rename`) or of a switcher
 //! row's (its pencil), and `/rename <title>` straight away.
 
-use gpui::{AnyElement, ClickEvent, Context, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, ClickEvent, Context, Entity, Window, div, prelude::*, px, rgb};
 
-use super::{AgentPane, Overlay};
-use crate::{
-    text_field::FieldEvent,
-    theme::{self, Continuous as _},
+use super::{
+    AgentPane, Overlay,
+    editor::{Editor, EditorColors, EditorEvent},
 };
+use crate::theme::{self, Continuous as _};
 
 /// A title being edited: whose, and where (the switcher's row, else the header).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,10 +49,7 @@ impl AgentPane {
         let title = self.title_of(&id);
         self.renaming = Some(Renaming { session: id, in_switcher });
         let focus = self.rename_field.update(cx, |f, cx| {
-            if in_switcher {
-                f.set_palette(None, cx);
-            }
-            f.replace_text(title, cx);
+            f.set_text(title, cx);
             f.select_all(cx);
             f.focus.clone()
         });
@@ -73,18 +70,18 @@ impl AgentPane {
     }
 
     /// The title field's ⏎ saves, esc (or leaving it) cancels; an empty or unchanged title saves nothing.
-    pub(super) fn rename_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn rename_event(&mut self, event: &EditorEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            FieldEvent::Submit => {
+            EditorEvent::Submit => {
                 let Some(r) = self.renaming.clone() else { return };
-                let typed = self.rename_field.read(cx).text.clone();
+                let typed = self.rename_field.read(cx).text().to_owned();
                 if let Some(title) = rename_to(&typed, &self.title_of(&r.session)) {
                     self.rename(r.session, title, cx);
                 }
                 self.end_rename(window, cx);
             }
-            FieldEvent::Cancel => self.end_rename(window, cx),
-            FieldEvent::Changed(_) | FieldEvent::Up | FieldEvent::Down => {}
+            EditorEvent::Escape => self.end_rename(window, cx),
+            _ => {}
         }
     }
 
@@ -142,8 +139,14 @@ impl AgentPane {
     pub(super) fn header_rename(&mut self, style: crate::pane_header::HeaderStyle, cx: &mut Context<Self>) -> Option<AnyElement> {
         let shown = self.session_id.as_deref()?;
         self.renaming.as_ref().filter(|r| !r.in_switcher && r.session == shown)?;
-        self.rename_field.update(cx, |f, cx| f.set_palette(Some(style.palette), cx));
         let border = theme::mix(style.palette.surface, style.palette.ink, 0.35);
+        let colors = EditorColors {
+            text: rgb(style.ink()).into(),
+            placeholder: rgb(style.palette.muted).into(),
+            caret: rgb(style.palette.accent).into(),
+            selection: selection(),
+        };
+        let field = rename_input(&self.rename_field, colors, cx);
         Some(
             div()
                 .flex()
@@ -155,22 +158,37 @@ impl AgentPane {
                         .id("agent-header-rename")
                         .flex()
                         .items_center()
-                        .flex_1()
+                        .flex_shrink(1.0)
                         .min_w_0()
-                        .max_w(px(420.0))
+                        // The editor takes the width it's given (it doesn't size to its text): a field's width,
+                        // narrower in a narrow header.
+                        .w(px(320.0))
                         .h(px(crate::pane_header::BUTTON))
                         .px(px(5.0))
                         .continuous(style.control)
                         .border_1()
                         .border_color(rgb(border))
                         .text_color(rgb(style.ink()))
-                        .child(self.rename_field.clone())
+                        .child(field)
                         // A click in the field stays there (it doesn't reach the header behind).
                         .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation()),
                 ))
                 .into_any_element(),
         )
     }
+}
+
+/// The selection's fill in a title field (as the composer's).
+pub(super) fn selection() -> gpui::Hsla {
+    let mut h: gpui::Hsla = rgb(theme::selection()).into();
+    h.a *= 0.6;
+    h
+}
+
+/// The title field: one line of the composer's editor (a caret to move, a click or drag to select, word and line
+/// keys, IME), scrolling sideways past its box.
+pub(super) fn rename_input(field: &Entity<Editor>, colors: EditorColors, cx: &mut gpui::App) -> AnyElement {
+    div().flex_1().min_w_0().overflow_hidden().child(Editor::element(field, 1, colors, cx)).into_any_element()
 }
 
 #[cfg(test)]
