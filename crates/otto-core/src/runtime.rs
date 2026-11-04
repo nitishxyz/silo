@@ -295,7 +295,7 @@ impl Runtime {
         otto_tools::registry::tools_with(family, &self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &web)
     }
     /// Add project-dependent tools (MCP servers). Their tools are granted by
-    /// pattern (`mcp__*` by default) and listed again before every request,
+    /// pattern (`mcp__*`, and `silo:*` for every tool from Silo, by default) and listed again before every request,
     /// so list changes reach the next step. Stopped by `shutdown`.
     pub fn add_source(&self, source: Arc<dyn otto_tools::ProjectSources>) {
         self.0.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(source);
@@ -429,15 +429,17 @@ impl Runtime {
         let window = resolved.info().caps.context_window;
         if let Some(names) = &options.tools {
             let (grant, _, denied) = self.grants(&agent, &family, options.parent_id.clone(), None).await?;
-            let granted = |n: &String| grant.iter().any(|p| crate::tools::pattern(p, n)) && !denied.iter().any(|d| crate::tools::pattern(d, n));
+            let granted =
+                |s: &otto_tools::ToolSpec| grant.iter().any(|p| crate::tools::grants(p, s)) && !denied.iter().any(|d| crate::tools::grants(d, s));
             let mut known: Vec<String> = self
                 .builtins(&family)
                 .into_iter()
                 .chain(self.extra_tools())
                 .chain(self.source_tools(Path::new(&root)).await)
-                .map(|t| t.spec().name.clone())
-                .chain(crate::tools::session_specs().into_iter().map(|s| s.name))
+                .map(|t| t.spec().clone())
+                .chain(crate::tools::session_specs())
                 .filter(granted)
+                .map(|s| s.name)
                 .collect();
             known.sort_unstable();
             known.dedup();
@@ -493,7 +495,7 @@ impl Runtime {
             otto_tools::registry::tools_for_family(family)
                 .iter()
                 .map(|t| t.spec().name.clone())
-                .chain(["skill".into(), "subagent".into(), "mcp__*".into()])
+                .chain(["skill".into(), "subagent".into(), "mcp__*".into(), crate::tools::SILO_SOURCE.into()])
                 .chain(self.extra_tools().iter().map(|t| t.spec().name.clone()))
                 .collect()
         } else {

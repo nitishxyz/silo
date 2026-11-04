@@ -27,6 +27,10 @@ pub struct ServerConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// An OAuth client registered with the server by hand, for servers without
+    /// dynamic client registration (Claude Code's `oauth` key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthClient>,
     #[serde(default)]
     pub disabled: bool,
     /// Tools load through `load_tools`: `true`, `false`, or unset to defer
@@ -39,6 +43,32 @@ pub struct ServerConfig {
     /// Start + initialize timeout in milliseconds (default 30 seconds).
     #[serde(default, rename = "startupTimeout", skip_serializing_if = "Option::is_none")]
     pub startup_timeout: Option<u64>,
+}
+
+/// A pre-registered OAuth client: its id (and secret, for a confidential
+/// client) and the loopback port its redirect URL was registered with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthClient {
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    #[serde(default, rename = "clientSecret", skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Default [`DEFAULT_CALLBACK_PORT`].
+    #[serde(default, rename = "callbackPort", skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Scopes to ask for, space separated (default: the server's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// The loopback port of a pre-registered client's redirect URL by default.
+pub const DEFAULT_CALLBACK_PORT: u16 = 33418;
+
+/// The redirect (callback) URL a sign-in on `port` uses: what to register
+/// with a server's OAuth app.
+#[must_use]
+pub fn callback_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}{}", crate::oauth::login::CALLBACK_PATH)
 }
 
 impl ServerConfig {
@@ -76,6 +106,12 @@ fn expanded(mut config: ServerConfig, env: &dyn Fn(&str) -> Option<String>) -> R
     }
     for value in config.args.iter_mut().chain(config.env.values_mut()).chain(config.headers.values_mut()) {
         one(value)?;
+    }
+    if let Some(oauth) = &mut config.oauth {
+        one(&mut oauth.client_id)?;
+        if let Some(secret) = &mut oauth.client_secret {
+            one(secret)?;
+        }
     }
     Ok(config)
 }

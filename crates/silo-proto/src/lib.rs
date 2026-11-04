@@ -28,6 +28,7 @@ pub mod permissions;
 pub mod release;
 pub mod search;
 pub mod text;
+pub mod tools;
 pub mod upgrade;
 pub mod upload;
 

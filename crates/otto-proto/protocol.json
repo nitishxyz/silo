@@ -2603,6 +2603,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -2647,6 +2679,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -2938,6 +2980,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -2982,6 +3056,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -3354,6 +3438,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -3398,6 +3514,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -3715,6 +3841,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -3759,6 +3917,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -4137,6 +4305,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -4181,6 +4381,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -4476,6 +4686,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -4520,6 +4762,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -4813,6 +5065,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -4857,6 +5141,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -5152,6 +5446,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -5196,6 +5522,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -5518,6 +5854,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -5562,6 +5930,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -6025,6 +6403,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -6069,6 +6479,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -6350,6 +6770,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -6394,6 +6846,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -6744,6 +7206,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -6788,6 +7282,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -7069,6 +7573,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -7113,6 +7649,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -7455,6 +8001,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -7499,6 +8077,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -7806,6 +8394,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -7850,6 +8470,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -8137,6 +8767,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -8181,6 +8843,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -8464,6 +9136,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -8508,6 +9212,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -8819,6 +9533,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -8863,6 +9609,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -9148,6 +9904,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -9192,6 +9980,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -9513,6 +10311,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -9557,6 +10387,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -9637,6 +10477,38 @@
       },
       "result": {
         "$defs": {
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -9749,6 +10621,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -10018,6 +10900,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -10062,6 +10976,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -10124,6 +11048,38 @@
       },
       "result": {
         "$defs": {
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -10269,6 +11225,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -10511,6 +11477,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -10555,6 +11553,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -10879,6 +11887,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -10923,6 +11963,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -11204,6 +12254,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -11248,6 +12330,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -11316,6 +12408,38 @@
       },
       "result": {
         "$defs": {
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -11428,6 +12552,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -11697,6 +12831,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -11741,6 +12907,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -12029,6 +13205,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -12073,6 +13281,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -12365,6 +13583,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -12409,6 +13659,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -12497,6 +13757,38 @@
       },
       "result": {
         "$defs": {
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -12609,6 +13901,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -12878,6 +14180,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -12922,6 +14256,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -13434,6 +14778,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -13478,6 +14854,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -13751,6 +15137,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -13795,6 +15213,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -14138,6 +15566,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -14182,6 +15642,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -14485,6 +15955,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -14529,6 +16031,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -14837,6 +16349,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -14881,6 +16425,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -15170,6 +16724,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -15214,6 +16800,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -15579,6 +17175,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -15623,6 +17251,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -15896,6 +17534,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -15940,6 +17610,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -16221,6 +17901,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -16265,6 +17977,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -16546,6 +18268,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -16590,6 +18344,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -16871,6 +18635,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -16915,6 +18711,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -17570,6 +19376,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -17614,6 +19452,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -18219,6 +20067,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -18263,6 +20143,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -18544,6 +20434,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -18588,6 +20510,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -19196,6 +21128,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -19240,6 +21204,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -19540,6 +21514,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -19584,6 +21590,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -19869,6 +21885,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -19913,6 +21961,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -20202,6 +22260,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -20246,6 +22336,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -20531,6 +22631,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -20575,6 +22707,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -20860,6 +23002,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -20904,6 +23078,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -21205,6 +23389,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -21249,6 +23465,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -21530,6 +23756,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -21574,6 +23832,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -22214,6 +24482,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -22258,6 +24558,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -23911,6 +26221,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -23955,6 +26297,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -24240,6 +26592,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -24284,6 +26668,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -24585,6 +26979,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -24629,6 +27055,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -24929,6 +27365,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -24973,6 +27441,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -25289,6 +27767,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -25333,6 +27843,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",
@@ -25645,6 +28165,38 @@
               }
             ]
           },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
           "McpScope": {
             "enum": [
               "global",
@@ -25689,6 +28241,16 @@
                       "type": "string"
                     },
                     "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "type": {
                     "const": "http",

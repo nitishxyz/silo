@@ -48,6 +48,9 @@ pub(crate) struct Form {
     pub url: String,
     /// `Name: value` lines.
     pub headers: String,
+    /// A pre-registered OAuth client, kept as configured (set by agents or
+    /// in the file; the form does not edit it).
+    pub oauth: Option<otto_proto::McpOAuth>,
 }
 
 impl Default for Form {
@@ -68,6 +71,7 @@ impl Form {
             env: empty(),
             url: empty(),
             headers: empty(),
+            oauth: None,
         }
     }
 
@@ -79,8 +83,9 @@ impl Form {
                 form.args = join_args(args);
                 form.env = env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
             }
-            McpTransport::Http { url, headers } => {
+            McpTransport::Http { url, headers, oauth } => {
                 form.kind = Kind::Http;
+                form.oauth.clone_from(oauth);
                 form.url.clone_from(url);
                 form.headers = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n");
             }
@@ -108,7 +113,7 @@ impl Form {
                 }
                 let headers = pairs(&self.headers, ':', |k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
                     .ok_or("Header lines are Name: value")?;
-                Ok(McpTransport::Http { url: url.to_owned(), headers })
+                Ok(McpTransport::Http { url: url.to_owned(), headers, oauth: self.oauth.clone() })
             }
         }
     }
@@ -1276,7 +1281,7 @@ mod tests {
     fn mcp_summaries_never_show_paths() {
         assert_eq!(summary(&stdio("/usr/local/bin/node", &["/Users/me/srv/index.js", "--port", "3"])), "node --port 3");
         assert_eq!(summary(&stdio("npx", &["-y", "@modelcontextprotocol/server-github"])), "npx -y @modelcontextprotocol/server-github");
-        let http = |url: &str| summary(&McpTransport::Http { url: url.into(), headers: BTreeMap::new() });
+        let http = |url: &str| summary(&McpTransport::Http { url: url.into(), headers: BTreeMap::new(), oauth: None });
         assert_eq!(http("https://user:pw@api.example.com:8443/mcp?x=1"), "api.example.com:8443");
         assert_eq!(http("https://mcp.linear.app/sse"), "mcp.linear.app");
     }

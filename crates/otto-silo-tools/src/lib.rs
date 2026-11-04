@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, collections::HashMap, path::PathBuf, sync::Arc}
 
 use async_trait::async_trait;
 use otto_tools::{
-    Effects, Loading, OutputPart, Source, Tool, ToolCx, ToolError, ToolErrorKind, ToolOutput, ToolSpec,
+    Effects, Loading, OutputPart, ProjectSources, Source, Tool, ToolCx, ToolError, ToolErrorKind, ToolOutput, ToolSpec,
     builtin::{
         render::{RenderError, RenderRequest, Rendered, Renderer},
         shell::{Finished, Terminal, Terminals},
@@ -120,6 +120,56 @@ pub struct Silo {
     pub terminals: Arc<dyn Terminals>,
     /// Rendered fetches for `web_fetch`/`web_search` (`browser_fetch`).
     pub renderer: Arc<dyn Renderer>,
+    /// The tools clients provide through silo (`tools.list`), under their
+    /// own names, listed again before every model request. Like Silo's own
+    /// (`tools`) their source is [`Source::Silo`]: the grant `silo:*` takes
+    /// every tool from Silo.
+    pub provided: Arc<dyn ProjectSources>,
+}
+
+/// Names otto keeps for its own tools (every family's built-ins, as named
+/// and as presented, and the session's): a provided tool so named is left
+/// out rather than shadow one.
+fn reserved() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names: std::collections::HashSet<String> = ["skill", "subagent", "load_tools"].into_iter().map(String::from).collect();
+        for family in ["openai", "anthropic", "google", "generic"] {
+            for tool in otto_tools::registry::tools_for_family(family) {
+                let spec = tool.spec();
+                names.insert(spec.name.clone());
+                names.extend(spec.presentations.iter().map(|p| p.name.clone()));
+            }
+        }
+        names
+    })
+}
+
+pub use silo_tools::provider::{Handler, handler};
+
+/// Keep `tools` provided for the whole local silo server, answering each
+/// call with `handler`: offered whenever silo runs, again after it
+/// restarts. Runs until dropped.
+pub async fn provide(config: Config, tools: Vec<silo_proto::tools::ProvidedTool>, handler: Handler) {
+    let socket = silo_proto::paths::socket(&config.home);
+    let mut wait = std::time::Duration::from_secs(1);
+    loop {
+        silo_client::set_token(config.token.clone());
+        // Passive: offering tools does not keep an idle silo running.
+        if let Ok((control, events)) = Control::connect_local(&socket, &config.client_name, true).await {
+            let started = std::time::Instant::now();
+            match silo_tools::provider::serve(control, events, None, tools.clone(), handler.clone(), || {}).await {
+                Ok(()) => tracing::info!("silo closed the tools connection"),
+                Err(error) => tracing::warn!("could not provide tools to silo: {error:#}"),
+            }
+            // A long-lived connection resets the backoff.
+            if started.elapsed() > std::time::Duration::from_secs(60) {
+                wait = std::time::Duration::from_secs(1);
+            }
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(std::time::Duration::from_secs(30));
+    }
 }
 
 #[must_use]
@@ -127,7 +177,44 @@ pub fn connect(config: Config) -> Silo {
     let shared = Arc::new(Shared { config, live: Mutex::new(None), anchors: Mutex::new(HashMap::new()) });
     let tools =
         silo_tools::descriptors().into_iter().map(|d| Arc::new(SiloTool { spec: spec(d), shared: shared.clone() }) as Arc<dyn Tool>).collect();
-    Silo { tools, terminals: Arc::new(SiloTerminals { shared: shared.clone() }), renderer: Arc::new(SiloRenderer { shared }) }
+    Silo {
+        tools,
+        terminals: Arc::new(SiloTerminals { shared: shared.clone() }),
+        renderer: Arc::new(SiloRenderer { shared: shared.clone() }),
+        provided: Arc::new(SiloProvided { shared }),
+    }
+}
+
+/// The tools clients provide through silo, for every project.
+struct SiloProvided {
+    shared: Arc<Shared>,
+}
+
+#[async_trait]
+impl ProjectSources for SiloProvided {
+    async fn tools(&self, project_root: &std::path::Path) -> Vec<Arc<dyn Tool>> {
+        // No silo, or an older one: none.
+        let Ok(tools) = self.shared.tools(project_root).await else { return Vec::new() };
+        let entries = match tools.provided().await {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+        silo_tools::provided_descriptors(&entries, &silo_tools::descriptors())
+            .into_iter()
+            .filter(|d| {
+                let clash = reserved().contains(&d.name);
+                if clash {
+                    tracing::debug!(tool = d.name, "a tool provided through silo is named like one of otto's own; left out");
+                }
+                !clash
+            })
+            .map(|d| {
+                let mut spec = spec(d);
+                spec.effects = if spec.effects.read_only() { Effects::READ } else { Effects::WRITE };
+                Arc::new(SiloTool { spec, shared: self.shared.clone() }) as Arc<dyn Tool>
+            })
+            .collect()
+    }
 }
 
 struct SiloRenderer {

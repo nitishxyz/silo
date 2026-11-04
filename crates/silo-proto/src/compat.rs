@@ -100,6 +100,11 @@ pub mod feature {
     /// `"otto"`). Sent only by servers that registered that service, so
     /// it is in neither [`super::FEATURES`] nor [`super::OPT_IN`].
     pub const OTTO: &str = "otto";
+    /// Provided tools: `tools.provide`, `tools.list`, `tools.call`,
+    /// `tools.reply` and the `tools.changed`/`tools.request` events. Older
+    /// servers answer `method_not_found`; agents then list Silo's own tools
+    /// only.
+    pub const TOOLS: &str = "tools";
 }
 
 /// Everything this build supports beyond protocol 1.
@@ -121,6 +126,7 @@ pub const FEATURES: &[&str] = &[
     feature::FILES_GIT,
     feature::FLOAT_PANES,
     feature::TAB_MOVES,
+    feature::TOOLS,
 ];
 
 /// Features this build's server supports that a client advertises only

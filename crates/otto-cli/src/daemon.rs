@@ -92,11 +92,15 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     runtime.add_tools(silo.tools);
     runtime.set_terminals(silo.terminals);
     runtime.set_renderer(silo.renderer);
+    // Tools clients provide through silo, under their own names.
+    runtime.add_source(silo.provided);
     let mcp = otto_mcp::Mcp::new(paths::user_config(), paths::auth_dir(&home).join("mcp"));
     runtime.add_source(mcp.clone());
     // Children that finished while their parent was closed, or before a restart.
     runtime.deliver_pending().await?;
     server.ready(otto_server::Services { runtime, models: services.clone(), auth: services, mcp }).await?;
+    // Otto's settings as tools through silo, for every agent there.
+    crate::settings_tools::spawn(home.clone());
     tracing::info!(pid = server.info.pid, "otto ready");
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let serving = server.serve_forever();

@@ -12,6 +12,10 @@ silo-pty.workspace = true
 silo-proto.workspace = true
 silo-store.workspace = true
 silo-transport.workspace = true
+# Silo's own tools, run for raw `tools.call` clients as the caller.
+silo-client.workspace = true
+silo-tools.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,7 +41,6 @@ objc2-foundation = { workspace = true, features = ["NSData", "NSError", "NSFileM
 objc2-app-kit = { workspace = true, features = ["NSPasteboard"] }
 
 [dev-dependencies]
-silo-client.workspace = true
 
 # One binary for the files in tests/it.rs (one link instead of one
 # per file); files needing a process of their own stay separate.
@@ -68,3 +71,7 @@ path = "tests/approval.rs"
 [[test]]
 name = "app_requests"
 path = "tests/app_requests.rs"
+
+[[test]]
+name = "tools"
+path = "tests/tools.rs"

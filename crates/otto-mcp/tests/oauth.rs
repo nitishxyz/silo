@@ -93,3 +93,29 @@ async fn a_pasted_callback_url_finishes_sign_in() {
     assert!(mcp.login(Some(dir.path()), "remote").await.unwrap_err().contains("Authorization"));
     mcp.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_preregistered_client_skips_registration_and_uses_its_callback_port() {
+    let fake = Fake::start(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    // A free port to stand for the one the OAuth app was registered with.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let oauth = json!({"clientId":"${APP_ID:-my-app}","clientSecret":"s3cret","callbackPort":port,"scope":"read write"});
+    let config = json!({"mcpServers":{"remote":{"type":"http","url":fake.url,"oauth":oauth}}});
+    std::fs::write(dir.path().join(".mcp.json"), config.to_string()).unwrap();
+    let mcp = Mcp::new(dir.path().join("user"), dir.path().join("tokens"));
+    let login = mcp.login(Some(dir.path()), "remote").await.unwrap();
+    let query: std::collections::HashMap<_, _> = reqwest::Url::parse(&login.url).unwrap().query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], "my-app");
+    assert_eq!(query["scope"], "read write");
+    assert_eq!(login.port, port);
+    assert_eq!(query["redirect_uri"], otto_mcp::config::callback_url(port));
+    assert!(fake.state().registered.is_empty(), "no dynamic registration");
+    let page = Fake::browse(&login.url).await.unwrap();
+    assert!(page.contains("Authorization complete"), "{page}");
+    mcp.login_complete(&login.login_id, None).await.unwrap();
+    let exchange = fake.state().token_requests.last().cloned().unwrap();
+    assert_eq!((exchange["client_id"].as_str(), exchange["client_secret"].as_str()), ("my-app", "s3cret"));
+    assert_eq!(echo(&mcp, &dir).await.unwrap(), "signed");
+    mcp.shutdown().await;
+}

@@ -268,6 +268,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::FilesChanged { .. } => Some(feature::FILES),
         Event::ChangesChanged { .. } => Some(feature::CHANGES),
         Event::ChangesProgress { .. } => Some(feature::CHANGES_SYNC),
+        Event::ToolsChanged {} | Event::ToolRequest(_) => Some(feature::TOOLS),
         Event::SessionsChanged { .. }
         | Event::SessionChanged { .. }
         | Event::SessionClosed { .. }
@@ -344,6 +345,10 @@ pub struct Registry {
     ended: HashMap<BlockId, (Capture, Instant)>,
     /// Told the otto session of each agent block that closes.
     pub agent_closed: Option<crate::AgentClosed>,
+    /// Tools clients provide (`tools.provide`).
+    pub provided: Vec<crate::tools::Provided>,
+    /// Forwarded tool calls waiting for their provider's `tools.reply`.
+    pub tool_calls: HashMap<String, crate::tools::Pending>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -379,6 +384,8 @@ impl Registry {
             attention: HashMap::new(),
             ended: HashMap::new(),
             agent_closed: None,
+            provided: Vec::new(),
+            tool_calls: HashMap::new(),
         }
     }
 
@@ -476,6 +483,7 @@ impl Registry {
     pub fn remove_client(&mut self, id: ClientId) {
         let watched: HashSet<BlockId> = self.clients.remove(&id).map(|c| c.streams.into_values().map(|(b, _, _)| b).collect()).unwrap_or_default();
         self.tickets.retain(|_, t| t.client_id != id);
+        self.tools_client_gone(id);
         self.watchers_changed(watched);
         let mut disowned = Vec::new();
         for (block_id, block) in &mut self.blocks {
@@ -537,8 +545,11 @@ impl Registry {
             | Event::ChangesProgress { block_id, .. } => block(block_id),
             Event::BlockStatus { status } => block(&status.block_id),
             Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
+            Event::ToolsChanged {} => Visibility::Sessions,
             // Sent with `emit_clients` to their recipients only.
-            Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::AppRequest { .. } => Visibility::Clients(Vec::new()),
+            Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::AppRequest { .. } | Event::ToolRequest(_) => {
+                Visibility::Clients(Vec::new())
+            }
         }
     }
 
@@ -1502,6 +1513,9 @@ impl Registry {
     /// another agent block still shows it.
     fn take_block(&mut self, block_id: &str) -> Option<Block> {
         let block = self.blocks.remove(block_id);
+        if block.is_some() {
+            self.tools_block_gone(block_id);
+        }
         if let (Some(Block::Agent(agent)), Some(closed)) = (&block, &self.agent_closed)
             && let Some(session) = agent.session_id()
             && !self.blocks.values().any(|b| matches!(b, Block::Agent(a) if a.session_id() == Some(session)))

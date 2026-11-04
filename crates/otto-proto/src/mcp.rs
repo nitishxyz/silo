@@ -28,7 +28,39 @@ pub enum McpTransport {
         url: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
+        /// An OAuth client registered with the server by hand, for servers
+        /// that do not let otto register itself (no dynamic client
+        /// registration). Its redirect URL is [`McpOAuth::callback_url`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth: Option<McpOAuth>,
     },
+}
+
+/// A pre-registered OAuth client of an HTTP server (`.mcp.json` `oauth`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpOAuth {
+    pub client_id: String,
+    /// For a confidential client; `${VAR}` keeps it out of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// The loopback port the redirect URL was registered with (default
+    /// [`MCP_CALLBACK_PORT`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Scopes to ask for, space separated (default: the server's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// The redirect URL port of a pre-registered client by default.
+pub const MCP_CALLBACK_PORT: u16 = 33418;
+
+impl McpOAuth {
+    /// The redirect (callback) URL to register with the server's OAuth app.
+    #[must_use]
+    pub fn callback_url(port: Option<u16>) -> String {
+        format!("http://127.0.0.1:{}/callback", port.unwrap_or(MCP_CALLBACK_PORT))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

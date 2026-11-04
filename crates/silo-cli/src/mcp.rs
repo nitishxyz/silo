@@ -27,8 +27,13 @@ pub async fn serve(tools: Tools) -> anyhow::Result<()> {
     });
     let mut tasks = tokio::task::JoinSet::new();
     let mut pending = HashMap::<String, CancellationToken>::new();
+    // Provided tools come and go: clients hear `notifications/tools/list_changed`.
+    let mut changes = tools.changes();
     loop {
         tokio::select! {
+            Ok(()) = changes.changed() => {
+                tx.send(json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})).await?;
+            }
             done = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(Ok(id)) = done { pending.remove(&id); }
             }
@@ -53,13 +58,24 @@ pub async fn serve(tools: Tools) -> anyhow::Result<()> {
                     "initialize" => {
                         let requested = request["params"]["protocolVersion"].as_str().unwrap_or_default();
                         let version = if ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].contains(&requested) { requested } else { "2025-06-18" };
-                        json!({"protocolVersion": version, "capabilities":{"tools":{}}, "serverInfo":{"name":"silo", "version":env!("CARGO_PKG_VERSION")}})
+                        json!({"protocolVersion": version, "capabilities":{"tools":{"listChanged":true}}, "serverInfo":{"name":"silo", "version":env!("CARGO_PKG_VERSION")}})
                     }
                     "ping" => json!({}),
-                    "tools/list" => json!({"tools": tools.descriptors().into_iter().map(|d| json!({"name":d.name,"description":d.description,"inputSchema":d.input_schema,"annotations":{"readOnlyHint":d.effects.read && !d.effects.write && !d.effects.process}})).collect::<Vec<_>>()}),
+                    "tools/list" => {
+                        let all = match tools.all_descriptors().await {
+                            Ok(all) => all,
+                            Err(error) => {
+                                tracing::warn!("provided tools: {error:#}");
+                                tools.descriptors()
+                            }
+                        };
+                        json!({"tools": all.into_iter().map(|d| json!({"name":d.name,"description":d.description,"inputSchema":d.input_schema,"annotations":{"readOnlyHint":d.effects.read && !d.effects.write && !d.effects.process}})).collect::<Vec<_>>()})
+                    }
                     "tools/call" => {
                         let Some(name) = request["params"]["name"].as_str().map(str::to_owned) else { tx.send(error_response(id, -32602, "name is required")).await?; continue; };
-                        if !tools.descriptors().iter().any(|d| d.name == name) { tx.send(error_response(id, -32602, "unknown tool")).await?; continue; }
+                        let known = tools.descriptors().iter().any(|d| d.name == name)
+                            || tools.provided().await.is_ok_and(|p| p.iter().any(|e| e.tool.name == name));
+                        if !known { tx.send(error_response(id, -32602, "unknown tool")).await?; continue; }
                         let input = request["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
                         let cancel = CancellationToken::new();
                         pending.insert(id.to_string(), cancel.clone());

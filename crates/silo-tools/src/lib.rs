@@ -3,6 +3,7 @@
 pub mod changes;
 mod descriptors;
 pub mod files;
+pub mod provider;
 
 use std::{
     collections::BTreeMap,
@@ -18,8 +19,9 @@ pub use silo_proto::agent::{BrowserFetchParams, BrowserFetchResult};
 use silo_proto::{
     control::{BlockView, Capture, CommandOutput, CommandRecords, Created, Event, Method, SpawnSpec},
     model::{Axis, BlockKind, BlockStatus, Lifecycle, SessionSummary, SessionView},
+    tools::{ToolContent, ToolEntry, ToolList, ToolOutcome, ToolsCallParams},
 };
-use tokio::sync::{Mutex, OnceCell, broadcast};
+use tokio::sync::{Mutex, OnceCell, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 pub type ToolError = anyhow::Error;
@@ -28,6 +30,45 @@ pub type ToolError = anyhow::Error;
 #[must_use]
 pub fn descriptors() -> Vec<ToolDescriptor> {
     descriptors::descriptors()
+}
+
+/// Whether `name` is one of Silo's own tools.
+#[must_use]
+pub fn is_builtin(name: &str) -> bool {
+    descriptors::is_builtin(name)
+}
+
+/// The kind of block Silo's own tool `name` works on (`browser_*`: a
+/// browser); `None` for the general ones (`block_list`, `notify`, …).
+#[must_use]
+pub fn block_kind(name: &str) -> Option<BlockKind> {
+    let prefix = |p: &str| name.starts_with(p);
+    if prefix("terminal_") {
+        Some(BlockKind::Terminal)
+    } else if prefix("browser_") {
+        Some(BlockKind::Browser)
+    } else if prefix("files_") {
+        Some(BlockKind::Files)
+    } else if prefix("changes_") {
+        Some(BlockKind::Changes)
+    } else {
+        None
+    }
+}
+
+impl From<ToolResult> for ToolOutcome {
+    fn from(result: ToolResult) -> Self {
+        let content = result
+            .content
+            .into_iter()
+            .map(|part| match part {
+                Part::Text(text) => ToolContent::Text { text },
+                Part::Json(value) => ToolContent::Json { value },
+                Part::Image { mime, data_base64 } => ToolContent::Image { mime, data_base64 },
+            })
+            .collect();
+        Self { content, is_error: result.is_error }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +137,10 @@ pub struct Tools {
     /// `files_show` and `changes_show` calls one at a time: two at once
     /// would each open a block.
     show_lock: Mutex<()>,
+    /// The provided tools as last listed; cleared by `tools.changed`.
+    provided: std::sync::Arc<std::sync::Mutex<Option<Vec<ToolEntry>>>>,
+    /// Bumped by every `tools.changed`.
+    changes: watch::Sender<u64>,
 }
 
 impl Drop for Tools {
@@ -109,8 +154,15 @@ impl Tools {
     pub fn new(control: Control, mut events: Events, cx: Context) -> Self {
         let (tx, _) = broadcast::channel(1024);
         let out = tx.clone();
+        let provided = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let changes = watch::Sender::new(0);
+        let (cache, changed) = (provided.clone(), changes.clone());
         let fan = tokio::spawn(async move {
             while let Some((_, event)) = events.recv().await {
+                if matches!(event, Event::ToolsChanged {}) {
+                    *cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    changed.send_modify(|n| *n += 1);
+                }
                 let _ = out.send(event);
             }
         });
@@ -123,12 +175,61 @@ impl Tools {
             shell: Mutex::new(None),
             run_lock: Mutex::new(()),
             show_lock: Mutex::new(()),
+            provided,
+            changes,
         }
     }
 
+    /// Silo's own tools' descriptors (no connection needed).
     #[must_use]
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         descriptors()
+    }
+
+    /// Silo's own tools and every tool clients provide that this
+    /// connection may call (`tools.list`), one descriptor per name.
+    ///
+    /// # Errors
+    /// A control failure.
+    pub async fn all_descriptors(&self) -> Result<Vec<ToolDescriptor>, ToolError> {
+        let mut all = descriptors();
+        all.extend(provided_descriptors(&self.provided().await?, &all));
+        Ok(all)
+    }
+
+    /// The tools clients provide that this connection may call; empty on a
+    /// server without them. Cached until the next `tools.changed`.
+    ///
+    /// # Errors
+    /// A control failure.
+    pub async fn provided(&self) -> Result<Vec<ToolEntry>, ToolError> {
+        if !self.control.peer_supports(silo_proto::compat::feature::TOOLS) {
+            return Ok(Vec::new());
+        }
+        self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
+        if let Some(cached) = self.provided.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+            return Ok(cached);
+        }
+        let seen = *self.changes.borrow();
+        let list: ToolList = self.control.call(Method::ToolsList {}).await?;
+        // A change during the call: the next caller lists again.
+        if *self.changes.borrow() == seen {
+            *self.provided.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(list.tools.clone());
+        }
+        Ok(list.tools)
+    }
+
+    /// Bumped whenever the provided tools change (subscribed on first
+    /// [`Self::provided`]).
+    #[must_use]
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    /// Whether the connection is gone.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.control.is_closed()
     }
 
     /// Execute a tool; cancellation stops waiting, not the program in its block.
@@ -256,9 +357,27 @@ impl Tools {
                 }
                 value
             }
+            _ if !descriptors::is_builtin(name) => return self.call_provided(name, input).await,
             _ => bail!("unknown tool: {name}"),
         };
         Ok(ToolResult::json(value))
+    }
+
+    /// A provided tool (`tools.call`); `block_id` in `input` picks the
+    /// block when several provide it.
+    async fn call_provided(&self, name: &str, mut input: Value) -> Result<ToolResult, ToolError> {
+        let entries: Vec<ToolEntry> = self.provided().await?.into_iter().filter(|e| e.tool.name == name).collect();
+        if entries.is_empty() {
+            bail!("unknown tool: {name}");
+        }
+        let block_id = if entries.iter().any(|e| e.block_id.is_some()) {
+            input.as_object_mut().and_then(|i| i.remove("block_id")).and_then(|v| v.as_str().map(str::to_owned))
+        } else {
+            None
+        };
+        let params = ToolsCallParams { name: name.to_owned(), block_id, input, timeout_ms: None };
+        let value = self.control.call_value(Method::ToolsCall(params)).await?;
+        Ok(outcome(ToolOutcome::from_value(value)))
     }
 
     /// `browser_fetch`: `input`'s URL loaded in a hidden page of the local
@@ -837,6 +956,78 @@ impl Tools {
         }
         Ok(found.into_iter().min_by_key(|(rank, _)| *rank).map(|(_, id)| id))
     }
+}
+
+/// Descriptors of provided tools `entries`, one per name (names Silo's own
+/// tools in `builtins` take are left out). A name some block provides takes
+/// `block_id` to pick the block.
+#[must_use]
+pub fn provided_descriptors(entries: &[ToolEntry], builtins: &[ToolDescriptor]) -> Vec<ToolDescriptor> {
+    let mut names: Vec<&str> = entries.iter().map(|e| e.tool.name.as_str()).collect();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|name| !builtins.iter().any(|b| b.name == *name))
+        .map(|name| {
+            let same: Vec<&ToolEntry> = entries.iter().filter(|e| e.tool.name == name).collect();
+            let first = same[0];
+            let mut input_schema = first.tool.input_schema.clone();
+            let blocks: Vec<&str> = same.iter().filter_map(|e| e.block_id.as_deref()).collect();
+            let mut description = first.tool.description.clone();
+            let providers: Vec<&str> = {
+                let mut p: Vec<&str> = same.iter().map(|e| e.provider.as_str()).collect();
+                p.sort_unstable();
+                p.dedup();
+                p
+            };
+            description.push_str(&format!("\n\n(Provided through Silo by {}", providers.join(", ")));
+            if !blocks.is_empty() {
+                description.push_str(&format!("; blocks {}", blocks.join(", ")));
+                if let Some(schema) = input_schema.as_object_mut() {
+                    let properties = schema.entry("properties").or_insert_with(|| json!({}));
+                    if let Some(properties) = properties.as_object_mut() {
+                        properties.insert(
+                            "block_id".into(),
+                            json!({"type": "string", "description": format!("The block whose {name} to call: one of {}", blocks.join(", "))}),
+                        );
+                    }
+                }
+            }
+            description.push_str(".)");
+            let read = same.iter().all(|e| e.tool.read_only);
+            ToolDescriptor {
+                name: name.to_owned(),
+                description,
+                input_schema,
+                effects: Effects { read, write: !read, process: false },
+                deferred: true,
+            }
+        })
+        .collect()
+}
+
+/// A provided tool's outcome as a [`ToolResult`], capped like every result.
+fn outcome(outcome: ToolOutcome) -> ToolResult {
+    let mut truncated = false;
+    let content = outcome
+        .content
+        .into_iter()
+        .map(|part| match part {
+            ToolContent::Text { text } => {
+                let (text, cut) = cap(&text);
+                truncated |= cut;
+                Part::Text(text)
+            }
+            ToolContent::Json { value } => {
+                let text = value.to_string();
+                let (capped, cut) = cap(&text);
+                truncated |= cut;
+                if cut { Part::Text(capped) } else { Part::Json(value) }
+            }
+            ToolContent::Image { mime, data_base64 } => Part::Image { mime, data_base64 },
+        })
+        .collect();
+    ToolResult { content, is_error: outcome.is_error, metadata: json!({"truncated": truncated}) }
 }
 
 /// Join lines a terminal `columns` wide soft-wrapped: a line filling the

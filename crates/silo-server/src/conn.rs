@@ -181,9 +181,15 @@ where
     let hello: ClientHello = hello.parse()?;
     let (tx, writer_task) = spawn_writer(writer, ());
     // Compatibility is checked first: an incompatible peer never enrolls.
-    let admitted = match compat::check(hello.protocol, &hello.vt) {
-        Err(error) => Err(error),
-        Ok(()) => admit(&server, &peer, &hello),
+    // The server's own connection acting for a `tools.call` caller.
+    let stand_in = match (&peer, &hello.grant) {
+        (Peer::Local { .. }, Some(secret)) => server.stand_ins.take(secret),
+        _ => None,
+    };
+    let admitted = match (compat::check(hello.protocol, &hello.vt), &stand_in) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Some(stand_in)) => Ok((stand_in.principal.clone(), None)),
+        (Ok(()), None) => admit(&server, &peer, &hello),
     };
     let (principal, device) = match admitted {
         Ok(admitted) => admitted,
@@ -202,19 +208,20 @@ where
         Principal::Offer { invite_id } => Some(invite_id.clone()),
         _ => None,
     };
-    let role = hello.role;
+    let role = stand_in.as_ref().map_or(hello.role, |s| s.role);
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
     let client_id = {
         let mut reg = server.registry.lock().unwrap();
-        let (pane, tty) = match &peer {
-            Peer::Local { pid } => approval::origin(*pid, &reg),
-            Peer::Remote { .. } => (None, false),
+        let (pane, tty) = match (&peer, &stand_in) {
+            (_, Some(stand_in)) => (stand_in.pane.clone(), stand_in.tty),
+            (Peer::Local { pid }, None) => approval::origin(*pid, &reg),
+            (Peer::Remote { .. }, None) => (None, false),
         };
         let id = reg.add_client(hello.client_name.clone(), hello.passive);
         if let Some(entry) = reg.clients.get_mut(&id) {
             entry.close = Some(close_tx);
             entry.origin = peer.conn_id();
-            entry.label = label(&hello.client_name, device.as_deref());
+            entry.label = stand_in.as_ref().map_or_else(|| label(&hello.client_name, device.as_deref()), |s| s.label.clone());
             entry.features.clone_from(&hello.features);
             entry.principal = principal.clone();
             entry.role = role;
@@ -306,6 +313,16 @@ where
                     server.registry.lock().unwrap().subscribe(client_id, tx.clone());
                 }
                 let shutdown = matches!(request.method, Method::ServerShutdown { .. } | Method::ServerRestart { .. });
+                // A tool call waits for its provider (and maybe a human):
+                // the connection's other calls go on meanwhile.
+                if let Method::ToolsCall(_) = &request.method {
+                    let (server, principal, tx) = (server.clone(), ctx.principal.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        let result = crate::tools::handle(&server, client_id, &principal, request.method).await;
+                        respond(&tx, id, result);
+                    });
+                    continue;
+                }
                 let result = run(&server, &ctx, gate.approval, request.method).await;
                 let done = result.is_ok();
                 respond(&tx, id, result);
@@ -321,6 +338,7 @@ where
         }
     };
     server.registry.lock().unwrap().remove_client(client_id);
+    server.stand_ins.client_gone(client_id).await;
     server.touch();
     drop(tx);
     let _ = writer_task.await;
@@ -800,6 +818,9 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::BrowserNetwork(_)
         | Method::BrowserScreenshot(_)
         | Method::BrowserFetch(_) => crate::app_bridge::handle(server, client_id, method).await,
+        Method::ToolsProvide(_) | Method::ToolsList {} | Method::ToolsCall(_) | Method::ToolsReply(_) => {
+            crate::tools::handle(server, client_id, &ctx.principal, method).await
+        }
         Method::BlockCommands { .. } | Method::TerminalCommandOutput { .. } => crate::prompts::handle(server, client_id, method).await,
         Method::FilesList(_)
         | Method::FilesRead(_)

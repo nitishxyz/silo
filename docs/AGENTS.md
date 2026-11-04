@@ -35,7 +35,8 @@ parked blocks.
 | Otto | `otto-silo-tools` (new crate) | The same tools as `otto_tools::Tool`s (`Source::Silo`) |
 
 Every tool runs over an ordinary control connection: the access table, grants (`SILO_TOKEN`) and approvals apply to
-each inner call. There is no new trust path and no server-side tool registry.
+each inner call. There is no new trust path. Tools other clients provide are listed and forwarded by the server
+(§10).
 
 ## 3. Server primitives
 
@@ -336,3 +337,70 @@ Known gaps:
   with submit, press (`Meta+A`, `Backspace`), hover, eval with ref args, scroll to a ref and by `dy`, wait_for
   (found and timeout), dialog accept and dismiss, console, network, full and element screenshots (png, jpeg), link
   navigation, back, URL navigation, stale refs after navigation, `no_app` for an unshown session.
+
+## 10. Tools through the server
+
+One list of tools for every agent, served by the server: Silo's own (§5), each working on a kind of block, and tools
+any client provides for a block or the whole server. Every agent gets the same list the same way: the agent block
+(otto, first party), `silo mcp` clients (Claude Code, Codex, …), `silo tool` and any client of `tools.*`. Feature
+`tools` (in `compat::FEATURES`); older servers answer `method_not_found` and agents see Silo's own tools only.
+
+Silo's own, by block kind (`ToolEntry.block_kind`, `silo_tools::block_kind`): terminal (`terminal_*`), browser
+(`browser_*`), files (`files_show`), changes (`changes_show`), and general ones (`block_list`, `session_list`,
+`notify`). A provided tool for a block has that block's kind. No tool name carries a prefix: names are unique, and a
+provided tool may not take one of Silo's own names.
+
+### 10.1 Protocol (`silo_proto::tools`, `silo-server/src/tools.rs`)
+
+| Method | Params | Result | Access |
+|---|---|---|---|
+| `tools.provide` | `block_id?`, `tools: [{name, description, input_schema?, read_only?, approval?}]` | `{}` | interact on the block; control on the server without one |
+| `tools.list` | | `{tools: [{…tool, block_id?, block_kind?, provider, provider_id}]}` | open; Silo's own (provider `silo`, id 0), then the provided ones the caller may call |
+| `tools.call` | `name, block_id?, input?: {}, timeout_ms?` | `{content: [{type: text\|image\|json, …}], is_error}` | Silo's own: each inner method's, as the caller; provided: view (read-only), else interact on its block or control on the server; `approval` tools wait for a human |
+| `tools.reply` | `request_id, result?, error?` | `{}` | the provider the request went to |
+
+- Silo's own run in the server on a stand-in connection: a passive connection to its own socket admitted with a
+  one-time secret as the caller (its principal, role, pane, terminal and label), kept per caller while it is
+  connected (so `terminal_run` keeps its shell) and opening new blocks beside the caller's pane. Inner refusals keep
+  their codes (`forbidden`, `not_found`, `no_app`, …).
+- `tools.provide` replaces the caller's offer for that scope (empty withdraws it). Names are `[a-z][a-z0-9_]*`
+  (≤ 64), never one of Silo's own, unique per scope across providers (another client's name there is refused); at
+  most 128 per offer;
+  `input_schema` must be an object schema (default `{"type":"object"}`).
+- A block's tools go when the block closes, all of a client's when it disconnects (its pending calls fail with
+  `no_app`). Every change emits `tools.changed {}` to every client.
+- `tools.call` resolves `name` to `block_id`'s tool (else the server's); without `block_id` the name must be
+  unique ("several blocks provide …: give block_id"). The server forwards it to the provider only as
+  `tools.request {request_id, name, block_id?, input, caller}` and waits up to `timeout_ms` (default 120 s, max
+  600 s). A result not of the `{content, is_error}` shape is passed on as one `json` part.
+- `approval` tools go through `approval::gate` (rights control on the server): a card in the app ("Run the tool
+  X with {…}") unless the Silo app itself calls; a CLI outside every pane with no app confirms on its terminal.
+
+### 10.2 Surfaces
+
+- `silo-tools`: `Tools::provided()` (cached until `tools.changed`), `Tools::all_descriptors()` (Silo's own plus
+  provided, one per name; a name some block provides gains a `block_id` input), and `Tools::call` routes unknown
+  names to `tools.call`. `silo_tools::provider::serve` offers tools on a connection and answers calls. `silo tool list` shows each tool's
+  block kind and provider.
+- `silo mcp`: lists provided tools too, advertises `tools.listChanged` and sends
+  `notifications/tools/list_changed` on every change.
+- `silo tool list [--json]`, `silo tool call <name> [json|-] [--block B] [--json]` (exit 1 on an error result),
+  `silo tool provide --file tools.json [--block B | --server] -- <command…>`: each call runs the command with the
+  input on stdin and `SILO_TOOL`, `SILO_TOOL_BLOCK`, `SILO_TOOL_CALLER` set; its stdout is the result (the
+  `{content, is_error}` shape as is, other JSON as data, else text), a failing exit an error result. The block
+  defaults to `$SILO_BLOCK`, so a program in a block offers tools for as long as it and its block live (it exits
+  when the block closes).
+- Otto: Silo's own tools stay native (`otto_silo_tools::Silo.tools`, run in otto's process so new blocks open
+  beside the calling agent's block); `Silo.provided`, a `ProjectSources` listed before every model request, adds the
+  provided ones under their own names (deferred, behind `load_tools`), leaving out any named like one of otto's own
+  (`read`, `shell`, …). Both have source `silo`: the grant pattern `silo:*` takes every tool from Silo. Agents without
+  a tool list are granted it; agents with one name the tools, use patterns (`browser_*`, `otto_*`) or `silo:*`.
+
+### 10.3 Otto's settings
+
+The otto daemon offers its settings for the whole server (`otto-cli/src/settings_tools.rs`, client "otto
+settings", reconnecting while it runs): `otto_agents_list`, `otto_agent_get`, `otto_agent_save`,
+`otto_agent_delete`, `otto_tools_catalog`, `otto_skills_list`, `otto_config_get`, `otto_config_set`,
+`otto_mcp_list`, `otto_mcp_add`, `otto_mcp_update`, `otto_mcp_remove`. Each runs the otto control method of that
+name (its params are the input schema) on the daemon's own socket, as the app's settings do. Every change is an
+`approval` tool; results have MCP `env`/`headers` values and key/token/secret/password fields redacted.

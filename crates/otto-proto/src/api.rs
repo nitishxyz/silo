@@ -204,7 +204,7 @@ pub fn examples() -> Vec<Method> {
             project_root: None,
             scope: McpScope::Global,
             name: "github".into(),
-            transport: McpTransport::Http { url: "https://api.example.com/mcp".into(), headers: Default::default() },
+            transport: McpTransport::Http { url: "https://api.example.com/mcp".into(), headers: Default::default(), oauth: None },
             enabled: true,
         },
         M::McpUpdate {

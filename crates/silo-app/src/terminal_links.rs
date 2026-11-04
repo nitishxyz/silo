@@ -58,7 +58,7 @@ fn url_spans(text: &str) -> Vec<(usize, usize)> {
             .then(|| {
                 SCHEMES
                     .iter()
-                    .find(|s| rest.len() > s.len() && rest[..s.len()].eq_ignore_ascii_case(s))
+                    .find(|s| rest.len() > s.len() && rest.as_bytes()[..s.len()].eq_ignore_ascii_case(s.as_bytes()))
                     .or_else(|| HOSTS.iter().find(|h| rest.starts_with(**h) && rest.as_bytes().get(h.len()).is_some_and(u8::is_ascii_digit)))
             })
             .flatten();
@@ -141,5 +141,17 @@ mod tests {
         // 界 takes columns 0-1; the address starts at column 3.
         let (start, end, url) = at("界 https://a.dev x", 5).unwrap();
         assert_eq!((start, end, url.as_str()), (3, 16, "https://a.dev"));
+    }
+
+    #[test]
+    fn multibyte_text_near_a_scheme_length_is_safe() {
+        // A powerline prompt: the 8th byte falls inside \u{e0b4}.
+        assert_eq!(at("~ \u{e0b4}\u{e0b4} main \u{e0b4} ok", 4), None);
+        assert_eq!(at("\u{e0b4} https://a.dev", 4).unwrap().2, "https://a.dev");
+        for s in ["日本語テキスト", "ñañañañañ", "\u{e0b4}\u{e0b4}\u{e0b4}x"] {
+            for c in 0..8 {
+                let _ = at(s, c);
+            }
+        }
     }
 }

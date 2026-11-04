@@ -1548,6 +1548,34 @@
         ],
         "type": "object"
       },
+      "ToolRequest": {
+        "properties": {
+          "block_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "caller": {
+            "$ref": "#/$defs/Caller"
+          },
+          "input": true,
+          "name": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "name",
+          "input",
+          "caller"
+        ],
+        "type": "object"
+      },
       "Watcher": {
         "properties": {
           "blocks": {
@@ -2249,6 +2277,38 @@
           },
           "event": {
             "const": "changes.progress",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "type": "object"
+          },
+          "event": {
+            "const": "tools.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/ToolRequest"
+          },
+          "event": {
+            "const": "tools.request",
             "type": "string"
           }
         },
@@ -15866,6 +15926,334 @@
           "desired"
         ],
         "title": "SizeInfo",
+        "type": "object"
+      }
+    },
+    "tools.call": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input": {
+            "default": {}
+          },
+          "name": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ToolContent": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "json",
+                    "type": "string"
+                  },
+                  "value": true
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/$defs/ToolContent"
+            },
+            "type": "array"
+          },
+          "is_error": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ToolOutcome",
+        "type": "object"
+      }
+    },
+    "tools.list": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BlockKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "terminal",
+                  "browser"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "agent",
+                "type": "string"
+              },
+              {
+                "const": "files",
+                "type": "string"
+              },
+              {
+                "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
+          "ToolEntry": {
+            "properties": {
+              "approval": {
+                "default": false,
+                "type": "boolean"
+              },
+              "block_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "block_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BlockKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "description": {
+                "type": "string"
+              },
+              "input_schema": {
+                "default": {
+                  "properties": {},
+                  "type": "object"
+                }
+              },
+              "name": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "provider_id": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "read_only": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "provider",
+              "provider_id"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "tools": {
+            "items": {
+              "$ref": "#/$defs/ToolEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "title": "ToolList",
+        "type": "object"
+      }
+    },
+    "tools.provide": {
+      "params": {
+        "$defs": {
+          "ProvidedTool": {
+            "properties": {
+              "approval": {
+                "default": false,
+                "type": "boolean"
+              },
+              "description": {
+                "type": "string"
+              },
+              "input_schema": {
+                "default": {
+                  "properties": {},
+                  "type": "object"
+                }
+              },
+              "name": {
+                "type": "string"
+              },
+              "read_only": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/$defs/ProvidedTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "tools.reply": {
+      "params": {
+        "$defs": {
+          "RpcError": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "data": {},
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RpcError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "result": {
+            "default": null
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
         "type": "object"
       }
     },

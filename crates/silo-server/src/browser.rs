@@ -36,6 +36,18 @@ impl Block {
         }
     }
 
+    /// What kind of block this is.
+    #[must_use]
+    pub fn kind(&self) -> BlockKind {
+        match self {
+            Self::Terminal(_) => BlockKind::Terminal,
+            Self::Browser(_) => BlockKind::Browser,
+            Self::Agent(_) => BlockKind::Agent,
+            Self::Files(_) => BlockKind::Files,
+            Self::Changes(_) => BlockKind::Changes,
+        }
+    }
+
     pub fn info(&self) -> Option<BlockInfo> {
         match self {
             Self::Terminal(handle) => handle.info.lock().ok().map(|i| i.clone()),

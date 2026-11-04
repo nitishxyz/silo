@@ -11,6 +11,7 @@ pub use crate::changes::*;
 pub use crate::files::*;
 pub use crate::permissions::{PermissionId, PermissionInfo, PermissionStatus, Permissions};
 pub use crate::search::*;
+pub use crate::tools::{ToolList, ToolRequest, ToolsCallParams, ToolsProvideParams, ToolsReplyParams};
 
 use crate::{
     access::{Grant, Granted, Rights, Scope},
@@ -230,6 +231,19 @@ pub enum Method {
     BrowserScreenshot(BrowserScreenshotParams),
     #[serde(rename = "browser.fetch")]
     BrowserFetch(BrowserFetchParams),
+    /// Offer tools (for a block, or the server) that agents call through
+    /// the server (`tools.call`); replaces the caller's earlier offer.
+    #[serde(rename = "tools.provide")]
+    ToolsProvide(ToolsProvideParams),
+    /// Every provided tool the caller may see.
+    #[serde(rename = "tools.list")]
+    ToolsList {},
+    /// Call a provided tool: forwarded to its provider.
+    #[serde(rename = "tools.call")]
+    ToolsCall(ToolsCallParams),
+    /// A provider's answer to a `tools.request`.
+    #[serde(rename = "tools.reply")]
+    ToolsReply(ToolsReplyParams),
     #[serde(rename = "files.list")]
     FilesList(FilesListParams),
     #[serde(rename = "files.read")]
@@ -950,6 +964,10 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.network", "Read captured network requests."),
     ("browser.screenshot", "Capture the page or an element as an image."),
     ("browser.fetch", "Load a URL in a hidden page of the app (agent profile) and return its rendered HTML."),
+    ("tools.provide", "Offer tools for a block or the server, which agents call through the server."),
+    ("tools.list", "List the tools clients provide."),
+    ("tools.call", "Call a provided tool; the server forwards it to its provider."),
+    ("tools.reply", "Answer a forwarded tool call (provider only)."),
     ("files.list", "List a directory of a files block."),
     ("files.read", "Read a file of a files block as text, or describe a binary."),
     ("files.read_image", "Read an image (png, jpeg, gif, webp, svg) of a files block, base64."),
@@ -1279,6 +1297,8 @@ pub const EVENTS: &[&str] = &[
     "files.changed",
     "changes.changed",
     "changes.progress",
+    "tools.changed",
+    "tools.request",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1365,6 +1385,13 @@ pub enum Event {
     /// progress, a line at a time, throttled).
     #[serde(rename = "changes.progress")]
     ChangesProgress { block_id: BlockId, op: SyncOp, text: String },
+    /// The provided tools changed: list them again (`tools.list`).
+    #[serde(rename = "tools.changed")]
+    ToolsChanged {},
+    /// Run a tool this client provides and answer with `tools.reply`
+    /// (sent to the provider only).
+    #[serde(rename = "tools.request")]
+    ToolRequest(ToolRequest),
 }
 
 /// Who made a call: a client's label and, for a process in one of this

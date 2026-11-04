@@ -230,6 +230,16 @@ impl Control {
         Self::connect_build(Conn::Unix(socket.to_owned()), client_name, passive, BUILD).await
     }
 
+    /// A passive connection to the local server socket carrying `secret`
+    /// as its credential, whatever [`set_token`] says: an agent token, or
+    /// the server's own stand-in for a caller (`tools.call`).
+    ///
+    /// # Errors
+    /// Connection or handshake failure.
+    pub async fn connect_with_secret(socket: &Path, client_name: &str, secret: String) -> anyhow::Result<(Self, Events)> {
+        Self::handshake(Conn::Unix(socket.to_owned()), client_name, true, BUILD, Credential::Grant(secret)).await
+    }
+
     /// Hello over `conn` announcing `build`: [`BUILD`] for any compatible
     /// server; another build only for best-effort `session.list` /
     /// `server.shutdown` on an incompatible server of that build.

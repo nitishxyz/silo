@@ -49,7 +49,7 @@ session.prompt(vec![InputPart::Text { text: task }], Delivery::Queue).await?;
   (`agents.get/save/delete`); `tool_catalog(project_root)` lists every grantable tool.
 - `add_source(Arc<dyn otto_tools::ProjectSources>)` adds project-dependent tools
   (MCP via `otto-mcp`), listed again before every model request and granted by
-  pattern (`mcp__*` by default). `shutdown` stops them; a `reopen`ed runtime starts them again on demand.
+  pattern (`mcp__*`, and `silo:*` for every tool from Silo, by default). `shutdown` stops them; a `reopen`ed runtime starts them again on demand.
 - `set_terminals(Arc<dyn otto_tools::builtin::shell::Terminals>)` runs `shell` commands in a terminal host
   (silo's parked command blocks, `otto_silo_tools::silo`); short read-only ones and calls it does not serve use
   pipes. Shell jobs are runtime-wide; a job's result (background, or a command that waited for input) is delivered

@@ -42,6 +42,11 @@ struct Cli {
 enum Command {
     /// Serve Silo tools over MCP stdio.
     Mcp,
+    /// List, call and provide the tools agents get through Silo.
+    Tool {
+        #[command(subcommand)]
+        command: ToolCommand,
+    },
     /// Report program status; hook failures never fail the harness.
     Report {
         state: Option<String>,
@@ -652,6 +657,46 @@ fn init_tracing() {
 }
 
 #[derive(Subcommand)]
+enum ToolCommand {
+    /// Every tool: Silo's own and those clients provide.
+    List {
+        /// The full descriptors (input schemas included) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Call a tool with a JSON object as input (`-`: read it from stdin).
+    Call {
+        name: String,
+        input: Option<String>,
+        /// The block whose tool to call, when several provide it.
+        #[arg(long)]
+        block: Option<String>,
+        /// Print the whole result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Provide tools until stopped: each call runs the command with the
+    /// input on stdin (`SILO_TOOL` names the tool) and its stdout is the
+    /// result.
+    Provide {
+        /// A JSON list of tools: `[{name, description, input_schema?,
+        /// read_only?, approval?}]`.
+        #[arg(long)]
+        file: PathBuf,
+        /// The block the tools belong to (default: `$SILO_BLOCK`); they go
+        /// when it closes.
+        #[arg(long, conflicts_with = "server")]
+        block: Option<String>,
+        /// Provide them for the whole server, not a block.
+        #[arg(long)]
+        server: bool,
+        /// The handler command and its arguments.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum HooksCommand {
     Install {
         #[arg(value_parser = ["claude", "codex", "opencode"])]
@@ -692,6 +737,29 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             let (control, events, _net) = connect(host).await?;
             silo_cli::mcp::serve(silo_tools::Tools::new(control, events, silo_tools::Context::default())).await?;
             Ok(0)
+        }
+        Command::Tool { command } => {
+            let (control, events, _net) = connect(host).await?;
+            match command {
+                ToolCommand::List { json } => {
+                    let tools = silo_tools::Tools::new(control, events, silo_tools::Context::default());
+                    print!("{}", silo_cli::tool::list(&tools, json).await?);
+                    Ok(0)
+                }
+                ToolCommand::Call { name, input, block, json } => {
+                    let input = silo_cli::tool::parse_input(input.as_deref(), block.as_deref())?;
+                    let tools = silo_tools::Tools::new(control.clone(), events, silo_tools::Context::default());
+                    let (text, failed) = silo_cli::tool::call(&control, &tools, &name, input, json).await?;
+                    print!("{text}");
+                    Ok(i32::from(failed))
+                }
+                ToolCommand::Provide { file, block, server, command } => {
+                    let tools = silo_cli::tool::read_tools(&file)?;
+                    let block = if server { None } else { block.or_else(|| std::env::var("SILO_BLOCK").ok()).filter(|b| !b.is_empty()) };
+                    silo_cli::tool::provide(control, events, block, tools, command).await?;
+                    Ok(0)
+                }
+            }
         }
         Command::Report { state, kind, app, title, message, id, block, codex_notify } => {
             let Some(block) = block.or_else(|| std::env::var("SILO_BLOCK").ok()).filter(|s| !s.is_empty()) else {

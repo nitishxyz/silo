@@ -2,6 +2,7 @@
 //! with PKCE S256 and the `resource` parameter, and exchange the code that comes back
 //! to a loopback redirect (or is pasted) for tokens.
 use super::{TokenStore, credential, discover};
+use crate::config::{self, DEFAULT_CALLBACK_PORT, OAuthClient};
 use otto_llm::auth::oauth::{self, LoopbackCallback};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
@@ -48,19 +49,31 @@ pub async fn probe(http: &reqwest::Client, server_url: &str, headers: &[(String,
     }
 }
 
-pub async fn begin(tokens: &TokenStore, server_url: &str, headers: &[(String, String)]) -> Result<Flow, String> {
+pub async fn begin(tokens: &TokenStore, server_url: &str, headers: &[(String, String)], client: Option<&OAuthClient>) -> Result<Flow, String> {
     let http = &tokens.http;
     let challenge = probe(http, server_url, headers).await;
     let metadata = discover::discover(http, server_url, &challenge).await?;
-    let registration = metadata
-        .registration_endpoint
-        .clone()
-        .ok_or("the server's sign-in does not allow registering otto (no dynamic client registration); set an Authorization header instead")?;
+    let scope = client.and_then(|c| c.scope.clone()).or_else(|| metadata.scope.clone());
+    // A client registered by hand: its id, on the port its redirect URL names.
+    if let Some(client) = client {
+        let port = client.callback_port.unwrap_or(DEFAULT_CALLBACK_PORT);
+        let callback = LoopbackCallback::bind(port, CALLBACK_PATH)
+            .await
+            .map_err(|e| format!("cannot listen on 127.0.0.1:{port} for the sign-in's callback ({e}); is another sign-in running?"))?;
+        let redirect_uri = callback.redirect_uri().map_err(|e| e.to_string())?;
+        return authorize(&metadata, server_url, callback, redirect_uri, client.client_id.clone(), client.client_secret.clone(), scope);
+    }
+    let registration = metadata.registration_endpoint.clone().ok_or_else(|| {
+        format!(
+            "the server's sign-in does not let otto register itself (no dynamic client registration). Register an OAuth app with the server using the callback URL {} and add its client id (oauth.clientId, and oauth.clientSecret if it has one) to this server, or set an Authorization header instead",
+            config::callback_url(DEFAULT_CALLBACK_PORT)
+        )
+    })?;
     let callback = LoopbackCallback::bind(0, CALLBACK_PATH).await.map_err(|e| e.to_string())?;
     let redirect_uri = callback.redirect_uri().map_err(|e| e.to_string())?;
     let mut body = json!({"client_name":"otto","redirect_uris":[redirect_uri],"grant_types":["authorization_code","refresh_token"],
         "response_types":["code"],"token_endpoint_auth_method":"none"});
-    if let Some(scope) = &metadata.scope {
+    if let Some(scope) = &scope {
         body["scope"] = json!(scope);
     }
     let response =
@@ -72,6 +85,19 @@ pub async fn begin(tokens: &TokenStore, server_url: &str, headers: &[(String, St
         .filter(|_| status.is_success())
         .ok_or_else(|| format!("client registration failed (HTTP {status}): {}", registered["error_description"].as_str().unwrap_or("no client_id")))?
         .to_owned();
+    authorize(&metadata, server_url, callback, redirect_uri, client_id, registered["client_secret"].as_str().map(String::from), scope)
+}
+
+/// The authorization URL for `client_id`, with PKCE S256 and `resource`.
+fn authorize(
+    metadata: &discover::Metadata,
+    server_url: &str,
+    callback: LoopbackCallback,
+    redirect_uri: String,
+    client_id: String,
+    client_secret: Option<String>,
+    scope: Option<String>,
+) -> Result<Flow, String> {
     let pkce = oauth::pkce_pair();
     let state = oauth::random_state();
     let mut url = reqwest::Url::parse(&metadata.authorization_endpoint).map_err(|e| format!("invalid authorization endpoint: {e}"))?;
@@ -83,7 +109,7 @@ pub async fn begin(tokens: &TokenStore, server_url: &str, headers: &[(String, St
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
         .append_pair("resource", &metadata.resource);
-    if let Some(scope) = &metadata.scope {
+    if let Some(scope) = &scope {
         url.query_pairs_mut().append_pair("scope", scope);
     }
     Ok(Flow {
@@ -96,10 +122,10 @@ pub async fn begin(tokens: &TokenStore, server_url: &str, headers: &[(String, St
         verifier: pkce.verifier,
         redirect_uri,
         client_id,
-        client_secret: registered["client_secret"].as_str().map(String::from),
-        token_endpoint: metadata.token_endpoint,
-        resource: metadata.resource,
-        scope: metadata.scope,
+        client_secret,
+        token_endpoint: metadata.token_endpoint.clone(),
+        resource: metadata.resource.clone(),
+        scope,
     })
 }
 

@@ -709,7 +709,10 @@ impl Workspace {
                 | Event::GrantsChanged { .. }
                 | Event::ApprovalRequested { .. }
                 | Event::ApprovalResolved { .. }
-                | Event::BlockAttention { .. },
+                | Event::BlockAttention { .. }
+                // Provided tools are the agents' business (`silo-tools`).
+                | Event::ToolsChanged {}
+                | Event::ToolRequest(_),
             ) => {}
         }
         cx.notify();

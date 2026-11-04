@@ -105,6 +105,12 @@ struct Field {
     value: String,
 }
 
+/// Whether `name` is one of Silo's own tools (or an old name of one).
+pub fn is_builtin(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    name == "terminal_list" || NAMES.get_or_init(|| descriptors().into_iter().map(|d| d.name).collect()).iter().any(|n| n == name)
+}
+
 pub fn descriptors() -> Vec<ToolDescriptor> {
     let entries = [
         (

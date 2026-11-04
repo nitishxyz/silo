@@ -373,6 +373,14 @@ fn summary(method: &Method, devices: &[silo_proto::control::PairedDevice]) -> St
         Method::AppHostsAdd { .. } => "Add a host to Silo".into(),
         Method::AppHostsRemove { host, .. } => format!("Remove the host {host} from Silo"),
         Method::ChangesPush(_) => "Push a branch to its remote".into(),
+        Method::ToolsCall(p) => {
+            let input = p.input.to_string();
+            let mut preview: String = input.chars().take(160).collect();
+            if preview.len() < input.len() {
+                preview.push('…');
+            }
+            format!("Run the tool {} with {preview}", p.name)
+        }
         Method::ChangesPrCreate(p) => {
             format!("Push a branch and open the pull request \u{201c}{}\u{201d}", p.title.trim().chars().take(80).collect::<String>())
         }

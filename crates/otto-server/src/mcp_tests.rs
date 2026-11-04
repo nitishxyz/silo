@@ -29,7 +29,7 @@ async fn mcp_servers_are_added_listed_updated_and_removed() {
     let root = f.dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
     let project_root = Some(root.to_string_lossy().into_owned());
-    let http = McpTransport::Http { url: fake.url.clone(), headers: [("X-Team".to_owned(), "a".to_owned())].into() };
+    let http = McpTransport::Http { url: fake.url.clone(), headers: [("X-Team".to_owned(), "a".to_owned())].into(), oauth: None };
     let add = Method::McpAdd { project_root: None, scope: McpScope::Global, name: "remote".into(), transport: http.clone(), enabled: true };
     let added: McpServer = client.call_typed(add.clone()).await.unwrap();
     assert_eq!((added.scope, &added.transport, added.enabled), (McpScope::Global, &http, true));
@@ -78,7 +78,7 @@ async fn an_mcp_server_signs_in_through_the_browser() {
     let _server = f.start().await;
     let client = f.connect().await;
     let mut events = client.events();
-    let http = McpTransport::Http { url: fake.url.clone(), headers: Default::default() };
+    let http = McpTransport::Http { url: fake.url.clone(), headers: Default::default(), oauth: None };
     let add = Method::McpAdd { project_root: None, scope: McpScope::Global, name: "remote".into(), transport: http, enabled: true };
     client.call(add).await.unwrap();
     mcp_event(&mut events, status_is(McpStatus::NeedsSignIn, 0)).await;

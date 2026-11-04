@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod hooks;
 pub mod link;
 pub mod mcp;
+pub mod tool;
 pub mod update;
 pub mod upgrade;
 

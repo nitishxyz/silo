@@ -47,16 +47,28 @@ fn implied(name: &str) -> &'static [&'static str] {
     }
 }
 
-fn allowed(live: &Live, name: &str) -> bool {
+/// The grant pattern taking every tool from Silo (its own and those
+/// provided through it), whatever its name.
+pub(crate) const SILO_SOURCE: &str = "silo:*";
+
+/// Whether `pattern` grants `spec`: by name, or [`SILO_SOURCE`] by source.
+pub(crate) fn grants(pattern_: &str, spec: &ToolSpec) -> bool {
+    pattern(pattern_, &spec.name) || (pattern_ == SILO_SOURCE && spec.source == otto_tools::Source::Silo)
+}
+
+fn allowed(live: &Live, spec: &ToolSpec) -> bool {
+    let name = spec.name.as_str();
     let list = |key: &str| {
-        live.row.meta[key].as_array().map(|a| a.iter().filter_map(Value::as_str).any(|p| [name].iter().chain(implied(name)).any(|n| pattern(p, n))))
+        live.row.meta[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).any(|p| grants(p, spec) || [name].iter().chain(implied(name)).any(|n| pattern(p, n))))
     };
     list("tools").unwrap_or(true) && !list("denied_tools").unwrap_or(false)
 }
 
 fn deferred(cx: &Context, all: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
     let live = cx.live();
-    all.iter().map(|t| t.spec()).filter(|s| behind_loader(&live, s) && allowed(&live, &s.name)).cloned().collect()
+    all.iter().map(|t| t.spec()).filter(|s| behind_loader(&live, s) && allowed(&live, s)).cloned().collect()
 }
 
 /// Whether a granted tool waits behind `load_tools`. The session's `loadable`
@@ -66,7 +78,7 @@ fn deferred(cx: &Context, all: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
 pub(crate) fn behind_loader(live: &Live, spec: &ToolSpec) -> bool {
     let Some(loadable) = live.row.meta["loadable"].as_array() else { return spec.loading == Loading::Deferred };
     let loadable: Vec<&str> = loadable.iter().filter_map(Value::as_str).collect();
-    let best = |patterns: &mut dyn Iterator<Item = &str>| patterns.filter(|p| pattern(p, &spec.name)).map(str::len).max();
+    let best = |patterns: &mut dyn Iterator<Item = &str>| patterns.filter(|p| grants(p, spec)).map(str::len).max();
     let shown = best(&mut live.row.meta["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| !loadable.contains(p)));
     match (shown, best(&mut loadable.iter().copied())) {
         (None, None) => spec.loading == Loading::Deferred,
@@ -77,7 +89,7 @@ pub(crate) fn behind_loader(live: &Live, spec: &ToolSpec) -> bool {
 /// `load_tools` only exists while it has something to load, and it only
 /// loads granted tools, so it needs no grant of its own (older sessions lack one).
 pub(crate) fn granted(live: &Live, spec: &ToolSpec) -> bool {
-    allowed(live, &spec.name) || (spec.name == "load_tools" && spec.source == otto_tools::Source::Builtin)
+    allowed(live, spec) || (spec.name == "load_tools" && spec.source == otto_tools::Source::Builtin)
 }
 
 pub(crate) async fn infos(cx: Arc<Context>) -> crate::Result<Vec<otto_proto::ToolInfo>> {

@@ -6258,6 +6258,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -8238,9 +8239,11 @@ dependencies = [
  "silo-proto",
  "silo-pty",
  "silo-store",
+ "silo-tools",
  "silo-transport",
  "silo-vt",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

@@ -286,6 +286,11 @@ pub fn need(method: &Method) -> Need {
         M::BrowserEval(_) => rights(Block(BLOCK), Control),
         // Runs pages on the user's Mac with the agent profile's cookies.
         M::BrowserFetch(_) => rights(Server, Control),
+        // Each tool's own rights (view to read, else control) and approval
+        // are checked when it is called (`silo-server/src/tools.rs`);
+        // providing needs interact on the block (control on the server
+        // without one), replying being the provider the call went to.
+        M::ToolsProvide(_) | M::ToolsList {} | M::ToolsCall(_) | M::ToolsReply(_) => Need::Open,
         M::ServerInfo {}
         | M::ApiList {}
         | M::ApiDescribe { .. }

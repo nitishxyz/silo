@@ -423,6 +423,9 @@ impl std::fmt::Debug for Method {
                         map.values_mut().for_each(|v| *v = Value::String("[REDACTED]".into()));
                     }
                 }
+                if let Some(secret) = value.pointer_mut("/params/transport/oauth/client_secret").filter(|v| v.is_string()) {
+                    *secret = Value::String("[REDACTED]".into());
+                }
             }
             Self::AttachmentPut { data_base64, .. } => value["params"]["data_base64"] = Value::String(format!("[{} bytes]", data_base64.len())),
             _ => {}

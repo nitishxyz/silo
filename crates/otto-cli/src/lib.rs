@@ -18,6 +18,7 @@ mod daemon;
 mod script;
 mod services;
 mod sessions;
+mod settings_tools;
 mod silo_status;
 
 #[derive(Parser)]

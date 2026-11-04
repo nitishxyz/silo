@@ -29,6 +29,7 @@ pub mod search;
 pub mod shell;
 pub mod status;
 pub mod sysclip;
+pub mod tools;
 pub mod trash;
 pub mod tunnel;
 pub mod upgrade;
@@ -156,6 +157,8 @@ pub struct Server {
     pub require_approval: bool,
     pub approvals: approval::Approvals,
     pub app_requests: app_bridge::Requests,
+    /// Connections running Silo's own tools for `tools.call` callers.
+    pub stand_ins: tools::StandIns,
     /// See [`Config::grant_sweep_ahead`].
     grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
     /// Data stream writers still running (see [`DataWriter`]).
@@ -550,6 +553,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         require_approval: config.require_approval,
         approvals: approval::Approvals::default(),
         app_requests: app_bridge::Requests::default(),
+        stand_ins: tools::StandIns::default(),
         grant_sweep_ahead: config.grant_sweep_ahead.clone(),
         data_writers: tokio::sync::watch::channel(0).0,
         services: config.services.clone(),

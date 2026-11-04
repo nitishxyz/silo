@@ -18,7 +18,11 @@ fn debug_redacts_credentials_without_changing_serialization() {
             project_root: None,
             scope: McpScope::Global,
             name: "web".into(),
-            transport: McpTransport::Http { url: "https://x.test".into(), headers: [("Authorization".into(), "secret-header".into())].into() },
+            transport: McpTransport::Http {
+                url: "https://x.test".into(),
+                headers: [("Authorization".into(), "secret-header".into())].into(),
+                oauth: None,
+            },
             enabled: true,
         },
         Method::McpUpdate {

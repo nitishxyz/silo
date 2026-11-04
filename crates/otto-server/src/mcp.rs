@@ -27,7 +27,9 @@ fn status(status: Status, enabled: bool) -> McpStatus {
 
 fn transport(config: ServerConfig) -> McpTransport {
     if config.is_http() {
-        McpTransport::Http { url: config.url.unwrap_or_default(), headers: config.headers }
+        let oauth =
+            config.oauth.map(|o| McpOAuth { client_id: o.client_id, client_secret: o.client_secret, callback_port: o.callback_port, scope: o.scope });
+        McpTransport::Http { url: config.url.unwrap_or_default(), headers: config.headers, oauth }
     } else {
         McpTransport::Stdio { command: config.command.unwrap_or_default(), args: config.args, env: config.env }
     }
@@ -36,7 +38,18 @@ fn transport(config: ServerConfig) -> McpTransport {
 fn config(transport: McpTransport) -> ServerConfig {
     match transport {
         McpTransport::Stdio { command, args, env } => ServerConfig { command: Some(command), args, env, ..Default::default() },
-        McpTransport::Http { url, headers } => ServerConfig { kind: Some("http".into()), url: Some(url), headers, ..Default::default() },
+        McpTransport::Http { url, headers, oauth } => ServerConfig {
+            kind: Some("http".into()),
+            url: Some(url),
+            headers,
+            oauth: oauth.map(|o| otto_mcp::config::OAuthClient {
+                client_id: o.client_id,
+                client_secret: o.client_secret,
+                callback_port: o.callback_port,
+                scope: o.scope,
+            }),
+            ..Default::default()
+        },
     }
 }
 

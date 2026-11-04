@@ -43,8 +43,8 @@ impl Mcp {
         if config.headers.keys().any(|k| k.eq_ignore_ascii_case("authorization")) {
             return Err(format!("{name} sends its own Authorization header"));
         }
-        let headers: Vec<(String, String)> = config.headers.into_iter().collect();
-        let mut flow = crate::oauth::login::begin(&self.shared.tokens, &url, &headers).await?;
+        let headers: Vec<(String, String)> = config.headers.clone().into_iter().collect();
+        let mut flow = crate::oauth::login::begin(&self.shared.tokens, &url, &headers, config.oauth.as_ref()).await?;
         let callback = flow.take_callback().ok_or("no loopback")?;
         let started = SignIn { login_id: uuid(), url: flow.url.clone(), port: flow.port, path: flow.path.clone() };
         let state = flow.state.clone();

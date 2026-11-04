@@ -20,17 +20,19 @@ pub struct Listed {
     pub tools: usize,
 }
 
-/// The transport keys of `config`: `type` and `command`/`args`/`env` or `url`/`headers`.
+/// The transport keys of `config`: `type` and `command`/`args`/`env` or `url`/`headers`/`oauth`.
 fn transport(config: &ServerConfig) -> Map<String, Value> {
     let mut out = Map::new();
     let value = serde_json::to_value(config).unwrap_or_default();
-    for key in ["type", "command", "args", "env", "url", "headers"] {
+    for key in TRANSPORT_KEYS {
         if let Some(v) = value.get(key) {
             out.insert(key.into(), v.clone());
         }
     }
     out
 }
+
+const TRANSPORT_KEYS: [&str; 7] = ["type", "command", "args", "env", "url", "headers", "oauth"];
 
 fn valid_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
@@ -41,6 +43,7 @@ fn valid_name(name: &str) -> Result<(), String> {
 
 fn valid_transport(config: &ServerConfig) -> Result<(), String> {
     match (config.is_http(), config.url.as_deref(), config.command.as_deref()) {
+        (true, _, _) if config.oauth.as_ref().is_some_and(|o| o.client_id.trim().is_empty()) => Err("an OAuth client needs a client id".into()),
         (true, Some(url), _) if url.starts_with("http://") || url.starts_with("https://") => Ok(()),
         (true, _, _) => Err("an HTTP server needs an http:// or https:// url".into()),
         (false, _, Some(command)) if !command.trim().is_empty() => Ok(()),
@@ -114,7 +117,7 @@ impl Mcp {
         let mut entry = before.clone();
         if let Some(config) = config {
             valid_transport(config)?;
-            for key in ["type", "command", "args", "env", "url", "headers"] {
+            for key in TRANSPORT_KEYS {
                 entry.remove(key);
             }
             entry.extend(transport(config));
